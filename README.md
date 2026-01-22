@@ -2,6 +2,8 @@
 
 An interactive, DaisyDisk-like terminal disk usage analyzer with rich 24-bit color UI, Unicode graphics, and drill-down navigation.
 
+![DUX Screenshot](assets/screenshot.png)
+
 ## Features
 
 - **Parallel scanning** using jwalk for fast filesystem traversal
