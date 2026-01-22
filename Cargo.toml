@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = ["dux-core", "dux-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+authors = ["Mjukis AB"]
+license = "MIT"
+repository = "https://github.com/mjukis-ab/dux"
+homepage = "https://github.com/mjukis-ab/dux"
+description = "An interactive, DaisyDisk-like terminal disk usage analyzer"
+
+[workspace.dependencies]
+# Core dependencies
+jwalk = "0.8"
+crossbeam-channel = "0.5"
+
+# CLI dependencies
+ratatui = "0.29"
+crossterm = "0.28"
+clap = { version = "4", features = ["derive"] }
+color-eyre = "0.6"
+
+# Shared
+thiserror = "2"

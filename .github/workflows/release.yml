@@ -1,0 +1,183 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Publish to crates.io
+  publish-crates:
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+
+      - name: Publish dux-core
+        run: cargo publish -p dux-core --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Wait for crates.io indexing
+        run: sleep 30
+
+      - name: Publish dux-cli
+        run: cargo publish -p dux-cli --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  # Create GitHub Release
+  create-release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    outputs:
+      upload_url: ${{ steps.create_release.outputs.upload_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create Release
+        id: create_release
+        uses: softprops/action-gh-release@v1
+        with:
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Build binaries for all platforms
+  build:
+    name: Build (${{ matrix.target }})
+    needs: create-release
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            archive: zip
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }} -p dux-cli
+
+      - name: Get version
+        id: version
+        shell: bash
+        run: echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Package (Unix)
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czvf ../../../dux-${{ steps.version.outputs.version }}-${{ matrix.target }}.tar.gz dux
+          cd ../../..
+
+      - name: Package (Windows)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          cd target/${{ matrix.target }}/release
+          Compress-Archive -Path dux.exe -DestinationPath ../../../dux-${{ steps.version.outputs.version }}-${{ matrix.target }}.zip
+          cd ../../..
+
+      - name: Upload Release Asset
+        uses: softprops/action-gh-release@v1
+        with:
+          files: dux-${{ steps.version.outputs.version }}-${{ matrix.target }}.${{ matrix.archive }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Update Homebrew tap
+  homebrew:
+    name: Update Homebrew
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get version
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Download release assets
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+          curl -L -o dux-x86_64-apple-darwin.tar.gz \
+            "https://github.com/mjukis-ab/dux/releases/download/v${VERSION}/dux-v${VERSION}-x86_64-apple-darwin.tar.gz"
+          curl -L -o dux-aarch64-apple-darwin.tar.gz \
+            "https://github.com/mjukis-ab/dux/releases/download/v${VERSION}/dux-v${VERSION}-aarch64-apple-darwin.tar.gz"
+          curl -L -o dux-x86_64-unknown-linux-gnu.tar.gz \
+            "https://github.com/mjukis-ab/dux/releases/download/v${VERSION}/dux-v${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+
+      - name: Calculate checksums
+        id: checksums
+        run: |
+          echo "sha256_x86_64_darwin=$(sha256sum dux-x86_64-apple-darwin.tar.gz | cut -d ' ' -f 1)" >> $GITHUB_OUTPUT
+          echo "sha256_aarch64_darwin=$(sha256sum dux-aarch64-apple-darwin.tar.gz | cut -d ' ' -f 1)" >> $GITHUB_OUTPUT
+          echo "sha256_x86_64_linux=$(sha256sum dux-x86_64-unknown-linux-gnu.tar.gz | cut -d ' ' -f 1)" >> $GITHUB_OUTPUT
+
+      - name: Generate Homebrew formula
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+          cat > dux.rb << 'FORMULA'
+          class Dux < Formula
+            desc "An interactive, DaisyDisk-like terminal disk usage analyzer"
+            homepage "https://github.com/mjukis-ab/dux"
+            version "${{ steps.version.outputs.version }}"
+            license "MIT"
+
+            on_macos do
+              if Hardware::CPU.intel?
+                url "https://github.com/mjukis-ab/dux/releases/download/v${{ steps.version.outputs.version }}/dux-v${{ steps.version.outputs.version }}-x86_64-apple-darwin.tar.gz"
+                sha256 "${{ steps.checksums.outputs.sha256_x86_64_darwin }}"
+              else
+                url "https://github.com/mjukis-ab/dux/releases/download/v${{ steps.version.outputs.version }}/dux-v${{ steps.version.outputs.version }}-aarch64-apple-darwin.tar.gz"
+                sha256 "${{ steps.checksums.outputs.sha256_aarch64_darwin }}"
+              end
+            end
+
+            on_linux do
+              url "https://github.com/mjukis-ab/dux/releases/download/v${{ steps.version.outputs.version }}/dux-v${{ steps.version.outputs.version }}-x86_64-unknown-linux-gnu.tar.gz"
+              sha256 "${{ steps.checksums.outputs.sha256_x86_64_linux }}"
+            end
+
+            def install
+              bin.install "dux"
+            end
+
+            test do
+              system "#{bin}/dux", "--version"
+            end
+          end
+          FORMULA
+
+      - name: Push to Homebrew tap
+        uses: dmnemec/copy_file_to_another_repo_action@main
+        env:
+          API_TOKEN_GITHUB: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        with:
+          source_file: 'dux.rb'
+          destination_repo: 'mjukis-ab/homebrew-tap'
+          destination_folder: 'Formula'
+          user_email: 'github-actions[bot]@users.noreply.github.com'
+          user_name: 'github-actions[bot]'
+          commit_message: 'Update dux to ${{ steps.version.outputs.version }}'

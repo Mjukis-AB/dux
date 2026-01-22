@@ -1,0 +1,22 @@
+[package]
+name = "dux-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Core library for DUX disk usage analyzer - tree data structures and parallel scanning"
+keywords = ["disk", "usage", "filesystem", "scanner"]
+categories = ["filesystem", "command-line-utilities"]
+
+[dependencies]
+jwalk = { workspace = true }
+crossbeam-channel = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+
+[[example]]
+name = "debug_scan"
+path = "../debug_scan.rs"

@@ -1,0 +1,30 @@
+[package]
+name = "dux-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "An interactive, DaisyDisk-like terminal disk usage analyzer with rich TUI"
+keywords = ["disk", "usage", "tui", "terminal", "cli"]
+categories = ["command-line-utilities", "filesystem"]
+
+[[bin]]
+name = "dux"
+path = "src/main.rs"
+
+[dependencies]
+dux-core = { path = "../dux-core", version = "0.1.0" }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+clap = { workspace = true }
+color-eyre = { workspace = true }
+
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/dux-v{ version }-{ target }.tar.gz"
+bin-dir = "dux{ binary-ext }"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-url = "{ repo }/releases/download/v{ version }/dux-v{ version }-{ target }.zip"
+pkg-fmt = "zip"
