@@ -33,11 +33,13 @@ impl Widget for Footer<'_> {
                 ("↑↓", "Navigate"),
                 ("←→", "Collapse/Expand"),
                 ("Enter", "Drill down"),
-                ("Backspace", "Back"),
+                ("o", "Open"),
+                ("d", "Delete"),
                 ("?", "Help"),
                 ("q", "Quit"),
             ],
             AppMode::Help => vec![("Esc", "Close help"), ("q", "Quit")],
+            AppMode::ConfirmDelete => vec![("y", "Yes"), ("n", "Cancel")],
         };
 
         let key_style = Style::default()

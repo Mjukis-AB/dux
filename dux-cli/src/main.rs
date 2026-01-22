@@ -17,7 +17,7 @@ use ratatui::{backend::CrosstermBackend, style::Style, widgets::Widget, Terminal
 
 use app::{Action, AppMode, AppState};
 use tui::{handle_key, AppEvent, EventHandler};
-use ui::{AppLayout, Footer, Header, HelpView, ProgressView, Theme, TreeView};
+use ui::{AppLayout, ConfirmDeleteView, Footer, Header, HelpView, ProgressView, Theme, TreeView};
 
 /// DUX - Interactive Terminal Disk Usage Analyzer
 #[derive(Parser, Debug)]
@@ -154,7 +154,7 @@ fn run_app(
                     ProgressView::new(&state.progress, state.spinner_frame, state.mode == AppMode::Finalizing, &theme)
                         .render(layout.tree, frame.buffer_mut());
                 }
-                AppMode::Browsing | AppMode::Help => {
+                AppMode::Browsing | AppMode::Help | AppMode::ConfirmDelete => {
                     if let Some(tree) = &state.tree {
                         TreeView::new(
                             tree,
@@ -169,6 +169,14 @@ fn run_app(
                     // Help overlay
                     if state.mode == AppMode::Help {
                         HelpView::new(&theme).render(area, frame.buffer_mut());
+                    }
+
+                    // Delete confirmation dialog
+                    if state.mode == AppMode::ConfirmDelete {
+                        if let Some(path) = &state.pending_delete {
+                            let size = state.pending_delete_size();
+                            ConfirmDeleteView::new(path, size, &theme).render(area, frame.buffer_mut());
+                        }
                     }
                 }
             }
@@ -216,6 +224,10 @@ fn handle_action(state: &mut AppState, action: Action) {
         Action::GoBack => state.go_back(),
         Action::ShowHelp => state.show_help(),
         Action::HideHelp => state.hide_help(),
+        Action::OpenInFinder => state.open_in_finder(),
+        Action::Delete => state.request_delete(),
+        Action::ConfirmDelete => state.confirm_delete(),
+        Action::CancelDelete => state.cancel_delete(),
         Action::Quit => state.quit(),
         Action::Tick => {}
     }

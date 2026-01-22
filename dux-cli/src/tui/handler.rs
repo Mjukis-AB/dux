@@ -8,6 +8,7 @@ pub fn handle_key(key: KeyEvent, mode: AppMode) -> Action {
         AppMode::Help => handle_key_help(key),
         AppMode::Scanning | AppMode::Finalizing => handle_key_scanning(key),
         AppMode::Browsing => handle_key_browsing(key),
+        AppMode::ConfirmDelete => handle_key_confirm_delete(key),
     }
 }
 
@@ -52,6 +53,20 @@ fn handle_key_browsing(key: KeyEvent) -> Action {
         // Help
         KeyCode::Char('?') => Action::ShowHelp,
 
+        // Open in Finder
+        KeyCode::Char('o') => Action::OpenInFinder,
+
+        // Delete
+        KeyCode::Char('d') => Action::Delete,
+
+        _ => Action::Tick,
+    }
+}
+
+fn handle_key_confirm_delete(key: KeyEvent) -> Action {
+    match key.code {
+        KeyCode::Char('y') | KeyCode::Enter => Action::ConfirmDelete,
+        KeyCode::Char('n') | KeyCode::Esc => Action::CancelDelete,
         _ => Action::Tick,
     }
 }

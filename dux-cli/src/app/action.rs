@@ -27,6 +27,14 @@ pub enum Action {
     ShowHelp,
     /// Hide help overlay
     HideHelp,
+    /// Open selected item in Finder
+    OpenInFinder,
+    /// Request delete (show confirmation dialog)
+    Delete,
+    /// Confirm delete operation
+    ConfirmDelete,
+    /// Cancel delete operation
+    CancelDelete,
     /// Quit the application
     Quit,
     /// No action (for tick events)

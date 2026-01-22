@@ -1,4 +1,5 @@
 pub mod bar_chart;
+mod confirm;
 mod footer;
 mod header;
 mod help;
@@ -7,6 +8,7 @@ mod progress;
 mod theme;
 mod tree_view;
 
+pub use confirm::ConfirmDeleteView;
 pub use footer::Footer;
 pub use header::Header;
 pub use help::HelpView;

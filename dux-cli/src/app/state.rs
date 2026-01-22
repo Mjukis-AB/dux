@@ -13,6 +13,8 @@ pub enum AppMode {
     Browsing,
     /// Showing help overlay
     Help,
+    /// Showing delete confirmation dialog
+    ConfirmDelete,
 }
 
 /// Application state
@@ -41,6 +43,8 @@ pub struct AppState {
     pub spinner_frame: usize,
     /// Error message to display
     pub error_message: Option<String>,
+    /// Path pending deletion (for confirmation dialog)
+    pub pending_delete: Option<PathBuf>,
 }
 
 impl AppState {
@@ -58,6 +62,7 @@ impl AppState {
             should_quit: false,
             spinner_frame: 0,
             error_message: None,
+            pending_delete: None,
         }
     }
 
@@ -242,5 +247,76 @@ impl AppState {
     #[allow(dead_code)]
     pub fn clear_error(&mut self) {
         self.error_message = None;
+    }
+
+    /// Open selected item in Finder (macOS)
+    pub fn open_in_finder(&self) {
+        if let Some(node_id) = self.selected_node() {
+            if let Some(tree) = &self.tree {
+                if let Some(node) = tree.get(node_id) {
+                    #[cfg(target_os = "macos")]
+                    {
+                        std::process::Command::new("open")
+                            .arg("-R") // Reveal in Finder
+                            .arg(&node.path)
+                            .spawn()
+                            .ok();
+                    }
+                }
+            }
+        }
+    }
+
+    /// Request delete - shows confirmation dialog
+    pub fn request_delete(&mut self) {
+        if let Some(node_id) = self.selected_node() {
+            if let Some(tree) = &self.tree {
+                if let Some(node) = tree.get(node_id) {
+                    self.pending_delete = Some(node.path.clone());
+                    self.mode = AppMode::ConfirmDelete;
+                }
+            }
+        }
+    }
+
+    /// Confirm and execute delete operation
+    pub fn confirm_delete(&mut self) {
+        if let Some(path) = self.pending_delete.take() {
+            let result = if path.is_dir() {
+                std::fs::remove_dir_all(&path)
+            } else {
+                std::fs::remove_file(&path)
+            };
+
+            if let Err(e) = result {
+                self.error_message = Some(format!("Delete failed: {}", e));
+            }
+
+            self.mode = AppMode::Browsing;
+        }
+    }
+
+    /// Cancel delete operation
+    pub fn cancel_delete(&mut self) {
+        self.pending_delete = None;
+        self.mode = AppMode::Browsing;
+    }
+
+    /// Get size of pending delete item
+    pub fn pending_delete_size(&self) -> Option<u64> {
+        self.pending_delete.as_ref().and_then(|path| {
+            self.tree.as_ref().and_then(|tree| {
+                // Find the node with this path
+                let nodes = tree.visible_nodes(self.view_root);
+                for node_id in nodes {
+                    if let Some(node) = tree.get(node_id) {
+                        if node.path == *path {
+                            return Some(node.size);
+                        }
+                    }
+                }
+                None
+            })
+        })
     }
 }
