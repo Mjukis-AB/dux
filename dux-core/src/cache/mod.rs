@@ -137,8 +137,11 @@ pub fn load_cache(path: &Path) -> Result<(CacheMetadata, DiskTree)> {
     if offset + tree_len > checksum_offset {
         return Err(crate::DuxError::Cache("Invalid tree length".to_string()));
     }
-    let tree: DiskTree = postcard::from_bytes(&data[offset..offset + tree_len])
+    let mut tree: DiskTree = postcard::from_bytes(&data[offset..offset + tree_len])
         .map_err(|e| crate::DuxError::Cache(format!("Failed to deserialize tree: {}", e)))?;
+
+    // Reconstruct paths (not serialized to save space)
+    tree.rebuild_paths();
 
     Ok((meta, tree))
 }
@@ -224,5 +227,56 @@ mod tests {
 
         assert_eq!(loaded_meta.total_size, 1024);
         assert_eq!(loaded_tree.len(), 1);
+    }
+
+    #[test]
+    fn test_paths_reconstructed_after_load() {
+        use crate::tree::NodeKind;
+
+        let temp = TempDir::new().unwrap();
+        let cache_path = temp.path().join("test.dux");
+        let root_path = temp.path().to_path_buf();
+
+        // Create a tree with nested structure
+        let mut tree = DiskTree::new(root_path.clone());
+        let subdir_id = tree.add_node(
+            "subdir".to_string(),
+            NodeKind::Directory,
+            root_path.join("subdir"),
+            crate::tree::NodeId::ROOT,
+        );
+        let file_id = tree.add_node(
+            "file.txt".to_string(),
+            NodeKind::File,
+            root_path.join("subdir").join("file.txt"),
+            subdir_id,
+        );
+
+        // Verify original paths
+        assert_eq!(tree.get(subdir_id).unwrap().path, root_path.join("subdir"));
+        assert_eq!(tree.get(file_id).unwrap().path, root_path.join("subdir").join("file.txt"));
+
+        let meta = CacheMetadata {
+            version: CACHE_VERSION,
+            root_path: root_path.clone(),
+            scan_time: SystemTime::now(),
+            root_mtime: SystemTime::now(),
+            total_size: 0,
+            node_count: 3,
+            config: CachedScanConfig {
+                follow_symlinks: false,
+                same_filesystem: true,
+                max_depth: None,
+            },
+        };
+
+        // Save and reload
+        save_cache(&cache_path, &tree, &meta).unwrap();
+        let (_, loaded_tree) = load_cache(&cache_path).unwrap();
+
+        // Verify paths were reconstructed correctly
+        assert_eq!(loaded_tree.root().path, root_path);
+        assert_eq!(loaded_tree.get(subdir_id).unwrap().path, root_path.join("subdir"));
+        assert_eq!(loaded_tree.get(file_id).unwrap().path, root_path.join("subdir").join("file.txt"));
     }
 }

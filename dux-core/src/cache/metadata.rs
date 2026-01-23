@@ -4,7 +4,7 @@ use std::time::SystemTime;
 use serde::{Deserialize, Serialize};
 
 /// Current cache format version - increment when format changes
-pub const CACHE_VERSION: u32 = 1;
+pub const CACHE_VERSION: u32 = 2;
 
 /// Magic bytes identifying a DUX cache file
 pub const CACHE_MAGIC: [u8; 4] = *b"DUXC";

@@ -74,6 +74,32 @@ impl DiskTree {
         &self.root_path
     }
 
+    /// Reconstruct paths for all nodes after deserialization
+    /// Must be called after loading from cache since paths are not serialized
+    pub fn rebuild_paths(&mut self) {
+        // Set root path first
+        if let Some(root) = self.nodes.get_mut(0).and_then(|o| o.as_mut()) {
+            root.path = self.root_path.clone();
+        }
+
+        // Process nodes in order (parents before children due to arena structure)
+        for i in 1..self.nodes.len() {
+            if let Some(node) = &self.nodes[i] {
+                let parent_path = node.parent
+                    .and_then(|pid| self.nodes.get(pid.index()))
+                    .and_then(|o| o.as_ref())
+                    .map(|p| p.path.clone());
+
+                if let Some(pp) = parent_path {
+                    let name = self.nodes[i].as_ref().map(|n| n.name.clone());
+                    if let (Some(node), Some(name)) = (self.nodes[i].as_mut(), name) {
+                        node.path = pp.join(&name);
+                    }
+                }
+            }
+        }
+    }
+
     /// Get total number of nodes (including tombstones)
     pub fn len(&self) -> usize {
         self.nodes.len()

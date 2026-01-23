@@ -57,7 +57,8 @@ pub struct TreeNode {
     /// Whether directory is expanded in UI
     #[serde(skip)]
     pub is_expanded: bool,
-    /// Full path to this node
+    /// Full path to this node (reconstructed on cache load)
+    #[serde(skip)]
     pub path: PathBuf,
 }
 
