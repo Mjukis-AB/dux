@@ -174,39 +174,39 @@ impl AppState {
 
     /// Toggle expand/collapse for selected node
     pub fn toggle_selected(&mut self) {
-        if let Some(node_id) = self.selected_node() {
-            if let Some(tree) = &mut self.tree {
-                tree.toggle_expanded(node_id);
-            }
+        if let Some(node_id) = self.selected_node()
+            && let Some(tree) = &mut self.tree
+        {
+            tree.toggle_expanded(node_id);
         }
     }
 
     /// Expand selected node
     pub fn expand_selected(&mut self) {
-        if let Some(node_id) = self.selected_node() {
-            if let Some(tree) = &mut self.tree {
-                tree.set_expanded(node_id, true);
-            }
+        if let Some(node_id) = self.selected_node()
+            && let Some(tree) = &mut self.tree
+        {
+            tree.set_expanded(node_id, true);
         }
     }
 
     /// Collapse selected node
     pub fn collapse_selected(&mut self) {
-        if let Some(node_id) = self.selected_node() {
-            if let Some(tree) = &mut self.tree {
-                let node = tree.get(node_id);
-                if let Some(node) = node {
-                    if node.is_expanded {
-                        tree.set_expanded(node_id, false);
-                    } else if let Some(parent) = node.parent {
-                        // If already collapsed, go to parent
-                        tree.set_expanded(parent, false);
-                        // Find parent's index in visible list
-                        let nodes = tree.visible_nodes(self.view_root);
-                        if let Some(idx) = nodes.iter().position(|&id| id == parent) {
-                            self.selected_index = idx;
-                            self.ensure_visible();
-                        }
+        if let Some(node_id) = self.selected_node()
+            && let Some(tree) = &mut self.tree
+        {
+            let node = tree.get(node_id);
+            if let Some(node) = node {
+                if node.is_expanded {
+                    tree.set_expanded(node_id, false);
+                } else if let Some(parent) = node.parent {
+                    // If already collapsed, go to parent
+                    tree.set_expanded(parent, false);
+                    // Find parent's index in visible list
+                    let nodes = tree.visible_nodes(self.view_root);
+                    if let Some(idx) = nodes.iter().position(|&id| id == parent) {
+                        self.selected_index = idx;
+                        self.ensure_visible();
                     }
                 }
             }
@@ -215,17 +215,16 @@ impl AppState {
 
     /// Drill down into selected directory
     pub fn drill_down(&mut self) {
-        if let Some(node_id) = self.selected_node() {
-            if let Some(tree) = &self.tree {
-                if let Some(node) = tree.get(node_id) {
-                    if node.kind.is_directory() && node.has_children() {
-                        self.history.push(self.view_root);
-                        self.view_root = node_id;
-                        self.selected_index = 0;
-                        self.scroll_offset = 0;
-                    }
-                }
-            }
+        if let Some(node_id) = self.selected_node()
+            && let Some(tree) = &self.tree
+            && let Some(node) = tree.get(node_id)
+            && node.kind.is_directory()
+            && node.has_children()
+        {
+            self.history.push(self.view_root);
+            self.view_root = node_id;
+            self.selected_index = 0;
+            self.scroll_offset = 0;
         }
     }
 
@@ -266,31 +265,29 @@ impl AppState {
 
     /// Open selected item in Finder (macOS)
     pub fn open_in_finder(&self) {
-        if let Some(node_id) = self.selected_node() {
-            if let Some(tree) = &self.tree {
-                if let Some(node) = tree.get(node_id) {
-                    #[cfg(target_os = "macos")]
-                    {
-                        std::process::Command::new("open")
-                            .arg("-R") // Reveal in Finder
-                            .arg(&node.path)
-                            .spawn()
-                            .ok();
-                    }
-                }
+        if let Some(node_id) = self.selected_node()
+            && let Some(tree) = &self.tree
+            && let Some(node) = tree.get(node_id)
+        {
+            #[cfg(target_os = "macos")]
+            {
+                std::process::Command::new("open")
+                    .arg("-R") // Reveal in Finder
+                    .arg(&node.path)
+                    .spawn()
+                    .ok();
             }
         }
     }
 
     /// Request delete - shows confirmation dialog
     pub fn request_delete(&mut self) {
-        if let Some(node_id) = self.selected_node() {
-            if let Some(tree) = &self.tree {
-                if let Some(node) = tree.get(node_id) {
-                    self.pending_delete = Some((node_id, node.path.clone()));
-                    self.mode = AppMode::ConfirmDelete;
-                }
-            }
+        if let Some(node_id) = self.selected_node()
+            && let Some(tree) = &self.tree
+            && let Some(node) = tree.get(node_id)
+        {
+            self.pending_delete = Some((node_id, node.path.clone()));
+            self.mode = AppMode::ConfirmDelete;
         }
     }
 

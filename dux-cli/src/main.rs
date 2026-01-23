@@ -119,16 +119,14 @@ fn run_app(
     let cache_path = cache_dir.as_ref().map(|d| cache_path_for(&path, d));
     let mut loaded_from_cache = false;
 
-    if !args.no_cache {
-        if let Some(ref cp) = cache_path {
-            if let Ok((meta, tree)) = load_cache(cp) {
-                if is_cache_valid(&meta, &path, &cache_config) {
-                    state.set_tree(tree);
-                    state.loaded_from_cache = true;
-                    loaded_from_cache = true;
-                }
-            }
-        }
+    if !args.no_cache
+        && let Some(ref cp) = cache_path
+        && let Ok((meta, tree)) = load_cache(cp)
+        && is_cache_valid(&meta, &path, &cache_config)
+    {
+        state.set_tree(tree);
+        state.loaded_from_cache = true;
+        loaded_from_cache = true;
     }
 
     // Start scanner only if not loaded from cache
@@ -162,31 +160,30 @@ fn run_app(
                     }
                     ScanMessage::Completed => {
                         // Scanner completed, get the tree
-                        if let Some(handle) = scan_handle.take() {
-                            if let Ok(tree) = handle.join() {
-                                // Save to cache in background
-                                if let Some(ref cp) = cache_path_for_save {
-                                    let tree_for_cache = tree.clone();
-                                    let cache_path = cp.clone();
-                                    let config = cache_config_for_save.clone();
-                                    let root = root_path_for_save.clone();
-                                    let root_mtime =
-                                        get_mtime(&root).unwrap_or(SystemTime::UNIX_EPOCH);
-                                    std::thread::spawn(move || {
-                                        let meta = CacheMetadata {
-                                            version: dux_core::CACHE_VERSION,
-                                            root_path: root,
-                                            scan_time: SystemTime::now(),
-                                            root_mtime,
-                                            total_size: tree_for_cache.total_size(),
-                                            node_count: tree_for_cache.live_count(),
-                                            config,
-                                        };
-                                        let _ = save_cache(&cache_path, &tree_for_cache, &meta);
-                                    });
-                                }
-                                state.set_tree(tree);
+                        if let Some(handle) = scan_handle.take()
+                            && let Ok(tree) = handle.join()
+                        {
+                            // Save to cache in background
+                            if let Some(ref cp) = cache_path_for_save {
+                                let tree_for_cache = tree.clone();
+                                let cache_path = cp.clone();
+                                let config = cache_config_for_save.clone();
+                                let root = root_path_for_save.clone();
+                                let root_mtime = get_mtime(&root).unwrap_or(SystemTime::UNIX_EPOCH);
+                                std::thread::spawn(move || {
+                                    let meta = CacheMetadata {
+                                        version: dux_core::CACHE_VERSION,
+                                        root_path: root,
+                                        scan_time: SystemTime::now(),
+                                        root_mtime,
+                                        total_size: tree_for_cache.total_size(),
+                                        node_count: tree_for_cache.live_count(),
+                                        config,
+                                    };
+                                    let _ = save_cache(&cache_path, &tree_for_cache, &meta);
+                                });
                             }
+                            state.set_tree(tree);
                         }
                         break;
                     }
@@ -249,12 +246,11 @@ fn run_app(
                     }
 
                     // Delete confirmation dialog
-                    if state.mode == AppMode::ConfirmDelete {
-                        if let Some(path) = state.pending_delete_path() {
-                            let size = state.pending_delete_size();
-                            ConfirmDeleteView::new(path, size, &theme)
-                                .render(area, frame.buffer_mut());
-                        }
+                    if state.mode == AppMode::ConfirmDelete
+                        && let Some(path) = state.pending_delete_path()
+                    {
+                        let size = state.pending_delete_size();
+                        ConfirmDeleteView::new(path, size, &theme).render(area, frame.buffer_mut());
                     }
                 }
             }

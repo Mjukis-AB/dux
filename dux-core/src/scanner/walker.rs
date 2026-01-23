@@ -219,10 +219,10 @@ impl Scanner {
                     children.retain(|entry| {
                         if let Ok(e) = entry {
                             // Check if child is on same filesystem
-                            if let Ok(meta) = e.metadata() {
-                                if meta.dev() != root_dev {
-                                    return false;
-                                }
+                            if let Ok(meta) = e.metadata()
+                                && meta.dev() != root_dev
+                            {
+                                return false;
                             }
                             // Check if child path is virtual/slow
                             if is_virtual_or_slow_path(&e.path(), &root_for_filter) {

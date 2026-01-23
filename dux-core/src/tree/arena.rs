@@ -161,32 +161,30 @@ impl DiskTree {
             .collect();
 
         // Then sort each node's children
-        for node_opt in &mut self.nodes {
-            if let Some(node) = node_opt {
-                node.children.sort_by(|a, b| {
-                    let size_a = sizes.get(a.index()).copied().unwrap_or(0);
-                    let size_b = sizes.get(b.index()).copied().unwrap_or(0);
-                    size_b.cmp(&size_a)
-                });
-            }
+        for node in self.nodes.iter_mut().flatten() {
+            node.children.sort_by(|a, b| {
+                let size_a = sizes.get(a.index()).copied().unwrap_or(0);
+                let size_b = sizes.get(b.index()).copied().unwrap_or(0);
+                size_b.cmp(&size_a)
+            });
         }
     }
 
     /// Toggle expanded state for a node
     pub fn toggle_expanded(&mut self, id: NodeId) {
-        if let Some(node) = self.get_mut(id) {
-            if node.kind.is_directory() {
-                node.is_expanded = !node.is_expanded;
-            }
+        if let Some(node) = self.get_mut(id)
+            && node.kind.is_directory()
+        {
+            node.is_expanded = !node.is_expanded;
         }
     }
 
     /// Set expanded state for a node
     pub fn set_expanded(&mut self, id: NodeId, expanded: bool) {
-        if let Some(node) = self.get_mut(id) {
-            if node.kind.is_directory() {
-                node.is_expanded = expanded;
-            }
+        if let Some(node) = self.get_mut(id)
+            && node.kind.is_directory()
+        {
+            node.is_expanded = expanded;
         }
     }
 
@@ -200,11 +198,11 @@ impl DiskTree {
     fn collect_visible(&self, id: NodeId, result: &mut Vec<NodeId>) {
         result.push(id);
 
-        if let Some(node) = self.get(id) {
-            if node.is_expanded {
-                for &child_id in &node.children {
-                    self.collect_visible(child_id, result);
-                }
+        if let Some(node) = self.get(id)
+            && node.is_expanded
+        {
+            for &child_id in &node.children {
+                self.collect_visible(child_id, result);
             }
         }
     }
@@ -258,10 +256,10 @@ impl DiskTree {
     /// Find a node by its path
     pub fn find_by_path(&self, path: &Path) -> Option<NodeId> {
         for (i, node_opt) in self.nodes.iter().enumerate() {
-            if let Some(node) = node_opt {
-                if node.path == path {
-                    return Some(NodeId(i));
-                }
+            if let Some(node) = node_opt
+                && node.path == path
+            {
+                return Some(NodeId(i));
             }
         }
         None
@@ -292,10 +290,10 @@ impl DiskTree {
         };
 
         // Remove from parent's children
-        if let Some(pid) = parent_id {
-            if let Some(parent) = self.get_mut(pid) {
-                parent.children.retain(|&c| c != id);
-            }
+        if let Some(pid) = parent_id
+            && let Some(parent) = self.get_mut(pid)
+        {
+            parent.children.retain(|&c| c != id);
         }
 
         // Collect all descendants to tombstone

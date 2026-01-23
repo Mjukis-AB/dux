@@ -56,7 +56,7 @@ impl Widget for ProgressView<'_> {
             .fg(self.theme.blue)
             .add_modifier(Modifier::BOLD);
 
-        buf.set_string(inner.x, inner.y, &spinner.to_string(), spinner_style);
+        buf.set_string(inner.x, inner.y, spinner.to_string(), spinner_style);
 
         // Status text
         let status_text = if self.finalizing {
@@ -72,23 +72,23 @@ impl Widget for ProgressView<'_> {
         );
 
         // Current path (truncated) - only show during scanning, not finalizing
-        if !self.finalizing {
-            if let Some(path) = &self.progress.current_path {
-                let path_str = path.to_string_lossy();
-                let max_len = inner.width.saturating_sub(2) as usize;
-                let display_path = if path_str.len() > max_len {
-                    format!("...{}", &path_str[path_str.len() - max_len + 3..])
-                } else {
-                    path_str.to_string()
-                };
+        if !self.finalizing
+            && let Some(path) = &self.progress.current_path
+        {
+            let path_str = path.to_string_lossy();
+            let max_len = inner.width.saturating_sub(2) as usize;
+            let display_path = if path_str.len() > max_len {
+                format!("...{}", &path_str[path_str.len() - max_len + 3..])
+            } else {
+                path_str.to_string()
+            };
 
-                buf.set_string(
-                    inner.x,
-                    inner.y + 1,
-                    &display_path,
-                    Style::default().fg(self.theme.fg_dim),
-                );
-            }
+            buf.set_string(
+                inner.x,
+                inner.y + 1,
+                &display_path,
+                Style::default().fg(self.theme.fg_dim),
+            );
         }
 
         // Stats line
