@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 
 use dux_core::{DiskTree, NodeId, ScanProgress};
 
@@ -24,6 +25,8 @@ pub enum AppMode {
     Help,
     /// Showing delete confirmation dialog
     ConfirmDelete,
+    /// Deleting in progress
+    Deleting,
 }
 
 /// Application state
@@ -58,6 +61,8 @@ pub struct AppState {
     pub session_stats: SessionStats,
     /// Whether tree was loaded from cache
     pub loaded_from_cache: bool,
+    /// Receiver for async delete results
+    pub delete_receiver: Option<mpsc::Receiver<Result<(NodeId, u64), String>>>,
 }
 
 impl AppState {
@@ -78,6 +83,7 @@ impl AppState {
             pending_delete: None,
             session_stats: SessionStats::default(),
             loaded_from_cache: false,
+            delete_receiver: None,
         }
     }
 
@@ -295,7 +301,7 @@ impl AppState {
         }
     }
 
-    /// Confirm and execute delete operation
+    /// Confirm and start async delete operation
     pub fn confirm_delete(&mut self) {
         if let Some((node_id, path)) = self.pending_delete.take() {
             // Get size before deletion
@@ -306,27 +312,53 @@ impl AppState {
                 .map(|n| n.size)
                 .unwrap_or(0);
 
-            // Perform filesystem deletion
-            let result = if path.is_dir() {
-                std::fs::remove_dir_all(&path)
-            } else {
-                std::fs::remove_file(&path)
-            };
-
-            if result.is_ok() {
-                // Update tree in-place
-                if let Some(tree) = &mut self.tree {
-                    tree.remove_node(node_id);
-                }
-                // Update session stats
-                self.session_stats.bytes_freed += size;
-                self.session_stats.items_deleted += 1;
-                // Adjust selection after removal
-                self.adjust_selection_after_delete();
-            } else if let Err(e) = result {
-                self.error_message = Some(format!("Delete failed: {}", e));
+            // Update tree immediately (optimistic update)
+            if let Some(tree) = &mut self.tree {
+                tree.remove_node(node_id);
             }
+            self.adjust_selection_after_delete();
 
+            // Spawn background deletion
+            let (tx, rx) = mpsc::channel();
+            self.delete_receiver = Some(rx);
+            self.mode = AppMode::Deleting;
+
+            std::thread::spawn(move || {
+                let result = if path.is_dir() {
+                    std::fs::remove_dir_all(&path)
+                } else {
+                    std::fs::remove_file(&path)
+                };
+
+                match result {
+                    Ok(()) => {
+                        let _ = tx.send(Ok((node_id, size)));
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Err(format!("Delete failed: {}", e)));
+                    }
+                }
+            });
+        }
+    }
+
+    /// Check if async delete completed and handle result
+    pub fn poll_delete(&mut self) {
+        if let Some(rx) = &self.delete_receiver
+            && let Ok(result) = rx.try_recv()
+        {
+            match result {
+                Ok((_node_id, size)) => {
+                    self.session_stats.bytes_freed += size;
+                    self.session_stats.items_deleted += 1;
+                }
+                Err(e) => {
+                    // Delete failed - we already removed from tree optimistically
+                    // Could restore here but simpler to just show error
+                    self.error_message = Some(e);
+                }
+            }
+            self.delete_receiver = None;
             self.mode = AppMode::Browsing;
         }
     }

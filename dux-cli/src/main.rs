@@ -228,7 +228,7 @@ fn run_app(
                     )
                     .render(layout.tree, frame.buffer_mut());
                 }
-                AppMode::Browsing | AppMode::Help | AppMode::ConfirmDelete => {
+                AppMode::Browsing | AppMode::Help | AppMode::ConfirmDelete | AppMode::Deleting => {
                     if let Some(tree) = &state.tree {
                         TreeView::new(
                             tree,
@@ -259,6 +259,9 @@ fn run_app(
             Footer::new(state.mode, &theme, &state.session_stats)
                 .render(layout.footer, frame.buffer_mut());
         })?;
+
+        // Poll for async delete completion
+        state.poll_delete();
 
         // Handle events
         match event_handler.next()? {

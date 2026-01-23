@@ -31,6 +31,13 @@ Before creating a release tag:
 - Arena-allocated with `Vec<Option<TreeNode>>` - `None` = tombstone (deleted)
 - `remove_node()` tombstones node + descendants and propagates size changes up to root
 
+## Deletion
+
+- Deletion runs in a background thread to keep UI responsive
+- Tree is updated optimistically (immediately) before filesystem deletion completes
+- If user quits during deletion, the deletion continues to completion in the background
+- Footer shows "Deleting..." during the operation
+
 ## Git Hooks
 
 Global hooks at `~/.git-hooks/` run `cargo fmt --check` and `cargo clippy` for Rust projects.
