@@ -5,6 +5,7 @@ mod ui;
 use std::io::{self, stdout};
 use std::path::PathBuf;
 use std::thread::JoinHandle;
+use std::time::SystemTime;
 
 use clap::Parser;
 use color_eyre::Result;
@@ -12,7 +13,10 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use dux_core::{CancellationToken, DiskTree, ScanConfig, ScanMessage, Scanner};
+use dux_core::{
+    cache_path_for, get_mtime, is_cache_valid, load_cache, save_cache, CacheMetadata,
+    CachedScanConfig, CancellationToken, DiskTree, ScanConfig, ScanMessage, Scanner,
+};
 use ratatui::{backend::CrosstermBackend, style::Style, widgets::Widget, Terminal};
 
 use app::{Action, AppMode, AppState};
@@ -40,6 +44,10 @@ struct Args {
     /// Cross filesystem boundaries
     #[arg(short = 'x', long)]
     cross_filesystems: bool,
+
+    /// Disable cache (always perform fresh scan)
+    #[arg(long)]
+    no_cache: bool,
 }
 
 fn main() -> Result<()> {
@@ -87,47 +95,104 @@ fn run_app(
     let mut state = AppState::new(path.clone());
     let event_handler = EventHandler::new(50); // 50ms tick rate
 
-    // Start scanner
-    let config = ScanConfig {
+    // Scan configuration
+    let scan_config = ScanConfig {
         follow_symlinks: args.follow_symlinks,
         max_depth: args.max_depth,
         same_filesystem: !args.cross_filesystems,
         num_threads: 0,
     };
 
+    // Cache configuration (for validation)
+    let cache_config = CachedScanConfig {
+        follow_symlinks: args.follow_symlinks,
+        same_filesystem: !args.cross_filesystems,
+        max_depth: args.max_depth,
+    };
+
+    // Try to load from cache
+    let cache_dir = dirs::cache_dir().map(|d| d.join("dux"));
+    let cache_path = cache_dir.as_ref().map(|d| cache_path_for(&path, d));
+    let mut loaded_from_cache = false;
+
+    if !args.no_cache {
+        if let Some(ref cp) = cache_path {
+            if let Ok((meta, tree)) = load_cache(cp) {
+                if is_cache_valid(&meta, &path, &cache_config) {
+                    state.set_tree(tree);
+                    state.loaded_from_cache = true;
+                    loaded_from_cache = true;
+                }
+            }
+        }
+    }
+
+    // Start scanner only if not loaded from cache
     let cancel_token = CancellationToken::new();
-    let scanner = Scanner::new(config).with_cancellation(cancel_token.clone());
-    let (progress_rx, scan_handle) = scanner.scan(path);
+    let (progress_rx, scan_handle) = if !loaded_from_cache {
+        let scanner = Scanner::new(scan_config.clone()).with_cancellation(cancel_token.clone());
+        let (rx, handle) = scanner.scan(path.clone());
+        (Some(rx), Some(handle))
+    } else {
+        (None, None)
+    };
 
     // Store the join handle in an Option so we can take it once
-    let mut scan_handle: Option<JoinHandle<DiskTree>> = Some(scan_handle);
+    let mut scan_handle: Option<JoinHandle<DiskTree>> = scan_handle;
+
+    // For cache saving after scan
+    let cache_path_for_save = cache_path.clone();
+    let cache_config_for_save = cache_config.clone();
+    let root_path_for_save = path.clone();
 
     loop {
-        // Check for scan progress/completion
-        while let Ok(msg) = progress_rx.try_recv() {
-            match msg {
-                ScanMessage::Progress(progress) => {
-                    state.update_progress(progress);
-                }
-                ScanMessage::Finalizing => {
-                    state.set_finalizing();
-                }
-                ScanMessage::Completed => {
-                    // Scanner completed, get the tree
-                    if let Some(handle) = scan_handle.take() {
-                        if let Ok(tree) = handle.join() {
-                            state.set_tree(tree);
-                        }
+        // Check for scan progress/completion (only if scanning)
+        if let Some(ref rx) = progress_rx {
+            while let Ok(msg) = rx.try_recv() {
+                match msg {
+                    ScanMessage::Progress(progress) => {
+                        state.update_progress(progress);
                     }
-                    break;
+                    ScanMessage::Finalizing => {
+                        state.set_finalizing();
+                    }
+                    ScanMessage::Completed => {
+                        // Scanner completed, get the tree
+                        if let Some(handle) = scan_handle.take() {
+                            if let Ok(tree) = handle.join() {
+                                // Save to cache in background
+                                if let Some(ref cp) = cache_path_for_save {
+                                    let tree_for_cache = tree.clone();
+                                    let cache_path = cp.clone();
+                                    let config = cache_config_for_save.clone();
+                                    let root = root_path_for_save.clone();
+                                    let root_mtime = get_mtime(&root).unwrap_or(SystemTime::UNIX_EPOCH);
+                                    std::thread::spawn(move || {
+                                        let meta = CacheMetadata {
+                                            version: dux_core::CACHE_VERSION,
+                                            root_path: root,
+                                            scan_time: SystemTime::now(),
+                                            root_mtime,
+                                            total_size: tree_for_cache.total_size(),
+                                            node_count: tree_for_cache.live_count(),
+                                            config,
+                                        };
+                                        let _ = save_cache(&cache_path, &tree_for_cache, &meta);
+                                    });
+                                }
+                                state.set_tree(tree);
+                            }
+                        }
+                        break;
+                    }
+                    ScanMessage::Cancelled => {
+                        state.quit();
+                    }
+                    ScanMessage::Error(e) => {
+                        state.set_error(e);
+                    }
+                    _ => {}
                 }
-                ScanMessage::Cancelled => {
-                    state.quit();
-                }
-                ScanMessage::Error(e) => {
-                    state.set_error(e);
-                }
-                _ => {}
             }
         }
 
@@ -182,7 +247,7 @@ fn run_app(
             }
 
             // Footer
-            Footer::new(state.mode, &theme).render(layout.footer, frame.buffer_mut());
+            Footer::new(state.mode, &theme, &state.session_stats).render(layout.footer, frame.buffer_mut());
         })?;
 
         // Handle events

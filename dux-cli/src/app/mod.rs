@@ -2,4 +2,4 @@ mod action;
 mod state;
 
 pub use action::Action;
-pub use state::{AppMode, AppState};
+pub use state::{AppMode, AppState, SessionStats};

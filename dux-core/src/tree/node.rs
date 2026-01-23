@@ -1,7 +1,9 @@
 use std::path::PathBuf;
 
+use serde::{Deserialize, Serialize};
+
 /// Unique identifier for a node in the tree
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct NodeId(pub usize);
 
 impl NodeId {
@@ -13,7 +15,7 @@ impl NodeId {
 }
 
 /// Type of filesystem entry
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NodeKind {
     Directory,
     File,
@@ -37,7 +39,7 @@ impl NodeKind {
 }
 
 /// A node in the disk tree
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TreeNode {
     pub id: NodeId,
     pub name: String,
@@ -53,6 +55,7 @@ pub struct TreeNode {
     /// Depth in tree (0 for root)
     pub depth: u16,
     /// Whether directory is expanded in UI
+    #[serde(skip)]
     pub is_expanded: bool,
     /// Full path to this node
     pub path: PathBuf,

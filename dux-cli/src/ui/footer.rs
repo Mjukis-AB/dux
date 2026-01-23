@@ -5,19 +5,20 @@ use ratatui::{
     widgets::Widget,
 };
 
-use crate::app::AppMode;
+use crate::app::{AppMode, SessionStats};
 
 use super::theme::Theme;
 
-/// Footer widget showing keyboard hints
+/// Footer widget showing keyboard hints and session stats
 pub struct Footer<'a> {
     mode: AppMode,
     theme: &'a Theme,
+    session_stats: &'a SessionStats,
 }
 
 impl<'a> Footer<'a> {
-    pub fn new(mode: AppMode, theme: &'a Theme) -> Self {
-        Self { mode, theme }
+    pub fn new(mode: AppMode, theme: &'a Theme, session_stats: &'a SessionStats) -> Self {
+        Self { mode, theme, session_stats }
     }
 }
 
@@ -66,6 +67,23 @@ impl Widget for Footer<'_> {
 
             if x >= area.x + area.width - 5 {
                 break;
+            }
+        }
+
+        // Show freed space on the right side (only if items have been deleted)
+        if self.session_stats.items_deleted > 0 {
+            let freed_text = format!(
+                "Freed: {} ({} item{})",
+                dux_core::format_size(self.session_stats.bytes_freed),
+                self.session_stats.items_deleted,
+                if self.session_stats.items_deleted == 1 { "" } else { "s" }
+            );
+            let stats_style = Style::default()
+                .fg(self.theme.green)
+                .add_modifier(Modifier::BOLD);
+            let stats_x = area.x + area.width - freed_text.len() as u16 - 1;
+            if stats_x > x + 2 {
+                buf.set_string(stats_x, area.y, &freed_text, stats_style);
             }
         }
     }

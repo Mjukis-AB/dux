@@ -17,6 +17,9 @@ pub enum DuxError {
 
     #[error("Scan was cancelled")]
     Cancelled,
+
+    #[error("Cache error: {0}")]
+    Cache(String),
 }
 
 pub type Result<T> = std::result::Result<T, DuxError>;

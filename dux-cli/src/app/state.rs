@@ -1,6 +1,15 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use dux_core::{DiskTree, NodeId, ScanProgress};
+
+/// Statistics tracked during the session
+#[derive(Debug, Default, Clone)]
+pub struct SessionStats {
+    /// Total bytes freed by deletions
+    pub bytes_freed: u64,
+    /// Number of items deleted
+    pub items_deleted: u32,
+}
 
 /// Application mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,6 +54,10 @@ pub struct AppState {
     pub error_message: Option<String>,
     /// Path pending deletion (for confirmation dialog)
     pub pending_delete: Option<PathBuf>,
+    /// Session statistics (deleted items, freed space)
+    pub session_stats: SessionStats,
+    /// Whether tree was loaded from cache
+    pub loaded_from_cache: bool,
 }
 
 impl AppState {
@@ -63,6 +76,8 @@ impl AppState {
             spinner_frame: 0,
             error_message: None,
             pending_delete: None,
+            session_stats: SessionStats::default(),
+            loaded_from_cache: false,
         }
     }
 
@@ -282,17 +297,54 @@ impl AppState {
     /// Confirm and execute delete operation
     pub fn confirm_delete(&mut self) {
         if let Some(path) = self.pending_delete.take() {
+            // Find the node and get its info before deletion
+            let node_id = self.find_node_by_path(&path);
+            let size = node_id
+                .and_then(|id| self.tree.as_ref()?.get(id))
+                .map(|n| n.size)
+                .unwrap_or(0);
+
+            // Perform filesystem deletion
             let result = if path.is_dir() {
                 std::fs::remove_dir_all(&path)
             } else {
                 std::fs::remove_file(&path)
             };
 
-            if let Err(e) = result {
+            if result.is_ok() {
+                // Update tree in-place
+                if let (Some(tree), Some(id)) = (&mut self.tree, node_id) {
+                    tree.remove_node(id);
+                }
+                // Update session stats
+                self.session_stats.bytes_freed += size;
+                self.session_stats.items_deleted += 1;
+                // Adjust selection after removal
+                self.adjust_selection_after_delete();
+            } else if let Err(e) = result {
                 self.error_message = Some(format!("Delete failed: {}", e));
             }
 
             self.mode = AppMode::Browsing;
+        }
+    }
+
+    /// Find node by filesystem path
+    fn find_node_by_path(&self, path: &Path) -> Option<NodeId> {
+        self.tree.as_ref()?.find_by_path(path)
+    }
+
+    /// Adjust selection after a node is deleted
+    fn adjust_selection_after_delete(&mut self) {
+        let nodes = self.visible_nodes();
+        if nodes.is_empty() {
+            self.selected_index = 0;
+        } else if self.selected_index >= nodes.len() {
+            self.selected_index = nodes.len().saturating_sub(1);
+        }
+        // Also reset scroll if needed
+        if self.scroll_offset > 0 && self.scroll_offset >= nodes.len() {
+            self.scroll_offset = nodes.len().saturating_sub(1);
         }
     }
 

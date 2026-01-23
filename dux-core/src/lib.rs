@@ -1,8 +1,13 @@
+pub mod cache;
 pub mod error;
 pub mod scanner;
 pub mod size;
 pub mod tree;
 
+pub use cache::{
+    cache_path_for, get_mtime, is_cache_valid, load_cache, save_cache, CacheMetadata,
+    CachedScanConfig, CACHE_MAGIC, CACHE_VERSION,
+};
 pub use error::{DuxError, Result};
 pub use scanner::{CancellationToken, ScanConfig, ScanMessage, ScanProgress, Scanner};
 pub use size::{format_count, format_size, format_size_short, size_percentage};
