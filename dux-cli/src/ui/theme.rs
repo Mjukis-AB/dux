@@ -34,23 +34,23 @@ impl Default for Theme {
     fn default() -> Self {
         Self {
             // Catppuccin Mocha base
-            bg: Color::Rgb(30, 30, 46),         // Base
-            bg_surface: Color::Rgb(49, 50, 68), // Surface0
+            bg: Color::Rgb(30, 30, 46),           // Base
+            bg_surface: Color::Rgb(49, 50, 68),   // Surface0
             bg_highlight: Color::Rgb(69, 71, 90), // Surface1
-            fg: Color::Rgb(205, 214, 244),      // Text
-            fg_dim: Color::Rgb(166, 173, 200),  // Subtext0
-            fg_muted: Color::Rgb(127, 132, 156), // Overlay0
+            fg: Color::Rgb(205, 214, 244),        // Text
+            fg_dim: Color::Rgb(166, 173, 200),    // Subtext0
+            fg_muted: Color::Rgb(127, 132, 156),  // Overlay0
 
             // Accent colors
-            blue: Color::Rgb(137, 180, 250),    // Blue
-            green: Color::Rgb(166, 227, 161),   // Green
-            yellow: Color::Rgb(249, 226, 175),  // Yellow
-            red: Color::Rgb(243, 139, 168),     // Red
-            purple: Color::Rgb(203, 166, 247),  // Mauve
-            teal: Color::Rgb(148, 226, 213),    // Teal
+            blue: Color::Rgb(137, 180, 250),   // Blue
+            green: Color::Rgb(166, 227, 161),  // Green
+            yellow: Color::Rgb(249, 226, 175), // Yellow
+            red: Color::Rgb(243, 139, 168),    // Red
+            purple: Color::Rgb(203, 166, 247), // Mauve
+            teal: Color::Rgb(148, 226, 213),   // Teal
 
             // UI
-            border: Color::Rgb(88, 91, 112),    // Surface2
+            border: Color::Rgb(88, 91, 112),         // Surface2
             selection_bg: Color::Rgb(137, 180, 250), // Blue
             selection_fg: Color::Rgb(30, 30, 46),    // Base
 

@@ -1,4 +1,4 @@
-use dux_core::{format_count, format_size, ScanProgress};
+use dux_core::{ScanProgress, format_count, format_size};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -20,7 +20,12 @@ pub struct ProgressView<'a> {
 }
 
 impl<'a> ProgressView<'a> {
-    pub fn new(progress: &'a ScanProgress, spinner_frame: usize, finalizing: bool, theme: &'a Theme) -> Self {
+    pub fn new(
+        progress: &'a ScanProgress,
+        spinner_frame: usize,
+        finalizing: bool,
+        theme: &'a Theme,
+    ) -> Self {
         Self {
             progress,
             spinner_frame,

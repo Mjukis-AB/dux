@@ -1,4 +1,4 @@
-use dux_core::{format_size, size_percentage, DiskTree, NodeId, NodeKind};
+use dux_core::{DiskTree, NodeId, NodeKind, format_size, size_percentage};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -236,7 +236,8 @@ impl Widget for TreeView<'_> {
             }
 
             // Size bar (right-aligned section)
-            let right_x = area.x + area.width - bar_width as u16 - pct_width as u16 - size_width as u16 - 2;
+            let right_x =
+                area.x + area.width - bar_width as u16 - pct_width as u16 - size_width as u16 - 2;
 
             let percentage = size_percentage(node.size, total_size);
             let bar_color = if is_selected {

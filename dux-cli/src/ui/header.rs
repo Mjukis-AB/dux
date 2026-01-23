@@ -68,7 +68,11 @@ impl Widget for Header<'_> {
         let status = if self.state.tree.is_none() {
             progress_indicator(&self.state.progress, self.state.spinner_frame)
         } else if let Some(tree) = &self.state.tree {
-            let cached_indicator = if self.state.loaded_from_cache { " (cached)" } else { "" };
+            let cached_indicator = if self.state.loaded_from_cache {
+                " (cached)"
+            } else {
+                ""
+            };
             format!(
                 "{} files, {}{}",
                 dux_core::format_count(tree.total_files()),

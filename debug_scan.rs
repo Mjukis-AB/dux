@@ -1,12 +1,15 @@
 // Run with: cargo run --example debug_scan -- /path/to/scan
 // Add to dux-core/Cargo.toml: [[example]] name = "debug_scan" path = "../debug_scan.rs"
 
+use dux_core::{ScanConfig, ScanMessage, Scanner};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
-use dux_core::{ScanConfig, ScanMessage, Scanner};
 
 fn main() {
-    let path = std::env::args().nth(1).map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+    let path = std::env::args()
+        .nth(1)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
 
     println!("Scanning: {:?}", path);
 
@@ -45,7 +48,10 @@ fn main() {
                         p.errors,
                         stuck_count,
                         path_changed,
-                        p.current_path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default()
+                        p.current_path
+                            .as_ref()
+                            .map(|p| p.to_string_lossy().to_string())
+                            .unwrap_or_default()
                     );
                     last_print = now;
                     last_path = p.current_path.clone();
@@ -68,5 +74,9 @@ fn main() {
     }
 
     let tree = handle.join().unwrap();
-    println!("\nFinal: {} nodes, {} total size", tree.len(), dux_core::format_size(tree.total_size()));
+    println!(
+        "\nFinal: {} nodes, {} total size",
+        tree.len(),
+        dux_core::format_size(tree.total_size())
+    );
 }

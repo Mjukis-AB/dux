@@ -18,7 +18,11 @@ pub struct Footer<'a> {
 
 impl<'a> Footer<'a> {
     pub fn new(mode: AppMode, theme: &'a Theme, session_stats: &'a SessionStats) -> Self {
-        Self { mode, theme, session_stats }
+        Self {
+            mode,
+            theme,
+            session_stats,
+        }
     }
 }
 
@@ -76,7 +80,11 @@ impl Widget for Footer<'_> {
                 "Freed: {} ({} item{})",
                 dux_core::format_size(self.session_stats.bytes_freed),
                 self.session_stats.items_deleted,
-                if self.session_stats.items_deleted == 1 { "" } else { "s" }
+                if self.session_stats.items_deleted == 1 {
+                    ""
+                } else {
+                    "s"
+                }
             );
             let stats_style = Style::default()
                 .fg(self.theme.green)

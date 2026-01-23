@@ -85,7 +85,8 @@ impl DiskTree {
         // Process nodes in order (parents before children due to arena structure)
         for i in 1..self.nodes.len() {
             if let Some(node) = &self.nodes[i] {
-                let parent_path = node.parent
+                let parent_path = node
+                    .parent
                     .and_then(|pid| self.nodes.get(pid.index()))
                     .and_then(|o| o.as_ref())
                     .map(|p| p.path.clone());
@@ -153,7 +154,11 @@ impl DiskTree {
     /// Sort all children by size descending
     pub fn sort_by_size(&mut self) {
         // First collect all the size information
-        let sizes: Vec<u64> = self.nodes.iter().map(|n| n.as_ref().map(|n| n.size).unwrap_or(0)).collect();
+        let sizes: Vec<u64> = self
+            .nodes
+            .iter()
+            .map(|n| n.as_ref().map(|n| n.size).unwrap_or(0))
+            .collect();
 
         // Then sort each node's children
         for node_opt in &mut self.nodes {

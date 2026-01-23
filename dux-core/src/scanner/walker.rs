@@ -98,20 +98,20 @@ impl SharedProgress {
 
 /// Patterns that indicate potentially slow/problematic paths
 const SLOW_PATTERNS: &[&str] = &[
-    "/Volumes/",                     // Mounted volumes (might be network/external)
-    "/.Spotlight-V100",              // Spotlight index
-    "/.fseventsd",                   // FSEvents
-    "/.DocumentRevisions-V100",      // Document versions
+    "/Volumes/",                // Mounted volumes (might be network/external)
+    "/.Spotlight-V100",         // Spotlight index
+    "/.fseventsd",              // FSEvents
+    "/.DocumentRevisions-V100", // Document versions
     "/System/Volumes/Data/.Spotlight-V100",
-    "CoreSimulator/Volumes",         // iOS Simulator disk images
-    "/.MobileBackups",               // Mobile backups
-    ".timemachine",                  // Time Machine
-    "/dev/",                         // Device files
-    "/proc/",                        // Linux proc filesystem
-    "/sys/",                         // Linux sys filesystem
-    "/private/var/folders",          // macOS temp folders (can hang)
-    "/private/var/db/dyld",          // dyld cache (permission issues)
-    "/private/var/db/uuidtext",      // UUID text (slow)
+    "CoreSimulator/Volumes",    // iOS Simulator disk images
+    "/.MobileBackups",          // Mobile backups
+    ".timemachine",             // Time Machine
+    "/dev/",                    // Device files
+    "/proc/",                   // Linux proc filesystem
+    "/sys/",                    // Linux sys filesystem
+    "/private/var/folders",     // macOS temp folders (can hang)
+    "/private/var/db/dyld",     // dyld cache (permission issues)
+    "/private/var/db/uuidtext", // UUID text (slow)
 ];
 
 /// Check if a path looks like a virtual/problematic filesystem path
@@ -179,9 +179,7 @@ impl Scanner {
         path_to_id.insert(root_path.clone(), NodeId::ROOT);
 
         // Get root device for same-filesystem check
-        let root_dev = std::fs::metadata(&root_path)
-            .map(|m| m.dev())
-            .unwrap_or(0);
+        let root_dev = std::fs::metadata(&root_path).map(|m| m.dev()).unwrap_or(0);
 
         // Shared progress state
         let shared_progress = Arc::new(SharedProgress::new());
@@ -192,7 +190,8 @@ impl Scanner {
         // Spawn heartbeat thread that sends progress every 100ms
         let heartbeat_handle = std::thread::spawn(move || {
             while !progress_for_heartbeat.done.load(Ordering::Relaxed)
-                  && !cancel_for_heartbeat.is_cancelled() {
+                && !cancel_for_heartbeat.is_cancelled()
+            {
                 std::thread::sleep(std::time::Duration::from_millis(100));
                 let progress = progress_for_heartbeat.to_scan_progress();
                 let _ = tx_for_heartbeat.send(ScanMessage::Progress(progress));
@@ -320,13 +319,17 @@ impl Scanner {
                 path_to_id.insert(path.clone(), node_id);
                 shared_progress.dirs_scanned.fetch_add(1, Ordering::Relaxed);
             } else {
-                shared_progress.files_scanned.fetch_add(1, Ordering::Relaxed);
+                shared_progress
+                    .files_scanned
+                    .fetch_add(1, Ordering::Relaxed);
             }
 
             // Set size for files
             let size = get_disk_usage(&metadata);
             tree.set_size(node_id, size);
-            shared_progress.bytes_scanned.fetch_add(size, Ordering::Relaxed);
+            shared_progress
+                .bytes_scanned
+                .fetch_add(size, Ordering::Relaxed);
 
             // Update current path
             if let Ok(mut guard) = shared_progress.current_path.lock() {

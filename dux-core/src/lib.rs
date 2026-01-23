@@ -5,8 +5,8 @@ pub mod size;
 pub mod tree;
 
 pub use cache::{
-    cache_path_for, get_mtime, is_cache_valid, load_cache, save_cache, CacheMetadata,
-    CachedScanConfig, CACHE_MAGIC, CACHE_VERSION,
+    CACHE_MAGIC, CACHE_VERSION, CacheMetadata, CachedScanConfig, cache_path_for, get_mtime,
+    is_cache_valid, load_cache, save_cache,
 };
 pub use error::{DuxError, Result};
 pub use scanner::{CancellationToken, ScanConfig, ScanMessage, ScanProgress, Scanner};

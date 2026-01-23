@@ -11,16 +11,16 @@ use clap::Parser;
 use color_eyre::Result;
 use crossterm::{
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use dux_core::{
-    cache_path_for, get_mtime, is_cache_valid, load_cache, save_cache, CacheMetadata,
-    CachedScanConfig, CancellationToken, DiskTree, ScanConfig, ScanMessage, Scanner,
+    CacheMetadata, CachedScanConfig, CancellationToken, DiskTree, ScanConfig, ScanMessage, Scanner,
+    cache_path_for, get_mtime, is_cache_valid, load_cache, save_cache,
 };
-use ratatui::{backend::CrosstermBackend, style::Style, widgets::Widget, Terminal};
+use ratatui::{Terminal, backend::CrosstermBackend, style::Style, widgets::Widget};
 
 use app::{Action, AppMode, AppState};
-use tui::{handle_key, AppEvent, EventHandler};
+use tui::{AppEvent, EventHandler, handle_key};
 use ui::{AppLayout, ConfirmDeleteView, Footer, Header, HelpView, ProgressView, Theme, TreeView};
 
 /// DUX - Interactive Terminal Disk Usage Analyzer
@@ -56,7 +56,11 @@ fn main() -> Result<()> {
     let args = Args::parse();
 
     // Resolve path
-    let path = args.path.clone().canonicalize().unwrap_or(args.path.clone());
+    let path = args
+        .path
+        .clone()
+        .canonicalize()
+        .unwrap_or(args.path.clone());
 
     // Validate path
     if !path.exists() {
@@ -166,7 +170,8 @@ fn run_app(
                                     let cache_path = cp.clone();
                                     let config = cache_config_for_save.clone();
                                     let root = root_path_for_save.clone();
-                                    let root_mtime = get_mtime(&root).unwrap_or(SystemTime::UNIX_EPOCH);
+                                    let root_mtime =
+                                        get_mtime(&root).unwrap_or(SystemTime::UNIX_EPOCH);
                                     std::thread::spawn(move || {
                                         let meta = CacheMetadata {
                                             version: dux_core::CACHE_VERSION,
@@ -202,7 +207,9 @@ fn run_app(
             let layout = AppLayout::new(area);
 
             // Background
-            frame.buffer_mut().set_style(area, Style::default().bg(theme.bg));
+            frame
+                .buffer_mut()
+                .set_style(area, Style::default().bg(theme.bg));
 
             // Update visible height for scrolling
             state.visible_height = layout.tree.height as usize;
@@ -216,8 +223,13 @@ fn run_app(
             // Main content
             match state.mode {
                 AppMode::Scanning | AppMode::Finalizing => {
-                    ProgressView::new(&state.progress, state.spinner_frame, state.mode == AppMode::Finalizing, &theme)
-                        .render(layout.tree, frame.buffer_mut());
+                    ProgressView::new(
+                        &state.progress,
+                        state.spinner_frame,
+                        state.mode == AppMode::Finalizing,
+                        &theme,
+                    )
+                    .render(layout.tree, frame.buffer_mut());
                 }
                 AppMode::Browsing | AppMode::Help | AppMode::ConfirmDelete => {
                     if let Some(tree) = &state.tree {
@@ -240,14 +252,16 @@ fn run_app(
                     if state.mode == AppMode::ConfirmDelete {
                         if let Some(path) = state.pending_delete_path() {
                             let size = state.pending_delete_size();
-                            ConfirmDeleteView::new(path, size, &theme).render(area, frame.buffer_mut());
+                            ConfirmDeleteView::new(path, size, &theme)
+                                .render(area, frame.buffer_mut());
                         }
                     }
                 }
             }
 
             // Footer
-            Footer::new(state.mode, &theme, &state.session_stats).render(layout.footer, frame.buffer_mut());
+            Footer::new(state.mode, &theme, &state.session_stats)
+                .render(layout.footer, frame.buffer_mut());
         })?;
 
         // Handle events

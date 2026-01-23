@@ -1,6 +1,6 @@
 mod metadata;
 
-pub use metadata::{CacheMetadata, CachedScanConfig, CACHE_MAGIC, CACHE_VERSION};
+pub use metadata::{CACHE_MAGIC, CACHE_VERSION, CacheMetadata, CachedScanConfig};
 
 use std::collections::hash_map::DefaultHasher;
 use std::fs::{self, File};
@@ -9,8 +9,8 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use crate::tree::DiskTree;
 use crate::Result;
+use crate::tree::DiskTree;
 
 /// Get the cache file path for a given root directory
 pub fn cache_path_for(root: &Path, cache_dir: &Path) -> PathBuf {
@@ -99,7 +99,9 @@ pub fn load_cache(path: &Path) -> Result<(CacheMetadata, DiskTree)> {
     ]);
     let computed_checksum = crc32fast::hash(&data[..checksum_offset]);
     if stored_checksum != computed_checksum {
-        return Err(crate::DuxError::Cache("Cache checksum mismatch".to_string()));
+        return Err(crate::DuxError::Cache(
+            "Cache checksum mismatch".to_string(),
+        ));
     }
 
     let mut offset = 0;
@@ -125,7 +127,9 @@ pub fn load_cache(path: &Path) -> Result<(CacheMetadata, DiskTree)> {
     let meta_len = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
     offset += 4;
     if offset + meta_len > checksum_offset {
-        return Err(crate::DuxError::Cache("Invalid metadata length".to_string()));
+        return Err(crate::DuxError::Cache(
+            "Invalid metadata length".to_string(),
+        ));
     }
     let meta: CacheMetadata = postcard::from_bytes(&data[offset..offset + meta_len])
         .map_err(|e| crate::DuxError::Cache(format!("Failed to deserialize metadata: {}", e)))?;
@@ -254,7 +258,10 @@ mod tests {
 
         // Verify original paths
         assert_eq!(tree.get(subdir_id).unwrap().path, root_path.join("subdir"));
-        assert_eq!(tree.get(file_id).unwrap().path, root_path.join("subdir").join("file.txt"));
+        assert_eq!(
+            tree.get(file_id).unwrap().path,
+            root_path.join("subdir").join("file.txt")
+        );
 
         let meta = CacheMetadata {
             version: CACHE_VERSION,
@@ -276,7 +283,13 @@ mod tests {
 
         // Verify paths were reconstructed correctly
         assert_eq!(loaded_tree.root().path, root_path);
-        assert_eq!(loaded_tree.get(subdir_id).unwrap().path, root_path.join("subdir"));
-        assert_eq!(loaded_tree.get(file_id).unwrap().path, root_path.join("subdir").join("file.txt"));
+        assert_eq!(
+            loaded_tree.get(subdir_id).unwrap().path,
+            root_path.join("subdir")
+        );
+        assert_eq!(
+            loaded_tree.get(file_id).unwrap().path,
+            root_path.join("subdir").join("file.txt")
+        );
     }
 }

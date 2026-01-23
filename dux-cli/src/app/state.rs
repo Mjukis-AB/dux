@@ -298,7 +298,9 @@ impl AppState {
     pub fn confirm_delete(&mut self) {
         if let Some((node_id, path)) = self.pending_delete.take() {
             // Get size before deletion
-            let size = self.tree.as_ref()
+            let size = self
+                .tree
+                .as_ref()
                 .and_then(|t| t.get(node_id))
                 .map(|n| n.size)
                 .unwrap_or(0);
