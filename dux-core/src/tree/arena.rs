@@ -74,12 +74,13 @@ impl DiskTree {
         &self.root_path
     }
 
-    /// Reconstruct paths for all nodes after deserialization
-    /// Must be called after loading from cache since paths are not serialized
+    /// Reconstruct paths and UI state for all nodes after deserialization
+    /// Must be called after loading from cache since paths and is_expanded are not serialized
     pub fn rebuild_paths(&mut self) {
-        // Set root path first
+        // Set root path and expand root
         if let Some(root) = self.nodes.get_mut(0).and_then(|o| o.as_mut()) {
             root.path = self.root_path.clone();
+            root.is_expanded = true;
         }
 
         // Process nodes in order (parents before children due to arena structure)
