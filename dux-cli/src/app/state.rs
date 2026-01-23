@@ -264,20 +264,24 @@ impl AppState {
     }
 
     /// Open selected item in Finder (macOS)
+    #[cfg(target_os = "macos")]
     pub fn open_in_finder(&self) {
         if let Some(node_id) = self.selected_node()
             && let Some(tree) = &self.tree
             && let Some(node) = tree.get(node_id)
         {
-            #[cfg(target_os = "macos")]
-            {
-                std::process::Command::new("open")
-                    .arg("-R") // Reveal in Finder
-                    .arg(&node.path)
-                    .spawn()
-                    .ok();
-            }
+            std::process::Command::new("open")
+                .arg("-R") // Reveal in Finder
+                .arg(&node.path)
+                .spawn()
+                .ok();
         }
+    }
+
+    /// Open selected item in Finder (no-op on non-macOS)
+    #[cfg(not(target_os = "macos"))]
+    pub fn open_in_finder(&self) {
+        // No-op on non-macOS platforms
     }
 
     /// Request delete - shows confirmation dialog
