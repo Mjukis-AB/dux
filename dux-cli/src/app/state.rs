@@ -52,8 +52,8 @@ pub struct AppState {
     pub spinner_frame: usize,
     /// Error message to display
     pub error_message: Option<String>,
-    /// Path pending deletion (for confirmation dialog)
-    pub pending_delete: Option<PathBuf>,
+    /// Item pending deletion (node ID and path for confirmation dialog)
+    pub pending_delete: Option<(NodeId, PathBuf)>,
     /// Session statistics (deleted items, freed space)
     pub session_stats: SessionStats,
     /// Whether tree was loaded from cache
@@ -287,7 +287,7 @@ impl AppState {
         if let Some(node_id) = self.selected_node() {
             if let Some(tree) = &self.tree {
                 if let Some(node) = tree.get(node_id) {
-                    self.pending_delete = Some(node.path.clone());
+                    self.pending_delete = Some((node_id, node.path.clone()));
                     self.mode = AppMode::ConfirmDelete;
                 }
             }
@@ -296,11 +296,10 @@ impl AppState {
 
     /// Confirm and execute delete operation
     pub fn confirm_delete(&mut self) {
-        if let Some(path) = self.pending_delete.take() {
-            // Find the node and get its info before deletion
-            let node_id = self.find_node_by_path(&path);
-            let size = node_id
-                .and_then(|id| self.tree.as_ref()?.get(id))
+        if let Some((node_id, path)) = self.pending_delete.take() {
+            // Get size before deletion
+            let size = self.tree.as_ref()
+                .and_then(|t| t.get(node_id))
                 .map(|n| n.size)
                 .unwrap_or(0);
 
@@ -313,8 +312,8 @@ impl AppState {
 
             if result.is_ok() {
                 // Update tree in-place
-                if let (Some(tree), Some(id)) = (&mut self.tree, node_id) {
-                    tree.remove_node(id);
+                if let Some(tree) = &mut self.tree {
+                    tree.remove_node(node_id);
                 }
                 // Update session stats
                 self.session_stats.bytes_freed += size;
@@ -327,11 +326,6 @@ impl AppState {
 
             self.mode = AppMode::Browsing;
         }
-    }
-
-    /// Find node by filesystem path
-    fn find_node_by_path(&self, path: &Path) -> Option<NodeId> {
-        self.tree.as_ref()?.find_by_path(path)
     }
 
     /// Adjust selection after a node is deleted
@@ -354,21 +348,14 @@ impl AppState {
         self.mode = AppMode::Browsing;
     }
 
+    /// Get path of pending delete item
+    pub fn pending_delete_path(&self) -> Option<&Path> {
+        self.pending_delete.as_ref().map(|(_, path)| path.as_path())
+    }
+
     /// Get size of pending delete item
     pub fn pending_delete_size(&self) -> Option<u64> {
-        self.pending_delete.as_ref().and_then(|path| {
-            self.tree.as_ref().and_then(|tree| {
-                // Find the node with this path
-                let nodes = tree.visible_nodes(self.view_root);
-                for node_id in nodes {
-                    if let Some(node) = tree.get(node_id) {
-                        if node.path == *path {
-                            return Some(node.size);
-                        }
-                    }
-                }
-                None
-            })
-        })
+        let (node_id, _) = self.pending_delete.as_ref()?;
+        self.tree.as_ref()?.get(*node_id).map(|n| n.size)
     }
 }

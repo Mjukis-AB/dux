@@ -238,7 +238,7 @@ fn run_app(
 
                     // Delete confirmation dialog
                     if state.mode == AppMode::ConfirmDelete {
-                        if let Some(path) = &state.pending_delete {
+                        if let Some(path) = state.pending_delete_path() {
                             let size = state.pending_delete_size();
                             ConfirmDeleteView::new(path, size, &theme).render(area, frame.buffer_mut());
                         }
