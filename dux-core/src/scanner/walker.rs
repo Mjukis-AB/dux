@@ -1,9 +1,11 @@
 use std::collections::HashMap;
 use std::fs::Metadata;
-use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 
 use crossbeam_channel::{Receiver, Sender};
 use jwalk::WalkDir;
@@ -179,7 +181,9 @@ impl Scanner {
         path_to_id.insert(root_path.clone(), NodeId::ROOT);
 
         // Get root device for same-filesystem check
-        let root_dev = std::fs::metadata(&root_path).map(|m| m.dev()).unwrap_or(0);
+        let root_dev = std::fs::metadata(&root_path)
+            .map(|m| get_device_id(&m))
+            .unwrap_or(0);
 
         // Shared progress state
         let shared_progress = Arc::new(SharedProgress::new());
@@ -220,7 +224,7 @@ impl Scanner {
                         if let Ok(e) = entry {
                             // Check if child is on same filesystem
                             if let Ok(meta) = e.metadata()
-                                && meta.dev() != root_dev
+                                && get_device_id(&meta) != root_dev
                             {
                                 return false;
                             }
@@ -280,7 +284,7 @@ impl Scanner {
             };
 
             // Check filesystem boundary
-            if self.config.same_filesystem && metadata.dev() != root_dev {
+            if self.config.same_filesystem && get_device_id(&metadata) != root_dev {
                 continue;
             }
 
@@ -360,9 +364,28 @@ impl Scanner {
 }
 
 /// Get actual disk usage for a file (accounts for sparse files and block size)
+#[cfg(unix)]
 fn get_disk_usage(metadata: &Metadata) -> u64 {
     // st_blocks is in 512-byte units
     metadata.blocks() * 512
+}
+
+/// Get actual disk usage for a file (Windows fallback - uses file size)
+#[cfg(not(unix))]
+fn get_disk_usage(metadata: &Metadata) -> u64 {
+    metadata.len()
+}
+
+/// Get device ID for same-filesystem checks
+#[cfg(unix)]
+fn get_device_id(metadata: &Metadata) -> u64 {
+    metadata.dev()
+}
+
+/// Get device ID (Windows - not supported, return 0)
+#[cfg(not(unix))]
+fn get_device_id(_metadata: &Metadata) -> u64 {
+    0
 }
 
 #[cfg(test)]
