@@ -228,7 +228,7 @@ fn run_app(
                     )
                     .render(layout.tree, frame.buffer_mut());
                 }
-                AppMode::Browsing | AppMode::Help | AppMode::ConfirmDelete | AppMode::Deleting => {
+                AppMode::Browsing | AppMode::Help | AppMode::ConfirmDelete => {
                     if let Some(tree) = &state.tree {
                         TreeView::new(
                             tree,

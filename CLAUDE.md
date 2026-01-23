@@ -35,8 +35,8 @@ Before creating a release tag:
 
 - Deletion runs in a background thread to keep UI responsive
 - Tree is updated optimistically (immediately) before filesystem deletion completes
+- User can continue browsing while deletion happens in background
 - If user quits during deletion, the deletion continues to completion in the background
-- Footer shows "Deleting..." during the operation
 
 ## Git Hooks
 

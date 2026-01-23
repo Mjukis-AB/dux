@@ -45,7 +45,6 @@ impl Widget for Footer<'_> {
             ],
             AppMode::Help => vec![("Esc", "Close help"), ("q", "Quit")],
             AppMode::ConfirmDelete => vec![("y", "Yes"), ("n", "Cancel")],
-            AppMode::Deleting => vec![("Deleting...", "")],
         };
 
         let key_style = Style::default()

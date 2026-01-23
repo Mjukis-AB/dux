@@ -25,8 +25,6 @@ pub enum AppMode {
     Help,
     /// Showing delete confirmation dialog
     ConfirmDelete,
-    /// Deleting in progress
-    Deleting,
 }
 
 /// Application state
@@ -321,7 +319,9 @@ impl AppState {
             // Spawn background deletion
             let (tx, rx) = mpsc::channel();
             self.delete_receiver = Some(rx);
-            self.mode = AppMode::Deleting;
+
+            // Return to browsing immediately - deletion happens in background
+            self.mode = AppMode::Browsing;
 
             std::thread::spawn(move || {
                 let result = if path.is_dir() {

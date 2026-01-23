@@ -9,16 +9,6 @@ pub fn handle_key(key: KeyEvent, mode: AppMode) -> Action {
         AppMode::Scanning | AppMode::Finalizing => handle_key_scanning(key),
         AppMode::Browsing => handle_key_browsing(key),
         AppMode::ConfirmDelete => handle_key_confirm_delete(key),
-        AppMode::Deleting => handle_key_deleting(key),
-    }
-}
-
-fn handle_key_deleting(key: KeyEvent) -> Action {
-    // Only allow quit during deletion (deletion continues in background)
-    match key.code {
-        KeyCode::Char('q') => Action::Quit,
-        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => Action::Quit,
-        _ => Action::Tick,
     }
 }
 
