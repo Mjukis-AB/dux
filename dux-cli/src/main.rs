@@ -284,6 +284,11 @@ fn run_app(
         }
     }
 
+    // Drop tree in background to avoid blocking on deallocation
+    if let Some(tree) = state.tree.take() {
+        std::thread::spawn(move || drop(tree));
+    }
+
     Ok(())
 }
 
