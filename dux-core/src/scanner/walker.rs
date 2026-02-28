@@ -176,6 +176,14 @@ impl Scanner {
         let root_path = root_path.canonicalize().unwrap_or(root_path);
         let mut tree = DiskTree::new(root_path.clone());
 
+        // Set root mtime for cache invalidation
+        if let Ok(root_meta) = std::fs::metadata(&root_path)
+            && let Ok(mtime) = root_meta.modified()
+            && let Some(root_node) = tree.get_mut(NodeId::ROOT)
+        {
+            root_node.mtime = Some(mtime);
+        }
+
         // Map from path to node ID for parent lookups
         let mut path_to_id: HashMap<PathBuf, NodeId> = HashMap::new();
         path_to_id.insert(root_path.clone(), NodeId::ROOT);
@@ -318,9 +326,14 @@ impl Scanner {
             // Add node
             let node_id = tree.add_node(name, kind, path.clone(), parent_id);
 
-            // Track path for directories
+            // Track path and mtime for directories
             if kind == NodeKind::Directory {
                 path_to_id.insert(path.clone(), node_id);
+                if let Ok(mtime) = metadata.modified()
+                    && let Some(node) = tree.get_mut(node_id)
+                {
+                    node.mtime = Some(mtime);
+                }
                 shared_progress.dirs_scanned.fetch_add(1, Ordering::Relaxed);
             } else {
                 shared_progress

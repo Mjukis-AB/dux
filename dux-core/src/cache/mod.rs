@@ -184,6 +184,35 @@ pub fn get_mtime(path: &Path) -> Option<SystemTime> {
     fs::metadata(path).ok()?.modified().ok()
 }
 
+/// Spot-check directory mtimes to detect deep changes that root mtime misses.
+///
+/// Collects all directory nodes with stored mtimes, sorts by size descending
+/// (largest dirs are most impactful if stale), and stats the top `limit` entries.
+/// Returns `true` if all checked mtimes match (cache is likely valid).
+pub fn spot_check_mtimes(tree: &crate::tree::DiskTree, limit: usize) -> bool {
+    use crate::tree::NodeKind;
+
+    // Collect (size, path, stored_mtime) for all directories with mtimes
+    let mut dirs: Vec<(u64, &Path, SystemTime)> = tree
+        .iter()
+        .filter(|n| n.kind == NodeKind::Directory)
+        .filter_map(|n| n.mtime.map(|mt| (n.size, n.path.as_path(), mt)))
+        .collect();
+
+    // Sort by size descending — largest dirs cover the most of the tree
+    dirs.sort_by(|a, b| b.0.cmp(&a.0));
+
+    for (_, path, stored_mtime) in dirs.into_iter().take(limit) {
+        match fs::metadata(path).and_then(|m| m.modified()) {
+            Ok(current_mtime) if current_mtime != stored_mtime => return false,
+            Err(_) => return false, // directory gone or inaccessible
+            _ => {}                 // matches
+        }
+    }
+
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -15,7 +15,7 @@ use crossterm::{
 };
 use dux_core::{
     CacheMetadata, CachedScanConfig, CancellationToken, DiskTree, ScanConfig, ScanMessage, Scanner,
-    cache_path_for, get_mtime, is_cache_valid, load_cache, save_cache,
+    cache_path_for, get_mtime, is_cache_valid, load_cache, save_cache, spot_check_mtimes,
 };
 use ratatui::{Terminal, backend::CrosstermBackend, style::Style, widgets::Widget};
 
@@ -123,6 +123,7 @@ fn run_app(
         && let Some(ref cp) = cache_path
         && let Ok((meta, tree)) = load_cache(cp)
         && is_cache_valid(&meta, &path, &cache_config)
+        && spot_check_mtimes(&tree, 32)
     {
         state.set_tree(tree);
         state.loaded_from_cache = true;
@@ -282,6 +283,24 @@ fn run_app(
             cancel_token.cancel();
             break;
         }
+    }
+
+    // Save cache if tree was modified (e.g. deletions)
+    if state.tree_modified
+        && let Some(ref tree) = state.tree
+        && let Some(ref cp) = cache_path_for_save
+    {
+        let root_mtime = get_mtime(&root_path_for_save).unwrap_or(SystemTime::UNIX_EPOCH);
+        let meta = CacheMetadata {
+            version: dux_core::CACHE_VERSION,
+            root_path: root_path_for_save.clone(),
+            scan_time: SystemTime::now(),
+            root_mtime,
+            total_size: tree.total_size(),
+            node_count: tree.live_count(),
+            config: cache_config_for_save.clone(),
+        };
+        let _ = save_cache(cp, tree, &meta);
     }
 
     // Drop tree in background to avoid blocking on deallocation

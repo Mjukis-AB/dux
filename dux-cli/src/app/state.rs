@@ -59,6 +59,8 @@ pub struct AppState {
     pub session_stats: SessionStats,
     /// Whether tree was loaded from cache
     pub loaded_from_cache: bool,
+    /// Whether the tree has been modified (e.g. by deletion) and needs cache update
+    pub tree_modified: bool,
     /// Receiver for async delete results
     pub delete_receiver: Option<mpsc::Receiver<Result<(NodeId, u64), String>>>,
 }
@@ -81,6 +83,7 @@ impl AppState {
             pending_delete: None,
             session_stats: SessionStats::default(),
             loaded_from_cache: false,
+            tree_modified: false,
             delete_receiver: None,
         }
     }
@@ -313,6 +316,7 @@ impl AppState {
             // Update tree immediately (optimistic update)
             if let Some(tree) = &mut self.tree {
                 tree.remove_node(node_id);
+                self.tree_modified = true;
             }
             self.adjust_selection_after_delete();
 

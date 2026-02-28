@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
@@ -54,6 +55,8 @@ pub struct TreeNode {
     pub children: Vec<NodeId>,
     /// Depth in tree (0 for root)
     pub depth: u16,
+    /// Modification time (directories only, for cache invalidation)
+    pub mtime: Option<SystemTime>,
     /// Whether directory is expanded in UI
     #[serde(skip)]
     pub is_expanded: bool,
@@ -80,6 +83,7 @@ impl TreeNode {
             parent,
             children: Vec::new(),
             depth,
+            mtime: None,
             is_expanded: depth == 0, // Root starts expanded
             path,
         }
