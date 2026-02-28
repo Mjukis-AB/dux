@@ -1,17 +1,21 @@
 pub mod bar_chart;
+mod build_artifacts_view;
 mod confirm;
 mod footer;
 mod header;
 mod help;
+mod large_files_view;
 mod layout;
 mod progress;
 mod theme;
 mod tree_view;
 
+pub use build_artifacts_view::BuildArtifactsView;
 pub use confirm::ConfirmDeleteView;
 pub use footer::Footer;
 pub use header::Header;
 pub use help::HelpView;
+pub use large_files_view::LargeFilesView;
 pub use layout::AppLayout;
 pub use progress::ProgressView;
 pub use theme::Theme;

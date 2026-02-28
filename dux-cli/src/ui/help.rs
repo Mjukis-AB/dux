@@ -22,7 +22,7 @@ impl Widget for HelpView<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         // Center the help box
         let width = 50.min(area.width.saturating_sub(4));
-        let height = 22.min(area.height.saturating_sub(4));
+        let height = 28.min(area.height.saturating_sub(4));
         let x = area.x + (area.width - width) / 2;
         let y = area.y + (area.height - height) / 2;
         let help_area = Rect::new(x, y, width, height);
@@ -51,6 +51,11 @@ impl Widget for HelpView<'_> {
             .add_modifier(Modifier::BOLD);
 
         let help_items = [
+            ("", "Views", true),
+            ("Tab", "Next view", false),
+            ("S-Tab", "Previous view", false),
+            ("s", "Cycle stale threshold (Build Artifacts)", false),
+            ("", "", false),
             ("", "Navigation", true),
             ("↑ k", "Move up", false),
             ("↓ j", "Move down", false),
@@ -61,7 +66,7 @@ impl Widget for HelpView<'_> {
             ("", "Tree", true),
             ("→ l", "Expand directory", false),
             ("← h", "Collapse directory", false),
-            ("Space Tab", "Toggle expand/collapse", false),
+            ("Space", "Toggle expand/collapse", false),
             ("Enter", "Drill down into directory", false),
             ("Backspace", "Go back", false),
             ("", "", false),

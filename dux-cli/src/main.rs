@@ -19,9 +19,12 @@ use dux_core::{
 };
 use ratatui::{Terminal, backend::CrosstermBackend, style::Style, widgets::Widget};
 
-use app::{Action, AppMode, AppState};
+use app::{Action, AppMode, AppState, ViewMode};
 use tui::{AppEvent, EventHandler, handle_key};
-use ui::{AppLayout, ConfirmDeleteView, Footer, Header, HelpView, ProgressView, Theme, TreeView};
+use ui::{
+    AppLayout, BuildArtifactsView, ConfirmDeleteView, Footer, Header, HelpView, LargeFilesView,
+    ProgressView, Theme, TreeView,
+};
 
 /// DUX - Interactive Terminal Disk Usage Analyzer
 #[derive(Parser, Debug)]
@@ -230,15 +233,40 @@ fn run_app(
                     .render(layout.tree, frame.buffer_mut());
                 }
                 AppMode::Browsing | AppMode::Help | AppMode::ConfirmDelete => {
-                    if let Some(tree) = &state.tree {
-                        TreeView::new(
-                            tree,
-                            state.view_root,
-                            state.selected_index,
-                            state.scroll_offset,
-                            &theme,
-                        )
-                        .render(layout.tree, frame.buffer_mut());
+                    state.ensure_views_computed();
+
+                    match state.view_mode {
+                        ViewMode::Tree => {
+                            if let Some(tree) = &state.tree {
+                                TreeView::new(
+                                    tree,
+                                    state.view_root,
+                                    state.selected_index,
+                                    state.scroll_offset,
+                                    &theme,
+                                )
+                                .render(layout.tree, frame.buffer_mut());
+                            }
+                        }
+                        ViewMode::LargeFiles => {
+                            LargeFilesView::new(
+                                &state.computed_views.large_files,
+                                state.large_files_state.selected_index,
+                                state.large_files_state.scroll_offset,
+                                &theme,
+                            )
+                            .render(layout.tree, frame.buffer_mut());
+                        }
+                        ViewMode::BuildArtifacts => {
+                            BuildArtifactsView::new(
+                                &state.computed_views.build_artifacts,
+                                state.build_artifacts_state.selected_index,
+                                state.build_artifacts_state.scroll_offset,
+                                state.computed_views.stale_threshold,
+                                &theme,
+                            )
+                            .render(layout.tree, frame.buffer_mut());
+                        }
                     }
 
                     // Help overlay
@@ -257,7 +285,8 @@ fn run_app(
             }
 
             // Footer
-            Footer::new(state.mode, &theme, &state.session_stats)
+            Footer::new(state.mode, state.view_mode, &theme, &state.session_stats)
+                .with_stale_threshold(state.computed_views.stale_threshold)
                 .render(layout.footer, frame.buffer_mut());
         })?;
 
@@ -319,11 +348,39 @@ fn handle_action(state: &mut AppState, action: Action) {
         Action::PageDown => state.page_down(),
         Action::GoToFirst => state.go_to_first(),
         Action::GoToLast => state.go_to_last(),
-        Action::Expand => state.expand_selected(),
-        Action::Collapse => state.collapse_selected(),
-        Action::Toggle => state.toggle_selected(),
-        Action::DrillDown => state.drill_down(),
-        Action::GoBack => state.go_back(),
+        // Tree-specific actions: only apply in Tree view
+        Action::Expand => {
+            if state.view_mode == ViewMode::Tree {
+                state.expand_selected();
+            }
+        }
+        Action::Collapse => {
+            if state.view_mode == ViewMode::Tree {
+                state.collapse_selected();
+            }
+        }
+        Action::Toggle => {
+            if state.view_mode == ViewMode::Tree {
+                state.toggle_selected();
+            }
+        }
+        Action::DrillDown => {
+            if state.view_mode == ViewMode::Tree {
+                state.drill_down();
+            }
+        }
+        Action::GoBack => {
+            if state.view_mode == ViewMode::Tree {
+                state.go_back();
+            }
+        }
+        Action::NextView => state.next_view(),
+        Action::PrevView => state.prev_view(),
+        Action::CycleStaleThreshold => {
+            if state.view_mode == ViewMode::BuildArtifacts {
+                state.computed_views.cycle_stale_threshold();
+            }
+        }
         Action::ShowHelp => state.show_help(),
         Action::HideHelp => state.hide_help(),
         Action::OpenInFinder => state.open_in_finder(),

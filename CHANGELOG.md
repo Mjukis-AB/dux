@@ -4,6 +4,21 @@ All notable changes to DUX will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- **Large Files view**: Flat list of all files sorted by size, helping find big files buried deep in the tree. Press `Tab` to switch views.
+- **Build Artifacts view**: Detects known build directories (`target/`, `node_modules/`, `DerivedData/`, etc.) with a staleness indicator. Press `s` to cycle the stale threshold (1d/7d/30d/90d/All).
+- **View switching**: `Tab`/`Shift-Tab` cycles between Tree, Large Files, and Build Artifacts views. All views support navigation, deletion, and open-in-Finder.
+- Help overlay now includes a Views section documenting the new key bindings.
+
+### Fixed
+- Scanner no longer hangs on cloud storage FUSE mounts (Google Drive, OneDrive, iCloud Drive). Added these paths to the skip list.
+- Scanner now probes directories with a 5-second metadata timeout before descending. Directories that don't respond in time (slow FUSE, hung NFS, etc.) are automatically skipped.
+
+### Changed
+- `Tab` now switches views instead of toggling expand/collapse (use `Space` for toggle).
+- Footer hints update dynamically based on the active view.
+- Header shows the active view name for non-Tree views.
+
 ## [0.4.0]
 
 ### Added

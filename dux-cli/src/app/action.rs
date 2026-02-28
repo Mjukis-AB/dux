@@ -37,6 +37,12 @@ pub enum Action {
     CancelDelete,
     /// Quit the application
     Quit,
+    /// Switch to next view
+    NextView,
+    /// Switch to previous view
+    PrevView,
+    /// Cycle stale threshold (Build Artifacts view)
+    CycleStaleThreshold,
     /// No action (for tick events)
     Tick,
 }

@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 use std::fs::Metadata;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
@@ -105,15 +106,17 @@ const SLOW_PATTERNS: &[&str] = &[
     "/.fseventsd",              // FSEvents
     "/.DocumentRevisions-V100", // Document versions
     "/System/Volumes/Data/.Spotlight-V100",
-    "CoreSimulator/Volumes",    // iOS Simulator disk images
-    "/.MobileBackups",          // Mobile backups
-    ".timemachine",             // Time Machine
-    "/dev/",                    // Device files
-    "/proc/",                   // Linux proc filesystem
-    "/sys/",                    // Linux sys filesystem
-    "/private/var/folders",     // macOS temp folders (can hang)
-    "/private/var/db/dyld",     // dyld cache (permission issues)
-    "/private/var/db/uuidtext", // UUID text (slow)
+    "CoreSimulator/Volumes",      // iOS Simulator disk images
+    "/.MobileBackups",            // Mobile backups
+    ".timemachine",               // Time Machine
+    "/dev/",                      // Device files
+    "/proc/",                     // Linux proc filesystem
+    "/sys/",                      // Linux sys filesystem
+    "/private/var/folders",       // macOS temp folders (can hang)
+    "/private/var/db/dyld",       // dyld cache (permission issues)
+    "/private/var/db/uuidtext",   // UUID text (slow)
+    "/Library/CloudStorage/",     // Cloud storage FUSE mounts (Google Drive, OneDrive, etc.)
+    "/Library/Mobile Documents/", // iCloud Drive documents
 ];
 
 /// Check if a path looks like a virtual/problematic filesystem path
@@ -137,6 +140,23 @@ fn is_virtual_or_slow_path(path: &std::path::Path, root_path: &std::path::Path) 
     }
 
     false
+}
+
+/// How long to wait for a metadata() call before assuming the path is on a slow/hung filesystem.
+const METADATA_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Fetch metadata with a timeout. Returns None if the call takes longer than METADATA_TIMEOUT.
+/// This prevents the scanner from hanging indefinitely on slow FUSE mounts or network filesystems.
+fn metadata_with_timeout(path: &Path) -> Option<Metadata> {
+    let path = path.to_path_buf();
+    let (tx, rx) = crossbeam_channel::bounded(1);
+    std::thread::spawn(move || {
+        let _ = tx.send(std::fs::metadata(&path));
+    });
+    match rx.recv_timeout(METADATA_TIMEOUT) {
+        Ok(Ok(meta)) => Some(meta),
+        _ => None,
+    }
 }
 
 /// Filesystem scanner
@@ -226,24 +246,34 @@ impl Scanner {
                     return;
                 }
 
-                // Filter out children that are on different filesystems or are virtual
-                if same_fs {
-                    children.retain(|entry| {
-                        if let Ok(e) = entry {
-                            // Check if child is on same filesystem
+                children.retain(|entry| {
+                    if let Ok(e) = entry {
+                        // Check if child path is virtual/slow
+                        if is_virtual_or_slow_path(&e.path(), &root_for_filter) {
+                            return false;
+                        }
+
+                        // For directories, probe metadata with a timeout to detect
+                        // slow FUSE/network mounts before jwalk descends into them
+                        if e.file_type().is_dir() {
+                            match metadata_with_timeout(&e.path()) {
+                                Some(meta) if same_fs => {
+                                    return get_device_id(&meta) == root_dev;
+                                }
+                                None => return false, // Timed out — skip this subtree
+                                _ => {}
+                            }
+                        } else if same_fs {
+                            // For files, use jwalk's cached metadata (already fetched)
                             if let Ok(meta) = e.metadata()
                                 && get_device_id(&meta) != root_dev
                             {
                                 return false;
                             }
-                            // Check if child path is virtual/slow
-                            if is_virtual_or_slow_path(&e.path(), &root_for_filter) {
-                                return false;
-                            }
                         }
-                        true
-                    });
-                }
+                    }
+                    true
+                });
             });
 
         let walker = if let Some(depth) = self.config.max_depth {

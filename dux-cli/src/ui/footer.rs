@@ -5,24 +5,39 @@ use ratatui::{
     widgets::Widget,
 };
 
-use crate::app::{AppMode, SessionStats};
+use crate::app::views::StaleThreshold;
+use crate::app::{AppMode, SessionStats, ViewMode};
 
 use super::theme::Theme;
 
 /// Footer widget showing keyboard hints and session stats
 pub struct Footer<'a> {
     mode: AppMode,
+    view_mode: ViewMode,
     theme: &'a Theme,
     session_stats: &'a SessionStats,
+    stale_threshold: Option<StaleThreshold>,
 }
 
 impl<'a> Footer<'a> {
-    pub fn new(mode: AppMode, theme: &'a Theme, session_stats: &'a SessionStats) -> Self {
+    pub fn new(
+        mode: AppMode,
+        view_mode: ViewMode,
+        theme: &'a Theme,
+        session_stats: &'a SessionStats,
+    ) -> Self {
         Self {
             mode,
+            view_mode,
             theme,
             session_stats,
+            stale_threshold: None,
         }
+    }
+
+    pub fn with_stale_threshold(mut self, threshold: StaleThreshold) -> Self {
+        self.stale_threshold = Some(threshold);
+        self
     }
 }
 
@@ -32,19 +47,47 @@ impl Widget for Footer<'_> {
             return;
         }
 
-        let hints = match self.mode {
-            AppMode::Scanning | AppMode::Finalizing => vec![("q", "Quit")],
-            AppMode::Browsing => vec![
-                ("↑↓", "Navigate"),
-                ("←→", "Collapse/Expand"),
-                ("Enter", "Drill down"),
-                ("o", "Open"),
-                ("d", "Delete"),
-                ("?", "Help"),
-                ("q", "Quit"),
-            ],
-            AppMode::Help => vec![("Esc", "Close help"), ("q", "Quit")],
-            AppMode::ConfirmDelete => vec![("y", "Yes"), ("n", "Cancel")],
+        let hints: Vec<(&str, String)> = match self.mode {
+            AppMode::Scanning | AppMode::Finalizing => vec![("q", "Quit".to_string())],
+            AppMode::Browsing => match self.view_mode {
+                ViewMode::Tree => vec![
+                    ("Tab", "Views".to_string()),
+                    ("↑↓", "Navigate".to_string()),
+                    ("←→", "Collapse/Expand".to_string()),
+                    ("Enter", "Drill down".to_string()),
+                    ("o", "Open".to_string()),
+                    ("d", "Delete".to_string()),
+                    ("?", "Help".to_string()),
+                    ("q", "Quit".to_string()),
+                ],
+                ViewMode::LargeFiles => vec![
+                    ("Tab", "Views".to_string()),
+                    ("↑↓", "Navigate".to_string()),
+                    ("o", "Open".to_string()),
+                    ("d", "Delete".to_string()),
+                    ("?", "Help".to_string()),
+                    ("q", "Quit".to_string()),
+                ],
+                ViewMode::BuildArtifacts => {
+                    let stale_label = self
+                        .stale_threshold
+                        .map(|t| format!("Stale:{}", t.label()))
+                        .unwrap_or_else(|| "Stale".to_string());
+                    vec![
+                        ("Tab", "Views".to_string()),
+                        ("↑↓", "Navigate".to_string()),
+                        ("s", stale_label),
+                        ("o", "Open".to_string()),
+                        ("d", "Delete".to_string()),
+                        ("?", "Help".to_string()),
+                        ("q", "Quit".to_string()),
+                    ]
+                }
+            },
+            AppMode::Help => vec![("Esc", "Close help".to_string()), ("q", "Quit".to_string())],
+            AppMode::ConfirmDelete => {
+                vec![("y", "Yes".to_string()), ("n", "Cancel".to_string())]
+            }
         };
 
         let key_style = Style::default()
@@ -60,7 +103,7 @@ impl Widget for Footer<'_> {
             x += key.len() as u16 + 1;
 
             // Description
-            buf.set_string(x, area.y, *desc, desc_style);
+            buf.set_string(x, area.y, desc.as_str(), desc_style);
             x += desc.len() as u16;
 
             // Separator

@@ -44,7 +44,14 @@ fn handle_key_browsing(key: KeyEvent) -> Action {
         // Expand/Collapse
         KeyCode::Right | KeyCode::Char('l') => Action::Expand,
         KeyCode::Left | KeyCode::Char('h') => Action::Collapse,
-        KeyCode::Char(' ') | KeyCode::Tab => Action::Toggle,
+        KeyCode::Char(' ') => Action::Toggle,
+
+        // View switching
+        KeyCode::Tab => Action::NextView,
+        KeyCode::BackTab => Action::PrevView,
+
+        // Stale threshold cycling
+        KeyCode::Char('s') => Action::CycleStaleThreshold,
 
         // Drill down / back
         KeyCode::Enter => Action::DrillDown,

@@ -3,6 +3,8 @@ use std::sync::mpsc;
 
 use dux_core::{DiskTree, NodeId, ScanProgress};
 
+use super::views::ComputedViews;
+
 /// Statistics tracked during the session
 #[derive(Debug, Default, Clone)]
 pub struct SessionStats {
@@ -27,6 +29,21 @@ pub enum AppMode {
     ConfirmDelete,
 }
 
+/// Which data projection is displayed
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewMode {
+    Tree,
+    LargeFiles,
+    BuildArtifacts,
+}
+
+/// Per-view selection state
+#[derive(Debug, Clone, Default)]
+pub struct ViewState {
+    pub selected_index: usize,
+    pub scroll_offset: usize,
+}
+
 /// Application state
 pub struct AppState {
     /// Current mode
@@ -37,7 +54,7 @@ pub struct AppState {
     pub tree: Option<DiskTree>,
     /// Current scan progress
     pub progress: ScanProgress,
-    /// Currently selected node index in visible list
+    /// Currently selected node index in visible list (tree view)
     pub selected_index: usize,
     /// Current view root (for drill-down)
     pub view_root: NodeId,
@@ -63,6 +80,14 @@ pub struct AppState {
     pub tree_modified: bool,
     /// Receiver for async delete results
     pub delete_receiver: Option<mpsc::Receiver<Result<(NodeId, u64), String>>>,
+    /// Current view mode
+    pub view_mode: ViewMode,
+    /// Large files view state
+    pub large_files_state: ViewState,
+    /// Build artifacts view state
+    pub build_artifacts_state: ViewState,
+    /// Pre-computed view data
+    pub computed_views: ComputedViews,
 }
 
 impl AppState {
@@ -85,11 +110,16 @@ impl AppState {
             loaded_from_cache: false,
             tree_modified: false,
             delete_receiver: None,
+            view_mode: ViewMode::Tree,
+            large_files_state: ViewState::default(),
+            build_artifacts_state: ViewState::default(),
+            computed_views: ComputedViews::new(),
         }
     }
 
     /// Set the tree after scanning completes
     pub fn set_tree(&mut self, tree: DiskTree) {
+        self.computed_views.rebuild(&tree);
         self.tree = Some(tree);
         self.mode = AppMode::Browsing;
         self.selected_index = 0;
@@ -119,64 +149,114 @@ impl AppState {
         }
     }
 
-    /// Get currently selected node ID
+    /// Get currently selected node ID (works for any view)
     pub fn selected_node(&self) -> Option<NodeId> {
-        let nodes = self.visible_nodes();
-        nodes.get(self.selected_index).copied()
+        match self.view_mode {
+            ViewMode::Tree => {
+                let nodes = self.visible_nodes();
+                nodes.get(self.selected_index).copied()
+            }
+            ViewMode::LargeFiles => self
+                .computed_views
+                .large_files
+                .get(self.large_files_state.selected_index)
+                .map(|e| e.node_id),
+            ViewMode::BuildArtifacts => self
+                .computed_views
+                .build_artifacts
+                .get(self.build_artifacts_state.selected_index)
+                .map(|e| e.node_id),
+        }
+    }
+
+    /// Get total item count for current view
+    fn current_item_count(&self) -> usize {
+        match self.view_mode {
+            ViewMode::Tree => self.visible_nodes().len(),
+            ViewMode::LargeFiles => self.computed_views.large_files.len(),
+            ViewMode::BuildArtifacts => self.computed_views.build_artifacts.len(),
+        }
+    }
+
+    /// Get mutable references to the active selection state
+    fn active_selection_mut(&mut self) -> (&mut usize, &mut usize) {
+        match self.view_mode {
+            ViewMode::Tree => (&mut self.selected_index, &mut self.scroll_offset),
+            ViewMode::LargeFiles => (
+                &mut self.large_files_state.selected_index,
+                &mut self.large_files_state.scroll_offset,
+            ),
+            ViewMode::BuildArtifacts => (
+                &mut self.build_artifacts_state.selected_index,
+                &mut self.build_artifacts_state.scroll_offset,
+            ),
+        }
+    }
+
+    /// Ensure the given index is visible within the scroll viewport
+    fn ensure_visible_for(selected: &mut usize, scroll: &mut usize, visible_height: usize) {
+        if *selected < *scroll {
+            *scroll = *selected;
+        } else if *selected >= *scroll + visible_height {
+            *scroll = *selected - visible_height + 1;
+        }
     }
 
     /// Move selection up
     pub fn move_up(&mut self) {
-        if self.selected_index > 0 {
-            self.selected_index -= 1;
-            self.ensure_visible();
+        let vh = self.visible_height;
+        let (sel, scroll) = self.active_selection_mut();
+        if *sel > 0 {
+            *sel -= 1;
         }
+        Self::ensure_visible_for(sel, scroll, vh);
     }
 
     /// Move selection down
     pub fn move_down(&mut self) {
-        let nodes = self.visible_nodes();
-        if self.selected_index < nodes.len().saturating_sub(1) {
-            self.selected_index += 1;
-            self.ensure_visible();
+        let count = self.current_item_count();
+        let vh = self.visible_height;
+        let (sel, scroll) = self.active_selection_mut();
+        if *sel < count.saturating_sub(1) {
+            *sel += 1;
         }
+        Self::ensure_visible_for(sel, scroll, vh);
     }
 
     /// Move selection up by a page
     pub fn page_up(&mut self) {
-        let page_size = self.visible_height.saturating_sub(2);
-        self.selected_index = self.selected_index.saturating_sub(page_size);
-        self.ensure_visible();
+        let vh = self.visible_height;
+        let page_size = vh.saturating_sub(2);
+        let (sel, scroll) = self.active_selection_mut();
+        *sel = sel.saturating_sub(page_size);
+        Self::ensure_visible_for(sel, scroll, vh);
     }
 
     /// Move selection down by a page
     pub fn page_down(&mut self) {
-        let page_size = self.visible_height.saturating_sub(2);
-        let nodes = self.visible_nodes();
-        self.selected_index = (self.selected_index + page_size).min(nodes.len().saturating_sub(1));
-        self.ensure_visible();
+        let count = self.current_item_count();
+        let vh = self.visible_height;
+        let page_size = vh.saturating_sub(2);
+        let (sel, scroll) = self.active_selection_mut();
+        *sel = (*sel + page_size).min(count.saturating_sub(1));
+        Self::ensure_visible_for(sel, scroll, vh);
     }
 
     /// Go to first item
     pub fn go_to_first(&mut self) {
-        self.selected_index = 0;
-        self.ensure_visible();
+        let vh = self.visible_height;
+        let (sel, scroll) = self.active_selection_mut();
+        *sel = 0;
+        Self::ensure_visible_for(sel, scroll, vh);
     }
 
     /// Go to last item
     pub fn go_to_last(&mut self) {
-        let nodes = self.visible_nodes();
-        self.selected_index = nodes.len().saturating_sub(1);
-        self.ensure_visible();
-    }
-
-    /// Ensure selected item is visible
-    fn ensure_visible(&mut self) {
-        if self.selected_index < self.scroll_offset {
-            self.scroll_offset = self.selected_index;
-        } else if self.selected_index >= self.scroll_offset + self.visible_height {
-            self.scroll_offset = self.selected_index - self.visible_height + 1;
-        }
+        let count = self.current_item_count();
+        let vh = self.visible_height;
+        let (sel, scroll) = self.active_selection_mut();
+        *sel = count.saturating_sub(1);
+        Self::ensure_visible_for(sel, scroll, vh);
     }
 
     /// Toggle expand/collapse for selected node
@@ -213,7 +293,9 @@ impl AppState {
                     let nodes = tree.visible_nodes(self.view_root);
                     if let Some(idx) = nodes.iter().position(|&id| id == parent) {
                         self.selected_index = idx;
-                        self.ensure_visible();
+                        let scroll = &mut self.scroll_offset;
+                        let sel = &mut self.selected_index;
+                        Self::ensure_visible_for(sel, scroll, self.visible_height);
                     }
                 }
             }
@@ -241,6 +323,44 @@ impl AppState {
             self.view_root = prev_root;
             self.selected_index = 0;
             self.scroll_offset = 0;
+        }
+    }
+
+    /// Switch to next view mode
+    pub fn next_view(&mut self) {
+        self.view_mode = match self.view_mode {
+            ViewMode::Tree => ViewMode::LargeFiles,
+            ViewMode::LargeFiles => ViewMode::BuildArtifacts,
+            ViewMode::BuildArtifacts => ViewMode::Tree,
+        };
+        self.ensure_views_computed();
+    }
+
+    /// Switch to previous view mode
+    pub fn prev_view(&mut self) {
+        self.view_mode = match self.view_mode {
+            ViewMode::Tree => ViewMode::BuildArtifacts,
+            ViewMode::LargeFiles => ViewMode::Tree,
+            ViewMode::BuildArtifacts => ViewMode::LargeFiles,
+        };
+        self.ensure_views_computed();
+    }
+
+    /// Ensure computed views are up to date, clamp selections
+    pub fn ensure_views_computed(&mut self) {
+        if self.computed_views.dirty {
+            if let Some(tree) = &self.tree {
+                self.computed_views.rebuild(tree);
+            }
+            // Clamp selection indices
+            let lf_count = self.computed_views.large_files.len();
+            if self.large_files_state.selected_index >= lf_count {
+                self.large_files_state.selected_index = lf_count.saturating_sub(1);
+            }
+            let ba_count = self.computed_views.build_artifacts.len();
+            if self.build_artifacts_state.selected_index >= ba_count {
+                self.build_artifacts_state.selected_index = ba_count.saturating_sub(1);
+            }
         }
     }
 
@@ -317,6 +437,7 @@ impl AppState {
             if let Some(tree) = &mut self.tree {
                 tree.remove_node(node_id);
                 self.tree_modified = true;
+                self.computed_views.dirty = true;
             }
             self.adjust_selection_after_delete();
 
@@ -369,15 +490,30 @@ impl AppState {
 
     /// Adjust selection after a node is deleted
     fn adjust_selection_after_delete(&mut self) {
-        let nodes = self.visible_nodes();
-        if nodes.is_empty() {
-            self.selected_index = 0;
-        } else if self.selected_index >= nodes.len() {
-            self.selected_index = nodes.len().saturating_sub(1);
-        }
-        // Also reset scroll if needed
-        if self.scroll_offset > 0 && self.scroll_offset >= nodes.len() {
-            self.scroll_offset = nodes.len().saturating_sub(1);
+        match self.view_mode {
+            ViewMode::Tree => {
+                let nodes = self.visible_nodes();
+                if nodes.is_empty() {
+                    self.selected_index = 0;
+                } else if self.selected_index >= nodes.len() {
+                    self.selected_index = nodes.len().saturating_sub(1);
+                }
+                if self.scroll_offset > 0 && self.scroll_offset >= nodes.len() {
+                    self.scroll_offset = nodes.len().saturating_sub(1);
+                }
+            }
+            ViewMode::LargeFiles => {
+                let count = self.computed_views.large_files.len();
+                if self.large_files_state.selected_index >= count {
+                    self.large_files_state.selected_index = count.saturating_sub(1);
+                }
+            }
+            ViewMode::BuildArtifacts => {
+                let count = self.computed_views.build_artifacts.len();
+                if self.build_artifacts_state.selected_index >= count {
+                    self.build_artifacts_state.selected_index = count.saturating_sub(1);
+                }
+            }
         }
     }
 

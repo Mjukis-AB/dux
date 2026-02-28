@@ -5,7 +5,7 @@ use ratatui::{
     widgets::Widget,
 };
 
-use crate::app::AppState;
+use crate::app::{AppState, ViewMode};
 
 use super::progress::progress_indicator;
 use super::theme::Theme;
@@ -35,22 +35,56 @@ impl Widget for Header<'_> {
             .add_modifier(Modifier::BOLD);
         buf.set_string(area.x + 1, area.y, title, title_style);
 
+        let mut content_x = area.x + 5;
+
+        // View mode indicator (only for non-Tree views)
+        let view_label = match self.state.view_mode {
+            ViewMode::Tree => None,
+            ViewMode::LargeFiles => Some("Large Files"),
+            ViewMode::BuildArtifacts => Some("Build Artifacts"),
+        };
+
+        if let Some(label) = view_label {
+            // Separator
+            buf.set_string(
+                content_x,
+                area.y,
+                "─",
+                Style::default().fg(self.theme.border),
+            );
+            content_x += 2;
+
+            let view_style = Style::default()
+                .fg(self.theme.blue)
+                .add_modifier(Modifier::BOLD);
+            buf.set_string(content_x, area.y, label, view_style);
+            content_x += label.len() as u16 + 1;
+        }
+
         // Separator
         buf.set_string(
-            area.x + 5,
+            content_x,
             area.y,
             "─",
             Style::default().fg(self.theme.border),
         );
+        content_x += 2;
 
         // Path/breadcrumbs
-        let path = if let Some(tree) = &self.state.tree {
-            tree.breadcrumbs(self.state.view_root)
-        } else {
-            self.state.root_path.to_string_lossy().to_string()
+        let path = match self.state.view_mode {
+            ViewMode::Tree => {
+                if let Some(tree) = &self.state.tree {
+                    tree.breadcrumbs(self.state.view_root)
+                } else {
+                    self.state.root_path.to_string_lossy().to_string()
+                }
+            }
+            ViewMode::LargeFiles | ViewMode::BuildArtifacts => {
+                self.state.root_path.to_string_lossy().to_string()
+            }
         };
 
-        let max_path_len = area.width.saturating_sub(30) as usize;
+        let max_path_len = area.width.saturating_sub(content_x - area.x + 22) as usize;
         let display_path = if path.len() > max_path_len {
             format!("...{}", &path[path.len() - max_path_len + 3..])
         } else {
@@ -58,7 +92,7 @@ impl Widget for Header<'_> {
         };
 
         buf.set_string(
-            area.x + 7,
+            content_x,
             area.y,
             &display_path,
             Style::default().fg(self.theme.fg),
