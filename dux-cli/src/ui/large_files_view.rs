@@ -1,4 +1,6 @@
-use dux_core::format_size;
+use std::collections::HashSet;
+
+use dux_core::{NodeId, format_size};
 use ratatui::{buffer::Buffer, layout::Rect, style::Style, widgets::Widget};
 
 use crate::app::views::LargeFileEntry;
@@ -11,6 +13,7 @@ pub struct LargeFilesView<'a> {
     entries: &'a [LargeFileEntry],
     selected_index: usize,
     scroll_offset: usize,
+    selected_nodes: &'a HashSet<NodeId>,
     theme: &'a Theme,
 }
 
@@ -19,12 +22,14 @@ impl<'a> LargeFilesView<'a> {
         entries: &'a [LargeFileEntry],
         selected_index: usize,
         scroll_offset: usize,
+        selected_nodes: &'a HashSet<NodeId>,
         theme: &'a Theme,
     ) -> Self {
         Self {
             entries,
             selected_index,
             scroll_offset,
+            selected_nodes,
             theme,
         }
     }
@@ -58,12 +63,17 @@ impl Widget for LargeFilesView<'_> {
             .enumerate()
         {
             let y = area.y + i as u16;
-            let is_selected = i + self.scroll_offset == self.selected_index;
+            let is_cursor = i + self.scroll_offset == self.selected_index;
+            let is_multi_selected = self.selected_nodes.contains(&entry.node_id);
 
-            let row_style = if is_selected {
+            let row_style = if is_cursor {
                 Style::default()
                     .bg(self.theme.selection_bg)
                     .fg(self.theme.selection_fg)
+            } else if is_multi_selected {
+                Style::default()
+                    .bg(self.theme.bg_highlight)
+                    .fg(self.theme.fg)
             } else {
                 Style::default().fg(self.theme.fg)
             };
@@ -75,17 +85,39 @@ impl Widget for LargeFilesView<'_> {
 
             let mut x = area.x;
 
+            // Selection marker
+            if is_multi_selected {
+                let marker_style = if is_cursor {
+                    Style::default()
+                        .bg(self.theme.selection_bg)
+                        .fg(self.theme.purple)
+                } else {
+                    Style::default()
+                        .bg(self.theme.bg_highlight)
+                        .fg(self.theme.purple)
+                };
+                buf.set_string(x, y, "▪ ", marker_style);
+                x += 2;
+            }
+
             // Icon
-            let icon_style = if is_selected {
+            let icon_style = if is_cursor {
                 row_style
             } else {
-                Style::default().fg(self.theme.fg_dim)
+                Style::default()
+                    .fg(self.theme.fg_dim)
+                    .bg(if is_multi_selected {
+                        self.theme.bg_highlight
+                    } else {
+                        self.theme.bg
+                    })
             };
             buf.set_string(x, y, "📄", icon_style);
             x += 2;
 
             // Path (truncated with leading ... if too long)
-            let max_path_len = path_width.saturating_sub(3); // 2 for icon + 1 space
+            let marker_offset = if is_multi_selected { 2 } else { 0 };
+            let max_path_len = path_width.saturating_sub(3 + marker_offset); // 2 for icon + 1 space
             let display_path = if entry.relative_path.len() > max_path_len {
                 let start = entry.relative_path.len() - max_path_len + 3;
                 format!("...{}", &entry.relative_path[start..])
@@ -93,10 +125,14 @@ impl Widget for LargeFilesView<'_> {
                 entry.relative_path.clone()
             };
 
-            let path_style = if is_selected {
+            let path_style = if is_cursor {
                 row_style
             } else {
-                Style::default().fg(self.theme.fg)
+                Style::default().fg(self.theme.fg).bg(if is_multi_selected {
+                    self.theme.bg_highlight
+                } else {
+                    self.theme.bg
+                })
             };
             buf.set_string(x, y, &display_path, path_style);
 
@@ -105,7 +141,7 @@ impl Widget for LargeFilesView<'_> {
                 area.x + area.width - bar_width as u16 - pct_width as u16 - size_width as u16 - 2;
 
             // Size bar
-            let bar_color = if is_selected {
+            let bar_color = if is_cursor {
                 self.theme.selection_fg
             } else {
                 self.theme.size_color(entry.percentage)
@@ -115,28 +151,44 @@ impl Widget for LargeFilesView<'_> {
                 right_x,
                 y,
                 &bar,
-                if is_selected {
+                if is_cursor {
                     row_style
                 } else {
-                    Style::default().fg(bar_color)
+                    Style::default().fg(bar_color).bg(if is_multi_selected {
+                        self.theme.bg_highlight
+                    } else {
+                        self.theme.bg
+                    })
                 },
             );
 
             // Percentage
             let pct_str = format!("{:>5.1}%", entry.percentage);
-            let pct_style = if is_selected {
+            let pct_style = if is_cursor {
                 row_style
             } else {
-                Style::default().fg(self.theme.fg_dim)
+                Style::default()
+                    .fg(self.theme.fg_dim)
+                    .bg(if is_multi_selected {
+                        self.theme.bg_highlight
+                    } else {
+                        self.theme.bg
+                    })
             };
             buf.set_string(right_x + bar_width as u16 - 1, y, &pct_str, pct_style);
 
             // Size
             let size_str = format!("{:>9}", format_size(entry.size));
-            let size_style = if is_selected {
+            let size_style = if is_cursor {
                 row_style
             } else {
-                Style::default().fg(self.theme.fg_muted)
+                Style::default()
+                    .fg(self.theme.fg_muted)
+                    .bg(if is_multi_selected {
+                        self.theme.bg_highlight
+                    } else {
+                        self.theme.bg
+                    })
             };
             buf.set_string(
                 right_x + bar_width as u16 + pct_width as u16 - 1,

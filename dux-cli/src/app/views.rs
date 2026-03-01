@@ -65,6 +65,8 @@ pub struct BuildArtifactEntry {
     pub percentage: f64,
     pub kind: ArtifactKind,
     pub is_stale: bool,
+    /// Most recent mtime of any descendant directory
+    pub newest_mtime: Option<SystemTime>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,7 +135,19 @@ impl ComputedViews {
 
     pub fn cycle_stale_threshold(&mut self) {
         self.stale_threshold = self.stale_threshold.next();
-        self.dirty = true;
+        // Only update is_stale flags — no need to re-collect from tree
+        let now = SystemTime::now();
+        let threshold = self.stale_threshold;
+        for entry in &mut self.build_artifacts {
+            entry.is_stale = match threshold.duration() {
+                None => true,
+                Some(dur) => entry
+                    .newest_mtime
+                    .and_then(|mt| now.duration_since(mt).ok())
+                    .map(|age| age > dur)
+                    .unwrap_or(false),
+            };
+        }
     }
 
     fn rebuild_large_files(tree: &DiskTree) -> Vec<LargeFileEntry> {
@@ -178,16 +192,29 @@ impl ComputedViews {
                     return None;
                 }
                 let kind = classify_artifact(&node.name)?;
+                // Skip if any ancestor is also a build artifact (e.g. target/debug/build)
+                let mut parent_id = node.parent;
+                while let Some(pid) = parent_id {
+                    if let Some(parent) = tree.get(pid) {
+                        if classify_artifact(&parent.name).is_some() {
+                            return None;
+                        }
+                        parent_id = parent.parent;
+                    } else {
+                        break;
+                    }
+                }
                 let relative_path = node
                     .path
                     .strip_prefix(root_path)
                     .unwrap_or(&node.path)
                     .to_string_lossy()
                     .to_string();
+                // Find the newest mtime among all descendant directories
+                let newest_mtime = Self::newest_descendant_mtime(tree, node.id);
                 let is_stale = match threshold.duration() {
                     None => true,
-                    Some(dur) => node
-                        .mtime
+                    Some(dur) => newest_mtime
                         .and_then(|mt| now.duration_since(mt).ok())
                         .map(|age| age > dur)
                         .unwrap_or(false),
@@ -199,11 +226,32 @@ impl ComputedViews {
                     percentage: size_percentage(node.size, total_size),
                     kind,
                     is_stale,
+                    newest_mtime,
                 })
             })
             .collect();
 
         entries.sort_by(|a, b| b.size.cmp(&a.size));
         entries
+    }
+
+    /// Walk all descendant directories and return the most recent mtime
+    fn newest_descendant_mtime(tree: &DiskTree, root: NodeId) -> Option<SystemTime> {
+        let mut newest: Option<SystemTime> = None;
+        let mut stack = vec![root];
+        while let Some(id) = stack.pop() {
+            if let Some(node) = tree.get(id) {
+                if let Some(mt) = node.mtime {
+                    newest = Some(match newest {
+                        Some(prev) => prev.max(mt),
+                        None => mt,
+                    });
+                }
+                for &child in &node.children {
+                    stack.push(child);
+                }
+            }
+        }
+        newest
     }
 }

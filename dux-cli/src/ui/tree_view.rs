@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use dux_core::{DiskTree, NodeId, NodeKind, format_size, size_percentage};
 use ratatui::{
     buffer::Buffer,
@@ -25,6 +27,7 @@ pub struct TreeView<'a> {
     view_root: NodeId,
     selected_index: usize,
     scroll_offset: usize,
+    selected_nodes: &'a HashSet<NodeId>,
     theme: &'a Theme,
 }
 
@@ -34,6 +37,7 @@ impl<'a> TreeView<'a> {
         view_root: NodeId,
         selected_index: usize,
         scroll_offset: usize,
+        selected_nodes: &'a HashSet<NodeId>,
         theme: &'a Theme,
     ) -> Self {
         Self {
@@ -41,6 +45,7 @@ impl<'a> TreeView<'a> {
             view_root,
             selected_index,
             scroll_offset,
+            selected_nodes,
             theme,
         }
     }
@@ -160,13 +165,18 @@ impl Widget for TreeView<'_> {
                 None => continue,
             };
 
-            let is_selected = i + self.scroll_offset == self.selected_index;
+            let is_cursor = i + self.scroll_offset == self.selected_index;
+            let is_multi_selected = self.selected_nodes.contains(node_id);
 
-            // Background for selected row
-            let row_style = if is_selected {
+            // Three-state: cursor (selection_bg), multi-selected (bg_highlight), normal
+            let row_style = if is_cursor {
                 Style::default()
                     .bg(self.theme.selection_bg)
                     .fg(self.theme.selection_fg)
+            } else if is_multi_selected {
+                Style::default()
+                    .bg(self.theme.bg_highlight)
+                    .fg(self.theme.fg)
             } else {
                 Style::default().fg(self.theme.fg)
             };
@@ -178,11 +188,40 @@ impl Widget for TreeView<'_> {
 
             let mut x = area.x;
 
+            // Selection marker for multi-selected items
+            if is_multi_selected && !is_cursor {
+                buf.set_string(
+                    x,
+                    y,
+                    "▪ ",
+                    Style::default()
+                        .bg(self.theme.bg_highlight)
+                        .fg(self.theme.purple),
+                );
+                x += 2;
+            } else if is_multi_selected && is_cursor {
+                buf.set_string(
+                    x,
+                    y,
+                    "▪ ",
+                    Style::default()
+                        .bg(self.theme.selection_bg)
+                        .fg(self.theme.purple),
+                );
+                x += 2;
+            }
+
             // Tree prefix
-            let prefix_style = if is_selected {
+            let prefix_style = if is_cursor {
                 row_style.fg(self.theme.selection_fg)
             } else {
-                Style::default().fg(self.theme.border)
+                Style::default()
+                    .fg(self.theme.border)
+                    .bg(if is_multi_selected {
+                        self.theme.bg_highlight
+                    } else {
+                        self.theme.bg
+                    })
             };
             buf.set_string(x, y, prefix, prefix_style);
             x += prefix.chars().count() as u16;
@@ -195,31 +234,48 @@ impl Widget for TreeView<'_> {
                 NodeKind::Symlink => "🔗",
                 NodeKind::Error => "⚠️",
             };
-            let icon_style = if is_selected {
+            let icon_style = if is_cursor {
                 row_style
             } else {
-                Style::default().fg(self.theme.icon_color(node.kind.is_directory()))
+                Style::default()
+                    .fg(self.theme.icon_color(node.kind.is_directory()))
+                    .bg(if is_multi_selected {
+                        self.theme.bg_highlight
+                    } else {
+                        self.theme.bg
+                    })
             };
             buf.set_string(x, y, icon, icon_style);
             x += 2; // Icon + space
 
             // Name
             let name = &node.name;
-            let max_name_len = name_width.saturating_sub(prefix.chars().count() + 3);
+            let marker_offset = if is_multi_selected { 2 } else { 0 };
+            let max_name_len =
+                name_width.saturating_sub(prefix.chars().count() + 3 + marker_offset);
             let display_name = if name.len() > max_name_len {
                 format!("{}…", &name[..max_name_len.saturating_sub(1)])
             } else {
                 name.clone()
             };
 
-            let name_style = if is_selected {
+            let name_style = if is_cursor {
                 row_style.add_modifier(Modifier::BOLD)
             } else if node.kind.is_directory() {
                 Style::default()
                     .fg(self.theme.fg)
+                    .bg(if is_multi_selected {
+                        self.theme.bg_highlight
+                    } else {
+                        self.theme.bg
+                    })
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(self.theme.fg)
+                Style::default().fg(self.theme.fg).bg(if is_multi_selected {
+                    self.theme.bg_highlight
+                } else {
+                    self.theme.bg
+                })
             };
             buf.set_string(x, y, &display_name, name_style);
 
@@ -227,10 +283,16 @@ impl Widget for TreeView<'_> {
             if node.kind.is_directory() && !node.children.is_empty() {
                 let indicator = if node.is_expanded { " ▼" } else { " ▶" };
                 let indicator_x = x + display_name.chars().count() as u16;
-                let indicator_style = if is_selected {
+                let indicator_style = if is_cursor {
                     row_style
                 } else {
-                    Style::default().fg(self.theme.fg_muted)
+                    Style::default()
+                        .fg(self.theme.fg_muted)
+                        .bg(if is_multi_selected {
+                            self.theme.bg_highlight
+                        } else {
+                            self.theme.bg
+                        })
                 };
                 buf.set_string(indicator_x, y, indicator, indicator_style);
             }
@@ -240,7 +302,7 @@ impl Widget for TreeView<'_> {
                 area.x + area.width - bar_width as u16 - pct_width as u16 - size_width as u16 - 2;
 
             let percentage = size_percentage(node.size, total_size);
-            let bar_color = if is_selected {
+            let bar_color = if is_cursor {
                 self.theme.selection_fg
             } else {
                 self.theme.size_color(percentage)
@@ -250,28 +312,44 @@ impl Widget for TreeView<'_> {
                 right_x,
                 y,
                 &bar,
-                if is_selected {
+                if is_cursor {
                     row_style
                 } else {
-                    Style::default().fg(bar_color)
+                    Style::default().fg(bar_color).bg(if is_multi_selected {
+                        self.theme.bg_highlight
+                    } else {
+                        self.theme.bg
+                    })
                 },
             );
 
             // Percentage
             let pct_str = format!("{:>5.1}%", percentage);
-            let pct_style = if is_selected {
+            let pct_style = if is_cursor {
                 row_style
             } else {
-                Style::default().fg(self.theme.fg_dim)
+                Style::default()
+                    .fg(self.theme.fg_dim)
+                    .bg(if is_multi_selected {
+                        self.theme.bg_highlight
+                    } else {
+                        self.theme.bg
+                    })
             };
             buf.set_string(right_x + bar_width as u16 - 1, y, &pct_str, pct_style);
 
             // Size
             let size_str = format!("{:>9}", format_size(node.size));
-            let size_style = if is_selected {
+            let size_style = if is_cursor {
                 row_style
             } else {
-                Style::default().fg(self.theme.fg_muted)
+                Style::default()
+                    .fg(self.theme.fg_muted)
+                    .bg(if is_multi_selected {
+                        self.theme.bg_highlight
+                    } else {
+                        self.theme.bg
+                    })
             };
             buf.set_string(
                 right_x + bar_width as u16 + pct_width as u16 - 1,

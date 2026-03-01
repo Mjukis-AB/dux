@@ -1,4 +1,6 @@
-use dux_core::format_size;
+use std::collections::HashSet;
+
+use dux_core::{NodeId, format_size};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -17,6 +19,7 @@ pub struct BuildArtifactsView<'a> {
     selected_index: usize,
     scroll_offset: usize,
     stale_threshold: StaleThreshold,
+    selected_nodes: &'a HashSet<NodeId>,
     theme: &'a Theme,
 }
 
@@ -26,6 +29,7 @@ impl<'a> BuildArtifactsView<'a> {
         selected_index: usize,
         scroll_offset: usize,
         stale_threshold: StaleThreshold,
+        selected_nodes: &'a HashSet<NodeId>,
         theme: &'a Theme,
     ) -> Self {
         Self {
@@ -33,6 +37,7 @@ impl<'a> BuildArtifactsView<'a> {
             selected_index,
             scroll_offset,
             stale_threshold,
+            selected_nodes,
             theme,
         }
     }
@@ -91,12 +96,17 @@ impl Widget for BuildArtifactsView<'_> {
             .enumerate()
         {
             let y = list_area.y + i as u16;
-            let is_selected = i + self.scroll_offset == self.selected_index;
+            let is_cursor = i + self.scroll_offset == self.selected_index;
+            let is_multi_selected = self.selected_nodes.contains(&entry.node_id);
 
-            let row_style = if is_selected {
+            let row_style = if is_cursor {
                 Style::default()
                     .bg(self.theme.selection_bg)
                     .fg(self.theme.selection_fg)
+            } else if is_multi_selected {
+                Style::default()
+                    .bg(self.theme.bg_highlight)
+                    .fg(self.theme.fg)
             } else {
                 Style::default().fg(self.theme.fg)
             };
@@ -108,17 +118,39 @@ impl Widget for BuildArtifactsView<'_> {
 
             let mut x = list_area.x;
 
+            // Selection marker
+            if is_multi_selected {
+                let marker_style = if is_cursor {
+                    Style::default()
+                        .bg(self.theme.selection_bg)
+                        .fg(self.theme.purple)
+                } else {
+                    Style::default()
+                        .bg(self.theme.bg_highlight)
+                        .fg(self.theme.purple)
+                };
+                buf.set_string(x, y, "▪ ", marker_style);
+                x += 2;
+            }
+
             // Icon
-            let icon_style = if is_selected {
+            let icon_style = if is_cursor {
                 row_style
             } else {
-                Style::default().fg(self.theme.yellow)
+                Style::default()
+                    .fg(self.theme.yellow)
+                    .bg(if is_multi_selected {
+                        self.theme.bg_highlight
+                    } else {
+                        self.theme.bg
+                    })
             };
             buf.set_string(x, y, "📁", icon_style);
             x += 2;
 
             // Path
-            let max_path_len = path_width.saturating_sub(3);
+            let marker_offset = if is_multi_selected { 2 } else { 0 };
+            let max_path_len = path_width.saturating_sub(3 + marker_offset);
             let display_path = if entry.relative_path.len() > max_path_len {
                 let start = entry.relative_path.len() - max_path_len + 3;
                 format!("...{}", &entry.relative_path[start..])
@@ -126,11 +158,16 @@ impl Widget for BuildArtifactsView<'_> {
                 entry.relative_path.clone()
             };
 
-            let path_style = if is_selected {
+            let path_style = if is_cursor {
                 row_style.add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
                     .fg(self.theme.fg)
+                    .bg(if is_multi_selected {
+                        self.theme.bg_highlight
+                    } else {
+                        self.theme.bg
+                    })
                     .add_modifier(Modifier::BOLD)
             };
             buf.set_string(x, y, &display_path, path_style);
@@ -138,20 +175,32 @@ impl Widget for BuildArtifactsView<'_> {
 
             // Kind label
             let kind_label = format!("[{}]", entry.kind.label());
-            let kind_style = if is_selected {
+            let kind_style = if is_cursor {
                 row_style
             } else {
-                Style::default().fg(self.theme.fg_muted)
+                Style::default()
+                    .fg(self.theme.fg_muted)
+                    .bg(if is_multi_selected {
+                        self.theme.bg_highlight
+                    } else {
+                        self.theme.bg
+                    })
             };
             buf.set_string(x, y, &kind_label, kind_style);
             x += kind_label.len() as u16 + 1;
 
             // Stale indicator
             if entry.is_stale {
-                let stale_style = if is_selected {
+                let stale_style = if is_cursor {
                     row_style
                 } else {
-                    Style::default().fg(self.theme.yellow)
+                    Style::default()
+                        .fg(self.theme.yellow)
+                        .bg(if is_multi_selected {
+                            self.theme.bg_highlight
+                        } else {
+                            self.theme.bg
+                        })
                 };
                 buf.set_string(x, y, "stale", stale_style);
             }
@@ -164,7 +213,7 @@ impl Widget for BuildArtifactsView<'_> {
                 - 2;
 
             // Size bar
-            let bar_color = if is_selected {
+            let bar_color = if is_cursor {
                 self.theme.selection_fg
             } else {
                 self.theme.size_color(entry.percentage)
@@ -174,28 +223,44 @@ impl Widget for BuildArtifactsView<'_> {
                 right_x,
                 y,
                 &bar,
-                if is_selected {
+                if is_cursor {
                     row_style
                 } else {
-                    Style::default().fg(bar_color)
+                    Style::default().fg(bar_color).bg(if is_multi_selected {
+                        self.theme.bg_highlight
+                    } else {
+                        self.theme.bg
+                    })
                 },
             );
 
             // Percentage
             let pct_str = format!("{:>5.1}%", entry.percentage);
-            let pct_style = if is_selected {
+            let pct_style = if is_cursor {
                 row_style
             } else {
-                Style::default().fg(self.theme.fg_dim)
+                Style::default()
+                    .fg(self.theme.fg_dim)
+                    .bg(if is_multi_selected {
+                        self.theme.bg_highlight
+                    } else {
+                        self.theme.bg
+                    })
             };
             buf.set_string(right_x + bar_width as u16 - 1, y, &pct_str, pct_style);
 
             // Size
             let size_str = format!("{:>9}", format_size(entry.size));
-            let size_style = if is_selected {
+            let size_style = if is_cursor {
                 row_style
             } else {
-                Style::default().fg(self.theme.fg_muted)
+                Style::default()
+                    .fg(self.theme.fg_muted)
+                    .bg(if is_multi_selected {
+                        self.theme.bg_highlight
+                    } else {
+                        self.theme.bg
+                    })
             };
             buf.set_string(
                 right_x + bar_width as u16 + pct_width as u16 - 1,

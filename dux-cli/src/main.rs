@@ -22,8 +22,8 @@ use ratatui::{Terminal, backend::CrosstermBackend, style::Style, widgets::Widget
 use app::{Action, AppMode, AppState, ViewMode};
 use tui::{AppEvent, EventHandler, handle_key};
 use ui::{
-    AppLayout, BuildArtifactsView, ConfirmDeleteView, Footer, Header, HelpView, LargeFilesView,
-    ProgressView, Theme, TreeView,
+    AppLayout, BuildArtifactsView, ConfirmDeleteView, ConfirmMultiDeleteView, Footer, Header,
+    HelpView, LargeFilesView, MultiDeleteProgressView, ProgressView, Theme, TreeView,
 };
 
 /// DUX - Interactive Terminal Disk Usage Analyzer
@@ -232,7 +232,11 @@ fn run_app(
                     )
                     .render(layout.tree, frame.buffer_mut());
                 }
-                AppMode::Browsing | AppMode::Help | AppMode::ConfirmDelete => {
+                AppMode::Browsing
+                | AppMode::Help
+                | AppMode::ConfirmDelete
+                | AppMode::ConfirmMultiDelete
+                | AppMode::MultiDeleting => {
                     state.ensure_views_computed();
 
                     match state.view_mode {
@@ -243,6 +247,7 @@ fn run_app(
                                     state.view_root,
                                     state.selected_index,
                                     state.scroll_offset,
+                                    &state.selected_nodes,
                                     &theme,
                                 )
                                 .render(layout.tree, frame.buffer_mut());
@@ -253,6 +258,7 @@ fn run_app(
                                 &state.computed_views.large_files,
                                 state.large_files_state.selected_index,
                                 state.large_files_state.scroll_offset,
+                                &state.selected_nodes,
                                 &theme,
                             )
                             .render(layout.tree, frame.buffer_mut());
@@ -263,6 +269,7 @@ fn run_app(
                                 state.build_artifacts_state.selected_index,
                                 state.build_artifacts_state.scroll_offset,
                                 state.computed_views.stale_threshold,
+                                &state.selected_nodes,
                                 &theme,
                             )
                             .render(layout.tree, frame.buffer_mut());
@@ -274,29 +281,58 @@ fn run_app(
                         HelpView::new(&theme).render(area, frame.buffer_mut());
                     }
 
-                    // Delete confirmation dialog
+                    // Multi-delete confirmation dialog (check before single)
+                    if state.mode == AppMode::ConfirmMultiDelete
+                        && let Some(ref items) = state.pending_multi_delete
+                    {
+                        ConfirmMultiDeleteView::new(items, &theme).render(area, frame.buffer_mut());
+                    }
+
+                    // Single delete confirmation dialog
                     if state.mode == AppMode::ConfirmDelete
                         && let Some(path) = state.pending_delete_path()
                     {
                         let size = state.pending_delete_size();
                         ConfirmDeleteView::new(path, size, &theme).render(area, frame.buffer_mut());
                     }
+
+                    // Multi-delete progress overlay
+                    if state.mode == AppMode::MultiDeleting
+                        && let Some(ref progress) = state.multi_delete_progress
+                    {
+                        MultiDeleteProgressView::new(progress, &theme)
+                            .render(area, frame.buffer_mut());
+                    }
                 }
             }
+
+            // Compute selection size for footer
+            let selection_size = selection_total_size(&state);
 
             // Footer
             Footer::new(state.mode, state.view_mode, &theme, &state.session_stats)
                 .with_stale_threshold(state.computed_views.stale_threshold)
+                .with_selection(
+                    state.selection_count(),
+                    selection_size,
+                    state.selecting_mode,
+                )
                 .render(layout.footer, frame.buffer_mut());
         })?;
 
         // Poll for async delete completion
         state.poll_delete();
+        state.poll_multi_delete();
 
         // Handle events
         match event_handler.next()? {
             AppEvent::Key(key) => {
-                let action = handle_key(key, state.mode);
+                let action = handle_key(
+                    key,
+                    state.mode,
+                    state.selection_count() > 0,
+                    state.selecting_mode,
+                );
                 handle_action(&mut state, action);
             }
             AppEvent::Resize(_, _) => {
@@ -348,6 +384,15 @@ fn handle_action(state: &mut AppState, action: Action) {
         Action::PageDown => state.page_down(),
         Action::GoToFirst => state.go_to_first(),
         Action::GoToLast => state.go_to_last(),
+        // Selection actions
+        Action::SelectUp => state.select_move_up(),
+        Action::SelectDown => state.select_move_down(),
+        Action::SelectPageUp => state.select_page_up(),
+        Action::SelectPageDown => state.select_page_down(),
+        Action::SelectToFirst => state.select_to_first(),
+        Action::SelectToLast => state.select_to_last(),
+        Action::ToggleSelect => state.toggle_select(),
+        Action::ClearSelection => state.clear_selection(),
         // Tree-specific actions: only apply in Tree view
         Action::Expand => {
             if state.view_mode == ViewMode::Tree {
@@ -387,9 +432,28 @@ fn handle_action(state: &mut AppState, action: Action) {
         Action::Delete => state.request_delete(),
         Action::ConfirmDelete => state.confirm_delete(),
         Action::CancelDelete => state.cancel_delete(),
+        Action::ConfirmMultiDelete => state.confirm_multi_delete(),
+        Action::CancelMultiDelete => state.cancel_multi_delete(),
         Action::Quit => state.quit(),
         Action::Tick => {}
     }
+}
+
+/// Compute total size of selected nodes for footer display
+fn selection_total_size(state: &AppState) -> u64 {
+    if state.selected_nodes.is_empty() {
+        return 0;
+    }
+    let tree = match &state.tree {
+        Some(t) => t,
+        None => return 0,
+    };
+    state
+        .selected_nodes
+        .iter()
+        .filter_map(|id| tree.get(*id))
+        .map(|n| n.size)
+        .sum()
 }
 
 fn render_size_bar(

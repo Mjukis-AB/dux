@@ -43,6 +43,26 @@ pub enum Action {
     PrevView,
     /// Cycle stale threshold (Build Artifacts view)
     CycleStaleThreshold,
+    /// Extend selection upward
+    SelectUp,
+    /// Extend selection downward
+    SelectDown,
+    /// Extend selection up by a page
+    SelectPageUp,
+    /// Extend selection down by a page
+    SelectPageDown,
+    /// Extend selection to first item
+    SelectToFirst,
+    /// Extend selection to last item
+    SelectToLast,
+    /// Toggle current item in/out of selection
+    ToggleSelect,
+    /// Clear multi-selection
+    ClearSelection,
+    /// Confirm multi-delete operation
+    ConfirmMultiDelete,
+    /// Cancel multi-delete operation
+    CancelMultiDelete,
     /// No action (for tick events)
     Tick,
 }
