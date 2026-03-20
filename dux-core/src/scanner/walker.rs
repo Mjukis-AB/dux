@@ -106,17 +106,17 @@ const SLOW_PATTERNS: &[&str] = &[
     "/.fseventsd",              // FSEvents
     "/.DocumentRevisions-V100", // Document versions
     "/System/Volumes/Data/.Spotlight-V100",
-    "CoreSimulator/Volumes",      // iOS Simulator disk images
-    "/.MobileBackups",            // Mobile backups
-    ".timemachine",               // Time Machine
-    "/dev/",                      // Device files
-    "/proc/",                     // Linux proc filesystem
-    "/sys/",                      // Linux sys filesystem
-    "/private/var/folders",       // macOS temp folders (can hang)
-    "/private/var/db/dyld",       // dyld cache (permission issues)
-    "/private/var/db/uuidtext",   // UUID text (slow)
-    "/Library/CloudStorage/",     // Cloud storage FUSE mounts (Google Drive, OneDrive, etc.)
-    "/Library/Mobile Documents/", // iCloud Drive documents
+    "CoreSimulator/Volumes",     // iOS Simulator disk images
+    "/.MobileBackups",           // Mobile backups
+    ".timemachine",              // Time Machine
+    "/dev/",                     // Device files
+    "/proc/",                    // Linux proc filesystem
+    "/sys/",                     // Linux sys filesystem
+    "/private/var/folders",      // macOS temp folders (can hang)
+    "/private/var/db/dyld",      // dyld cache (permission issues)
+    "/private/var/db/uuidtext",  // UUID text (slow)
+    "/Library/CloudStorage",     // Cloud storage FUSE mounts (Google Drive, OneDrive, etc.)
+    "/Library/Mobile Documents", // iCloud Drive documents
 ];
 
 /// Check if a path looks like a virtual/problematic filesystem path
