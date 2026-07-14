@@ -2,6 +2,7 @@ mod metadata;
 
 pub use metadata::{CACHE_MAGIC, CACHE_VERSION, CacheMetadata, CachedScanConfig};
 
+use std::cmp::Reverse;
 use std::collections::hash_map::DefaultHasher;
 use std::fs::{self, File};
 use std::hash::{Hash, Hasher};
@@ -200,7 +201,7 @@ pub fn spot_check_mtimes(tree: &crate::tree::DiskTree, limit: usize) -> bool {
         .collect();
 
     // Sort by size descending — largest dirs cover the most of the tree
-    dirs.sort_by(|a, b| b.0.cmp(&a.0));
+    dirs.sort_by_key(|entry| Reverse(entry.0));
 
     for (_, path, stored_mtime) in dirs.into_iter().take(limit) {
         match fs::metadata(path).and_then(|m| m.modified()) {

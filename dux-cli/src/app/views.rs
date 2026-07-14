@@ -1,3 +1,4 @@
+use std::cmp::Reverse;
 use std::time::{Duration, SystemTime};
 
 use dux_core::{DiskTree, NodeId, NodeKind, size_percentage};
@@ -173,7 +174,7 @@ impl ComputedViews {
             })
             .collect();
 
-        entries.sort_by(|a, b| b.size.cmp(&a.size));
+        entries.sort_by_key(|entry| Reverse(entry.size));
         entries
     }
 
@@ -231,7 +232,7 @@ impl ComputedViews {
             })
             .collect();
 
-        entries.sort_by(|a, b| b.size.cmp(&a.size));
+        entries.sort_by_key(|entry| Reverse(entry.size));
         entries
     }
 
