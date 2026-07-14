@@ -35,6 +35,20 @@ cd dux
 cargo install --path dux-cli
 ```
 
+## Development
+
+```bash
+# Build and run directly from the repo
+cargo run -p dux-cli
+
+# Run with arguments
+cargo run -p dux-cli -- /path/to/directory
+
+# Build release binary
+cargo build --release -p dux-cli
+# Binary at: target/release/dux
+```
+
 ## Usage
 
 ```bash
@@ -62,9 +76,13 @@ dux -x /path
 | `↓`/`j` | Move down |
 | `→`/`l` | Expand directory |
 | `←`/`h` | Collapse directory |
-| `Space`/`Tab` | Toggle expand/collapse |
+| `Space` | Toggle expand/collapse |
+| `Tab`/`Shift-Tab` | Switch views |
 | `Enter` | Drill down into directory |
 | `Backspace`/`Esc` | Go back |
+| `v` | Toggle multi-selection |
+| `d` | Delete selected item(s) |
+| `o` | Reveal selected item in Finder (macOS) |
 | `?` | Show help |
 | `q`/`Ctrl+C` | Quit |
 
