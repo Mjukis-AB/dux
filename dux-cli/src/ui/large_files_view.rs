@@ -6,6 +6,7 @@ use ratatui::{buffer::Buffer, layout::Rect, style::Style, widgets::Widget};
 use crate::app::views::LargeFileEntry;
 
 use super::bar_chart::render_bar;
+use super::text::truncate_start;
 use super::theme::Theme;
 
 /// Large files flat list view
@@ -53,7 +54,8 @@ impl Widget for LargeFilesView<'_> {
         let bar_width: usize = 24;
         let pct_width: usize = 6;
         let size_width: usize = 10;
-        let path_width = area.width as usize - bar_width - pct_width - size_width - 4;
+        let path_width =
+            (area.width as usize).saturating_sub(bar_width + pct_width + size_width + 4);
 
         for (i, entry) in self
             .entries
@@ -115,15 +117,10 @@ impl Widget for LargeFilesView<'_> {
             buf.set_string(x, y, "📄", icon_style);
             x += 2;
 
-            // Path (truncated with leading ... if too long)
+            // Path (truncated at the beginning if too long)
             let marker_offset = if is_multi_selected { 2 } else { 0 };
             let max_path_len = path_width.saturating_sub(3 + marker_offset); // 2 for icon + 1 space
-            let display_path = if entry.relative_path.len() > max_path_len {
-                let start = entry.relative_path.len() - max_path_len + 3;
-                format!("...{}", &entry.relative_path[start..])
-            } else {
-                entry.relative_path.clone()
-            };
+            let display_path = truncate_start(&entry.relative_path, max_path_len);
 
             let path_style = if is_cursor {
                 row_style
@@ -137,8 +134,10 @@ impl Widget for LargeFilesView<'_> {
             buf.set_string(x, y, &display_path, path_style);
 
             // Right-aligned section
-            let right_x =
-                area.x + area.width - bar_width as u16 - pct_width as u16 - size_width as u16 - 2;
+            let right_x = area.x
+                + area
+                    .width
+                    .saturating_sub(bar_width as u16 + pct_width as u16 + size_width as u16 + 2);
 
             // Size bar
             let bar_color = if is_cursor {

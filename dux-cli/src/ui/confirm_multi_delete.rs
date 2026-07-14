@@ -7,6 +7,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Padding, Widget},
 };
 
+use super::text::{char_count, truncate_start};
 use super::theme::Theme;
 
 /// Multi-delete confirmation dialog widget
@@ -61,7 +62,7 @@ impl Widget for ConfirmMultiDeleteView<'_> {
             .add_modifier(Modifier::BOLD);
 
         let mut row = inner.y;
-        let max_w = inner.width as usize - 2;
+        let max_w = (inner.width as usize).saturating_sub(2);
 
         // Header line
         let header = format!(
@@ -79,14 +80,10 @@ impl Widget for ConfirmMultiDeleteView<'_> {
             // Reserve space for "  path  (size)"
             let size_part = format!("  ({})", size_str);
             let avail = max_w.saturating_sub(size_part.len() + 2);
-            let display_path = if path_str.len() > avail {
-                format!("...{}", &path_str[path_str.len() - avail + 3..])
-            } else {
-                path_str.to_string()
-            };
+            let display_path = truncate_start(&path_str, avail);
             buf.set_string(inner.x + 1, row, &display_path, path_style);
             buf.set_string(
-                inner.x + 1 + display_path.len() as u16,
+                inner.x + 1 + char_count(&display_path) as u16,
                 row,
                 &size_part,
                 dim_style,

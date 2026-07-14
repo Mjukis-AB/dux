@@ -11,6 +11,7 @@ use ratatui::{
 use crate::app::views::{BuildArtifactEntry, StaleThreshold};
 
 use super::bar_chart::render_bar;
+use super::text::{char_count, truncate_start};
 use super::theme::Theme;
 
 /// Build artifacts flat list view
@@ -80,13 +81,8 @@ impl Widget for BuildArtifactsView<'_> {
         // Reserve space for kind label + stale indicator
         let kind_width: usize = 12; // "[CocoaPods] " max
         let stale_width: usize = 6; // "stale " or "      "
-        let path_width = list_area.width as usize
-            - bar_width
-            - pct_width
-            - size_width
-            - kind_width
-            - stale_width
-            - 4;
+        let path_width = (list_area.width as usize)
+            .saturating_sub(bar_width + pct_width + size_width + kind_width + stale_width + 4);
 
         for (i, entry) in self
             .entries
@@ -151,12 +147,7 @@ impl Widget for BuildArtifactsView<'_> {
             // Path
             let marker_offset = if is_multi_selected { 2 } else { 0 };
             let max_path_len = path_width.saturating_sub(3 + marker_offset);
-            let display_path = if entry.relative_path.len() > max_path_len {
-                let start = entry.relative_path.len() - max_path_len + 3;
-                format!("...{}", &entry.relative_path[start..])
-            } else {
-                entry.relative_path.clone()
-            };
+            let display_path = truncate_start(&entry.relative_path, max_path_len);
 
             let path_style = if is_cursor {
                 row_style.add_modifier(Modifier::BOLD)
@@ -171,7 +162,7 @@ impl Widget for BuildArtifactsView<'_> {
                     .add_modifier(Modifier::BOLD)
             };
             buf.set_string(x, y, &display_path, path_style);
-            x += display_path.len() as u16 + 1;
+            x += char_count(&display_path) as u16 + 1;
 
             // Kind label
             let kind_label = format!("[{}]", entry.kind.label());
@@ -206,11 +197,10 @@ impl Widget for BuildArtifactsView<'_> {
             }
 
             // Right-aligned section
-            let right_x = list_area.x + list_area.width
-                - bar_width as u16
-                - pct_width as u16
-                - size_width as u16
-                - 2;
+            let right_x = list_area.x
+                + list_area
+                    .width
+                    .saturating_sub(bar_width as u16 + pct_width as u16 + size_width as u16 + 2);
 
             // Size bar
             let bar_color = if is_cursor {

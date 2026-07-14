@@ -9,6 +9,7 @@ mod large_files_view;
 mod layout;
 mod multi_delete_progress;
 mod progress;
+pub(crate) mod text;
 mod theme;
 mod tree_view;
 

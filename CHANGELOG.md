@@ -7,6 +7,7 @@ All notable changes to DUX will be documented in this file.
 ### Fixed
 - Prevented deletion of the active scan root.
 - Failed filesystem deletions no longer remove items from the displayed or cached tree.
+- Unicode paths are truncated safely without slicing through UTF-8 characters.
 
 ## [0.5.0]
 

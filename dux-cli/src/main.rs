@@ -489,8 +489,12 @@ fn render_size_bar(
     } else {
         format!("{} total", dux_core::format_size(total_size))
     };
+    let label = ui::text::truncate_start(&label, area.width.saturating_sub(2) as usize);
     buf.set_string(
-        area.x + area.width - label.len() as u16 - 1,
+        area.x
+            + area
+                .width
+                .saturating_sub(ui::text::char_count(&label) as u16 + 1),
         area.y,
         &label,
         Style::default().fg(theme.fg_dim),

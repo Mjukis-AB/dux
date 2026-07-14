@@ -8,6 +8,7 @@ use ratatui::{
 use crate::app::{AppState, ViewMode};
 
 use super::progress::progress_indicator;
+use super::text::{char_count, truncate_start};
 use super::theme::Theme;
 
 /// Header widget showing title, path, and status
@@ -84,12 +85,9 @@ impl Widget for Header<'_> {
             }
         };
 
-        let max_path_len = area.width.saturating_sub(content_x - area.x + 22) as usize;
-        let display_path = if path.len() > max_path_len {
-            format!("...{}", &path[path.len() - max_path_len + 3..])
-        } else {
-            path
-        };
+        let reserved_width = content_x.saturating_sub(area.x).saturating_add(22);
+        let max_path_len = area.width.saturating_sub(reserved_width) as usize;
+        let display_path = truncate_start(&path, max_path_len);
 
         buf.set_string(
             content_x,
@@ -117,7 +115,8 @@ impl Widget for Header<'_> {
             String::new()
         };
 
-        let status_x = area.x + area.width - status.len() as u16 - 2;
+        let status = truncate_start(&status, area.width.saturating_sub(2) as usize);
+        let status_x = area.x + area.width.saturating_sub(char_count(&status) as u16 + 2);
         let status_style = if self.state.tree.is_none() {
             Style::default().fg(self.theme.yellow)
         } else {

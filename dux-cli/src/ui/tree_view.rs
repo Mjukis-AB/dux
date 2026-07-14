@@ -9,6 +9,7 @@ use ratatui::{
 };
 
 use super::bar_chart::render_bar;
+use super::text::truncate_end;
 use super::theme::Theme;
 
 /// Tree prefix characters
@@ -150,7 +151,8 @@ impl Widget for TreeView<'_> {
         let bar_width = 24;
         let pct_width = 6;
         let size_width = 10;
-        let name_width = area.width as usize - bar_width - pct_width - size_width - 4;
+        let name_width =
+            (area.width as usize).saturating_sub(bar_width + pct_width + size_width + 4);
 
         for (i, (node_id, prefix)) in nodes
             .iter()
@@ -253,11 +255,7 @@ impl Widget for TreeView<'_> {
             let marker_offset = if is_multi_selected { 2 } else { 0 };
             let max_name_len =
                 name_width.saturating_sub(prefix.chars().count() + 3 + marker_offset);
-            let display_name = if name.len() > max_name_len {
-                format!("{}…", &name[..max_name_len.saturating_sub(1)])
-            } else {
-                name.clone()
-            };
+            let display_name = truncate_end(name, max_name_len);
 
             let name_style = if is_cursor {
                 row_style.add_modifier(Modifier::BOLD)
@@ -298,8 +296,10 @@ impl Widget for TreeView<'_> {
             }
 
             // Size bar (right-aligned section)
-            let right_x =
-                area.x + area.width - bar_width as u16 - pct_width as u16 - size_width as u16 - 2;
+            let right_x = area.x
+                + area
+                    .width
+                    .saturating_sub(bar_width as u16 + pct_width as u16 + size_width as u16 + 2);
 
             let percentage = size_percentage(node.size, total_size);
             let bar_color = if is_cursor {

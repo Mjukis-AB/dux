@@ -7,6 +7,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Padding, Widget},
 };
 
+use super::text::truncate_start;
 use super::theme::Theme;
 
 /// Delete confirmation dialog widget
@@ -57,11 +58,7 @@ impl Widget for ConfirmDeleteView<'_> {
         // Path to delete (truncated if needed)
         let path_str = self.path.to_string_lossy();
         let max_path_len = (inner.width as usize).saturating_sub(2);
-        let display_path = if path_str.len() > max_path_len {
-            format!("...{}", &path_str[path_str.len() - max_path_len + 3..])
-        } else {
-            path_str.to_string()
-        };
+        let display_path = truncate_start(&path_str, max_path_len);
 
         buf.set_string(inner.x, inner.y, "Delete:", text_style);
         buf.set_string(inner.x, inner.y + 1, &display_path, path_style);

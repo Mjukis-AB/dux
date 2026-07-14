@@ -8,6 +8,7 @@ use ratatui::{
 use crate::app::views::StaleThreshold;
 use crate::app::{AppMode, SessionStats, ViewMode};
 
+use super::text::{char_count, truncate_start};
 use super::theme::Theme;
 
 /// Footer widget showing keyboard hints and session stats
@@ -119,11 +120,11 @@ impl Widget for Footer<'_> {
         for (i, (key, desc)) in hints.iter().enumerate() {
             // Key
             buf.set_string(x, area.y, *key, key_style);
-            x += key.len() as u16 + 1;
+            x += char_count(key) as u16 + 1;
 
             // Description
             buf.set_string(x, area.y, desc.as_str(), desc_style);
-            x += desc.len() as u16;
+            x += char_count(desc) as u16;
 
             // Separator
             if i < hints.len() - 1 {
@@ -169,7 +170,8 @@ impl Widget for Footer<'_> {
         };
 
         if let Some((text, style)) = right_text {
-            let stats_x = area.x + area.width - text.len() as u16 - 1;
+            let text = truncate_start(&text, area.width.saturating_sub(2) as usize);
+            let stats_x = area.x + area.width.saturating_sub(char_count(&text) as u16 + 1);
             if stats_x > x + 2 {
                 buf.set_string(stats_x, area.y, &text, style);
             }

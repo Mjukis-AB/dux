@@ -6,6 +6,7 @@ use ratatui::{
     widgets::{Block, Borders, Padding, Widget},
 };
 
+use super::text::truncate_start;
 use super::theme::Theme;
 
 /// Braille spinner characters
@@ -77,11 +78,7 @@ impl Widget for ProgressView<'_> {
         {
             let path_str = path.to_string_lossy();
             let max_len = inner.width.saturating_sub(2) as usize;
-            let display_path = if path_str.len() > max_len {
-                format!("...{}", &path_str[path_str.len() - max_len + 3..])
-            } else {
-                path_str.to_string()
-            };
+            let display_path = truncate_start(&path_str, max_len);
 
             buf.set_string(
                 inner.x,
