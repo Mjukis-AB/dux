@@ -4,6 +4,10 @@ All notable changes to DUX will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- Prevented deletion of the active scan root.
+- Failed filesystem deletions no longer remove items from the displayed or cached tree.
+
 ## [0.5.0]
 
 ### Added

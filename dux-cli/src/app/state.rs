@@ -51,7 +51,7 @@ pub struct ViewState {
 
 /// Result from a single item in a multi-delete batch
 pub enum MultiDeleteResult {
-    Success { size: u64 },
+    Success { node_id: NodeId, size: u64 },
     Failure { path: PathBuf, error: String },
 }
 
@@ -457,6 +457,7 @@ impl AppState {
         if !self.selected_nodes.is_empty() {
             self.request_multi_delete();
         } else if let Some(node_id) = self.selected_node()
+            && node_id != NodeId::ROOT
             && let Some(tree) = &self.tree
             && let Some(node) = tree.get(node_id)
         {
@@ -468,6 +469,12 @@ impl AppState {
     /// Confirm and start async delete operation
     pub fn confirm_delete(&mut self) {
         if let Some((node_id, path)) = self.pending_delete.take() {
+            // Defense in depth: the scan root must never be deleted.
+            if node_id == NodeId::ROOT {
+                self.mode = AppMode::Browsing;
+                return;
+            }
+
             // Get size before deletion
             let size = self
                 .tree
@@ -475,16 +482,6 @@ impl AppState {
                 .and_then(|t| t.get(node_id))
                 .map(|n| n.size)
                 .unwrap_or(0);
-
-            // Update tree immediately (optimistic update)
-            if let Some(tree) = &mut self.tree {
-                tree.remove_node(node_id);
-                self.tree_modified = true;
-                self.computed_views.dirty = true;
-            }
-            // Remove from selection if present
-            self.selected_nodes.remove(&node_id);
-            self.adjust_selection_after_delete();
 
             // Spawn background deletion
             let (tx, rx) = mpsc::channel();
@@ -518,13 +515,18 @@ impl AppState {
             && let Ok(result) = rx.try_recv()
         {
             match result {
-                Ok((_node_id, size)) => {
+                Ok((node_id, size)) => {
+                    if let Some(tree) = &mut self.tree {
+                        tree.remove_node(node_id);
+                        self.tree_modified = true;
+                        self.computed_views.dirty = true;
+                    }
+                    self.selected_nodes.remove(&node_id);
+                    self.adjust_selection_after_delete();
                     self.session_stats.bytes_freed += size;
                     self.session_stats.items_deleted += 1;
                 }
                 Err(e) => {
-                    // Delete failed - we already removed from tree optimistically
-                    // Could restore here but simpler to just show error
                     self.error_message = Some(e);
                 }
             }
@@ -777,7 +779,7 @@ impl AppState {
         self.mode = AppMode::ConfirmMultiDelete;
     }
 
-    /// Confirm multi-delete: optimistic tree removal + spawn concurrent threads
+    /// Confirm multi-delete and spawn concurrent filesystem operations
     pub fn confirm_multi_delete(&mut self) {
         let items = match self.pending_multi_delete.take() {
             Some(items) => items,
@@ -786,17 +788,8 @@ impl AppState {
 
         let total = items.len();
 
-        // Optimistic tree removal
-        if let Some(tree) = &mut self.tree {
-            for &(node_id, _, _) in &items {
-                tree.remove_node(node_id);
-            }
-            self.tree_modified = true;
-            self.computed_views.dirty = true;
-        }
         self.selected_nodes.clear();
         self.selecting_mode = false;
-        self.adjust_selection_after_delete();
 
         // Shared channel for all delete threads
         let (tx, rx) = mpsc::channel();
@@ -811,7 +804,7 @@ impl AppState {
         self.mode = AppMode::MultiDeleting;
 
         // Spawn one thread per item (concurrent deletion)
-        for (_node_id, path, size) in items {
+        for (node_id, path, size) in items {
             let tx = tx.clone();
             std::thread::spawn(move || {
                 let result = if path.is_dir() {
@@ -820,7 +813,7 @@ impl AppState {
                     std::fs::remove_file(&path)
                 };
                 let msg = match result {
-                    Ok(()) => MultiDeleteResult::Success { size },
+                    Ok(()) => MultiDeleteResult::Success { node_id, size },
                     Err(e) => MultiDeleteResult::Failure {
                         path,
                         error: format!("{}", e),
@@ -841,7 +834,12 @@ impl AppState {
         while let Ok(result) = progress.receiver.try_recv() {
             progress.completed += 1;
             match result {
-                MultiDeleteResult::Success { size, .. } => {
+                MultiDeleteResult::Success { node_id, size } => {
+                    if let Some(tree) = &mut self.tree {
+                        tree.remove_node(node_id);
+                        self.tree_modified = true;
+                        self.computed_views.dirty = true;
+                    }
                     progress.bytes_freed += size;
                     self.session_stats.bytes_freed += size;
                     self.session_stats.items_deleted += 1;
@@ -853,6 +851,7 @@ impl AppState {
         }
 
         if progress.completed >= progress.total {
+            self.adjust_selection_after_delete();
             let failures = std::mem::take(
                 &mut self
                     .multi_delete_progress
@@ -885,5 +884,158 @@ impl AppState {
     pub fn cancel_multi_delete(&mut self) {
         self.pending_multi_delete = None;
         self.mode = AppMode::Browsing;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dux_core::NodeKind;
+
+    fn state_with_child() -> (AppState, NodeId) {
+        let root = PathBuf::from("/test-root");
+        let mut tree = DiskTree::new(root.clone());
+        let child = tree.add_node(
+            "file.txt".to_string(),
+            NodeKind::File,
+            root.join("file.txt"),
+            NodeId::ROOT,
+        );
+        tree.set_size(child, 10);
+        tree.aggregate_sizes();
+
+        let mut state = AppState::new(root);
+        state.set_tree(tree);
+        (state, child)
+    }
+
+    #[test]
+    fn single_delete_never_targets_root() {
+        let (mut state, _) = state_with_child();
+
+        state.request_delete();
+
+        assert!(state.pending_delete.is_none());
+        assert_eq!(state.mode, AppMode::Browsing);
+    }
+
+    #[test]
+    fn single_delete_confirmation_rejects_root() {
+        let (mut state, _) = state_with_child();
+        state.pending_delete = Some((NodeId::ROOT, state.root_path.clone()));
+        state.mode = AppMode::ConfirmDelete;
+
+        state.confirm_delete();
+
+        assert!(state.delete_receiver.is_none());
+        assert!(
+            state
+                .tree
+                .as_ref()
+                .and_then(|tree| tree.get(NodeId::ROOT))
+                .is_some()
+        );
+        assert_eq!(state.mode, AppMode::Browsing);
+    }
+
+    #[test]
+    fn failed_single_delete_keeps_tree_node() {
+        let (mut state, child) = state_with_child();
+        let (tx, rx) = mpsc::channel();
+        state.delete_receiver = Some(rx);
+        tx.send(Err("Delete failed".to_string())).unwrap();
+
+        state.poll_delete();
+
+        assert!(
+            state
+                .tree
+                .as_ref()
+                .and_then(|tree| tree.get(child))
+                .is_some()
+        );
+        assert!(!state.tree_modified);
+        assert_eq!(state.session_stats.items_deleted, 0);
+    }
+
+    #[test]
+    fn successful_single_delete_updates_tree() {
+        let (mut state, child) = state_with_child();
+        let (tx, rx) = mpsc::channel();
+        state.delete_receiver = Some(rx);
+        tx.send(Ok((child, 10))).unwrap();
+
+        state.poll_delete();
+
+        assert!(
+            state
+                .tree
+                .as_ref()
+                .and_then(|tree| tree.get(child))
+                .is_none()
+        );
+        assert!(state.tree_modified);
+        assert_eq!(state.session_stats.items_deleted, 1);
+        assert_eq!(state.session_stats.bytes_freed, 10);
+    }
+
+    #[test]
+    fn failed_multi_delete_keeps_tree_node() {
+        let (mut state, child) = state_with_child();
+        let (tx, rx) = mpsc::channel();
+        state.multi_delete_progress = Some(MultiDeleteProgress {
+            total: 1,
+            completed: 0,
+            bytes_freed: 0,
+            failures: Vec::new(),
+            receiver: rx,
+        });
+        tx.send(MultiDeleteResult::Failure {
+            path: PathBuf::from("/test-root/file.txt"),
+            error: "Delete failed".to_string(),
+        })
+        .unwrap();
+
+        state.poll_multi_delete();
+
+        assert!(
+            state
+                .tree
+                .as_ref()
+                .and_then(|tree| tree.get(child))
+                .is_some()
+        );
+        assert!(!state.tree_modified);
+        assert_eq!(state.session_stats.items_deleted, 0);
+    }
+
+    #[test]
+    fn successful_multi_delete_updates_tree() {
+        let (mut state, child) = state_with_child();
+        let (tx, rx) = mpsc::channel();
+        state.multi_delete_progress = Some(MultiDeleteProgress {
+            total: 1,
+            completed: 0,
+            bytes_freed: 0,
+            failures: Vec::new(),
+            receiver: rx,
+        });
+        tx.send(MultiDeleteResult::Success {
+            node_id: child,
+            size: 10,
+        })
+        .unwrap();
+
+        state.poll_multi_delete();
+
+        assert!(
+            state
+                .tree
+                .as_ref()
+                .and_then(|tree| tree.get(child))
+                .is_none()
+        );
+        assert!(state.tree_modified);
+        assert_eq!(state.session_stats.items_deleted, 1);
     }
 }

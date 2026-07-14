@@ -38,7 +38,8 @@ Before creating a release tag:
 ## Deletion
 
 - Deletion runs in a background thread to keep UI responsive
-- Tree is updated optimistically (immediately) before filesystem deletion completes
+- Tree and cache state are updated only after filesystem deletion succeeds
+- Failed deletions remain visible and surface an error in the UI
 - User can continue browsing while deletion happens in background
 - If user quits during deletion, the deletion continues to completion in the background
 
