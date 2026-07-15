@@ -13,10 +13,12 @@ pub use cache::{
     is_cache_valid, load_cache, save_cache, spot_check_mtimes,
 };
 pub use domain::{
-    ActivityGuard, BlockReason, Candidate, CandidateAction, CandidateCategory, CandidateId,
-    CandidateValidationError, Evidence, EvidenceKind, LocalizedTextKey, ProvenanceUrl, Rule,
-    RuleDefinition, RuleGuards, RuleId, RuleMatcher, RuleMatcherDefinition, RuleRef, RuleRevision,
-    RuleScope, RuleValidationError, SafetyTier, ScanId, StableIdError,
+    ActivityGuard, BlockReason, CLEANUP_PLAN_VALIDITY, Candidate, CandidateAction,
+    CandidateCategory, CandidateId, CandidateValidationError, CleanupMode, CleanupPlan,
+    CleanupPlanId, CleanupPlanItem, CleanupPlanValidationError, Evidence, EvidenceKind,
+    LocalizedTextKey, OperationStatus, PlanWarning, ProvenanceUrl, Rule, RuleDefinition,
+    RuleGuards, RuleId, RuleMatcher, RuleMatcherDefinition, RuleRef, RuleRevision, RuleScope,
+    RuleValidationError, SafetyTier, ScanId, StableIdError,
 };
 pub use error::{DuxError, Result};
 pub use projection::{
