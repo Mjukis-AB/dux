@@ -37,7 +37,7 @@ impl Widget for ConfirmDeleteView<'_> {
 
         // Draw border
         let block = Block::default()
-            .title(" Delete? ")
+            .title(" Permanent Delete? ")
             .title_alignment(Alignment::Center)
             .borders(Borders::ALL)
             .border_style(Style::default().fg(self.theme.red))
@@ -60,7 +60,7 @@ impl Widget for ConfirmDeleteView<'_> {
         let max_path_len = (inner.width as usize).saturating_sub(2);
         let display_path = truncate_start(&path_str, max_path_len);
 
-        buf.set_string(inner.x, inner.y, "Delete:", text_style);
+        buf.set_string(inner.x, inner.y, "Permanently delete 1 item:", text_style);
         buf.set_string(inner.x, inner.y + 1, &display_path, path_style);
 
         // Size info
@@ -75,5 +75,27 @@ impl Widget for ConfirmDeleteView<'_> {
         buf.set_string(inner.x + 4, hints_y, "Yes, delete", text_style);
         buf.set_string(inner.x + 18, hints_y, "[n]", key_style);
         buf.set_string(inner.x + 22, hints_y, "Cancel", text_style);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn renders_permanent_single_item_confirmation() {
+        let area = Rect::new(0, 0, 80, 20);
+        let mut buffer = Buffer::empty(area);
+        ConfirmDeleteView::new(Path::new("/tmp/file"), Some(1024), &Theme::default())
+            .render(area, &mut buffer);
+
+        let text = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(text.contains("Permanently delete 1 item:"));
+        assert!(text.contains("[y]"));
+        assert!(text.contains("[n]"));
     }
 }

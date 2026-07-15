@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs::Metadata;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -11,6 +11,8 @@ use std::os::unix::fs::MetadataExt;
 use crossbeam_channel::{Receiver, Sender};
 use jwalk::WalkDir;
 
+use super::filesystem::{self, FilesystemDisposition};
+use super::probe_pool::{ProbePool, ProbePoolError, directory_probe_pool};
 use super::progress::{ScanMessage, ScanProgress};
 use crate::tree::{DiskTree, NodeId, NodeKind};
 
@@ -99,64 +101,158 @@ impl SharedProgress {
     }
 }
 
-/// Patterns that indicate potentially slow/problematic paths
-const SLOW_PATTERNS: &[&str] = &[
-    "/Volumes/",                // Mounted volumes (might be network/external)
-    "/.Spotlight-V100",         // Spotlight index
-    "/.fseventsd",              // FSEvents
-    "/.DocumentRevisions-V100", // Document versions
-    "/System/Volumes/Data/.Spotlight-V100",
-    "CoreSimulator/Volumes",     // iOS Simulator disk images
-    "/.MobileBackups",           // Mobile backups
-    ".timemachine",              // Time Machine
-    "/dev/",                     // Device files
-    "/proc/",                    // Linux proc filesystem
-    "/sys/",                     // Linux sys filesystem
-    "/private/var/folders",      // macOS temp folders (can hang)
-    "/private/var/db/dyld",      // dyld cache (permission issues)
-    "/private/var/db/uuidtext",  // UUID text (slow)
-    "/Library/CloudStorage",     // Cloud storage FUSE mounts (Google Drive, OneDrive, etc.)
-    "/Library/Mobile Documents", // iCloud Drive documents
+/// Structured rules for paths that are potentially slow or virtual.
+///
+/// Matching path components instead of string fragments avoids treating a
+/// normal directory such as `<scan root>/dev` as the system `/dev` tree.
+#[derive(Debug, Clone, Copy)]
+enum SlowPathRule {
+    AbsolutePrefix(&'static str),
+    Component(&'static str),
+    MacUserHomePrefix(&'static str),
+}
+
+impl SlowPathRule {
+    fn matches(self, path: &Path) -> bool {
+        match self {
+            Self::AbsolutePrefix(prefix) => path.starts_with(Path::new(prefix)),
+            Self::Component(name) => path.components().any(|part| part.as_os_str() == name),
+            Self::MacUserHomePrefix(prefix) => {
+                let mut parts = path.components();
+                matches!(parts.next(), Some(Component::RootDir))
+                    && parts.next().is_some_and(|part| part.as_os_str() == "Users")
+                    && matches!(parts.next(), Some(Component::Normal(_)))
+                    && parts.as_path().starts_with(Path::new(prefix))
+            }
+        }
+    }
+}
+
+const SLOW_PATH_RULES: &[SlowPathRule] = &[
+    SlowPathRule::Component(".Spotlight-V100"),
+    SlowPathRule::Component(".fseventsd"),
+    SlowPathRule::Component(".DocumentRevisions-V100"),
+    SlowPathRule::AbsolutePrefix("/Library/Developer/CoreSimulator/Volumes"),
+    SlowPathRule::MacUserHomePrefix("Library/Developer/CoreSimulator/Volumes"),
+    SlowPathRule::Component(".MobileBackups"),
+    SlowPathRule::Component(".timemachine"),
+    SlowPathRule::AbsolutePrefix("/dev"),
+    SlowPathRule::AbsolutePrefix("/proc"),
+    SlowPathRule::AbsolutePrefix("/sys"),
+    SlowPathRule::AbsolutePrefix("/private/var/folders"),
+    SlowPathRule::AbsolutePrefix("/private/var/db/dyld"),
+    SlowPathRule::AbsolutePrefix("/private/var/db/uuidtext"),
+    SlowPathRule::AbsolutePrefix("/Library/CloudStorage"),
+    SlowPathRule::MacUserHomePrefix("Library/CloudStorage"),
+    SlowPathRule::AbsolutePrefix("/Library/Mobile Documents"),
+    SlowPathRule::MacUserHomePrefix("Library/Mobile Documents"),
 ];
 
-/// Check if a path looks like a virtual/problematic filesystem path
-/// Only returns true if the path contains a slow pattern AND is not under the root path
+/// Check if a path looks like a virtual/problematic filesystem path.
+///
+/// A rule is ignored when the scan root matches the same rule, allowing a user
+/// to explicitly scan a location that DUX would skip while scanning its parent.
 fn is_virtual_or_slow_path(path: &std::path::Path, root_path: &std::path::Path) -> bool {
     // If this path is the root or an ancestor of root, don't skip it
     if path == root_path || root_path.starts_with(path) {
         return false;
     }
 
-    let path_str = path.to_string_lossy();
-    let root_str = root_path.to_string_lossy();
-
-    // Check for known virtual filesystem patterns
-    for pattern in SLOW_PATTERNS {
-        // Only skip if the pattern appears in the path but NOT in the root path
-        // This allows scanning within /private/var/folders if that's where we started
-        if path_str.contains(pattern) && !root_str.contains(pattern) {
-            return true;
-        }
-    }
-
-    false
+    SLOW_PATH_RULES
+        .iter()
+        .copied()
+        .any(|rule| rule.matches(path) && !rule.matches(root_path))
 }
 
 /// How long to wait for a metadata() call before assuming the path is on a slow/hung filesystem.
 const METADATA_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Fetch metadata with a timeout. Returns None if the call takes longer than METADATA_TIMEOUT.
-/// This prevents the scanner from hanging indefinitely on slow FUSE mounts or network filesystems.
-fn metadata_with_timeout(path: &Path) -> Option<Metadata> {
-    let path = path.to_path_buf();
-    let (tx, rx) = crossbeam_channel::bounded(1);
-    std::thread::spawn(move || {
-        let _ = tx.send(std::fs::metadata(&path));
-    });
-    match rx.recv_timeout(METADATA_TIMEOUT) {
-        Ok(Ok(meta)) => Some(meta),
-        _ => None,
-    }
+#[derive(Debug)]
+struct DirectoryProbe {
+    metadata: Metadata,
+    filesystem: FilesystemDisposition,
+}
+
+struct DirectoryProbeRequest {
+    path: PathBuf,
+    root_dev: u64,
+    classify_crossed_filesystem: bool,
+    filesystem_cache: Arc<Mutex<HashMap<u64, FilesystemDisposition>>>,
+}
+
+/// Fetch metadata and, when crossing a device boundary, classify its filesystem.
+/// Pool failures are distinct from ordinary metadata errors so callers can
+/// avoid treating a missing entry as a pool-wide timeout.
+fn directory_probe_with_timeout(
+    path: &Path,
+    root_dev: u64,
+    classify_crossed_filesystem: bool,
+    filesystem_cache: Arc<Mutex<HashMap<u64, FilesystemDisposition>>>,
+    cancellation: &CancellationToken,
+) -> Result<Option<DirectoryProbe>, ProbePoolError> {
+    directory_probe_with(
+        directory_probe_pool(),
+        DirectoryProbeRequest {
+            path: path.to_path_buf(),
+            root_dev,
+            classify_crossed_filesystem,
+            filesystem_cache,
+        },
+        METADATA_TIMEOUT,
+        cancellation,
+        filesystem::probe,
+    )
+}
+
+fn directory_probe_with<F>(
+    pool: &ProbePool,
+    request: DirectoryProbeRequest,
+    timeout: Duration,
+    cancellation: &CancellationToken,
+    probe_filesystem: F,
+) -> Result<Option<DirectoryProbe>, ProbePoolError>
+where
+    F: FnOnce(&Path) -> FilesystemDisposition + Send + 'static,
+{
+    pool.run(timeout, cancellation, move || {
+        let result = std::fs::metadata(&request.path).map(|metadata| {
+            let device = get_device_id(&metadata);
+            let filesystem = if request.classify_crossed_filesystem && device != request.root_dev {
+                request
+                    .filesystem_cache
+                    .lock()
+                    .ok()
+                    .and_then(|cache| cache.get(&device).copied())
+                    .unwrap_or_else(|| {
+                        // Concurrent first visits may duplicate this probe. Do
+                        // not hold the mutex across a syscall that can hang.
+                        let disposition = probe_filesystem(&request.path);
+                        if let Ok(mut cache) = request.filesystem_cache.lock() {
+                            cache.insert(device, disposition);
+                        }
+                        disposition
+                    })
+            } else {
+                FilesystemDisposition::Unknown
+            };
+
+            DirectoryProbe {
+                metadata,
+                filesystem,
+            }
+        });
+        result.ok()
+    })
+}
+
+fn should_skip_directory(
+    same_filesystem: bool,
+    root_dev: u64,
+    directory_dev: u64,
+    filesystem: FilesystemDisposition,
+) -> bool {
+    directory_dev != root_dev
+        && (same_filesystem || filesystem == FilesystemDisposition::NetworkOrVirtual)
 }
 
 /// Filesystem scanner
@@ -235,11 +331,18 @@ impl Scanner {
         // Configure walker with process_read_dir to skip problematic directories
         let same_fs = self.config.same_filesystem;
         let root_for_filter = root_path.clone();
+        let cancel_for_filter = self.cancel_token.clone();
+        let filesystem_cache = Arc::new(Mutex::new(HashMap::new()));
         let walker = WalkDir::new(&root_path)
             .skip_hidden(false)
             .follow_links(self.config.follow_symlinks)
             .sort(false) // We'll sort by size later
             .process_read_dir(move |_depth, path, _read_dir_state, children| {
+                if cancel_for_filter.is_cancelled() {
+                    children.clear();
+                    return;
+                }
+
                 // Skip children in virtual/slow directories
                 if is_virtual_or_slow_path(path, &root_for_filter) {
                     children.clear();
@@ -247,6 +350,10 @@ impl Scanner {
                 }
 
                 children.retain(|entry| {
+                    if cancel_for_filter.is_cancelled() {
+                        return false;
+                    }
+
                     if let Ok(e) = entry {
                         // Check if child path is virtual/slow
                         if is_virtual_or_slow_path(&e.path(), &root_for_filter) {
@@ -254,14 +361,27 @@ impl Scanner {
                         }
 
                         // For directories, probe metadata with a timeout to detect
-                        // slow FUSE/network mounts before jwalk descends into them
+                        // slow FUSE/network mounts before jwalk descends into them.
+                        // Metadata must stay inside this timeout: asking jwalk's
+                        // entry for metadata first can itself block on the mount.
                         if e.file_type().is_dir() {
-                            match metadata_with_timeout(&e.path()) {
-                                Some(meta) if same_fs => {
-                                    return get_device_id(&meta) == root_dev;
+                            match directory_probe_with_timeout(
+                                &e.path(),
+                                root_dev,
+                                !same_fs,
+                                Arc::clone(&filesystem_cache),
+                                &cancel_for_filter,
+                            ) {
+                                Ok(Some(probe)) => {
+                                    return !should_skip_directory(
+                                        same_fs,
+                                        root_dev,
+                                        get_device_id(&probe.metadata),
+                                        probe.filesystem,
+                                    );
                                 }
-                                None => return false, // Timed out — skip this subtree
-                                _ => {}
+                                Ok(None) => return false,
+                                Err(_) => return false,
                             }
                         } else if same_fs {
                             // For files, use jwalk's cached metadata (already fetched)
@@ -330,11 +450,14 @@ impl Scanner {
             let file_type = entry.file_type();
             let kind = if file_type.is_dir() {
                 NodeKind::Directory
+            } else if file_type.is_file() {
+                NodeKind::File
             } else if file_type.is_symlink() {
                 NodeKind::Symlink
             } else {
-                NodeKind::File
+                NodeKind::Other
             };
+            let path_is_symlink = entry.path_is_symlink();
 
             // Get parent path and node ID
             let parent_path = match path.parent() {
@@ -355,6 +478,9 @@ impl Scanner {
 
             // Add node
             let node_id = tree.add_node(name, kind, path.clone(), parent_id);
+            if let Some(node) = tree.get_mut(node_id) {
+                node.path_is_symlink = path_is_symlink;
+            }
 
             // Track path and mtime for directories
             if kind == NodeKind::Directory {
@@ -465,5 +591,251 @@ mod tests {
 
         let tree = handle.join().unwrap();
         assert!(tree.len() >= 4); // root + 2 files + subdir + 1 file
+    }
+
+    #[test]
+    fn slow_path_rules_match_boundaries_not_substrings() {
+        let root = Path::new("/tmp/dux-scan");
+
+        assert!(is_virtual_or_slow_path(Path::new("/dev/null"), root));
+        assert!(is_virtual_or_slow_path(
+            Path::new("/Users/test/Library/CloudStorage/provider"),
+            root
+        ));
+        assert!(is_virtual_or_slow_path(
+            Path::new("/Users/test/Library/Developer/CoreSimulator/Volumes/device"),
+            root
+        ));
+
+        assert!(!is_virtual_or_slow_path(
+            Path::new("/tmp/dux-scan/dev/payload.bin"),
+            root
+        ));
+        assert!(!is_virtual_or_slow_path(
+            Path::new("/tmp/dux-scan/developer/payload.bin"),
+            root
+        ));
+        assert!(!is_virtual_or_slow_path(
+            Path::new("/tmp/dux-scan/.timemachine-backup/data"),
+            root
+        ));
+        assert!(!is_virtual_or_slow_path(
+            Path::new("/tmp/dux-scan/Library/CloudStorage-copy/data"),
+            root
+        ));
+        assert!(!is_virtual_or_slow_path(
+            Path::new("/tmp/dux-scan/project/Library/CloudStorage/data"),
+            root
+        ));
+        assert!(!is_virtual_or_slow_path(
+            Path::new("/tmp/dux-scan/fixture/CoreSimulator/Volumes/device"),
+            root
+        ));
+    }
+
+    #[test]
+    fn slow_path_rules_allow_explicit_scan_roots() {
+        assert!(!is_virtual_or_slow_path(
+            Path::new("/dev/fd"),
+            Path::new("/dev")
+        ));
+        assert!(!is_virtual_or_slow_path(
+            Path::new("/tmp/root/.fseventsd/events"),
+            Path::new("/tmp/root/.fseventsd")
+        ));
+    }
+
+    #[test]
+    fn volumes_are_classified_by_filesystem_instead_of_path() {
+        assert!(!is_virtual_or_slow_path(
+            Path::new("/Volumes/External/data"),
+            Path::new("/")
+        ));
+    }
+
+    #[test]
+    fn mount_policy_preserves_roots_and_rejects_problematic_crossings() {
+        assert!(!should_skip_directory(
+            false,
+            1,
+            1,
+            FilesystemDisposition::NetworkOrVirtual
+        ));
+        assert!(should_skip_directory(
+            true,
+            1,
+            2,
+            FilesystemDisposition::Local
+        ));
+        assert!(should_skip_directory(
+            false,
+            1,
+            2,
+            FilesystemDisposition::NetworkOrVirtual
+        ));
+        assert!(!should_skip_directory(
+            false,
+            1,
+            2,
+            FilesystemDisposition::Local
+        ));
+        assert!(!should_skip_directory(
+            false,
+            1,
+            2,
+            FilesystemDisposition::Unknown
+        ));
+    }
+
+    #[test]
+    fn directory_probe_timeout_rejects_the_subtree() {
+        let temp = TempDir::new().unwrap();
+        let device = get_device_id(&fs::metadata(temp.path()).unwrap());
+        let cache = Arc::new(Mutex::new(HashMap::new()));
+        let pool = ProbePool::new(1, 1);
+
+        let result = directory_probe_with(
+            &pool,
+            DirectoryProbeRequest {
+                path: temp.path().to_path_buf(),
+                root_dev: device.wrapping_add(1),
+                classify_crossed_filesystem: true,
+                filesystem_cache: cache,
+            },
+            Duration::from_millis(1),
+            &CancellationToken::new(),
+            |_| {
+                std::thread::sleep(Duration::from_millis(25));
+                FilesystemDisposition::Local
+            },
+        );
+
+        assert!(matches!(result, Err(ProbePoolError::DeadlineExceeded)));
+    }
+
+    #[test]
+    fn metadata_error_does_not_report_pool_unavailability() {
+        let temp = TempDir::new().unwrap();
+        let missing = temp.path().join("missing");
+        let pool = ProbePool::new(1, 1);
+
+        let result = directory_probe_with(
+            &pool,
+            DirectoryProbeRequest {
+                path: missing,
+                root_dev: 0,
+                classify_crossed_filesystem: true,
+                filesystem_cache: Arc::new(Mutex::new(HashMap::new())),
+            },
+            Duration::from_secs(1),
+            &CancellationToken::new(),
+            |_| FilesystemDisposition::Local,
+        );
+
+        assert!(matches!(result, Ok(None)));
+    }
+
+    #[test]
+    fn timed_out_probe_does_not_prevent_the_next_probe() {
+        let temp = TempDir::new().unwrap();
+        let device = get_device_id(&fs::metadata(temp.path()).unwrap());
+        let pool = ProbePool::new(1, 1);
+        let request = || DirectoryProbeRequest {
+            path: temp.path().to_path_buf(),
+            root_dev: device.wrapping_add(1),
+            classify_crossed_filesystem: true,
+            filesystem_cache: Arc::new(Mutex::new(HashMap::new())),
+        };
+
+        let timed_out = directory_probe_with(
+            &pool,
+            request(),
+            Duration::from_millis(1),
+            &CancellationToken::new(),
+            |_| {
+                std::thread::sleep(Duration::from_millis(20));
+                FilesystemDisposition::Local
+            },
+        );
+        assert!(matches!(timed_out, Err(ProbePoolError::DeadlineExceeded)));
+
+        let next = directory_probe_with(
+            &pool,
+            request(),
+            Duration::from_secs(1),
+            &CancellationToken::new(),
+            |_| FilesystemDisposition::Local,
+        );
+        assert!(matches!(next, Ok(Some(_))));
+    }
+
+    #[test]
+    fn scanner_keeps_nested_directory_named_dev() {
+        let temp = TempDir::new().unwrap();
+        let nested_dev = temp.path().join("dev");
+        let payload = nested_dev.join("payload.bin");
+        fs::create_dir(&nested_dev).unwrap();
+        fs::write(&payload, b"payload").unwrap();
+
+        let scanner = Scanner::new(ScanConfig::default());
+        let (rx, handle) = scanner.scan(temp.path().to_path_buf());
+        for _ in rx {}
+
+        let tree = handle.join().unwrap();
+        assert!(
+            tree.find_by_path(&nested_dev.canonicalize().unwrap())
+                .is_some()
+        );
+        assert!(
+            tree.find_by_path(&payload.canonicalize().unwrap())
+                .is_some()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn followed_symlinks_preserve_path_provenance() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().unwrap();
+        let targets = TempDir::new().unwrap();
+        let real_dir = targets.path().join("real-dir");
+        let linked_dir = temp.path().join("linked-dir");
+        let real_manifest = targets.path().join("real-manifest");
+        let linked_manifest = temp.path().join("Cargo.toml");
+        fs::create_dir(&real_dir).unwrap();
+        fs::write(real_dir.join("output"), b"payload").unwrap();
+        fs::write(&real_manifest, b"[package]").unwrap();
+        symlink(&real_dir, &linked_dir).unwrap();
+        symlink(&real_manifest, &linked_manifest).unwrap();
+
+        let scanner = Scanner::new(ScanConfig {
+            follow_symlinks: true,
+            ..ScanConfig::default()
+        });
+        let (rx, handle) = scanner.scan(temp.path().to_path_buf());
+        for _ in rx {}
+        let tree = handle.join().unwrap();
+
+        let canonical_root = temp.path().canonicalize().unwrap();
+        let linked_dir = canonical_root.join("linked-dir");
+        let linked_manifest = canonical_root.join("Cargo.toml");
+        let scanned_paths = || {
+            tree.iter()
+                .map(|node| node.path.clone())
+                .collect::<Vec<_>>()
+        };
+        let linked_dir_id = tree
+            .find_by_path(&linked_dir)
+            .unwrap_or_else(|| panic!("linked directory missing from {:#?}", scanned_paths()));
+        let linked_manifest_id = tree
+            .find_by_path(&linked_manifest)
+            .unwrap_or_else(|| panic!("linked marker missing from {:#?}", scanned_paths()));
+        let linked_dir_node = tree.get(linked_dir_id).unwrap();
+        let linked_manifest_node = tree.get(linked_manifest_id).unwrap();
+        assert_eq!(linked_dir_node.kind, NodeKind::Directory);
+        assert!(linked_dir_node.path_is_symlink);
+        assert_eq!(linked_manifest_node.kind, NodeKind::File);
+        assert!(linked_manifest_node.path_is_symlink);
     }
 }

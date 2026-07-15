@@ -13,12 +13,17 @@ use super::theme::Theme;
 /// Progress overlay shown during multi-delete
 pub struct MultiDeleteProgressView<'a> {
     progress: &'a MultiDeleteProgress,
+    quit_requested: bool,
     theme: &'a Theme,
 }
 
 impl<'a> MultiDeleteProgressView<'a> {
-    pub fn new(progress: &'a MultiDeleteProgress, theme: &'a Theme) -> Self {
-        Self { progress, theme }
+    pub fn new(progress: &'a MultiDeleteProgress, quit_requested: bool, theme: &'a Theme) -> Self {
+        Self {
+            progress,
+            quit_requested,
+            theme,
+        }
     }
 }
 
@@ -91,11 +96,11 @@ impl Widget for MultiDeleteProgressView<'_> {
 
         // Hint at bottom
         let hint_y = row.max(inner.y + inner.height.saturating_sub(1));
-        buf.set_string(
-            inner.x,
-            hint_y,
-            "Press q to quit (deletions continue in background)",
-            dim_style,
-        );
+        let hint = if self.quit_requested {
+            "Quit requested - waiting for deletions to finish"
+        } else {
+            "Press q to quit after deletions finish"
+        };
+        buf.set_string(inner.x, hint_y, hint, dim_style);
     }
 }

@@ -145,6 +145,7 @@ fn run_app(
 
     // Store the join handle in an Option so we can take it once
     let mut scan_handle: Option<JoinHandle<DiskTree>> = scan_handle;
+    let mut cache_save_handle: Option<JoinHandle<dux_core::Result<()>>> = None;
 
     // For cache saving after scan
     let cache_path_for_save = cache_path.clone();
@@ -174,7 +175,7 @@ fn run_app(
                                 let config = cache_config_for_save.clone();
                                 let root = root_path_for_save.clone();
                                 let root_mtime = get_mtime(&root).unwrap_or(SystemTime::UNIX_EPOCH);
-                                std::thread::spawn(move || {
+                                cache_save_handle = Some(std::thread::spawn(move || {
                                     let meta = CacheMetadata {
                                         version: dux_core::CACHE_VERSION,
                                         root_path: root,
@@ -184,8 +185,8 @@ fn run_app(
                                         node_count: tree_for_cache.live_count(),
                                         config,
                                     };
-                                    let _ = save_cache(&cache_path, &tree_for_cache, &meta);
-                                });
+                                    save_cache(&cache_path, &tree_for_cache, &meta)
+                                }));
                             }
                             state.set_tree(tree);
                         }
@@ -300,7 +301,7 @@ fn run_app(
                     if state.mode == AppMode::MultiDeleting
                         && let Some(ref progress) = state.multi_delete_progress
                     {
-                        MultiDeleteProgressView::new(progress, &theme)
+                        MultiDeleteProgressView::new(progress, state.quit_requested, &theme)
                             .render(area, frame.buffer_mut());
                     }
                 }
@@ -312,6 +313,7 @@ fn run_app(
             // Footer
             Footer::new(state.mode, state.view_mode, &theme, &state.session_stats)
                 .with_stale_threshold(state.computed_views.stale_threshold)
+                .with_quit_requested(state.quit_requested)
                 .with_selection(
                     state.selection_count(),
                     selection_size,
@@ -350,6 +352,10 @@ fn run_app(
         }
     }
 
+    // Ensure the initial post-scan snapshot cannot overwrite a newer tree
+    // after deletion results have been applied.
+    join_cache_save(cache_save_handle.take())?;
+
     // Save cache if tree was modified (e.g. deletions)
     if state.tree_modified
         && let Some(ref tree) = state.tree
@@ -365,14 +371,18 @@ fn run_app(
             node_count: tree.live_count(),
             config: cache_config_for_save.clone(),
         };
-        let _ = save_cache(cp, tree, &meta);
+        save_cache(cp, tree, &meta)?;
     }
 
-    // Drop tree in background to avoid blocking on deallocation
-    if let Some(tree) = state.tree.take() {
-        std::thread::spawn(move || drop(tree));
-    }
+    Ok(())
+}
 
+fn join_cache_save(handle: Option<JoinHandle<dux_core::Result<()>>>) -> Result<()> {
+    if let Some(handle) = handle {
+        handle
+            .join()
+            .map_err(|_| color_eyre::eyre::eyre!("background cache writer panicked"))??;
+    }
     Ok(())
 }
 
@@ -499,4 +509,72 @@ fn render_size_bar(
         &label,
         Style::default().fg(theme.fg_dim),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dux_core::{NodeId, NodeKind};
+
+    fn cache_metadata(root: PathBuf, tree: &DiskTree) -> CacheMetadata {
+        CacheMetadata {
+            version: dux_core::CACHE_VERSION,
+            root_path: root,
+            scan_time: SystemTime::now(),
+            root_mtime: SystemTime::now(),
+            total_size: tree.total_size(),
+            node_count: tree.live_count(),
+            config: CachedScanConfig {
+                follow_symlinks: false,
+                same_filesystem: true,
+                max_depth: None,
+            },
+        }
+    }
+
+    #[test]
+    fn post_delete_cache_write_follows_initial_writer() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().join("root");
+        let cache_path = temp.path().join("scan.dux");
+
+        let mut initial_tree = DiskTree::new(root.clone());
+        initial_tree.add_node(
+            "deleted.txt".to_string(),
+            NodeKind::File,
+            root.join("deleted.txt"),
+            NodeId::ROOT,
+        );
+        let initial_meta = cache_metadata(root.clone(), &initial_tree);
+        let final_tree = DiskTree::new(root.clone());
+        let final_meta = cache_metadata(root.clone(), &final_tree);
+
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let initial_path = cache_path.clone();
+        let initial_writer = std::thread::spawn(move || {
+            release_rx.recv().unwrap();
+            save_cache(&initial_path, &initial_tree, &initial_meta)
+        });
+
+        let (finalizer_started_tx, finalizer_started_rx) = std::sync::mpsc::channel();
+        let final_path = cache_path.clone();
+        let finalizer = std::thread::spawn(move || {
+            finalizer_started_tx.send(()).unwrap();
+            join_cache_save(Some(initial_writer)).unwrap();
+            save_cache(&final_path, &final_tree, &final_meta).unwrap();
+        });
+
+        finalizer_started_rx.recv().unwrap();
+        assert!(!cache_path.exists());
+        release_tx.send(()).unwrap();
+        finalizer.join().unwrap();
+
+        let (_, loaded_tree) = load_cache(&cache_path).unwrap();
+        assert_eq!(loaded_tree.live_count(), 1);
+        assert!(
+            loaded_tree
+                .find_by_path(&root.join("deleted.txt"))
+                .is_none()
+        );
+    }
 }

@@ -40,8 +40,18 @@ Before creating a release tag:
 - Deletion runs in a background thread to keep UI responsive
 - Tree and cache state are updated only after filesystem deletion succeeds
 - Failed deletions remain visible and surface an error in the UI
+- Delete confirmation captures the entry's filesystem identity without following symlinks. It also captures every ancestor directory identity from the scan root to the target parent; the worker re-checks ancestors and the target before removal and skips changed, missing, symlinked, or reparse-point paths.
+- Build-artifact deletes additionally capture the exact marker-file identities used for classification and re-check them at execution time.
 - User can continue browsing while deletion happens in background
-- Quitting during a deletion currently kills in-flight deletes at process exit (delete threads are detached); ROADMAP Milestone 0 hardening changes quit to drain in-flight deletions first
+- Deletion workers are tracked; graceful quit waits for them, applies their results to the tree, then persists the cache. External force termination can still interrupt a filesystem operation.
+
+## Build Artifact Classification
+
+- Classification is fail-closed and tree-aware; directory names alone are not evidence.
+- Markers must be exact-case, direct sibling/child regular files and must not be symlinks.
+- Current rules: Cargo `target` + sibling `Cargo.toml`; Node `node_modules` + sibling `package.json`; Gradle `build`/`.gradle` + a sibling Gradle build/settings script; Python `__pycache__` + sibling `.py`, `.tox` + sibling `tox.ini`, and `.venv`/`venv` + child `pyvenv.cfg`; CocoaPods `Pods` + sibling `Podfile` + child `Manifest.lock`; Next/Nuxt output + sibling `package.json` + matching framework config.
+- `DerivedData`, `Build`, `dist`, `vendor`, and `.cache` are intentionally not classified yet.
+- “Marker-matched” means likely tooling ownership, not guaranteed reproducibility. Permanent deletion remains manually confirmed.
 
 ## Git Hooks
 

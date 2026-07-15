@@ -642,6 +642,8 @@ Use three cadences rather than one full-disk scan loop.
 - Probe slow mounts with a bounded prober pool, not one thread per directory.
 - Surface skipped and timed-out paths.
 
+M0 implementation note: the process-wide probe pool deliberately caps potentially wedged kernel calls at four threads. Filesystem syscalls cannot be cancelled in-process; if all four workers become permanently stuck, later probes time out until DUX restarts. The scan-coverage work must surface this as pool exhaustion and should add a circuit breaker or killable helper-process design so a long-running menu-bar session does not repeatedly spend the full deadline.
+
 ### 10.4 Incremental freshness
 
 After the initial app release, add FSEvents invalidation:
@@ -1361,16 +1363,30 @@ Goal: fix what is broken in the shipped CLI, secure the release pipeline, and pr
 
 Hardening tasks (ship as v0.5.x patch releases; see the verified defect list in §4):
 
-- [ ] Fix scanner skip patterns: absolute-prefix and path-component matching plus statfs-based detection, with a regression fixture containing a directory named `dev`.
-- [ ] Join in-flight deletions on quit (or require explicit confirmation to abandon them); correct the documentation that claims deletion survives quit.
-- [ ] Remove Enter as a delete-confirmation key; show item counts in both confirm dialogs.
-- [ ] Re-stat and compare (device, inode) immediately before every delete.
-- [ ] Gate artifact classification on marker evidence (for example, `target` requires a sibling `Cargo.toml`).
+- [x] Fix scanner skip patterns: absolute-prefix and path-component matching plus statfs-based detection, with a regression fixture containing a directory named `dev`. Completed 2026-07-15; cache v5 invalidates snapshots created under the old scan policy and additionally persists followed-symlink provenance.
+- [x] Replace one-thread-per-directory scanner probes with a process-wide four-worker bounded pool, one end-to-end deadline, cancellation polling, and abandoned-job suppression. Completed 2026-07-15.
+- [x] Join in-flight deletions on quit (or require explicit confirmation to abandon them); correct the documentation that claims deletion survives quit. Completed 2026-07-15 with deferred quit, tracked worker handles, disconnected-worker recovery, and ordered cache persistence.
+- [x] Remove Enter as a delete-confirmation key; show item counts in both confirm dialogs. Completed 2026-07-15 with explicit permanent-delete copy and focused key/render tests.
+- [x] Re-stat and compare filesystem identity immediately before every delete. Completed 2026-07-15: identity is captured before the confirmation UI opens, then the shared single/batch deletion helper compares non-following `(device, inode)` metadata on Unix or `(volume serial, 128-bit file ID)` from a non-following Windows handle immediately before removal. Mismatch, disappearance, and inspection failure leave tree/cache/statistics state unchanged.
+- [x] Gate artifact classification on marker evidence (for example, `target` requires a sibling `Cargo.toml`). Completed 2026-07-15 with the fail-closed M0 rule set and execution checks detailed below.
 - [ ] Bound multi-delete concurrency with a small worker pool.
 - [ ] Show cache age in the header; add a rescan keybinding; use per-process cache temp names.
 - [ ] Fix the footer selection total double-counting nested selections.
 - [ ] Apply §20.1 to the release workflow and add cargo audit/deny to CI.
 - [ ] Move `debug_scan.rs` into `dux-core/examples/`.
+
+M0 deletion-lifecycle note: graceful in-app quit deliberately waits for active permanent deletions and cannot cancel a filesystem syscall already in progress. A truly hung delete can therefore keep graceful quit waiting indefinitely; external force termination may leave partial filesystem work and stale cache state. A force-abandon flow belongs with the later centralized executor and must require explicit destructive-risk confirmation.
+
+M0 artifact-evidence implementation:
+
+- Classification requires a directory node with no followed-symlink ancestor. A marker is accepted only when its final path component is an exact-case, direct sibling/child regular file that is not itself a followed symlink.
+- Current positive rules are: Cargo `target` + sibling `Cargo.toml`; Node `node_modules` + sibling `package.json`; Gradle `build` or `.gradle` + sibling `build.gradle`, `build.gradle.kts`, `settings.gradle`, or `settings.gradle.kts`; Python `__pycache__` + sibling `*.py`, `.tox` + sibling `tox.ini`, or `.venv`/`venv` + child `pyvenv.cfg`; CocoaPods `Pods` + sibling `Podfile` + child `Manifest.lock`; Next `.next` + sibling `package.json` + `next.config.{js,mjs,ts}`; Nuxt `.nuxt` + sibling `package.json` + `nuxt.config.{js,mjs,ts}`.
+- `DerivedData`, `Build`, `dist`, `vendor`, and `.cache` deliberately remain unclassified: their names and plausible nearby files do not yet provide sufficiently specific evidence for a permanent-delete-backed entry.
+- The UI says “Marker-matched”, not “safe”. In particular, `pyvenv.cfg` and a CocoaPods manifest identify ownership but do not prove that all contents can be reproduced. No entry is scheduled or automatically removed, and permanent deletion still requires explicit confirmation.
+- A delete plan captures the identities of all classification markers, the target, and every non-followed directory from the scan root through the target parent. Execution rejects changed markers, changed/missing ancestors, and symlink/reparse ancestors before re-checking the target immediately before removal.
+- Positive, missing-marker, partial-marker, wrong-case, wrong-location, wrong-kind, symlink-marker, symlink-ancestor, changed-evidence, nested-artifact, and live ancestor-replacement fixtures cover the rules. The evidence model follows the upstream tool layouts documented by [Cargo](https://doc.rust-lang.org/cargo/reference/build-cache.html), [npm](https://docs.npmjs.com/files/folders/), [Python bytecode](https://docs.python.org/3/faq/programming.html), [Python virtual environments](https://docs.python.org/3/library/venv.html), [Gradle](https://docs.gradle.org/current/userguide/gradle_directories.html), [CocoaPods](https://guides.cocoapods.org/using/the-podfile.html), [Next](https://nextjs.org/docs/pages/api-reference/config/next-config-js/distDir), and [Nuxt](https://nuxt.com/docs/3.x/directory-structure/nuxt).
+
+M0 identity-check note: request-time capture protects the confirmation-to-execution interval, including marker and ancestor replacement, but it does not prove that a cached/previous scan still describes the object present when confirmation opens. The separate ancestor/target identity checks and removal syscall also leave a narrow final TOCTOU window, and an unchanged directory identity does not freeze its descendants. The later plan model must carry scan/plan identity, and the centralized executor should use descriptor-relative or handle-relative mutation where the platform permits it.
 
 Spike tasks:
 

@@ -1,4 +1,5 @@
 mod action;
+mod deletion;
 mod state;
 pub mod views;
 

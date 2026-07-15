@@ -21,6 +21,7 @@ pub enum NodeKind {
     Directory,
     File,
     Symlink,
+    Other,
     Error,
 }
 
@@ -30,6 +31,7 @@ impl NodeKind {
             NodeKind::Directory => "📁",
             NodeKind::File => "📄",
             NodeKind::Symlink => "🔗",
+            NodeKind::Other => "❓",
             NodeKind::Error => "⚠️",
         }
     }
@@ -60,6 +62,8 @@ pub struct TreeNode {
     /// Whether directory is expanded in UI
     #[serde(skip)]
     pub is_expanded: bool,
+    /// Whether this path component is a symlink, even when scans follow links
+    pub path_is_symlink: bool,
     /// Full path to this node (reconstructed on cache load)
     #[serde(skip)]
     pub path: PathBuf,
@@ -85,6 +89,7 @@ impl TreeNode {
             depth,
             mtime: None,
             is_expanded: depth == 0, // Root starts expanded
+            path_is_symlink: false,
             path,
         }
     }

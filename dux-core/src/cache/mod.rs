@@ -264,6 +264,38 @@ mod tests {
     }
 
     #[test]
+    fn test_previous_scanner_policy_cache_is_rejected() {
+        let temp = TempDir::new().unwrap();
+        let cache_path = temp.path().join("old-policy.dux");
+        let tree = DiskTree::new(temp.path().to_path_buf());
+        let meta = CacheMetadata {
+            version: CACHE_VERSION,
+            root_path: temp.path().to_path_buf(),
+            scan_time: SystemTime::now(),
+            root_mtime: SystemTime::now(),
+            total_size: 0,
+            node_count: 1,
+            config: CachedScanConfig {
+                follow_symlinks: false,
+                same_filesystem: true,
+                max_depth: None,
+            },
+        };
+
+        save_cache(&cache_path, &tree, &meta).unwrap();
+
+        let mut data = std::fs::read(&cache_path).unwrap();
+        data[4..8].copy_from_slice(&(CACHE_VERSION - 1).to_le_bytes());
+        let checksum_offset = data.len() - 4;
+        let checksum = crc32fast::hash(&data[..checksum_offset]);
+        data[checksum_offset..].copy_from_slice(&checksum.to_le_bytes());
+        std::fs::write(&cache_path, data).unwrap();
+
+        let error = load_cache(&cache_path).unwrap_err();
+        assert!(error.to_string().contains("Cache version mismatch"));
+    }
+
+    #[test]
     fn test_paths_reconstructed_after_load() {
         use crate::tree::NodeKind;
 
@@ -279,6 +311,7 @@ mod tests {
             root_path.join("subdir"),
             crate::tree::NodeId::ROOT,
         );
+        tree.get_mut(subdir_id).unwrap().path_is_symlink = true;
         let file_id = tree.add_node(
             "file.txt".to_string(),
             NodeKind::File,
@@ -317,6 +350,7 @@ mod tests {
             loaded_tree.get(subdir_id).unwrap().path,
             root_path.join("subdir")
         );
+        assert!(loaded_tree.get(subdir_id).unwrap().path_is_symlink);
         assert_eq!(
             loaded_tree.get(file_id).unwrap().path,
             root_path.join("subdir").join("file.txt")

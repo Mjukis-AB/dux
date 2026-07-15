@@ -21,6 +21,7 @@ pub struct Footer<'a> {
     selection_count: usize,
     selection_size: u64,
     selecting_mode: bool,
+    quit_requested: bool,
 }
 
 impl<'a> Footer<'a> {
@@ -39,6 +40,7 @@ impl<'a> Footer<'a> {
             selection_count: 0,
             selection_size: 0,
             selecting_mode: false,
+            quit_requested: false,
         }
     }
 
@@ -51,6 +53,11 @@ impl<'a> Footer<'a> {
         self.selection_count = count;
         self.selection_size = size;
         self.selecting_mode = selecting;
+        self
+    }
+
+    pub fn with_quit_requested(mut self, quit_requested: bool) -> Self {
+        self.quit_requested = quit_requested;
         self
     }
 }
@@ -67,47 +74,51 @@ impl Widget for Footer<'_> {
             ("v", "Select".to_string())
         };
 
-        let hints: Vec<(&str, String)> = match self.mode {
-            AppMode::Scanning | AppMode::Finalizing => vec![("q", "Quit".to_string())],
-            AppMode::Browsing => match self.view_mode {
-                ViewMode::Tree => vec![
-                    ("Tab", "Views".to_string()),
-                    ("↑↓", "Navigate".to_string()),
-                    select_hint.clone(),
-                    ("←→", "Collapse/Expand".to_string()),
-                    ("d", "Delete".to_string()),
-                    ("?", "Help".to_string()),
-                    ("q", "Quit".to_string()),
-                ],
-                ViewMode::LargeFiles => vec![
-                    ("Tab", "Views".to_string()),
-                    ("↑↓", "Navigate".to_string()),
-                    select_hint.clone(),
-                    ("d", "Delete".to_string()),
-                    ("?", "Help".to_string()),
-                    ("q", "Quit".to_string()),
-                ],
-                ViewMode::BuildArtifacts => {
-                    let stale_label = self
-                        .stale_threshold
-                        .map(|t| format!("Stale:{}", t.label()))
-                        .unwrap_or_else(|| "Stale".to_string());
-                    vec![
+        let hints: Vec<(&str, String)> = if self.quit_requested {
+            vec![("…", "Waiting for deletion before quitting".to_string())]
+        } else {
+            match self.mode {
+                AppMode::Scanning | AppMode::Finalizing => vec![("q", "Quit".to_string())],
+                AppMode::Browsing => match self.view_mode {
+                    ViewMode::Tree => vec![
                         ("Tab", "Views".to_string()),
                         ("↑↓", "Navigate".to_string()),
                         select_hint.clone(),
-                        ("s", stale_label),
+                        ("←→", "Collapse/Expand".to_string()),
                         ("d", "Delete".to_string()),
                         ("?", "Help".to_string()),
                         ("q", "Quit".to_string()),
-                    ]
+                    ],
+                    ViewMode::LargeFiles => vec![
+                        ("Tab", "Views".to_string()),
+                        ("↑↓", "Navigate".to_string()),
+                        select_hint.clone(),
+                        ("d", "Delete".to_string()),
+                        ("?", "Help".to_string()),
+                        ("q", "Quit".to_string()),
+                    ],
+                    ViewMode::BuildArtifacts => {
+                        let stale_label = self
+                            .stale_threshold
+                            .map(|t| format!("Stale:{}", t.label()))
+                            .unwrap_or_else(|| "Stale".to_string());
+                        vec![
+                            ("Tab", "Views".to_string()),
+                            ("↑↓", "Navigate".to_string()),
+                            select_hint.clone(),
+                            ("s", stale_label),
+                            ("d", "Delete".to_string()),
+                            ("?", "Help".to_string()),
+                            ("q", "Quit".to_string()),
+                        ]
+                    }
+                },
+                AppMode::Help => vec![("Esc", "Close help".to_string()), ("q", "Quit".to_string())],
+                AppMode::ConfirmDelete | AppMode::ConfirmMultiDelete => {
+                    vec![("y", "Yes".to_string()), ("n", "Cancel".to_string())]
                 }
-            },
-            AppMode::Help => vec![("Esc", "Close help".to_string()), ("q", "Quit".to_string())],
-            AppMode::ConfirmDelete | AppMode::ConfirmMultiDelete => {
-                vec![("y", "Yes".to_string()), ("n", "Cancel".to_string())]
+                AppMode::MultiDeleting => vec![("q", "Quit after deletions".to_string())],
             }
-            AppMode::MultiDeleting => vec![("q", "Quit (deletions continue)".to_string())],
         };
 
         let key_style = Style::default()
@@ -176,5 +187,32 @@ impl Widget for Footer<'_> {
                 buf.set_string(stats_x, area.y, &text, style);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deferred_quit_copy_does_not_claim_background_survival() {
+        let area = Rect::new(0, 0, 80, 1);
+        let mut buffer = Buffer::empty(area);
+        Footer::new(
+            AppMode::MultiDeleting,
+            ViewMode::Tree,
+            &Theme::default(),
+            &SessionStats::default(),
+        )
+        .with_quit_requested(true)
+        .render(area, &mut buffer);
+
+        let text = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(text.contains("Waiting for deletion before quitting"));
+        assert!(!text.contains("continue"));
     }
 }

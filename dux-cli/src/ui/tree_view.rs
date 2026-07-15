@@ -234,6 +234,7 @@ impl Widget for TreeView<'_> {
                 NodeKind::Directory => "📁",
                 NodeKind::File => "📄",
                 NodeKind::Symlink => "🔗",
+                NodeKind::Other => "❓",
                 NodeKind::Error => "⚠️",
             };
             let icon_style = if is_cursor {

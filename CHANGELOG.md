@@ -8,6 +8,18 @@ All notable changes to DUX will be documented in this file.
 - Prevented deletion of the active scan root.
 - Failed filesystem deletions no longer remove items from the displayed or cached tree.
 - Unicode paths are truncated safely without slicing through UTF-8 characters.
+- Scanner path exclusions now use component-aware rules, and crossed filesystems are classified before traversal instead of treating every `/Volumes` path as unsafe.
+- Scanner metadata and filesystem probes now use a process-wide bounded worker pool instead of spawning one detached thread per directory.
+- Permanent-delete dialogs now require an explicit `y` and show the effective item count; Enter no longer confirms deletion.
+- Graceful quit now waits for active deletion workers, applies their results, and orders cache writes so an older snapshot cannot overwrite the post-delete tree.
+- Permanent deletes now capture non-following filesystem identity before confirmation and re-check it immediately before removal; replaced or missing entries are skipped without changing tree state or deletion statistics.
+- Build-artifact entries now require exact, regular, non-symlink marker files instead of directory names alone. Ambiguous names such as `DerivedData`, `Build`, `dist`, `vendor`, and `.cache` are omitted until stronger rules exist.
+- Artifact marker identities and every directory identity from the scan root to the target parent are re-checked before permanent deletion. Changed evidence, replaced ancestors, and symlink/reparse ancestors fail closed.
+- Followed symlinks retain path provenance in scan snapshots, and deletion is refused below a known followed-symlink ancestor.
+
+### Changed
+- Cache version bumped to v5 so scans created with the previous scanner policy or without symlink provenance auto-invalidate.
+- The Build Artifacts view now labels entries as “Marker-matched”; classification identifies likely tooling ownership but does not assert that contents are automatically safe or reproducible.
 
 ## [0.5.0]
 

@@ -21,6 +21,12 @@ clap = { workspace = true }
 color-eyre = { workspace = true }
 dirs = "5"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+
+[dev-dependencies]
+tempfile = "3"
+
 [package.metadata.binstall]
 pkg-url = "{ repo }/releases/download/v{ version }/dux-v{ version }-{ target }.tar.gz"
 bin-dir = "dux{ binary-ext }"

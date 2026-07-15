@@ -42,7 +42,7 @@ impl Widget for ConfirmMultiDeleteView<'_> {
         Clear.render(dialog_area, buf);
 
         let block = Block::default()
-            .title(" Delete Multiple? ")
+            .title(" Permanent Delete? ")
             .title_alignment(Alignment::Center)
             .borders(Borders::ALL)
             .border_style(Style::default().fg(self.theme.red))
@@ -66,7 +66,7 @@ impl Widget for ConfirmMultiDeleteView<'_> {
 
         // Header line
         let header = format!(
-            "Delete {} item{}:",
+            "Permanently delete {} item{}:",
             count,
             if count == 1 { "" } else { "s" }
         );
@@ -111,5 +111,33 @@ impl Widget for ConfirmMultiDeleteView<'_> {
         buf.set_string(inner.x + 4, hints_y, "Yes, delete all", text_style);
         buf.set_string(inner.x + 22, hints_y, "[n]", key_style);
         buf.set_string(inner.x + 26, hints_y, "Cancel", text_style);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn render_items(items: &[(dux_core::NodeId, PathBuf, u64)]) -> String {
+        let area = Rect::new(0, 0, 90, 24);
+        let mut buffer = Buffer::empty(area);
+        ConfirmMultiDeleteView::new(items, &Theme::default()).render(area, &mut buffer);
+        buffer.content().iter().map(|cell| cell.symbol()).collect()
+    }
+
+    #[test]
+    fn renders_effective_item_count_with_correct_pluralization() {
+        let one = vec![(dux_core::NodeId::ROOT, PathBuf::from("/tmp/a"), 1)];
+        assert!(render_items(&one).contains("Permanently delete 1 item:"));
+
+        let two = vec![
+            (dux_core::NodeId::ROOT, PathBuf::from("/tmp/a"), 1),
+            (dux_core::NodeId::ROOT, PathBuf::from("/tmp/b"), 2),
+        ];
+        let rendered = render_items(&two);
+        assert!(rendered.contains("Permanently delete 2 items:"));
+        assert!(rendered.contains("[y]"));
+        assert!(rendered.contains("[n]"));
     }
 }

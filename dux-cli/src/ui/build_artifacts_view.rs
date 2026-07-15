@@ -51,7 +51,10 @@ impl Widget for BuildArtifactsView<'_> {
         }
 
         // Subtitle row showing stale threshold
-        let subtitle = format!("Stale: >{} (s to change)", self.stale_threshold.label());
+        let subtitle = format!(
+            "Marker-matched • Stale: >{} (s to change)",
+            self.stale_threshold.label()
+        );
         buf.set_string(
             area.x + 1,
             area.y,
@@ -67,7 +70,7 @@ impl Widget for BuildArtifactsView<'_> {
         );
 
         if self.entries.is_empty() {
-            let msg = "No build artifacts found";
+            let msg = "No marker-matched build artifacts found";
             let x = list_area.x + (list_area.width.saturating_sub(msg.len() as u16)) / 2;
             let y = list_area.y + list_area.height / 2;
             buf.set_string(x, y, msg, Style::default().fg(self.theme.fg_dim));

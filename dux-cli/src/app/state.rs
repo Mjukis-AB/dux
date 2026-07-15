@@ -1,9 +1,11 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
+use std::thread::JoinHandle;
 
 use dux_core::{DiskTree, NodeId, ScanProgress};
 
+use super::deletion::{PlannedDelete, capture_delete_plan, execute_planned_delete};
 use super::views::ComputedViews;
 
 /// Statistics tracked during the session
@@ -55,6 +57,11 @@ pub enum MultiDeleteResult {
     Failure { path: PathBuf, error: String },
 }
 
+struct DeleteWorker {
+    path: PathBuf,
+    handle: JoinHandle<()>,
+}
+
 /// Progress tracker for multi-delete operations
 pub struct MultiDeleteProgress {
     pub total: usize,
@@ -62,6 +69,7 @@ pub struct MultiDeleteProgress {
     pub bytes_freed: u64,
     pub failures: Vec<(PathBuf, String)>,
     pub receiver: mpsc::Receiver<MultiDeleteResult>,
+    workers: Vec<DeleteWorker>,
 }
 
 /// Application state
@@ -86,12 +94,16 @@ pub struct AppState {
     pub visible_height: usize,
     /// Whether app should quit
     pub should_quit: bool,
+    /// Whether quit is waiting for active deletion workers to finish
+    pub quit_requested: bool,
     /// Spinner frame for animation
     pub spinner_frame: usize,
     /// Error message to display
     pub error_message: Option<String>,
     /// Item pending deletion (node ID and path for confirmation dialog)
     pub pending_delete: Option<(NodeId, PathBuf)>,
+    /// Target and artifact-evidence identities captured before confirmation
+    pending_delete_plan: Option<PlannedDelete>,
     /// Session statistics (deleted items, freed space)
     pub session_stats: SessionStats,
     /// Whether tree was loaded from cache
@@ -100,6 +112,8 @@ pub struct AppState {
     pub tree_modified: bool,
     /// Receiver for async delete results
     pub delete_receiver: Option<mpsc::Receiver<Result<(NodeId, u64), String>>>,
+    /// Tracked worker for the current single-item deletion
+    delete_worker: Option<DeleteWorker>,
     /// Current view mode
     pub view_mode: ViewMode,
     /// Large files view state
@@ -114,6 +128,8 @@ pub struct AppState {
     pub selecting_mode: bool,
     /// Items pending multi-delete confirmation
     pub pending_multi_delete: Option<Vec<(NodeId, PathBuf, u64)>>,
+    /// Target and artifact-evidence identities captured before batch confirmation
+    pending_multi_delete_plans: HashMap<NodeId, PlannedDelete>,
     /// Multi-delete progress tracker
     pub multi_delete_progress: Option<MultiDeleteProgress>,
 }
@@ -131,13 +147,16 @@ impl AppState {
             scroll_offset: 0,
             visible_height: 20,
             should_quit: false,
+            quit_requested: false,
             spinner_frame: 0,
             error_message: None,
             pending_delete: None,
+            pending_delete_plan: None,
             session_stats: SessionStats::default(),
             loaded_from_cache: false,
             tree_modified: false,
             delete_receiver: None,
+            delete_worker: None,
             view_mode: ViewMode::Tree,
             large_files_state: ViewState::default(),
             build_artifacts_state: ViewState::default(),
@@ -145,6 +164,7 @@ impl AppState {
             selected_nodes: HashSet::new(),
             selecting_mode: false,
             pending_multi_delete: None,
+            pending_multi_delete_plans: HashMap::new(),
             multi_delete_progress: None,
         }
     }
@@ -412,7 +432,24 @@ impl AppState {
 
     /// Request quit
     pub fn quit(&mut self) {
-        self.should_quit = true;
+        if self.has_in_flight_deletions() {
+            self.quit_requested = true;
+            if self.multi_delete_progress.is_some() {
+                self.mode = AppMode::MultiDeleting;
+            }
+        } else {
+            self.should_quit = true;
+        }
+    }
+
+    fn has_in_flight_deletions(&self) -> bool {
+        self.delete_receiver.is_some() || self.multi_delete_progress.is_some()
+    }
+
+    fn finish_deferred_quit_if_idle(&mut self) {
+        if self.quit_requested && !self.has_in_flight_deletions() {
+            self.should_quit = true;
+        }
     }
 
     /// Set error message
@@ -461,19 +498,50 @@ impl AppState {
             && let Some(tree) = &self.tree
             && let Some(node) = tree.get(node_id)
         {
-            self.pending_delete = Some((node_id, node.path.clone()));
-            self.mode = AppMode::ConfirmDelete;
+            let path = node.path.clone();
+            if self.has_symlink_ancestor(node_id) {
+                self.error_message = Some(format!(
+                    "Delete refused because {} is beneath a followed symlink",
+                    path.display()
+                ));
+                return;
+            }
+            let evidence_paths = self.artifact_evidence_paths(node_id);
+            match capture_delete_plan(&self.root_path, &path, &evidence_paths) {
+                Ok(plan) => {
+                    self.pending_delete = Some((node_id, path));
+                    self.pending_delete_plan = Some(plan);
+                    self.mode = AppMode::ConfirmDelete;
+                }
+                Err(error) => {
+                    self.error_message = Some(format!(
+                        "Could not prepare delete for {}: {error}",
+                        path.display()
+                    ));
+                }
+            }
         }
     }
 
     /// Confirm and start async delete operation
     pub fn confirm_delete(&mut self) {
         if let Some((node_id, path)) = self.pending_delete.take() {
+            let plan = self.pending_delete_plan.take();
+
             // Defense in depth: the scan root must never be deleted.
             if node_id == NodeId::ROOT {
                 self.mode = AppMode::Browsing;
                 return;
             }
+
+            let Some(plan) = plan else {
+                self.error_message = Some(
+                    "Delete cancelled because its filesystem identity was not captured. Rescan before trying again."
+                        .to_string(),
+                );
+                self.mode = AppMode::Browsing;
+                return;
+            };
 
             // Get size before deletion
             let size = self
@@ -490,48 +558,73 @@ impl AppState {
             // Return to browsing immediately - deletion happens in background
             self.mode = AppMode::Browsing;
 
-            std::thread::spawn(move || {
-                let result = if path.is_dir() {
-                    std::fs::remove_dir_all(&path)
-                } else {
-                    std::fs::remove_file(&path)
-                };
+            let worker_path = path.clone();
+            let handle = std::thread::spawn(move || {
+                let result = execute_planned_delete(&path, plan);
 
                 match result {
                     Ok(()) => {
                         let _ = tx.send(Ok((node_id, size)));
                     }
                     Err(e) => {
-                        let _ = tx.send(Err(format!("Delete failed: {}", e)));
+                        let _ = tx.send(Err(e.to_string()));
                     }
                 }
+            });
+            self.delete_worker = Some(DeleteWorker {
+                path: worker_path,
+                handle,
             });
         }
     }
 
     /// Check if async delete completed and handle result
     pub fn poll_delete(&mut self) {
-        if let Some(rx) = &self.delete_receiver
-            && let Ok(result) = rx.try_recv()
-        {
-            match result {
-                Ok((node_id, size)) => {
-                    if let Some(tree) = &mut self.tree {
-                        tree.remove_node(node_id);
-                        self.tree_modified = true;
-                        self.computed_views.dirty = true;
+        let Some(rx) = self.delete_receiver.take() else {
+            return;
+        };
+
+        match rx.try_recv() {
+            Ok(result) => {
+                if let Some(worker) = self.delete_worker.take() {
+                    let _ = worker.handle.join();
+                }
+                match result {
+                    Ok((node_id, size)) => {
+                        if let Some(tree) = &mut self.tree {
+                            tree.remove_node(node_id);
+                            self.tree_modified = true;
+                            self.computed_views.dirty = true;
+                        }
+                        self.selected_nodes.remove(&node_id);
+                        self.adjust_selection_after_delete();
+                        self.session_stats.bytes_freed += size;
+                        self.session_stats.items_deleted += 1;
                     }
-                    self.selected_nodes.remove(&node_id);
-                    self.adjust_selection_after_delete();
-                    self.session_stats.bytes_freed += size;
-                    self.session_stats.items_deleted += 1;
+                    Err(e) => {
+                        self.error_message = Some(e);
+                    }
                 }
-                Err(e) => {
-                    self.error_message = Some(e);
-                }
+                self.mode = AppMode::Browsing;
+                self.finish_deferred_quit_if_idle();
             }
-            self.delete_receiver = None;
-            self.mode = AppMode::Browsing;
+            Err(mpsc::TryRecvError::Empty) => {
+                self.delete_receiver = Some(rx);
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                if let Some(worker) = self.delete_worker.take() {
+                    let path = worker.path;
+                    let _ = worker.handle.join();
+                    self.error_message = Some(format!(
+                        "Delete worker stopped without a result: {}",
+                        path.display()
+                    ));
+                } else {
+                    self.error_message = Some("Delete worker stopped without a result".to_string());
+                }
+                self.mode = AppMode::Browsing;
+                self.finish_deferred_quit_if_idle();
+            }
         }
     }
 
@@ -567,6 +660,7 @@ impl AppState {
     /// Cancel delete operation
     pub fn cancel_delete(&mut self) {
         self.pending_delete = None;
+        self.pending_delete_plan = None;
         self.mode = AppMode::Browsing;
     }
 
@@ -775,7 +869,32 @@ impl AppState {
             return;
         }
 
+        let mut plans = HashMap::with_capacity(items.len());
+        for (node_id, path, _) in &items {
+            if self.has_symlink_ancestor(*node_id) {
+                self.error_message = Some(format!(
+                    "Delete refused because {} is beneath a followed symlink. No deletion was started.",
+                    path.display()
+                ));
+                return;
+            }
+            let evidence_paths = self.artifact_evidence_paths(*node_id);
+            match capture_delete_plan(&self.root_path, path, &evidence_paths) {
+                Ok(plan) => {
+                    plans.insert(*node_id, plan);
+                }
+                Err(error) => {
+                    self.error_message = Some(format!(
+                        "Could not prepare delete for {}: {error}. No deletion was started.",
+                        path.display()
+                    ));
+                    return;
+                }
+            }
+        }
+
         self.pending_multi_delete = Some(items);
+        self.pending_multi_delete_plans = plans;
         self.mode = AppMode::ConfirmMultiDelete;
     }
 
@@ -785,8 +904,28 @@ impl AppState {
             Some(items) => items,
             None => return,
         };
+        let mut plans = std::mem::take(&mut self.pending_multi_delete_plans);
 
-        let total = items.len();
+        let mut planned_items = Vec::with_capacity(items.len());
+        for (node_id, path, size) in items {
+            if node_id == NodeId::ROOT {
+                self.error_message =
+                    Some("Multi-delete cancelled because it included the scan root.".to_string());
+                self.mode = AppMode::Browsing;
+                return;
+            }
+            let Some(plan) = plans.remove(&node_id) else {
+                self.error_message = Some(
+                    "Multi-delete cancelled because a filesystem identity was not captured. Rescan before trying again."
+                        .to_string(),
+                );
+                self.mode = AppMode::Browsing;
+                return;
+            };
+            planned_items.push((node_id, path, size, plan));
+        }
+
+        let total = planned_items.len();
 
         self.selected_nodes.clear();
         self.selecting_mode = false;
@@ -800,34 +939,40 @@ impl AppState {
             bytes_freed: 0,
             failures: Vec::new(),
             receiver: rx,
+            workers: Vec::with_capacity(total),
         });
         self.mode = AppMode::MultiDeleting;
 
         // Spawn one thread per item (concurrent deletion)
-        for (node_id, path, size) in items {
+        for (node_id, path, size, plan) in planned_items {
             let tx = tx.clone();
-            std::thread::spawn(move || {
-                let result = if path.is_dir() {
-                    std::fs::remove_dir_all(&path)
-                } else {
-                    std::fs::remove_file(&path)
-                };
+            let worker_path = path.clone();
+            let handle = std::thread::spawn(move || {
+                let result = execute_planned_delete(&path, plan);
                 let msg = match result {
                     Ok(()) => MultiDeleteResult::Success { node_id, size },
                     Err(e) => MultiDeleteResult::Failure {
                         path,
-                        error: format!("{}", e),
+                        error: e.to_string(),
                     },
                 };
                 let _ = tx.send(msg);
             });
+            self.multi_delete_progress
+                .as_mut()
+                .expect("created above")
+                .workers
+                .push(DeleteWorker {
+                    path: worker_path,
+                    handle,
+                });
         }
     }
 
     /// Poll multi-delete channel, update progress, transition when done
     pub fn poll_multi_delete(&mut self) {
-        let progress = match &mut self.multi_delete_progress {
-            Some(p) => p,
+        let mut progress = match self.multi_delete_progress.take() {
+            Some(progress) => progress,
             None => return,
         };
 
@@ -850,15 +995,53 @@ impl AppState {
             }
         }
 
-        if progress.completed >= progress.total {
+        let all_workers_finished = progress
+            .workers
+            .iter()
+            .all(|worker| worker.handle.is_finished());
+        if all_workers_finished {
+            while let Ok(result) = progress.receiver.try_recv() {
+                progress.completed += 1;
+                match result {
+                    MultiDeleteResult::Success { node_id, size } => {
+                        if let Some(tree) = &mut self.tree {
+                            tree.remove_node(node_id);
+                            self.tree_modified = true;
+                            self.computed_views.dirty = true;
+                        }
+                        progress.bytes_freed += size;
+                        self.session_stats.bytes_freed += size;
+                        self.session_stats.items_deleted += 1;
+                    }
+                    MultiDeleteResult::Failure { path, error } => {
+                        progress.failures.push((path, error));
+                    }
+                }
+            }
+        }
+
+        if progress.completed >= progress.total || all_workers_finished {
+            let missing_results = progress.total.saturating_sub(progress.completed);
+            let mut panicked_workers = 0;
+            for worker in progress.workers.drain(..) {
+                let path = worker.path;
+                if worker.handle.join().is_err() {
+                    panicked_workers += 1;
+                    progress
+                        .failures
+                        .push((path, "delete worker panicked".to_string()));
+                }
+            }
+            let unexplained_missing = missing_results.saturating_sub(panicked_workers);
+            if unexplained_missing > 0 {
+                progress.failures.push((
+                    self.root_path.clone(),
+                    format!("{unexplained_missing} delete worker result(s) were lost"),
+                ));
+            }
+
             self.adjust_selection_after_delete();
-            let failures = std::mem::take(
-                &mut self
-                    .multi_delete_progress
-                    .as_mut()
-                    .expect("checked above")
-                    .failures,
-            );
+            let failures = std::mem::take(&mut progress.failures);
             if !failures.is_empty() {
                 let msg = if failures.len() == 1 {
                     format!(
@@ -875,15 +1058,57 @@ impl AppState {
                 };
                 self.error_message = Some(msg);
             }
-            self.multi_delete_progress = None;
             self.mode = AppMode::Browsing;
+            self.finish_deferred_quit_if_idle();
+        } else {
+            self.multi_delete_progress = Some(progress);
         }
     }
 
     /// Cancel multi-delete confirmation
     pub fn cancel_multi_delete(&mut self) {
         self.pending_multi_delete = None;
+        self.pending_multi_delete_plans.clear();
         self.mode = AppMode::Browsing;
+    }
+
+    fn artifact_evidence_paths(&self, node_id: NodeId) -> Vec<PathBuf> {
+        self.computed_views
+            .build_artifacts
+            .iter()
+            .find(|entry| entry.node_id == node_id)
+            .map(|entry| entry.evidence_paths.clone())
+            .unwrap_or_default()
+    }
+
+    fn has_symlink_ancestor(&self, node_id: NodeId) -> bool {
+        let Some(tree) = &self.tree else {
+            return true;
+        };
+        let mut parent_id = tree.get(node_id).and_then(|node| node.parent);
+        while let Some(id) = parent_id {
+            let Some(parent) = tree.get(id) else {
+                return true;
+            };
+            if parent.path_is_symlink {
+                return true;
+            }
+            parent_id = parent.parent;
+        }
+        false
+    }
+}
+
+impl Drop for AppState {
+    fn drop(&mut self) {
+        if let Some(worker) = self.delete_worker.take() {
+            let _ = worker.handle.join();
+        }
+        if let Some(progress) = &mut self.multi_delete_progress {
+            for worker in progress.workers.drain(..) {
+                let _ = worker.handle.join();
+            }
+        }
     }
 }
 
@@ -891,6 +1116,7 @@ impl AppState {
 mod tests {
     use super::*;
     use dux_core::NodeKind;
+    use tempfile::TempDir;
 
     fn state_with_child() -> (AppState, NodeId) {
         let root = PathBuf::from("/test-root");
@@ -989,6 +1215,7 @@ mod tests {
             bytes_freed: 0,
             failures: Vec::new(),
             receiver: rx,
+            workers: Vec::new(),
         });
         tx.send(MultiDeleteResult::Failure {
             path: PathBuf::from("/test-root/file.txt"),
@@ -1019,6 +1246,7 @@ mod tests {
             bytes_freed: 0,
             failures: Vec::new(),
             receiver: rx,
+            workers: Vec::new(),
         });
         tx.send(MultiDeleteResult::Success {
             node_id: child,
@@ -1037,5 +1265,419 @@ mod tests {
         );
         assert!(state.tree_modified);
         assert_eq!(state.session_stats.items_deleted, 1);
+    }
+
+    #[test]
+    fn quit_without_deletion_exits_immediately() {
+        let (mut state, _) = state_with_child();
+
+        state.quit();
+
+        assert!(state.should_quit);
+        assert!(!state.quit_requested);
+    }
+
+    #[test]
+    fn quit_waits_for_single_delete_and_applies_its_result() {
+        let (mut state, child) = state_with_child();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (result_tx, result_rx) = mpsc::channel();
+        state.delete_receiver = Some(result_rx);
+        state.delete_worker = Some(DeleteWorker {
+            path: PathBuf::from("/test-root/file.txt"),
+            handle: std::thread::spawn(move || {
+                release_rx.recv().unwrap();
+                result_tx.send(Ok((child, 10))).unwrap();
+            }),
+        });
+
+        state.quit();
+        state.poll_delete();
+        assert!(state.quit_requested);
+        assert!(!state.should_quit);
+
+        release_tx.send(()).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while !state.should_quit {
+            assert!(std::time::Instant::now() < deadline);
+            state.poll_delete();
+            std::thread::yield_now();
+        }
+
+        assert!(
+            state
+                .tree
+                .as_ref()
+                .and_then(|tree| tree.get(child))
+                .is_none()
+        );
+        assert!(state.tree_modified);
+        assert_eq!(state.session_stats.items_deleted, 1);
+        assert!(state.delete_worker.is_none());
+    }
+
+    #[test]
+    fn confirmed_real_delete_finishes_before_quit() {
+        let temp = TempDir::new().unwrap();
+        let file_path = temp.path().join("delete-me.txt");
+        std::fs::write(&file_path, b"payload").unwrap();
+
+        let mut tree = DiskTree::new(temp.path().to_path_buf());
+        let child = tree.add_node(
+            "delete-me.txt".to_string(),
+            NodeKind::File,
+            file_path.clone(),
+            NodeId::ROOT,
+        );
+        tree.set_size(child, 7);
+        let mut state = AppState::new(temp.path().to_path_buf());
+        state.set_tree(tree);
+        state.selected_index = 1;
+        state.request_delete();
+        assert_eq!(state.mode, AppMode::ConfirmDelete);
+
+        state.confirm_delete();
+        state.quit();
+        assert!(!state.should_quit);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !state.should_quit {
+            assert!(std::time::Instant::now() < deadline);
+            state.poll_delete();
+            std::thread::yield_now();
+        }
+
+        assert!(!file_path.exists());
+        assert!(state.tree.as_ref().unwrap().get(child).is_none());
+        assert!(state.delete_worker.is_none());
+    }
+
+    #[test]
+    fn single_delete_plan_fails_closed_when_path_cannot_be_inspected() {
+        let (mut state, _) = state_with_child();
+        state.selected_index = 1;
+
+        state.request_delete();
+
+        assert!(state.pending_delete.is_none());
+        assert!(state.pending_delete_plan.is_none());
+        assert_eq!(state.mode, AppMode::Browsing);
+        assert!(
+            state
+                .error_message
+                .as_deref()
+                .is_some_and(|message| message.contains("Could not prepare delete"))
+        );
+    }
+
+    #[test]
+    fn multi_delete_skips_replaced_item_and_deletes_unchanged_item() {
+        let temp = TempDir::new().unwrap();
+        let first_path = temp.path().join("first.txt");
+        let second_path = temp.path().join("second.txt");
+        let original_second = temp.path().join("original-second.txt");
+        std::fs::write(&first_path, b"first").unwrap();
+        std::fs::write(&second_path, b"second").unwrap();
+
+        let mut tree = DiskTree::new(temp.path().to_path_buf());
+        let first = tree.add_node(
+            "first.txt".to_string(),
+            NodeKind::File,
+            first_path.clone(),
+            NodeId::ROOT,
+        );
+        let second = tree.add_node(
+            "second.txt".to_string(),
+            NodeKind::File,
+            second_path.clone(),
+            NodeId::ROOT,
+        );
+        tree.set_size(first, 5);
+        tree.set_size(second, 6);
+
+        let mut state = AppState::new(temp.path().to_path_buf());
+        state.set_tree(tree);
+        state.selected_nodes.insert(first);
+        state.selected_nodes.insert(second);
+        state.request_delete();
+        assert_eq!(state.mode, AppMode::ConfirmMultiDelete);
+
+        std::fs::rename(&second_path, &original_second).unwrap();
+        std::fs::write(&second_path, b"replacement").unwrap();
+        state.confirm_multi_delete();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while state.multi_delete_progress.is_some() {
+            assert!(std::time::Instant::now() < deadline);
+            state.poll_multi_delete();
+            std::thread::yield_now();
+        }
+
+        assert!(!first_path.exists());
+        assert_eq!(std::fs::read(&second_path).unwrap(), b"replacement");
+        assert_eq!(std::fs::read(&original_second).unwrap(), b"second");
+        let tree = state.tree.as_ref().unwrap();
+        assert!(tree.get(first).is_none());
+        assert!(tree.get(second).is_some());
+        assert_eq!(state.session_stats.items_deleted, 1);
+        assert_eq!(state.session_stats.bytes_freed, 5);
+        assert!(
+            state
+                .error_message
+                .as_deref()
+                .is_some_and(|message| message.contains("changed"))
+        );
+    }
+
+    #[test]
+    fn changed_artifact_marker_blocks_state_driven_delete() {
+        let temp = TempDir::new().unwrap();
+        let manifest = temp.path().join("Cargo.toml");
+        let original_manifest = temp.path().join("original-Cargo.toml");
+        let target = temp.path().join("target");
+        std::fs::write(&manifest, b"[package]").unwrap();
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(target.join("output"), b"build output").unwrap();
+
+        let mut tree = DiskTree::new(temp.path().to_path_buf());
+        tree.add_node(
+            "Cargo.toml".to_string(),
+            NodeKind::File,
+            manifest.clone(),
+            NodeId::ROOT,
+        );
+        let target_id = tree.add_node(
+            "target".to_string(),
+            NodeKind::Directory,
+            target.clone(),
+            NodeId::ROOT,
+        );
+        let mut state = AppState::new(temp.path().to_path_buf());
+        state.set_tree(tree);
+        state.view_mode = ViewMode::BuildArtifacts;
+        assert_eq!(state.computed_views.build_artifacts.len(), 1);
+
+        state.request_delete();
+        assert_eq!(state.mode, AppMode::ConfirmDelete);
+        std::fs::rename(&manifest, &original_manifest).unwrap();
+        std::fs::write(&manifest, b"replacement").unwrap();
+        state.confirm_delete();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while state.delete_receiver.is_some() {
+            assert!(std::time::Instant::now() < deadline);
+            state.poll_delete();
+            std::thread::yield_now();
+        }
+
+        assert!(target.exists());
+        assert!(state.tree.as_ref().unwrap().get(target_id).is_some());
+        assert_eq!(state.session_stats.items_deleted, 0);
+        assert!(
+            state
+                .error_message
+                .as_deref()
+                .is_some_and(|message| message.contains("artifact evidence"))
+        );
+    }
+
+    #[test]
+    fn delete_beneath_followed_symlink_is_refused_before_planning() {
+        let root = PathBuf::from("/test-root");
+        let mut tree = DiskTree::new(root.clone());
+        let linked = tree.add_node(
+            "linked".to_string(),
+            NodeKind::Directory,
+            root.join("linked"),
+            NodeId::ROOT,
+        );
+        tree.get_mut(linked).unwrap().path_is_symlink = true;
+        tree.add_node(
+            "file.txt".to_string(),
+            NodeKind::File,
+            root.join("linked/file.txt"),
+            linked,
+        );
+        let mut state = AppState::new(root);
+        state.set_tree(tree);
+        state.view_mode = ViewMode::LargeFiles;
+
+        state.request_delete();
+
+        assert!(state.pending_delete.is_none());
+        assert!(state.pending_delete_plan.is_none());
+        assert!(
+            state
+                .error_message
+                .as_deref()
+                .is_some_and(|message| message.contains("beneath a followed symlink"))
+        );
+    }
+
+    #[test]
+    fn disconnected_single_worker_does_not_block_deferred_quit() {
+        let (mut state, child) = state_with_child();
+        let (result_tx, result_rx) = mpsc::channel::<Result<(NodeId, u64), String>>();
+        drop(result_tx);
+        state.delete_receiver = Some(result_rx);
+        state.delete_worker = Some(DeleteWorker {
+            path: PathBuf::from("/test-root/file.txt"),
+            handle: std::thread::spawn(|| {}),
+        });
+
+        state.quit();
+        state.poll_delete();
+
+        assert!(state.should_quit);
+        assert!(state.error_message.is_some());
+        assert!(
+            state
+                .tree
+                .as_ref()
+                .and_then(|tree| tree.get(child))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn quit_waits_for_every_multi_delete_worker() {
+        let (mut state, first_child) = state_with_child();
+        let second_child = state.tree.as_mut().unwrap().add_node(
+            "second.txt".to_string(),
+            NodeKind::File,
+            PathBuf::from("/test-root/second.txt"),
+            NodeId::ROOT,
+        );
+        state.tree.as_mut().unwrap().set_size(second_child, 20);
+
+        let (result_tx, result_rx) = mpsc::channel();
+        let (first_release_tx, first_release_rx) = mpsc::channel();
+        let (second_release_tx, second_release_rx) = mpsc::channel();
+        let first_tx = result_tx.clone();
+        let first = DeleteWorker {
+            path: PathBuf::from("/test-root/file.txt"),
+            handle: std::thread::spawn(move || {
+                first_release_rx.recv().unwrap();
+                first_tx
+                    .send(MultiDeleteResult::Success {
+                        node_id: first_child,
+                        size: 10,
+                    })
+                    .unwrap();
+            }),
+        };
+        let second = DeleteWorker {
+            path: PathBuf::from("/test-root/second.txt"),
+            handle: std::thread::spawn(move || {
+                second_release_rx.recv().unwrap();
+                result_tx
+                    .send(MultiDeleteResult::Success {
+                        node_id: second_child,
+                        size: 20,
+                    })
+                    .unwrap();
+            }),
+        };
+        state.multi_delete_progress = Some(MultiDeleteProgress {
+            total: 2,
+            completed: 0,
+            bytes_freed: 0,
+            failures: Vec::new(),
+            receiver: result_rx,
+            workers: vec![first, second],
+        });
+        state.mode = AppMode::MultiDeleting;
+
+        state.quit();
+        first_release_tx.send(()).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while state
+            .multi_delete_progress
+            .as_ref()
+            .is_some_and(|progress| progress.completed == 0)
+        {
+            assert!(std::time::Instant::now() < deadline);
+            state.poll_multi_delete();
+            std::thread::yield_now();
+        }
+        assert!(!state.should_quit);
+
+        second_release_tx.send(()).unwrap();
+        while !state.should_quit {
+            assert!(std::time::Instant::now() < deadline);
+            state.poll_multi_delete();
+            std::thread::yield_now();
+        }
+
+        let tree = state.tree.as_ref().unwrap();
+        assert!(tree.get(first_child).is_none());
+        assert!(tree.get(second_child).is_none());
+        assert_eq!(state.session_stats.items_deleted, 2);
+        assert_eq!(state.session_stats.bytes_freed, 30);
+    }
+
+    #[test]
+    fn missing_multi_delete_result_does_not_wedge_quit() {
+        let (mut state, child) = state_with_child();
+        let (result_tx, result_rx) = mpsc::channel();
+        drop(result_tx);
+        state.multi_delete_progress = Some(MultiDeleteProgress {
+            total: 1,
+            completed: 0,
+            bytes_freed: 0,
+            failures: Vec::new(),
+            receiver: result_rx,
+            workers: vec![DeleteWorker {
+                path: PathBuf::from("/test-root/file.txt"),
+                handle: std::thread::spawn(|| {}),
+            }],
+        });
+        state.mode = AppMode::MultiDeleting;
+
+        state.quit();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while !state.should_quit {
+            assert!(std::time::Instant::now() < deadline);
+            state.poll_multi_delete();
+            std::thread::yield_now();
+        }
+
+        assert!(state.error_message.is_some());
+        assert!(state.tree.as_ref().unwrap().get(child).is_some());
+        assert!(state.multi_delete_progress.is_none());
+    }
+
+    #[test]
+    fn panicked_multi_delete_worker_does_not_wedge_quit() {
+        let (mut state, child) = state_with_child();
+        let (_result_tx, result_rx) = mpsc::channel();
+        state.multi_delete_progress = Some(MultiDeleteProgress {
+            total: 1,
+            completed: 0,
+            bytes_freed: 0,
+            failures: Vec::new(),
+            receiver: result_rx,
+            workers: vec![DeleteWorker {
+                path: PathBuf::from("/test-root/file.txt"),
+                handle: std::thread::spawn(|| panic!("intentional delete worker panic")),
+            }],
+        });
+        state.mode = AppMode::MultiDeleting;
+
+        state.quit();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while !state.should_quit {
+            assert!(std::time::Instant::now() < deadline);
+            state.poll_multi_delete();
+            std::thread::yield_now();
+        }
+
+        assert!(
+            state
+                .error_message
+                .as_deref()
+                .is_some_and(|message| message.contains("delete worker panicked"))
+        );
+        assert!(state.tree.as_ref().unwrap().get(child).is_some());
     }
 }
