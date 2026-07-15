@@ -2,7 +2,7 @@
 
 Status: Draft implementation specification
 
-Last updated: 2026-07-14
+Last updated: 2026-07-15
 
 Primary platform: macOS 14 or later
 
@@ -80,7 +80,7 @@ These decisions are defaults for implementation and do not require further produ
 - AI MUST NOT create cleanup targets, change a safety tier, approve a cleanup, execute a command, or invoke filesystem tools.
 - Arbitrary files selected in Explorer MUST go to Trash by default.
 - Moving a file to Trash MUST NOT be reported as “space freed”; it is “moved to Trash” until the filesystem reports more available capacity.
-- Permanent cleanup MAY be offered only for deterministic, tested, regenerable candidates or through an explicit advanced user action.
+- Permanent cleanup MAY be offered only for deterministic, tested, regenerable candidates in the first production authority graph. Any future arbitrary-path advanced permanent action requires its own threat model and security-design revision; it cannot inherit safe or schedule-eligible status.
 - Scheduled cleanup MUST be limited to rules marked safe and schedule-eligible by the shipped deterministic policy.
 - DUX MUST fail closed. An uncertain candidate is shown for understanding, not cleanup.
 - DUX MUST never empty the user’s entire Trash as a side effect of another cleanup.
@@ -92,7 +92,8 @@ These decisions are defaults for implementation and do not require further produ
 - No telemetry is required for core product operation.
 - AI receives structured metadata only by default, never file contents.
 - Absolute paths MUST be shortened to home-relative paths before being sent to AI unless the user explicitly enables full paths.
-- Credentials, keychains, tokens, browser profiles, messages, mail, notes, cloud documents, password-manager data, and security-tool state MUST be excluded from AI payloads and cleanup suggestions.
+- Credentials, keychains, tokens, browser profiles, messages, mail, notes, password-manager data, and security-tool state MUST be excluded from AI payloads and cleanup suggestions.
+- Cloud-document contents and paths MUST be excluded from AI payloads and direct-deletion suggestions. A future metadata-only local-copy eviction recommendation is a separate non-destructive flow and requires confirmed full upload, no local-only changes, a supported provider API, and explicit re-download disclosure.
 - Local databases, snapshots, and caches contain full path listings of the user’s disk and are sensitive at rest: create them user-only (0700 directories, 0600 files) and cover data-at-rest handling in `SECURITY_DESIGN.md`.
 
 ### 3.5 Language and localization
@@ -104,10 +105,12 @@ These decisions are defaults for implementation and do not require further produ
 
 ## 4. Current repository assessment
 
-The current workspace has two crates:
+The current repository has three Rust workspace crates plus the macOS app:
 
 - `dux-core`: scanner, tree arena, size formatting, and a versioned scan cache.
 - `dux-cli`: Ratatui application, interaction state, computed views, and destructive filesystem operations.
+- `dux-ffi`: the private UniFFI engine-session boundary used by the app.
+- `dux-macos`: the native SwiftUI menu bar, Explorer, and Settings shell.
 
 Useful foundations already present:
 
@@ -151,7 +154,9 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-At the time of writing, all 24 existing Rust tests pass. Preserve that baseline while extracting behavior.
+At this checkpoint, the workspace has 192 passing Rust tests across core,
+projection, CLI, and FFI targets. Preserve and extend that baseline while
+extracting behavior.
 
 ## 5. Mole research: lessons to adopt and avoid
 
@@ -1750,7 +1755,31 @@ Tasks:
   unresolved gap as non-authoritative; executable alias and textual-miss cases
   separately ensure the current API produces no positive witness.
   `SECURITY_DESIGN.md` remains the next safety checkpoint.
-- [ ] Add `SECURITY_DESIGN.md`.
+- [x] Add `SECURITY_DESIGN.md`.
+  The normative design now defines the threat model, assets, one-way authority
+  graph, fresh-observation/candidate/plan/approval/executor chain, path and
+  protected-root stages, deterministic rule trust, execution-mode semantics,
+  scheduling gates, AI isolation, TCC/unsandboxed boundaries, sensitive local
+  persistence, FFI/CLI/multi-process rules, release integrity, incident review,
+  required verification, and a cleanup shipping gate. It separately labels the
+  read-only app, non-authoritative Rust scaffolding, and the actual legacy CLI
+  permanent-delete path—including current protected-root, lossy-name, recursive,
+  hard-link, journal, capacity-reporting, and path-based race debt—so target controls are
+  not misrepresented as runtime enforcement.
+
+  Its code-grounded review also found and closed an immediate legacy escape:
+  a forged cached terminal `.` or `..` component could previously alias the
+  scan root or parent because deletion planning validated only the target's
+  parent. Legacy admission now requires an absolute, control-free, valid-text,
+  normal-component strict descendant and rejects target, ancestor, or marker
+  evidence on another filesystem; regression tests preserve the boundary.
+
+  The design resolves two ambiguous roadmap boundaries conservatively: the
+  first production authority graph has no arbitrary-path permanent mode, and
+  cloud contents/paths remain excluded from AI and direct deletion while a
+  future supported local-copy eviction flow is metadata-only, fully-uploaded,
+  non-destructive, and separately disclosed. The forbidden destructive-call
+  lint remains the next checkpoint.
 - [ ] Add forbidden destructive-call CI lint.
 - [ ] Route existing CLI delete requests through a temporary centralized executor adapter.
 - [ ] Preserve CLI behavior and tests; clearly label current permanent deletion until replaced.

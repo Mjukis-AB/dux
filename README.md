@@ -37,8 +37,10 @@ cargo install --path dux-cli
 
 ## Development
 
-The macOS app implementation plan is in the [roadmap](ROADMAP.md), with accepted
-technical boundaries in the [architecture decision records](docs/adr/README.md).
+The macOS app implementation plan is in the [roadmap](ROADMAP.md), with its
+normative cleanup and privacy boundary in the [security design](SECURITY_DESIGN.md)
+and accepted technical decisions in the
+[architecture decision records](docs/adr/README.md).
 
 ```bash
 # Build and run directly from the repo
