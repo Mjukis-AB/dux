@@ -112,10 +112,15 @@ uniffi::setup_scaffolding!();
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
+
+    static ENGINE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn reports_library_and_contract_versions_through_engine() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
         let engine = DuxEngine::new();
 
         assert_eq!(
@@ -129,6 +134,7 @@ mod tests {
 
     #[test]
     fn delegates_size_formatting_to_core() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
         let engine = DuxEngine::new();
         let result = engine.format_size(1536).expect("open engine");
 
@@ -139,6 +145,7 @@ mod tests {
 
     #[test]
     fn close_is_idempotent_and_rejects_later_calls() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
         let baseline = live_engine_instance_count();
 
         {
