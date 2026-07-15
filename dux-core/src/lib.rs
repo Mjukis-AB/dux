@@ -1,6 +1,7 @@
 pub mod cache;
 pub mod cleanup;
 pub mod domain;
+pub mod engine;
 pub mod error;
 // Path evidence and textual protection policy are intentionally staged ahead
 // of trusted mount, volume, home-resolution, rule-scope, and planner witnesses.
@@ -31,6 +32,12 @@ pub use domain::{
     LocalizedTextKey, OperationStatus, PlanWarning, ProvenanceUrl, Rule, RuleDefinition,
     RuleGuards, RuleId, RuleMatcher, RuleMatcherDefinition, RuleRef, RuleRevision, RuleScope,
     RuleValidationError, SafetyTier, ScanId, StableIdError,
+};
+pub use engine::{
+    CancelOutcome, CloseOutcome, EngineConfig, EngineConfigError, EngineConfigField,
+    EngineConfigReason, EngineHandle, EngineLifecycle, EngineOpenError, FormatSizeBatchResult,
+    FormattedSizeEntry, StartTaskError, TaskAccessError, TaskEvent, TaskEventBatch, TaskEventKind,
+    TaskFailureKind, TaskId, TaskKind, TaskPhase, TaskSnapshot,
 };
 pub use error::{DuxError, Result};
 pub use projection::{

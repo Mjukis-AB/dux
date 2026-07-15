@@ -820,6 +820,16 @@ Swift MUST invoke blocking calls off the main actor, convert generated values to
 application-owned `Sendable` DTOs, and treat ARC release as neither
 cancellation nor shutdown. Explicit close and cancellation are idempotent.
 
+The current core checkpoint owns one registry per engine session with fixed
+worker, queue, event, terminal-record, and input bounds; the application
+architecture owns one engine session. Its only production task is a read-only
+formatting batch: it has no path, scan, persistence, AI, plan, or cleanup
+authority. Cancellation intent is recorded separately from the
+operation-reported outcome so a late request cannot falsely claim completed
+effects were rolled back, and engine `Closed` means every worker has quiesced.
+The UniFFI `DuxEngine` remains a smoke-only lifecycle object; task IDs, event
+pages, results, and cancellation do not yet cross FFI.
+
 Every expected error is typed. Rust panics are defects and MUST NOT become UI
 text or unwind through Swift. Callback/event tests cover retention, completion,
 cancellation, reentrancy, stale generations, and cycle avoidance before real
@@ -1036,7 +1046,7 @@ incident as a substitute for deterministic local evidence.
 | macOS app cleanup | Absent | Entire cleanup release gate in §17.3 |
 | Legacy CLI deletion | Active arbitrary-descendant permanent path routed through a temporary core adapter; strict-target/volume/identity rechecks only; scanned-byte estimates labeled in CLI | Replace adapter with reviewed plan/approval/executor chain without weakening current checks |
 | Centralized executor | Production executor absent; temporary legacy adapter is containment only | Typed admission, cross-process lease, live revalidation, and journal required |
-| Engine/FFI task and plan API | Smoke-only; contract displayed but not app-enforced | Version rejection plus bounded scan/task/plan handles and cancellation |
+| Engine/FFI task and plan API | Core handle and bounded per-session registry implemented for one read-only formatting batch; app architecture owns one session; UniFFI handle remains smoke-only, with no scan/task/plan DTOs or cleanup authority | Version rejection plus bounded scan/task/plan handles and cancellation |
 | Typed scan coverage/issues | Absent; current scanner counts/skips and permits relaxed flags | Required before any scan is described as complete or becomes plan input |
 | Cache semantic/input validation | Atomic write plus CRC/version only; full-file read before bounds | Bounded reads, tree/path semantics, private permissions, retention, and migration |
 | Hard-link accounting and policy | Absent; only non-authoritative path snapshots capture link count | Deduplicated scan accounting and explicit per-mode admission rules |

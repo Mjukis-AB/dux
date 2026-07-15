@@ -1828,7 +1828,26 @@ Goal: provide a durable orchestration layer shared by CLI and app.
 
 Tasks:
 
-- [ ] Add engine handle and task registry.
+- [x] Add engine handle and task registry.
+  `dux-core::engine` now owns an application-scoped, cloneable handle with
+  explicit database/snapshot/cache paths and one FIFO task registry per engine
+  session, bounded to two workers, sixteen queued tasks, sixty-four retained
+  terminal records, and sixty-four events per task. The application owns one
+  engine session. Nonzero process-global task IDs never reuse or
+  wrap; typed snapshots keep cancellation intent separate from the observed
+  terminal outcome; event cursors and page sizes fail closed; worker panics
+  become stable internal failures; and explicit nonblocking close cancels and
+  removes queued work, requests running cancellation, rejects use after close,
+  and supports a bounded quiescence wait. A real, immutable, read-only formatting batch with a
+  256-item input cap exercises production submission, progress, cancellation,
+  result publication, and retention. Tests cover worker/queue bounds, FIFO,
+  cancellation races, close/drop/clone lifecycle, panic containment and safe
+  shutdown after mutex poisoning, cursor continuity, storage-role overlap,
+  non-wrapping ID exhaustion, and
+  cross-platform path construction. This is deliberately not scan,
+  persistence, priority, callback, cleanup, CLI, or FFI task integration; the
+  Phase 0 UniFFI `DuxEngine` remains a smoke-only transport handle until a later
+  coarse task DTO/event slice.
 - [ ] Add versioned SQLite migrations.
 - [ ] Add scan/session/candidate/cleanup persistence.
 - [ ] Keep binary snapshots atomic and checksummed.
