@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "id": "fixture.missing.path",
+      "revision": 1,
+      "title_key": "rule.fixture.missing.path.title",
+      "category": "unknown_storage",
+      "scope": "selected_scan_root",
+      "required_ancestor_markers_any": [],
+      "required_markers_all": [],
+      "forbidden_markers_any": [],
+      "exact_bundle_identifiers": [],
+      "excluded_descendants": [],
+      "protected_descendants": [],
+      "minimum_age_days": null,
+      "minimum_bytes": 0,
+      "inactive_processes": [],
+      "requires_cloud_upload_complete": false,
+      "safety": "informational",
+      "action": "no_action",
+      "schedule_eligible": false,
+      "explanation_key": "rule.fixture.missing.path.explanation",
+      "provenance": ["https://example.com/missing-path"]
+    }
+  ]
+}

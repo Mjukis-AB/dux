@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "id": "fixture.duplicate.marker",
+      "revision": 1,
+      "title_key": "rule.fixture.duplicate.marker.title",
+      "category": "developer_artifact",
+      "scope": "configured_project_roots",
+      "path_component": "fixture-target",
+      "required_ancestor_markers_any": ["Fixture.toml", "Fixture.toml"],
+      "required_markers_all": [],
+      "forbidden_markers_any": [],
+      "exact_bundle_identifiers": [],
+      "excluded_descendants": [],
+      "protected_descendants": [],
+      "minimum_age_days": null,
+      "minimum_bytes": 0,
+      "inactive_processes": [],
+      "requires_cloud_upload_complete": false,
+      "safety": "informational",
+      "action": "reveal_only",
+      "schedule_eligible": false,
+      "explanation_key": "rule.fixture.duplicate.marker.explanation",
+      "provenance": ["https://example.com/duplicate-marker"]
+    }
+  ]
+}

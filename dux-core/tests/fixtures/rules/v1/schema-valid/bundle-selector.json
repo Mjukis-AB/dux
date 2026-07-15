@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "id": "fixture.application.bundle",
+      "revision": 4,
+      "title_key": "rule.fixture.application.bundle.title",
+      "category": "application_cache",
+      "scope": "home",
+      "path_component": null,
+      "required_ancestor_markers_any": [],
+      "required_markers_all": [],
+      "forbidden_markers_any": [],
+      "exact_bundle_identifiers": ["com.example.Fixture"],
+      "excluded_descendants": [],
+      "protected_descendants": [],
+      "minimum_age_days": null,
+      "minimum_bytes": 0,
+      "inactive_processes": [],
+      "requires_cloud_upload_complete": false,
+      "safety": "informational",
+      "action": "reveal_only",
+      "schedule_eligible": false,
+      "explanation_key": "rule.fixture.application.bundle.explanation",
+      "provenance": [
+        "http://example.com/dux-fixture-bundle"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "id": "fixture.developer.artifact",
+      "revision": 1,
+      "title_key": "rule.fixture.developer.artifact.title",
+      "category": "developer_artifact",
+      "scope": "configured_project_roots",
+      "path_component": "fixture-target",
+      "required_ancestor_markers_any": ["Fixture.toml"],
+      "required_markers_all": [],
+      "forbidden_markers_any": ["fixture.locked"],
+      "exact_bundle_identifiers": [],
+      "excluded_descendants": ["nested/excluded"],
+      "protected_descendants": ["nested/protected"],
+      "minimum_age_days": 7,
+      "minimum_bytes": 104857600,
+      "inactive_processes": [
+        {
+          "kind": "process_name",
+          "value": "fixture-build"
+        },
+        {
+          "kind": "bundle_identifier",
+          "value": "com.example.Fixture"
+        }
+      ],
+      "requires_cloud_upload_complete": false,
+      "safety": "safe_regenerable",
+      "action": "remove_known_regenerable_contents",
+      "schedule_eligible": true,
+      "explanation_key": "rule.fixture.developer.artifact.explanation",
+      "provenance": [
+        "https://example.com/dux-fixture-provenance"
+      ]
+    }
+  ]
+}

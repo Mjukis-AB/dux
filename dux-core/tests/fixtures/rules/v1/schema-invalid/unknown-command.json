@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "id": "fixture.unknown.command",
+      "revision": 1,
+      "title_key": "rule.fixture.unknown.command.title",
+      "category": "unknown_storage",
+      "scope": "selected_scan_root",
+      "path_component": "fixture-data",
+      "required_ancestor_markers_any": [],
+      "required_markers_all": [],
+      "forbidden_markers_any": [],
+      "exact_bundle_identifiers": [],
+      "excluded_descendants": [],
+      "protected_descendants": [],
+      "minimum_age_days": null,
+      "minimum_bytes": 0,
+      "inactive_processes": [],
+      "requires_cloud_upload_complete": false,
+      "safety": "informational",
+      "action": "no_action",
+      "schedule_eligible": false,
+      "explanation_key": "rule.fixture.unknown.command.explanation",
+      "provenance": ["https://example.com/unknown-command"],
+      "command": "rm -rf fixture-data"
+    }
+  ]
+}

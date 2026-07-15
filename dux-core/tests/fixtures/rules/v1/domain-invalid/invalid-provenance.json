@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "id": "fixture.invalid.provenance",
+      "revision": 1,
+      "title_key": "rule.fixture.invalid.provenance.title",
+      "category": "unknown_storage",
+      "scope": "selected_scan_root",
+      "path_component": "fixture-data",
+      "required_ancestor_markers_any": [],
+      "required_markers_all": [],
+      "forbidden_markers_any": [],
+      "exact_bundle_identifiers": [],
+      "excluded_descendants": [],
+      "protected_descendants": [],
+      "minimum_age_days": null,
+      "minimum_bytes": 0,
+      "inactive_processes": [],
+      "requires_cloud_upload_complete": false,
+      "safety": "informational",
+      "action": "reveal_only",
+      "schedule_eligible": false,
+      "explanation_key": "rule.fixture.invalid.provenance.explanation",
+      "provenance": ["https://."]
+    }
+  ]
+}

@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "id": "fixture.duplicate.rule",
+      "revision": 1,
+      "title_key": "rule.fixture.duplicate.rule.title",
+      "category": "unknown_storage",
+      "scope": "selected_scan_root",
+      "path_component": "fixture-one",
+      "required_ancestor_markers_any": [],
+      "required_markers_all": [],
+      "forbidden_markers_any": [],
+      "exact_bundle_identifiers": [],
+      "excluded_descendants": [],
+      "protected_descendants": [],
+      "minimum_age_days": null,
+      "minimum_bytes": 0,
+      "inactive_processes": [],
+      "requires_cloud_upload_complete": false,
+      "safety": "informational",
+      "action": "no_action",
+      "schedule_eligible": false,
+      "explanation_key": "rule.fixture.duplicate.rule.explanation",
+      "provenance": ["https://example.com/duplicate-one"]
+    },
+    {
+      "id": "fixture.duplicate.rule",
+      "revision": 1,
+      "title_key": "rule.fixture.duplicate.rule.title",
+      "category": "unknown_storage",
+      "scope": "selected_scan_root",
+      "path_component": "fixture-two",
+      "required_ancestor_markers_any": [],
+      "required_markers_all": [],
+      "forbidden_markers_any": [],
+      "exact_bundle_identifiers": [],
+      "excluded_descendants": [],
+      "protected_descendants": [],
+      "minimum_age_days": null,
+      "minimum_bytes": 0,
+      "inactive_processes": [],
+      "requires_cloud_upload_complete": false,
+      "safety": "informational",
+      "action": "no_action",
+      "schedule_eligible": false,
+      "explanation_key": "rule.fixture.duplicate.rule.explanation",
+      "provenance": ["https://example.com/duplicate-two"]
+    }
+  ]
+}

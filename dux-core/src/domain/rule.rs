@@ -272,6 +272,7 @@ fn is_valid_relative_path(value: &str) -> bool {
 
 fn is_valid_bundle_identifier(value: &str) -> bool {
     is_meaningful_value(value)
+        && value.len() <= 255
         && value.contains('.')
         && value.split('.').all(|component| {
             !component.is_empty()

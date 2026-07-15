@@ -1,0 +1,367 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:dux:schema:rule-catalog:1",
+  "title": "DUX deterministic cleanup rule catalog v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "rules"],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "rules": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 256,
+      "items": {
+        "$ref": "#/$defs/rule"
+      }
+    }
+  },
+  "$defs": {
+    "stable_dotted_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?)*$"
+    },
+    "portable_component": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "pattern": "^(?!\\.{1,2}$)(?!.*[.]$)[^<>:\"/\\\\|?*\\u0000-\\u001F\\u007F]+$"
+    },
+    "relative_path": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "pattern": "^(?!/)(?!.*\\\\)(?!.*//)(?!.*(?:^|/)\\.{1,2}(?:/|$)).+$"
+    },
+    "bundle_identifier": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 255,
+      "pattern": "^[A-Za-z0-9-]+(?:\\.[A-Za-z0-9-]+)+$"
+    },
+    "activity_guard": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "value"],
+          "properties": {
+            "kind": {
+              "const": "process_name"
+            },
+            "value": {
+              "$ref": "#/$defs/portable_component"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "value"],
+          "properties": {
+            "kind": {
+              "const": "bundle_identifier"
+            },
+            "value": {
+              "$ref": "#/$defs/bundle_identifier"
+            }
+          }
+        }
+      ]
+    },
+    "rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "revision",
+        "title_key",
+        "category",
+        "scope",
+        "path_component",
+        "required_ancestor_markers_any",
+        "required_markers_all",
+        "forbidden_markers_any",
+        "exact_bundle_identifiers",
+        "excluded_descendants",
+        "protected_descendants",
+        "minimum_age_days",
+        "minimum_bytes",
+        "inactive_processes",
+        "requires_cloud_upload_complete",
+        "safety",
+        "action",
+        "schedule_eligible",
+        "explanation_key",
+        "provenance"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/stable_dotted_id"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "title_key": {
+          "$ref": "#/$defs/stable_dotted_id"
+        },
+        "category": {
+          "enum": [
+            "developer_artifact",
+            "application_cache",
+            "browser_cache",
+            "log_and_diagnostic",
+            "installer_and_download",
+            "device_and_simulator_data",
+            "cloud_file",
+            "large_review_item",
+            "protected_system_data",
+            "unknown_storage"
+          ]
+        },
+        "scope": {
+          "enum": [
+            "home",
+            "user_cache_directory",
+            "configured_project_roots",
+            "selected_scan_root"
+          ]
+        },
+        "path_component": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/portable_component"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "required_ancestor_markers_any": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/relative_path"
+          }
+        },
+        "required_markers_all": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/relative_path"
+          }
+        },
+        "forbidden_markers_any": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/relative_path"
+          }
+        },
+        "exact_bundle_identifiers": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/bundle_identifier"
+          }
+        },
+        "excluded_descendants": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/relative_path"
+          }
+        },
+        "protected_descendants": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/relative_path"
+          }
+        },
+        "minimum_age_days": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 36500
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "minimum_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "inactive_processes": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/activity_guard"
+          }
+        },
+        "requires_cloud_upload_complete": {
+          "type": "boolean"
+        },
+        "safety": {
+          "enum": [
+            "safe_regenerable",
+            "safe_evictable",
+            "review_required",
+            "informational",
+            "protected"
+          ]
+        },
+        "action": {
+          "enum": [
+            "remove_known_regenerable_contents",
+            "evict_local_copy",
+            "move_to_trash",
+            "reveal_only",
+            "no_action"
+          ]
+        },
+        "schedule_eligible": {
+          "type": "boolean"
+        },
+        "explanation_key": {
+          "$ref": "#/$defs/stable_dotted_id"
+        },
+        "provenance": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048,
+            "format": "uri",
+            "pattern": "^https?://"
+          }
+        }
+      },
+      "allOf": [
+        {
+          "oneOf": [
+            {
+              "properties": {
+                "path_component": {
+                  "$ref": "#/$defs/portable_component"
+                },
+                "exact_bundle_identifiers": {
+                  "maxItems": 0
+                }
+              }
+            },
+            {
+              "properties": {
+                "path_component": {
+                  "type": "null"
+                },
+                "exact_bundle_identifiers": {
+                  "minItems": 1
+                }
+              }
+            }
+          ]
+        },
+        {
+          "oneOf": [
+            {
+              "properties": {
+                "safety": {
+                  "const": "safe_regenerable"
+                },
+                "action": {
+                  "const": "remove_known_regenerable_contents"
+                }
+              }
+            },
+            {
+              "properties": {
+                "safety": {
+                  "const": "safe_evictable"
+                },
+                "action": {
+                  "const": "evict_local_copy"
+                }
+              }
+            },
+            {
+              "properties": {
+                "safety": {
+                  "const": "review_required"
+                },
+                "action": {
+                  "const": "move_to_trash"
+                }
+              }
+            },
+            {
+              "properties": {
+                "safety": {
+                  "enum": ["informational", "protected"]
+                },
+                "action": {
+                  "enum": ["reveal_only", "no_action"]
+                }
+              }
+            }
+          ]
+        },
+        {
+          "if": {
+            "properties": {
+              "schedule_eligible": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "safety": {
+                "const": "safe_regenerable"
+              },
+              "action": {
+                "const": "remove_known_regenerable_contents"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "safety": {
+                "const": "safe_evictable"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "requires_cloud_upload_complete": {
+                "const": true
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

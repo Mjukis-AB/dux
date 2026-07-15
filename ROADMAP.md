@@ -438,30 +438,39 @@ Plans expire after a short interval, initially 15 minutes. Execution MUST re-sta
 
 Rules are bundled versioned data validated at build time and load time. Prefer JSON plus a checked-in JSON Schema. Do not allow arbitrary shell fragments in rules.
 
-Required fields:
+The v1 catalog envelope has its own schema version, distinct from each rule's
+revision. Every rule field is explicit: disabled optional guards/selectors use
+`null`, and empty collections remain present so security-reviewed policy diffs
+cannot acquire hidden defaults.
 
 ```json
 {
-  "id": "developer.rust.target",
-  "revision": 1,
-  "title_key": "rule.developer.rust.target.title",
-  "category": "developer_artifact",
-  "scope": "configured_project_roots",
-  "path_component": "target",
-  "required_ancestor_markers_any": ["Cargo.toml"],
-  "required_markers_all": [],
-  "forbidden_markers_any": [],
-  "excluded_descendants": [],
-  "protected_descendants": [],
-  "minimum_age_days": 7,
-  "minimum_bytes": 104857600,
-  "inactive_processes": [],
-  "requires_cloud_upload_complete": false,
-  "safety": "safe_regenerable",
-  "action": "remove_known_regenerable_contents",
-  "schedule_eligible": true,
-  "explanation_key": "rule.developer.rust.target.explanation",
-  "provenance": ["https://doc.rust-lang.org/cargo/guide/build-cache.html"]
+  "schema_version": 1,
+  "rules": [
+    {
+      "id": "developer.rust.target",
+      "revision": 1,
+      "title_key": "rule.developer.rust.target.title",
+      "category": "developer_artifact",
+      "scope": "configured_project_roots",
+      "path_component": "target",
+      "required_ancestor_markers_any": ["Cargo.toml"],
+      "required_markers_all": [],
+      "forbidden_markers_any": [],
+      "exact_bundle_identifiers": [],
+      "excluded_descendants": [],
+      "protected_descendants": [],
+      "minimum_age_days": 7,
+      "minimum_bytes": 104857600,
+      "inactive_processes": [],
+      "requires_cloud_upload_complete": false,
+      "safety": "safe_regenerable",
+      "action": "remove_known_regenerable_contents",
+      "schedule_eligible": true,
+      "explanation_key": "rule.developer.rust.target.explanation",
+      "provenance": ["https://doc.rust-lang.org/cargo/guide/build-cache.html"]
+    }
+  ]
 }
 ```
 
@@ -1591,7 +1600,30 @@ Tasks:
   candidates. JSON/Serde documents and loading, filesystem matching, candidate
   filesystem-path validation, overlap planning, persistence, FFI DTOs, AI, and
   execution deliberately remain at their later roadmap boundaries.
-- [ ] Introduce rule schema/loader with fixture validation.
+- [x] Introduce rule schema/loader with fixture validation. Completed
+  2026-07-15: a self-contained Draft 2020-12 catalog schema now fixes the v1
+  envelope, exhaustive required fields and enums, selector alternatives,
+  collection/string/numeric budgets, the complete safety/action matrix,
+  scheduling constraint, cloud-upload guard, HTTP(S) provenance shape, and
+  denial of unknown properties. The internal byte-only Rust loader separately
+  caps catalogs at 1 MiB and 256 rules, uses private deny-unknown wire DTOs with
+  required nullable fields, rejects duplicate values and active rule IDs or
+  revisions, converts every value through invariant-bearing domain
+  constructors, and stores validated rules in stable ID order. Its API remains
+  crate-private until a signed bundled-rule source exists: validation proves
+  shape and policy consistency, not trusted origin or cleanup authority. Eight
+  checked synthetic `fixture.*` catalogs cover path and bundle selectors,
+  missing/unknown/mixed fields, duplicate IDs/values, and invalid provenance;
+  eight focused tests also reject malformed/trailing/duplicate JSON, remove
+  every required field, inject unknown fields at
+  every object level, exhaust the 25 safety/action pairs, cover every category
+  and scope, exercise scheduling/cloud constraints, typed limits/errors, schema
+  meta-validation, and deterministic ordering. JSON Schema validation uses a
+  dev-only no-resolver dependency, while release code adds only `serde_json`.
+  No rule catalog or fixture is embedded in Rust, copied into the macOS resource
+  phase, exposed over FFI, or made available to AI/CLI callers. Evaluator
+  filesystem fixtures and independently researched production rules remain
+  later tasks.
 - [ ] Introduce cleanup-plan types without execution.
 - [ ] Introduce lexical/canonical path validator.
 - [ ] Add protected-root registry with per-platform sets (macOS, Linux, Windows).

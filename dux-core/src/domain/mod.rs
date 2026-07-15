@@ -8,6 +8,14 @@ mod candidate;
 mod id;
 mod policy;
 mod rule;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the validated catalog loader remains internal until a signed bundled-rule source exists"
+    )
+)]
+mod rule_document;
 
 pub use candidate::{BlockReason, Candidate, CandidateValidationError, Evidence, EvidenceKind};
 pub use id::{CandidateId, LocalizedTextKey, RuleId, RuleRef, RuleRevision, ScanId, StableIdError};
