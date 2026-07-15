@@ -5,6 +5,7 @@
 //! at later boundaries and must not infer authority from these values.
 
 mod candidate;
+mod cleanup_plan;
 mod id;
 mod policy;
 mod rule;
@@ -18,7 +19,14 @@ mod rule;
 mod rule_document;
 
 pub use candidate::{BlockReason, Candidate, CandidateValidationError, Evidence, EvidenceKind};
-pub use id::{CandidateId, LocalizedTextKey, RuleId, RuleRef, RuleRevision, ScanId, StableIdError};
+pub use cleanup_plan::{
+    CLEANUP_PLAN_VALIDITY, CleanupMode, CleanupPlan, CleanupPlanItem, CleanupPlanValidationError,
+    OperationStatus, PlanWarning,
+};
+pub use id::{
+    CandidateId, CleanupPlanId, LocalizedTextKey, RuleId, RuleRef, RuleRevision, ScanId,
+    StableIdError,
+};
 pub use policy::{CandidateAction, CandidateCategory, SafetyTier};
 pub use rule::{
     ActivityGuard, ProvenanceUrl, Rule, RuleDefinition, RuleGuards, RuleMatcher,

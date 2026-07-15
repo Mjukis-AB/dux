@@ -110,6 +110,7 @@ macro_rules! token_id {
 }
 
 token_id!(CandidateId, "candidate ID");
+token_id!(CleanupPlanId, "cleanup plan ID");
 token_id!(ScanId, "scan ID");
 
 macro_rules! dotted_id {
@@ -231,8 +232,12 @@ mod tests {
     #[test]
     fn opaque_ids_are_bounded_ascii_tokens() {
         assert!(CandidateId::new("candidate:01HZ-123").is_ok());
+        assert!(CleanupPlanId::new("plan:01HZ-123").is_ok());
         assert!(ScanId::new("scan_2026-07-15").is_ok());
         assert!(CandidateId::new("candidate/one").is_err());
+        assert!(CleanupPlanId::new("").is_err());
+        assert!(CleanupPlanId::new("plan one").is_err());
+        assert!(CleanupPlanId::new("x".repeat(MAX_ID_BYTES + 1)).is_err());
         assert!(ScanId::new("scan one").is_err());
         assert!(ScanId::new("x".repeat(MAX_ID_BYTES + 1)).is_err());
     }

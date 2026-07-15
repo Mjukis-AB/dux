@@ -418,6 +418,7 @@ pub enum CleanupMode {
     DryRun,
     Trash,
     PermanentSafe,
+    EvictLocalCopy,
 }
 
 pub enum OperationStatus {
@@ -425,12 +426,17 @@ pub enum OperationStatus {
     DryRun,
     Trashed,
     Removed,
+    Evicted,
     Skipped,
     Rejected,
     Failed,
     ChangedSincePlan,
 }
 ```
+
+Cloud eviction has its own mode and result because it is neither Trash nor
+permanent removal. A dry run retains each item's proposed action so review copy
+can distinguish all three outcomes accurately.
 
 Plans expire after a short interval, initially 15 minutes. Execution MUST re-stat and revalidate every path. A plan created from a stale scan may be displayed, but it cannot execute without refresh.
 
@@ -1625,7 +1631,23 @@ Tasks:
   phase, exposed over FFI, or made available to AI/CLI callers. Evaluator
   filesystem fixtures and independently researched production rules remain
   later tasks.
-- [ ] Introduce cleanup-plan types without execution.
+- [x] Introduce cleanup-plan types without execution. Completed 2026-07-15:
+  immutable core plan/item types now preserve the source scan, candidate and
+  rule revision, exact observed paths, evidence, policy, timestamps, scheduling
+  eligibility, checked byte estimate, fixed 15-minute lifetime, and mandatory
+  user-facing warning taxonomy. Explicit dry-run, Trash, permanent-safe, and
+  cloud-eviction modes fail closed against blockers, non-cleanup candidates,
+  mixed scans, duplicate IDs, incompatible policy, arithmetic overflow, and
+  unresolved exact or parent/child path overlap. Cloud eviction has distinct
+  `Evicted` result semantics rather than being mislabeled deletion. Nine focused
+  tests cover frozen facts, expiration boundaries and overflow, exhaustive mode
+  compatibility, overlap in either order, mandatory/deduplicated warnings,
+  schedule-policy preservation, and the inert operation-status taxonomy. Plan
+  construction remains private inside the domain module until the following
+  path-validator and planner slices can supply validated target witnesses; the
+  types perform no I/O, expose no mutation or approval API, and grant no
+  execution authority. FFI, persistence, AI, CLI migration, plan-result
+  journaling, and execution remain at their later roadmap boundaries.
 - [ ] Introduce lexical/canonical path validator.
 - [ ] Add protected-root registry with per-platform sets (macOS, Linux, Windows).
 - [ ] Add dangerous-path corpus and fuzz/property tests.
