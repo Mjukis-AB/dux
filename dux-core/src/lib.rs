@@ -1,4 +1,5 @@
 pub mod cache;
+pub mod cleanup;
 pub mod domain;
 pub mod error;
 // Path evidence and textual protection policy are intentionally staged ahead

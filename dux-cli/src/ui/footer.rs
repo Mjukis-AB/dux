@@ -75,7 +75,10 @@ impl Widget for Footer<'_> {
         };
 
         let hints: Vec<(&str, String)> = if self.quit_requested {
-            vec![("…", "Waiting for deletion before quitting".to_string())]
+            vec![(
+                "…",
+                "Waiting for permanent deletion before quitting".to_string(),
+            )]
         } else {
             match self.mode {
                 AppMode::Scanning | AppMode::Finalizing => vec![("q", "Quit".to_string())],
@@ -85,7 +88,7 @@ impl Widget for Footer<'_> {
                         ("↑↓", "Navigate".to_string()),
                         select_hint.clone(),
                         ("←→", "Collapse/Expand".to_string()),
-                        ("d", "Delete".to_string()),
+                        ("d", "Permanently delete".to_string()),
                         ("r", "Rescan".to_string()),
                         ("?", "Help".to_string()),
                         ("q", "Quit".to_string()),
@@ -94,7 +97,7 @@ impl Widget for Footer<'_> {
                         ("Tab", "Views".to_string()),
                         ("↑↓", "Navigate".to_string()),
                         select_hint.clone(),
-                        ("d", "Delete".to_string()),
+                        ("d", "Permanently delete".to_string()),
                         ("r", "Rescan".to_string()),
                         ("?", "Help".to_string()),
                         ("q", "Quit".to_string()),
@@ -109,7 +112,7 @@ impl Widget for Footer<'_> {
                             ("↑↓", "Navigate".to_string()),
                             select_hint.clone(),
                             ("s", stale_label),
-                            ("d", "Delete".to_string()),
+                            ("d", "Permanently delete".to_string()),
                             ("r", "Rescan".to_string()),
                             ("?", "Help".to_string()),
                             ("q", "Quit".to_string()),
@@ -120,7 +123,9 @@ impl Widget for Footer<'_> {
                 AppMode::ConfirmDelete | AppMode::ConfirmMultiDelete => {
                     vec![("y", "Yes".to_string()), ("n", "Cancel".to_string())]
                 }
-                AppMode::MultiDeleting => vec![("q", "Quit after deletions".to_string())],
+                AppMode::MultiDeleting => {
+                    vec![("q", "Quit after permanent deletions".to_string())]
+                }
             }
         };
 
@@ -166,7 +171,7 @@ impl Widget for Footer<'_> {
         } else if self.session_stats.items_deleted > 0 {
             Some((
                 format!(
-                    "Freed: {} ({} item{})",
+                    "Deleted (scan estimate): {} ({} item{})",
                     dux_core::format_size(self.session_stats.bytes_freed),
                     self.session_stats.items_deleted,
                     if self.session_stats.items_deleted == 1 {
@@ -215,7 +220,28 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(text.contains("Waiting for deletion before quitting"));
+        assert!(text.contains("Waiting for permanent deletion before quitting"));
         assert!(!text.contains("continue"));
+    }
+
+    #[test]
+    fn browsing_and_session_copy_are_explicit_and_do_not_claim_measured_recovery() {
+        let area = Rect::new(0, 0, 240, 1);
+        let mut buffer = Buffer::empty(area);
+        let stats = SessionStats {
+            bytes_freed: 1024,
+            items_deleted: 1,
+        };
+        Footer::new(AppMode::Browsing, ViewMode::Tree, &Theme::default(), &stats)
+            .render(area, &mut buffer);
+
+        let text = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(text.contains("Permanently delete"));
+        assert!(text.contains("Deleted (scan estimate):"));
+        assert!(!text.contains("Freed:"));
     }
 }

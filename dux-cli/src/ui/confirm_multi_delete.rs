@@ -105,16 +105,19 @@ impl Widget for ConfirmMultiDeleteView<'_> {
         row += 1; // blank line
 
         // Total size
-        let total_str = format!("Total: {}", dux_core::format_size(total_size));
+        let total_str = format!(
+            "Scanned total estimate: {}",
+            dux_core::format_size(total_size)
+        );
         buf.set_string(inner.x, row, &total_str, text_style);
         row += 1;
 
         // Action hints at bottom
         let hints_y = row.max(inner.y + inner.height.saturating_sub(1));
         buf.set_string(inner.x, hints_y, "[y]", key_style);
-        buf.set_string(inner.x + 4, hints_y, "Yes, delete all", text_style);
-        buf.set_string(inner.x + 22, hints_y, "[n]", key_style);
-        buf.set_string(inner.x + 26, hints_y, "Cancel", text_style);
+        buf.set_string(inner.x + 4, hints_y, "Delete all permanently", text_style);
+        buf.set_string(inner.x + 27, hints_y, "[n]", key_style);
+        buf.set_string(inner.x + 31, hints_y, "Cancel", text_style);
     }
 }
 
@@ -154,6 +157,9 @@ mod tests {
 
         let rendered = render_items(&items);
 
-        assert!(rendered.contains(&format!("Total: {}", dux_core::format_size(u64::MAX))));
+        assert!(rendered.contains(&format!(
+            "Scanned total estimate: {}",
+            dux_core::format_size(u64::MAX)
+        )));
     }
 }

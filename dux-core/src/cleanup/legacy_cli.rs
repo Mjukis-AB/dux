@@ -1,9 +1,14 @@
+//! Temporary centralized adapter for the hardened-but-legacy CLI permanent delete path.
+//!
+//! This is not the production cleanup executor described by `SECURITY_DESIGN.md`: it accepts
+//! neither reviewed domain plans nor approval witnesses, and it must never be exposed over FFI.
+
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct FileIdentity {
+struct FileIdentity {
     volume: u64,
     object: u128,
 }
@@ -30,7 +35,9 @@ struct PlannedEvidence {
 }
 
 #[derive(Debug)]
-pub(super) struct PlannedDelete {
+#[must_use = "a prepared legacy permanent-delete plan must be executed or explicitly dropped"]
+pub struct LegacyCliPermanentDeletePlan {
+    target_path: PathBuf,
     target_identity: FileIdentity,
     ancestors: Vec<PlannedAncestor>,
     evidence: Vec<PlannedEvidence>,
@@ -43,12 +50,12 @@ struct EntrySnapshot {
 }
 
 #[derive(Debug)]
-pub(super) enum DeleteError {
+pub enum LegacyCliDeleteError {
     ChangedSincePlan { path: PathBuf, details: String },
     Remove { path: PathBuf, source: io::Error },
 }
 
-impl fmt::Display for DeleteError {
+impl fmt::Display for LegacyCliDeleteError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ChangedSincePlan { path, details } => write!(
@@ -63,11 +70,45 @@ impl fmt::Display for DeleteError {
     }
 }
 
-pub(super) fn capture_delete_plan(
+impl std::error::Error for LegacyCliDeleteError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::ChangedSincePlan { .. } => None,
+            Self::Remove { source, .. } => Some(source),
+        }
+    }
+}
+
+/// Temporary core-owned entry point for the legacy CLI's arbitrary-descendant permanent delete.
+///
+/// It intentionally does not accept [`crate::CleanupPlan`] and does not implement the reviewed
+/// authority graph required for app cleanup. The macOS app and FFI must not expose this adapter.
+#[doc(hidden)]
+pub struct LegacyCliPermanentDeleteExecutor;
+
+impl LegacyCliPermanentDeleteExecutor {
+    /// Capture the CLI's existing target, ancestor, volume, and marker identity checks.
+    pub fn prepare(
+        scan_root: &Path,
+        path: &Path,
+        evidence_paths: &[PathBuf],
+    ) -> io::Result<LegacyCliPermanentDeletePlan> {
+        prepare_plan(scan_root, path, evidence_paths)
+    }
+
+    /// Revalidate and permanently remove the prepared target.
+    ///
+    /// Consuming the plan binds execution to the exact target captured before confirmation.
+    pub fn execute(plan: LegacyCliPermanentDeletePlan) -> Result<(), LegacyCliDeleteError> {
+        execute_plan(plan)
+    }
+}
+
+fn prepare_plan(
     scan_root: &Path,
     path: &Path,
     evidence_paths: &[PathBuf],
-) -> io::Result<PlannedDelete> {
+) -> io::Result<LegacyCliPermanentDeletePlan> {
     validate_delete_target(scan_root, path)?;
     let ancestors = capture_ancestors(scan_root, path)?;
     let scan_volume = ancestors
@@ -108,7 +149,8 @@ pub(super) fn capture_delete_plan(
         });
     }
 
-    Ok(PlannedDelete {
+    Ok(LegacyCliPermanentDeletePlan {
+        target_path: path.to_path_buf(),
         target_identity: target.identity,
         ancestors,
         evidence,
@@ -215,67 +257,73 @@ fn capture_ancestors(scan_root: &Path, path: &Path) -> io::Result<Vec<PlannedAnc
     clippy::disallowed_methods,
     reason = "temporary legacy cleanup adapter is the only product deletion boundary"
 )]
-pub(super) fn execute_planned_delete(path: &Path, plan: PlannedDelete) -> Result<(), DeleteError> {
-    for evidence in plan.evidence {
-        let current =
-            capture_entry(&evidence.path).map_err(|source| DeleteError::ChangedSincePlan {
-                path: path.to_path_buf(),
+fn execute_plan(plan: LegacyCliPermanentDeletePlan) -> Result<(), LegacyCliDeleteError> {
+    let LegacyCliPermanentDeletePlan {
+        target_path: path,
+        target_identity,
+        ancestors,
+        evidence,
+    } = plan;
+    for evidence in evidence {
+        let current = capture_entry(&evidence.path).map_err(|source| {
+            LegacyCliDeleteError::ChangedSincePlan {
+                path: path.clone(),
                 details: format!(
                     "artifact evidence {} could no longer be inspected: {source}",
                     evidence.path.display()
                 ),
-            })?;
+            }
+        })?;
         if current.kind != EntryKind::RegularFile || current.identity != evidence.identity {
-            return Err(DeleteError::ChangedSincePlan {
-                path: path.to_path_buf(),
+            return Err(LegacyCliDeleteError::ChangedSincePlan {
+                path: path.clone(),
                 details: format!("artifact evidence {} changed", evidence.path.display()),
             });
         }
     }
 
-    for ancestor in plan.ancestors {
-        let current =
-            capture_entry(&ancestor.path).map_err(|source| DeleteError::ChangedSincePlan {
-                path: path.to_path_buf(),
+    for ancestor in ancestors {
+        let current = capture_entry(&ancestor.path).map_err(|source| {
+            LegacyCliDeleteError::ChangedSincePlan {
+                path: path.clone(),
                 details: format!(
                     "ancestor {} could no longer be inspected: {source}",
                     ancestor.path.display()
                 ),
-            })?;
+            }
+        })?;
         if current.kind != EntryKind::Directory || current.identity != ancestor.identity {
-            return Err(DeleteError::ChangedSincePlan {
-                path: path.to_path_buf(),
+            return Err(LegacyCliDeleteError::ChangedSincePlan {
+                path: path.clone(),
                 details: format!("ancestor {} changed", ancestor.path.display()),
             });
         }
     }
 
-    let current = capture_entry(path).map_err(|source| DeleteError::ChangedSincePlan {
-        path: path.to_path_buf(),
-        details: source.to_string(),
-    })?;
+    let current =
+        capture_entry(&path).map_err(|source| LegacyCliDeleteError::ChangedSincePlan {
+            path: path.clone(),
+            details: source.to_string(),
+        })?;
 
-    if current.identity != plan.target_identity {
-        return Err(DeleteError::ChangedSincePlan {
-            path: path.to_path_buf(),
+    if current.identity != target_identity {
+        return Err(LegacyCliDeleteError::ChangedSincePlan {
+            path: path.clone(),
             details: "filesystem identity no longer matches".to_string(),
         });
     }
 
     let result = match current.kind {
-        // DUX-DESTRUCTIVE: allow=legacy-delete-directory -- reviewed legacy adapter deletes the identity-checked planned directory
-        EntryKind::Directory => std::fs::remove_dir_all(path),
+        // DUX-DESTRUCTIVE: allow=legacy-adapter-delete-directory -- reviewed legacy adapter deletes the identity-checked planned directory
+        EntryKind::Directory => std::fs::remove_dir_all(&path),
         #[cfg(windows)]
-        // DUX-DESTRUCTIVE: allow=legacy-delete-windows-link -- reviewed legacy adapter deletes the identity-checked planned Windows link
-        EntryKind::SymlinkDirectory => std::fs::remove_dir_all(path),
-        // DUX-DESTRUCTIVE: allow=legacy-delete-file -- reviewed legacy adapter deletes the identity-checked planned file
-        EntryKind::RegularFile | EntryKind::Other => std::fs::remove_file(path),
+        // DUX-DESTRUCTIVE: allow=legacy-adapter-delete-windows-link -- reviewed legacy adapter deletes the identity-checked planned Windows link
+        EntryKind::SymlinkDirectory => std::fs::remove_dir_all(&path),
+        // DUX-DESTRUCTIVE: allow=legacy-adapter-delete-file -- reviewed legacy adapter deletes the identity-checked planned file
+        EntryKind::RegularFile | EntryKind::Other => std::fs::remove_file(&path),
     };
 
-    result.map_err(|source| DeleteError::Remove {
-        path: path.to_path_buf(),
-        source,
-    })
+    result.map_err(|source| LegacyCliDeleteError::Remove { path, source })
 }
 
 #[cfg(unix)]
@@ -389,8 +437,15 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    fn plan(path: &Path) -> PlannedDelete {
-        capture_delete_plan(path.parent().unwrap(), path, &[]).unwrap()
+    fn plan(path: &Path) -> LegacyCliPermanentDeletePlan {
+        LegacyCliPermanentDeleteExecutor::prepare(path.parent().unwrap(), path, &[]).unwrap()
+    }
+
+    #[test]
+    fn prepared_plan_is_send() {
+        fn assert_send<T: Send>() {}
+
+        assert_send::<LegacyCliPermanentDeletePlan>();
     }
 
     #[test]
@@ -400,7 +455,7 @@ mod tests {
         std::fs::write(&path, b"original").unwrap();
         let plan = plan(&path);
 
-        execute_planned_delete(&path, plan).unwrap();
+        LegacyCliPermanentDeleteExecutor::execute(plan).unwrap();
 
         assert!(!path.exists());
     }
@@ -423,7 +478,7 @@ mod tests {
             scan_root.join("..").join("outside-sentinel"),
         ] {
             assert!(
-                capture_delete_plan(&scan_root, &target, &[]).is_err(),
+                LegacyCliPermanentDeleteExecutor::prepare(&scan_root, &target, &[]).is_err(),
                 "unsafe target was admitted: {}",
                 target.display()
             );
@@ -440,7 +495,7 @@ mod tests {
         let path = temp.path().join("line\nbreak");
         std::fs::write(&path, b"keep").unwrap();
 
-        assert!(capture_delete_plan(temp.path(), &path, &[]).is_err());
+        assert!(LegacyCliPermanentDeleteExecutor::prepare(temp.path(), &path, &[]).is_err());
         assert!(path.exists());
     }
 
@@ -456,7 +511,7 @@ mod tests {
         bytes.push(0xff);
         let path = PathBuf::from(OsString::from_vec(bytes));
 
-        assert!(capture_delete_plan(temp.path(), &path, &[]).is_err());
+        assert!(LegacyCliPermanentDeleteExecutor::prepare(temp.path(), &path, &[]).is_err());
     }
 
     #[test]
@@ -474,9 +529,12 @@ mod tests {
         std::fs::rename(&path, &original).unwrap();
         std::fs::write(&path, b"replacement").unwrap();
 
-        let error = execute_planned_delete(&path, plan).unwrap_err();
+        let error = LegacyCliPermanentDeleteExecutor::execute(plan).unwrap_err();
 
-        assert!(matches!(error, DeleteError::ChangedSincePlan { .. }));
+        assert!(matches!(
+            error,
+            LegacyCliDeleteError::ChangedSincePlan { .. }
+        ));
         assert_eq!(std::fs::read(&path).unwrap(), b"replacement");
         assert_eq!(std::fs::read(&original).unwrap(), b"original");
     }
@@ -497,9 +555,12 @@ mod tests {
         std::fs::create_dir(&path).unwrap();
         std::fs::write(path.join("sentinel"), b"keep").unwrap();
 
-        let error = execute_planned_delete(&path, plan).unwrap_err();
+        let error = LegacyCliPermanentDeleteExecutor::execute(plan).unwrap_err();
 
-        assert!(matches!(error, DeleteError::ChangedSincePlan { .. }));
+        assert!(matches!(
+            error,
+            LegacyCliDeleteError::ChangedSincePlan { .. }
+        ));
         assert!(path.join("sentinel").exists());
         assert!(original.exists());
     }
@@ -517,9 +578,12 @@ mod tests {
         // DUX-DESTRUCTIVE: allow=test-delete-missing-entry -- remove a TempDir-owned fixture to verify disappearance is not credited
         std::fs::remove_file(&path).unwrap();
 
-        let error = execute_planned_delete(&path, plan).unwrap_err();
+        let error = LegacyCliPermanentDeleteExecutor::execute(plan).unwrap_err();
 
-        assert!(matches!(error, DeleteError::ChangedSincePlan { .. }));
+        assert!(matches!(
+            error,
+            LegacyCliDeleteError::ChangedSincePlan { .. }
+        ));
     }
 
     #[cfg(unix)]
@@ -535,7 +599,7 @@ mod tests {
         symlink(&target, &link).unwrap();
         let plan = plan(&link);
 
-        execute_planned_delete(&link, plan).unwrap();
+        LegacyCliPermanentDeleteExecutor::execute(plan).unwrap();
 
         assert!(std::fs::symlink_metadata(&link).is_err());
         assert!(target.join("sentinel").exists());
@@ -563,9 +627,12 @@ mod tests {
         std::fs::rename(&link, &original_link).unwrap();
         symlink(&second_target, &link).unwrap();
 
-        let error = execute_planned_delete(&link, plan).unwrap_err();
+        let error = LegacyCliPermanentDeleteExecutor::execute(plan).unwrap_err();
 
-        assert!(matches!(error, DeleteError::ChangedSincePlan { .. }));
+        assert!(matches!(
+            error,
+            LegacyCliDeleteError::ChangedSincePlan { .. }
+        ));
         assert_eq!(std::fs::read_link(&link).unwrap(), second_target);
         assert_eq!(std::fs::read_link(&original_link).unwrap(), first_target);
     }
@@ -582,15 +649,22 @@ mod tests {
         let original_evidence = temp.path().join("original-Cargo.toml");
         std::fs::create_dir(&target).unwrap();
         std::fs::write(&evidence, b"original").unwrap();
-        let plan =
-            capture_delete_plan(temp.path(), &target, std::slice::from_ref(&evidence)).unwrap();
+        let plan = LegacyCliPermanentDeleteExecutor::prepare(
+            temp.path(),
+            &target,
+            std::slice::from_ref(&evidence),
+        )
+        .unwrap();
         // DUX-DESTRUCTIVE: allow=test-delete-changed-evidence -- replace TempDir-owned evidence to verify stale artifact rejection
         std::fs::rename(&evidence, &original_evidence).unwrap();
         std::fs::write(&evidence, b"replacement").unwrap();
 
-        let error = execute_planned_delete(&target, plan).unwrap_err();
+        let error = LegacyCliPermanentDeleteExecutor::execute(plan).unwrap_err();
 
-        assert!(matches!(error, DeleteError::ChangedSincePlan { .. }));
+        assert!(matches!(
+            error,
+            LegacyCliDeleteError::ChangedSincePlan { .. }
+        ));
         assert!(target.exists());
         assert_eq!(std::fs::read(&evidence).unwrap(), b"replacement");
     }
@@ -608,7 +682,9 @@ mod tests {
         std::fs::write(&real_evidence, b"manifest").unwrap();
         symlink(&real_evidence, &evidence).unwrap();
 
-        assert!(capture_delete_plan(temp.path(), &target, &[evidence]).is_err());
+        assert!(
+            LegacyCliPermanentDeleteExecutor::prepare(temp.path(), &target, &[evidence]).is_err()
+        );
         assert!(target.exists());
     }
 
@@ -624,7 +700,10 @@ mod tests {
         let project = scan.path().join("project");
         symlink(external.path(), &project).unwrap();
 
-        assert!(capture_delete_plan(scan.path(), &project.join("target"), &[]).is_err());
+        assert!(
+            LegacyCliPermanentDeleteExecutor::prepare(scan.path(), &project.join("target"), &[],)
+                .is_err()
+        );
         assert!(external_target.exists());
     }
 
@@ -644,7 +723,7 @@ mod tests {
         let target = project.join("target");
         std::fs::create_dir_all(&target).unwrap();
         std::fs::write(target.join("original-sentinel"), b"keep").unwrap();
-        let plan = capture_delete_plan(scan.path(), &target, &[]).unwrap();
+        let plan = LegacyCliPermanentDeleteExecutor::prepare(scan.path(), &target, &[]).unwrap();
 
         let external_target = external.path().join("target");
         std::fs::create_dir(&external_target).unwrap();
@@ -654,9 +733,12 @@ mod tests {
         std::fs::rename(&project, &original_project).unwrap();
         symlink(external.path(), &project).unwrap();
 
-        let error = execute_planned_delete(&target, plan).unwrap_err();
+        let error = LegacyCliPermanentDeleteExecutor::execute(plan).unwrap_err();
 
-        assert!(matches!(error, DeleteError::ChangedSincePlan { .. }));
+        assert!(matches!(
+            error,
+            LegacyCliDeleteError::ChangedSincePlan { .. }
+        ));
         assert!(external_sentinel.exists());
         assert!(original_project.join("target/original-sentinel").exists());
     }

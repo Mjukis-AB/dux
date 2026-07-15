@@ -38,7 +38,7 @@ impl Widget for MultiDeleteProgressView<'_> {
         Clear.render(dialog_area, buf);
 
         let block = Block::default()
-            .title(" Deleting... ")
+            .title(" Permanently deleting... ")
             .title_alignment(Alignment::Center)
             .borders(Borders::ALL)
             .border_style(Style::default().fg(self.theme.yellow))
@@ -72,9 +72,10 @@ impl Widget for MultiDeleteProgressView<'_> {
         buf.set_string(inner.x, row, &bar, Style::default().fg(self.theme.green));
         row += 2;
 
-        // Freed bytes
+        // Scan-derived estimate for successfully deleted items. This is not a
+        // post-operation capacity measurement.
         let freed_str = format!(
-            "Freed: {}",
+            "Deleted (scan estimate): {}",
             dux_core::format_size(self.progress.bytes_freed)
         );
         buf.set_string(inner.x, row, &freed_str, text_style);
@@ -97,10 +98,33 @@ impl Widget for MultiDeleteProgressView<'_> {
         // Hint at bottom
         let hint_y = row.max(inner.y + inner.height.saturating_sub(1));
         let hint = if self.quit_requested {
-            "Quit requested - waiting for deletions to finish"
+            "Quit requested - waiting for permanent deletions"
         } else {
-            "Press q to quit after deletions finish"
+            "Press q to quit after permanent deletions"
         };
         buf.set_string(inner.x, hint_y, hint, dim_style);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn copy_is_explicit_about_permanence_and_estimated_bytes() {
+        let progress = MultiDeleteProgress::test_snapshot(2, 1, 1024);
+        let area = Rect::new(0, 0, 80, 20);
+        let mut buffer = Buffer::empty(area);
+        MultiDeleteProgressView::new(&progress, false, &Theme::default()).render(area, &mut buffer);
+
+        let text = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(text.contains("Permanently deleting..."));
+        assert!(text.contains("Deleted (scan estimate): 1.0 KB"));
+        assert!(text.contains("after permanent deletions"));
+        assert!(!text.contains("Freed:"));
     }
 }

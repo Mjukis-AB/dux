@@ -116,8 +116,9 @@ Swift MUST own presentation, user interaction, settings, and provider process
 configuration. Generated UniFFI APIs MUST remain contained in `EngineService`.
 Views and `AppModel` MUST NOT import destructive capabilities.
 
-`dux-cli` MUST become a client of the shared engine. Its existing deletion module
-is migration debt, not a second approved architecture.
+`dux-cli` MUST become a client of the shared engine. Its temporary core-owned
+legacy deletion adapter is migration debt, not a second approved architecture
+or the production executor.
 
 ## 4. Threat model
 
@@ -204,16 +205,22 @@ complete authority chain because trusted home/volume discovery, stable rule
 scope grants, plan-time source witnesses, full platform ancestry guarantees,
 and executor-time mutation revalidation do not yet exist.
 
-The existing CLI still performs permanent deletion in
-`dux-cli/src/app/deletion.rs`. It captures target, marker, and ancestor identity
-before confirmation and rechecks those facts immediately before calling
-`remove_file` or `remove_dir_all`. It also waits for tracked deletion workers on
-graceful quit. This is useful hardening, but it remains legacy behavior because:
+The existing CLI still offers permanent deletion, but its filesystem effect is
+now centralized in the temporary core-owned
+`dux-core/src/cleanup/legacy_cli.rs` adapter. The CLI can only prepare an opaque,
+target-bound plan before confirmation and consume that exact plan through the
+adapter; it no longer owns or directly invokes recursive deletion. The adapter
+captures target, marker, and ancestor identity before confirmation and rechecks
+those facts immediately before calling `remove_file` or `remove_dir_all`. The
+CLI still waits for tracked deletion workers on graceful quit. This is useful
+containment, but it remains legacy behavior because:
 
-- it is owned by the UI crate rather than a centralized core executor;
+- the temporary adapter is not the production centralized executor or an
+  implementation of the reviewed authority graph;
 - it is not constructed from the new immutable cleanup-plan model;
 - it has no durable operation journal or pre/post capacity verification;
-- it reports scanned item sizes as bytes freed;
+- its byte accounting is derived from scan estimates rather than measured
+  post-operation capacity (the CLI now labels that distinction explicitly);
 - its final removal is path-based and retains a TOCTOU window;
 - unchanged directory identity does not freeze descendants; and
 - cache-rebuilt paths can be lossy and are not valid cleanup identity.
@@ -919,8 +926,13 @@ adjacent to one matched statement and includes a specific reason. Unknown,
 duplicate, malformed, misplaced, copied, unused, and multi-call annotations
 fail, while registered IDs missing from source are stale and fail repository
 scanning. Current product mutation remains temporarily restricted to the three
-identity-checked calls in `execute_planned_delete`; this baseline is removed when the centralized
-executor adapter replaces it. Internal cache exceptions own only `create_new`
+identity-checked calls in `legacy_cli::execute_plan`, registered as the
+`legacy-adapter-delete-*` exceptions. A repository architecture check rejects
+references or re-exports outside the adapter and CLI state orchestration, so
+FFI and the macOS app cannot adopt this legacy route. The public Rust surface is
+temporary and unsupported rather than a sealed authority boundary; this
+baseline is removed when the production centralized executor replaces the
+adapter. Internal cache exceptions own only `create_new`
 temporary files and their atomic destination. Build exceptions own only
 `mktemp -d` staging paths or the exact repository-generated XCFramework path;
 the builder rejects its former caller-selected output path and any symlinked or
@@ -1022,8 +1034,8 @@ incident as a substitute for deterministic local evidence.
 | Rule schema/loader | Implemented for private synthetic fixtures | Signed bundled source, independently researched rules, provenance tests |
 | Candidate and cleanup-plan records | Implemented as non-executable domain data | Connect only through deterministic evaluator and planner-owned witnesses |
 | macOS app cleanup | Absent | Entire cleanup release gate in §17.3 |
-| Legacy CLI deletion | Active arbitrary-descendant permanent path; strict-target/volume/identity rechecks only; UI-owned debt | Migrate behind centralized executor without weakening current checks |
-| Centralized executor | Absent | Typed admission, cross-process lease, live revalidation, and journal required |
+| Legacy CLI deletion | Active arbitrary-descendant permanent path routed through a temporary core adapter; strict-target/volume/identity rechecks only; scanned-byte estimates labeled in CLI | Replace adapter with reviewed plan/approval/executor chain without weakening current checks |
+| Centralized executor | Production executor absent; temporary legacy adapter is containment only | Typed admission, cross-process lease, live revalidation, and journal required |
 | Engine/FFI task and plan API | Smoke-only; contract displayed but not app-enforced | Version rejection plus bounded scan/task/plan handles and cancellation |
 | Typed scan coverage/issues | Absent; current scanner counts/skips and permits relaxed flags | Required before any scan is described as complete or becomes plan input |
 | Cache semantic/input validation | Atomic write plus CRC/version only; full-file read before bounds | Bounded reads, tree/path semantics, private permissions, retention, and migration |

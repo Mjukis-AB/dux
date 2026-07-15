@@ -154,12 +154,28 @@ fn inspect_at(
     Ok(PlatformEntrySnapshot {
         identity: identity(&stat),
         kind,
-        hard_link_count: stat.st_nlink as u64,
+        hard_link_count: hard_link_count(&stat),
     })
 }
 
 fn identity(stat: &nix::libc::stat) -> FilesystemIdentity {
-    FilesystemIdentity::new(stat.st_dev as u64, stat.st_ino as u128)
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    let volume = stat.st_dev;
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    let volume = stat.st_dev as u64;
+
+    FilesystemIdentity::new(volume, u128::from(stat.st_ino))
+}
+
+fn hard_link_count(stat: &nix::libc::stat) -> u64 {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        stat.st_nlink
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    {
+        stat.st_nlink as u64
+    }
 }
 
 fn kind(stat: &nix::libc::stat) -> Option<FilesystemEntryKind> {

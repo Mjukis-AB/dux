@@ -80,7 +80,7 @@ class DestructiveCallLintTests(unittest.TestCase):
             "std::fs::rename(a, b);\n"
         )
         self.assert_rule("src/example.rs", call, "invalid-annotation-scope")
-        path = "dux-cli/src/app/deletion.rs"
+        path = "dux-core/src/cleanup/legacy_cli.rs"
         self.assert_rule(path, call, "invalid-annotation-scope")
         allowed_test = (
             "#[cfg(test)]\nmod tests {\nfn replaced_file_is_not_deleted() {\n"
@@ -94,28 +94,31 @@ class DestructiveCallLintTests(unittest.TestCase):
     def test_legacy_baseline_is_symbol_and_count_restricted(self) -> None:
         marker = "// DUX-" + "DESTRUCTIVE: allow={} -- reviewed legacy adapter owns {} path\n"
         source = (
-            "fn execute_planned_delete() {\n"
-            f"    {marker.format('legacy-delete-file', 'the first planned')}"
+            "fn execute_plan() {\n"
+            f"    {marker.format('legacy-adapter-delete-file', 'the first planned')}"
             "    std::fs::remove_file(first);\n"
-            f"    {marker.format('legacy-delete-directory', 'the second planned')}"
+            f"    {marker.format('legacy-adapter-delete-directory', 'the second planned')}"
             "    std::fs::remove_dir_all(second);\n"
-            f"    {marker.format('legacy-delete-windows-link', 'the third planned')}"
+            f"    {marker.format('legacy-adapter-delete-windows-link', 'the third planned')}"
             "    std::fs::remove_dir_all(third);\n"
             "}\n"
         )
-        self.assertEqual(lint.scan_source("dux-cli/src/app/deletion.rs", source), [])
-        duplicated = source.replace("legacy-delete-directory", "legacy-delete-file").replace(
-            "legacy-delete-windows-link", "legacy-delete-file"
+        path = "dux-core/src/cleanup/legacy_cli.rs"
+        self.assertEqual(lint.scan_source(path, source), [])
+        duplicated = source.replace(
+            "legacy-adapter-delete-directory", "legacy-adapter-delete-file"
+        ).replace(
+            "legacy-adapter-delete-windows-link", "legacy-adapter-delete-file"
         )
         duplicated = duplicated.replace("remove_dir_all", "remove_file")
-        self.assert_rule("dux-cli/src/app/deletion.rs", duplicated, "duplicate-exception-id")
+        self.assert_rule(path, duplicated, "duplicate-exception-id")
         spoofed = (
-            "fn execute_planned_delete() {\n"
-            "// DUX-DESTRUCTIVE: allow=legacy-delete-file -- reviewed legacy adapter owns this planned path\n"
+            "fn execute_plan() {\n"
+            "// DUX-DESTRUCTIVE: allow=legacy-adapter-delete-file -- reviewed legacy adapter owns this planned path\n"
             "std::fs::rename(first, second); // remove_file\n"
             "}\n"
         )
-        self.assert_rule("dux-cli/src/app/deletion.rs", spoofed, "invalid-annotation-scope")
+        self.assert_rule(path, spoofed, "invalid-annotation-scope")
 
     def test_shell_traps_moves_and_find_delete_are_rejected(self) -> None:
         self.assert_rule("script.sh", "trap 'rm -rf \"$tmp\"' EXIT\n", "shell-remove")
@@ -151,6 +154,34 @@ class DestructiveCallLintTests(unittest.TestCase):
         self.assert_rule("src/example.rs", source, "invalid-clippy-suppression")
         conditional = "#[cfg_attr(target_os = \"macos\", allow(clippy::disallowed_methods))]\nfn product() {}\n"
         self.assert_rule("src/example.rs", conditional, "invalid-clippy-suppression")
+
+    def test_legacy_adapter_cannot_be_referenced_by_ffi_or_other_clients(self) -> None:
+        source = "use dux_core::cleanup::legacy_cli::LegacyCliPermanentDeleteExecutor;\n"
+        self.assert_rule("dux-ffi/src/lib.rs", source, "legacy-adapter-boundary")
+        self.assert_rule("dux-macos/Dux/App.swift", "LegacyCliPermanentDeleteExecutor\n", "legacy-adapter-boundary")
+        self.assert_rule(
+            "dux-core/src/cleanup/mod.rs",
+            "pub mod legacy_cli;\npub use legacy_cli::*;\n",
+            "legacy-adapter-boundary",
+        )
+        for reexport in [
+            "pub use dux_core;\n",
+            "pub use dux_core as core;\n",
+            "pub use dux_core::*;\n",
+            "pub use dux_core::cleanup;\n",
+            "pub use dux_core::cleanup as cleanup_api;\n",
+            "pub use dux_core::{cleanup, DiskTree};\n",
+            "pub use dux_core::{self as core, DiskTree};\n",
+            "pub extern crate dux_core as core;\n",
+        ]:
+            with self.subTest(reexport=reexport):
+                self.assert_rule("dux-ffi/src/lib.rs", reexport, "legacy-adapter-boundary")
+
+        findings = lint.scan_source(
+            "dux-core/src/cleanup/mod.rs",
+            "//! Cleanup boundaries.\n#[doc(hidden)]\npub mod legacy_cli;\n",
+        )
+        self.assertNotIn("legacy-adapter-boundary", {finding.rule for finding in findings})
 
     def test_swift_and_python_effects_are_rejected(self) -> None:
         self.assert_rule(

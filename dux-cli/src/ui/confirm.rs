@@ -65,16 +65,16 @@ impl Widget for ConfirmDeleteView<'_> {
 
         // Size info
         if let Some(size) = self.size {
-            let size_str = format!("Size: {}", dux_core::format_size(size));
+            let size_str = format!("Scanned size estimate: {}", dux_core::format_size(size));
             buf.set_string(inner.x, inner.y + 3, &size_str, text_style);
         }
 
         // Action hints
         let hints_y = inner.y + inner.height.saturating_sub(1);
         buf.set_string(inner.x, hints_y, "[y]", key_style);
-        buf.set_string(inner.x + 4, hints_y, "Yes, delete", text_style);
-        buf.set_string(inner.x + 18, hints_y, "[n]", key_style);
-        buf.set_string(inner.x + 22, hints_y, "Cancel", text_style);
+        buf.set_string(inner.x + 4, hints_y, "Delete permanently", text_style);
+        buf.set_string(inner.x + 23, hints_y, "[n]", key_style);
+        buf.set_string(inner.x + 27, hints_y, "Cancel", text_style);
     }
 }
 
@@ -95,6 +95,7 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(text.contains("Permanently delete 1 item:"));
+        assert!(text.contains("Scanned size estimate: 1.0 KB"));
         assert!(text.contains("[y]"));
         assert!(text.contains("[n]"));
     }

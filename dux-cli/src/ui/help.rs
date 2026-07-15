@@ -76,7 +76,7 @@ impl Widget for HelpView<'_> {
             ("", "", false),
             ("", "Actions", true),
             ("o", "Open in Finder", false),
-            ("d", "Delete selected item(s)", false),
+            ("d", "Permanently delete selected item(s)", false),
             ("r", "Rescan from filesystem", false),
             ("", "", false),
             ("", "Other", true),

@@ -240,32 +240,32 @@ class ExceptionSpec:
 
 
 EXCEPTIONS = {
-    "legacy-delete-directory": ExceptionSpec(
-        "dux-cli/src/app/deletion.rs", "rust-filesystem-effect", "execute_planned_delete"
+    "legacy-adapter-delete-directory": ExceptionSpec(
+        "dux-core/src/cleanup/legacy_cli.rs", "rust-filesystem-effect", "execute_plan"
     ),
-    "legacy-delete-windows-link": ExceptionSpec(
-        "dux-cli/src/app/deletion.rs", "rust-filesystem-effect", "execute_planned_delete"
+    "legacy-adapter-delete-windows-link": ExceptionSpec(
+        "dux-core/src/cleanup/legacy_cli.rs", "rust-filesystem-effect", "execute_plan"
     ),
-    "legacy-delete-file": ExceptionSpec(
-        "dux-cli/src/app/deletion.rs", "rust-filesystem-effect", "execute_planned_delete"
+    "legacy-adapter-delete-file": ExceptionSpec(
+        "dux-core/src/cleanup/legacy_cli.rs", "rust-filesystem-effect", "execute_plan"
     ),
     "test-delete-replaced-file": ExceptionSpec(
-        "dux-cli/src/app/deletion.rs", "rust-filesystem-effect", "test:replaced_file_is_not_deleted"
+        "dux-core/src/cleanup/legacy_cli.rs", "rust-filesystem-effect", "test:replaced_file_is_not_deleted"
     ),
     "test-delete-replaced-directory": ExceptionSpec(
-        "dux-cli/src/app/deletion.rs", "rust-filesystem-effect", "test:replaced_directory_is_not_deleted"
+        "dux-core/src/cleanup/legacy_cli.rs", "rust-filesystem-effect", "test:replaced_directory_is_not_deleted"
     ),
     "test-delete-missing-entry": ExceptionSpec(
-        "dux-cli/src/app/deletion.rs", "rust-filesystem-effect", "test:missing_entry_is_not_counted_as_deleted"
+        "dux-core/src/cleanup/legacy_cli.rs", "rust-filesystem-effect", "test:missing_entry_is_not_counted_as_deleted"
     ),
     "test-delete-replaced-symlink": ExceptionSpec(
-        "dux-cli/src/app/deletion.rs", "rust-filesystem-effect", "test:replaced_symlink_is_not_deleted"
+        "dux-core/src/cleanup/legacy_cli.rs", "rust-filesystem-effect", "test:replaced_symlink_is_not_deleted"
     ),
     "test-delete-changed-evidence": ExceptionSpec(
-        "dux-cli/src/app/deletion.rs", "rust-filesystem-effect", "test:changed_artifact_evidence_blocks_delete"
+        "dux-core/src/cleanup/legacy_cli.rs", "rust-filesystem-effect", "test:changed_artifact_evidence_blocks_delete"
     ),
     "test-delete-replaced-ancestor": ExceptionSpec(
-        "dux-cli/src/app/deletion.rs", "rust-filesystem-effect", "test:replaced_ancestor_cannot_redirect_delete_outside_scan_root"
+        "dux-core/src/cleanup/legacy_cli.rs", "rust-filesystem-effect", "test:replaced_ancestor_cannot_redirect_delete_outside_scan_root"
     ),
     "finder-reveal": ExceptionSpec("dux-cli/src/app/state.rs", "rust-process-spawn", "open_in_finder"),
     "test-state-replaced-multi-item": ExceptionSpec(
@@ -331,9 +331,9 @@ EXCEPTIONS = {
 }
 
 EXCEPTION_PRIMITIVES = {
-    "legacy-delete-directory": "remove_dir_all",
-    "legacy-delete-windows-link": "remove_dir_all",
-    "legacy-delete-file": "remove_file",
+    "legacy-adapter-delete-directory": "remove_dir_all",
+    "legacy-adapter-delete-windows-link": "remove_dir_all",
+    "legacy-adapter-delete-file": "remove_file",
     "test-delete-replaced-file": "rename",
     "test-delete-replaced-directory": "rename",
     "test-delete-missing-entry": "remove_file",
@@ -362,17 +362,39 @@ EXCEPTION_PRIMITIVES = {
 }
 
 CLIPPY_SUPPRESSION_COUNTS = {
-    "dux-cli/src/app/deletion.rs": 7,
+    "dux-core/src/cleanup/legacy_cli.rs": 7,
     "dux-cli/src/app/state.rs": 3,
     "dux-core/src/cache/mod.rs": 2,
     "dux-core/src/path_validation/protected.rs": 1,
 }
 
 CLIPPY_PRODUCT_SUPPRESSION_SYMBOLS = {
-    "dux-cli/src/app/deletion.rs": {"execute_planned_delete"},
+    "dux-core/src/cleanup/legacy_cli.rs": {"execute_plan"},
     "dux-cli/src/app/state.rs": {"open_in_finder"},
     "dux-core/src/cache/mod.rs": {"save_cache"},
 }
+
+LEGACY_ADAPTER_ALLOWED_PATHS = {
+    "dux-cli/src/app/state.rs",
+    "dux-core/src/cleanup/legacy_cli.rs",
+    "scripts/check_destructive_calls.py",
+    "scripts/tests/test_check_destructive_calls.py",
+}
+
+LEGACY_ADAPTER_MARKERS = (
+    "LegacyCliPermanentDelete",
+    "legacy_cli",
+)
+
+LEGACY_ADAPTER_MODULE_DECLARATION = "pub mod legacy_cli;"
+
+LEGACY_ADAPTER_REEXPORT_PATTERNS = (
+    re.compile(
+        r"\bpub\s+use\s+(?:::)?dux_core\s*(?:;|as\b|::\s*(?:\*|cleanup\b)|::\s*\{[^}]*\b(?:self|cleanup)\b)",
+        re.DOTALL,
+    ),
+    re.compile(r"\bpub\s+extern\s+crate\s+dux_core\b"),
+)
 
 
 def _line_number(text: str, offset: int) -> int:
@@ -1035,6 +1057,33 @@ def scan_source(
     suffix = pathlib.PurePosixPath(path).suffix.lower()
     annotations, annotation_findings = _annotations(lines)
     findings = [dataclasses.replace(finding, path=path) for finding in annotation_findings]
+    legacy_adapter_source = source
+    if path == "dux-core/src/cleanup/mod.rs":
+        legacy_adapter_source = legacy_adapter_source.replace(
+            LEGACY_ADAPTER_MODULE_DECLARATION, ""
+        )
+    if path not in LEGACY_ADAPTER_ALLOWED_PATHS and any(
+        marker in legacy_adapter_source for marker in LEGACY_ADAPTER_MARKERS
+    ):
+        findings.append(
+            Finding(
+                path,
+                1,
+                "legacy-adapter-boundary",
+                "legacy CLI permanent-delete adapter may not be referenced from this source",
+            )
+        )
+    if suffix == ".rs" and path not in LEGACY_ADAPTER_ALLOWED_PATHS:
+        rust_code = _strip_c_like_comments_and_literals(source)
+        if any(pattern.search(rust_code) for pattern in LEGACY_ADAPTER_REEXPORT_PATTERNS):
+            findings.append(
+                Finding(
+                    path,
+                    1,
+                    "legacy-adapter-boundary",
+                    "dux-core cleanup modules may not be publicly re-exported",
+                )
+            )
     if suffix == ".rs":
         findings.extend(
             _clippy_suppression_findings(

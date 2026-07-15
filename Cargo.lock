@@ -707,7 +707,6 @@ dependencies = [
  "dux-core",
  "ratatui",
  "tempfile",
- "windows-sys 0.61.2",
 ]
 
 [[package]]

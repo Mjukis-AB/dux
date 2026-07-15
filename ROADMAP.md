@@ -1797,8 +1797,22 @@ Tasks:
   is a removal/relocation/truncation/process escape boundary, not a proof that
   arbitrary app persistence writes can never overwrite data; persistence still
   requires its separate ownership, permissions, and semantic validation gates.
-- [ ] Route existing CLI delete requests through a temporary centralized executor adapter.
-- [ ] Preserve CLI behavior and tests; clearly label current permanent deletion until replaced.
+- [x] Route existing CLI delete requests through a temporary centralized executor adapter.
+  Single- and multi-item requests now prepare and consume an opaque,
+  target-bound plan through `dux-core::cleanup::legacy_cli`; the CLI UI no
+  longer contains or directly invokes `remove_file`/`remove_dir_all`. The
+  adapter preserves the existing strict-descendant, same-volume, target,
+  ancestor, and marker-identity rechecks without claiming to implement the
+  future cleanup-plan/approval/executor authority graph. The destructive-call
+  policy pins its three raw effects to this adapter and rejects adapter
+  references or re-exports from FFI, Swift, and every non-CLI client.
+- [x] Preserve CLI behavior and tests; clearly label current permanent deletion until replaced.
+  The existing deletion regression suite moved intact to core and continues to
+  cover replaced/missing targets, symlinks, ancestor redirection, marker
+  replacement, invalid targets, and worker transfer. CLI confirmation,
+  progress, footer, help, and deferred-quit copy now consistently says
+  “permanent”; scan-derived item totals are labeled as estimates rather than
+  measured freed capacity. Focused rendering tests enforce both disclosures.
 
 Exit criteria:
 

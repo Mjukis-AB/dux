@@ -6,10 +6,11 @@ use std::sync::{Arc, mpsc};
 use std::thread::JoinHandle;
 use std::time::SystemTime;
 
-use dux_core::{DiskTree, NodeId, ScanProgress};
-
-use super::deletion::{PlannedDelete, capture_delete_plan, execute_planned_delete};
 use super::views::ComputedViews;
+use dux_core::cleanup::legacy_cli::{
+    LegacyCliPermanentDeleteExecutor, LegacyCliPermanentDeletePlan,
+};
+use dux_core::{DiskTree, NodeId, ScanProgress};
 
 const MULTI_DELETE_WORKER_LIMIT: usize = 4;
 
@@ -91,13 +92,13 @@ struct MultiDeleteTask {
     node_id: NodeId,
     path: PathBuf,
     size: u64,
-    plan: PlannedDelete,
+    plan: LegacyCliPermanentDeletePlan,
 }
 
 fn execute_multi_delete_task<E, F>(task: MultiDeleteTask, execute: F) -> MultiDeleteResult
 where
     E: std::fmt::Display,
-    F: FnOnce(&Path, PlannedDelete) -> Result<(), E>,
+    F: FnOnce(LegacyCliPermanentDeletePlan) -> Result<(), E>,
 {
     let MultiDeleteTask {
         node_id,
@@ -106,7 +107,7 @@ where
         plan,
     } = task;
     let failure_path = path.clone();
-    match catch_unwind(AssertUnwindSafe(|| match execute(&path, plan) {
+    match catch_unwind(AssertUnwindSafe(|| match execute(plan) {
         Ok(()) => MultiDeleteResult::Success { node_id, size },
         Err(error) => MultiDeleteResult::Failure {
             path,
@@ -124,7 +125,8 @@ where
 /// Statistics tracked during the session
 #[derive(Debug, Default, Clone)]
 pub struct SessionStats {
-    /// Total bytes freed by deletions
+    /// Scan-derived size estimate for items successfully deleted. This is not
+    /// post-operation capacity measurement.
     pub bytes_freed: u64,
     /// Number of items deleted
     pub items_deleted: u32,
@@ -185,6 +187,21 @@ pub struct MultiDeleteProgress {
     workers: Vec<DeleteWorker>,
 }
 
+#[cfg(test)]
+impl MultiDeleteProgress {
+    pub(crate) fn test_snapshot(total: usize, completed: usize, bytes_freed: u64) -> Self {
+        let (_sender, receiver) = mpsc::channel();
+        Self {
+            total,
+            completed,
+            bytes_freed,
+            failures: Vec::new(),
+            receiver,
+            workers: Vec::new(),
+        }
+    }
+}
+
 /// Application state
 pub struct AppState {
     /// Current mode
@@ -216,7 +233,7 @@ pub struct AppState {
     /// Item pending deletion (node ID and path for confirmation dialog)
     pub pending_delete: Option<(NodeId, PathBuf)>,
     /// Target and artifact-evidence identities captured before confirmation
-    pending_delete_plan: Option<PlannedDelete>,
+    pending_delete_plan: Option<LegacyCliPermanentDeletePlan>,
     /// Session statistics (deleted items, freed space)
     pub session_stats: SessionStats,
     /// Whether tree was loaded from cache
@@ -244,7 +261,7 @@ pub struct AppState {
     /// Items pending multi-delete confirmation
     pub pending_multi_delete: Option<Vec<(NodeId, PathBuf, u64)>>,
     /// Target and artifact-evidence identities captured before batch confirmation
-    pending_multi_delete_plans: HashMap<NodeId, PlannedDelete>,
+    pending_multi_delete_plans: HashMap<NodeId, LegacyCliPermanentDeletePlan>,
     /// Multi-delete progress tracker
     pub multi_delete_progress: Option<MultiDeleteProgress>,
 }
@@ -674,7 +691,8 @@ impl AppState {
                 return;
             }
             let evidence_paths = self.artifact_evidence_paths(node_id);
-            match capture_delete_plan(&self.root_path, &path, &evidence_paths) {
+            match LegacyCliPermanentDeleteExecutor::prepare(&self.root_path, &path, &evidence_paths)
+            {
                 Ok(plan) => {
                     self.pending_delete = Some((node_id, path));
                     self.pending_delete_plan = Some(plan);
@@ -727,7 +745,7 @@ impl AppState {
 
             let worker_path = path.clone();
             let handle = std::thread::spawn(move || {
-                let result = execute_planned_delete(&path, plan);
+                let result = LegacyCliPermanentDeleteExecutor::execute(plan);
 
                 match result {
                     Ok(()) => {
@@ -1061,7 +1079,8 @@ impl AppState {
                 return;
             }
             let evidence_paths = self.artifact_evidence_paths(*node_id);
-            match capture_delete_plan(&self.root_path, path, &evidence_paths) {
+            match LegacyCliPermanentDeleteExecutor::prepare(&self.root_path, path, &evidence_paths)
+            {
                 Ok(plan) => {
                     plans.insert(*node_id, plan);
                 }
@@ -1117,7 +1136,8 @@ impl AppState {
         let worker_path = self.root_path.clone();
         let handles =
             match spawn_bounded_workers(planned_items, MULTI_DELETE_WORKER_LIMIT, move |task| {
-                let msg = execute_multi_delete_task(task, execute_planned_delete);
+                let msg =
+                    execute_multi_delete_task(task, LegacyCliPermanentDeleteExecutor::execute);
                 let _ = tx.send(msg);
             }) {
                 Ok(handles) => handles,
@@ -1372,7 +1392,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("item.txt");
         std::fs::write(&path, b"keep").unwrap();
-        let plan = capture_delete_plan(temp.path(), &path, &[]).unwrap();
+        let plan = LegacyCliPermanentDeleteExecutor::prepare(temp.path(), &path, &[]).unwrap();
 
         let result = execute_multi_delete_task(
             MultiDeleteTask {
@@ -1381,7 +1401,7 @@ mod tests {
                 size: 4,
                 plan,
             },
-            |_, _| -> Result<(), String> { panic!("intentional task panic") },
+            |_| -> Result<(), String> { panic!("intentional task panic") },
         );
 
         let MultiDeleteResult::Failure {
