@@ -196,7 +196,9 @@ flows MUST NOT gain a generic “ignore safety” switch.
 
 As of the review date, the macOS application is read-only. It samples startup
 volume capacity and proves the Swift/Rust boundary; it has no scan, candidate,
-plan, cleanup, AI-provider, database, or scheduling API.
+plan, cleanup, AI-provider, history/settings, or scheduling API. The shared
+core engine opens its private SQLite compatibility store internally before
+workers start, but that store has no app-facing CRUD surface.
 
 `dux-core` has typed rule, candidate, cleanup-plan, lexical validation,
 filesystem evidence, protected-root policy, and dangerous-path test models.
@@ -257,8 +259,9 @@ authority.
 Current binary scan caches are atomic and checksummed, but checksums detect
 corruption rather than malicious tampering and the current cache writer does
 not enforce the future 0700-directory/0600-file permissions. Cached paths are
-therefore sensitive, non-authoritative data. Public app cleanup is blocked
-until private permissions and migration tests exist.
+therefore sensitive, non-authoritative data. The SQLite store now has private
+permissions and migration tests; binary snapshot/cache storage does not, so
+public app cleanup remains blocked.
 
 The current loader reads the complete cache before structural validation, has
 no retention cap, and accepts same-user replacement as ordinary input. A forged
@@ -274,15 +277,19 @@ The following implemented controls are safe foundations, not shipping approval:
 - a deny-unknown rule-catalog schema and private loader for test fixtures;
 - a versioned dangerous-path corpus, cross-platform properties, and an isolated
   filesystem-free fuzz target; and
+- a private, versioned SQLite migration boundary with path-free compatibility
+  status, transactional checksummed upgrades, read-only newer-schema handling,
+  and hardened owned-store provisioning; and
 - release dependency, checksum, action-pinning, and packaging gates for the
   existing Rust artifacts.
 
 The source tree configures Hardened Runtime for the app spike, but no public
 Developer ID-signed/notarized artifact exists yet. The explicit DUX FFI version
 is displayed rather than enforced by the Swift service today; this must become
-a startup rejection before real engine APIs ship. SQLite, settings, history,
-AI, Trash, eviction, scheduling, notifications, launch-at-login, and typed TCC
-coverage are wholly unimplemented.
+a startup rejection before real engine APIs ship. SQLite schema migration and
+store coordination are implemented, but settings/history CRUD is not. AI,
+Trash, eviction, scheduling, notifications, launch-at-login, and typed TCC
+coverage remain unimplemented.
 
 ## 6. Cleanup authority chain
 
@@ -744,10 +751,79 @@ files, checksum/version validation, durable flush where required, and atomic
 replacement. CRC checks detect accidental corruption, not authenticity or
 confidentiality.
 
+The implemented SQLite boundary provisions a previously absent DUX directory
+in an unpredictable private sibling stage. It creates and durably writes a
+fixed ownership marker plus an empty database before atomically publishing the
+directory without replacement. A racing winner is re-probed and never
+overwritten. An existing unmarked directory or database is not claimed,
+repaired, or populated, and a marker-owned missing database is not recreated.
+After a successful current-schema migration and WAL setup it durably creates a
+separate private initialization sentinel. This preserves the immutable
+ownership marker while distinguishing an interrupted first provision from a
+previously initialized database later truncated to zero. The SQLite layer
+accepts only its database, ownership marker, initialization sentinel, known
+SQLite sidecars, and the exact reserved `snapshots`, `ai`, and `logs` siblings
+in the final DUX directory; the later owners of those sibling stores must
+perform their own no-follow identity and permission validation.
+
+On Unix, stage children are created relative to a retained directory handle;
+the final no-replace rename is relative to a retained current-user parent that
+is not writable by group or others. Linux and macOS expose no equivalent of
+Windows' source-handle-bound directory rename, so the unpredictable stage name
+and retained-identity checks detect but cannot prevent a malicious same-user
+process substituting that source name immediately before publication. Such
+same-user code is outside the storage-isolation guarantee stated above; DUX
+fails closed on the post-publication identity mismatch. The final DUX directory and SQLite files
+must have exact 0700/0600 modes and current ownership; regular files must have
+one link. macOS additionally rejects every extended ACL on final DUX objects,
+while permitting deny-only ACLs on the publication parent so the normal system
+`everyone deny delete` entry on `~/Library/Application Support` remains usable.
+Linux currently relies on ownership and mode checks and does not inspect POSIX
+ACLs. On Windows, the stage children and no-replace publication are bound to
+retained handles, final objects receive protected current-user-only DACLs, and
+a final-root handle that denies delete sharing prevents a parent
+`DELETE_CHILD` grant from swapping the directory while SQLite uses its path.
+SQLite-created Windows sidecars inherit private access and are immediately
+repaired to the exact protected file DACL before further use.
+
+Migration SQL is embedded, sequential, SHA-256 checked, denied embedded
+transaction/savepoint control, applied in one runner-owned `BEGIN IMMEDIATE`
+transaction, and recorded in a contiguous ledger paired with an exact schema
+fingerprint. Stored path observations use a frozen lossless
+codec: tag 1 is UTF-8 host-path bytes and tag 2 is little-endian UTF-16 host
+units; tag 0 is reserved for UTF-8 non-path aggregate keys. Path fields accept
+at most 32,768 host units, including the corresponding 65,536-byte UTF-16
+representation. Semantic status, pressure, tier, mode, trigger, and category
+values are constrained self-describing text rather than implicit enum ordinals.
+
+Compatibility inspection and migration have both SQLite-VM-operation ceilings
+and deadlines sampled every 1,000 VM operations by SQLite's progress callback.
+Schema/ledger storage types and byte lengths are checked before Rust
+materialization, fingerprint input has per-value and aggregate caps, and direct
+Rust-side deadline checkpoints cover row validation and hashing.
+Startup performs bounded full quick/foreign-key integrity inspection; live
+presentation status performs only bounded ledger/version/fingerprint
+compatibility inspection rather than rescanning all stored rows. Exceeding a
+budget returns a distinct path-free limit category and never asserts
+corruption. Every compatibility refresh holds the process coordinator mutex
+and then the stable cross-process writer lease. A newer valid schema is opened
+strictly read-only and is never downgraded. Marker-owned recovery sidecars may
+be opened read-write only under that lease for SQLite recovery; a resulting
+newer schema is immediately reopened read-only.
+
+An interrupted or losing first provision can leave a private sibling named
+`.dux-stage-*` containing only the fixed marker and empty database. This is a
+small availability/footprint debt, not a published store or cleanup authority.
+Future retention maintenance must scavenge only bounded, identity-validated,
+code-owned stages; current code deliberately does not recursively delete an
+unproven path during error recovery.
+
 Symlinked storage roots, ownership mismatch, unsupported schema versions, and
 unsafe permissions block writes. Older clients fail read-only rather than
-downgrade or corrupt shared state. The app, bundled CLI, and standalone CLI
-coordinate migrations and snapshot publication across processes.
+downgrade or corrupt shared state. The internal SQLite coordinator provides a
+stable cross-process lease whenever an `EngineHandle` opens the store. App/FFI
+and CLI adoption plus coordinated binary-snapshot publication remain future
+integration work.
 
 ### 12.3 Retention and deletion
 
@@ -759,6 +835,12 @@ oldest unreferenced snapshots first. AI insights default to 30 days, are
 user-clearable, and are invalidated when the redacted-input digest changes.
 Operation history is retained until the user explicitly clears it so interrupted
 and failed cleanup remains explainable.
+
+The SQLite schema records raw and daily-rollup capacity samples as distinct,
+constrained kinds so retention cannot infer a sample's lifetime from timestamp
+shape. Scan coverage likewise records a constrained status separately from its
+optional quantitative estimate: unknown coverage remains `NULL`, never a
+misleading zero, while complete coverage is exactly 1000 permille.
 
 Clearing DUX data removes only DUX-owned stores after the same storage-root and
 symlink checks. It does not empty system Trash, provider caches, or user data.
@@ -822,11 +904,13 @@ cancellation nor shutdown. Explicit close and cancellation are idempotent.
 
 The current core checkpoint owns one registry per engine session with fixed
 worker, queue, event, terminal-record, and input bounds; the application
-architecture owns one engine session. Its only production task is a read-only
-formatting batch: it has no path, scan, persistence, AI, plan, or cleanup
-authority. Cancellation intent is recorded separately from the
-operation-reported outcome so a late request cannot falsely claim completed
-effects were rolled back, and engine `Closed` means every worker has quiesced.
+architecture owns one engine session. Startup validates and migrates one
+private SQLite store before workers are published, but exposes no raw SQL or
+domain persistence. Its only production task is a read-only formatting batch:
+it has no scan, AI, plan, or cleanup authority. Cancellation intent is recorded
+separately from the operation-reported outcome so a late request cannot falsely
+claim completed effects were rolled back, and engine `Closed` means every
+worker has quiesced.
 The UniFFI `DuxEngine` remains a smoke-only lifecycle object; task IDs, event
 pages, results, and cancellation do not yet cross FFI.
 
@@ -1046,13 +1130,14 @@ incident as a substitute for deterministic local evidence.
 | macOS app cleanup | Absent | Entire cleanup release gate in §17.3 |
 | Legacy CLI deletion | Active arbitrary-descendant permanent path routed through a temporary core adapter; strict-target/volume/identity rechecks only; scanned-byte estimates labeled in CLI | Replace adapter with reviewed plan/approval/executor chain without weakening current checks |
 | Centralized executor | Production executor absent; temporary legacy adapter is containment only | Typed admission, cross-process lease, live revalidation, and journal required |
-| Engine/FFI task and plan API | Core handle and bounded per-session registry implemented for one read-only formatting batch; app architecture owns one session; UniFFI handle remains smoke-only, with no scan/task/plan DTOs or cleanup authority | Version rejection plus bounded scan/task/plan handles and cancellation |
+| Engine/FFI task and plan API | Core handle, pre-worker SQLite compatibility handshake, and bounded per-session registry implemented for one read-only formatting batch; app architecture owns one session; UniFFI handle remains smoke-only, with no scan/task/plan DTOs or cleanup authority | FFI version rejection plus bounded scan/task/plan handles and cancellation |
+| SQLite compatibility store | Checksummed v1 migration/fingerprint, lossless bounded path codec, bounded full/lightweight inspection, private atomic provisioning with durable initialization evidence, cross-platform process writer/version-race coverage, newer-schema read-only transition, and rollback/WAL recovery are implemented; status only, no domain CRUD | Typed scan/history APIs, retention, and bounded identity-safe abandoned-stage maintenance |
 | Typed scan coverage/issues | Absent; current scanner counts/skips and permits relaxed flags | Required before any scan is described as complete or becomes plan input |
 | Cache semantic/input validation | Atomic write plus CRC/version only; full-file read before bounds | Bounded reads, tree/path semantics, private permissions, retention, and migration |
 | Hard-link accounting and policy | Absent; only non-authoritative path snapshots capture link count | Deduplicated scan accounting and explicit per-mode admission rules |
 | Forbidden destructive-call lint | Implemented with compiler-resolved Rust denial, cross-language repository scan, scoped annotations, self-tests, and CI | Keep exception set exact; remove legacy baseline during executor migration |
 | Durable operation journal/history | Absent | Required before shared executor ships |
-| Private 0700/0600 stores | Not enforced by current cache | Required for app databases, snapshots, caches, and provider temp data |
+| Private 0700/0600 stores | SQLite stage/final root, database, marker, and sidecars enforce ownership, no-follow identity, links, and Unix modes; macOS rejects final-object ACLs but accepts deny-only publication-parent ACLs; Windows uses exact protected DACLs plus handle-bound publication and a retained final-root rename guard; current binary cache remains non-private | Extend equivalent ownership and atomic-publication guarantees to snapshots, caches, logs, provider temp data, and bounded abandoned-stage maintenance |
 | Trash executor | Absent | Platform-native implementation and integration tests |
 | Cloud eviction | Absent | Supported API plus fully-uploaded/no-local-change evidence |
 | Scheduled cleanup | Absent | Manual-history maturity and all automation gates in §10 |

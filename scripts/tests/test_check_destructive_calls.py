@@ -40,6 +40,16 @@ class DestructiveCallLintTests(unittest.TestCase):
             "fn go() { let launch = std::process::Command::new; launch(\"tool\"); }",
             "rust-process-spawn",
         )
+        self.assert_rule(
+            "src/example.rs",
+            "unsafe { nix::libc::syscall(nix::libc::SYS_renameat2, a, b, c, d, flags); }",
+            "rust-platform-delete",
+        )
+        self.assert_rule(
+            "src/example.rs",
+            "unsafe { renameatx_np(parent, from, parent, to, flags); }",
+            "rust-platform-delete",
+        )
 
     def test_comments_and_literals_do_not_trigger_rust_rules(self) -> None:
         source = '// std::fs::remove_file(path);\nlet text = "remove_dir_all(path)";\n'

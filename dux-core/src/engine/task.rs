@@ -131,6 +131,8 @@ pub enum CloseOutcome {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum EngineOpenError {
+    #[error("engine database is unavailable: {0:?}")]
+    Database(crate::persistence::DatabaseOpenErrorKind),
     #[error("engine worker resources are unavailable")]
     WorkerUnavailable,
 }

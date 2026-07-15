@@ -57,15 +57,26 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Test destructive-call policy
-        if: runner.os == 'Linux'
         run: python3 -m unittest discover -s scripts/tests -p 'test_*.py'
 
       - name: Enforce destructive-call boundary
-        if: runner.os == 'Linux'
         run: python3 scripts/check_destructive_calls.py
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Clippy non-shipping fuzz adapter
+        if: runner.os == 'Linux'
+        env:
+          RUSTFLAGS: --cfg fuzzing
+        run: cargo clippy --package dux-core --all-targets --locked -- -D warnings
+
+      - name: Clippy isolated fuzz harness
+        if: runner.os == 'Linux'
+        env:
+          CLIPPY_CONF_DIR: ${{ github.workspace }}/fuzz
+          RUSTFLAGS: --cfg fuzzing
+        run: cargo clippy --manifest-path fuzz/Cargo.toml --all-targets --locked -- -D warnings
 
       - name: Build all targets
         run: cargo build --workspace --all-targets --locked
@@ -95,6 +106,16 @@ jobs:
       - name: Check workspace
         run: cargo check --workspace --all-targets --locked
 
+      - name: Check non-shipping fuzz adapter
+        env:
+          RUSTFLAGS: --cfg fuzzing
+        run: cargo check --package dux-core --all-targets --locked
+
+      - name: Check isolated fuzz harness
+        env:
+          RUSTFLAGS: --cfg fuzzing
+        run: cargo check --manifest-path fuzz/Cargo.toml --all-targets --locked
+
   dependencies:
     name: Dependency policy
     runs-on: ubuntu-latest
@@ -118,8 +139,14 @@ jobs:
       - name: Audit RustSec advisories
         run: cargo audit --deny warnings
 
+      - name: Audit isolated fuzz dependencies
+        run: cargo audit --file fuzz/Cargo.lock --deny warnings
+
       - name: Check dependency policy
         run: cargo deny --locked check
+
+      - name: Check isolated fuzz dependency policy
+        run: cargo deny --manifest-path fuzz/Cargo.toml --locked check --config fuzz/deny.toml
 
   build:
     name: Build (${{ matrix.target }})
@@ -161,6 +188,13 @@ jobs:
 
       - name: Build release binary
         run: cargo build --release --locked --target ${{ matrix.target }} -p dux-cli
+
+      - name: Verify macOS 14 deployment target
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          bash scripts/check_macos_deployment_target.sh \
+            target/${{ matrix.target }}/release/dux
 
       - name: Smoke-test native binary
         if: (runner.os == 'Linux' && matrix.target == 'x86_64-unknown-linux-gnu') || (runner.os == 'Windows' && matrix.target == 'x86_64-pc-windows-msvc') || (runner.os == 'macOS' && runner.arch == 'ARM64' && matrix.target == 'aarch64-apple-darwin') || (runner.os == 'macOS' && runner.arch == 'X64' && matrix.target == 'x86_64-apple-darwin')

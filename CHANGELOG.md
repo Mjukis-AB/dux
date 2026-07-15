@@ -5,7 +5,28 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
-- Added the shared core engine handle and bounded per-session FIFO task registry with explicit disjoint storage paths, fixed workers/queue/event/result retention, opaque non-reused task IDs, typed cancellation and terminal state, panic containment, nonblocking close with quiescence, and a bounded read-only formatting operation. The application architecture owns one session; the UniFFI engine remains smoke-only, and no scan, persistence, AI, plan, or cleanup authority is exposed by this checkpoint.
+- Added a versioned private SQLite foundation owned by the shared engine. A
+  checksummed v1 `STRICT` schema covers all planned aggregate/history tables
+  with bounded fields, constrained semantic text, and a tested lossless
+  UTF-8/UTF-16 path codec. Transactional migrations and live compatibility
+  refresh use separate VM/deadline budgets, WAL, bounded lock waits, and a
+  stable advisory writer lease; bounded schema materialization and runner-owned
+  transaction control prevent crafted metadata or migration batches from
+  escaping those limits. Valid newer schemas reopen read-only while
+  foreign, unmarked, corrupt, drifted, or over-budget stores return path-free
+  categories. Private staged provisioning atomically publishes an immutable
+  ownership marker plus empty database without replacing a racing path, then
+  durably records successful initialization so zero-length corruption cannot
+  be mistaken for a fresh store, and
+  permits the exact future `snapshots`, `ai`, and `logs` siblings. Unix stores
+  enforce owner/mode/link/no-follow invariants, with deny-only publication-parent
+  ACLs and exact final-object ACL rejection on macOS. Windows uses protected
+  owner-only DACLs, handle-relative stage creation, handle-bound publication, a
+  retained final-root rename guard, and exact SQLite-sidecar DACL repair. Real
+  Unix crash regressions, cross-platform writer/version-race coverage, and native macOS/Windows
+  storage tests cover the platform-specific boundaries. No domain CRUD or
+  cleanup authority is exposed by this checkpoint.
+- Added the shared core engine handle and bounded per-session FIFO task registry with explicit disjoint storage paths, fixed workers/queue/event/result retention, opaque non-reused task IDs, typed cancellation and terminal state, panic containment, nonblocking close with quiescence, and a bounded read-only formatting operation. The application architecture owns one session; the UniFFI engine remains smoke-only, and no scan, domain-persistence operation, AI, plan, or cleanup authority is exposed by this checkpoint.
 - Added a temporary core-owned adapter for the legacy CLI permanent-delete path. Single and batch requests consume opaque target-bound plans through one guarded effect boundary, and repository policy prevents the adapter from being exposed through FFI or the macOS app.
 - Added a CI-enforced destructive-call boundary: compiler-resolved per-platform Rust filesystem/process denials plus a cross-language repository scanner with one-use registered exceptions, executable/shebang discovery, release enforcement, and executable policy tests. The XCFramework builder now rejects arbitrary destinations and symlinked output parents before any build tool or destructive mutation runs.
 - Added the normative DUX security design: an implementation-status-aware threat model and cleanup shipping gate covering the one-way observation-to-executor authority chain, path and protected-root evidence, rule provenance, Trash/permanent/eviction semantics, automation, AI isolation, private persistence, TCC and unsandboxed authority, FFI/CLI boundaries, supply-chain integrity, incident response, and the explicit gaps in the current legacy CLI deletion path.

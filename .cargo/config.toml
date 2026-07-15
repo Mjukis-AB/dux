@@ -1,0 +1,5 @@
+# Keep Rust and native C/C++ objects compatible with the app's supported macOS
+# baseline. Apple toolchains consume this variable; non-Apple toolchains ignore
+# it, so one Cargo configuration covers local and CI builds on every host.
+[env]
+MACOSX_DEPLOYMENT_TARGET = { value = "14.0", force = true }

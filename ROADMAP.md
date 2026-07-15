@@ -729,8 +729,14 @@ settings
 Minimum columns:
 
 - `volumes`: stable ID, mount path, display name, filesystem, internal/removable flags, first/last seen.
-- `disk_samples`: volume ID, sampled time, total, available, important available, pressure.
-- `scans`: scan ID, root, start/end, status, snapshot version/path, counts, bytes, coverage.
+- `disk_samples`: volume ID, raw/daily-rollup kind, sampled time, total,
+  available, important available, pressure. Kind participates in uniqueness and
+  retention selection so a daily rollup cannot collide with a raw sample at
+  the same timestamp.
+- `scans`: scan ID, root, start/end, status, snapshot version/path, counts,
+  bytes, and first-class `unknown`/`complete`/`limited_access`/`partial`
+  coverage. Quantitative coverage is nullable so unknown coverage is never
+  encoded as zero.
 - `scan_aggregates`: scan ID, category/rule/top-level path key, bytes, file count.
 - `scan_issues`: scan ID, shortened path, issue kind, count/message.
 - `candidates`: candidate ID, scan ID, rule ID/revision, tier, bytes, created time, status.
@@ -1844,11 +1850,77 @@ Tasks:
   cancellation races, close/drop/clone lifecycle, panic containment and safe
   shutdown after mutex poisoning, cursor continuity, storage-role overlap,
   non-wrapping ID exhaustion, and
-  cross-platform path construction. This is deliberately not scan,
-  persistence, priority, callback, cleanup, CLI, or FFI task integration; the
-  Phase 0 UniFFI `DuxEngine` remains a smoke-only transport handle until a later
-  coarse task DTO/event slice.
-- [ ] Add versioned SQLite migrations.
+  cross-platform path construction. The registry operation is deliberately not
+  scan, domain-persistence, priority, callback, cleanup, CLI, or FFI task
+  integration; the Phase 0 UniFFI `DuxEngine` remains a smoke-only transport
+  handle until a later coarse task DTO/event slice.
+- [x] Add versioned SQLite migrations. Completed 2026-07-16: engine startup now
+  provisions and opens a private SQLite store before publishing any worker,
+  with one reusable coordinator per retained physical database identity and
+  process, including case/normalization aliases on case-insensitive
+  filesystems. The checksummed v1 migration creates every §11.1 table with
+  SQLite `STRICT`, bounded text/blob fields, constrained self-describing
+  semantic values, and a frozen lossless path codec: UTF-8 host bytes use tag
+  1, little-endian UTF-16 host units use tag 2, and UTF-8 logical aggregate
+  keys use tag 0. The 32,768-host-unit limit admits the corresponding
+  65,536-byte Windows representation. A contiguous SHA-256 migration ledger,
+  DUX application ID, and exact schema fingerprint detect partial migration or
+  drift; upgrades run in one `BEGIN IMMEDIATE` transaction.
+
+  A stable advisory lock plus SQLite WAL, five-second busy bounds, `FULL`
+  synchronization, defensive connection settings, disabled attachment/schema
+  trust, and runtime limits guard each writer. Full startup and migration
+  integrity inspection use fixed VM-operation ceilings and deadlines sampled by
+  a SQLite progress callback. Live, fallible status uses a smaller bounded
+  ledger/version/fingerprint compatibility inspection instead of rescanning
+  history or foreign-key rows on every render. It rechecks under the same
+  lease, transitions a reused coordinator to read-only after an external
+  upgrade, and never treats cached startup status as write authority.
+  Marker-owned rollback/WAL recovery artifacts are opened RW only under the
+  lease; a recovered newer schema is immediately reopened strictly read-only.
+  Foreign, corrupt, partially migrated, drifted, over-budget, or unmarked
+  stores fail with distinct path-free categories.
+
+  First provisioning builds an exact private sibling stage containing a
+  durably written immutable ownership marker and empty database, then publishes
+  the directory atomically without replacement. Successful current-schema
+  setup durably adds a separate private initialization sentinel, so a later
+  zero-length truncation cannot be mistaken for an interrupted first provision.
+  A collision re-probes the
+  winner and never overwrites it; unmarked empty directories/databases and a
+  marker missing its database remain untouched. Unix stage creation and final
+  no-replace rename are descriptor-relative beneath retained directories, with
+  retained identities, no-follow opens, single-link checks, and exact
+  0700/0600 repair. macOS permits deny-only ACLs on the publication parent (as
+  used by normal `Application Support`) but rejects extended ACLs on final DUX
+  objects; Linux relies on owner/mode checks. Windows uses owner-only protected
+  DACLs at birth, retained file IDs, handle-relative stage children,
+  handle-bound no-replace publication, a retained final-root rename guard, and
+  immediate exact-DACL repair for inherited SQLite sidecars;
+  reparse/device/multi-link and ambiguous DOS/ADS/alias syntax reject. The root
+  admits only SQLite objects and exact reserved `snapshots`, `ai`, and `logs`
+  siblings so later Milestone 2 stores do not invalidate the database. Failed
+  or losing provisions can leave tiny private `.dux-stage-*` siblings with only
+  the marker/empty database; bounded identity-safe scavenging is deferred to
+  retention maintenance rather than recursively deleting an unproven path.
+  Unix has no supported source-handle-bound directory rename, so malicious
+  same-user substitution of the unpredictable stage name remains outside the
+  storage-isolation boundary and is rejected by post-publication identity
+  validation; Windows binds publication directly to the retained source handle.
+
+  Cross-platform tests cover exact migration/checksum/fingerprint/codec
+  constraints, idempotent process reuse, transactional rollback, bounded
+  inspection, live status skew, newer-version read-only behavior, shared-layout
+  siblings, foreign metadata preservation, collisions, missing ownership
+  evidence, schema/ledger drift, hard links, and bounded lease release. Unix
+  subprocess tests add cross-platform lock/version races, while Unix adds real
+  SIGKILL hot-journal and missing-shared-memory WAL recovery. macOS tests add
+  deny/allow ACL and physical alias cases;
+  Windows-native tests add exact DACL/sidecar repair, source-path replacement,
+  no-replace publication, and final-root rename-guard cases. Unix special-file
+  and sidecar-symlink tests remain platform-scoped. This foundation exposes
+  status only: domain CRUD, history queries, retention, binary snapshots,
+  CLI/FFI transport, and real cleanup authority remain subsequent tasks.
 - [ ] Add scan/session/candidate/cleanup persistence.
 - [ ] Keep binary snapshots atomic and checksummed.
 - [ ] Add capacity sample storage.

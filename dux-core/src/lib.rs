@@ -7,6 +7,7 @@ pub mod error;
 // of trusted mount, volume, home-resolution, rule-scope, and planner witnesses.
 #[allow(dead_code)]
 pub(crate) mod path_validation;
+pub mod persistence;
 pub mod projection;
 
 /// Non-shipping, filesystem-free invariant oracle for the isolated fuzz crate.
@@ -40,6 +41,9 @@ pub use engine::{
     TaskFailureKind, TaskId, TaskKind, TaskPhase, TaskSnapshot,
 };
 pub use error::{DuxError, Result};
+pub use persistence::{
+    DATABASE_SCHEMA_VERSION, DatabaseAccess, DatabaseOpenErrorKind, DatabaseStatus,
+};
 pub use projection::{
     ArtifactClassification, ArtifactKind, BuildArtifactEntry, LargeFileEntry, StaleThreshold,
     classify_artifact, project_build_artifacts_at, project_large_files,

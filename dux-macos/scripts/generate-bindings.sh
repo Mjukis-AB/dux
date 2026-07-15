@@ -10,6 +10,10 @@ readonly STAGING_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/dux-bindings.XXXXXX")"
 readonly GENERATED_ROOT="$STAGING_ROOT/Generated"
 readonly HEADERS_ROOT="$STAGING_ROOT/Headers"
 
+# Keep the host-side binding generator aligned even when this script is
+# invoked from outside the repository and Cargo cannot discover .cargo/config.
+export MACOSX_DEPLOYMENT_TARGET="14.0"
+
 # DUX-DESTRUCTIVE: allow=build-bindings-staging-remove -- mktemp-created staging directory is exclusively owned by this build
 trap 'rm -rf "$STAGING_ROOT"' EXIT
 

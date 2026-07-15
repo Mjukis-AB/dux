@@ -67,6 +67,20 @@ C header/module map and XCFramework remain under ignored `Generated/` and must
 be recreated before building from a clean checkout. Never combine bindings and
 a library produced from different source revisions or build configurations.
 
+The repository Cargo configuration pins `MACOSX_DEPLOYMENT_TARGET=14.0` for
+Cargo invocations started inside the DUX checkout, including native
+dependencies compiled by build scripts. The macOS helper scripts also export
+the baseline when invoked from elsewhere. Release and app CI verify the final
+Mach-O load command with:
+
+```bash
+bash scripts/check_macos_deployment_target.sh path/to/Mach-O
+```
+
+This is a DUX workspace and release-artifact guarantee. A downstream crate
+consumer builds under its own workspace Cargo configuration and deployment
+policy.
+
 `project.yml` is the source for `Dux.xcodeproj`. Regenerate the project with
 XcodeGen 2.44.1 after changing project structure:
 

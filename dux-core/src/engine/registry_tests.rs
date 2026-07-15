@@ -45,8 +45,35 @@ fn handle_is_send_sync_and_config_is_explicit() {
     let expected = config(&temp);
     let engine = EngineHandle::open(expected.clone()).unwrap();
     assert_eq!(engine.config(), &expected);
+    assert_eq!(
+        engine.database_status().unwrap(),
+        crate::persistence::DatabaseStatus {
+            schema_version: crate::persistence::DATABASE_SCHEMA_VERSION,
+            access: crate::persistence::DatabaseAccess::ReadWriteCurrent,
+        }
+    );
     engine.close();
     assert!(engine.wait_until_closed(TEST_TIMEOUT));
+}
+
+#[test]
+fn database_failure_prevents_engine_publication_without_echoing_paths() {
+    let temp = TempDir::new().unwrap();
+    let blocked_root = temp.path().join("blocked-root");
+    std::fs::write(&blocked_root, b"not a directory").unwrap();
+    let config = EngineConfig::new(
+        blocked_root.join("dux.sqlite3"),
+        temp.path().join("snapshots"),
+        temp.path().join("cache"),
+    )
+    .unwrap();
+
+    let error = EngineHandle::open(config).err().unwrap();
+    assert_eq!(
+        error,
+        EngineOpenError::Database(crate::persistence::DatabaseOpenErrorKind::UnsafeStorageRoot)
+    );
+    assert!(!error.to_string().contains("blocked-root"));
 }
 
 #[test]

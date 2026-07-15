@@ -12,6 +12,7 @@ use super::task::{
     FormattedSizeEntry, StartTaskError, TaskAccessError, TaskEvent, TaskEventBatch, TaskEventKind,
     TaskFailureKind, TaskId, TaskKind, TaskPhase, TaskSnapshot,
 };
+use crate::persistence::{DatabaseStatus, StoreCoordinator};
 
 const FORMAT_BATCH_LIMIT: usize = 256;
 
@@ -290,6 +291,7 @@ impl Shared {
 
 struct EngineInner {
     config: EngineConfig,
+    store: Arc<StoreCoordinator>,
     shared: Arc<Shared>,
     workers: Mutex<Option<Vec<JoinHandle<()>>>>,
 }
@@ -315,6 +317,10 @@ impl EngineHandle {
         config: EngineConfig,
         limits: RegistryLimits,
     ) -> Result<Self, EngineOpenError> {
+        // Durable storage is validated and migrated before any worker becomes
+        // observable, so a failed open cannot leave a live partial engine.
+        let store = StoreCoordinator::open(config.database_path())
+            .map_err(|error| EngineOpenError::Database(error.kind))?;
         let shared = Arc::new(Shared::new(limits));
         let mut workers = Vec::with_capacity(limits.workers);
         for index in 0..limits.workers {
@@ -340,6 +346,7 @@ impl EngineHandle {
         Ok(Self {
             inner: Arc::new(EngineInner {
                 config,
+                store,
                 shared,
                 workers: Mutex::new(Some(workers)),
             }),
@@ -348,6 +355,13 @@ impl EngineHandle {
 
     pub fn config(&self) -> &EngineConfig {
         &self.inner.config
+    }
+
+    /// Path-free compatibility status for the engine's durable store.
+    pub fn database_status(
+        &self,
+    ) -> Result<DatabaseStatus, crate::persistence::DatabaseOpenErrorKind> {
+        self.inner.store.status().map_err(|error| error.kind)
     }
 
     pub fn lifecycle(&self) -> EngineLifecycle {

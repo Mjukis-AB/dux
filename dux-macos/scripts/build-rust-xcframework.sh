@@ -14,6 +14,10 @@ readonly OUTPUT_PATH="${1:-$EXPECTED_OUTPUT_PATH}"
 readonly HEADERS_PATH="${DUX_FFI_HEADERS_PATH:-}"
 
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$REPO_ROOT/target}"
+# Rust build scripts that compile C/C++ dependencies must receive the same
+# minimum OS as the Xcode target. Without this, clang stamps bundled objects
+# with the host SDK version and the universal app cannot actually run on 14.
+export MACOSX_DEPLOYMENT_TARGET="14.0"
 
 if [[ "$OUTPUT_PATH" != "$EXPECTED_OUTPUT_PATH" ]]; then
     echo "error: output must be the repository-owned XCFramework path '$EXPECTED_OUTPUT_PATH'" >&2

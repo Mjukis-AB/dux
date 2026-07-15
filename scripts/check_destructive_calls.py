@@ -63,6 +63,8 @@ RUST_RULES = (
             r"\s*::\s*(?:remove|unlink|unlinkat|rmdir)\b"
             r"|\b(?:FileDispositionInfo(?:Ex)?|FILE_DISPOSITION_INFO|"
             r"SetFileInformationByHandle)\b"
+            r"|\bnix\s*::\s*libc\s*::\s*SYS_renameat2\b"
+            r"|(?<!fn )\brenameatx_np\s*\("
         ),
     ),
     (
@@ -268,6 +270,21 @@ EXCEPTIONS = {
         "dux-core/src/cleanup/legacy_cli.rs", "rust-filesystem-effect", "test:replaced_ancestor_cannot_redirect_delete_outside_scan_root"
     ),
     "finder-reveal": ExceptionSpec("dux-cli/src/app/state.rs", "rust-process-spawn", "open_in_finder"),
+    "test-persistence-helper-spawn": ExceptionSpec(
+        "dux-core/src/persistence/persistence_tests.rs",
+        "rust-process-spawn",
+        "spawn_persistence_helper",
+    ),
+    "test-persistence-displace-shm": ExceptionSpec(
+        "dux-core/src/persistence/persistence_tests.rs",
+        "rust-filesystem-effect",
+        "test:wal_is_recovered_after_crash_even_when_shared_memory_is_missing",
+    ),
+    "test-persistence-truncate-owned-database": ExceptionSpec(
+        "dux-core/src/persistence/persistence_tests.rs",
+        "rust-truncation-effect",
+        "test:marker_owned_database_truncated_after_its_valid_header_is_corrupt",
+    ),
     "test-state-replaced-multi-item": ExceptionSpec(
         "dux-cli/src/app/state.rs", "rust-filesystem-effect", "test:multi_delete_skips_replaced_item_and_deletes_unchanged_item"
     ),
@@ -289,6 +306,27 @@ EXCEPTIONS = {
     ),
     "test-protected-replaced-root": ExceptionSpec(
         "dux-core/src/path_validation/protected.rs", "rust-filesystem-effect", "test:replacement_scan_root_at_the_same_path_rejects_old_target_evidence"
+    ),
+    "storage-root-handle-publish": ExceptionSpec(
+        "dux-core/src/persistence/storage/windows.rs",
+        "rust-platform-delete",
+        "rename_by_handle_no_replace",
+    ),
+    "storage-root-linux-publish": ExceptionSpec(
+        "dux-core/src/persistence/storage.rs", "rust-platform-delete"
+    ),
+    "storage-root-macos-publish": ExceptionSpec(
+        "dux-core/src/persistence/storage.rs", "rust-platform-delete"
+    ),
+    "test-storage-root-source-swap": ExceptionSpec(
+        "dux-core/src/persistence/storage/windows.rs",
+        "rust-filesystem-effect",
+        "test:staged_root_source_path_swap_never_publishes_the_replacement",
+    ),
+    "test-storage-final-root-rename-guard": ExceptionSpec(
+        "dux-core/src/persistence/storage/windows.rs",
+        "rust-filesystem-effect",
+        "test:fresh_store_reopens_before_blocking_external_final_root_rename",
     ),
     "build-xcframework-staging-remove": ExceptionSpec(
         "dux-macos/scripts/build-rust-xcframework.sh", "shell-remove"
@@ -341,6 +379,9 @@ EXCEPTION_PRIMITIVES = {
     "test-delete-changed-evidence": "rename",
     "test-delete-replaced-ancestor": "rename",
     "finder-reveal": "Command::new",
+    "test-persistence-helper-spawn": "Command::new",
+    "test-persistence-displace-shm": "rename",
+    "test-persistence-truncate-owned-database": "set_len",
     "test-state-replaced-multi-item": "rename",
     "test-state-changed-evidence": "rename",
     "cache-write-failure-temp-remove": "remove_file",
@@ -349,6 +390,11 @@ EXCEPTION_PRIMITIVES = {
     "test-cache-first-temp-remove": "remove_file",
     "test-cache-second-temp-remove": "remove_file",
     "test-protected-replaced-root": "rename",
+    "storage-root-handle-publish": "SetFileInformationByHandle",
+    "storage-root-linux-publish": "SYS_renameat2",
+    "storage-root-macos-publish": "renameatx_np",
+    "test-storage-root-source-swap": "rename",
+    "test-storage-final-root-rename-guard": "rename",
     "build-xcframework-staging-remove": "rm",
     "build-xcframework-output-remove": "rm",
     "build-xcframework-publish-move": "mv",
@@ -366,6 +412,8 @@ CLIPPY_SUPPRESSION_COUNTS = {
     "dux-cli/src/app/state.rs": 3,
     "dux-core/src/cache/mod.rs": 2,
     "dux-core/src/path_validation/protected.rs": 1,
+    "dux-core/src/persistence/persistence_tests.rs": 3,
+    "dux-core/src/persistence/storage/windows.rs": 2,
 }
 
 CLIPPY_PRODUCT_SUPPRESSION_SYMBOLS = {

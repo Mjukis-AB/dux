@@ -20,6 +20,7 @@ pub enum EngineConfigReason {
     TooLong,
     FilesystemRoot,
     MissingFileName,
+    UnsupportedPlatformSyntax,
     OverlappingStorage,
 }
 
@@ -33,9 +34,8 @@ pub struct EngineConfigError {
 
 /// Explicit process-independent locations owned by one engine session.
 ///
-/// This checkpoint validates and retains these paths but performs no storage
-/// I/O. Directory creation, symlink inspection, private permissions, and
-/// migrations belong to the persistence milestone.
+/// Opening an engine securely provisions and migrates the database parent.
+/// Snapshot and cache roots remain reserved for their later storage owners.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EngineConfig {
     database_path: PathBuf,
@@ -87,8 +87,14 @@ impl EngineConfig {
     }
 }
 
+#[cfg(not(windows))]
 fn paths_overlap(left: &Path, right: &Path) -> bool {
     left == right || left.starts_with(right) || right.starts_with(left)
+}
+
+#[cfg(windows)]
+fn paths_overlap(left: &Path, right: &Path) -> bool {
+    windows_path_is_prefix(left, right) || windows_path_is_prefix(right, left)
 }
 
 fn validate_path(
@@ -121,7 +127,117 @@ fn validate_path(
     if require_file_name && path.file_name().is_none() {
         return Err(reject(EngineConfigReason::MissingFileName));
     }
+    #[cfg(windows)]
+    validate_windows_path(path)
+        .map_err(|()| reject(EngineConfigReason::UnsupportedPlatformSyntax))?;
     Ok(())
+}
+
+#[cfg(windows)]
+fn validate_windows_path(path: &Path) -> Result<(), ()> {
+    use std::path::Prefix;
+
+    let Some(Component::Prefix(prefix)) = path.components().next() else {
+        return Err(());
+    };
+    if !matches!(prefix.kind(), Prefix::Disk(_)) {
+        return Err(());
+    }
+
+    for component in path.components() {
+        let Component::Normal(name) = component else {
+            continue;
+        };
+        let text = name.to_str().ok_or(())?;
+        if text.ends_with('.')
+            || text.ends_with(' ')
+            || text
+                .chars()
+                .any(|character| matches!(character, '<' | '>' | ':' | '"' | '|' | '?' | '*' | '~'))
+            || is_windows_reserved_name(text)
+        {
+            return Err(());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn is_windows_reserved_name(component: &str) -> bool {
+    let stem = component.split('.').next().unwrap_or(component);
+    if stem.eq_ignore_ascii_case("CON")
+        || stem.eq_ignore_ascii_case("PRN")
+        || stem.eq_ignore_ascii_case("AUX")
+        || stem.eq_ignore_ascii_case("NUL")
+        || stem.eq_ignore_ascii_case("CONIN$")
+        || stem.eq_ignore_ascii_case("CONOUT$")
+    {
+        return true;
+    }
+    let upper = stem.to_ascii_uppercase();
+    matches!(
+        upper.as_str(),
+        "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    ) || ["COM¹", "COM²", "COM³", "LPT¹", "LPT²", "LPT³"]
+        .iter()
+        .any(|reserved| stem.eq_ignore_ascii_case(reserved))
+}
+
+#[cfg(windows)]
+fn windows_path_is_prefix(prefix: &Path, path: &Path) -> bool {
+    let prefix_components: Vec<_> = prefix.components().collect();
+    let path_components: Vec<_> = path.components().collect();
+    prefix_components.len() <= path_components.len()
+        && prefix_components
+            .iter()
+            .zip(path_components.iter())
+            .all(|(left, right)| windows_components_equal(*left, *right))
+}
+
+#[cfg(windows)]
+fn windows_components_equal(left: Component<'_>, right: Component<'_>) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Globalization::{CSTR_EQUAL, CompareStringOrdinal};
+
+    let (left, right) = match (left, right) {
+        (Component::Prefix(left), Component::Prefix(right)) => {
+            (left.as_os_str(), right.as_os_str())
+        }
+        (Component::RootDir, Component::RootDir) => return true,
+        (Component::Normal(left), Component::Normal(right)) => (left, right),
+        _ => return false,
+    };
+    let left: Vec<u16> = left.encode_wide().collect();
+    let right: Vec<u16> = right.encode_wide().collect();
+    let Ok(left_len) = i32::try_from(left.len()) else {
+        return false;
+    };
+    let Ok(right_len) = i32::try_from(right.len()) else {
+        return false;
+    };
+    // SAFETY: both pointers remain live for the call and their explicit UTF-16
+    // lengths fit the Win32 API. Ordinal ignore-case matches Windows path
+    // comparison without locale-sensitive transformations.
+    unsafe {
+        CompareStringOrdinal(left.as_ptr(), left_len, right.as_ptr(), right_len, 1) == CSTR_EQUAL
+    }
 }
 
 #[cfg(test)]
@@ -257,5 +373,41 @@ mod tests {
             assert_eq!(error.field, field);
             assert_eq!(error.reason, EngineConfigReason::OverlappingStorage);
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_storage_paths_reject_ambiguous_namespace_forms() {
+        let invalid = [
+            r"C:\data\dux.sqlite3:stream",
+            r"C:\data\dux.sqlite3.",
+            r"C:\data\NUL.sqlite3",
+            r"C:\PROGRA~1\dux.sqlite3",
+            r"\\?\C:\data\dux.sqlite3",
+            r"\\server\share\dux.sqlite3",
+        ];
+        for path in invalid {
+            let error = EngineConfig::new(
+                PathBuf::from(path),
+                PathBuf::from(r"C:\data\snapshots"),
+                PathBuf::from(r"C:\cache"),
+            )
+            .unwrap_err();
+            assert_eq!(error.field, EngineConfigField::Database);
+            assert_eq!(error.reason, EngineConfigReason::UnsupportedPlatformSyntax);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_storage_roles_compare_with_ordinal_case_folding() {
+        let error = EngineConfig::new(
+            PathBuf::from(r"C:\Data\dux.sqlite3"),
+            PathBuf::from(r"c:\data"),
+            PathBuf::from(r"C:\cache"),
+        )
+        .unwrap_err();
+        assert_eq!(error.field, EngineConfigField::Snapshots);
+        assert_eq!(error.reason, EngineConfigReason::OverlappingStorage);
     }
 }
