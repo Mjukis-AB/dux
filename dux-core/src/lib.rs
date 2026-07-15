@@ -1,4 +1,5 @@
 pub mod cache;
+pub mod domain;
 pub mod error;
 pub mod projection;
 pub mod scanner;
@@ -10,6 +11,12 @@ mod time;
 pub use cache::{
     CACHE_MAGIC, CACHE_VERSION, CacheMetadata, CachedScanConfig, cache_path_for, get_mtime,
     is_cache_valid, load_cache, save_cache, spot_check_mtimes,
+};
+pub use domain::{
+    ActivityGuard, BlockReason, Candidate, CandidateAction, CandidateCategory, CandidateId,
+    CandidateValidationError, Evidence, EvidenceKind, LocalizedTextKey, ProvenanceUrl, Rule,
+    RuleDefinition, RuleGuards, RuleId, RuleMatcher, RuleMatcherDefinition, RuleRef, RuleRevision,
+    RuleScope, RuleValidationError, SafetyTier, ScanId, StableIdError,
 };
 pub use error::{DuxError, Result};
 pub use projection::{
