@@ -1,0 +1,4 @@
+[bindings.swift]
+module_name = "DuxFFI"
+ffi_module_name = "DuxFFILowLevel"
+generate_immutable_records = true

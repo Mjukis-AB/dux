@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -13,63 +16,197 @@ jobs:
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned 2026-07-15
+        with:
+          toolchain: 1.96.0
 
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
       - name: Build
-        run: cargo build --workspace --all-targets
+        run: cargo build --workspace --all-targets --locked
 
       - name: Run tests
-        run: cargo test --workspace
+        run: cargo test --workspace --all-targets --locked
+
+  macos-ffi-app:
+    name: macOS FFI app
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Install Rust with macOS targets
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned 2026-07-15
+        with:
+          toolchain: 1.96.0
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: macos-ffi-app
+
+      - name: Generate Debug Rust XCFramework and Swift bindings
+        env:
+          CONFIGURATION: Debug
+        run: ./dux-macos/scripts/generate-bindings.sh
+
+      - name: Verify committed Debug Swift bindings
+        run: git diff --exit-code -- dux-macos/Dux/Generated/DuxFFI.swift
+
+      - name: Build unsigned universal Debug spike app
+        run: |
+          xcodebuild \
+            -project dux-macos/Dux.xcodeproj \
+            -scheme Dux \
+            -configuration Debug \
+            -destination 'generic/platform=macOS' \
+            -derivedDataPath target/dux-derived-data \
+            ARCHS="arm64 x86_64" \
+            ONLY_ACTIVE_ARCH=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Test linked Rust call and main-actor handoff
+        run: |
+          xcodebuild \
+            -project dux-macos/Dux.xcodeproj \
+            -scheme Dux \
+            -configuration Debug \
+            -derivedDataPath target/dux-derived-data \
+            CODE_SIGNING_ALLOWED=NO \
+            test
+
+      - name: Generate Release Rust XCFramework and Swift bindings
+        env:
+          CONFIGURATION: Release
+        run: ./dux-macos/scripts/generate-bindings.sh
+
+      - name: Verify committed Release Swift bindings
+        run: git diff --exit-code -- dux-macos/Dux/Generated/DuxFFI.swift
+
+      - name: Build unsigned universal Release spike app
+        run: |
+          xcodebuild \
+            -project dux-macos/Dux.xcodeproj \
+            -scheme Dux \
+            -configuration Release \
+            -destination 'generic/platform=macOS' \
+            -derivedDataPath target/dux-derived-data-release \
+            ARCHS="arm64 x86_64" \
+            ONLY_ACTIVE_ARCH=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            build
 
   lint:
     name: Lint
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned 2026-07-15
         with:
+          toolchain: 1.96.0
           components: rustfmt, clippy
 
       - name: Check formatting
         run: cargo fmt --all -- --check
 
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
-  build-check:
-    name: Build Release
+  msrv:
+    name: Minimum Rust 1.88
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Install minimum Rust
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned 2026-07-15
+        with:
+          toolchain: 1.88.0
+
+      - name: Check workspace
+        run: cargo check --workspace --all-targets --locked
+
+  dependencies:
+    name: Dependency policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned 2026-07-15
+        with:
+          toolchain: 1.96.0
 
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+      - name: Install dependency scanners
+        run: |
+          cargo install cargo-audit --version 0.22.2 --locked
+          cargo install cargo-deny --version 0.20.2 --locked
+
+      - name: Audit RustSec advisories
+        run: cargo audit --deny warnings
+
+      - name: Check dependency policy
+        run: cargo deny --locked check
+
+  build-check:
+    name: Build release
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned 2026-07-15
+        with:
+          toolchain: 1.96.0
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
       - name: Build release
-        run: cargo build --workspace --release
+        run: cargo build --workspace --release --locked
 
       - name: Check binary size
+        shell: bash
         run: |
-          SIZE=$(stat -c%s target/release/dux 2>/dev/null || stat -f%z target/release/dux)
-          echo "Binary size: $SIZE bytes ($(echo "scale=2; $SIZE/1048576" | bc) MB)"
-          # Fail if larger than 15MB
-          if [ "$SIZE" -gt 15728640 ]; then
-            echo "Binary too large!"
+          size=$(stat -c%s target/release/dux)
+          echo "Binary size: ${size} bytes"
+          if [ "$size" -gt 15728640 ]; then
+            echo "Binary exceeds the 15 MiB release limit"
             exit 1
           fi

@@ -109,7 +109,16 @@ impl ProbePool {
             };
 
             match result_rx.recv_timeout(remaining.min(CANCELLATION_POLL_INTERVAL)) {
-                Ok(result) => return Ok(result),
+                Ok(result) => {
+                    // The caller can be descheduled after computing `remaining`.
+                    // Do not accept a result that arrived while the caller was
+                    // asleep after the end-to-end deadline had already passed.
+                    if Instant::now() >= deadline {
+                        abandoned.store(true, Ordering::Release);
+                        return Err(ProbePoolError::DeadlineExceeded);
+                    }
+                    return Ok(result);
+                }
                 Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
                 Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
                     abandoned.store(true, Ordering::Release);

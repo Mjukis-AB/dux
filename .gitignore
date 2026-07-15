@@ -1,2 +1,4 @@
 /target
-Cargo.lock
+/dux-macos/Generated/
+/dux-macos/Dux.xcodeproj/project.xcworkspace/xcuserdata/
+/dux-macos/Dux.xcodeproj/xcuserdata/

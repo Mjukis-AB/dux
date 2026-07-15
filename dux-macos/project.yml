@@ -1,0 +1,56 @@
+name: Dux
+
+options:
+  minimumXcodeGenVersion: 2.44.1
+  createIntermediateGroups: true
+  deploymentTarget:
+    macOS: "14.0"
+
+schemes:
+  Dux:
+    build:
+      targets:
+        Dux: all
+        DuxTests: [test]
+    test:
+      targets:
+        - DuxTests
+
+targets:
+  Dux:
+    type: application
+    platform: macOS
+    productName: DUX
+    sources:
+      - path: Dux
+    dependencies:
+      - framework: Generated/DuxFFI.xcframework
+        embed: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: se.mjukis.dux.spike
+        PRODUCT_NAME: DUX
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: DUX
+        INFOPLIST_KEY_LSUIElement: YES
+        MACOSX_DEPLOYMENT_TARGET: "14.0"
+        SWIFT_VERSION: "6.0"
+        SWIFT_STRICT_CONCURRENCY: complete
+        ENABLE_HARDENED_RUNTIME: YES
+        DEAD_CODE_STRIPPING: YES
+
+  DuxTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: DuxTests
+    dependencies:
+      - target: Dux
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: se.mjukis.dux.spike.tests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/DUX.app/Contents/MacOS/DUX"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+        SWIFT_VERSION: "6.0"
+        SWIFT_STRICT_CONCURRENCY: complete

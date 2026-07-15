@@ -1,0 +1,42 @@
+# Architecture Decision Records
+
+This directory records durable architecture decisions for DUX. The roadmap
+describes intended product behavior and implementation order; ADRs explain why
+specific technical boundaries were chosen and when they may be reconsidered.
+
+## Status vocabulary
+
+- **Proposed**: under review and not yet binding.
+- **Accepted**: the default for implementation and review.
+- **Superseded**: replaced by a newer ADR, which must link back to the old one.
+- **Deprecated**: retained for history but no longer applicable.
+
+Accepted ADRs are not immutable. Replace a decision with a new ADR when its
+assumptions materially change; do not silently rewrite the original decision.
+Clarifications that do not change the decision may be added in place.
+
+## Index
+
+| ADR | Decision | Status |
+| --- | --- | --- |
+| [0001](0001-native-swiftui-macos-application.md) | Native SwiftUI macOS application | Accepted |
+| [0002](0002-direct-developer-id-distribution.md) | Direct Developer ID distribution | Accepted |
+| [0003](0003-primary-build-without-app-sandbox.md) | Primary build without App Sandbox | Accepted |
+| [0004](0004-shared-rust-engine.md) | Shared Rust engine | Accepted |
+| [0005](0005-uniffi-swift-rust-transport.md) | UniFFI for the Swift/Rust transport | Accepted |
+
+## Authoring rules
+
+Each ADR must include:
+
+1. status and decision date;
+2. the forces and constraints behind the decision;
+3. the decision and its implementation boundaries;
+4. positive and negative consequences;
+5. alternatives considered;
+6. validation criteria and explicit reconsideration triggers;
+7. links to related roadmap sections, ADRs, and primary references.
+
+Use the next four-digit number. Keep one primary decision per file. If a spike
+is required before deciding, record the uncertainty rather than presenting an
+untested choice as accepted.

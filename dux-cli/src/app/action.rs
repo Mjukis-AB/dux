@@ -43,6 +43,8 @@ pub enum Action {
     PrevView,
     /// Cycle stale threshold (Build Artifacts view)
     CycleStaleThreshold,
+    /// Start a fresh filesystem scan without using cache
+    Rescan,
     /// Extend selection upward
     SelectUp,
     /// Extend selection downward

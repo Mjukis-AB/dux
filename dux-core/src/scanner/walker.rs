@@ -757,7 +757,10 @@ mod tests {
                 FilesystemDisposition::Local
             },
         );
-        assert!(matches!(timed_out, Err(ProbePoolError::DeadlineExceeded)));
+        assert!(
+            matches!(timed_out, Err(ProbePoolError::DeadlineExceeded)),
+            "unexpected first probe result: {timed_out:?}"
+        );
 
         let next = directory_probe_with(
             &pool,

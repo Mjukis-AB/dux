@@ -1,5 +1,4 @@
-// Run with: cargo run --example debug_scan -- /path/to/scan
-// Add to dux-core/Cargo.toml: [[example]] name = "debug_scan" path = "../debug_scan.rs"
+// Run with: cargo run -p dux-core --example debug_scan -- /path/to/scan
 
 use dux_core::{ScanConfig, ScanMessage, Scanner};
 use std::path::PathBuf;

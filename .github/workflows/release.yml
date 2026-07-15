@@ -3,56 +3,121 @@ name: Release
 on:
   push:
     tags:
-      - 'v*'
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
 
-permissions:
-  contents: write
-
 jobs:
-  # Publish to crates.io
-  publish-crates:
-    name: Publish to crates.io
-    runs-on: ubuntu-latest
+  verify:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out tagged source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Publish dux-core
-        run: cargo publish -p dux-core --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
-
-      - name: Wait for crates.io indexing
-        run: sleep 30
-
-      - name: Publish dux-cli
-        run: cargo publish -p dux-cli --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
-
-  # Create GitHub Release
-  create-release:
-    name: Create Release
-    runs-on: ubuntu-latest
-    outputs:
-      upload_url: ${{ steps.create_release.outputs.upload_url }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Create Release
-        id: create_release
-        uses: softprops/action-gh-release@v1
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned 2026-07-15
         with:
-          generate_release_notes: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          toolchain: 1.96.0
+          components: rustfmt, clippy
 
-  # Build binaries for all platforms
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - name: Verify tag matches workspace version
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          if [[ ! "$GITHUB_REF_NAME" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "Stable release tag must have the form vX.Y.Z"
+            exit 1
+          fi
+          package_versions=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "dux-core" or .name == "dux-cli") | .version' | sort -u)
+          test "$(printf '%s\n' "$package_versions" | wc -l | tr -d ' ')" -eq 1
+          test "$package_versions" = "$version"
+
+      - name: Check formatting
+        if: runner.os == 'Linux'
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Build all targets
+        run: cargo build --workspace --all-targets --locked
+
+      - name: Run tests
+        run: cargo test --workspace --all-targets --locked
+
+      - name: Verify publishable packages
+        if: runner.os == 'Linux'
+        run: cargo package --workspace --locked
+
+  msrv:
+    name: Minimum Rust 1.88
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Install minimum Rust
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned 2026-07-15
+        with:
+          toolchain: 1.88.0
+
+      - name: Check workspace
+        run: cargo check --workspace --all-targets --locked
+
+  dependencies:
+    name: Dependency policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned 2026-07-15
+        with:
+          toolchain: 1.96.0
+
+      - name: Install dependency scanners
+        run: |
+          cargo install cargo-audit --version 0.22.2 --locked
+          cargo install cargo-deny --version 0.20.2 --locked
+
+      - name: Audit RustSec advisories
+        run: cargo audit --deny warnings
+
+      - name: Check dependency policy
+        run: cargo deny --locked check
+
   build:
     name: Build (${{ matrix.target }})
-    needs: create-release
+    needs: [verify, msrv, dependencies]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -69,98 +134,244 @@ jobs:
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             archive: zip
-
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Check out tagged source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          persist-credentials: false
+
+      - name: Install Rust target
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned 2026-07-15
+        with:
+          toolchain: 1.96.0
           targets: ${{ matrix.target }}
 
-      - name: Build
-        run: cargo build --release --target ${{ matrix.target }} -p dux-cli
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: ${{ matrix.target }}
 
-      - name: Get version
-        id: version
+      - name: Build release binary
+        run: cargo build --release --locked --target ${{ matrix.target }} -p dux-cli
+
+      - name: Smoke-test native binary
+        if: (runner.os == 'Linux' && matrix.target == 'x86_64-unknown-linux-gnu') || (runner.os == 'Windows' && matrix.target == 'x86_64-pc-windows-msvc') || (runner.os == 'macOS' && runner.arch == 'ARM64' && matrix.target == 'aarch64-apple-darwin') || (runner.os == 'macOS' && runner.arch == 'X64' && matrix.target == 'x86_64-apple-darwin')
         shell: bash
-        run: echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+        run: "target/${{ matrix.target }}/release/dux${{ runner.os == 'Windows' && '.exe' || '' }} --version"
 
-      - name: Package (Unix)
+      - name: Package and checksum Unix binary
         if: matrix.archive == 'tar.gz'
         shell: bash
         run: |
-          cd target/${{ matrix.target }}/release
-          tar czvf ../../../dux-${{ steps.version.outputs.version }}-${{ matrix.target }}.tar.gz dux
-          cd ../../..
+          archive="dux-${GITHUB_REF_NAME}-${{ matrix.target }}.tar.gz"
+          mkdir -p dist
+          tar -C "target/${{ matrix.target }}/release" -czf "dist/$archive" dux
+          cd dist
+          shasum -a 256 "$archive" > "$archive.sha256"
 
-      - name: Package (Windows)
+      - name: Package and checksum Windows binary
         if: matrix.archive == 'zip'
         shell: pwsh
         run: |
-          cd target/${{ matrix.target }}/release
-          Compress-Archive -Path dux.exe -DestinationPath ../../../dux-${{ steps.version.outputs.version }}-${{ matrix.target }}.zip
-          cd ../../..
+          $archive = "dux-$env:GITHUB_REF_NAME-${{ matrix.target }}.zip"
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Compress-Archive -Path "target/${{ matrix.target }}/release/dux.exe" -DestinationPath "dist/$archive"
+          $hash = (Get-FileHash -Algorithm SHA256 "dist/$archive").Hash.ToLowerInvariant()
+          [System.IO.File]::WriteAllText("$PWD/dist/$archive.sha256", "$hash  $archive`n", [System.Text.UTF8Encoding]::new($false))
 
-      - name: Upload Release Asset
-        uses: softprops/action-gh-release@v1
+      - name: Store verified build output
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          files: dux-${{ steps.version.outputs.version }}-${{ matrix.target }}.${{ matrix.archive }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          name: release-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
 
-  # Update Homebrew tap
-  homebrew:
-    name: Update Homebrew
+  publish-crates:
+    name: Publish crates.io packages
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CRATES_IO_USER_AGENT: dux-release-workflow/1.0 (+https://github.com/mjukis-ab/dux)
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out tagged source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
 
-      - name: Get version
-        id: version
-        run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned 2026-07-15
+        with:
+          toolchain: 1.96.0
 
-      - name: Download release assets
+      - name: Publish dux-core
+        shell: bash
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
-          VERSION=${{ steps.version.outputs.version }}
-          curl -L -o dux-x86_64-apple-darwin.tar.gz \
-            "https://github.com/mjukis-ab/dux/releases/download/v${VERSION}/dux-v${VERSION}-x86_64-apple-darwin.tar.gz"
-          curl -L -o dux-aarch64-apple-darwin.tar.gz \
-            "https://github.com/mjukis-ab/dux/releases/download/v${VERSION}/dux-v${VERSION}-aarch64-apple-darwin.tar.gz"
-          curl -L -o dux-x86_64-unknown-linux-gnu.tar.gz \
-            "https://github.com/mjukis-ab/dux/releases/download/v${VERSION}/dux-v${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          version=${GITHUB_REF_NAME#v}
+          cargo package -p dux-core --locked
+          status=$(curl --silent --show-error --location --retry 3 --user-agent "$CRATES_IO_USER_AGENT" --output /dev/null --write-out '%{http_code}' "https://crates.io/api/v1/crates/dux-core/$version")
+          case "$status" in
+            200)
+              curl --fail --silent --show-error --location --retry 3 --user-agent "$CRATES_IO_USER_AGENT" "https://crates.io/api/v1/crates/dux-core/$version/download" --output "$RUNNER_TEMP/dux-core-$version.crate"
+              cmp "target/package/dux-core-$version.crate" "$RUNNER_TEMP/dux-core-$version.crate"
+              echo "dux-core $version is already published from these sources"
+              ;;
+            404)
+              cargo publish -p dux-core --locked --token "$CARGO_REGISTRY_TOKEN"
+              ;;
+            *)
+              echo "crates.io returned unexpected HTTP status $status for dux-core $version"
+              exit 1
+              ;;
+          esac
 
-      - name: Calculate checksums
-        id: checksums
+      - name: Wait for dux-core to become available
+        shell: bash
         run: |
-          echo "sha256_x86_64_darwin=$(sha256sum dux-x86_64-apple-darwin.tar.gz | cut -d ' ' -f 1)" >> $GITHUB_OUTPUT
-          echo "sha256_aarch64_darwin=$(sha256sum dux-aarch64-apple-darwin.tar.gz | cut -d ' ' -f 1)" >> $GITHUB_OUTPUT
-          echo "sha256_x86_64_linux=$(sha256sum dux-x86_64-unknown-linux-gnu.tar.gz | cut -d ' ' -f 1)" >> $GITHUB_OUTPUT
+          version=${GITHUB_REF_NAME#v}
+          for attempt in {1..30}; do
+            status=$(curl --silent --show-error --location --retry 3 --user-agent "$CRATES_IO_USER_AGENT" --output /dev/null --write-out '%{http_code}' "https://crates.io/api/v1/crates/dux-core/$version")
+            case "$status" in
+              200) exit 0 ;;
+              404) sleep 10 ;;
+              *)
+                echo "crates.io returned unexpected HTTP status $status while waiting for dux-core $version"
+                exit 1
+                ;;
+            esac
+          done
+          echo "dux-core $version did not become available in time"
+          exit 1
 
-      - name: Generate Homebrew formula
+      - name: Publish dux-cli
+        shell: bash
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
-          VERSION=${{ steps.version.outputs.version }}
-          cat > dux.rb << 'FORMULA'
+          version=${GITHUB_REF_NAME#v}
+          packaged=false
+          for attempt in {1..12}; do
+            if cargo package -p dux-cli --locked; then
+              packaged=true
+              break
+            fi
+            sleep 10
+          done
+          if [ "$packaged" != true ]; then
+            echo "dux-core $version did not reach Cargo's index in time"
+            exit 1
+          fi
+          status=$(curl --silent --show-error --location --retry 3 --user-agent "$CRATES_IO_USER_AGENT" --output /dev/null --write-out '%{http_code}' "https://crates.io/api/v1/crates/dux-cli/$version")
+          case "$status" in
+            200)
+              curl --fail --silent --show-error --location --retry 3 --user-agent "$CRATES_IO_USER_AGENT" "https://crates.io/api/v1/crates/dux-cli/$version/download" --output "$RUNNER_TEMP/dux-cli-$version.crate"
+              cmp "target/package/dux-cli-$version.crate" "$RUNNER_TEMP/dux-cli-$version.crate"
+              echo "dux-cli $version is already published from these sources"
+              ;;
+            404)
+              cargo publish -p dux-cli --locked --token "$CARGO_REGISTRY_TOKEN"
+              ;;
+            *)
+              echo "crates.io returned unexpected HTTP status $status for dux-cli $version"
+              exit 1
+              ;;
+          esac
+
+  create-release:
+    name: Publish GitHub release
+    needs: publish-crates
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Download build outputs
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: release-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Verify archives and assemble SHA256SUMS
+        shell: bash
+        run: |
+          test "$(find release-assets -type f \( -name '*.tar.gz' -o -name '*.zip' \) | wc -l)" -eq 4
+          test "$(find release-assets -type f -name '*.sha256' | wc -l)" -eq 4
+          cd release-assets
+          cat ./*.sha256 | sort -k2 > SHA256SUMS
+          sha256sum --check SHA256SUMS
+          rm ./*.sha256
+
+      - name: Stage, upload, and publish release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            is_draft=$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)
+            if [ "$is_draft" != true ]; then
+              echo "Refusing to replace assets on an already-published release"
+              exit 1
+            fi
+          else
+            gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag --draft --generate-notes --title "$GITHUB_REF_NAME"
+          fi
+          gh release upload "$GITHUB_REF_NAME" release-assets/*.tar.gz release-assets/*.zip release-assets/SHA256SUMS --repo "$GITHUB_REPOSITORY" --clobber
+          gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false
+
+  homebrew:
+    name: Update Homebrew tap
+    needs: create-release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Download published checksums
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --pattern SHA256SUMS
+
+      - name: Generate and push Homebrew formula
+        shell: bash
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          intel_darwin=$(awk -v file="dux-${GITHUB_REF_NAME}-x86_64-apple-darwin.tar.gz" '$2 == file { print $1 }' SHA256SUMS)
+          arm_darwin=$(awk -v file="dux-${GITHUB_REF_NAME}-aarch64-apple-darwin.tar.gz" '$2 == file { print $1 }' SHA256SUMS)
+          intel_linux=$(awk -v file="dux-${GITHUB_REF_NAME}-x86_64-unknown-linux-gnu.tar.gz" '$2 == file { print $1 }' SHA256SUMS)
+          test -n "$intel_darwin"
+          test -n "$arm_darwin"
+          test -n "$intel_linux"
+
+          auth=$(printf 'x-access-token:%s' "$HOMEBREW_TAP_TOKEN" | base64 | tr -d '\n')
+          echo "::add-mask::$auth"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" clone --depth 1 https://github.com/mjukis-ab/homebrew-tap.git tap
+
+          mkdir -p tap/Formula
+          cat > tap/Formula/dux.rb <<FORMULA
           class Dux < Formula
             desc "An interactive, DaisyDisk-like terminal disk usage analyzer"
             homepage "https://github.com/mjukis-ab/dux"
-            version "${{ steps.version.outputs.version }}"
+            version "$version"
             license "MIT"
 
             on_macos do
               if Hardware::CPU.intel?
-                url "https://github.com/mjukis-ab/dux/releases/download/v${{ steps.version.outputs.version }}/dux-v${{ steps.version.outputs.version }}-x86_64-apple-darwin.tar.gz"
-                sha256 "${{ steps.checksums.outputs.sha256_x86_64_darwin }}"
+                url "https://github.com/mjukis-ab/dux/releases/download/v$version/dux-v$version-x86_64-apple-darwin.tar.gz"
+                sha256 "$intel_darwin"
               else
-                url "https://github.com/mjukis-ab/dux/releases/download/v${{ steps.version.outputs.version }}/dux-v${{ steps.version.outputs.version }}-aarch64-apple-darwin.tar.gz"
-                sha256 "${{ steps.checksums.outputs.sha256_aarch64_darwin }}"
+                url "https://github.com/mjukis-ab/dux/releases/download/v$version/dux-v$version-aarch64-apple-darwin.tar.gz"
+                sha256 "$arm_darwin"
               end
             end
 
             on_linux do
-              url "https://github.com/mjukis-ab/dux/releases/download/v${{ steps.version.outputs.version }}/dux-v${{ steps.version.outputs.version }}-x86_64-unknown-linux-gnu.tar.gz"
-              sha256 "${{ steps.checksums.outputs.sha256_x86_64_linux }}"
+              url "https://github.com/mjukis-ab/dux/releases/download/v$version/dux-v$version-x86_64-unknown-linux-gnu.tar.gz"
+              sha256 "$intel_linux"
             end
 
             def install
@@ -173,14 +384,12 @@ jobs:
           end
           FORMULA
 
-      - name: Push to Homebrew tap
-        uses: dmnemec/copy_file_to_another_repo_action@main
-        env:
-          API_TOKEN_GITHUB: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-        with:
-          source_file: 'dux.rb'
-          destination_repo: 'mjukis-ab/homebrew-tap'
-          destination_folder: 'Formula'
-          user_email: 'github-actions[bot]@users.noreply.github.com'
-          user_name: 'github-actions[bot]'
-          commit_message: 'Update dux to ${{ steps.version.outputs.version }}'
+          git -C tap config user.email 'github-actions[bot]@users.noreply.github.com'
+          git -C tap config user.name 'github-actions[bot]'
+          git -C tap add Formula/dux.rb
+          if git -C tap diff --cached --quiet; then
+            echo "Homebrew formula is already current"
+            exit 0
+          fi
+          git -C tap commit -m "Update dux to $version"
+          git -C tap -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push origin HEAD:main

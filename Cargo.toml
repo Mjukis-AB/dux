@@ -1,10 +1,11 @@
 [workspace]
 resolver = "2"
-members = ["dux-core", "dux-cli"]
+members = ["dux-core", "dux-cli", "dux-ffi"]
 
 [workspace.package]
 version = "0.5.0"
 edition = "2024"
+rust-version = "1.88"
 authors = ["Mjukis AB"]
 license = "MIT"
 repository = "https://github.com/mjukis-ab/dux"
@@ -17,10 +18,11 @@ jwalk = "0.8"
 crossbeam-channel = "0.5"
 
 # CLI dependencies
-ratatui = "0.29"
-crossterm = "0.28"
+ratatui = { version = "0.30", default-features = false, features = ["crossterm", "layout-cache", "underline-color"] }
+crossterm = "0.29"
 clap = { version = "4", features = ["derive"] }
 color-eyre = "0.6"
 
 # Shared
 thiserror = "2"
+uniffi = "=0.31.2"

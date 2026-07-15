@@ -1,0 +1,27 @@
+[package]
+name = "dux-ffi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "UniFFI boundary for the DUX storage engine"
+publish = false
+
+[features]
+bindgen = ["uniffi/cli"]
+
+[lib]
+name = "dux_ffi"
+crate-type = ["rlib", "staticlib", "cdylib"]
+
+[[bin]]
+name = "uniffi-bindgen-swift"
+path = "uniffi-bindgen-swift.rs"
+required-features = ["bindgen"]
+
+[dependencies]
+dux-core = { path = "../dux-core", version = "0.5.0" }
+thiserror = { workspace = true }
+uniffi = { workspace = true }

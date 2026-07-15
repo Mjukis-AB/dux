@@ -86,6 +86,7 @@ impl Widget for Footer<'_> {
                         select_hint.clone(),
                         ("←→", "Collapse/Expand".to_string()),
                         ("d", "Delete".to_string()),
+                        ("r", "Rescan".to_string()),
                         ("?", "Help".to_string()),
                         ("q", "Quit".to_string()),
                     ],
@@ -94,13 +95,14 @@ impl Widget for Footer<'_> {
                         ("↑↓", "Navigate".to_string()),
                         select_hint.clone(),
                         ("d", "Delete".to_string()),
+                        ("r", "Rescan".to_string()),
                         ("?", "Help".to_string()),
                         ("q", "Quit".to_string()),
                     ],
                     ViewMode::BuildArtifacts => {
                         let stale_label = self
                             .stale_threshold
-                            .map(|t| format!("Stale:{}", t.label()))
+                            .map(|threshold| format!("Stale:{}", threshold.label()))
                             .unwrap_or_else(|| "Stale".to_string());
                         vec![
                             ("Tab", "Views".to_string()),
@@ -108,6 +110,7 @@ impl Widget for Footer<'_> {
                             select_hint.clone(),
                             ("s", stale_label),
                             ("d", "Delete".to_string()),
+                            ("r", "Rescan".to_string()),
                             ("?", "Help".to_string()),
                             ("q", "Quit".to_string()),
                         ]

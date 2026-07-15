@@ -37,6 +37,9 @@ cargo install --path dux-cli
 
 ## Development
 
+The macOS app implementation plan is in the [roadmap](ROADMAP.md), with accepted
+technical boundaries in the [architecture decision records](docs/adr/README.md).
+
 ```bash
 # Build and run directly from the repo
 cargo run -p dux-cli
@@ -83,6 +86,7 @@ dux -x /path
 | `v` | Toggle multi-selection |
 | `d` | Delete selected item(s) |
 | `o` | Reveal selected item in Finder (macOS) |
+| `r` | Rescan directly from the filesystem |
 | `?` | Show help |
 | `q`/`Ctrl+C` | Quit |
 

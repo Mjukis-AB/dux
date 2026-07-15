@@ -4,14 +4,17 @@ pub use metadata::{CACHE_MAGIC, CACHE_VERSION, CacheMetadata, CachedScanConfig};
 
 use std::cmp::Reverse;
 use std::collections::hash_map::DefaultHasher;
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::hash::{Hash, Hasher};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 
 use crate::Result;
 use crate::tree::DiskTree;
+
+static CACHE_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Get the cache file path for a given root directory
 pub fn cache_path_for(root: &Path, cache_dir: &Path) -> PathBuf {
@@ -66,16 +69,50 @@ pub fn save_cache(path: &Path, tree: &DiskTree, meta: &CacheMetadata) -> Result<
     let checksum = crc32fast::hash(&data);
     data.extend_from_slice(&checksum.to_le_bytes());
 
-    // Write atomically by writing to temp file then renaming
-    let temp_path = path.with_extension("tmp");
-    let mut file = File::create(&temp_path)?;
-    file.write_all(&data)?;
-    file.sync_all()?;
+    // A process-specific, exclusively created temp file prevents concurrent DUX
+    // instances saving the same root from truncating each other's in-progress data.
+    let (temp_path, mut file) = create_cache_temp_file(path)?;
+    if let Err(error) = file.write_all(&data).and_then(|()| file.sync_all()) {
+        drop(file);
+        let _ = fs::remove_file(&temp_path);
+        return Err(error.into());
+    }
     drop(file);
 
-    fs::rename(&temp_path, path)?;
+    if let Err(error) = fs::rename(&temp_path, path) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(error.into());
+    }
 
     Ok(())
+}
+
+fn create_cache_temp_file(path: &Path) -> std::io::Result<(PathBuf, File)> {
+    loop {
+        let temp_path = cache_temp_path_for(path);
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+        {
+            Ok(file) => return Ok((temp_path, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn cache_temp_path_for(path: &Path) -> PathBuf {
+    let counter = CACHE_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_default();
+    path.with_file_name(format!(
+        ".{file_name}.{}.{}.tmp",
+        std::process::id(),
+        counter
+    ))
 }
 
 /// Load a tree from cache file
@@ -232,6 +269,41 @@ mod tests {
     }
 
     #[test]
+    fn cache_temp_paths_are_process_specific_and_unique() {
+        let cache_path = PathBuf::from("/tmp/dux-cache/scan.dux");
+
+        let first = cache_temp_path_for(&cache_path);
+        let second = cache_temp_path_for(&cache_path);
+
+        assert_ne!(first, second);
+        assert_eq!(first.parent(), cache_path.parent());
+        assert!(
+            first
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .contains(&format!(".{}.", std::process::id()))
+        );
+        assert!(first.to_string_lossy().ends_with(".tmp"));
+    }
+
+    #[test]
+    fn cache_temp_files_for_one_target_can_coexist() {
+        let temp = TempDir::new().unwrap();
+        let cache_path = temp.path().join("scan.dux");
+
+        let (first_path, first_file) = create_cache_temp_file(&cache_path).unwrap();
+        let (second_path, second_file) = create_cache_temp_file(&cache_path).unwrap();
+
+        assert_ne!(first_path, second_path);
+        assert!(first_path.exists());
+        assert!(second_path.exists());
+        drop((first_file, second_file));
+        std::fs::remove_file(first_path).unwrap();
+        std::fs::remove_file(second_path).unwrap();
+    }
+
+    #[test]
     fn test_save_load_cache() {
         let temp = TempDir::new().unwrap();
         let cache_path = temp.path().join("test.dux");
@@ -261,6 +333,7 @@ mod tests {
 
         assert_eq!(loaded_meta.total_size, 1024);
         assert_eq!(loaded_tree.len(), 1);
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 1);
     }
 
     #[test]

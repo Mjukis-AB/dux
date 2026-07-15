@@ -128,8 +128,7 @@ fn run_app(
         && is_cache_valid(&meta, &path, &cache_config)
         && spot_check_mtimes(&tree, 32)
     {
-        state.set_tree(tree);
-        state.loaded_from_cache = true;
+        state.set_cached_tree(tree, meta.scan_time);
         loaded_from_cache = true;
     }
 
@@ -144,6 +143,7 @@ fn run_app(
     };
 
     // Store the join handle in an Option so we can take it once
+    let mut progress_rx = progress_rx;
     let mut scan_handle: Option<JoinHandle<DiskTree>> = scan_handle;
     let mut cache_save_handle: Option<JoinHandle<dux_core::Result<()>>> = None;
 
@@ -154,53 +154,84 @@ fn run_app(
 
     loop {
         // Check for scan progress/completion (only if scanning)
+        let mut scan_completed = false;
+        let mut scan_cancelled = false;
+        let mut scan_disconnected = false;
         if let Some(ref rx) = progress_rx {
-            while let Ok(msg) = rx.try_recv() {
-                match msg {
-                    ScanMessage::Progress(progress) => {
+            loop {
+                match rx.try_recv() {
+                    Ok(ScanMessage::Progress(progress)) => {
                         state.update_progress(progress);
                     }
-                    ScanMessage::Finalizing => {
+                    Ok(ScanMessage::Finalizing) => {
                         state.set_finalizing();
                     }
-                    ScanMessage::Completed => {
-                        // Scanner completed, get the tree
-                        if let Some(handle) = scan_handle.take()
-                            && let Ok(tree) = handle.join()
-                        {
-                            // Save to cache in background
-                            if let Some(ref cp) = cache_path_for_save {
-                                let tree_for_cache = tree.clone();
-                                let cache_path = cp.clone();
-                                let config = cache_config_for_save.clone();
-                                let root = root_path_for_save.clone();
-                                let root_mtime = get_mtime(&root).unwrap_or(SystemTime::UNIX_EPOCH);
-                                cache_save_handle = Some(std::thread::spawn(move || {
-                                    let meta = CacheMetadata {
-                                        version: dux_core::CACHE_VERSION,
-                                        root_path: root,
-                                        scan_time: SystemTime::now(),
-                                        root_mtime,
-                                        total_size: tree_for_cache.total_size(),
-                                        node_count: tree_for_cache.live_count(),
-                                        config,
-                                    };
-                                    save_cache(&cache_path, &tree_for_cache, &meta)
-                                }));
-                            }
-                            state.set_tree(tree);
-                        }
+                    Ok(ScanMessage::Completed) => {
+                        scan_completed = true;
                         break;
                     }
-                    ScanMessage::Cancelled => {
+                    Ok(ScanMessage::Cancelled) => {
+                        scan_cancelled = true;
                         state.quit();
+                        break;
                     }
-                    ScanMessage::Error(e) => {
-                        state.set_error(e);
+                    Ok(ScanMessage::Error(error)) => {
+                        state.set_error(error);
                     }
-                    _ => {}
+                    Ok(_) => {}
+                    Err(crossbeam_channel::TryRecvError::Empty) => break,
+                    Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                        scan_disconnected = true;
+                        break;
+                    }
                 }
             }
+        }
+
+        if scan_completed {
+            progress_rx = None;
+            let handle = scan_handle.take().ok_or_else(|| {
+                color_eyre::eyre::eyre!("scanner completed without a worker handle")
+            })?;
+            match handle.join() {
+                Ok(tree) => {
+                    // Never let an older background writer rename over this newer scan.
+                    join_cache_save(cache_save_handle.take())?;
+                    let scan_time = SystemTime::now();
+                    if let Some(ref cp) = cache_path_for_save {
+                        let tree_for_cache = tree.clone();
+                        let cache_path = cp.clone();
+                        let meta = cache_metadata_for_tree(
+                            &tree_for_cache,
+                            root_path_for_save.clone(),
+                            cache_config_for_save.clone(),
+                            scan_time,
+                        );
+                        cache_save_handle = Some(std::thread::spawn(move || {
+                            save_cache(&cache_path, &tree_for_cache, &meta)
+                        }));
+                    }
+                    state.set_scanned_tree(tree, scan_time);
+                }
+                Err(_) => recover_from_scan_failure(
+                    &mut state,
+                    "Scanner worker panicked after reporting completion".to_string(),
+                )?,
+            }
+        } else if scan_cancelled {
+            progress_rx = None;
+            if let Some(handle) = scan_handle.take() {
+                let _ = handle.join();
+            }
+        } else if scan_disconnected {
+            progress_rx = None;
+            let join_result = scan_handle.take().map(JoinHandle::join);
+            let message = match join_result {
+                Some(Err(_)) => "Scanner worker panicked before completing".to_string(),
+                Some(Ok(_)) => "Scanner stopped before reporting completion".to_string(),
+                None => "Scanner channel disconnected without a worker handle".to_string(),
+            };
+            recover_from_scan_failure(&mut state, message)?;
         }
 
         // Draw UI
@@ -308,7 +339,7 @@ fn run_app(
             }
 
             // Compute selection size for footer
-            let selection_size = selection_total_size(&state);
+            let selection_size = state.selection_total_size();
 
             // Footer
             Footer::new(state.mode, state.view_mode, &theme, &state.session_stats)
@@ -335,7 +366,19 @@ fn run_app(
                     state.selection_count() > 0,
                     state.selecting_mode,
                 );
-                handle_action(&mut state, action);
+                if action == Action::Rescan {
+                    // A completed older scan must finish writing before a newer scan starts.
+                    join_cache_save(cache_save_handle.take())?;
+                    if state.prepare_rescan() {
+                        let scanner = Scanner::new(scan_config.clone())
+                            .with_cancellation(cancel_token.clone());
+                        let (rx, handle) = scanner.scan(path.clone());
+                        progress_rx = Some(rx);
+                        scan_handle = Some(handle);
+                    }
+                } else {
+                    handle_action(&mut state, action);
+                }
             }
             AppEvent::Resize(_, _) => {
                 // Terminal will redraw on next loop
@@ -361,20 +404,44 @@ fn run_app(
         && let Some(ref tree) = state.tree
         && let Some(ref cp) = cache_path_for_save
     {
-        let root_mtime = get_mtime(&root_path_for_save).unwrap_or(SystemTime::UNIX_EPOCH);
-        let meta = CacheMetadata {
-            version: dux_core::CACHE_VERSION,
-            root_path: root_path_for_save.clone(),
-            scan_time: SystemTime::now(),
-            root_mtime,
-            total_size: tree.total_size(),
-            node_count: tree.live_count(),
-            config: cache_config_for_save.clone(),
-        };
+        let meta = cache_metadata_for_tree(
+            tree,
+            root_path_for_save.clone(),
+            cache_config_for_save.clone(),
+            state.scan_time().unwrap_or_else(SystemTime::now),
+        );
         save_cache(cp, tree, &meta)?;
     }
 
     Ok(())
+}
+
+fn cache_metadata_for_tree(
+    tree: &DiskTree,
+    root_path: PathBuf,
+    config: CachedScanConfig,
+    scan_time: SystemTime,
+) -> CacheMetadata {
+    let root_mtime = get_mtime(&root_path).unwrap_or(SystemTime::UNIX_EPOCH);
+    CacheMetadata {
+        version: dux_core::CACHE_VERSION,
+        root_path,
+        scan_time,
+        root_mtime,
+        total_size: tree.total_size(),
+        node_count: tree.live_count(),
+        config,
+    }
+}
+
+fn recover_from_scan_failure(state: &mut AppState, message: String) -> Result<()> {
+    if state.tree.is_some() {
+        state.mode = AppMode::Browsing;
+        state.set_error(format!("{message}; keeping the previous scan"));
+        Ok(())
+    } else {
+        Err(color_eyre::eyre::eyre!(message))
+    }
 }
 
 fn join_cache_save(handle: Option<JoinHandle<dux_core::Result<()>>>) -> Result<()> {
@@ -436,6 +503,7 @@ fn handle_action(state: &mut AppState, action: Action) {
                 state.computed_views.cycle_stale_threshold();
             }
         }
+        Action::Rescan => {}
         Action::ShowHelp => state.show_help(),
         Action::HideHelp => state.hide_help(),
         Action::OpenInFinder => state.open_in_finder(),
@@ -447,23 +515,6 @@ fn handle_action(state: &mut AppState, action: Action) {
         Action::Quit => state.quit(),
         Action::Tick => {}
     }
-}
-
-/// Compute total size of selected nodes for footer display
-fn selection_total_size(state: &AppState) -> u64 {
-    if state.selected_nodes.is_empty() {
-        return 0;
-    }
-    let tree = match &state.tree {
-        Some(t) => t,
-        None => return 0,
-    };
-    state
-        .selected_nodes
-        .iter()
-        .filter_map(|id| tree.get(*id))
-        .map(|n| n.size)
-        .sum()
 }
 
 fn render_size_bar(
@@ -478,13 +529,16 @@ fn render_size_bar(
         return;
     }
 
-    let total_size = state
-        .tree
-        .as_ref()
-        .map(|t| t.total_size())
-        .unwrap_or(state.progress.bytes_scanned);
-
-    let is_scanning = state.tree.is_none();
+    let is_scanning = matches!(state.mode, AppMode::Scanning | AppMode::Finalizing);
+    let total_size = if is_scanning {
+        state.progress.bytes_scanned
+    } else {
+        state
+            .tree
+            .as_ref()
+            .map(|tree| tree.total_size())
+            .unwrap_or(0)
+    };
     let bar_width = area.width.saturating_sub(20) as usize;
 
     // During scanning, show a pulsing/growing bar; after complete, show full bar
@@ -575,6 +629,71 @@ mod tests {
             loaded_tree
                 .find_by_path(&root.join("deleted.txt"))
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn cache_update_preserves_the_tree_original_scan_time() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().to_path_buf();
+        let cache_path = temp.path().join("scan.dux");
+        let tree = DiskTree::new(root.clone());
+        let original_scan_time = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(12_345);
+        let config = CachedScanConfig {
+            follow_symlinks: false,
+            same_filesystem: true,
+            max_depth: None,
+        };
+
+        let meta = cache_metadata_for_tree(&tree, root, config, original_scan_time);
+        save_cache(&cache_path, &tree, &meta).unwrap();
+
+        let (loaded_meta, _) = load_cache(&cache_path).unwrap();
+        assert_eq!(loaded_meta.scan_time, original_scan_time);
+    }
+
+    #[test]
+    fn rescan_size_bar_uses_progress_instead_of_retained_tree_size() {
+        let mut tree = DiskTree::new(PathBuf::from("/scan"));
+        tree.set_size(NodeId::ROOT, 1024 * 1024);
+        let mut state = AppState::new(PathBuf::from("/scan"));
+        state.set_cached_tree(tree, SystemTime::UNIX_EPOCH);
+        assert!(state.prepare_rescan());
+        state.progress.bytes_scanned = 2 * 1024;
+        let area = ratatui::layout::Rect::new(0, 0, 80, 1);
+        let mut buffer = ratatui::buffer::Buffer::empty(area);
+
+        render_size_bar(&state, &Theme::default(), area, &mut buffer);
+
+        let text = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(text.contains("2.0 KB scanned"), "{text}");
+        assert!(!text.contains("total"), "{text}");
+    }
+
+    #[test]
+    fn failed_rescan_restores_browsing_with_the_previous_tree() {
+        let mut state = AppState::new(PathBuf::from("/scan"));
+        state.set_cached_tree(
+            DiskTree::new(PathBuf::from("/scan")),
+            SystemTime::UNIX_EPOCH,
+        );
+        assert!(state.prepare_rescan());
+
+        recover_from_scan_failure(&mut state, "injected scan failure".to_string()).unwrap();
+
+        assert_eq!(state.mode, AppMode::Browsing);
+        assert!(state.tree.is_some());
+        assert!(state.loaded_from_cache);
+        assert_eq!(state.scan_time(), Some(SystemTime::UNIX_EPOCH));
+        assert!(
+            state
+                .error_message
+                .as_deref()
+                .is_some_and(|message| message.contains("keeping the previous scan"))
         );
     }
 }

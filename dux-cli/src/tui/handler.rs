@@ -74,6 +74,9 @@ fn handle_key_browsing(key: KeyEvent, has_selection: bool, selecting: bool) -> A
         // Stale threshold cycling
         KeyCode::Char('s') => Action::CycleStaleThreshold,
 
+        // Refresh the tree from the filesystem
+        KeyCode::Char('r') => Action::Rescan,
+
         // Drill down / back
         KeyCode::Enter => Action::DrillDown,
         KeyCode::Backspace => Action::GoBack,
@@ -189,5 +192,19 @@ mod tests {
             handle_key(key(KeyCode::Enter), AppMode::Browsing, false, false),
             Action::DrillDown
         );
+    }
+
+    #[test]
+    fn rescan_is_available_only_while_browsing() {
+        assert_eq!(
+            handle_key(key(KeyCode::Char('r')), AppMode::Browsing, false, false),
+            Action::Rescan
+        );
+        for mode in [AppMode::Scanning, AppMode::MultiDeleting] {
+            assert_eq!(
+                handle_key(key(KeyCode::Char('r')), mode, false, false),
+                Action::Tick
+            );
+        }
     }
 }

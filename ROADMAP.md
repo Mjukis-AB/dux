@@ -68,8 +68,10 @@ These decisions are defaults for implementation and do not require further produ
 
 - Keep filesystem scanning, classification, cleanup planning, safety validation, and shared domain models in Rust.
 - Keep macOS scenes, navigation, charts, notifications, settings UI, and command-provider configuration in Swift.
-- Add a small Rust FFI crate and generate Swift bindings with UniFFI unless the Phase 0 spike demonstrates an unacceptable Swift concurrency or packaging problem.
-- If UniFFI is rejected, use a narrow, versioned C ABI. Do not reimplement core policy in Swift.
+- Generate Swift bindings for the small Rust FFI crate with the locked UniFFI
+  release selected by [ADR 0005](docs/adr/0005-uniffi-swift-rust-transport.md).
+- Keep the narrow, versioned C ABI in ADR 0005 as a replacement path, not a
+  parallel API. Transport changes must not reimplement core policy in Swift.
 - Use SQLite for durable history and settings that need queries.
 - Keep large full-tree scan snapshots in versioned binary files rather than inserting millions of nodes into SQLite.
 
@@ -206,6 +208,7 @@ dux/
 ├── Cargo.toml
 ├── ROADMAP.md
 ├── SECURITY_DESIGN.md
+├── docs/adr/
 ├── dux-core/
 │   ├── src/
 │   │   ├── engine/
@@ -732,10 +735,13 @@ The app, the bundled CLI, the standalone CLI, and (later) the scheduler are sepa
 Use:
 
 - `MenuBarExtra` with window style;
-- a normal `WindowGroup` for Explorer;
+- a singleton normal `Window(id:)` for Explorer;
 - a Settings scene;
-- `LSUIElement` so the app can behave as a menu bar utility;
-- an explicit setting to show a Dock icon while Explorer is open if testing proves that improves window discoverability.
+- `LSUIElement` so the initial app is an accessory/menu-bar utility with no
+  Dock icon by default;
+- a focused AppKit activation bridge for opening/focusing Explorer. Runtime
+  Dock-icon switching and a removable menu-extra setting are out of scope for
+  v1.
 
 One shared `AppModel`/coordinator owns engine state. Menu bar and Explorer must never start duplicate scans accidentally.
 
@@ -808,7 +814,8 @@ Show:
 - 30-day free-space line chart;
 - top growth categories since the prior comparable scan;
 - top recommendation groups;
-- coverage and Full Disk Access status.
+- coverage and observed access limitations, with Full Disk Access guidance when
+  relevant. macOS has no public authoritative Full Disk Access status query.
 
 Charts must be accessible with text summaries and keyboard focus. Every segment opens a filtered detail view.
 
@@ -966,11 +973,14 @@ AI is an optional explanation layer. The deterministic engine must remain fully 
 
 ### 14.1 Supported provider model
 
-Initial adapters:
+Initial adapter candidates:
 
 - Claude CLI adapter;
 - Codex CLI adapter;
 - disabled/no-provider adapter.
+
+The disabled adapter is the only adapter allowed to ship before the security
+gate in §14.2 passes.
 
 Add a generic custom-command adapter only after the fixed adapters establish a safe contract.
 
@@ -996,6 +1006,14 @@ The macOS app is launched outside a login shell, so provider discovery must:
 - Capture stderr separately and redact it before display/logging.
 - Require output matching a versioned JSON Schema.
 - Cache by a digest of redacted input plus adapter version.
+
+These process controls are defense in depth, not confinement. A command spawned
+by an unsandboxed app may retain ambient filesystem and TCC authority,
+especially when the app has Full Disk Access. Do not ship a local Claude,
+Codex, or custom-command adapter until an adversarial security/TCC spike proves
+the authority boundary on every supported macOS release. If it cannot, use a
+metadata-only remote API or another architecture with real confinement. Tool-
+disable flags alone do not satisfy this gate.
 
 ### 14.3 AI input
 
@@ -1138,7 +1156,7 @@ dux recommendations [--json]
 dux plan [--json]           # always a dry-run; plans never execute from this command
 dux history [--json] [--limit N]
 dux rules list [--json]
-dux doctor [--json]         # coverage, Full Disk Access state, skipped roots, cache/database health
+dux doctor [--json]         # coverage/access evidence, skipped roots, cache/database health
 ```
 
 Do not add permanent cleanup CLI commands until the shared planner/executor and safety suite exist. CLI cleanup must use the same plans, validation, and history as the app.
@@ -1164,6 +1182,10 @@ Do not add permanent cleanup CLI commands until the shared planner/executor and 
 - When stdout is not a TTY, noninteractive commands may default to JSON only if explicitly documented and tested.
 
 ## 17. FFI boundary
+
+The transport is UniFFI under
+[ADR 0005](docs/adr/0005-uniffi-swift-rust-transport.md). Its generated API is a
+private implementation detail contained by `EngineService`, not a public ABI.
 
 Keep the FFI coarse-grained. Do not expose millions of Rust nodes as chatty one-call-per-node objects.
 
@@ -1266,7 +1288,8 @@ Create filesystem fixtures representing:
 - Finder reveal;
 - launch-at-login registration state without enabling it on CI machines;
 - notification deep links;
-- Full Disk Access probe result mapping;
+- observed access-probe evidence and coverage mapping, without inventing an
+  authoritative Full Disk Access boolean;
 - universal Rust XCFramework loading;
 - CLI install/upgrade/uninstall in a temporary HOME;
 - AI process timeout, malformed output, excessive output, cancellation, and missing executable.
@@ -1370,10 +1393,10 @@ Hardening tasks (ship as v0.5.x patch releases; see the verified defect list in 
 - [x] Re-stat and compare filesystem identity immediately before every delete. Completed 2026-07-15: identity is captured before the confirmation UI opens, then the shared single/batch deletion helper compares non-following `(device, inode)` metadata on Unix or `(volume serial, 128-bit file ID)` from a non-following Windows handle immediately before removal. Mismatch, disappearance, and inspection failure leave tree/cache/statistics state unchanged.
 - [x] Gate artifact classification on marker evidence (for example, `target` requires a sibling `Cargo.toml`). Completed 2026-07-15 with the fail-closed M0 rule set and execution checks detailed below.
 - [x] Bound multi-delete concurrency with a small worker pool. Completed 2026-07-15: confirmed batches are queued onto at most four named workers, per-item results retain the existing progress/tree/statistics behavior, and every pool handle remains tracked for deferred quit and `Drop` joining. A panic while processing one item is converted into that item's failure so later queued work can continue; concurrency-cap and larger real-batch fixtures cover the integration.
-- [ ] Show cache age in the header; add a rescan keybinding; use per-process cache temp names.
-- [ ] Fix the footer selection total double-counting nested selections.
-- [ ] Apply §20.1 to the release workflow and add cargo audit/deny to CI.
-- [ ] Move `debug_scan.rs` into `dux-core/examples/`.
+- [x] Show cache age in the header; add a rescan keybinding; use per-process cache temp names. Completed 2026-07-15: cached headers show compact age from the original scan timestamp; `r` starts a cache-bypassing scan while retaining the prior tree as failure fallback; successful replacement resets navigation and publishes a new timestamp; deletion-only cache updates preserve the tree's original timestamp. Cache writers exclusively create PID-and-counter-qualified temp files, clean them after write/rename failures, and join older in-process writers before a newer scan can publish. Concurrent processes remain last-writer-wins until later snapshot writer coordination.
+- [x] Fix the footer selection total double-counting nested selections. Completed 2026-07-15: footer bytes and multi-delete planning now share one deterministic effective-selection calculation that removes any selected node with a selected ancestor, ignores stale/tombstoned IDs, excludes the root, and saturates byte addition. The footer continues to show the raw highlighted-row count while its byte total matches the roots that confirmation will act on.
+- [x] Apply §20.1 to the release workflow and add cargo audit/deny to CI. Completed 2026-07-15: CI and tag builds use a committed lockfile, exact Rust/tool versions, read-only default permissions, and full-SHA action pins. Releases now gate four target builds on tests plus RustSec/license/source policy, compute per-producer checksums, verify and aggregate them into `SHA256SUMS`, publish crates.io before a draft-backed GitHub release, then update Homebrew through inline Git with the tap-only PAT. Exact-version crates.io reruns compare packaged bytes before continuing. Enabling the gates also upgraded the vulnerable Crossbeam lock entry, disabled Postcard's unused heapless defaults, and upgraded Ratatui/Crossterm to remove the remaining unmaintained/yanked transitive crates.
+- [x] Move `debug_scan.rs` into `dux-core/examples/`. Completed 2026-07-15: the diagnostics binary now uses Cargo's conventional example discovery, needs no out-of-crate manifest path override, and is included when `dux-core` is packaged and published.
 
 M0 deletion-lifecycle note: graceful in-app quit deliberately waits for active permanent deletions and cannot cancel a filesystem syscall already in progress. A truly hung delete can therefore keep graceful quit waiting indefinitely; external force termination may leave partial filesystem work and stale cache state. A force-abandon flow belongs with the later centralized executor and must require explicit destructive-risk confirmation.
 
@@ -1390,15 +1413,102 @@ M0 identity-check note: request-time capture protects the confirmation-to-execut
 
 Spike tasks:
 
-- [ ] Add architecture decision records for native SwiftUI, direct distribution, no sandbox, and shared Rust engine.
-- [ ] Create minimal `dux-ffi` returning its version and one size-format result.
-- [ ] Build Rust for arm64 and x86_64 and package a universal XCFramework.
-- [ ] Generate/import Swift bindings in a minimal Xcode app.
-- [ ] Call Rust off the main actor and render the result.
-- [ ] Verify Debug and Release builds from a clean checkout.
-- [ ] Decide UniFFI versus C ABI and record the decision.
-- [ ] Prototype `MenuBarExtra` plus normal Explorer window and Settings.
-- [ ] Prototype Foundation important-usage volume capacity.
+- [x] Add architecture decision records for native SwiftUI, direct distribution, no sandbox, and shared Rust engine. Completed 2026-07-15: accepted decisions and implementation gates are indexed in [`docs/adr/`](docs/adr/README.md), including the external-AI subprocess security gate.
+- [x] Create minimal `dux-ffi` returning its version and one size-format result.
+  Completed 2026-07-15: the non-published UniFFI crate builds `rlib`,
+  `staticlib`, and `cdylib` artifacts; exports a library/FFI-contract version
+  handshake plus a typed raw-bytes/display smoke record; delegates formatting
+  to `dux-core`; and configures immutable Swift records. This proves the Rust
+  boundary only—the display string is not a localization contract or final API.
+- [x] Build Rust for arm64 and x86_64 and package a universal XCFramework.
+  Completed 2026-07-15: a locked, fail-closed script supports Debug and Release,
+  verifies both Rust targets, builds both macOS architectures, creates and
+  validates one fat static library, then packages a single `macos-arm64_x86_64`
+  `DuxFFI.xcframework` slice. Generated output is ignored, identical cached
+  Release builds produce identical file hashes, and a dedicated macOS CI job
+  exercises the clean build path. Headers and Swift source remain the next
+  binding-generation task.
+- [x] Generate/import Swift bindings in a minimal Xcode app. Completed
+  2026-07-15: the pinned UniFFI 0.31.2 generator binary emits deterministic Swift,
+  C-header, and module-map inputs from the universal archive; the header-bearing
+  XCFramework and committed Swift source are produced together; and a generated
+  Xcode project compiles and links them in an unsigned macOS 14 SwiftUI spike
+  app. CI regenerates the boundary before building so mismatched source/library
+  revisions fail during compilation or UniFFI initialization checks.
+- [x] Call Rust off the main actor and render the result. Completed 2026-07-15:
+  `EngineService` runs synchronous UniFFI work on a dedicated non-main dispatch
+  queue, converts generated records into a Sendable app DTO before crossing the
+  continuation, and returns it to an observable `@MainActor` model. The SwiftUI
+  spike renders library/contract versions, raw bytes, Rust display text, and the
+  verified execution context. Linked XCTest coverage asserts both the real Rust
+  values and the main-actor state handoff, locally and in macOS CI.
+- [x] Verify Debug and Release builds from a clean checkout. Completed
+  2026-07-15 from a source-only temporary snapshot containing the tracked and
+  intended untracked repository inputs but no `target/` directory or generated
+  XCFramework. Each configuration independently regenerated its matching
+  UniFFI bindings and Rust library before Xcode built an unsigned universal
+  `arm64` + `x86_64` app. The macOS CI job now repeats the configuration-matched
+  Debug build and linked tests plus the Release build from GitHub's clean
+  checkout, preventing a cached or locally generated artifact from satisfying
+  the gate.
+- [x] Decide UniFFI versus C ABI and record the decision. Completed 2026-07-15:
+  [ADR 0005](docs/adr/0005-uniffi-swift-rust-transport.md) accepts the locked
+  UniFFI Swift bindings for the private in-process app boundary based on the
+  typed-record, checksum, off-main concurrency, deterministic-generation, and
+  universal Debug/Release spike evidence. Generated APIs stay contained inside
+  `EngineService`; sync calls remain off-main; DTOs stay coarse, immutable, and
+  owned; UniFFI and the DUX contract retain separate version checks. A narrow
+  opaque-handle C ABI is documented as a replacement—not parallel—path with
+  explicit triggers for packaging, concurrency, lifetime, safety, maintenance,
+  or measured performance failures.
+- [x] Before merging the first real engine handle, prove one typed fallible
+  UniFFI export and the opaque-handle construction/use/close/release lifecycle
+  through linked Swift tests, including use-after-close rejection. Completed
+  2026-07-15: FFI contract v2 introduces one application-scoped `DuxEngine`
+  object with atomic lifecycle state, idempotent explicit close, and fallible
+  version/format methods returning the stable `EngineError::Closed`. Generated
+  Swift errors are caught and mapped to app-owned `EngineServiceError` values;
+  views never import them as render state. Rust tests cover close and drop, while
+  four linked Swift tests cover the real typed values, main-actor handoff,
+  construction, both close outcomes, direct typed use-after-close rejection,
+  service error mapping, Swift object deallocation, and return to the baseline
+  Rust live-instance count. The diagnostic counter is not application state.
+- [x] Prototype `MenuBarExtra` plus normal Explorer window and Settings.
+  Completed 2026-07-15: the SwiftUI lifecycle now starts with a persistent,
+  window-style menu bar extra; a primary accessible action targets one
+  `Window(id: "explorer")`, which SwiftUI orders forward instead of creating
+  another instance; and the native `Settings` scene opens through the same
+  menu surface. One `@State` `AppModel` and application-scoped `DuxEngine` are
+  shared by all three scenes. `AppActivation` uses macOS 14's non-deprecated
+  `NSApplication.activate()` request after opening Explorer or Settings, while
+  the generated app has `LSUIElement=true` and therefore no default Dock icon.
+  Keeping `MenuBarExtra` first relies on SwiftUI's macOS 14 automatic launch
+  behavior so a fresh launch does not present Explorer; do not reorder the
+  scenes without a launch regression check. A String Catalog owns the shell's
+  user-facing keys, and VoiceOver labels cover the status item and actions.
+  Six linked tests now include one concurrent menu/Explorer load assertion that
+  proves the shared model starts only one engine request plus a built-bundle
+  assertion for `LSUIElement`. Real scan-session deduplication remains an engine
+  task because the Phase 0 handle does not expose scanning yet.
+- [x] Prototype Foundation important-usage volume capacity. Completed
+  2026-07-15: `VolumeMonitor` samples the startup volume (`/`) through Foundation
+  on a dedicated utility queue and requests its localized name, total capacity,
+  ordinary available capacity, and important-usage capacity. The immutable,
+  timestamped snapshot prefers important-usage capacity for the headline value,
+  retains ordinary availability for usage accounting, records fallback
+  provenance, and rejects missing, negative, or internally inconsistent values.
+  One shared `AppModel` deduplicates initial capacity work across scenes; the menu
+  bar and Explorer show exact values plus a text-backed accessible capacity bar
+  without deriving free space from directory scans. Five focused capacity tests,
+  including a real startup-volume Foundation sample, plus the shared-load test
+  cover preference, fallback, validation, off-main execution, and scene
+  deduplication.
+  Pressure thresholds and hysteresis deliberately remain unimplemented here:
+  Milestone 3's Rust evaluator owns that policy so Swift cannot create a second
+  source of truth.
+
+M0 implementation is complete, but the milestone does not meet its exit criteria
+until the hardening changes are actually released as a v0.5.x patch.
 
 Exit criteria:
 
@@ -1562,10 +1672,16 @@ Tasks:
 
 - [ ] Define versioned AI input/output schemas.
 - [ ] Add privacy redaction and sensitive-path exclusion tests.
-- [ ] Implement Claude CLI probe/invocation adapter.
-- [ ] Implement Codex CLI probe/invocation adapter.
+- [ ] Run the adversarial macOS security/TCC spike and record whether local AI
+  subprocesses can be confined when DUX has broad access.
+- [ ] Implement the Claude CLI probe/invocation adapter only if that spike
+  approves its authority boundary.
+- [ ] Implement the Codex CLI probe/invocation adapter only if that spike
+  approves its authority boundary.
 - [ ] Implement timeout, output limit, cancellation, and process-tree cleanup.
-- [ ] Validate tools-disabled behavior for each adapter; reject adapters that cannot guarantee it.
+- [ ] Validate tools-disabled behavior for each approved adapter as defense in
+  depth; reject adapters that cannot guarantee it, without treating it as
+  subprocess confinement.
 - [ ] Implement “Explain selection” and group overlays.
 - [ ] Add “View metadata sent” and clear-cache controls.
 - [ ] Prove through type/module boundaries that AI cannot create plans.
@@ -1610,7 +1726,10 @@ Tasks:
 - [ ] Add Settings CLI installer/upgrader/remover.
 - [ ] Add final JSON commands and golden schema tests.
 - [ ] Preserve standalone Homebrew/crates.io release.
-- [ ] Add app DMG or ZIP packaging.
+- [ ] Freeze the production bundle identifier, Apple Developer team, signing
+  identity, and designated requirement before TCC and launch-at-login testing.
+- [ ] Add the primary notarized/stapled DMG with an Applications link; optionally
+  publish a notarized ZIP as a secondary artifact.
 - [ ] Add Developer ID signing, notarization, and stapling CI.
 - [ ] Add update framework only after signing is stable.
 - [ ] Publish privacy, security, and cleanup-rule documentation.
@@ -1675,11 +1794,18 @@ Mitigation: coverage model, guided permissions, useful partial mode, and no fals
 
 ### External AI command gains filesystem authority
 
-Mitigation: fixed adapters, no shell, empty working directory, tools-disabled requirement, sanitized environment, structured metadata, timeout, and no connection to planner/executor.
+Mitigation: block local command adapters until an adversarial macOS/TCC spike
+proves an actual authority boundary on every supported release. If it cannot,
+use a metadata-only remote API or another confined architecture. Fixed adapters,
+no shell, empty working directory, disabled tools, sanitized environment,
+structured metadata, timeouts, and no planner/executor connection remain
+defense in depth, not confinement.
 
 ### UniFFI/Swift concurrency friction
 
-Mitigation: Phase 0 spike, coarse API, generated-binding smoke tests, and documented C ABI fallback.
+Mitigation: Phase 0 spike, coarse API, generated-binding smoke tests, and the
+replacement-only C ABI fallback and reconsideration triggers in
+[ADR 0005](docs/adr/0005-uniffi-swift-rust-transport.md).
 
 ### Trash does not free disk space
 

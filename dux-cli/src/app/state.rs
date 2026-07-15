@@ -4,6 +4,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
 use std::thread::JoinHandle;
+use std::time::SystemTime;
 
 use dux_core::{DiskTree, NodeId, ScanProgress};
 
@@ -220,6 +221,8 @@ pub struct AppState {
     pub session_stats: SessionStats,
     /// Whether tree was loaded from cache
     pub loaded_from_cache: bool,
+    /// Original scan time for the current tree, including cache-backed trees
+    scan_time: Option<SystemTime>,
     /// Whether the tree has been modified (e.g. by deletion) and needs cache update
     pub tree_modified: bool,
     /// Receiver for async delete results
@@ -266,6 +269,7 @@ impl AppState {
             pending_delete_plan: None,
             session_stats: SessionStats::default(),
             loaded_from_cache: false,
+            scan_time: None,
             tree_modified: false,
             delete_receiver: None,
             delete_worker: None,
@@ -282,12 +286,58 @@ impl AppState {
     }
 
     /// Set the tree after scanning completes
+    #[cfg(test)]
     pub fn set_tree(&mut self, tree: DiskTree) {
+        self.install_tree(tree);
+        self.loaded_from_cache = false;
+        self.scan_time = None;
+        self.tree_modified = false;
+    }
+
+    pub fn set_cached_tree(&mut self, tree: DiskTree, scan_time: SystemTime) {
+        self.install_tree(tree);
+        self.loaded_from_cache = true;
+        self.scan_time = Some(scan_time);
+        self.tree_modified = false;
+    }
+
+    pub fn set_scanned_tree(&mut self, tree: DiskTree, scan_time: SystemTime) {
+        self.install_tree(tree);
+        self.loaded_from_cache = false;
+        self.scan_time = Some(scan_time);
+        self.tree_modified = false;
+    }
+
+    fn install_tree(&mut self, tree: DiskTree) {
         self.computed_views.rebuild(&tree);
         self.tree = Some(tree);
         self.mode = AppMode::Browsing;
         self.selected_index = 0;
         self.view_root = NodeId::ROOT;
+        self.history.clear();
+        self.scroll_offset = 0;
+        self.large_files_state = ViewState::default();
+        self.build_artifacts_state = ViewState::default();
+        self.selected_nodes.clear();
+        self.selecting_mode = false;
+    }
+
+    pub fn scan_time(&self) -> Option<SystemTime> {
+        self.scan_time
+    }
+
+    pub fn prepare_rescan(&mut self) -> bool {
+        if self.has_in_flight_deletions() {
+            self.error_message =
+                Some("Rescan is unavailable until the active deletion finishes.".to_string());
+            return false;
+        }
+
+        self.mode = AppMode::Scanning;
+        self.progress = ScanProgress::default();
+        self.spinner_frame = 0;
+        self.error_message = None;
+        true
     }
 
     /// Update scan progress
@@ -843,6 +893,17 @@ impl AppState {
         self.selected_nodes.len()
     }
 
+    /// Total bytes affected by the selection after removing nested overlap.
+    pub fn selection_total_size(&self) -> u64 {
+        let Some(tree) = &self.tree else {
+            return 0;
+        };
+        self.effective_selected_nodes()
+            .into_iter()
+            .filter_map(|node_id| tree.get(node_id))
+            .fold(0, |total, node| total.saturating_add(node.size))
+    }
+
     /// Add current node to selection, move up, add new node
     pub fn select_move_up(&mut self) {
         if let Some(node_id) = self.node_at_index(self.current_selected_index()) {
@@ -923,15 +984,18 @@ impl AppState {
 
     // --- Multi-delete methods ---
 
-    /// Remove children whose ancestor is also selected
-    fn dedup_selected_nodes(&self) -> Vec<NodeId> {
+    /// Selected live nodes whose ancestors are not also selected.
+    fn effective_selected_nodes(&self) -> Vec<NodeId> {
         let tree = match &self.tree {
             Some(t) => t,
             None => return Vec::new(),
         };
 
-        let mut result: Vec<NodeId> = Vec::new();
+        let mut result = Vec::new();
         for &node_id in &self.selected_nodes {
+            if node_id == NodeId::ROOT || tree.get(node_id).is_none() {
+                continue;
+            }
             // Walk up to check if any ancestor is also in the set
             let mut ancestor_selected = false;
             let mut current = node_id;
@@ -950,6 +1014,7 @@ impl AppState {
                 result.push(node_id);
             }
         }
+        result.sort_by_key(|node_id| node_id.index());
         result
     }
 
@@ -960,7 +1025,7 @@ impl AppState {
             None => return,
         };
 
-        let deduped = self.dedup_selected_nodes();
+        let deduped = self.effective_selected_nodes();
         if deduped.is_empty() {
             return;
         }
@@ -1341,6 +1406,169 @@ mod tests {
         let mut state = AppState::new(root);
         state.set_tree(tree);
         (state, child)
+    }
+
+    #[test]
+    fn prepare_rescan_retains_current_tree_until_replacement_succeeds() {
+        let (mut state, child) = state_with_child();
+        let tree = state.tree.take().unwrap();
+        state.set_cached_tree(tree, SystemTime::UNIX_EPOCH);
+        state.selected_nodes.insert(child);
+        state.history.push(NodeId::ROOT);
+        state.view_root = child;
+        state.tree_modified = true;
+        state.session_stats.items_deleted = 2;
+
+        assert!(state.prepare_rescan());
+
+        assert_eq!(state.mode, AppMode::Scanning);
+        assert!(state.tree.is_some());
+        assert!(state.loaded_from_cache);
+        assert_eq!(state.scan_time(), Some(SystemTime::UNIX_EPOCH));
+        assert!(state.tree_modified);
+        assert!(state.selected_nodes.contains(&child));
+        assert_eq!(state.history, vec![NodeId::ROOT]);
+        assert_eq!(state.view_root, child);
+        assert_eq!(state.session_stats.items_deleted, 2);
+
+        let replacement_time = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(60);
+        state.set_scanned_tree(DiskTree::new(state.root_path.clone()), replacement_time);
+        assert_eq!(state.mode, AppMode::Browsing);
+        assert!(!state.loaded_from_cache);
+        assert_eq!(state.scan_time(), Some(replacement_time));
+        assert!(!state.tree_modified);
+        assert!(state.selected_nodes.is_empty());
+        assert!(state.history.is_empty());
+        assert_eq!(state.view_root, NodeId::ROOT);
+    }
+
+    #[test]
+    fn prepare_rescan_refuses_while_a_delete_is_in_flight() {
+        let (mut state, _) = state_with_child();
+        let (_tx, rx) = mpsc::channel();
+        state.delete_receiver = Some(rx);
+
+        assert!(!state.prepare_rescan());
+
+        assert!(state.tree.is_some());
+        assert_eq!(state.mode, AppMode::Browsing);
+        assert!(
+            state
+                .error_message
+                .as_deref()
+                .is_some_and(|message| message.contains("active deletion"))
+        );
+    }
+
+    #[test]
+    fn selection_total_counts_nested_nodes_only_once() {
+        let root = PathBuf::from("/test-root");
+        let mut tree = DiskTree::new(root.clone());
+        let directory = tree.add_node(
+            "directory".to_string(),
+            NodeKind::Directory,
+            root.join("directory"),
+            NodeId::ROOT,
+        );
+        let child = tree.add_node(
+            "child.bin".to_string(),
+            NodeKind::File,
+            root.join("directory/child.bin"),
+            directory,
+        );
+        let sibling = tree.add_node(
+            "sibling.bin".to_string(),
+            NodeKind::File,
+            root.join("sibling.bin"),
+            NodeId::ROOT,
+        );
+        tree.set_size(directory, 100);
+        tree.set_size(child, 40);
+        tree.set_size(sibling, 25);
+        let mut state = AppState::new(root);
+        state.set_tree(tree);
+        state.selected_nodes.extend([directory, child, sibling]);
+
+        assert_eq!(state.selection_count(), 3);
+        assert_eq!(state.effective_selected_nodes(), vec![directory, sibling]);
+        assert_eq!(state.selection_total_size(), 125);
+    }
+
+    #[test]
+    fn selection_total_ignores_stale_ids_and_saturates() {
+        let root = PathBuf::from("/test-root");
+        let mut tree = DiskTree::new(root.clone());
+        let first = tree.add_node(
+            "first.bin".to_string(),
+            NodeKind::File,
+            root.join("first.bin"),
+            NodeId::ROOT,
+        );
+        let second = tree.add_node(
+            "second.bin".to_string(),
+            NodeKind::File,
+            root.join("second.bin"),
+            NodeId::ROOT,
+        );
+        tree.set_size(first, u64::MAX);
+        tree.set_size(second, 1);
+        let mut state = AppState::new(root);
+        state.set_tree(tree);
+        state.view_mode = ViewMode::LargeFiles;
+        state
+            .selected_nodes
+            .extend([first, second, NodeId(usize::MAX)]);
+
+        assert_eq!(state.effective_selected_nodes(), vec![first, second]);
+        assert_eq!(state.selection_total_size(), u64::MAX);
+    }
+
+    #[test]
+    fn footer_total_and_multi_delete_use_the_same_selection_roots() {
+        let temp = TempDir::new().unwrap();
+        let directory_path = temp.path().join("directory");
+        let child_path = directory_path.join("child.bin");
+        let sibling_path = temp.path().join("sibling.bin");
+        std::fs::create_dir(&directory_path).unwrap();
+        std::fs::write(&child_path, b"child").unwrap();
+        std::fs::write(&sibling_path, b"sibling").unwrap();
+
+        let mut tree = DiskTree::new(temp.path().to_path_buf());
+        let directory = tree.add_node(
+            "directory".to_string(),
+            NodeKind::Directory,
+            directory_path,
+            NodeId::ROOT,
+        );
+        let child = tree.add_node(
+            "child.bin".to_string(),
+            NodeKind::File,
+            child_path,
+            directory,
+        );
+        let sibling = tree.add_node(
+            "sibling.bin".to_string(),
+            NodeKind::File,
+            sibling_path,
+            NodeId::ROOT,
+        );
+        tree.set_size(directory, 100);
+        tree.set_size(child, 40);
+        tree.set_size(sibling, 25);
+        let mut state = AppState::new(temp.path().to_path_buf());
+        state.set_tree(tree);
+        state.selected_nodes.extend([directory, child, sibling]);
+
+        assert_eq!(state.selection_total_size(), 125);
+        state.request_delete();
+
+        assert_eq!(state.mode, AppMode::ConfirmMultiDelete);
+        let pending = state.pending_multi_delete.as_ref().unwrap();
+        assert_eq!(
+            pending.iter().map(|item| item.0).collect::<Vec<_>>(),
+            vec![directory, sibling]
+        );
+        assert_eq!(pending.iter().map(|item| item.2).sum::<u64>(), 125);
     }
 
     #[test]

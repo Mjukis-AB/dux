@@ -25,7 +25,11 @@ impl<'a> ConfirmMultiDeleteView<'a> {
 impl Widget for ConfirmMultiDeleteView<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let count = self.items.len();
-        let total_size: u64 = self.items.iter().map(|(_, _, s)| s).sum();
+        let total_size = self
+            .items
+            .iter()
+            .map(|(_, _, size)| *size)
+            .fold(0u64, u64::saturating_add);
         let show_count = count.min(5);
         let has_more = count > 5;
 
@@ -139,5 +143,17 @@ mod tests {
         assert!(rendered.contains("Permanently delete 2 items:"));
         assert!(rendered.contains("[y]"));
         assert!(rendered.contains("[n]"));
+    }
+
+    #[test]
+    fn total_size_saturates_like_the_footer() {
+        let items = vec![
+            (dux_core::NodeId::ROOT, PathBuf::from("/tmp/huge"), u64::MAX),
+            (dux_core::NodeId::ROOT, PathBuf::from("/tmp/extra"), 1),
+        ];
+
+        let rendered = render_items(&items);
+
+        assert!(rendered.contains(&format!("Total: {}", dux_core::format_size(u64::MAX))));
     }
 }

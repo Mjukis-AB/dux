@@ -22,7 +22,7 @@ impl Widget for HelpView<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         // Center the help box
         let width = 50.min(area.width.saturating_sub(4));
-        let height = 31.min(area.height.saturating_sub(4));
+        let height = 36.min(area.height.saturating_sub(4));
         let x = area.x + (area.width - width) / 2;
         let y = area.y + (area.height - height) / 2;
         let help_area = Rect::new(x, y, width, height);
@@ -77,6 +77,7 @@ impl Widget for HelpView<'_> {
             ("", "Actions", true),
             ("o", "Open in Finder", false),
             ("d", "Delete selected item(s)", false),
+            ("r", "Rescan from filesystem", false),
             ("", "", false),
             ("", "Other", true),
             ("?", "Toggle this help", false),
