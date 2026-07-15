@@ -68,17 +68,38 @@ pub(super) fn capture_delete_plan(
     path: &Path,
     evidence_paths: &[PathBuf],
 ) -> io::Result<PlannedDelete> {
+    validate_delete_target(scan_root, path)?;
     let ancestors = capture_ancestors(scan_root, path)?;
+    let scan_volume = ancestors
+        .first()
+        .expect("validated delete ancestry includes the scan root")
+        .identity
+        .volume;
+    if ancestors
+        .iter()
+        .any(|ancestor| ancestor.identity.volume != scan_volume)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "delete target crosses a filesystem boundary",
+        ));
+    }
+
+    let target = capture_entry(path)?;
+    if target.identity.volume != scan_volume {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "delete target crosses a filesystem boundary",
+        ));
+    }
+
     let mut evidence = Vec::with_capacity(evidence_paths.len());
     for evidence_path in evidence_paths {
         let snapshot = capture_entry(evidence_path)?;
-        if snapshot.kind != EntryKind::RegularFile {
+        if snapshot.kind != EntryKind::RegularFile || snapshot.identity.volume != scan_volume {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!(
-                    "artifact evidence is not a regular non-symlink file: {}",
-                    evidence_path.display()
-                ),
+                "artifact evidence is not a regular non-symlink file on the scan volume",
             ));
         }
         evidence.push(PlannedEvidence {
@@ -88,10 +109,55 @@ pub(super) fn capture_delete_plan(
     }
 
     Ok(PlannedDelete {
-        target_identity: capture_entry(path)?.identity,
+        target_identity: target.identity,
         ancestors,
         evidence,
     })
+}
+
+fn validate_delete_target(scan_root: &Path, path: &Path) -> io::Result<()> {
+    if !scan_root.is_absolute() || !path.is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "delete target and scan root must be absolute",
+        ));
+    }
+
+    let relative = path.strip_prefix(scan_root).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "delete target is outside the scan root",
+        )
+    })?;
+    let mut component_count = 0usize;
+    for component in relative.components() {
+        let std::path::Component::Normal(name) = component else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "delete target contains an unsafe path component",
+            ));
+        };
+        let name = name.to_str().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "delete target contains invalid text encoding",
+            )
+        })?;
+        if name.chars().any(char::is_control) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "delete target contains a control character",
+            ));
+        }
+        component_count += 1;
+    }
+    if component_count == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "delete target must be a strict descendant of the scan root",
+        ));
+    }
+    Ok(())
 }
 
 fn capture_ancestors(scan_root: &Path, path: &Path) -> io::Result<Vec<PlannedAncestor>> {
@@ -330,6 +396,60 @@ mod tests {
         execute_planned_delete(&path, plan).unwrap();
 
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn terminal_dot_components_cannot_escape_or_alias_the_scan_root() {
+        let temp = TempDir::new().unwrap();
+        let scan_root = temp.path().join("scan-root");
+        std::fs::create_dir(&scan_root).unwrap();
+        let outside = temp.path().join("outside-sentinel");
+        let inside = scan_root.join("inside-sentinel");
+        std::fs::write(&outside, b"keep").unwrap();
+        std::fs::write(&inside, b"keep").unwrap();
+
+        for target in [
+            scan_root.clone(),
+            scan_root.join("."),
+            scan_root.join(".."),
+            scan_root.join("child").join(".."),
+            scan_root.join("..").join("outside-sentinel"),
+        ] {
+            assert!(
+                capture_delete_plan(&scan_root, &target, &[]).is_err(),
+                "unsafe target was admitted: {}",
+                target.display()
+            );
+        }
+
+        assert!(outside.exists());
+        assert!(inside.exists());
+        assert!(scan_root.exists());
+    }
+
+    #[test]
+    fn control_character_target_is_rejected_before_confirmation() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("line\nbreak");
+        std::fs::write(&path, b"keep").unwrap();
+
+        assert!(capture_delete_plan(temp.path(), &path, &[]).is_err());
+        assert!(path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn invalid_text_target_is_rejected_before_filesystem_inspection() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+        let temp = TempDir::new().unwrap();
+        let mut bytes = temp.path().as_os_str().as_bytes().to_vec();
+        bytes.extend_from_slice(b"/");
+        bytes.push(0xff);
+        let path = PathBuf::from(OsString::from_vec(bytes));
+
+        assert!(capture_delete_plan(temp.path(), &path, &[]).is_err());
     }
 
     #[test]
