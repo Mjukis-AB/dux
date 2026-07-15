@@ -889,12 +889,43 @@ recovery. DUX MUST NOT download and execute an unsigned replacement.
 
 ### 17.1 Destructive-call boundary
 
-CI MUST reject product mutation calls outside the executor and narrow
-platform-effect adapters. The scan includes Rust removal APIs, shell `rm`, Swift
-`FileManager.removeItem`, process execution that can mutate, and equivalent new
-wrappers. Tests and internal atomic-temp cleanup require a reviewable annotation
-that names the locally constructed scope; an annotation is not permitted for
-user-controlled cleanup.
+CI MUST reject cleanup-capable removal, relocation, Trash/eviction, selected
+direct truncation, and process-launch calls outside the executor and narrow
+platform-effect adapters. The scan includes Rust removal/truncation APIs, shell
+`rm` and `truncate`, Swift `FileManager` removal/eviction and direct URL writes,
+Python destructive calls/write modes, process execution that can mutate, and
+equivalent new wrappers. Tests and internal atomic-temp cleanup require a
+reviewable annotation that names the locally constructed scope; an annotation
+is not permitted for user-controlled cleanup. This lint is not a general proof
+that arbitrary persistence writes cannot overwrite data: app-owned stores also
+require the ownership, permissions, bounded-input, and semantic gates in §11.
+
+This boundary is implemented in two layers. Workspace Clippy configuration
+denies compiler-resolved Rust filesystem mutation and child-process methods, so
+imports, aliases, re-exports, and formatting do not bypass the Rust rule. The
+standard-library repository scanner covers Rust defense in depth plus Swift,
+generated Swift, C-family sources, shell and workflow blocks, PowerShell, batch,
+and Python. It scans tracked and untracked non-ignored source plus executable,
+shebang, Makefile, and `.command` inputs; an unknown executable language fails
+closed. Its self-tests exercise multiline calls, aliases and callable references,
+quoted/split shell tokens, PowerShell, cloud eviction, process strings,
+truncation, generated/untracked inventory, stale annotations, and intentional
+negatives. Compiler-resolved Clippy runs on each supported OS so target-gated
+Rust is checked, and both policy tests and scanning are repeated for release tags.
+
+Every exception has one stable registered ID bound to an exact path, detected
+rule/primitive, and where needed an enclosing symbol or test context. It is
+adjacent to one matched statement and includes a specific reason. Unknown,
+duplicate, malformed, misplaced, copied, unused, and multi-call annotations
+fail, while registered IDs missing from source are stale and fail repository
+scanning. Current product mutation remains temporarily restricted to the three
+identity-checked calls in `execute_planned_delete`; this baseline is removed when the centralized
+executor adapter replaces it. Internal cache exceptions own only `create_new`
+temporary files and their atomic destination. Build exceptions own only
+`mktemp -d` staging paths or the exact repository-generated XCFramework path;
+the builder rejects its former caller-selected output path and any symlinked or
+non-physical output parent before invoking any tool. The Finder exception
+launches a fixed non-shell `open -R` argument vector.
 
 The lint is defense in depth, not authority. Adding an allowed wrapper still
 requires typed executor admission, tests, and this document to be updated.
@@ -997,7 +1028,7 @@ incident as a substitute for deterministic local evidence.
 | Typed scan coverage/issues | Absent; current scanner counts/skips and permits relaxed flags | Required before any scan is described as complete or becomes plan input |
 | Cache semantic/input validation | Atomic write plus CRC/version only; full-file read before bounds | Bounded reads, tree/path semantics, private permissions, retention, and migration |
 | Hard-link accounting and policy | Absent; only non-authoritative path snapshots capture link count | Deduplicated scan accounting and explicit per-mode admission rules |
-| Forbidden destructive-call lint | Absent | Required before adding another mutation surface |
+| Forbidden destructive-call lint | Implemented with compiler-resolved Rust denial, cross-language repository scan, scoped annotations, self-tests, and CI | Keep exception set exact; remove legacy baseline during executor migration |
 | Durable operation journal/history | Absent | Required before shared executor ships |
 | Private 0700/0600 stores | Not enforced by current cache | Required for app databases, snapshots, caches, and provider temp data |
 | Trash executor | Absent | Platform-native implementation and integration tests |

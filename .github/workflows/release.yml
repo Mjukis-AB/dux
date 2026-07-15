@@ -56,6 +56,14 @@ jobs:
         if: runner.os == 'Linux'
         run: cargo fmt --all -- --check
 
+      - name: Test destructive-call policy
+        if: runner.os == 'Linux'
+        run: python3 -m unittest discover -s scripts/tests -p 'test_*.py'
+
+      - name: Enforce destructive-call boundary
+        if: runner.os == 'Linux'
+        run: python3 scripts/check_destructive_calls.py
+
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
@@ -303,6 +311,7 @@ jobs:
           cd release-assets
           cat ./*.sha256 | sort -k2 > SHA256SUMS
           sha256sum --check SHA256SUMS
+          # DUX-DESTRUCTIVE: allow=release-checksum-sidecars-remove -- remove only downloaded checksum sidecars after verification
           rm ./*.sha256
 
       - name: Stage, upload, and publish release

@@ -5,6 +5,9 @@ publish = false
 edition = "2024"
 license = "MIT"
 
+[lints.clippy]
+disallowed_methods = "deny"
+
 [package.metadata]
 cargo-fuzz = true
 

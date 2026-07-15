@@ -1784,6 +1784,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test replaces a TempDir-owned scan root to exercise identity rejection"
+    )]
     fn replacement_scan_root_at_the_same_path_rejects_old_target_evidence() {
         let current = std::env::current_dir().unwrap();
         let container = tempdir_in(current).unwrap();
@@ -1800,6 +1804,7 @@ mod tests {
         let registry =
             ProtectedRootRegistry::with_home_directory_evidence(&old_canonical_root).unwrap();
 
+        // DUX-DESTRUCTIVE: allow=test-protected-replaced-root -- replace a TempDir-owned root to verify stale root evidence rejection
         std::fs::rename(&root_path, &moved_root_path).unwrap();
         std::fs::create_dir(&root_path).unwrap();
         let replacement_root = capture_scan_root(validate_scan_root(&root_path).unwrap()).unwrap();

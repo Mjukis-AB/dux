@@ -10,6 +10,7 @@ readonly STAGING_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/dux-bindings.XXXXXX")"
 readonly GENERATED_ROOT="$STAGING_ROOT/Generated"
 readonly HEADERS_ROOT="$STAGING_ROOT/Headers"
 
+# DUX-DESTRUCTIVE: allow=build-bindings-staging-remove -- mktemp-created staging directory is exclusively owned by this build
 trap 'rm -rf "$STAGING_ROOT"' EXIT
 
 if ! command -v perl >/dev/null 2>&1; then

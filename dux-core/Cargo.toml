@@ -28,8 +28,8 @@ nix = { version = "0.31", default-features = false, features = ["fs", "mount"] }
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
 
-[lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
+[lints]
+workspace = true
 
 [dev-dependencies]
 jsonschema = { version = "0.47.0", default-features = false }

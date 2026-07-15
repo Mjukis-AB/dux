@@ -1778,9 +1778,25 @@ Tasks:
   first production authority graph has no arbitrary-path permanent mode, and
   cloud contents/paths remain excluded from AI and direct deletion while a
   future supported local-copy eviction flow is metadata-only, fully-uploaded,
-  non-destructive, and separately disclosed. The forbidden destructive-call
-  lint remains the next checkpoint.
-- [ ] Add forbidden destructive-call CI lint.
+  non-destructive, and separately disclosed.
+- [x] Add forbidden destructive-call CI lint. CI now combines Clippy's
+  compiler-resolved `disallowed_methods` policy for Rust with a repository
+  scanner for Rust, Swift, shell/workflow, PowerShell, and Python mutation and
+  process escape hatches plus selected direct truncation APIs. Exceptions use a
+  one-use registered ID bound to an exact path, detected primitive/rule, and
+  where needed enclosing symbol or test context; each annotation is adjacent
+  and reasoned. The ledger is restricted to the legacy executor, create-new
+  cache files, repository-owned build/release outputs, fixed Finder reveal, or
+  test-owned temporary paths; malformed, copied, overbroad, misplaced, unknown,
+  and stale annotations fail. Platform-native Clippy runs on Linux, macOS, and
+  Windows; the same scanner and self-tests run in PR and tagged-release gates.
+  Executable/shebang sources and generated/untracked local sources are included,
+  while an unclassified executable language fails closed. The
+  XCFramework builder now rejects caller-selected output paths before running
+  tools or mutation and rejects symlinked/non-physical output parents. The lint
+  is a removal/relocation/truncation/process escape boundary, not a proof that
+  arbitrary app persistence writes can never overwrite data; persistence still
+  requires its separate ownership, permissions, and semantic validation gates.
 - [ ] Route existing CLI delete requests through a temporary centralized executor adapter.
 - [ ] Preserve CLI behavior and tests; clearly label current permanent deletion until replaced.
 

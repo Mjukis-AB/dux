@@ -211,6 +211,10 @@ fn capture_ancestors(scan_root: &Path, path: &Path) -> io::Result<Vec<PlannedAnc
     Ok(ancestors)
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "temporary legacy cleanup adapter is the only product deletion boundary"
+)]
 pub(super) fn execute_planned_delete(path: &Path, plan: PlannedDelete) -> Result<(), DeleteError> {
     for evidence in plan.evidence {
         let current =
@@ -259,9 +263,12 @@ pub(super) fn execute_planned_delete(path: &Path, plan: PlannedDelete) -> Result
     }
 
     let result = match current.kind {
+        // DUX-DESTRUCTIVE: allow=legacy-delete-directory -- reviewed legacy adapter deletes the identity-checked planned directory
         EntryKind::Directory => std::fs::remove_dir_all(path),
         #[cfg(windows)]
+        // DUX-DESTRUCTIVE: allow=legacy-delete-windows-link -- reviewed legacy adapter deletes the identity-checked planned Windows link
         EntryKind::SymlinkDirectory => std::fs::remove_dir_all(path),
+        // DUX-DESTRUCTIVE: allow=legacy-delete-file -- reviewed legacy adapter deletes the identity-checked planned file
         EntryKind::RegularFile | EntryKind::Other => std::fs::remove_file(path),
     };
 
@@ -453,12 +460,17 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test replaces a TempDir-owned fixture to exercise TOCTOU rejection"
+    )]
     fn replaced_file_is_not_deleted() {
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("file.txt");
         let original = temp.path().join("original.txt");
         std::fs::write(&path, b"original").unwrap();
         let plan = plan(&path);
+        // DUX-DESTRUCTIVE: allow=test-delete-replaced-file -- replace a TempDir-owned fixture to verify stale identity rejection
         std::fs::rename(&path, &original).unwrap();
         std::fs::write(&path, b"replacement").unwrap();
 
@@ -470,12 +482,17 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test replaces a TempDir-owned fixture to exercise TOCTOU rejection"
+    )]
     fn replaced_directory_is_not_deleted() {
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("directory");
         let original = temp.path().join("original-directory");
         std::fs::create_dir(&path).unwrap();
         let plan = plan(&path);
+        // DUX-DESTRUCTIVE: allow=test-delete-replaced-directory -- replace a TempDir-owned directory to verify stale identity rejection
         std::fs::rename(&path, &original).unwrap();
         std::fs::create_dir(&path).unwrap();
         std::fs::write(path.join("sentinel"), b"keep").unwrap();
@@ -488,11 +505,16 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test removes a TempDir-owned fixture to exercise disappearance handling"
+    )]
     fn missing_entry_is_not_counted_as_deleted() {
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("file.txt");
         std::fs::write(&path, b"original").unwrap();
         let plan = plan(&path);
+        // DUX-DESTRUCTIVE: allow=test-delete-missing-entry -- remove a TempDir-owned fixture to verify disappearance is not credited
         std::fs::remove_file(&path).unwrap();
 
         let error = execute_planned_delete(&path, plan).unwrap_err();
@@ -521,6 +543,10 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test replaces a TempDir-owned symlink to exercise TOCTOU rejection"
+    )]
     fn replaced_symlink_is_not_deleted() {
         use std::os::unix::fs::symlink;
 
@@ -533,6 +559,7 @@ mod tests {
         std::fs::create_dir(&second_target).unwrap();
         symlink(&first_target, &link).unwrap();
         let plan = plan(&link);
+        // DUX-DESTRUCTIVE: allow=test-delete-replaced-symlink -- replace a TempDir-owned symlink to verify stale identity rejection
         std::fs::rename(&link, &original_link).unwrap();
         symlink(&second_target, &link).unwrap();
 
@@ -544,6 +571,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test replaces TempDir-owned evidence to exercise TOCTOU rejection"
+    )]
     fn changed_artifact_evidence_blocks_delete() {
         let temp = TempDir::new().unwrap();
         let target = temp.path().join("target");
@@ -553,6 +584,7 @@ mod tests {
         std::fs::write(&evidence, b"original").unwrap();
         let plan =
             capture_delete_plan(temp.path(), &target, std::slice::from_ref(&evidence)).unwrap();
+        // DUX-DESTRUCTIVE: allow=test-delete-changed-evidence -- replace TempDir-owned evidence to verify stale artifact rejection
         std::fs::rename(&evidence, &original_evidence).unwrap();
         std::fs::write(&evidence, b"replacement").unwrap();
 
@@ -598,6 +630,10 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test replaces a TempDir-owned ancestor to exercise redirect rejection"
+    )]
     fn replaced_ancestor_cannot_redirect_delete_outside_scan_root() {
         use std::os::unix::fs::symlink;
 
@@ -614,6 +650,7 @@ mod tests {
         std::fs::create_dir(&external_target).unwrap();
         let external_sentinel = external_target.join("external-sentinel");
         std::fs::write(&external_sentinel, b"keep").unwrap();
+        // DUX-DESTRUCTIVE: allow=test-delete-replaced-ancestor -- replace a TempDir-owned ancestor to verify redirect rejection
         std::fs::rename(&project, &original_project).unwrap();
         symlink(external.path(), &project).unwrap();
 

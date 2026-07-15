@@ -39,6 +39,10 @@ fn hash_path(path: &Path) -> u64 {
 /// [4B] Tree length (u32 LE)
 /// [MB] Tree (postcard)
 /// [4B] CRC32 checksum of all preceding bytes
+#[expect(
+    clippy::disallowed_methods,
+    reason = "atomic cache publication owns its create-new temporary file and cache destination"
+)]
 pub fn save_cache(path: &Path, tree: &DiskTree, meta: &CacheMetadata) -> Result<()> {
     // Ensure parent directory exists
     if let Some(parent) = path.parent() {
@@ -74,12 +78,15 @@ pub fn save_cache(path: &Path, tree: &DiskTree, meta: &CacheMetadata) -> Result<
     let (temp_path, mut file) = create_cache_temp_file(path)?;
     if let Err(error) = file.write_all(&data).and_then(|()| file.sync_all()) {
         drop(file);
+        // DUX-DESTRUCTIVE: allow=cache-write-failure-temp-remove -- remove only the create-new temporary cache file after write failure
         let _ = fs::remove_file(&temp_path);
         return Err(error.into());
     }
     drop(file);
 
+    // DUX-DESTRUCTIVE: allow=cache-atomic-publish -- atomically publish the exclusively created temporary cache file
     if let Err(error) = fs::rename(&temp_path, path) {
+        // DUX-DESTRUCTIVE: allow=cache-publish-failure-temp-remove -- remove only the create-new temporary cache file after publish failure
         let _ = fs::remove_file(&temp_path);
         return Err(error.into());
     }
@@ -295,6 +302,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test removes two exclusively created TempDir-owned cache fixtures"
+    )]
     fn cache_temp_files_for_one_target_can_coexist() {
         let temp = TempDir::new().unwrap();
         let cache_path = temp.path().join("scan.dux");
@@ -306,7 +317,9 @@ mod tests {
         assert!(first_path.exists());
         assert!(second_path.exists());
         drop((first_file, second_file));
+        // DUX-DESTRUCTIVE: allow=test-cache-first-temp-remove -- remove the first exclusively created TempDir-owned cache fixture
         std::fs::remove_file(first_path).unwrap();
+        // DUX-DESTRUCTIVE: allow=test-cache-second-temp-remove -- remove the second exclusively created TempDir-owned cache fixture
         std::fs::remove_file(second_path).unwrap();
     }
 

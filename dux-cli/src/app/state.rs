@@ -627,11 +627,16 @@ impl AppState {
 
     /// Open selected item in Finder (macOS)
     #[cfg(target_os = "macos")]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "non-shell Finder reveal uses a fixed executable and argument structure"
+    )]
     pub fn open_in_finder(&self) {
         if let Some(node_id) = self.selected_node()
             && let Some(tree) = &self.tree
             && let Some(node) = tree.get(node_id)
         {
+            // DUX-DESTRUCTIVE: allow=finder-reveal -- fixed open command reveals one selected path without shell evaluation
             std::process::Command::new("open")
                 .arg("-R") // Reveal in Finder
                 .arg(&node.path)
@@ -1807,6 +1812,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test replaces a TempDir-owned fixture to exercise multi-delete TOCTOU rejection"
+    )]
     fn multi_delete_skips_replaced_item_and_deletes_unchanged_item() {
         let temp = TempDir::new().unwrap();
         let first_path = temp.path().join("first.txt");
@@ -1838,6 +1847,7 @@ mod tests {
         state.request_delete();
         assert_eq!(state.mode, AppMode::ConfirmMultiDelete);
 
+        // DUX-DESTRUCTIVE: allow=test-state-replaced-multi-item -- replace a TempDir-owned fixture to verify multi-delete identity checks
         std::fs::rename(&second_path, &original_second).unwrap();
         std::fs::write(&second_path, b"replacement").unwrap();
         state.confirm_multi_delete();
@@ -1913,6 +1923,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test replaces TempDir-owned evidence to exercise state-driven TOCTOU rejection"
+    )]
     fn changed_artifact_marker_blocks_state_driven_delete() {
         let temp = TempDir::new().unwrap();
         let manifest = temp.path().join("Cargo.toml");
@@ -1942,6 +1956,7 @@ mod tests {
 
         state.request_delete();
         assert_eq!(state.mode, AppMode::ConfirmDelete);
+        // DUX-DESTRUCTIVE: allow=test-state-changed-evidence -- replace TempDir-owned evidence to verify state-driven artifact checks
         std::fs::rename(&manifest, &original_manifest).unwrap();
         std::fs::write(&manifest, b"replacement").unwrap();
         state.confirm_delete();

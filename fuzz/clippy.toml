@@ -1,0 +1,11 @@
+# libfuzzer_sys's fuzz_target! macro creates its own corpus/artifact files.
+# Product code is still checked for deletion, relocation, truncation, and spawn APIs.
+disallowed-methods = [
+  { path = "std::fs::remove_file", reason = "filesystem mutation must be reviewed by the destructive-call policy" },
+  { path = "std::fs::remove_dir", reason = "filesystem mutation must be reviewed by the destructive-call policy" },
+  { path = "std::fs::remove_dir_all", reason = "recursive deletion must be reviewed by the destructive-call policy" },
+  { path = "std::fs::rename", reason = "filesystem replacement must be reviewed by the destructive-call policy" },
+  { path = "std::process::Command::new", reason = "child processes must be reviewed by the destructive-call policy" },
+  { path = "std::fs::File::set_len", reason = "file truncation must be reviewed by the destructive-call policy" },
+  { path = "std::fs::OpenOptions::truncate", reason = "file truncation must be reviewed by the destructive-call policy" },
+]
