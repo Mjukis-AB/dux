@@ -180,6 +180,55 @@ fn every_document_field_is_explicit_and_unknown_fields_fail_closed() {
 }
 
 #[test]
+fn schema_and_loader_share_the_ascii_relative_path_contract() {
+    let schema = schema();
+    let validator = jsonschema::draft202012::options()
+        .should_validate_formats(true)
+        .build(&schema)
+        .unwrap();
+
+    for relative_path in [
+        "nested/path with spaces/file+name",
+        "x/1234567890-_.+$@[]{}()&!,;='",
+    ] {
+        let mut document = valid_document();
+        document["rules"][0]["required_markers_all"] = json!([relative_path]);
+        let bytes = serde_json::to_vec(&document).unwrap();
+        assert!(
+            validator.is_valid(&document),
+            "schema rejected {relative_path:?}"
+        );
+        load_rule_registry_json(&bytes)
+            .unwrap_or_else(|error| panic!("loader rejected {relative_path:?}: {error:#}"));
+    }
+
+    let invalid_paths = [
+        "bad:name".to_owned(),
+        "x".repeat(256),
+        "nested/trailing.".to_owned(),
+        "nested/ leading".to_owned(),
+        "nested/trailing ".to_owned(),
+        "nested/résumé".to_owned(),
+        format!("{}/{}", "a".repeat(255), "b".repeat(255)).repeat(3),
+    ];
+    for relative_path in invalid_paths {
+        let mut document = valid_document();
+        document["rules"][0]["required_markers_all"] = json!([relative_path]);
+        let bytes = serde_json::to_vec(&document).unwrap();
+        assert!(
+            !validator.is_valid(&document),
+            "schema accepted {:?}",
+            document["rules"][0]["required_markers_all"][0]
+        );
+        assert!(
+            load_rule_registry_json(&bytes).is_err(),
+            "loader accepted {:?}",
+            document["rules"][0]["required_markers_all"][0]
+        );
+    }
+}
+
+#[test]
 fn schema_and_loader_cover_the_exhaustive_safety_action_matrix() {
     let schema = schema();
     let validator = jsonschema::draft202012::options()

@@ -257,6 +257,7 @@ impl RuleMatcher {
 
 fn is_valid_path_component(value: &str) -> bool {
     is_meaningful_value(value)
+        && value.is_ascii()
         && value.len() <= 255
         && value != "."
         && value != ".."
@@ -675,6 +676,7 @@ mod tests {
             "C:",
             "target*",
             "target.",
+            "tärget",
         ] {
             let mut definition = matcher_definition();
             definition.path_component = Some(path_component.to_owned());
@@ -691,6 +693,7 @@ mod tests {
             "nested/../Cargo.toml",
             "nested//Cargo.toml",
             "nested\\Cargo.toml",
+            "nested/Cargö.toml",
         ] {
             let mut definition = matcher_definition();
             definition.required_markers_all = vec![relative_path.to_owned()];

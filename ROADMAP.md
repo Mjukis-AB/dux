@@ -1614,11 +1614,12 @@ Tasks:
   shape and policy consistency, not trusted origin or cleanup authority. Eight
   checked synthetic `fixture.*` catalogs cover path and bundle selectors,
   missing/unknown/mixed fields, duplicate IDs/values, and invalid provenance;
-  eight focused tests also reject malformed/trailing/duplicate JSON, remove
+  nine focused tests also reject malformed/trailing/duplicate JSON, remove
   every required field, inject unknown fields at
   every object level, exhaust the 25 safety/action pairs, cover every category
   and scope, exercise scheduling/cloud constraints, typed limits/errors, schema
-  meta-validation, and deterministic ordering. JSON Schema validation uses a
+  meta-validation, deterministic ordering, and schema/runtime parity for the
+  ASCII byte-bounded relative-path grammar. JSON Schema validation uses a
   dev-only no-resolver dependency, while release code adds only `serde_json`.
   No rule catalog or fixture is embedded in Rust, copied into the macOS resource
   phase, exposed over FFI, or made available to AI/CLI callers. Evaluator
