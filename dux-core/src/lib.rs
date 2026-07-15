@@ -1,5 +1,6 @@
 pub mod cache;
 pub mod error;
+pub mod projection;
 pub mod scanner;
 pub mod size;
 pub mod tree;
@@ -9,6 +10,11 @@ pub use cache::{
     is_cache_valid, load_cache, save_cache, spot_check_mtimes,
 };
 pub use error::{DuxError, Result};
+pub use projection::{
+    ArtifactClassification, ArtifactKind, BuildArtifactEntry, LargeFileEntry, StaleThreshold,
+    classify_artifact, project_build_artifacts_at, project_large_files,
+    refresh_artifact_staleness_at,
+};
 pub use scanner::{CancellationToken, ScanConfig, ScanMessage, ScanProgress, Scanner};
 pub use size::{format_count, format_size, format_size_short, size_percentage};
 pub use tree::{DiskTree, NodeId, NodeKind, TreeNode};

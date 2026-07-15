@@ -8,7 +8,9 @@ use ratatui::{
     widgets::Widget,
 };
 
-use crate::app::views::{BuildArtifactEntry, StaleThreshold};
+use crate::app::views::{
+    BuildArtifactEntry, StaleThreshold, artifact_kind_label, stale_threshold_label,
+};
 
 use super::bar_chart::render_bar;
 use super::text::{char_count, truncate_start};
@@ -53,7 +55,7 @@ impl Widget for BuildArtifactsView<'_> {
         // Subtitle row showing stale threshold
         let subtitle = format!(
             "Marker-matched • Stale: >{} (s to change)",
-            self.stale_threshold.label()
+            stale_threshold_label(self.stale_threshold)
         );
         buf.set_string(
             area.x + 1,
@@ -168,7 +170,7 @@ impl Widget for BuildArtifactsView<'_> {
             x += char_count(&display_path) as u16 + 1;
 
             // Kind label
-            let kind_label = format!("[{}]", entry.kind.label());
+            let kind_label = format!("[{}]", artifact_kind_label(entry.kind));
             let kind_style = if is_cursor {
                 row_style
             } else {

@@ -5,7 +5,7 @@ use ratatui::{
     widgets::Widget,
 };
 
-use crate::app::views::StaleThreshold;
+use crate::app::views::{StaleThreshold, stale_threshold_label};
 use crate::app::{AppMode, SessionStats, ViewMode};
 
 use super::text::{char_count, truncate_start};
@@ -102,7 +102,7 @@ impl Widget for Footer<'_> {
                     ViewMode::BuildArtifacts => {
                         let stale_label = self
                             .stale_threshold
-                            .map(|threshold| format!("Stale:{}", threshold.label()))
+                            .map(|threshold| format!("Stale:{}", stale_threshold_label(threshold)))
                             .unwrap_or_else(|| "Stale".to_string());
                         vec![
                             ("Tab", "Views".to_string()),

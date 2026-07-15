@@ -1524,7 +1524,22 @@ Goal: make CLI behavior reusable and remove UI-owned destructive authority.
 
 Tasks:
 
-- [ ] Move `ArtifactKind`, artifact classification, large-file projection, and staleness calculation from CLI into core.
+- [x] Move `ArtifactKind`, artifact classification, large-file projection, and
+  staleness calculation from CLI into core. Completed 2026-07-15:
+  `dux-core::projection` now owns the public product-neutral types and pure
+  projections over `DiskTree`. Artifact matching preserves the complete M0
+  marker, exact-kind/case/location, symlink-chain, evidence-order, and verified-
+  ancestor suppression rules; its marker IDs/paths are explicitly snapshot
+  evidence that deletion callers must revalidate. Large-file membership,
+  relative paths, stable size ordering, percentages, newest-subtree mtime,
+  strict stale boundaries, missing/future-clock behavior, and in-place threshold
+  refresh are core calculations with an injected observation time. The CLI keeps
+  only dirty-view coordination, threshold cycling, and presentation labels while
+  consuming the shared results unchanged for deletion planning. Thirteen core
+  projection regressions include the eight migrated classification fixtures and
+  previously missing large-file/staleness edge cases; CLI state/deletion tests
+  continue proving evidence revalidation and selection behavior. File mtimes and
+  the corresponding cache bump remain the next independent task.
 - [ ] Record file modification times in scan nodes (cache format bump) to support age guards.
 - [ ] Introduce candidate and rule domain types.
 - [ ] Introduce rule schema/loader with fixture validation.
