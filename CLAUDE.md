@@ -41,7 +41,7 @@ Before creating a release tag:
 - Tree and cache state are updated only after filesystem deletion succeeds
 - Failed deletions remain visible and surface an error in the UI
 - User can continue browsing while deletion happens in background
-- If user quits during deletion, the deletion continues to completion in the background
+- Quitting during a deletion currently kills in-flight deletes at process exit (delete threads are detached); ROADMAP Milestone 0 hardening changes quit to drain in-flight deletions first
 
 ## Git Hooks
 

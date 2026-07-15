@@ -25,6 +25,8 @@ This document is the implementation source of truth for evolving DUX from a term
 
 The roadmap is deliberately explicit. An implementer should not need to invent safety policy, product boundaries, data contracts, or milestone order while working through it. If implementation reality conflicts with this document, update the document in the same pull request that changes the decision.
 
+As normative specifications land (`SECURITY_DESIGN.md`, the rule schema, the AI contract), extract them into standalone documents and let this roadmap shrink toward product decisions and milestones — smaller focused documents keep the update-in-the-same-PR rule cheap to honor. Mirror milestone checkboxes into repository issues so progress is visible outside this file.
+
 Normative terms:
 
 - **MUST** is a correctness or safety requirement.
@@ -89,6 +91,14 @@ These decisions are defaults for implementation and do not require further produ
 - AI receives structured metadata only by default, never file contents.
 - Absolute paths MUST be shortened to home-relative paths before being sent to AI unless the user explicitly enables full paths.
 - Credentials, keychains, tokens, browser profiles, messages, mail, notes, cloud documents, password-manager data, and security-tool state MUST be excluded from AI payloads and cleanup suggestions.
+- Local databases, snapshots, and caches contain full path listings of the user’s disk and are sensitive at rest: create them user-only (0700 directories, 0600 files) and cover data-at-rest handling in `SECURITY_DESIGN.md`.
+
+### 3.5 Language and localization
+
+- Ship 1.0 in English only.
+- All user-facing strings MUST be centralized (String Catalogs in Swift, a single strings module in Rust) from the first commit so localization is a translation task, not a refactor.
+- Swedish is the first localization candidate after 1.0.
+- Copy rules in this document (for example “storage,” never “memory”) apply to every locale.
 
 ## 4. Current repository assessment
 
@@ -108,6 +118,18 @@ Useful foundations already present:
 - Finder reveal from the CLI;
 - multi-selection and asynchronous deletion;
 - macOS, Linux, and Windows CLI CI/release coverage.
+
+Verified defects in the current implementation (code-grounded review, 2026-07-14). These are fixed by the Milestone 0 hardening tasks:
+
+1. `SLOW_PATTERNS` in `dux-core/src/scanner/walker.rs` matches substrings of the whole path, so any directory whose path contains `/dev/`, `/proc/`, `/sys/`, or `/Volumes/` is silently dropped. Confirmed empirically: a folder named `dev` under the scan root reports 0 bytes with no error and no coverage note.
+2. Deletion does not survive quitting: deletes run on detached threads that die at process exit, so quitting mid-delete can leave a half-deleted directory and a cache that still records it intact. Documentation claiming deletion continues after quit is wrong.
+3. Enter confirms permanent deletion in the confirm dialogs while also being the drill-down key in browsing mode, and the dialogs only advertise `[y]`/`[n]`.
+4. Build-artifact classification matches directory names only (`target`, `build`, `vendor`, and so on) with no marker evidence, and feeds multi-select permanent deletion.
+5. Cache invalidation (root mtime plus spot-checking the 32 largest directory mtimes) cannot see in-place file growth; the UI shows “(cached)” without the scan age and offers no rescan key.
+6. `metadata_with_timeout` spawns one OS thread per directory scanned.
+7. Multi-delete spawns one unbounded thread per selected item.
+8. The footer selection total double-counts nested selections (parent plus child).
+9. Concurrent dux instances scanning the same root race on the same cache temp file name (CRC32 makes this self-healing, but the rename race exists).
 
 Required architectural corrections:
 
@@ -259,9 +281,10 @@ pub enum DiskPressure {
 
 Default startup-volume thresholds:
 
-- Critical when important available capacity is at or below 10 GiB or 5%, whichever triggers first.
-- Warning when at or below 30 GiB or 10%, whichever triggers first.
+- Critical when important available capacity is at or below min(10 GiB, 5% of total capacity).
+- Warning when at or below min(30 GiB, 10% of total capacity).
 - Healthy otherwise.
+- Use `min`, not or-semantics: “10 GiB or 5%, whichever triggers first” would put a 4 TB volume into Critical at 205 GiB free. With `min`, a 4 TB volume goes Critical at 10 GiB and a 64 GB volume at roughly 3.2 GiB.
 - Thresholds are user-configurable, but the UI must always show the actual bytes and percent alongside the label.
 - Apply hysteresis so a volume does not oscillate between states near a threshold. Default recovery margin: 2 GiB and 1 percentage point.
 
@@ -313,7 +336,7 @@ Add only metadata required for correctness or product features:
 
 - logical byte length;
 - allocated byte count;
-- modification time;
+- modification time for files and directories (the current scanner records directories only; extending to files requires a cache format bump and adds per-node memory — plan both);
 - optional access time, clearly marked as unreliable;
 - device and inode identity on Unix for hard-link deduplication;
 - file type;
@@ -344,6 +367,7 @@ pub struct Candidate {
 
 pub enum SafetyTier {
     SafeRegenerable,
+    SafeEvictable,
     ReviewRequired,
     Informational,
     Protected,
@@ -351,6 +375,7 @@ pub enum SafetyTier {
 
 pub enum CandidateAction {
     RemoveKnownRegenerableContents,
+    EvictLocalCopy,
     MoveToTrash,
     RevealOnly,
     NoAction,
@@ -365,6 +390,7 @@ Candidate invariants:
 - Candidates cannot overlap after planning. If parent and child match, the planner retains one according to explicit rule precedence.
 - An unavailable or changed path is re-evaluated at execution time.
 - Estimated bytes are estimates until execution and post-action capacity verification complete.
+- `SafeEvictable`/`EvictLocalCopy` applies only to confirmed fully uploaded cloud items (for example iCloud Drive via the ubiquitous-item eviction API). Eviction MUST never target items with local-only changes, MUST be labeled non-destructive-but-requires-network-to-re-download, and MUST NOT be reported as deletion.
 
 ### 7.5 Cleanup plan and result
 
@@ -442,6 +468,7 @@ Rule engine requirements:
 - Include a rule revision in every history item.
 - Validate that schedule-eligible implies `SafeRegenerable` and permanent-safe action.
 - Validate that protected paths cannot be weakened by a cleanup rule.
+- Rules ship inside the signed app bundle. If remote rule updates are ever introduced, they MUST be signature-verified; unsigned remote rules are forbidden.
 - Ship rules with positive, negative, nested, symlink, and changed-after-scan fixtures.
 
 Initial independently researched categories:
@@ -459,6 +486,11 @@ Safe-regenerable candidates to investigate first:
 - crash reports and diagnostic logs with age limits;
 - old application update packages and package-manager download caches;
 - valid cache directories carrying a non-symlinked `CACHEDIR.TAG`, as supporting evidence only.
+
+Evictable candidates (non-destructive local-space recovery):
+
+- fully uploaded iCloud Drive items evicted with the Foundation ubiquitous-item API, disclosed as “stays in iCloud, re-downloads on demand”;
+- other cloud providers only where a supported eviction API exists — never by deleting provider-managed files directly.
 
 Review-required candidates:
 
@@ -494,6 +526,8 @@ UI code requests candidates and plans. It does not directly remove paths. Remove
 
 Only `dux-core/src/cleanup/executor.rs` and platform-specific modules may perform destructive filesystem operations. Add a CI script that fails if forbidden calls appear elsewhere, with narrow annotations for test temporary directories.
 
+Where practical, enforce this at the type level: the executor’s mutating entry points take a witness type constructible only from a reviewed, unexpired, non-dry-run plan, so dry-run code paths cannot compile into mutations.
+
 ### Layer 3: lexical validation
 
 Reject:
@@ -507,12 +541,14 @@ Reject:
 - top-level `/Applications`, `/Library`, `/Users`, `/Volumes`, `/System`, `/bin`, `/sbin`, `/usr`, `/etc`, `/var`, `/private`, and similar critical roots;
 - a cleanup root equal to the scan root unless a narrowly defined rule permits only children.
 
+`dux-core` is shared with the cross-platform CLI, so the validator MUST carry per-platform protected-root sets: `~/Library` itself on macOS (children reachable only through specific rules); `/home`, `/root`, `/opt`, `/srv`, and `/nix` on Linux; drive roots, `C:\Windows`, `C:\Users`, and `C:\Program Files` on Windows.
+
 ### Layer 4: canonical and symlink validation
 
 - Use descriptor-relative or equivalent race-resistant operations where practical.
 - Resolve symlinks without following them into protected roots.
 - Refuse a symlinked cleanup base.
-- Record device identity at plan time and execution time.
+- Record (device, inode) identity for every path at plan time; execution MUST re-stat and compare both, returning `ChangedSincePlan` on mismatch.
 - Reject paths that cross to a different volume unless the rule and plan explicitly target that volume.
 - Treat disappearance as skipped, not success.
 
@@ -531,6 +567,12 @@ Execution requires that markers, bundle identity, age, and process guards still 
 - Scheduled cleanup can use only permanent-safe mode.
 - Permanent mode requires a typed confirmation sentence the first time it is enabled globally; ordinary per-run confirmation can be simpler afterward.
 - Settings must provide a global “Disable permanent cleanup” switch.
+
+Trash execution requirements:
+
+- macOS Trash MUST use `FileManager.trashItem(at:)` through the platform executor — never a manual move into `~/.Trash` (that loses put-back metadata, breaks on external volumes, and degrades into copy-plus-delete across volumes).
+- The Linux CLI implements the XDG Trash specification or refuses Trash mode; it MUST NOT fake it with moves.
+- Ad hoc Trash of a symlink trashes the link itself, never the target, and says so in the review UI.
 
 ### Layer 8: audit and verification
 
@@ -558,6 +600,8 @@ At minimum test:
 - protected child beneath an otherwise cleanable cache;
 - active-process guard;
 - cancellation halfway through a plan;
+- process exit or crash halfway through a plan leaves a consistent operation journal that the next launch reports truthfully;
+- graceful shutdown drains or cleanly cancels in-flight operations before the process exits;
 - partial failures and retry;
 - dry-run producing the same decisions without mutations;
 - forbidden destructive-call CI lint;
@@ -594,6 +638,8 @@ Use three cadences rather than one full-disk scan loop.
 - Allow explicit external-volume scans.
 - Deduplicate hard-linked files within one scan.
 - Bound metadata timeouts and worker count.
+- Skip decisions MUST match absolute path prefixes and whole path components, never substrings, and SHOULD use filesystem-type detection (statfs) instead of name patterns; every skipped subtree MUST surface as a scan issue.
+- Probe slow mounts with a bounded prober pool, not one thread per directory.
 - Surface skipped and timed-out paths.
 
 ### 10.4 Incremental freshness
@@ -665,7 +711,17 @@ Do not store full millions-node trees in SQLite initially. Continue using versio
 - Cleanup history: retained until user clears it.
 - AI insights: default 30 days, user-clearable, and regenerated on input digest change.
 - Full snapshots: latest two complete snapshots per root plus any snapshot referenced by an active cleanup review.
+- The snapshots directory has a total size cap (default 2 GiB, configurable); evict oldest first. Settings shows DUX’s own disk footprint with a clear-data action — a disk-pressure tool must not be a storage thief itself.
 - Never delete history during cleanup without a separate settings action.
+
+### 11.3 Multi-process access
+
+The app, the bundled CLI, the standalone CLI, and (later) the scheduler are separate processes sharing this data.
+
+- Open SQLite in WAL mode with a busy timeout; writes go through one store coordinator per process, and an advisory lock serializes writers across processes.
+- Snapshot and cache writers use per-process unique temp names plus atomic rename; never a shared fixed `.tmp` name.
+- An older binary opening a newer schema MUST NOT write: it either falls back to read-only with a clear message or exits cleanly. Define and test both directions of version skew.
+- All files under `Application Support/Dux` and `Caches/Dux` are created user-only (0700 directories, 0600 files).
 
 ## 12. macOS application specification
 
@@ -704,6 +760,8 @@ Order:
 5. Top three deterministic recommendation groups.
 6. Primary button: `Review and recover…` opens Explorer Recommendations.
 7. Secondary actions: `Scan now`, `Open Explorer`, `Settings`, `Quit`.
+
+Milestone availability: items 1–2 and 7 ship in Milestone 3; item 3 (trend) arrives with Milestone 6 samples; items 4–6 depend on Milestone 5 candidates. Earlier milestones omit those slots entirely rather than showing placeholder data.
 
 During scanning:
 
@@ -761,6 +819,7 @@ Group by user-understandable outcome, not raw path:
 - Logs and diagnostics
 - Installers and downloads
 - Device and simulator data
+- Cloud files that can free local space (evictable)
 - Large review items
 - Unknown items to understand
 
@@ -845,6 +904,16 @@ On first launch:
 
 The product remains useful without Full Disk Access. Never show a false complete result.
 
+### 12.11 Future feature candidates (post-first-beta)
+
+Ideas that pass the §23 scope gate but are deliberately not scheduled yet:
+
+- App-centric storage attribution: map `~/Library/{Application Support,Caches,Containers}` to bundle identifiers for a read-only “storage by app” view, including orphaned data from deleted apps as review candidates.
+- Container/VM awareness: detect Docker/OrbStack/Colima images and simulator runtimes; where reclaim requires a vendor tool, show the exact command for the user to copy — DUX never executes it.
+- Menu bar free-space sparkline.
+- Exportable storage report (JSON or HTML) for support and team use.
+- Duplicate detection stays deferred until hashing cost and UX are designed.
+
 ## 13. Low-disk monitoring and notifications
 
 ### 13.1 State machine
@@ -879,12 +948,13 @@ Clicking the notification opens Recommendations filtered to the affected volume 
 
 When Critical:
 
-1. stale safe-regenerable candidates;
-2. Trash size as information only;
-3. old installers and archives requiring review;
-4. large files;
-5. guided storage exploration;
-6. permission gaps that may hide large areas.
+1. evictable cloud items (non-destructive; frees local space immediately when fully uploaded);
+2. stale safe-regenerable candidates;
+3. Trash size as information only;
+4. old installers and archives requiring review;
+5. large files;
+6. guided storage exploration;
+7. permission gaps that may hide large areas.
 
 Do not recommend risky system modifications merely because capacity is critical.
 
@@ -908,7 +978,8 @@ The macOS app is launched outside a login shell, so provider discovery must:
 - probe common user binary directories without invoking a shell;
 - canonicalize and display the resolved executable;
 - show version/probe status;
-- never execute a raw user-authored shell string.
+- never execute a raw user-authored shell string;
+- record the provider version ranges each adapter was tested against; the probe rejects unknown major versions instead of guessing at flags.
 
 ### 14.2 Invocation contract
 
@@ -947,7 +1018,8 @@ Limits:
 - no credentials or sensitive-category paths;
 - no environment dump;
 - no complete home directory listing in a single prompt;
-- indicate omitted/aggregated children.
+- indicate omitted/aggregated children;
+- file and directory names are untrusted input: they appear only as JSON data fields, are never concatenated into instruction text, and adapters assume they may contain prompt-injection attempts.
 
 ### 14.4 AI output
 
@@ -1061,9 +1133,10 @@ dux                         # existing TUI
 dux scan [PATH]
 dux status [--json]
 dux recommendations [--json]
-dux plan [--json] [--dry-run]
+dux plan [--json]           # always a dry-run; plans never execute from this command
 dux history [--json] [--limit N]
 dux rules list [--json]
+dux doctor [--json]         # coverage, Full Disk Access state, skipped roots, cache/database health
 ```
 
 Do not add permanent cleanup CLI commands until the shared planner/executor and safety suite exist. CLI cleanup must use the same plans, validation, and history as the app.
@@ -1100,6 +1173,7 @@ get_volume_status() -> [VolumeStatusDto]
 start_scan(request, callback) -> TaskId
 cancel_task(task_id)
 get_snapshot_summary(scan_id) -> SnapshotSummaryDto
+get_scan_issues(scan_id, page) -> ScanIssuePageDto
 get_children(scan_id, node_id, sort, page) -> NodePageDto
 get_treemap(scan_id, node_id, budget) -> TreemapDto
 get_candidates(scan_id, filter) -> CandidatePageDto
@@ -1165,6 +1239,7 @@ Task priority:
 - disk-pressure hysteresis;
 - history/regrowth calculations;
 - AI schema validation independent of provider execution;
+- hostile-filename AI inputs (prompt-injection attempts embedded in names) yield schema-valid, non-actionable output or rejection;
 - snapshot/database migration.
 
 ### 19.2 Fixture tests
@@ -1252,7 +1327,7 @@ Universal architecture verification
 Rule schema and fixture validation
 Database/snapshot migration tests
 Forbidden destructive-call scan
-Dependency vulnerability/license review
+Dependency vulnerability/license review (cargo audit and cargo deny in CI, not manual)
 Archive signing verification
 Notarization and stapling verification
 Sparkle/appcast signature verification if Sparkle is adopted
@@ -1269,17 +1344,36 @@ Add a macOS-major-version audit issue/template covering:
 - bundled CLI architectures;
 - rule validity for Xcode/simulators and Apple developer tooling.
 
+### 20.1 Release pipeline security (applies to the existing CLI pipeline immediately)
+
+- Pin every GitHub Action to a full commit SHA; mutable tags and branches are forbidden. The current `copy_file_to_another_repo_action@main` holding a cross-repo PAT is the exact shape of a Homebrew-tap poisoning attack.
+- Replace the third-party copy action with an inline `git clone`/`commit`/`push` using a fine-grained PAT scoped to the tap repository only.
+- Order release jobs test → build all targets → publish to crates.io → upload assets → update tap. crates.io publishes are immutable and MUST come after everything else is verified.
+- Publish a `SHA256SUMS` asset for every release; compute checksums in the build job that produced the artifacts.
+
 ## 21. Milestone plan
 
 Each milestone should land as several reviewable pull requests. Do not combine core safety extraction, FFI, and a full UI in one change.
 
-### Milestone 0: Baseline and architecture spikes
+### Milestone 0: Baseline hardening and architecture spikes
 
-Goal: prove the risky integration choices without product expansion.
+Goal: fix what is broken in the shipped CLI, secure the release pipeline, and prove the risky integration choices without product expansion.
 
-Tasks:
+Hardening tasks (ship as v0.5.x patch releases; see the verified defect list in §4):
 
-- [ ] Preserve and document the current dirty working tree before roadmap implementation begins.
+- [ ] Fix scanner skip patterns: absolute-prefix and path-component matching plus statfs-based detection, with a regression fixture containing a directory named `dev`.
+- [ ] Join in-flight deletions on quit (or require explicit confirmation to abandon them); correct the documentation that claims deletion survives quit.
+- [ ] Remove Enter as a delete-confirmation key; show item counts in both confirm dialogs.
+- [ ] Re-stat and compare (device, inode) immediately before every delete.
+- [ ] Gate artifact classification on marker evidence (for example, `target` requires a sibling `Cargo.toml`).
+- [ ] Bound multi-delete concurrency with a small worker pool.
+- [ ] Show cache age in the header; add a rescan keybinding; use per-process cache temp names.
+- [ ] Fix the footer selection total double-counting nested selections.
+- [ ] Apply §20.1 to the release workflow and add cargo audit/deny to CI.
+- [ ] Move `debug_scan.rs` into `dux-core/examples/`.
+
+Spike tasks:
+
 - [ ] Add architecture decision records for native SwiftUI, direct distribution, no sandbox, and shared Rust engine.
 - [ ] Create minimal `dux-ffi` returning its version and one size-format result.
 - [ ] Build Rust for arm64 and x86_64 and package a universal XCFramework.
@@ -1292,6 +1386,7 @@ Tasks:
 
 Exit criteria:
 
+- Hardening fixes have shipped in a v0.5.x release and the §4 defect list is resolved.
 - A clean CI job builds the universal app shell.
 - The menu bar can open the normal window.
 - Swift receives a typed Rust value.
@@ -1304,11 +1399,12 @@ Goal: make CLI behavior reusable and remove UI-owned destructive authority.
 Tasks:
 
 - [ ] Move `ArtifactKind`, artifact classification, large-file projection, and staleness calculation from CLI into core.
+- [ ] Record file modification times in scan nodes (cache format bump) to support age guards.
 - [ ] Introduce candidate and rule domain types.
 - [ ] Introduce rule schema/loader with fixture validation.
 - [ ] Introduce cleanup-plan types without execution.
 - [ ] Introduce lexical/canonical path validator.
-- [ ] Add protected-root registry.
+- [ ] Add protected-root registry with per-platform sets (macOS, Linux, Windows).
 - [ ] Add dangerous-path corpus and fuzz/property tests.
 - [ ] Add `SECURITY_DESIGN.md`.
 - [ ] Add forbidden destructive-call CI lint.
@@ -1432,6 +1528,8 @@ Tasks:
 - [ ] Add emergency recovery ordering.
 - [ ] Add rule outcome/regrowth measurement.
 - [ ] Add recurring “storage thief” ranking.
+- [ ] Add iCloud evictable candidates and an eviction executor (non-destructive; disclosed as re-download-on-demand). MAY ship after the first beta.
+- [ ] Add snapshot diff mode in Explorer: tree/treemap colored by growth between the last two snapshots. MAY ship after the first beta.
 
 Exit criteria:
 
@@ -1579,6 +1677,10 @@ Mitigation: do not copy code/lists/text; independently research rules; record pr
 
 Mitigation: use the product definition as a gate. Features must improve disk understanding, recovery, or prevention.
 
+### Release pipeline compromise
+
+Mitigation: SHA-pinned actions, minimal scoped tokens, publishing only after build and test succeed, inline tap updates instead of third-party actions, published checksums, and the signing gates in §20.
+
 ## 24. Definition of done for any cleanup rule
 
 A rule is not done until all are true:
@@ -1616,7 +1718,7 @@ A rule is not done until all are true:
 
 If starting immediately, use this exact order:
 
-1. Finish and commit or otherwise isolate the current uncommitted CLI fixes.
+1. Ship the Milestone 0 hardening fixes for the current CLI and release pipeline (v0.5.x).
 2. Land the minimal Swift/Rust FFI app-shell spike.
 3. Move existing computed views from CLI to core without changing behavior.
 4. Add candidate/rule/plan types with no deletion.
