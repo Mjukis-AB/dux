@@ -44,6 +44,7 @@ The tag workflow is strictly ordered: validation/security, four-target builds, c
 - Cache stored in `~/.cache/dux/` (or platform equivalent via `dirs` crate)
 - Format: Magic + Version + Metadata + Tree (postcard) + CRC32
 - `TreeNode.path` and `is_expanded` are `#[serde(skip)]` - reconstructed on load via `rebuild_paths()`
+- `TreeNode.mtime` is captured for files and directories from the same metadata used for size, serialized in cache v6, and remains snapshot evidence rather than mutation authority. Followed links retain `path_is_symlink` while using target metadata; pre-Unix-epoch values unsupported by Serde remain `None`.
 - Bump `CACHE_VERSION` in `dux-core/src/cache/metadata.rs` when format changes
 - Cache age always means the tree's original scan time; deletion-only cache updates must preserve it.
 - `r` starts a cache-bypassing rescan. Keep the previous tree and dirty state until the replacement scan succeeds so failure or quit cannot lose the last usable snapshot.

@@ -339,7 +339,7 @@ Add only metadata required for correctness or product features:
 
 - logical byte length;
 - allocated byte count;
-- modification time for files and directories (the current scanner records directories only; extending to files requires a cache format bump and adds per-node memory — plan both);
+- modification time for files and directories (captured from the size metadata snapshot since cache v6; the optional field already occupied the current in-memory node layout, while populated file values increase serialized cache size);
 - optional access time, clearly marked as unreliable;
 - device and inode identity on Unix for hard-link deduplication;
 - file type;
@@ -1538,9 +1538,25 @@ Tasks:
   consuming the shared results unchanged for deletion planning. Thirteen core
   projection regressions include the eight migrated classification fixtures and
   previously missing large-file/staleness edge cases; CLI state/deletion tests
-  continue proving evidence revalidation and selection behavior. File mtimes and
-  the corresponding cache bump remain the next independent task.
-- [ ] Record file modification times in scan nodes (cache format bump) to support age guards.
+  continue proving evidence revalidation and selection behavior.
+- [x] Record file modification times in scan nodes (cache format bump) to
+  support age guards. Completed 2026-07-15: the scanner now captures modification
+  time for every discovered file and directory from the same metadata already
+  used for its allocated size, so collection adds no filesystem query. Followed
+  symlinks use target metadata while retaining path provenance; non-file/directory
+  nodes, unavailable times, and pre-Unix-epoch values unsupported by Serde remain
+  explicitly unknown instead of breaking cache writes. Cache
+  version 6 rejects v5 snapshots before decoding, ensuring cached trees cannot
+  silently omit all file activity. Scanner regressions prove exact file and
+  directory capture (including followed-link target semantics), cache time
+  normalization rejects unsupported pre-epoch values, the cache round-trip
+  preserves a deterministic file time, the previous version is rejected, and
+  the existing projection regression proves newest-file activity controls
+  artifact staleness. The optional field
+  already occupied each current `TreeNode`, so this changes serialized cache
+  size rather than the present node layout. These timestamps remain scan
+  evidence only: future actionable age guards must treat incomplete coverage as
+  unknown/non-actionable and revalidate independently of this snapshot.
 - [ ] Introduce candidate and rule domain types.
 - [ ] Introduce rule schema/loader with fixture validation.
 - [ ] Introduce cleanup-plan types without execution.

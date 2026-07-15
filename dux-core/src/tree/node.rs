@@ -57,7 +57,13 @@ pub struct TreeNode {
     pub children: Vec<NodeId>,
     /// Depth in tree (0 for root)
     pub depth: u16,
-    /// Modification time (directories only, for cache invalidation)
+    /// Modification time captured for scanned files and directories.
+    ///
+    /// This comes from the same entry metadata used for size and is `None` for
+    /// other entry kinds, when the filesystem does not expose a modification
+    /// time, or for pre-Unix-epoch values unsupported by cache serialization. A
+    /// followed symlink that resolves to a file or directory records the target's
+    /// time while retaining `path_is_symlink` provenance.
     pub mtime: Option<SystemTime>,
     /// Whether directory is expanded in UI
     #[serde(skip)]

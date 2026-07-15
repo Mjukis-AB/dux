@@ -294,7 +294,10 @@ impl Scanner {
 
         // Set root mtime for cache invalidation
         if let Ok(root_meta) = std::fs::metadata(&root_path)
-            && let Ok(mtime) = root_meta.modified()
+            && let Some(mtime) = root_meta
+                .modified()
+                .ok()
+                .and_then(crate::time::cache_serializable_time)
             && let Some(root_node) = tree.get_mut(NodeId::ROOT)
         {
             root_node.mtime = Some(mtime);
@@ -480,16 +483,17 @@ impl Scanner {
             let node_id = tree.add_node(name, kind, path.clone(), parent_id);
             if let Some(node) = tree.get_mut(node_id) {
                 node.path_is_symlink = path_is_symlink;
+                if matches!(kind, NodeKind::Directory | NodeKind::File) {
+                    node.mtime = metadata
+                        .modified()
+                        .ok()
+                        .and_then(crate::time::cache_serializable_time);
+                }
             }
 
-            // Track path and mtime for directories
+            // Track directory paths for parent lookups.
             if kind == NodeKind::Directory {
                 path_to_id.insert(path.clone(), node_id);
-                if let Ok(mtime) = metadata.modified()
-                    && let Some(node) = tree.get_mut(node_id)
-                {
-                    node.mtime = Some(mtime);
-                }
                 shared_progress.dirs_scanned.fetch_add(1, Ordering::Relaxed);
             } else {
                 shared_progress
@@ -579,10 +583,14 @@ mod tests {
     #[test]
     fn test_scan_with_files() {
         let temp = TempDir::new().unwrap();
-        fs::write(temp.path().join("file1.txt"), "hello").unwrap();
+        let file_path = temp.path().join("file1.txt");
+        fs::write(&file_path, "hello").unwrap();
         fs::write(temp.path().join("file2.txt"), "world").unwrap();
-        fs::create_dir(temp.path().join("subdir")).unwrap();
-        fs::write(temp.path().join("subdir/file3.txt"), "test").unwrap();
+        let directory_path = temp.path().join("subdir");
+        fs::create_dir(&directory_path).unwrap();
+        fs::write(directory_path.join("file3.txt"), "test").unwrap();
+        let expected_file_mtime = fs::metadata(&file_path).unwrap().modified().unwrap();
+        let expected_directory_mtime = fs::metadata(&directory_path).unwrap().modified().unwrap();
 
         let scanner = Scanner::new(ScanConfig::default());
         let (rx, handle) = scanner.scan(temp.path().to_path_buf());
@@ -591,6 +599,21 @@ mod tests {
 
         let tree = handle.join().unwrap();
         assert!(tree.len() >= 4); // root + 2 files + subdir + 1 file
+        let canonical_root = temp.path().canonicalize().unwrap();
+        let file = tree
+            .get(
+                tree.find_by_path(&canonical_root.join("file1.txt"))
+                    .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(file.kind, NodeKind::File);
+        assert_eq!(file.mtime, Some(expected_file_mtime));
+        assert_eq!(
+            tree.get(tree.find_by_path(&canonical_root.join("subdir")).unwrap())
+                .unwrap()
+                .mtime,
+            Some(expected_directory_mtime)
+        );
     }
 
     #[test]
@@ -811,6 +834,8 @@ mod tests {
         fs::write(&real_manifest, b"[package]").unwrap();
         symlink(&real_dir, &linked_dir).unwrap();
         symlink(&real_manifest, &linked_manifest).unwrap();
+        let expected_directory_mtime = fs::metadata(&linked_dir).unwrap().modified().unwrap();
+        let expected_manifest_mtime = fs::metadata(&linked_manifest).unwrap().modified().unwrap();
 
         let scanner = Scanner::new(ScanConfig {
             follow_symlinks: true,
@@ -838,7 +863,9 @@ mod tests {
         let linked_manifest_node = tree.get(linked_manifest_id).unwrap();
         assert_eq!(linked_dir_node.kind, NodeKind::Directory);
         assert!(linked_dir_node.path_is_symlink);
+        assert_eq!(linked_dir_node.mtime, Some(expected_directory_mtime));
         assert_eq!(linked_manifest_node.kind, NodeKind::File);
         assert!(linked_manifest_node.path_is_symlink);
+        assert_eq!(linked_manifest_node.mtime, Some(expected_manifest_mtime));
     }
 }

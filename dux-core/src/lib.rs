@@ -5,6 +5,8 @@ pub mod scanner;
 pub mod size;
 pub mod tree;
 
+mod time;
+
 pub use cache::{
     CACHE_MAGIC, CACHE_VERSION, CacheMetadata, CachedScanConfig, cache_path_for, get_mtime,
     is_cache_valid, load_cache, save_cache, spot_check_mtimes,

@@ -217,9 +217,16 @@ pub fn is_cache_valid(meta: &CacheMetadata, root: &Path, config: &CachedScanConf
     true
 }
 
-/// Get the modification time of a path
+/// Get a cache-serializable modification time for a path.
+///
+/// Pre-Unix-epoch filesystem values are represented as unknown because Serde's
+/// `SystemTime` format cannot encode them.
 pub fn get_mtime(path: &Path) -> Option<SystemTime> {
-    fs::metadata(path).ok()?.modified().ok()
+    fs::metadata(path)
+        .ok()?
+        .modified()
+        .ok()
+        .and_then(crate::time::cache_serializable_time)
 }
 
 /// Spot-check directory mtimes to detect deep changes that root mtime misses.
@@ -337,9 +344,9 @@ mod tests {
     }
 
     #[test]
-    fn test_previous_scanner_policy_cache_is_rejected() {
+    fn previous_cache_version_is_rejected() {
         let temp = TempDir::new().unwrap();
-        let cache_path = temp.path().join("old-policy.dux");
+        let cache_path = temp.path().join("old-version.dux");
         let tree = DiskTree::new(temp.path().to_path_buf());
         let meta = CacheMetadata {
             version: CACHE_VERSION,
@@ -391,6 +398,8 @@ mod tests {
             root_path.join("subdir").join("file.txt"),
             subdir_id,
         );
+        let file_mtime = SystemTime::UNIX_EPOCH + Duration::from_secs(1_234_567);
+        tree.get_mut(file_id).unwrap().mtime = Some(file_mtime);
 
         // Verify original paths
         assert_eq!(tree.get(subdir_id).unwrap().path, root_path.join("subdir"));
@@ -428,5 +437,6 @@ mod tests {
             loaded_tree.get(file_id).unwrap().path,
             root_path.join("subdir").join("file.txt")
         );
+        assert_eq!(loaded_tree.get(file_id).unwrap().mtime, Some(file_mtime));
     }
 }
