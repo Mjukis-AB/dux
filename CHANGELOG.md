@@ -16,6 +16,7 @@ All notable changes to DUX will be documented in this file.
 - Build-artifact entries now require exact, regular, non-symlink marker files instead of directory names alone. Ambiguous names such as `DerivedData`, `Build`, `dist`, `vendor`, and `.cache` are omitted until stronger rules exist.
 - Artifact marker identities and every directory identity from the scan root to the target parent are re-checked before permanent deletion. Changed evidence, replaced ancestors, and symlink/reparse ancestors fail closed.
 - Followed symlinks retain path provenance in scan snapshots, and deletion is refused below a known followed-symlink ancestor.
+- Multi-delete now uses a fixed pool of at most four workers instead of spawning one thread per selected item. Per-item panics become failures without stranding later queued deletions, and graceful quit continues waiting for the complete confirmed batch.
 
 ### Changed
 - Cache version bumped to v5 so scans created with the previous scanner policy or without symlink provenance auto-invalidate.

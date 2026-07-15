@@ -20,6 +20,7 @@ crossterm = { workspace = true }
 clap = { workspace = true }
 color-eyre = { workspace = true }
 dirs = "5"
+crossbeam-channel = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }

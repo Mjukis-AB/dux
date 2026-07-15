@@ -42,6 +42,7 @@ Before creating a release tag:
 - Failed deletions remain visible and surface an error in the UI
 - Delete confirmation captures the entry's filesystem identity without following symlinks. It also captures every ancestor directory identity from the scan root to the target parent; the worker re-checks ancestors and the target before removal and skips changed, missing, symlinked, or reparse-point paths.
 - Build-artifact deletes additionally capture the exact marker-file identities used for classification and re-check them at execution time.
+- Confirmed multi-delete batches use at most four named workers fed by a shared queue. All handles remain tracked; graceful quit and `Drop` wait for active and queued items, and an individual task panic is reported as that item's failure without stopping the pool.
 - User can continue browsing while deletion happens in background
 - Deletion workers are tracked; graceful quit waits for them, applies their results to the tree, then persists the cache. External force termination can still interrupt a filesystem operation.
 

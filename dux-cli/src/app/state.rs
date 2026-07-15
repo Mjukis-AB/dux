@@ -1,12 +1,124 @@
 use std::collections::{HashMap, HashSet};
+use std::io;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::thread::JoinHandle;
 
 use dux_core::{DiskTree, NodeId, ScanProgress};
 
 use super::deletion::{PlannedDelete, capture_delete_plan, execute_planned_delete};
 use super::views::ComputedViews;
+
+const MULTI_DELETE_WORKER_LIMIT: usize = 4;
+
+type WorkerMain = Box<dyn FnOnce() + Send + 'static>;
+
+fn spawn_bounded_workers<T, F>(
+    items: Vec<T>,
+    worker_limit: usize,
+    work: F,
+) -> io::Result<Vec<JoinHandle<()>>>
+where
+    T: Send + 'static,
+    F: Fn(T) + Send + Sync + 'static,
+{
+    spawn_bounded_workers_with(items, worker_limit, work, |index, worker_main| {
+        std::thread::Builder::new()
+            .name(format!("dux-delete-{index}"))
+            .spawn(worker_main)
+    })
+}
+
+fn spawn_bounded_workers_with<T, F, S>(
+    items: Vec<T>,
+    worker_limit: usize,
+    work: F,
+    mut spawn: S,
+) -> io::Result<Vec<JoinHandle<()>>>
+where
+    T: Send + 'static,
+    F: Fn(T) + Send + Sync + 'static,
+    S: FnMut(usize, WorkerMain) -> io::Result<JoinHandle<()>>,
+{
+    assert!(worker_limit > 0, "worker limit must be non-zero");
+    if items.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let worker_count = worker_limit.min(items.len());
+    let (task_tx, task_rx) = crossbeam_channel::unbounded();
+    let work = Arc::new(work);
+    let mut workers = Vec::with_capacity(worker_count);
+    for index in 0..worker_count {
+        let task_rx = task_rx.clone();
+        let work = Arc::clone(&work);
+        let worker_main: WorkerMain = Box::new(move || {
+            while let Ok(item) = task_rx.recv() {
+                work(item);
+            }
+        });
+        match spawn(index, worker_main) {
+            Ok(worker) => workers.push(worker),
+            Err(error) => {
+                drop(task_tx);
+                for worker in workers {
+                    let _ = worker.join();
+                }
+                return Err(error);
+            }
+        }
+    }
+
+    for item in items {
+        if task_tx.send(item).is_err() {
+            drop(task_tx);
+            for worker in workers {
+                let _ = worker.join();
+            }
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "delete worker queue disconnected",
+            ));
+        }
+    }
+    drop(task_tx);
+    Ok(workers)
+}
+
+struct MultiDeleteTask {
+    node_id: NodeId,
+    path: PathBuf,
+    size: u64,
+    plan: PlannedDelete,
+}
+
+fn execute_multi_delete_task<E, F>(task: MultiDeleteTask, execute: F) -> MultiDeleteResult
+where
+    E: std::fmt::Display,
+    F: FnOnce(&Path, PlannedDelete) -> Result<(), E>,
+{
+    let MultiDeleteTask {
+        node_id,
+        path,
+        size,
+        plan,
+    } = task;
+    let failure_path = path.clone();
+    match catch_unwind(AssertUnwindSafe(|| match execute(&path, plan) {
+        Ok(()) => MultiDeleteResult::Success { node_id, size },
+        Err(error) => MultiDeleteResult::Failure {
+            path,
+            error: error.to_string(),
+        },
+    })) {
+        Ok(result) => result,
+        Err(_) => MultiDeleteResult::Failure {
+            path: failure_path,
+            error: "delete worker panicked while deleting this item".to_string(),
+        },
+    }
+}
 
 /// Statistics tracked during the session
 #[derive(Debug, Default, Clone)]
@@ -922,16 +1034,34 @@ impl AppState {
                 self.mode = AppMode::Browsing;
                 return;
             };
-            planned_items.push((node_id, path, size, plan));
+            planned_items.push(MultiDeleteTask {
+                node_id,
+                path,
+                size,
+                plan,
+            });
         }
 
         let total = planned_items.len();
+        let (tx, rx) = mpsc::channel();
+        let worker_path = self.root_path.clone();
+        let handles =
+            match spawn_bounded_workers(planned_items, MULTI_DELETE_WORKER_LIMIT, move |task| {
+                let msg = execute_multi_delete_task(task, execute_planned_delete);
+                let _ = tx.send(msg);
+            }) {
+                Ok(handles) => handles,
+                Err(error) => {
+                    self.error_message = Some(format!(
+                        "Could not start multi-delete workers: {error}. No deletion was started."
+                    ));
+                    self.mode = AppMode::Browsing;
+                    return;
+                }
+            };
 
         self.selected_nodes.clear();
         self.selecting_mode = false;
-
-        // Shared channel for all delete threads
-        let (tx, rx) = mpsc::channel();
 
         self.multi_delete_progress = Some(MultiDeleteProgress {
             total,
@@ -939,31 +1069,17 @@ impl AppState {
             bytes_freed: 0,
             failures: Vec::new(),
             receiver: rx,
-            workers: Vec::with_capacity(total),
+            workers: Vec::with_capacity(MULTI_DELETE_WORKER_LIMIT.min(total)),
         });
         self.mode = AppMode::MultiDeleting;
 
-        // Spawn one thread per item (concurrent deletion)
-        for (node_id, path, size, plan) in planned_items {
-            let tx = tx.clone();
-            let worker_path = path.clone();
-            let handle = std::thread::spawn(move || {
-                let result = execute_planned_delete(&path, plan);
-                let msg = match result {
-                    Ok(()) => MultiDeleteResult::Success { node_id, size },
-                    Err(e) => MultiDeleteResult::Failure {
-                        path,
-                        error: e.to_string(),
-                    },
-                };
-                let _ = tx.send(msg);
-            });
+        for handle in handles {
             self.multi_delete_progress
                 .as_mut()
                 .expect("created above")
                 .workers
                 .push(DeleteWorker {
-                    path: worker_path,
+                    path: worker_path.clone(),
                     handle,
                 });
         }
@@ -1115,8 +1231,100 @@ impl Drop for AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Barrier;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use dux_core::NodeKind;
     use tempfile::TempDir;
+
+    #[test]
+    fn bounded_workers_cap_concurrency_and_process_every_item() {
+        const LIMIT: usize = 4;
+        const ITEMS: usize = 12;
+
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let completed = Arc::new(AtomicUsize::new(0));
+        let first_wave = Arc::new(Barrier::new(LIMIT + 1));
+
+        let worker_active = Arc::clone(&active);
+        let worker_peak = Arc::clone(&peak);
+        let worker_completed = Arc::clone(&completed);
+        let worker_first_wave = Arc::clone(&first_wave);
+        let workers = spawn_bounded_workers((0..ITEMS).collect(), LIMIT, move |item| {
+            let now_active = worker_active.fetch_add(1, Ordering::SeqCst) + 1;
+            worker_peak.fetch_max(now_active, Ordering::SeqCst);
+            if item < LIMIT {
+                worker_first_wave.wait();
+            }
+            worker_completed.fetch_add(1, Ordering::SeqCst);
+            worker_active.fetch_sub(1, Ordering::SeqCst);
+        })
+        .unwrap();
+
+        assert_eq!(workers.len(), LIMIT);
+        first_wave.wait();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+
+        assert_eq!(peak.load(Ordering::SeqCst), LIMIT);
+        assert_eq!(completed.load(Ordering::SeqCst), ITEMS);
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn partial_worker_start_failure_runs_no_items() {
+        let executed = Arc::new(AtomicUsize::new(0));
+        let worker_executed = Arc::clone(&executed);
+
+        let result = spawn_bounded_workers_with(
+            vec![1, 2, 3, 4],
+            4,
+            move |_| {
+                worker_executed.fetch_add(1, Ordering::SeqCst);
+            },
+            |index, worker_main| {
+                if index == 2 {
+                    Err(io::Error::other("injected spawn failure"))
+                } else {
+                    std::thread::Builder::new().spawn(worker_main)
+                }
+            },
+        );
+
+        assert!(result.is_err());
+        assert_eq!(executed.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn multi_delete_task_panic_becomes_an_item_failure() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("item.txt");
+        std::fs::write(&path, b"keep").unwrap();
+        let plan = capture_delete_plan(temp.path(), &path, &[]).unwrap();
+
+        let result = execute_multi_delete_task(
+            MultiDeleteTask {
+                node_id: NodeId(1),
+                path: path.clone(),
+                size: 4,
+                plan,
+            },
+            |_, _| -> Result<(), String> { panic!("intentional task panic") },
+        );
+
+        let MultiDeleteResult::Failure {
+            path: failed_path,
+            error,
+        } = result
+        else {
+            panic!("panicking task unexpectedly succeeded");
+        };
+        assert_eq!(failed_path, path);
+        assert!(error.contains("panicked"));
+        assert!(path.exists());
+    }
 
     fn state_with_child() -> (AppState, NodeId) {
         let root = PathBuf::from("/test-root");
@@ -1430,6 +1638,53 @@ mod tests {
     }
 
     #[test]
+    fn multi_delete_uses_four_workers_for_larger_batches() {
+        const ITEM_COUNT: usize = MULTI_DELETE_WORKER_LIMIT + 3;
+
+        let temp = TempDir::new().unwrap();
+        let mut tree = DiskTree::new(temp.path().to_path_buf());
+        let mut node_ids = Vec::new();
+        let mut paths = Vec::new();
+        for index in 0..ITEM_COUNT {
+            let name = format!("item-{index}.txt");
+            let path = temp.path().join(&name);
+            std::fs::write(&path, b"x").unwrap();
+            let node_id = tree.add_node(name, NodeKind::File, path.clone(), NodeId::ROOT);
+            tree.set_size(node_id, 1);
+            node_ids.push(node_id);
+            paths.push(path);
+        }
+
+        let mut state = AppState::new(temp.path().to_path_buf());
+        state.set_tree(tree);
+        state.selected_nodes.extend(node_ids.iter().copied());
+        state.request_delete();
+        assert_eq!(state.mode, AppMode::ConfirmMultiDelete);
+
+        state.confirm_multi_delete();
+
+        let progress = state.multi_delete_progress.as_ref().unwrap();
+        assert_eq!(progress.total, ITEM_COUNT);
+        assert_eq!(progress.workers.len(), MULTI_DELETE_WORKER_LIMIT);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while state.multi_delete_progress.is_some() {
+            assert!(std::time::Instant::now() < deadline);
+            state.poll_multi_delete();
+            std::thread::yield_now();
+        }
+
+        assert!(paths.iter().all(|path| !path.exists()));
+        assert!(
+            node_ids
+                .iter()
+                .all(|node_id| state.tree.as_ref().unwrap().get(*node_id).is_none())
+        );
+        assert_eq!(state.session_stats.items_deleted, ITEM_COUNT as u32);
+        assert_eq!(state.session_stats.bytes_freed, ITEM_COUNT as u64);
+    }
+
+    #[test]
     fn changed_artifact_marker_blocks_state_driven_delete() {
         let temp = TempDir::new().unwrap();
         let manifest = temp.path().join("Cargo.toml");
@@ -1540,61 +1795,62 @@ mod tests {
     }
 
     #[test]
-    fn quit_waits_for_every_multi_delete_worker() {
-        let (mut state, first_child) = state_with_child();
-        let second_child = state.tree.as_mut().unwrap().add_node(
-            "second.txt".to_string(),
-            NodeKind::File,
-            PathBuf::from("/test-root/second.txt"),
-            NodeId::ROOT,
-        );
-        state.tree.as_mut().unwrap().set_size(second_child, 20);
+    fn quit_waits_for_active_and_queued_multi_delete_items() {
+        const ITEM_COUNT: usize = MULTI_DELETE_WORKER_LIMIT + 2;
+
+        let root = PathBuf::from("/test-root");
+        let mut tree = DiskTree::new(root.clone());
+        let mut tasks = Vec::new();
+        for index in 0..ITEM_COUNT {
+            let node_id = tree.add_node(
+                format!("item-{index}.txt"),
+                NodeKind::File,
+                root.join(format!("item-{index}.txt")),
+                NodeId::ROOT,
+            );
+            tree.set_size(node_id, 1);
+            tasks.push((node_id, 1));
+        }
+        let mut state = AppState::new(root.clone());
+        state.set_tree(tree);
 
         let (result_tx, result_rx) = mpsc::channel();
-        let (first_release_tx, first_release_rx) = mpsc::channel();
-        let (second_release_tx, second_release_rx) = mpsc::channel();
-        let first_tx = result_tx.clone();
-        let first = DeleteWorker {
-            path: PathBuf::from("/test-root/file.txt"),
-            handle: std::thread::spawn(move || {
-                first_release_rx.recv().unwrap();
-                first_tx
-                    .send(MultiDeleteResult::Success {
-                        node_id: first_child,
-                        size: 10,
-                    })
-                    .unwrap();
-            }),
-        };
-        let second = DeleteWorker {
-            path: PathBuf::from("/test-root/second.txt"),
-            handle: std::thread::spawn(move || {
-                second_release_rx.recv().unwrap();
-                result_tx
-                    .send(MultiDeleteResult::Success {
-                        node_id: second_child,
-                        size: 20,
-                    })
-                    .unwrap();
-            }),
-        };
+        let (release_tx, release_rx) = crossbeam_channel::bounded(ITEM_COUNT);
+        let workers = spawn_bounded_workers(tasks, MULTI_DELETE_WORKER_LIMIT, move |task| {
+            release_rx.recv().unwrap();
+            result_tx
+                .send(MultiDeleteResult::Success {
+                    node_id: task.0,
+                    size: task.1,
+                })
+                .unwrap();
+        })
+        .unwrap()
+        .into_iter()
+        .map(|handle| DeleteWorker {
+            path: root.clone(),
+            handle,
+        })
+        .collect();
         state.multi_delete_progress = Some(MultiDeleteProgress {
-            total: 2,
+            total: ITEM_COUNT,
             completed: 0,
             bytes_freed: 0,
             failures: Vec::new(),
             receiver: result_rx,
-            workers: vec![first, second],
+            workers,
         });
         state.mode = AppMode::MultiDeleting;
 
         state.quit();
-        first_release_tx.send(()).unwrap();
+        for _ in 0..MULTI_DELETE_WORKER_LIMIT {
+            release_tx.send(()).unwrap();
+        }
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
         while state
             .multi_delete_progress
             .as_ref()
-            .is_some_and(|progress| progress.completed == 0)
+            .is_some_and(|progress| progress.completed < MULTI_DELETE_WORKER_LIMIT)
         {
             assert!(std::time::Instant::now() < deadline);
             state.poll_multi_delete();
@@ -1602,7 +1858,9 @@ mod tests {
         }
         assert!(!state.should_quit);
 
-        second_release_tx.send(()).unwrap();
+        for _ in MULTI_DELETE_WORKER_LIMIT..ITEM_COUNT {
+            release_tx.send(()).unwrap();
+        }
         while !state.should_quit {
             assert!(std::time::Instant::now() < deadline);
             state.poll_multi_delete();
@@ -1610,10 +1868,13 @@ mod tests {
         }
 
         let tree = state.tree.as_ref().unwrap();
-        assert!(tree.get(first_child).is_none());
-        assert!(tree.get(second_child).is_none());
-        assert_eq!(state.session_stats.items_deleted, 2);
-        assert_eq!(state.session_stats.bytes_freed, 30);
+        assert!(
+            (1..=ITEM_COUNT)
+                .map(NodeId)
+                .all(|node_id| tree.get(node_id).is_none())
+        );
+        assert_eq!(state.session_stats.items_deleted, ITEM_COUNT as u32);
+        assert_eq!(state.session_stats.bytes_freed, ITEM_COUNT as u64);
     }
 
     #[test]
