@@ -6,6 +6,7 @@
 
 mod filesystem;
 mod lexical;
+mod protected;
 
 #[cfg(unix)]
 mod unix;
@@ -46,6 +47,11 @@ pub(crate) use lexical::WindowsComponentError;
 // registry. They must not become an arbitrary-path FFI or client API.
 #[allow(unused_imports)]
 pub(crate) use lexical::{LexicalCleanupPath, LexicalPathError, LexicalScanRoot};
+#[allow(unused_imports)]
+pub(crate) use protected::{
+    PROTECTED_ROOT_POLICY_REVISION, ProtectedPathForm, ProtectedPathKind, ProtectedRootDisposition,
+    ProtectedRootError, ProtectedRootRegistry,
+};
 
 #[cfg(unix)]
 use unix as platform;

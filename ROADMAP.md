@@ -1680,7 +1680,45 @@ Tasks:
   dangling/looped and symlinked roots), missing and special entries, hard links,
   root binding, identity chains, diagnostic path privacy, and non-mutation;
   this checkpoint is cross-target compiled for Windows and Linux.
-- [ ] Add protected-root registry with per-platform sets (macOS, Linux, Windows).
+- [x] Add protected-root registry with per-platform sets (macOS, Linux, Windows).
+  A revisioned, crate-private textual registry now evaluates both requested and
+  canonical scan-root and target locations with component boundaries and a
+  deterministic hard-deny-over-guard precedence. The policy model separates
+  exact structural anchors, hard-denied trees, and guarded trees whose children
+  will require a future code-owned deterministic-rule grant; no arbitrary rule,
+  caller boolean, scan selection, or mode can satisfy that grant today.
+
+  The macOS table covers System and Darwin infrastructure, system applications
+  and libraries, package roots, user/volume containers, `/private` backing
+  paths, validated home-directory evidence, other profiles beneath conventional
+  and configured profile containers, and guarded home Library content.
+  Linux covers boot/device/process/runtime/system trees, usr-merge spellings,
+  `/var`, root, Nix/Snap/package and service roots, home and mount containers,
+  validated home-directory evidence, and other profiles beneath conventional
+  and configured profile containers. Windows applies hard OS/recovery/recycle/
+  volume-information denies on every drive, guards Program Files and ProgramData
+  descendants, protects drive/profile roots and other profiles beneath
+  conventional and configured profile containers, and guards current-profile
+  AppData. Static ASCII system components compare conservatively without Unicode
+  normalization; Linux remains case-sensitive, and every match is component-aware
+  rather than a string prefix.
+
+  The registry deliberately returns only `Denied`, `SpecificRuleRequired`, or
+  `NoTextualMatch` textual dispositions. `NoTextualMatch` is not an allow or
+  safety witness. Production registry construction is sealed until trusted OS
+  account/known-folder discovery supplies the actual home and profile-container
+  boundaries; accounts in unrelated undiscovered containers remain unknown, not
+  safe. Complete filesystem-root-to-scan ancestry, authoritative mount-location
+  identity (including Linux bind-mount detection), trusted selected-volume
+  evidence, stable per-boundary deterministic-rule grant identifiers, and
+  Windows handle-relative validation also remain mandatory before planner use.
+  Focused tests exercise all platform tables on every host, a checked full-table
+  revision fingerprint and duplicate checks, exhaustive exact/descendant target
+  and scan coverage, invalid and relocated home boundaries, all four evidence
+  forms, hard-over-guard precedence, custom homes, drive/case/component
+  boundaries, unresolved Windows legacy aliases, unsupported-platform failure,
+  diagnostic privacy, and live non-mutation. The dangerous corpus and
+  fuzz/property checkpoint remains next.
 - [ ] Add dangerous-path corpus and fuzz/property tests.
 - [ ] Add `SECURITY_DESIGN.md`.
 - [ ] Add forbidden destructive-call CI lint.

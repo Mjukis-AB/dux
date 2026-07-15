@@ -1,8 +1,8 @@
 pub mod cache;
 pub mod domain;
 pub mod error;
-// The validator is intentionally staged ahead of its protected-root consumer.
-// Its constructors remain crate-private until that fail-closed layer lands.
+// Path evidence and textual protection policy are intentionally staged ahead
+// of trusted mount, volume, home-resolution, rule-scope, and planner witnesses.
 #[allow(dead_code)]
 pub(crate) mod path_validation;
 pub mod projection;
