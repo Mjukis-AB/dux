@@ -1,6 +1,10 @@
 pub mod cache;
 pub mod domain;
 pub mod error;
+// The validator is intentionally staged ahead of its protected-root consumer.
+// Its constructors remain crate-private until that fail-closed layer lands.
+#[allow(dead_code)]
+pub(crate) mod path_validation;
 pub mod projection;
 pub mod scanner;
 pub mod size;

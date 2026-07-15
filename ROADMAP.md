@@ -1648,7 +1648,38 @@ Tasks:
   types perform no I/O, expose no mutation or approval API, and grant no
   execution authority. FFI, persistence, AI, CLI migration, plan-result
   journaling, and execution remain at their later roadmap boundaries.
-- [ ] Introduce lexical/canonical path validator.
+- [x] Introduce lexical/canonical path validator.
+  `dux-core::path_validation` now stages non-authoritative structural evidence
+  behind crate-private constructors. Raw host-native syntax is inspected before
+  `Path` normalization and rejects empty/relative paths, dot traversal,
+  repeated or trailing separators, controls, invalid Unicode encoding,
+  excessive encoded length, ambiguous Windows namespaces and aliases, bare
+  cleanup roots, scan-root equality, and non-descendant prefix collisions.
+  Cleanup lexical evidence carries its exact scan root and relative path, so it
+  cannot be paired with another root. Cache-reconstructed tree paths are not
+  integrated and are forbidden by policy because the current cache persists
+  names through a lossy Unicode representation; a typed fresh/lossless scan-
+  provenance witness remains required when the later planner adopts this API.
+
+  The live stage walks each component without following symlinks (descriptor-
+  relative `openat`/`fstatat` on Unix and repeated cumulative-path no-follow
+  handles on Windows), refuses symlinks/reparse points and special entries,
+  rejects detectable volume
+  crossings, and binds canonical path, portable volume/object identity, target
+  kind, hard-link count, and the ordered ancestor identity chain into an
+  immutable snapshot. It requires canonicalization to preserve the exact
+  platform path location, compares repeated captures plus canonical identity to
+  fail closed on observed changes, and performs no filesystem mutation. The
+  snapshot is time-bound evidence only: it grants no planner/executor authority,
+  is absent from FFI and clients, and still requires the following protected-
+  root registry and later executor-time revalidation. Windows inspection is
+  still full-path based and remains non-actionable until handle-bound or
+  equivalent executor revalidation closes its ancestor-reparse race. Native
+  tests cover strict
+  scope, normalization hazards, Unicode/lossy encoding, symlinks (including
+  dangling/looped and symlinked roots), missing and special entries, hard links,
+  root binding, identity chains, diagnostic path privacy, and non-mutation;
+  this checkpoint is cross-target compiled for Windows and Linux.
 - [ ] Add protected-root registry with per-platform sets (macOS, Linux, Windows).
 - [ ] Add dangerous-path corpus and fuzz/property tests.
 - [ ] Add `SECURITY_DESIGN.md`.
