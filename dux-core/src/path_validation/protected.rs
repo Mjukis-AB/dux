@@ -5,7 +5,7 @@ use thiserror::Error;
 use super::{CanonicalPathSnapshot, CanonicalScanRoot, LexicalCleanupPath};
 
 /// Bump whenever a protected-root entry or its coverage changes.
-pub(crate) const PROTECTED_ROOT_POLICY_REVISION: u32 = 1;
+pub(crate) const PROTECTED_ROOT_POLICY_REVISION: u32 = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum ProtectedPathKind {
@@ -508,10 +508,15 @@ impl PlatformPolicy {
                         .first()
                         .is_some_and(|value| self.platform.components_equal(value, child))
                 }) {
+                    let level = if matches!(context, MatchContext::Target) && relative.len() == 1 {
+                        ProtectionLevel::Denied
+                    } else {
+                        ProtectionLevel::SpecificRuleRequired
+                    };
                     best = prefer_match(
                         best,
                         ProtectionMatch {
-                            level: ProtectionLevel::SpecificRuleRequired,
+                            level,
                             kind: ProtectedPathKind::UserLibrary,
                         },
                     );
@@ -950,6 +955,269 @@ fn rules(platform: PolicyPlatform) -> &'static [StaticRule] {
     }
 }
 
+#[cfg(fuzzing)]
+pub(super) fn assert_fuzz_invariants(input: &[u8]) {
+    let (tag, payload) = input.split_first().unwrap_or((&b'A', &[]));
+    match *tag {
+        b'S' => fuzz_static_policy(payload),
+        b'G' => fuzz_dynamic_policy(payload),
+        b'P' => fuzz_precedence(payload),
+        b'A' => fuzz_arbitrary_policy(payload),
+        value => match value % 4 {
+            0 => fuzz_static_policy(input),
+            1 => fuzz_dynamic_policy(input),
+            2 => fuzz_precedence(input),
+            _ => fuzz_arbitrary_policy(input),
+        },
+    }
+}
+
+#[cfg(fuzzing)]
+#[derive(Clone, Copy)]
+enum FuzzCoverage {
+    Exact,
+    HardTree,
+    GuardedTree,
+}
+
+#[cfg(fuzzing)]
+fn fuzz_static_policy(input: &[u8]) {
+    const CASES: &[(PolicyPlatform, &[&str], FuzzCoverage)] = &[
+        (PolicyPlatform::MacOs, &["System"], FuzzCoverage::HardTree),
+        (
+            PolicyPlatform::MacOs,
+            &["Applications"],
+            FuzzCoverage::GuardedTree,
+        ),
+        (PolicyPlatform::MacOs, &["Users"], FuzzCoverage::Exact),
+        (PolicyPlatform::Linux, &["etc"], FuzzCoverage::HardTree),
+        (PolicyPlatform::Linux, &["opt"], FuzzCoverage::HardTree),
+        (PolicyPlatform::Linux, &["home"], FuzzCoverage::Exact),
+        (
+            PolicyPlatform::Windows,
+            &["Windows"],
+            FuzzCoverage::HardTree,
+        ),
+        (
+            PolicyPlatform::Windows,
+            &["Program Files"],
+            FuzzCoverage::GuardedTree,
+        ),
+        (PolicyPlatform::Windows, &["Users"], FuzzCoverage::Exact),
+    ];
+    let (platform, components, coverage) =
+        CASES[usize::from(input.first().copied().unwrap_or_default()) % CASES.len()];
+    let exact = match platform {
+        PolicyPlatform::Windows => PolicyPath::drive('C', components),
+        _ => PolicyPath::unix(components),
+    };
+    let mut descendant = exact.clone();
+    descendant.components.push("fuzz-child".to_owned());
+    let mut sibling = exact.clone();
+    sibling.components[0].push_str("-lookalike");
+    let expected = match coverage {
+        FuzzCoverage::Exact => (Some(ProtectionLevel::Denied), None, None, None),
+        FuzzCoverage::HardTree => (
+            Some(ProtectionLevel::Denied),
+            Some(ProtectionLevel::Denied),
+            Some(ProtectionLevel::Denied),
+            Some(ProtectionLevel::Denied),
+        ),
+        FuzzCoverage::GuardedTree => (
+            Some(ProtectionLevel::Denied),
+            Some(ProtectionLevel::SpecificRuleRequired),
+            Some(ProtectionLevel::SpecificRuleRequired),
+            Some(ProtectionLevel::SpecificRuleRequired),
+        ),
+    };
+    assert_eq!(
+        classify_static(platform, MatchContext::Target, &exact).map(|value| value.level),
+        expected.0
+    );
+    assert_eq!(
+        classify_static(platform, MatchContext::Target, &descendant).map(|value| value.level),
+        expected.1
+    );
+    assert_eq!(
+        classify_static(platform, MatchContext::ScanScope, &exact).map(|value| value.level),
+        expected.2
+    );
+    assert_eq!(
+        classify_static(platform, MatchContext::ScanScope, &descendant).map(|value| value.level),
+        expected.3
+    );
+    assert_eq!(
+        classify_static(platform, MatchContext::Target, &sibling),
+        None
+    );
+}
+
+#[cfg(fuzzing)]
+fn fuzz_dynamic_policy(input: &[u8]) {
+    let platform = match input.first().copied().unwrap_or_default() % 3 {
+        0 => PolicyPlatform::MacOs,
+        1 => PolicyPlatform::Linux,
+        _ => PolicyPlatform::Windows,
+    };
+    let suffix = input
+        .iter()
+        .skip(1)
+        .take(16)
+        .map(|byte| char::from(b'a' + (byte % 26)))
+        .collect::<String>();
+    let current = format!("current-{suffix}");
+    let foreign = format!("foreign-{suffix}");
+    let (home, foreign_home, guarded_root, guarded_child) = match platform {
+        PolicyPlatform::MacOs => (
+            PolicyPath::unix(&["Users", &current]),
+            PolicyPath::unix(&["Users", &foreign, "Downloads"]),
+            PolicyPath::unix(&["Users", &current, "Library"]),
+            PolicyPath::unix(&["Users", &current, "Library", "Caches"]),
+        ),
+        PolicyPlatform::Linux => (
+            PolicyPath::unix(&["home", &current]),
+            PolicyPath::unix(&["home", &foreign, ".cache"]),
+            PolicyPath::unix(&["home", &current, ".cache"]),
+            PolicyPath::unix(&["home", &current, ".cache", "tool"]),
+        ),
+        PolicyPlatform::Windows => (
+            PolicyPath::drive('C', &["Users", &current]),
+            PolicyPath::drive('C', &["Users", &foreign, "Downloads"]),
+            PolicyPath::drive('C', &["Users", &current, "AppData"]),
+            PolicyPath::drive('C', &["Users", &current, "AppData", "Local"]),
+        ),
+        PolicyPlatform::Unsupported => unreachable!(),
+    };
+    let home_paths = vec![home.clone()];
+    let policy = PlatformPolicy {
+        platform,
+        profile_containers: profile_parents(&home_paths),
+        home_paths,
+    };
+    assert_eq!(
+        policy.classify_target(&home).map(|value| value.level),
+        Some(ProtectionLevel::Denied)
+    );
+    assert_eq!(
+        policy
+            .classify_target(&foreign_home)
+            .map(|value| value.level),
+        Some(ProtectionLevel::Denied)
+    );
+    if platform == PolicyPlatform::Linux {
+        assert_eq!(policy.classify_target(&guarded_root), None);
+        assert_eq!(policy.classify_target(&guarded_child), None);
+    } else {
+        assert_eq!(
+            policy
+                .classify_target(&guarded_root)
+                .map(|value| value.level),
+            Some(ProtectionLevel::Denied)
+        );
+        assert_eq!(
+            policy
+                .classify_target(&guarded_child)
+                .map(|value| value.level),
+            Some(ProtectionLevel::SpecificRuleRequired)
+        );
+    }
+}
+
+#[cfg(fuzzing)]
+fn fuzz_precedence(input: &[u8]) {
+    let policy = PlatformPolicy {
+        platform: PolicyPlatform::MacOs,
+        home_paths: vec![PolicyPath::unix(&["Users", "fuzz-user"])],
+        profile_containers: vec![PolicyPath::unix(&["Users"])],
+    };
+    let guarded = PolicyPath::unix(&["Applications", "Fuzz.app"]);
+    let denied = PolicyPath::unix(&["System", "Library"]);
+    let forms = [
+        ProtectedPathForm::ScanRootRequested,
+        ProtectedPathForm::ScanRootCanonical,
+        ProtectedPathForm::TargetRequested,
+        ProtectedPathForm::TargetCanonical,
+    ];
+    let guarded_form = forms[usize::from(input.first().copied().unwrap_or_default()) % forms.len()];
+    let denied_form = forms[usize::from(input.get(1).copied().unwrap_or_default()) % forms.len()];
+    let context = |form| match form {
+        ProtectedPathForm::ScanRootRequested | ProtectedPathForm::ScanRootCanonical => {
+            MatchContext::ScanScope
+        }
+        ProtectedPathForm::TargetRequested | ProtectedPathForm::TargetCanonical => {
+            MatchContext::Target
+        }
+    };
+    assert!(matches!(
+        policy.assess(&[(guarded_form, context(guarded_form), &guarded)]),
+        ProtectedRootDisposition::SpecificRuleRequired { .. }
+    ));
+    for paths in [
+        vec![
+            (guarded_form, context(guarded_form), &guarded),
+            (denied_form, context(denied_form), &denied),
+        ],
+        vec![
+            (denied_form, context(denied_form), &denied),
+            (guarded_form, context(guarded_form), &guarded),
+        ],
+    ] {
+        assert!(matches!(
+            policy.assess(&paths),
+            ProtectedRootDisposition::Denied { .. }
+        ));
+    }
+}
+
+#[cfg(fuzzing)]
+fn fuzz_arbitrary_policy(input: &[u8]) {
+    let platform = match input.first().copied().unwrap_or_default() % 3 {
+        0 => PolicyPlatform::MacOs,
+        1 => PolicyPlatform::Linux,
+        _ => PolicyPlatform::Windows,
+    };
+    let home = match platform {
+        PolicyPlatform::Windows => PolicyPath::drive('C', &["Users", "fuzz-user"]),
+        PolicyPlatform::MacOs => PolicyPath::unix(&["Users", "fuzz-user"]),
+        _ => PolicyPath::unix(&["home", "fuzz-user"]),
+    };
+    let home_paths = vec![home];
+    let policy = PlatformPolicy {
+        platform,
+        profile_containers: profile_parents(&home_paths),
+        home_paths,
+    };
+    let Ok(arbitrary) = std::str::from_utf8(input) else {
+        return;
+    };
+    let components = arbitrary
+        .split(['/', '\\'])
+        .filter(|component| !component.is_empty())
+        .take(32)
+        .map(|component| component.chars().take(64).collect::<String>())
+        .collect::<Vec<_>>();
+    if components.is_empty() {
+        return;
+    }
+    let refs = components.iter().map(String::as_str).collect::<Vec<_>>();
+    let path = match platform {
+        PolicyPlatform::Windows => PolicyPath::drive('D', &refs),
+        _ => PolicyPath::unix(&refs),
+    };
+    let first = policy.assess(&[(
+        ProtectedPathForm::TargetRequested,
+        MatchContext::Target,
+        &path,
+    )]);
+    let second = policy.assess(&[(
+        ProtectedPathForm::TargetRequested,
+        MatchContext::Target,
+        &path,
+    )]);
+    assert_eq!(first, second);
+    assert_eq!(first.policy_revision(), PROTECTED_ROOT_POLICY_REVISION);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -987,7 +1255,7 @@ mod tests {
 
     #[test]
     fn policy_tables_are_versioned_unique_and_have_expected_sizes() {
-        assert_eq!(PROTECTED_ROOT_POLICY_REVISION, 1);
+        assert_eq!(PROTECTED_ROOT_POLICY_REVISION, 2);
         for (platform, expected) in [
             (PolicyPlatform::MacOs, 18),
             (PolicyPlatform::Linux, 24),
@@ -1062,7 +1330,7 @@ mod tests {
     }
 
     #[test]
-    fn policy_revision_one_has_a_checked_full_table_fingerprint() {
+    fn policy_revision_two_has_a_checked_full_table_fingerprint() {
         let mut signature = String::new();
         for platform in [
             PolicyPlatform::MacOs,
@@ -1086,8 +1354,8 @@ mod tests {
             .fold(0xcbf29ce484222325_u64, |hash, byte| {
                 (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
             });
-        const POLICY_REVISION_1_FINGERPRINT: u64 = 10_830_234_716_710_889_208;
-        assert_eq!(fingerprint, POLICY_REVISION_1_FINGERPRINT);
+        const POLICY_REVISION_2_STATIC_TABLE_FINGERPRINT: u64 = 10_830_234_716_710_889_208;
+        assert_eq!(fingerprint, POLICY_REVISION_2_STATIC_TABLE_FINGERPRINT);
     }
 
     #[test]
@@ -1168,6 +1436,10 @@ mod tests {
             denied(ProtectedPathKind::UserHome)
         );
         assert_eq!(
+            target(&policy, &PolicyPath::unix(&["Users", "alice", "Library"])),
+            denied(ProtectedPathKind::UserLibrary)
+        );
+        assert_eq!(
             target(
                 &policy,
                 &PolicyPath::unix(&["Users", "alice", "Library", "Caches"])
@@ -1238,6 +1510,13 @@ mod tests {
                 &PolicyPath::drive('C', &["Users", "Bob", "Downloads"])
             ),
             denied(ProtectedPathKind::UserHome)
+        );
+        assert_eq!(
+            target(
+                &policy,
+                &PolicyPath::drive('C', &["Users", "Alice", "AppData"])
+            ),
+            denied(ProtectedPathKind::UserLibrary)
         );
         assert_eq!(
             target(
@@ -1461,9 +1740,14 @@ mod tests {
         )]);
         assert_eq!(
             disposition,
-            ProtectedRootDisposition::NoTextualMatch { policy_revision: 1 }
+            ProtectedRootDisposition::NoTextualMatch {
+                policy_revision: PROTECTED_ROOT_POLICY_REVISION,
+            }
         );
-        assert_eq!(disposition.policy_revision(), 1);
+        assert_eq!(
+            disposition.policy_revision(),
+            PROTECTED_ROOT_POLICY_REVISION
+        );
     }
 
     #[test]
@@ -1538,3 +1822,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "dangerous_path_tests.rs"]
+mod dangerous_path_tests;

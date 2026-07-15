@@ -1,0 +1,20 @@
+[package]
+name = "dux-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license = "MIT"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "=0.4.13"
+dux-core = { path = "../dux-core", version = "=0.5.0" }
+
+[[bin]]
+name = "path_validation"
+path = "fuzz_targets/path_validation.rs"
+test = false
+doc = false
+bench = false

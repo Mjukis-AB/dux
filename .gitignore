@@ -1,4 +1,7 @@
 /target
+/fuzz/target/
+/fuzz/artifacts/
+/fuzz/coverage/
 /dux-macos/Generated/
 /dux-macos/Dux.xcodeproj/project.xcworkspace/xcuserdata/
 /dux-macos/Dux.xcodeproj/xcuserdata/

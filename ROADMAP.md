@@ -632,7 +632,11 @@ At minimum test:
 - partial failures and retry;
 - dry-run producing the same decisions without mutations;
 - forbidden destructive-call CI lint;
-- fuzz target invariant: every accepted path is absolute, non-root, traversal-free, and outside protected scopes.
+- fuzz/property invariants are stage-specific: lexical cleanup success is
+  lossless, absolute, non-root, traversal-free, and a strict component
+  descendant; known protected paths never weaken from denied to guarded/miss.
+  Neither lexical success nor `NoTextualMatch` is an accepted/safe path or an
+  execution witness.
 
 ## 10. Scanning and refresh architecture
 
@@ -1717,9 +1721,35 @@ Tasks:
   and scan coverage, invalid and relocated home boundaries, all four evidence
   forms, hard-over-guard precedence, custom homes, drive/case/component
   boundaries, unresolved Windows legacy aliases, unsupported-platform failure,
-  diagnostic privacy, and live non-mutation. The dangerous corpus and
-  fuzz/property checkpoint remains next.
-- [ ] Add dangerous-path corpus and fuzz/property tests.
+  diagnostic privacy, and live non-mutation.
+- [x] Add dangerous-path corpus and fuzz/property tests.
+  The deny-unknown v1 JSON corpus is independently authored rather than
+  generated from implementation tables. It carries stable IDs and explicit
+  stage outcomes for 37 host-native lexical cases, all 52 macOS/Linux/Windows
+  static roots, 24 dynamic home/profile/guard cases, and six documented known
+  gaps. Native companions exercise invalid Unix bytes and unpaired Windows
+  UTF-16; deterministic properties cover every control character, dot segments,
+  encoded-unit boundaries, lossless strict descendants, component-prefix
+  lookalikes, exact/hard/guard matrices, and deny precedence across evidence
+  forms. Corpus outcomes are deliberately `reject`, `denied`, `guarded`,
+  `NoTextualMatch`, or non-authoritative evidence—never “safe” or “allowed.”
+
+  This checkpoint also corrected dynamic guarded-root semantics: the exact
+  `$HOME/Library` and `$HOME/AppData` roots are denied, while descendants and
+  scan scopes require a future stable rule-boundary grant. The isolated
+  `fuzz/` package pins `libfuzzer-sys` and its own audited lockfile, exposes a
+  bounded `cfg(fuzzing)` invariant oracle only to fuzz builds, performs no
+  filesystem I/O, and retains six seed classes. A 20,000-run fixed-seed smoke
+  campaign passes locally; pinned nightly CI repeats it on changes and runs a
+  five-minute weekly campaign, preserving crash artifacts for promotion into
+  the reviewed corpus.
+
+  These tests do not close the explicitly recorded Linux bind-mount, macOS
+  firmlink, Windows alias/reparse, trusted-volume/home discovery, stable rule-
+  grant, or executor-revalidation gaps. The corpus instead records every such
+  unresolved gap as non-authoritative; executable alias and textual-miss cases
+  separately ensure the current API produces no positive witness.
+  `SECURITY_DESIGN.md` remains the next safety checkpoint.
 - [ ] Add `SECURITY_DESIGN.md`.
 - [ ] Add forbidden destructive-call CI lint.
 - [ ] Route existing CLI delete requests through a temporary centralized executor adapter.

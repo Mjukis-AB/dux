@@ -6,6 +6,13 @@ pub mod error;
 #[allow(dead_code)]
 pub(crate) mod path_validation;
 pub mod projection;
+
+/// Non-shipping, filesystem-free invariant oracle for the isolated fuzz crate.
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub fn __fuzz_path_validation_and_policy(input: &[u8]) {
+    path_validation::fuzz_support::exercise(input);
+}
 pub mod scanner;
 pub mod size;
 pub mod tree;

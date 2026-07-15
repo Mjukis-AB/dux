@@ -1,0 +1,79 @@
+name: Path safety fuzzing
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/fuzz.yml"
+      - "Cargo.toml"
+      - "dux-core/**"
+      - "fuzz/**"
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/fuzz.yml"
+      - "Cargo.toml"
+      - "dux-core/**"
+      - "fuzz/**"
+  schedule:
+    - cron: "23 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: path-safety-fuzz-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  path-validation:
+    name: Path validation invariant oracle
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Install pinned nightly
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned 2026-07-15
+        with:
+          toolchain: nightly-2026-07-14
+
+      - name: Install pinned cargo-fuzz
+        run: cargo install cargo-fuzz --version 0.13.2 --locked
+
+      - name: Build instrumented target
+        working-directory: fuzz
+        run: cargo +nightly-2026-07-14 fuzz build path_validation
+
+      - name: Run pull-request and push smoke campaign
+        if: github.event_name != 'schedule'
+        working-directory: fuzz
+        run: |
+          cargo +nightly-2026-07-14 fuzz run path_validation -- \
+            -seed=6845581 \
+            -runs=20000 \
+            -max_len=65536 \
+            -timeout=2
+
+      - name: Run weekly campaign
+        if: github.event_name == 'schedule'
+        working-directory: fuzz
+        run: |
+          cargo +nightly-2026-07-14 fuzz run path_validation -- \
+            -seed=6845581 \
+            -max_total_time=300 \
+            -max_len=65536 \
+            -timeout=2
+
+      - name: Preserve crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: path-validation-fuzz-artifacts
+          path: fuzz/artifacts/path_validation
+          if-no-files-found: ignore
+          retention-days: 14

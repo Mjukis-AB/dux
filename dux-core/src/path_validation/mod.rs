@@ -8,6 +8,9 @@ mod filesystem;
 mod lexical;
 mod protected;
 
+#[cfg(fuzzing)]
+pub(crate) mod fuzz_support;
+
 #[cfg(unix)]
 mod unix;
 #[cfg(windows)]

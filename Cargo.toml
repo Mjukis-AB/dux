@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["dux-core", "dux-cli", "dux-ffi"]
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.5.0"
