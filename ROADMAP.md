@@ -2488,6 +2488,29 @@ Tasks:
   tests cover the slice.
   [`docs/CLI_JSON.md`](docs/CLI_JSON.md) is the normative v1 contract.
 - [ ] Add history retention maintenance.
+  - SQLite capacity/AI-cache sub-checkpoint completed 2026-07-16: one
+    current-schema, writer-leased immediate transaction creates deterministic
+    UTC daily capacity rollups from the exact last raw tuple, retains raw
+    samples for 30 exact days and daily rollups for 365 complete UTC days, and
+    removes AI insights only at or after their stored expiration. Raw pruning
+    inside the daily window first requires the exact rollup in the same
+    transaction; a conflicting rollup or malformed target rolls the entire
+    batch back. Fixed limits prune at most 128 raw rows, create at most the 128
+    rollups required by that selected raw batch, prune 128 daily rows and 16 AI
+    rows, and report `has_more` for later idle rescheduling. Every retained day
+    is rolled up no later than its first raw sample aging out; any future earlier
+    rollup pass requires a durable bounded cursor so dense covered history cannot
+    starve pruning.
+    A SQLite authorizer admits only capacity inserts/deletes and AI-table
+    deletes; the private fixed AI statement additionally binds the selected ID
+    and expiration cutoff. A fixed VM/deadline budget bounds every query and
+    write.
+    Exact post-commit reconciliation, newer-schema fencing, boundary,
+    idempotence, batch-cap, corruption/rollback, and forbidden-table tests cover
+    the private store operation. [`docs/RETENTION.md`](docs/RETENTION.md) is the
+    normative policy. The broad item remains open for engine idle orchestration,
+    latest-two/pinned/2-GiB snapshot retention, orphan/temp/stage maintenance,
+    and explicit user clear-data actions.
 - [x] Add engine integration tests with temporary HOME and database. Completed
   2026-07-16: an actual `dux-core` engine scans a fixture into an isolated
   platform-correct application-support/cache layout, closes to full worker

@@ -35,6 +35,7 @@ use super::history::{
 use super::migrations::{
     SchemaState, apply_pending_migrations, inspect_schema, inspect_schema_for_status,
 };
+use super::retention::{RetentionBatchResult, apply_retention_batch, reconcile_retention_batch};
 use super::status::{
     DATABASE_SCHEMA_VERSION, DatabaseAccess, DatabaseOpenError, DatabaseOpenErrorKind,
     DatabaseStatus,
@@ -858,6 +859,66 @@ impl StoreCoordinator {
     ) -> Result<RecentScanRecords, HistoryError> {
         let guard = self.lock_current_history_connection()?;
         load_recent_scan_records(&guard.connection, limit)
+    }
+
+    /// Apply one bounded batch of automatic retention to DUX-owned capacity
+    /// telemetry and expired AI cache rows. Cleanup, scan, candidate, outcome,
+    /// schedule, and settings history are outside the SQL mutation allowlist.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "the engine background-maintenance task is the next retention slice"
+        )
+    )]
+    pub(crate) fn run_history_retention_batch(
+        &self,
+        observed_at: SystemTime,
+    ) -> Result<RetentionBatchResult, HistoryError> {
+        self.run_history_retention_batch_with_hook(observed_at, || Ok(()))
+    }
+
+    fn run_history_retention_batch_with_hook(
+        &self,
+        observed_at: SystemTime,
+        after_commit: impl FnOnce() -> Result<(), HistoryError>,
+    ) -> Result<RetentionBatchResult, HistoryError> {
+        let mut guard = self.lock_current_history_connection()?;
+        let transaction = guard
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(map_write_sql_error)?;
+        let applied = apply_retention_batch(&transaction, observed_at)?;
+        let result = applied.result;
+        let reconciliation = applied.reconciliation;
+        let failure = match transaction
+            .commit()
+            .map_err(map_write_sql_error)
+            .and_then(|()| after_commit())
+            .and_then(|()| self.revalidate_current_history_guard(&guard))
+        {
+            Ok(()) => return Ok(result),
+            Err(failure) => failure,
+        };
+
+        if self.revalidate_current_history_guard(&guard).is_err() {
+            return Err(HistoryError::new(HistoryErrorKind::OutcomeUnknown));
+        }
+        match reconcile_retention_batch(&guard.connection, &reconciliation) {
+            Ok(true) => Ok(result),
+            Ok(false) => Err(failure),
+            Err(_) => Err(HistoryError::new(HistoryErrorKind::OutcomeUnknown)),
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn run_history_retention_batch_after_commit_failure_for_test(
+        &self,
+        observed_at: SystemTime,
+    ) -> Result<RetentionBatchResult, HistoryError> {
+        self.run_history_retention_batch_with_hook(observed_at, || {
+            Err(HistoryError::new(HistoryErrorKind::DatabaseUnavailable))
+        })
     }
 
     /// Insert one complete deterministic candidate observation atomically.

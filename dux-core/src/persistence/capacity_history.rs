@@ -570,26 +570,44 @@ fn load_volume_observation(
     volume_id: &VolumeId,
 ) -> Result<Option<StoredVolumeObservation>, HistoryError> {
     run_bounded_query(connection, || {
-        connection
-            .query_row(
-                "SELECT
-                    typeof(mount_path), length(mount_path), mount_path,
-                    typeof(mount_path_encoding), mount_path_encoding,
-                    typeof(display_name), length(CAST(display_name AS BLOB)), display_name,
-                    typeof(filesystem), length(CAST(filesystem AS BLOB)), filesystem,
-                    typeof(is_internal), is_internal,
-                    typeof(is_removable), is_removable,
-                    typeof(first_seen_unix_ms), first_seen_unix_ms,
-                    typeof(last_seen_unix_ms), last_seen_unix_ms
-                 FROM volumes WHERE volume_id = ?1",
-                [volume_id.as_str()],
-                raw_volume_row,
-            )
-            .optional()
-            .map_err(map_query_sql_error)?
-            .map(decode_volume_row)
-            .transpose()
+        load_volume_observation_with_caller_budget(connection, volume_id)
     })
+}
+
+/// Load and fully validate one capacity-volume observation while relying on an
+/// already-installed caller budget. Retention uses this instead of nesting the
+/// ordinary capacity-query progress handler inside its transaction-wide guard.
+pub(super) fn load_capacity_volume_interval_with_caller_budget(
+    connection: &Connection,
+    volume_id: &VolumeId,
+) -> Result<Option<(i64, i64)>, HistoryError> {
+    load_volume_observation_with_caller_budget(connection, volume_id)
+        .map(|volume| volume.map(|volume| (volume.first_seen_unix_ms, volume.last_seen_unix_ms)))
+}
+
+fn load_volume_observation_with_caller_budget(
+    connection: &Connection,
+    volume_id: &VolumeId,
+) -> Result<Option<StoredVolumeObservation>, HistoryError> {
+    connection
+        .query_row(
+            "SELECT
+                typeof(mount_path), length(mount_path), mount_path,
+                typeof(mount_path_encoding), mount_path_encoding,
+                typeof(display_name), length(CAST(display_name AS BLOB)), display_name,
+                typeof(filesystem), length(CAST(filesystem AS BLOB)), filesystem,
+                typeof(is_internal), is_internal,
+                typeof(is_removable), is_removable,
+                typeof(first_seen_unix_ms), first_seen_unix_ms,
+                typeof(last_seen_unix_ms), last_seen_unix_ms
+             FROM volumes WHERE volume_id = ?1",
+            [volume_id.as_str()],
+            raw_volume_row,
+        )
+        .optional()
+        .map_err(map_query_sql_error)?
+        .map(decode_volume_row)
+        .transpose()
 }
 
 struct RawVolumeRow {

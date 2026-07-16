@@ -5,6 +5,18 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Added the first bounded history-retention checkpoint. A private
+  current-schema SQLite operation creates completed-day UTC capacity rollups
+  from the exact last raw observation, retains raw samples for 30 exact days
+  and daily rollups for 365 complete UTC days, and deletes AI cache records only
+  when their stored expiration is reached. Each transaction validates every
+  target, creates a required still-retainable rollup before raw pruning, rolls
+  back on conflicting or malformed data, and limits work to 128 raw rows and
+  their required rollups, 128 daily rows, and 16 AI rows before returning
+  `has_more`. A mutation authorizer excludes scan, candidate,
+  cleanup, rule-outcome, schedule, and settings history; fixed VM/deadline
+  budgets and exact post-commit reconciliation make interruption and retry
+  fail closed. Snapshot retention and engine scheduling remain separate work.
 - Added the first noninteractive shared-engine CLI surfaces: `dux status` and
   `dux history [--limit 1..=200]`, each with explicit `--json`. A bounded,
   path-free core query validates complete scan/coverage records under one
