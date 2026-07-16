@@ -555,30 +555,37 @@ pub(super) fn load_scan_record(
     id: &ScanId,
 ) -> Result<Option<ScanRecord>, HistoryError> {
     run_bounded_query(connection, || {
-        let raw = connection
-            .query_row(
-                "SELECT typeof(scan_id), length(CAST(scan_id AS BLOB)), scan_id,
-                        typeof(root_path), length(root_path), root_path,
-                        root_path_encoding, started_at_unix_ms, completed_at_unix_ms,
-                        typeof(status), length(CAST(status AS BLOB)), status,
-                        directory_count, file_count, logical_bytes, allocated_bytes,
-                        typeof(coverage_status), length(CAST(coverage_status AS BLOB)),
-                        coverage_status, typeof(coverage_permille), coverage_permille,
-                        typeof(issue_count), issue_count,
-                        typeof(snapshot_version), snapshot_version,
-                        typeof(snapshot_relative_path), length(snapshot_relative_path),
-                        snapshot_relative_path,
-                        typeof(snapshot_relative_path_encoding), snapshot_relative_path_encoding,
-                        typeof(snapshot_checksum_sha256), length(snapshot_checksum_sha256),
-                        snapshot_checksum_sha256
-                 FROM scans WHERE scan_id = ?1",
-                [id.as_str()],
-                raw_scan_row,
-            )
-            .optional()
-            .map_err(map_query_sql_error)?;
-        raw.map(|raw| decode_scan_row(connection, raw)).transpose()
+        load_scan_record_within_budget(connection, id)
     })
+}
+
+pub(super) fn load_scan_record_within_budget(
+    connection: &Connection,
+    id: &ScanId,
+) -> Result<Option<ScanRecord>, HistoryError> {
+    let raw = connection
+        .query_row(
+            "SELECT typeof(scan_id), length(CAST(scan_id AS BLOB)), scan_id,
+                    typeof(root_path), length(root_path), root_path,
+                    root_path_encoding, started_at_unix_ms, completed_at_unix_ms,
+                    typeof(status), length(CAST(status AS BLOB)), status,
+                    directory_count, file_count, logical_bytes, allocated_bytes,
+                    typeof(coverage_status), length(CAST(coverage_status AS BLOB)),
+                    coverage_status, typeof(coverage_permille), coverage_permille,
+                    typeof(issue_count), issue_count,
+                    typeof(snapshot_version), snapshot_version,
+                    typeof(snapshot_relative_path), length(snapshot_relative_path),
+                    snapshot_relative_path,
+                    typeof(snapshot_relative_path_encoding), snapshot_relative_path_encoding,
+                    typeof(snapshot_checksum_sha256), length(snapshot_checksum_sha256),
+                    snapshot_checksum_sha256
+             FROM scans WHERE scan_id = ?1",
+            [id.as_str()],
+            raw_scan_row,
+        )
+        .optional()
+        .map_err(map_query_sql_error)?;
+    raw.map(|raw| decode_scan_row(connection, raw)).transpose()
 }
 
 struct RawScanRow {

@@ -17,7 +17,8 @@ use crate::domain::{
 
 use super::codec::{EncodedBytes, StoredEncoding, decode_host_path, encode_host_path};
 use super::history::{
-    HistoryError, HistoryErrorKind, map_query_sql_error, map_write_sql_error, run_bounded_query,
+    HistoryError, HistoryErrorKind, ScanStatus, load_scan_record, load_scan_record_within_budget,
+    map_query_sql_error, map_write_sql_error, run_bounded_query,
 };
 
 const MAX_PATHS: usize = 256;
@@ -42,6 +43,19 @@ pub(crate) enum CandidateHistoryStatus {
 }
 
 impl CandidateHistoryStatus {
+    fn as_stored(self) -> &'static str {
+        match self {
+            Self::Discovered => "discovered",
+            Self::Selected => "selected",
+            Self::Dismissed => "dismissed",
+            Self::Stale => "stale",
+            Self::Planned => "planned",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Unavailable => "unavailable",
+        }
+    }
+
     fn from_stored(value: &str) -> Result<Self, HistoryError> {
         match value {
             "discovered" => Ok(Self::Discovered),
@@ -54,6 +68,56 @@ impl CandidateHistoryStatus {
             "unavailable" => Ok(Self::Unavailable),
             _ => Err(corrupt()),
         }
+    }
+}
+
+/// User review intent only. These transitions do not approve a plan or effect.
+/// Evaluator, planner, and journal-owned statuses deliberately have no generic
+/// transition surface.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CandidateReviewTransition {
+    Select,
+    ClearSelection,
+    DismissDiscovered,
+    DismissSelected,
+    Restore,
+}
+
+impl CandidateReviewTransition {
+    fn statuses(self) -> (CandidateHistoryStatus, CandidateHistoryStatus) {
+        match self {
+            Self::Select => (
+                CandidateHistoryStatus::Discovered,
+                CandidateHistoryStatus::Selected,
+            ),
+            Self::ClearSelection => (
+                CandidateHistoryStatus::Selected,
+                CandidateHistoryStatus::Discovered,
+            ),
+            Self::DismissDiscovered => (
+                CandidateHistoryStatus::Discovered,
+                CandidateHistoryStatus::Dismissed,
+            ),
+            Self::DismissSelected => (
+                CandidateHistoryStatus::Selected,
+                CandidateHistoryStatus::Dismissed,
+            ),
+            Self::Restore => (
+                CandidateHistoryStatus::Dismissed,
+                CandidateHistoryStatus::Discovered,
+            ),
+        }
+    }
+
+    fn validate_candidate(self, candidate: &CompleteCandidateRecord) -> Result<(), HistoryError> {
+        let (expected, target) = self.statuses();
+        if (self == Self::Select
+            && (!candidate.action.is_cleanup_operation() || !candidate.blockers.is_empty()))
+            || (candidate.status != expected && candidate.status != target)
+        {
+            return Err(HistoryError::new(HistoryErrorKind::InvalidTransition));
+        }
+        Ok(())
     }
 }
 
@@ -261,16 +325,13 @@ pub(super) fn insert_candidate(
     transaction: &Transaction<'_>,
     candidate: &PreparedCandidate,
 ) -> Result<(), HistoryError> {
-    let scan_exists: Option<i64> = transaction
-        .query_row(
-            "SELECT 1 FROM scans WHERE scan_id = ?1",
-            [&candidate.source_scan_id],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(map_query_sql_error)?;
-    if scan_exists.is_none() {
+    let scan_id = ScanId::new(candidate.source_scan_id.clone())
+        .map_err(|_| HistoryError::new(HistoryErrorKind::InvalidInput))?;
+    let Some(scan) = load_scan_record(transaction, &scan_id)? else {
         return Err(HistoryError::new(HistoryErrorKind::NotFound));
+    };
+    if scan.status() != ScanStatus::Succeeded {
+        return Err(HistoryError::new(HistoryErrorKind::InvalidTransition));
     }
 
     let changed = transaction
@@ -359,6 +420,36 @@ pub(super) fn insert_candidate(
     Ok(())
 }
 
+pub(super) fn transition_candidate_review(
+    transaction: &Transaction<'_>,
+    id: &CandidateId,
+    transition: CandidateReviewTransition,
+) -> Result<(CandidateHistoryStatus, CandidateHistoryStatus), HistoryError> {
+    let Some(record) = load_candidate_record(transaction, id)? else {
+        return Err(HistoryError::new(HistoryErrorKind::NotFound));
+    };
+    let StoredCandidateRecord::Complete(candidate) = record else {
+        return Err(HistoryError::new(HistoryErrorKind::InvalidTransition));
+    };
+    let (previous, next) = transition.statuses();
+    transition.validate_candidate(&candidate)?;
+    if candidate.status == next {
+        return Ok((previous, next));
+    }
+    let changed = transaction
+        .execute(
+            "UPDATE candidates
+             SET status = ?1
+             WHERE candidate_id = ?2 AND record_format_version = 2 AND status = ?3",
+            params![next.as_stored(), id.as_str(), previous.as_stored()],
+        )
+        .map_err(map_write_sql_error)?;
+    if changed != 1 {
+        return Err(HistoryError::new(HistoryErrorKind::InvalidTransition));
+    }
+    Ok((previous, next))
+}
+
 pub(super) fn load_candidate_record(
     connection: &Connection,
     id: &CandidateId,
@@ -371,6 +462,14 @@ pub(super) fn load_candidate_record(
 pub(super) fn load_candidate_record_within_budget(
     connection: &Connection,
     id: &CandidateId,
+) -> Result<Option<StoredCandidateRecord>, HistoryError> {
+    load_candidate_record_within_budget_and_hook(connection, id, |_| Ok(()))
+}
+
+fn load_candidate_record_within_budget_and_hook(
+    connection: &Connection,
+    id: &CandidateId,
+    after_source_scan: impl FnOnce(&Connection) -> Result<(), HistoryError>,
 ) -> Result<Option<StoredCandidateRecord>, HistoryError> {
     let raw = connection
             .query_row(
@@ -396,9 +495,9 @@ pub(super) fn load_candidate_record_within_budget(
         return Ok(None);
     };
     let common = decode_common(&raw)?;
-    ensure_source_scan_exists(connection, &common.source_scan_id)?;
     match raw.record_format_version {
         1 => Ok(Some(StoredCandidateRecord::LegacySummary({
+            ensure_source_scan_exists(connection, &common.source_scan_id)?;
             if raw.category.is_some()
                 || raw.action.is_some()
                 || raw.rule_schedule_eligible.is_some()
@@ -419,6 +518,8 @@ pub(super) fn load_candidate_record_within_budget(
             }
         }))),
         2 => {
+            ensure_source_scan_succeeded(connection, &common.source_scan_id)?;
+            after_source_scan(connection)?;
             let paths = load_paths(connection, id)?;
             let evidence = load_evidence(connection, id)?;
             let blockers = load_blockers(connection, id)?;
@@ -753,6 +854,16 @@ fn ensure_source_scan_exists(connection: &Connection, id: &ScanId) -> Result<(),
         .optional()
         .map_err(map_query_sql_error)?;
     if exists.is_none() {
+        return Err(corrupt());
+    }
+    Ok(())
+}
+
+fn ensure_source_scan_succeeded(connection: &Connection, id: &ScanId) -> Result<(), HistoryError> {
+    let Some(scan) = load_scan_record_within_budget(connection, id)? else {
+        return Err(corrupt());
+    };
+    if scan.status() != ScanStatus::Succeeded {
         return Err(corrupt());
     }
     Ok(())
@@ -1262,6 +1373,841 @@ mod tests {
                 .unwrap(),
             )
             .unwrap();
+    }
+
+    fn load_complete(store: &StoreCoordinator, id: &CandidateId) -> CompleteCandidateRecord {
+        let StoredCandidateRecord::Complete(record) =
+            store.load_candidate(id).unwrap().expect("candidate exists")
+        else {
+            panic!("format-2 candidate became a legacy summary");
+        };
+        record
+    }
+
+    fn persist_review_candidate(
+        store: &StoreCoordinator,
+        root: &Path,
+        id: &str,
+        scan_id: &str,
+        policy: &Rule,
+        blockers: Vec<BlockReason>,
+    ) -> CandidateId {
+        let path = root.join(format!("candidate-fixture-{id}"));
+        let candidate = candidate(
+            id,
+            scan_id,
+            policy,
+            vec![path.clone()],
+            vec![Evidence::MatchedPath { path }],
+            blockers,
+            None,
+            4_096,
+        );
+        store
+            .record_candidate_discovered(
+                &NewCandidateRecord::try_from_candidate(
+                    &candidate,
+                    UNIX_EPOCH + Duration::from_secs(1_750_000_002),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        candidate.id().clone()
+    }
+
+    #[test]
+    fn review_status_is_typed_idempotent_and_preserves_frozen_facts_after_reopen() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let root = temp.path().join("root");
+        let store = StoreCoordinator::open(&database).unwrap();
+        start_and_finish_scan(&store, &root, "scan:review-status");
+        let policy = rule(
+            "fixture.candidate.review-status",
+            CandidateCategory::ApplicationCache,
+            SafetyTier::SafeRegenerable,
+            CandidateAction::RemoveKnownRegenerableContents,
+            false,
+        );
+        let id = persist_review_candidate(
+            &store,
+            &root,
+            "candidate:review-status",
+            "scan:review-status",
+            &policy,
+            Vec::new(),
+        );
+        let discovered = load_complete(&store, &id);
+
+        assert_eq!(
+            store
+                .transition_candidate_review_status(&id, CandidateReviewTransition::Select)
+                .unwrap(),
+            CandidateHistoryStatus::Selected
+        );
+        assert_eq!(
+            store
+                .transition_candidate_review_status(&id, CandidateReviewTransition::Select)
+                .unwrap(),
+            CandidateHistoryStatus::Selected
+        );
+        let mut expected = discovered.clone();
+        expected.status = CandidateHistoryStatus::Selected;
+        assert_eq!(load_complete(&store, &id), expected);
+
+        assert_eq!(
+            store
+                .transition_candidate_review_status(&id, CandidateReviewTransition::ClearSelection,)
+                .unwrap(),
+            CandidateHistoryStatus::Discovered
+        );
+        assert_eq!(load_complete(&store, &id), discovered);
+        assert_eq!(
+            store
+                .transition_candidate_review_status(
+                    &id,
+                    CandidateReviewTransition::DismissDiscovered,
+                )
+                .unwrap(),
+            CandidateHistoryStatus::Dismissed
+        );
+        assert_eq!(
+            store
+                .transition_candidate_review_status(
+                    &id,
+                    CandidateReviewTransition::DismissDiscovered,
+                )
+                .unwrap(),
+            CandidateHistoryStatus::Dismissed
+        );
+        assert_eq!(
+            store
+                .transition_candidate_review_status(&id, CandidateReviewTransition::Select)
+                .unwrap_err()
+                .kind,
+            HistoryErrorKind::InvalidTransition
+        );
+        assert_eq!(
+            store
+                .transition_candidate_review_status(&id, CandidateReviewTransition::Restore)
+                .unwrap(),
+            CandidateHistoryStatus::Discovered
+        );
+        assert_eq!(
+            store
+                .transition_candidate_review_status(&id, CandidateReviewTransition::Restore)
+                .unwrap(),
+            CandidateHistoryStatus::Discovered
+        );
+        store
+            .transition_candidate_review_status(&id, CandidateReviewTransition::DismissDiscovered)
+            .unwrap();
+
+        let selected_dismissal = persist_review_candidate(
+            &store,
+            &root,
+            "candidate:review-selected-dismissal",
+            "scan:review-status",
+            &policy,
+            Vec::new(),
+        );
+        store
+            .transition_candidate_review_status(
+                &selected_dismissal,
+                CandidateReviewTransition::Select,
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .transition_candidate_review_status(
+                    &selected_dismissal,
+                    CandidateReviewTransition::DismissSelected,
+                )
+                .unwrap(),
+            CandidateHistoryStatus::Dismissed
+        );
+
+        drop(store);
+        let reopened = StoreCoordinator::open(&database).unwrap();
+        expected.status = CandidateHistoryStatus::Dismissed;
+        assert_eq!(load_complete(&reopened, &id), expected);
+    }
+
+    #[test]
+    fn review_selection_rejects_blocked_and_non_cleanup_candidates_without_erasing_facts() {
+        let temp = TempDir::new().unwrap();
+        let store = StoreCoordinator::open(&temp.path().join("store/dux.sqlite3")).unwrap();
+        let root = temp.path().join("root");
+        start_and_finish_scan(&store, &root, "scan:review-policy");
+        let cleanup = rule(
+            "fixture.candidate.review-cleanup",
+            CandidateCategory::ApplicationCache,
+            SafetyTier::SafeRegenerable,
+            CandidateAction::RemoveKnownRegenerableContents,
+            false,
+        );
+        let informational = rule(
+            "fixture.candidate.review-info",
+            CandidateCategory::UnknownStorage,
+            SafetyTier::Informational,
+            CandidateAction::RevealOnly,
+            false,
+        );
+        let blocked = persist_review_candidate(
+            &store,
+            &root,
+            "candidate:review-blocked",
+            "scan:review-policy",
+            &cleanup,
+            vec![BlockReason::PartialScanCoverage],
+        );
+        let info = persist_review_candidate(
+            &store,
+            &root,
+            "candidate:review-info",
+            "scan:review-policy",
+            &informational,
+            Vec::new(),
+        );
+
+        for id in [&blocked, &info] {
+            assert_eq!(
+                store
+                    .transition_candidate_review_status(id, CandidateReviewTransition::Select)
+                    .unwrap_err()
+                    .kind,
+                HistoryErrorKind::InvalidTransition
+            );
+            assert_eq!(
+                load_complete(&store, id).status,
+                CandidateHistoryStatus::Discovered
+            );
+            store.with_connection(|connection| {
+                connection
+                    .execute(
+                        "UPDATE candidates SET status = 'selected' WHERE candidate_id = ?1",
+                        [id.as_str()],
+                    )
+                    .unwrap();
+            });
+            assert_eq!(
+                store
+                    .transition_candidate_review_status(id, CandidateReviewTransition::Select)
+                    .unwrap_err()
+                    .kind,
+                HistoryErrorKind::InvalidTransition
+            );
+            assert_eq!(
+                store
+                    .transition_candidate_review_status(
+                        id,
+                        CandidateReviewTransition::DismissSelected,
+                    )
+                    .unwrap(),
+                CandidateHistoryStatus::Dismissed
+            );
+        }
+        assert_eq!(
+            load_complete(&store, &blocked).blockers,
+            vec![BlockReason::PartialScanCoverage]
+        );
+    }
+
+    #[test]
+    fn review_selection_policy_matrix_is_exhaustive_and_all_blockers_fail_closed() {
+        let temp = TempDir::new().unwrap();
+        let store = StoreCoordinator::open(&temp.path().join("store/dux.sqlite3")).unwrap();
+        let root = temp.path().join("root");
+        let scan_id = "scan:review-policy-matrix";
+        start_and_finish_scan(&store, &root, scan_id);
+
+        let cleanup_policies = [
+            (
+                "regenerable",
+                rule(
+                    "fixture.candidate.matrix.regenerable",
+                    CandidateCategory::ApplicationCache,
+                    SafetyTier::SafeRegenerable,
+                    CandidateAction::RemoveKnownRegenerableContents,
+                    false,
+                ),
+            ),
+            (
+                "evictable",
+                rule(
+                    "fixture.candidate.matrix.evictable",
+                    CandidateCategory::CloudFile,
+                    SafetyTier::SafeEvictable,
+                    CandidateAction::EvictLocalCopy,
+                    false,
+                ),
+            ),
+            (
+                "trash",
+                rule(
+                    "fixture.candidate.matrix.trash",
+                    CandidateCategory::LargeReviewItem,
+                    SafetyTier::ReviewRequired,
+                    CandidateAction::MoveToTrash,
+                    false,
+                ),
+            ),
+        ];
+        for (label, policy) in cleanup_policies {
+            let path = root.join(format!("candidate-fixture-matrix-{label}"));
+            let evidence = if policy.action() == CandidateAction::EvictLocalCopy {
+                vec![Evidence::CloudUploadComplete { path: path.clone() }]
+            } else {
+                vec![Evidence::MatchedPath { path: path.clone() }]
+            };
+            let candidate = candidate(
+                &format!("candidate:matrix-{label}"),
+                scan_id,
+                &policy,
+                vec![path],
+                evidence,
+                Vec::new(),
+                None,
+                1,
+            );
+            store
+                .record_candidate_discovered(
+                    &NewCandidateRecord::try_from_candidate(
+                        &candidate,
+                        UNIX_EPOCH + Duration::from_secs(1_750_000_002),
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+            assert_eq!(
+                store
+                    .transition_candidate_review_status(
+                        candidate.id(),
+                        CandidateReviewTransition::Select,
+                    )
+                    .unwrap(),
+                CandidateHistoryStatus::Selected
+            );
+        }
+
+        for (label, safety, action) in [
+            (
+                "informational",
+                SafetyTier::Informational,
+                CandidateAction::RevealOnly,
+            ),
+            (
+                "protected",
+                SafetyTier::Protected,
+                CandidateAction::NoAction,
+            ),
+        ] {
+            let policy = rule(
+                &format!("fixture.candidate.matrix.{label}"),
+                CandidateCategory::UnknownStorage,
+                safety,
+                action,
+                false,
+            );
+            let id = persist_review_candidate(
+                &store,
+                &root,
+                &format!("candidate:matrix-{label}"),
+                scan_id,
+                &policy,
+                Vec::new(),
+            );
+            assert_eq!(
+                store
+                    .transition_candidate_review_status(&id, CandidateReviewTransition::Select)
+                    .unwrap_err()
+                    .kind,
+                HistoryErrorKind::InvalidTransition
+            );
+        }
+
+        let cleanup = rule(
+            "fixture.candidate.matrix.blocked",
+            CandidateCategory::ApplicationCache,
+            SafetyTier::SafeRegenerable,
+            CandidateAction::RemoveKnownRegenerableContents,
+            false,
+        );
+        for (index, blocker) in ALL_BLOCKERS.iter().enumerate() {
+            let id = persist_review_candidate(
+                &store,
+                &root,
+                &format!("candidate:matrix-blocker-{index}"),
+                scan_id,
+                &cleanup,
+                vec![blocker.clone()],
+            );
+            assert_eq!(
+                store
+                    .transition_candidate_review_status(&id, CandidateReviewTransition::Select)
+                    .unwrap_err()
+                    .kind,
+                HistoryErrorKind::InvalidTransition,
+                "selection accepted blocker {blocker:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn review_status_reconciles_post_commit_failure_and_exact_cas_races() {
+        let temp = TempDir::new().unwrap();
+        let store = StoreCoordinator::open(&temp.path().join("store/dux.sqlite3")).unwrap();
+        let root = temp.path().join("root");
+        start_and_finish_scan(&store, &root, "scan:review-race");
+        let policy = rule(
+            "fixture.candidate.review-race",
+            CandidateCategory::ApplicationCache,
+            SafetyTier::SafeRegenerable,
+            CandidateAction::RemoveKnownRegenerableContents,
+            false,
+        );
+        let reconciled = persist_review_candidate(
+            &store,
+            &root,
+            "candidate:review-reconciled",
+            "scan:review-race",
+            &policy,
+            Vec::new(),
+        );
+        assert_eq!(
+            store
+                .transition_candidate_review_status_after_commit_failure_for_test(
+                    &reconciled,
+                    CandidateReviewTransition::Select,
+                )
+                .unwrap(),
+            CandidateHistoryStatus::Selected
+        );
+
+        let raced = persist_review_candidate(
+            &store,
+            &root,
+            "candidate:review-raced",
+            "scan:review-race",
+            &policy,
+            Vec::new(),
+        );
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let first_store = std::sync::Arc::clone(&store);
+        let first_id = raced.clone();
+        let first_barrier = std::sync::Arc::clone(&barrier);
+        let first = std::thread::spawn(move || {
+            first_barrier.wait();
+            first_store
+                .transition_candidate_review_status(&first_id, CandidateReviewTransition::Select)
+        });
+        let second_store = std::sync::Arc::clone(&store);
+        let second_id = raced.clone();
+        let second_barrier = std::sync::Arc::clone(&barrier);
+        let second = std::thread::spawn(move || {
+            second_barrier.wait();
+            second_store.transition_candidate_review_status(
+                &second_id,
+                CandidateReviewTransition::DismissDiscovered,
+            )
+        });
+        barrier.wait();
+        let results = [first.join().unwrap(), second.join().unwrap()];
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| {
+                    result
+                        .as_ref()
+                        .is_err_and(|error| error.kind == HistoryErrorKind::InvalidTransition)
+                })
+                .count(),
+            1
+        );
+        assert!(matches!(
+            load_complete(&store, &raced).status,
+            CandidateHistoryStatus::Selected | CandidateHistoryStatus::Dismissed
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn review_status_exact_match_cannot_mask_unsafe_post_commit_storage() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let marker = database.with_extension("sqlite3.writer.lock");
+        let store = StoreCoordinator::open(&database).unwrap();
+        let root = temp.path().join("root");
+        start_and_finish_scan(&store, &root, "scan:review-unsafe");
+        let policy = rule(
+            "fixture.candidate.review-unsafe",
+            CandidateCategory::ApplicationCache,
+            SafetyTier::SafeRegenerable,
+            CandidateAction::RemoveKnownRegenerableContents,
+            false,
+        );
+        let id = persist_review_candidate(
+            &store,
+            &root,
+            "candidate:review-unsafe",
+            "scan:review-unsafe",
+            &policy,
+            Vec::new(),
+        );
+
+        let error = store
+            .transition_candidate_review_status_with_after_commit_hook_for_test(
+                &id,
+                CandidateReviewTransition::Select,
+                || {
+                    std::fs::write(&marker, b"NOT-A-DUX-MARKER")
+                        .map_err(|_| HistoryError::new(HistoryErrorKind::InternalState))
+                },
+            )
+            .unwrap_err();
+        assert_eq!(error.kind, HistoryErrorKind::OutcomeUnknown);
+        store.with_connection(|connection| {
+            let durable: String = connection
+                .query_row(
+                    "SELECT status FROM candidates WHERE candidate_id = ?1",
+                    [id.as_str()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(durable, "selected");
+        });
+    }
+
+    #[test]
+    fn review_status_refuses_missing_legacy_corrupt_and_lifecycle_owned_rows() {
+        let temp = TempDir::new().unwrap();
+        let store = StoreCoordinator::open(&temp.path().join("store/dux.sqlite3")).unwrap();
+        let root = temp.path().join("root");
+        start_and_finish_scan(&store, &root, "scan:review-refusal");
+        let missing = CandidateId::new("candidate:review-missing").unwrap();
+        assert_eq!(
+            store
+                .transition_candidate_review_status(&missing, CandidateReviewTransition::Select,)
+                .unwrap_err()
+                .kind,
+            HistoryErrorKind::NotFound
+        );
+
+        let legacy = CandidateId::new("candidate:review-legacy").unwrap();
+        store.with_connection(|connection| {
+            connection
+                .execute(
+                    "INSERT INTO candidates (
+                         candidate_id, scan_id, rule_id, rule_revision, safety_tier,
+                         estimated_bytes, created_at_unix_ms, status, record_format_version
+                     ) VALUES (?1, 'scan:review-refusal', 'fixture.legacy', 1,
+                         'review_required', 1, 1, 'discovered', 1)",
+                    [legacy.as_str()],
+                )
+                .unwrap();
+        });
+        assert_eq!(
+            store
+                .transition_candidate_review_status(&legacy, CandidateReviewTransition::Select)
+                .unwrap_err()
+                .kind,
+            HistoryErrorKind::InvalidTransition
+        );
+        assert_eq!(
+            store.with_connection(|connection| {
+                connection
+                    .query_row(
+                        "SELECT status FROM candidates WHERE candidate_id = ?1",
+                        [legacy.as_str()],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .unwrap()
+            }),
+            "discovered"
+        );
+
+        let policy = rule(
+            "fixture.candidate.review-refusal",
+            CandidateCategory::ApplicationCache,
+            SafetyTier::SafeRegenerable,
+            CandidateAction::RemoveKnownRegenerableContents,
+            false,
+        );
+        let lifecycle = persist_review_candidate(
+            &store,
+            &root,
+            "candidate:review-lifecycle",
+            "scan:review-refusal",
+            &policy,
+            Vec::new(),
+        );
+        for status in ["stale", "planned", "completed", "failed", "unavailable"] {
+            store.with_connection(|connection| {
+                connection
+                    .execute(
+                        "UPDATE candidates SET status = ?1 WHERE candidate_id = ?2",
+                        params![status, lifecycle.as_str()],
+                    )
+                    .unwrap();
+            });
+            assert_eq!(
+                store
+                    .transition_candidate_review_status(
+                        &lifecycle,
+                        CandidateReviewTransition::Select,
+                    )
+                    .unwrap_err()
+                    .kind,
+                HistoryErrorKind::InvalidTransition,
+                "review API accepted lifecycle-owned {status} status"
+            );
+        }
+
+        let corrupt = persist_review_candidate(
+            &store,
+            &root,
+            "candidate:review-corrupt",
+            "scan:review-refusal",
+            &policy,
+            Vec::new(),
+        );
+        store.with_connection(|connection| {
+            connection
+                .execute(
+                    "DELETE FROM candidate_evidence WHERE candidate_id = ?1",
+                    [corrupt.as_str()],
+                )
+                .unwrap();
+        });
+        assert_eq!(
+            store
+                .transition_candidate_review_status(&corrupt, CandidateReviewTransition::Select,)
+                .unwrap_err()
+                .kind,
+            HistoryErrorKind::CorruptData
+        );
+        assert_eq!(
+            store.with_connection(|connection| {
+                connection
+                    .query_row(
+                        "SELECT status FROM candidates WHERE candidate_id = ?1",
+                        [corrupt.as_str()],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .unwrap()
+            }),
+            "discovered"
+        );
+    }
+
+    #[test]
+    fn complete_candidates_require_a_durably_succeeded_source_scan() {
+        let temp = TempDir::new().unwrap();
+        let store = StoreCoordinator::open(&temp.path().join("store/dux.sqlite3")).unwrap();
+        let root = temp.path().join("root");
+        let policy = rule(
+            "fixture.candidate.source-scan",
+            CandidateCategory::ApplicationCache,
+            SafetyTier::SafeRegenerable,
+            CandidateAction::RemoveKnownRegenerableContents,
+            false,
+        );
+
+        let cases = [
+            ("failed", Some(TerminalScanStatus::Failed)),
+            ("cancelled", Some(TerminalScanStatus::Cancelled)),
+            ("interrupted", Some(TerminalScanStatus::Interrupted)),
+            ("running", None),
+        ];
+        for (label, terminal) in cases {
+            let scan_id = ScanId::new(format!("scan:candidate-source-{label}")).unwrap();
+            store
+                .record_scan_started(
+                    &NewScanRecord::try_new(
+                        scan_id.clone(),
+                        root.clone(),
+                        UNIX_EPOCH + Duration::from_secs(1_750_000_000),
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+            if let Some(terminal) = terminal {
+                store
+                    .record_scan_finished(
+                        &ScanCompletionRecord::try_new(
+                            scan_id.clone(),
+                            UNIX_EPOCH + Duration::from_secs(1_750_000_001),
+                            terminal,
+                            ScanCounts::default(),
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap();
+            }
+            let path = root.join(format!("candidate-fixture-{label}"));
+            let candidate = candidate(
+                &format!("candidate:source-{label}"),
+                scan_id.as_str(),
+                &policy,
+                vec![path.clone()],
+                vec![Evidence::MatchedPath { path }],
+                Vec::new(),
+                None,
+                1,
+            );
+            assert_eq!(
+                store
+                    .record_candidate_discovered(
+                        &NewCandidateRecord::try_from_candidate(
+                            &candidate,
+                            UNIX_EPOCH + Duration::from_secs(1_750_000_002),
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap_err()
+                    .kind,
+                HistoryErrorKind::InvalidTransition,
+                "candidate accepted {label} source scan"
+            );
+        }
+
+        let queued_scan = ScanId::new("scan:candidate-source-queued").unwrap();
+        store
+            .record_scan_started(
+                &NewScanRecord::try_new(
+                    queued_scan.clone(),
+                    root.clone(),
+                    UNIX_EPOCH + Duration::from_secs(1_750_000_000),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        store.with_connection(|connection| {
+            connection
+                .execute(
+                    "UPDATE scans SET status = 'queued' WHERE scan_id = ?1",
+                    [queued_scan.as_str()],
+                )
+                .unwrap();
+        });
+        let queued_path = root.join("candidate-fixture-queued");
+        let queued_candidate = candidate(
+            "candidate:source-queued",
+            queued_scan.as_str(),
+            &policy,
+            vec![queued_path.clone()],
+            vec![Evidence::MatchedPath { path: queued_path }],
+            Vec::new(),
+            None,
+            1,
+        );
+        assert_eq!(
+            store
+                .record_candidate_discovered(
+                    &NewCandidateRecord::try_from_candidate(
+                        &queued_candidate,
+                        UNIX_EPOCH + Duration::from_secs(1_750_000_002),
+                    )
+                    .unwrap(),
+                )
+                .unwrap_err()
+                .kind,
+            HistoryErrorKind::InvalidTransition
+        );
+
+        start_and_finish_scan(&store, &root, "scan:candidate-source-succeeded");
+        let accepted = persist_review_candidate(
+            &store,
+            &root,
+            "candidate:source-succeeded",
+            "scan:candidate-source-succeeded",
+            &policy,
+            Vec::new(),
+        );
+        store.with_connection(|connection| {
+            connection
+                .execute(
+                    "UPDATE scans SET status = 'failed'
+                     WHERE scan_id = 'scan:candidate-source-succeeded'",
+                    [],
+                )
+                .unwrap();
+        });
+        assert_eq!(
+            store
+                .load_scan(&ScanId::new("scan:candidate-source-succeeded").unwrap())
+                .unwrap()
+                .unwrap()
+                .status(),
+            ScanStatus::Failed
+        );
+        assert_eq!(
+            store.load_candidate(&accepted).unwrap_err().kind,
+            HistoryErrorKind::CorruptData
+        );
+    }
+
+    #[test]
+    fn candidate_query_budget_survives_the_nested_source_scan_read() {
+        let temp = TempDir::new().unwrap();
+        let store = StoreCoordinator::open(&temp.path().join("store/dux.sqlite3")).unwrap();
+        let root = temp.path().join("root");
+        start_and_finish_scan(&store, &root, "scan:candidate-budget");
+        let policy = rule(
+            "fixture.candidate.budget",
+            CandidateCategory::ApplicationCache,
+            SafetyTier::SafeRegenerable,
+            CandidateAction::RemoveKnownRegenerableContents,
+            false,
+        );
+        let id = persist_review_candidate(
+            &store,
+            &root,
+            "candidate:budget",
+            "scan:candidate-budget",
+            &policy,
+            Vec::new(),
+        );
+
+        store.with_connection(|connection| {
+            let interrupt = connection.get_interrupt_handle();
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            let failsafe = std::thread::spawn(move || {
+                if done_rx.recv_timeout(Duration::from_secs(2)).is_err() {
+                    interrupt.interrupt();
+                }
+            });
+            let started = std::time::Instant::now();
+            let error = run_bounded_query(connection, || {
+                load_candidate_record_within_budget_and_hook(connection, &id, |connection| {
+                    connection
+                        .query_row(
+                            "WITH RECURSIVE counter(value) AS (
+                                 VALUES(0)
+                                 UNION ALL
+                                 SELECT value + 1 FROM counter WHERE value < 100000000
+                             )
+                             SELECT sum(value) FROM counter",
+                            [],
+                            |row| row.get::<_, i64>(0),
+                        )
+                        .map(|_| ())
+                        .map_err(map_query_sql_error)
+                })
+                .map(|_| ())
+            })
+            .unwrap_err();
+            let elapsed = started.elapsed();
+            let _ = done_tx.send(());
+            failsafe.join().unwrap();
+
+            assert_eq!(error.kind, HistoryErrorKind::QueryLimitExceeded);
+            assert!(
+                elapsed < Duration::from_secs(1),
+                "candidate query budget was removed before child loading: {elapsed:?}"
+            );
+        });
     }
 
     #[test]
@@ -1961,6 +2907,16 @@ mod tests {
         assert_eq!(
             store
                 .load_candidate(candidate.candidate().id())
+                .unwrap_err()
+                .kind,
+            HistoryErrorKind::IncompatibleSchema
+        );
+        assert_eq!(
+            store
+                .transition_candidate_review_status(
+                    &CandidateId::new("candidate:future-review").unwrap(),
+                    CandidateReviewTransition::Select,
+                )
                 .unwrap_err()
                 .kind,
             HistoryErrorKind::IncompatibleSchema

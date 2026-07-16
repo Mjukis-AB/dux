@@ -926,14 +926,23 @@ authority edge.
 
 The implemented typed candidate-history API prepares all bounded data before
 locking, atomically inserts a format-2 parent and contiguous ordered children,
-and requires the referenced scan to exist. Its exact-ID reader shares the
+and requires a durably succeeded source scan. Its exact-ID reader shares the
 bounded SQLite progress budget across parent and child queries, checks storage
 types and byte lengths before materialization, and returns either a dedicated
 complete observation or an explicit legacy summary. It rejects legacy child
 pollution, missing/gapped/over-limit children, dangling scans, malformed
-evidence, incompatible policy, and incomplete cloud-upload facts. It cannot
-construct a domain `Candidate`, change status, create a plan, or execute an
-effect.
+evidence, incompatible policy, incomplete cloud-upload facts, and complete
+candidates attached to running or non-successful scans. The only standalone
+status writer is a typed cleanup-review projection: exact `discovered`↔
+`selected`, source-specific transition to `dismissed`, and explicit
+`dismissed`→`discovered` restore after full format-2 validation; direct
+dismissed-to-selected transition is absent. Selection requires a cleanup-
+capable blocker-free observation but is never approval; dismissal is neither a
+protected-path rule nor authority over an already frozen plan. Legacy rows and
+evaluator/planner/journal-owned statuses
+cannot enter this API. Exact post-commit target state is adopted only while the
+retained store and current schema still validate under the writer lease. It
+cannot construct a domain `Candidate`, create a plan, or execute an effect.
 
 The implemented typed cleanup-history boundary likewise remains
 non-authoritative and currently accepts only an immutable domain plan for a
@@ -1357,7 +1366,7 @@ incident as a substitute for deterministic local evidence.
 | Legacy CLI deletion | Active arbitrary-descendant permanent path routed through a temporary core adapter; strict-target/volume/identity rechecks only; scanned-byte estimates labeled in CLI | Replace adapter with reviewed plan/approval/executor chain without weakening current checks |
 | Centralized executor | Production executor absent; temporary legacy adapter is containment only | Typed admission, integration with the existing cross-process lease/journal, and live target revalidation required |
 | Engine/FFI task and plan API | Core handle, pre-worker SQLite/snapshot compatibility handshake, bounded per-session registry, read-only formatting, and durable full-scan tasks are implemented. Scan admission fences schema skew and overlapping session-local roots; direct cancellation reaches the scanner; typed results/events expose observations only. App architecture owns one session; UniFFI remains smoke-only and no plan/cleanup authority exists | FFI version rejection plus bounded scan/history/plan DTOs and cancellation transport; priority and cross-process scan leasing remain later |
-| SQLite compatibility store | Checksummed v1/v2 migrations with exact per-version fingerprints, lossless bounded path codec, bounded full/lightweight inspection, private atomic provisioning with durable initialization evidence, cross-platform process writer/version-race coverage, durable writer-locked cleanup-lock layout upgrade, private tri-state process-instance liveness evidence, newer-schema read-only transition, rollback/WAL recovery, engine-integrated scan lifecycle/coverage, candidate and planned-cleanup history, and a bounded cleanup-lock-coupled owner-generation journal state machine are implemented; stored paths and policy remain non-authoritative observations | Evaluator/planner lifecycle integration, candidate status lifecycle, Windows host-scope proof, retention, executor integration, hard-process-death scan-row recovery, and bounded identity-safe abandoned-stage maintenance |
+| SQLite compatibility store | Checksummed v1/v2 migrations with exact per-version fingerprints, lossless bounded path codec, bounded full/lightweight inspection, private atomic provisioning with durable initialization evidence, cross-platform process writer/version-race coverage, durable writer-locked cleanup-lock layout upgrade, private tri-state process-instance liveness evidence, newer-schema read-only transition, rollback/WAL recovery, engine-integrated scan lifecycle/coverage, succeeded-scan-bound candidate observations, typed review status, planned-cleanup history, and a bounded cleanup-lock-coupled owner-generation journal state machine are implemented; stored paths, review state, and policy remain non-authoritative observations | Evaluator-owned stale/unavailable state, planner/journal-coupled candidate status, evaluator/planner engine lifecycle integration, Windows host-scope proof, retention, executor integration, hard-process-death scan-row recovery, and bounded identity-safe abandoned-stage maintenance |
 | Capacity sample persistence | Typed raw SQLite-v2 writes and bounded latest/cursor reads are implemented with opaque stable volume IDs, separate ordinary/important availability, hourly routine suppression, immediate stored-pressure transitions, monotonic metadata, storage/schema-gated exact retry reconciliation, volume/sample interval checks, hostile-row validation, and version-skew fencing; important-only UI observations are not persisted | Swift/engine/FFI/CLI wiring, Rust pressure evaluation/hysteresis, daily rollups, pressure episodes, and retention |
 | Binary full-tree snapshot store | Independent v1 wire has bounded pre-allocation, exact graph/path/aggregate/flag semantics, frozen golden digests, SHA-256 references, private marker-owned storage, unique temps, atomic no-replace publication, read-only final handles, database→snapshot lock ordering, version-skew fencing, and exact file-first scan-summary-plus-coverage reconciliation. Durable engine tasks publish only a completed-only fresh-scan converter's lossless canonical DFS nodes and fail-closed hard-link accounting; bytes remain non-authoritative | Explorer/FFI integration, last-complete selection, memory benchmarks, latest-two/2 GiB retention, active-review pins, abandoned-stage/temp maintenance, and native Windows sparse/compressed-allocation verification |
 | Typed scan coverage/issues | Implemented as bounded semantic domain values, authoritative scanner terminal outcomes, engine task results/events, atomic SQLite-v2 summary children, truthful fresh/legacy-cache CLI labels, and changed-hard-link observations; observations grant no plan or cleanup authority | FFI/Swift transport, paged Explorer details, and permission onboarding |

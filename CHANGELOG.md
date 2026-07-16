@@ -5,6 +5,18 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Added a typed, crate-private candidate review-state boundary. Complete
+  format-2 candidates can move between `discovered` and `selected`, from either
+  exact source state to `dismissed`, and explicitly restore dismissal to
+  `discovered`; there is no direct dismissed-to-selected edge, and exact target
+  retries are idempotent. Selection means cleanup-review intent and requires a
+  cleanup-capable, blocker-free observation, but it is not approval or cleanup
+  authority. Full bounded candidate facts are validated before an exact SQLite
+  compare-and-set, post-commit ambiguity is reconciled only while current
+  secured storage remains valid, and legacy/corrupt/newer-schema rows fail
+  closed. Complete candidates now also require a durably succeeded source scan
+  on insert and load. Evaluator-owned stale/unavailable state and atomic
+  planner/journal-owned planned/completed/failed state remain separate work.
 - Added durable full scans to the shared engine. Scan admission canonicalizes
   and snapshot-bounds roots, fences newer read-only schemas, excludes
   overlapping root scopes within one engine session, and creates no durable ID

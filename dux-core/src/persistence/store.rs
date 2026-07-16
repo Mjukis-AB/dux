@@ -8,8 +8,8 @@ use rusqlite::limits::Limit;
 use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 
 use super::candidate_history::{
-    NewCandidateRecord, PreparedCandidate, StoredCandidateRecord, insert_candidate,
-    load_candidate_record,
+    CandidateHistoryStatus, CandidateReviewTransition, NewCandidateRecord, PreparedCandidate,
+    StoredCandidateRecord, insert_candidate, load_candidate_record, transition_candidate_review,
 };
 use super::capacity_history::{
     CapacityPage, CapacityPageCursor, CapacityWriteOutcome, CapacityWriteReason,
@@ -619,6 +619,81 @@ impl StoreCoordinator {
     ) -> Result<Option<StoredCandidateRecord>, HistoryError> {
         let guard = self.lock_current_history_connection()?;
         load_candidate_record(&guard.connection, id)
+    }
+
+    /// Persist one review-only candidate status transition. Selection is user
+    /// intent, not plan approval or cleanup authority.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "candidate review transport integrates with the evaluator task slice"
+        )
+    )]
+    pub(crate) fn transition_candidate_review_status(
+        &self,
+        id: &crate::domain::CandidateId,
+        transition: CandidateReviewTransition,
+    ) -> Result<CandidateHistoryStatus, HistoryError> {
+        self.transition_candidate_review_status_with_hook(id, transition, || Ok(()))
+    }
+
+    fn transition_candidate_review_status_with_hook(
+        &self,
+        id: &crate::domain::CandidateId,
+        transition: CandidateReviewTransition,
+        after_commit: impl FnOnce() -> Result<(), HistoryError>,
+    ) -> Result<CandidateHistoryStatus, HistoryError> {
+        let mut guard = self.lock_current_history_connection()?;
+        let transaction = guard
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(map_write_sql_error)?;
+        let (expected, target) = transition_candidate_review(&transaction, id, transition)?;
+        let failure = match transaction
+            .commit()
+            .map_err(map_write_sql_error)
+            .and_then(|()| after_commit())
+            .and_then(|()| self.revalidate_current_history_guard(&guard))
+        {
+            Ok(()) => return Ok(target),
+            Err(failure) => failure,
+        };
+
+        if self.revalidate_current_history_guard(&guard).is_err() {
+            return Err(HistoryError::new(HistoryErrorKind::OutcomeUnknown));
+        }
+        match load_candidate_record(&guard.connection, id) {
+            Ok(Some(StoredCandidateRecord::Complete(record))) if record.status == target => {
+                Ok(target)
+            }
+            Ok(Some(StoredCandidateRecord::Complete(record))) if record.status == expected => {
+                Err(failure)
+            }
+            Ok(Some(_)) => Err(HistoryError::new(HistoryErrorKind::InvalidTransition)),
+            Ok(None) | Err(_) => Err(HistoryError::new(HistoryErrorKind::OutcomeUnknown)),
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn transition_candidate_review_status_after_commit_failure_for_test(
+        &self,
+        id: &crate::domain::CandidateId,
+        transition: CandidateReviewTransition,
+    ) -> Result<CandidateHistoryStatus, HistoryError> {
+        self.transition_candidate_review_status_with_hook(id, transition, || {
+            Err(HistoryError::new(HistoryErrorKind::DatabaseUnavailable))
+        })
+    }
+
+    #[cfg(all(test, unix))]
+    pub(super) fn transition_candidate_review_status_with_after_commit_hook_for_test(
+        &self,
+        id: &crate::domain::CandidateId,
+        transition: CandidateReviewTransition,
+        after_commit: impl FnOnce() -> Result<(), HistoryError>,
+    ) -> Result<CandidateHistoryStatus, HistoryError> {
+        self.transition_candidate_review_status_with_hook(id, transition, after_commit)
     }
 
     /// Atomically freeze one review-data plan as a non-executable planned journal.

@@ -1982,6 +1982,42 @@ Tasks:
     integration remained open. The subsequent journal slice closed the
     execution-state portion; the broad checkbox stays unchecked for candidate
     status and scan/evaluator/planner lifecycle integration.
+  - Candidate review-status sub-checkpoint completed 2026-07-16: the
+    crate-private format-2 history boundary now exposes only typed review
+    commands, never an arbitrary status setter. Exact source-state transitions
+    support `discovered` ↔ `selected`, either source to `dismissed`, and an
+    explicit dismissed-to-discovered restore; there is no direct dismissed-to-
+    selected edge. An exact target retry is idempotent, while evaluator/planner/
+    journal-owned states cannot enter the review API. Selection means cleanup-
+    review intent and requires a complete cleanup-capable observation with no
+    blockers, but grants no plan or execution authority. Dismissal hides this
+    exact scan-bound observation and does not create a security exclusion or
+    revoke a plan already frozen elsewhere.
+
+    Each operation full-decodes the bounded candidate and succeeded source scan
+    before one primary-key/status compare-and-set under the coordinator and
+    cross-process writer lease. It changes no immutable parent fact or child;
+    legacy summaries, malformed children, missing IDs, incompatible schemas,
+    and wrong source states fail closed. Commit ambiguity is adopted only when
+    retained storage and the current schema revalidate under the same lease and
+    the fully decoded row has the exact target state; unsafe storage becomes
+    `OutcomeUnknown`. Complete candidate insertion and loading now reject
+    running, cancelled, failed, or interrupted source scans, closing the path
+    by which non-success traversal observations could satisfy later plan-
+    history dependency checks. Migrated format-1 summaries still require only
+    their historical scan foreign key and remain non-actionable.
+
+    Focused tests cover select/deselect, dismissal from either source, explicit
+    restore, idempotence, lifecycle-owned-state refusal, every blocker and
+    cleanup/non-cleanup policy pair,
+    immutable-fact preservation after reopen, exact concurrent CAS races,
+    injected post-commit reconciliation, unsafe-storage ambiguity, legacy,
+    missing/corrupt/newer-schema rows, every non-success scan status, the shared
+    candidate/source-scan query budget, and selected-versus-dismissed plan-
+    history admission including post-plan dismissal. Status remains a current
+    projection, not an event timeline. Evaluator-owned stale/unavailable,
+    planner-atomic planned, journal-derived completed/failed, and engine/FFI/UI
+    transport remain open, so the broad persistence checkbox stays unchecked.
   - Planned-cleanup journal sub-checkpoint completed 2026-07-16: a crate-private
     boundary prepares and bounds an immutable cleanup plan before locking,
     requires its scan and every format-2 candidate observation to exist and

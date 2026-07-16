@@ -1512,7 +1512,7 @@ mod tests {
         RuleGuards, RuleMatcher, RuleMatcherDefinition, RuleScope,
     };
     use crate::persistence::StoreCoordinator;
-    use crate::persistence::candidate_history::NewCandidateRecord;
+    use crate::persistence::candidate_history::{CandidateReviewTransition, NewCandidateRecord};
     use crate::persistence::history::{
         NewScanRecord, ScanCompletionRecord, ScanCounts, TerminalScanStatus,
     };
@@ -1720,6 +1720,98 @@ mod tests {
             CandidateAction::EvictLocalCopy
         );
         assert_eq!(stored.warnings, cleanup_plan.warnings());
+    }
+
+    #[test]
+    fn selected_review_state_preserves_plan_checks_and_dismissal_blocks_new_plans() {
+        let temp = TempDir::new().unwrap();
+        let store = StoreCoordinator::open(&temp.path().join("store/dux.sqlite3")).unwrap();
+        let root = temp.path().join("root");
+        let scan_id = "scan:cleanup-review-state";
+        start_scan(&store, &root, scan_id);
+        let policy = rule(
+            "fixture.cleanup.review-state",
+            CandidateCategory::ApplicationCache,
+            SafetyTier::SafeRegenerable,
+            CandidateAction::RemoveKnownRegenerableContents,
+        );
+
+        let selected = candidate(
+            "candidate:cleanup-selected",
+            scan_id,
+            &policy,
+            root.join("cleanup-fixture-selected"),
+            10,
+        );
+        persist_candidate(&store, &selected, 1_750_000_002);
+        store
+            .transition_candidate_review_status(selected.id(), CandidateReviewTransition::Select)
+            .unwrap();
+        let selected_plan = plan(
+            "plan:cleanup-selected",
+            CleanupMode::PermanentSafe,
+            std::slice::from_ref(&selected),
+        );
+        let selected_session = CleanupSessionId::new("session:cleanup-selected").unwrap();
+        store
+            .record_cleanup_session_planned(
+                &NewCleanupSessionRecord::try_from_plan(
+                    selected_session.clone(),
+                    &selected_plan,
+                    UNIX_EPOCH + Duration::from_secs(1_750_000_011),
+                    CleanupTrigger::Manual,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        store
+            .transition_candidate_review_status(
+                selected.id(),
+                CandidateReviewTransition::DismissSelected,
+            )
+            .unwrap();
+        assert!(matches!(
+            store.load_cleanup_session(&selected_session).unwrap(),
+            Some(StoredCleanupSessionRecord::Planned(_))
+        ));
+
+        let dismissed = candidate(
+            "candidate:cleanup-dismissed",
+            scan_id,
+            &policy,
+            root.join("cleanup-fixture-dismissed"),
+            10,
+        );
+        persist_candidate(&store, &dismissed, 1_750_000_003);
+        store
+            .transition_candidate_review_status(
+                dismissed.id(),
+                CandidateReviewTransition::DismissDiscovered,
+            )
+            .unwrap();
+        let dismissed_plan = plan(
+            "plan:cleanup-dismissed",
+            CleanupMode::PermanentSafe,
+            std::slice::from_ref(&dismissed),
+        );
+        let error = store
+            .record_cleanup_session_planned(
+                &NewCleanupSessionRecord::try_from_plan(
+                    CleanupSessionId::new("session:cleanup-dismissed").unwrap(),
+                    &dismissed_plan,
+                    UNIX_EPOCH + Duration::from_secs(1_750_000_012),
+                    CleanupTrigger::Manual,
+                )
+                .unwrap(),
+            )
+            .unwrap_err();
+        assert_eq!(error.kind, HistoryErrorKind::InvalidInput);
+        assert!(
+            store
+                .load_cleanup_session(&CleanupSessionId::new("session:cleanup-dismissed").unwrap())
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
