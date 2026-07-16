@@ -118,6 +118,59 @@ fn over_budget_candidate_records(
     vec![NewCandidateRecord::try_from_candidate(&candidate, completed_at).unwrap()]
 }
 
+fn completed_marker_candidate() -> (
+    TempDir,
+    EngineConfig,
+    EngineHandle,
+    ScanId,
+    crate::CandidateId,
+    PathBuf,
+) {
+    let temp = TempDir::new().unwrap();
+    let config = config(&temp);
+    let root = temp.path().join("scan-root");
+    let project = root.join("project");
+    let target = project.join("target");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::write(project.join("Cargo.toml"), b"[package]\nname='fixture'\n").unwrap();
+    std::fs::write(target.join("object"), vec![7_u8; 8 * 1024]).unwrap();
+    let expected_target = target.canonicalize().unwrap();
+    let engine =
+        EngineHandle::open_with_limits(config.clone(), RegistryLimits::testing(1, 4, 8, 16))
+            .unwrap();
+    let task = engine.start_scan(root).unwrap();
+    assert_eq!(wait_terminal(&engine, task).phase, TaskPhase::Succeeded);
+    let scan_id = engine.scan_result(task).unwrap().unwrap().scan_id().clone();
+    let history = engine.candidate_history_for_scan(&scan_id).unwrap();
+    assert_eq!(history.candidates().len(), 1);
+    let candidate_id = history.candidates()[0].id().clone();
+    (temp, config, engine, scan_id, candidate_id, expected_target)
+}
+
+fn make_marker_candidate_cleanup_reviewable(engine: &EngineHandle, scan_id: &ScanId) {
+    engine.inner.store.with_connection(|connection| {
+        connection
+            .execute(
+                "UPDATE candidates
+                 SET safety_tier = 'safe_regenerable',
+                     proposed_action = 'remove_known_regenerable_contents',
+                     rule_schedule_eligible = 1
+                 WHERE scan_id = ?1",
+                [scan_id.as_str()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "DELETE FROM candidate_blockers
+                 WHERE candidate_id = (
+                     SELECT candidate_id FROM candidates WHERE scan_id = ?1
+                 )",
+                [scan_id.as_str()],
+            )
+            .unwrap();
+    });
+}
+
 fn seed_ai_insight(engine: &EngineHandle, id: &str, created_ms: i64, expires_ms: i64) {
     let mut digest = [0_u8; 32];
     for (destination, source) in digest.iter_mut().zip(id.as_bytes()) {
@@ -350,6 +403,20 @@ fn newer_database_never_provisions_missing_snapshot_storage() {
     assert_eq!(
         engine.candidate_history_for_scan(&ScanId::new("scan:future-schema").unwrap()),
         Err(CandidateHistoryError::IncompatibleSchema)
+    );
+    let future_scan = ScanId::new("scan:future-schema").unwrap();
+    let future_candidate = crate::CandidateId::new("candidate:future-schema").unwrap();
+    assert_eq!(
+        engine.candidate_path_page(&future_scan, &future_candidate, 0, 1),
+        Err(CandidateDetailError::IncompatibleSchema)
+    );
+    assert_eq!(
+        engine.review_candidate(
+            &future_scan,
+            &future_candidate,
+            CandidateReviewCommand::Dismiss,
+        ),
+        Err(CandidateReviewError::IncompatibleSchema)
     );
     assert_eq!(
         engine.snapshot_retention_cap(),
@@ -1503,6 +1570,509 @@ fn completed_scan_persists_marker_verified_discovery_batch_across_reopen() {
 }
 
 #[test]
+fn candidate_detail_pages_are_bounded_contiguous_and_survive_reopen() {
+    let (_temp, config, engine, scan_id, candidate_id, expected_target) =
+        completed_marker_candidate();
+
+    assert_eq!(
+        engine.candidate_path_page(&scan_id, &candidate_id, 0, 0),
+        Err(CandidateDetailError::InvalidLimit {
+            maximum: MAX_CANDIDATE_DETAIL_PAGE_LIMIT,
+        })
+    );
+    assert_eq!(
+        engine.candidate_evidence_page(
+            &scan_id,
+            &candidate_id,
+            0,
+            MAX_CANDIDATE_DETAIL_PAGE_LIMIT + 1,
+        ),
+        Err(CandidateDetailError::InvalidLimit {
+            maximum: MAX_CANDIDATE_DETAIL_PAGE_LIMIT,
+        })
+    );
+
+    let paths = engine
+        .candidate_path_page(&scan_id, &candidate_id, 0, 1)
+        .unwrap();
+    assert_eq!(paths.scan_id(), &scan_id);
+    assert_eq!(paths.candidate().id(), &candidate_id);
+    assert_eq!(paths.cursor(), 0);
+    assert_eq!(paths.total_paths(), 1);
+    assert_eq!(paths.next_cursor(), None);
+    assert_eq!(paths.paths().len(), 1);
+    assert_eq!(paths.paths()[0].ordinal(), 0);
+    assert_eq!(
+        paths.paths()[0].path().display(),
+        expected_target.display().to_string()
+    );
+    assert!(!paths.paths()[0].path().encoded_bytes().is_empty());
+    #[cfg(windows)]
+    assert_eq!(
+        paths.paths()[0].path().encoding(),
+        DurablePathEncoding::Utf16LittleEndian
+    );
+    #[cfg(not(windows))]
+    assert_eq!(
+        paths.paths()[0].path().encoding(),
+        DurablePathEncoding::Utf8
+    );
+
+    let path_end = engine
+        .candidate_path_page(&scan_id, &candidate_id, paths.total_paths(), 1)
+        .unwrap();
+    assert!(path_end.paths().is_empty());
+    assert_eq!(path_end.next_cursor(), None);
+    assert_eq!(
+        engine.candidate_path_page(&scan_id, &candidate_id, paths.total_paths() + 1, 1),
+        Err(CandidateDetailError::CursorOutOfRange)
+    );
+
+    let first_evidence = engine
+        .candidate_evidence_page(&scan_id, &candidate_id, 0, 1)
+        .unwrap();
+    assert_eq!(first_evidence.scan_id(), &scan_id);
+    assert_eq!(first_evidence.candidate().id(), &candidate_id);
+    assert_eq!(first_evidence.cursor(), 0);
+    assert_eq!(first_evidence.evidence().len(), 1);
+    assert_eq!(first_evidence.evidence()[0].ordinal(), 0);
+    assert_eq!(first_evidence.next_cursor(), Some(1));
+    let mut observed = first_evidence.evidence().to_vec();
+    let mut cursor = first_evidence.next_cursor();
+    while let Some(next) = cursor {
+        let page = engine
+            .candidate_evidence_page(&scan_id, &candidate_id, next, 1)
+            .unwrap();
+        observed.extend_from_slice(page.evidence());
+        cursor = page.next_cursor();
+    }
+    assert_eq!(observed.len(), usize::from(first_evidence.total_evidence()));
+    for (ordinal, item) in observed.iter().enumerate() {
+        assert_eq!(item.ordinal(), u16::try_from(ordinal).unwrap());
+    }
+
+    engine.close();
+    assert!(engine.wait_until_closed(TEST_TIMEOUT));
+    drop(engine);
+    let reopened = EngineHandle::open(config).unwrap();
+    assert_eq!(
+        reopened
+            .candidate_path_page(&scan_id, &candidate_id, 0, 1)
+            .unwrap(),
+        paths
+    );
+    assert_eq!(
+        reopened
+            .candidate_evidence_page(&scan_id, &candidate_id, 0, 1)
+            .unwrap(),
+        first_evidence
+    );
+}
+
+#[test]
+fn candidate_detail_distinguishes_scan_evaluation_candidate_and_lifecycle_failures() {
+    let (_temp, _config, engine, scan_id, candidate_id, _target) = completed_marker_candidate();
+    let missing_scan = ScanId::new("scan:missing-detail").unwrap();
+    let missing_candidate = crate::CandidateId::new("candidate:missing-detail").unwrap();
+    assert_eq!(
+        engine.candidate_path_page(&missing_scan, &candidate_id, 0, 1),
+        Err(CandidateDetailError::ScanNotFound)
+    );
+    assert_eq!(
+        engine.candidate_path_page(&scan_id, &missing_candidate, 0, 1),
+        Err(CandidateDetailError::CandidateNotFound)
+    );
+
+    let cancelled_scan = ScanId::new("scan:detail-not-run").unwrap();
+    engine
+        .inner
+        .store
+        .record_scan_started(
+            &NewScanRecord::try_new(
+                cancelled_scan.clone(),
+                engine.config().cache_directory().join("detail-not-run"),
+                SystemTime::UNIX_EPOCH + Duration::from_secs(1),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    engine
+        .inner
+        .store
+        .record_scan_finished(
+            &ScanCompletionRecord::try_new_with_coverage(
+                cancelled_scan.clone(),
+                SystemTime::UNIX_EPOCH + Duration::from_secs(2),
+                TerminalScanStatus::Cancelled,
+                ScanCounts::default(),
+                ScanCoverage::unknown(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(
+        engine.candidate_evidence_page(&cancelled_scan, &candidate_id, 0, 1),
+        Err(CandidateDetailError::EvaluationNotSucceeded)
+    );
+
+    engine.close();
+    assert!(engine.wait_until_closed(TEST_TIMEOUT));
+    assert_eq!(
+        engine.candidate_path_page(&scan_id, &candidate_id, 0, 1),
+        Err(CandidateDetailError::Closed)
+    );
+    assert_eq!(
+        engine.review_candidate(&scan_id, &candidate_id, CandidateReviewCommand::Dismiss),
+        Err(CandidateReviewError::Closed)
+    );
+}
+
+#[test]
+fn every_candidate_evidence_variant_maps_to_a_distinct_non_authoritative_dto() {
+    #[cfg(windows)]
+    let path = PathBuf::from(r"C:\fixture\observed");
+    #[cfg(not(windows))]
+    let path = PathBuf::from("/fixture/observed");
+    let newest_mtime = SystemTime::UNIX_EPOCH + Duration::from_secs(10);
+    let evidence = [
+        Evidence::MatchedPath { path: path.clone() },
+        Evidence::RequiredMarker { path: path.clone() },
+        Evidence::ForbiddenMarkerAbsent { path: path.clone() },
+        Evidence::BundleIdentifier {
+            path: path.clone(),
+            identifier: "com.example.fixture".to_owned(),
+        },
+        Evidence::MinimumAge {
+            newest_mtime,
+            minimum_age: Duration::from_secs(20),
+        },
+        Evidence::MinimumSize {
+            observed_bytes: 30,
+            minimum_bytes: 20,
+        },
+        Evidence::InactiveProcess {
+            identifier: "fixture-process".to_owned(),
+        },
+        Evidence::CloudUploadComplete { path },
+    ];
+    let mapped = evidence
+        .iter()
+        .map(public_candidate_evidence)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert!(matches!(
+        mapped[0],
+        DurableCandidateEvidence::MatchedPath { .. }
+    ));
+    assert!(matches!(
+        mapped[1],
+        DurableCandidateEvidence::RequiredMarker { .. }
+    ));
+    assert!(matches!(
+        mapped[2],
+        DurableCandidateEvidence::ForbiddenMarkerAbsent { .. }
+    ));
+    assert!(matches!(
+        &mapped[3],
+        DurableCandidateEvidence::BundleIdentifier { identifier, .. }
+            if identifier.as_ref() == "com.example.fixture"
+    ));
+    assert!(matches!(
+        mapped[4],
+        DurableCandidateEvidence::MinimumAge {
+            newest_mtime: value,
+            minimum_age
+        } if value == newest_mtime && minimum_age == Duration::from_secs(20)
+    ));
+    assert!(matches!(
+        mapped[5],
+        DurableCandidateEvidence::MinimumSize {
+            observed_bytes: 30,
+            minimum_bytes: 20
+        }
+    ));
+    assert!(matches!(
+        &mapped[6],
+        DurableCandidateEvidence::InactiveProcess { identifier }
+            if identifier.as_ref() == "fixture-process"
+    ));
+    assert!(matches!(
+        mapped[7],
+        DurableCandidateEvidence::CloudUploadComplete { .. }
+    ));
+}
+
+#[test]
+fn semantic_candidate_review_is_scan_bound_idempotent_and_never_plans() {
+    let (_temp, _config, engine, scan_id, candidate_id, _target) = completed_marker_candidate();
+
+    assert_eq!(
+        engine.review_candidate(&scan_id, &candidate_id, CandidateReviewCommand::Select),
+        Err(CandidateReviewError::NotReviewable)
+    );
+    let dismissed = engine
+        .review_candidate(&scan_id, &candidate_id, CandidateReviewCommand::Dismiss)
+        .unwrap();
+    assert_eq!(dismissed.scan_id(), &scan_id);
+    assert_eq!(dismissed.candidate_id(), &candidate_id);
+    assert_eq!(dismissed.status(), DurableCandidateStatus::Dismissed);
+    assert_eq!(
+        engine
+            .review_candidate(&scan_id, &candidate_id, CandidateReviewCommand::Dismiss)
+            .unwrap(),
+        dismissed
+    );
+    assert_eq!(
+        engine
+            .candidate_path_page(&scan_id, &candidate_id, 0, 1)
+            .unwrap()
+            .candidate()
+            .status(),
+        DurableCandidateStatus::Dismissed
+    );
+    assert_eq!(
+        engine
+            .review_candidate(&scan_id, &candidate_id, CandidateReviewCommand::Restore)
+            .unwrap()
+            .status(),
+        DurableCandidateStatus::Discovered
+    );
+    assert_eq!(
+        engine.review_candidate(
+            &ScanId::new("scan:wrong-review-source").unwrap(),
+            &candidate_id,
+            CandidateReviewCommand::Dismiss,
+        ),
+        Err(CandidateReviewError::CandidateNotFound)
+    );
+    engine.inner.store.with_connection(|connection| {
+        assert_eq!(
+            connection
+                .query_row("SELECT count(*) FROM cleanup_sessions", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT count(*) FROM candidate_plan_claims", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            0
+        );
+    });
+    assert_eq!(
+        engine
+            .candidate_history_for_scan(&scan_id)
+            .unwrap()
+            .candidates()[0]
+            .status(),
+        DurableCandidateStatus::Discovered
+    );
+}
+
+#[test]
+fn cleanup_eligible_candidate_supports_select_clear_and_selected_dismissal() {
+    let (_temp, _config, engine, scan_id, candidate_id, _target) = completed_marker_candidate();
+    make_marker_candidate_cleanup_reviewable(&engine, &scan_id);
+
+    let selected = engine
+        .review_candidate(&scan_id, &candidate_id, CandidateReviewCommand::Select)
+        .unwrap();
+    assert_eq!(selected.status(), DurableCandidateStatus::Selected);
+    assert_eq!(
+        engine
+            .review_candidate(&scan_id, &candidate_id, CandidateReviewCommand::Select)
+            .unwrap(),
+        selected
+    );
+    assert_eq!(
+        engine
+            .review_candidate(
+                &scan_id,
+                &candidate_id,
+                CandidateReviewCommand::ClearSelection,
+            )
+            .unwrap()
+            .status(),
+        DurableCandidateStatus::Discovered
+    );
+    engine
+        .review_candidate(&scan_id, &candidate_id, CandidateReviewCommand::Select)
+        .unwrap();
+    assert_eq!(
+        engine
+            .review_candidate(&scan_id, &candidate_id, CandidateReviewCommand::Dismiss)
+            .unwrap()
+            .status(),
+        DurableCandidateStatus::Dismissed
+    );
+    assert_eq!(
+        engine
+            .review_candidate(&scan_id, &candidate_id, CandidateReviewCommand::Restore)
+            .unwrap()
+            .status(),
+        DurableCandidateStatus::Discovered
+    );
+}
+
+#[test]
+fn candidate_review_reconciles_exact_post_commit_state_and_rejects_terminal_owners() {
+    let (_temp, _config, engine, scan_id, candidate_id, _target) = completed_marker_candidate();
+    make_marker_candidate_cleanup_reviewable(&engine, &scan_id);
+
+    assert_eq!(
+        engine
+            .inner
+            .store
+            .review_candidate_after_commit_failure_for_test(
+                &scan_id,
+                &candidate_id,
+                CandidateReviewAction::Select,
+            )
+            .unwrap(),
+        CandidateHistoryStatus::Selected
+    );
+    assert_eq!(
+        engine
+            .review_candidate(
+                &scan_id,
+                &candidate_id,
+                CandidateReviewCommand::ClearSelection,
+            )
+            .unwrap()
+            .status(),
+        DurableCandidateStatus::Discovered
+    );
+
+    for status in ["stale", "unavailable", "completed", "failed"] {
+        engine.inner.store.with_connection(|connection| {
+            connection
+                .execute(
+                    "UPDATE candidates SET status = ?2 WHERE candidate_id = ?1",
+                    rusqlite::params![candidate_id.as_str(), status],
+                )
+                .unwrap();
+        });
+        assert_eq!(
+            engine.review_candidate(&scan_id, &candidate_id, CandidateReviewCommand::Dismiss),
+            Err(CandidateReviewError::NotReviewable),
+            "status {status} must remain evaluator/journal owned"
+        );
+    }
+}
+
+#[test]
+fn concurrent_select_and_dismiss_converge_without_overwriting_dismissal() {
+    let (_temp, _config, engine, scan_id, candidate_id, _target) = completed_marker_candidate();
+    make_marker_candidate_cleanup_reviewable(&engine, &scan_id);
+    let barrier = Arc::new(std::sync::Barrier::new(3));
+    let select_engine = engine.clone();
+    let select_scan = scan_id.clone();
+    let select_candidate = candidate_id.clone();
+    let select_barrier = Arc::clone(&barrier);
+    let select = std::thread::spawn(move || {
+        select_barrier.wait();
+        select_engine.review_candidate(
+            &select_scan,
+            &select_candidate,
+            CandidateReviewCommand::Select,
+        )
+    });
+    let dismiss_engine = engine.clone();
+    let dismiss_scan = scan_id.clone();
+    let dismiss_candidate = candidate_id.clone();
+    let dismiss_barrier = Arc::clone(&barrier);
+    let dismiss = std::thread::spawn(move || {
+        dismiss_barrier.wait();
+        dismiss_engine.review_candidate(
+            &dismiss_scan,
+            &dismiss_candidate,
+            CandidateReviewCommand::Dismiss,
+        )
+    });
+    barrier.wait();
+
+    let select = select.join().unwrap();
+    let dismiss = dismiss.join().unwrap();
+    assert!(select.is_ok() || select == Err(CandidateReviewError::NotReviewable));
+    assert_eq!(dismiss.unwrap().status(), DurableCandidateStatus::Dismissed);
+    assert_eq!(
+        engine
+            .candidate_history_for_scan(&scan_id)
+            .unwrap()
+            .candidates()[0]
+            .status(),
+        DurableCandidateStatus::Dismissed
+    );
+}
+
+#[test]
+fn candidate_detail_and_review_error_mappings_are_exhaustive() {
+    let mappings = [
+        (
+            HistoryErrorKind::IncompatibleSchema,
+            CandidateDetailError::IncompatibleSchema,
+            CandidateReviewError::IncompatibleSchema,
+        ),
+        (
+            HistoryErrorKind::QueryLimitExceeded,
+            CandidateDetailError::QueryLimitExceeded,
+            CandidateReviewError::QueryLimitExceeded,
+        ),
+        (
+            HistoryErrorKind::Busy,
+            CandidateDetailError::Busy,
+            CandidateReviewError::Busy,
+        ),
+        (
+            HistoryErrorKind::UnsafeStorage,
+            CandidateDetailError::UnsafeStorage,
+            CandidateReviewError::UnsafeStorage,
+        ),
+        (
+            HistoryErrorKind::CorruptData,
+            CandidateDetailError::CorruptData,
+            CandidateReviewError::CorruptData,
+        ),
+        (
+            HistoryErrorKind::InternalState,
+            CandidateDetailError::InternalState,
+            CandidateReviewError::InternalState,
+        ),
+        (
+            HistoryErrorKind::NotFound,
+            CandidateDetailError::CandidateNotFound,
+            CandidateReviewError::CandidateNotFound,
+        ),
+    ];
+    for (kind, detail, review) in mappings {
+        assert_eq!(map_candidate_detail_error(kind), detail);
+        assert_eq!(map_candidate_review_error(kind), review);
+    }
+    for kind in [
+        HistoryErrorKind::InvalidInput,
+        HistoryErrorKind::AlreadyExists,
+        HistoryErrorKind::InvalidTransition,
+    ] {
+        assert_eq!(
+            map_candidate_review_error(kind),
+            CandidateReviewError::NotReviewable
+        );
+    }
+    assert_eq!(
+        map_candidate_review_error(HistoryErrorKind::OutcomeUnknown),
+        CandidateReviewError::OutcomeUnknown
+    );
+    assert_eq!(
+        map_candidate_review_error(HistoryErrorKind::DatabaseUnavailable),
+        CandidateReviewError::Unavailable
+    );
+}
+
+#[test]
 fn candidate_history_rejects_corrupt_child_rows_without_partial_results() {
     let temp = TempDir::new().unwrap();
     let root = temp.path().join("scan-root");
@@ -1523,6 +2093,12 @@ fn candidate_history_rejects_corrupt_child_rows_without_partial_results() {
         result.candidate_evaluation(),
         CandidateEvaluationTaskStatus::Succeeded { candidate_count: 1 }
     );
+    let candidate_id = engine
+        .candidate_history_for_scan(&scan_id)
+        .unwrap()
+        .candidates()[0]
+        .id()
+        .clone();
     engine.inner.store.with_connection(|connection| {
         assert_eq!(
             connection
@@ -1541,6 +2117,10 @@ fn candidate_history_rejects_corrupt_child_rows_without_partial_results() {
     assert_eq!(
         engine.candidate_history_for_scan(&scan_id),
         Err(CandidateHistoryError::CorruptData)
+    );
+    assert_eq!(
+        engine.candidate_path_page(&scan_id, &candidate_id, 0, 1),
+        Err(CandidateDetailError::CorruptData)
     );
 }
 
@@ -1565,6 +2145,12 @@ fn candidate_history_rejects_over_budget_graph_before_payload_decode() {
         result.candidate_evaluation(),
         CandidateEvaluationTaskStatus::Succeeded { candidate_count: 1 }
     );
+    let candidate_id = engine
+        .candidate_history_for_scan(&scan_id)
+        .unwrap()
+        .candidates()[0]
+        .id()
+        .clone();
     engine.inner.store.with_connection(|connection| {
         connection
             .execute(
@@ -1644,6 +2230,19 @@ fn candidate_history_rejects_over_budget_graph_before_payload_decode() {
         engine.candidate_history_for_scan(&scan_id),
         Err(CandidateHistoryError::QueryLimitExceeded)
     );
+    assert_eq!(
+        engine.candidate_path_page(&scan_id, &candidate_id, 0, 1),
+        Err(CandidateDetailError::QueryLimitExceeded)
+    );
+    assert_eq!(
+        engine
+            .inner
+            .store
+            .load_candidate(&candidate_id)
+            .unwrap_err()
+            .kind,
+        HistoryErrorKind::QueryLimitExceeded
+    );
 }
 
 #[test]
@@ -1710,6 +2309,16 @@ fn materialization_limit_becomes_typed_discovery_failure_before_publication() {
     let candidates = over_budget_candidate_records(&scan_id, evaluated_at);
     assert!(
         !CandidateEvaluationCompletion::batch_fits_materialization_budget(&candidates).unwrap()
+    );
+    let (_temp, engine) = engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    assert_eq!(
+        engine
+            .inner
+            .store
+            .record_candidate_discovered(&candidates[0])
+            .unwrap_err()
+            .kind,
+        HistoryErrorKind::InvalidInput
     );
     let identity = CandidateEvaluationIdentity::try_new(1, 1, [1; 32], 1, [2; 32]).unwrap();
 

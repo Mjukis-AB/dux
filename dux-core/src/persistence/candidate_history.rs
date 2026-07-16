@@ -844,7 +844,13 @@ pub(super) fn load_candidate_record(
     connection: &Connection,
     id: &CandidateId,
 ) -> Result<Option<StoredCandidateRecord>, HistoryError> {
+    // Product-facing exact loads own a fresh query envelope and preflight the
+    // decoded graph before copying payloads. Cleanup-history callers use the
+    // `_within_budget` form only after their enclosing aggregate query has
+    // already bounded the same data; repeating these scans there would reject
+    // the maximum legal cleanup/journal contracts under the shared VM limit.
     run_bounded_query(connection, || {
+        ensure_stored_candidate_budget(connection, id)?;
         load_candidate_record_within_budget(connection, id)
     })
 }
@@ -1156,6 +1162,224 @@ fn bounded_batch_payload_usage(
 ) -> Result<(u64, u64, u64), HistoryError> {
     let (count, bytes, invalid) = connection
         .query_row(sql, params![scan_id.as_str(), limit], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })
+        .map_err(map_query_sql_error)?;
+    Ok((
+        u64::try_from(count).map_err(|_| corrupt())?,
+        u64::try_from(bytes).map_err(|_| corrupt())?,
+        u64::try_from(invalid).map_err(|_| corrupt())?,
+    ))
+}
+
+/// Preflight one exact candidate before any payload-bearing child query. The
+/// scan-wide loader has the same aggregate guard, but review/detail operations
+/// also call this exact loader directly and must not be able to materialize a
+/// schema-shaped graph above the shared decoded-memory budget.
+fn ensure_stored_candidate_budget(
+    connection: &Connection,
+    id: &CandidateId,
+) -> Result<(), HistoryError> {
+    let (count, invalid, format): (i64, i64, i64) = connection
+        .query_row(
+            "SELECT count(*), COALESCE(sum(invalid), 0), COALESCE(max(format), 0)
+             FROM (
+                 SELECT CASE WHEN typeof(record_format_version) = 'integer'
+                                  THEN record_format_version ELSE -1 END AS format,
+                        CASE WHEN
+                            typeof(record_format_version) != 'integer' OR
+                            record_format_version NOT IN (1, 2) OR
+                            typeof(candidate_id) != 'text' OR
+                            length(CAST(candidate_id AS BLOB)) NOT BETWEEN 1 AND 128 OR
+                            typeof(scan_id) != 'text' OR
+                            length(CAST(scan_id AS BLOB)) NOT BETWEEN 1 AND 128 OR
+                            typeof(rule_id) != 'text' OR
+                            length(CAST(rule_id AS BLOB)) NOT BETWEEN 1 AND 128 OR
+                            typeof(rule_revision) != 'integer' OR
+                            typeof(safety_tier) != 'text' OR
+                            length(CAST(safety_tier AS BLOB)) NOT BETWEEN 1 AND 64 OR
+                            typeof(estimated_bytes) != 'integer' OR
+                            typeof(created_at_unix_ms) != 'integer' OR
+                            typeof(status) != 'text' OR
+                            length(CAST(status AS BLOB)) NOT BETWEEN 1 AND 64 OR
+                            (record_format_version = 1 AND (
+                                typeof(category) != 'null' OR
+                                typeof(proposed_action) != 'null' OR
+                                typeof(rule_schedule_eligible) != 'null' OR
+                                typeof(newest_mtime_unix_seconds) != 'null' OR
+                                typeof(newest_mtime_nanoseconds) != 'null'
+                            )) OR
+                            (record_format_version = 2 AND (
+                                typeof(category) != 'text' OR
+                                length(CAST(category AS BLOB)) NOT BETWEEN 1 AND 64 OR
+                                typeof(proposed_action) != 'text' OR
+                                length(CAST(proposed_action AS BLOB)) NOT BETWEEN 1 AND 64 OR
+                                typeof(rule_schedule_eligible) != 'integer' OR
+                                typeof(newest_mtime_unix_seconds) NOT IN ('null', 'integer') OR
+                                typeof(newest_mtime_nanoseconds) NOT IN ('null', 'integer')
+                            ))
+                        THEN 1 ELSE 0 END AS invalid
+                 FROM candidates WHERE candidate_id = ?1 LIMIT 2
+             )",
+            [id.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(map_query_sql_error)?;
+    if count == 0 {
+        return Ok(());
+    }
+    if count != 1 || invalid != 0 || !matches!(format, 1 | 2) {
+        return Err(corrupt());
+    }
+    if format == 1 {
+        return Ok(());
+    }
+
+    let (paths, path_payload_bytes, invalid_paths) = exact_payload_usage(
+        connection,
+        "SELECT count(*), COALESCE(sum(payload_bytes), 0),
+                COALESCE(sum(invalid), 0)
+         FROM (
+             SELECT CASE WHEN typeof(observed_path) = 'blob'
+                         THEN length(observed_path) ELSE 0 END AS payload_bytes,
+                    CASE WHEN typeof(path_ordinal) != 'integer' OR
+                                   typeof(observed_path) != 'blob' OR
+                                   length(observed_path) NOT BETWEEN 1 AND 65536 OR
+                                   typeof(observed_path_encoding) != 'integer'
+                         THEN 1 ELSE 0 END AS invalid
+             FROM candidate_paths WHERE candidate_id = ?1 LIMIT ?2
+         )",
+        id,
+        MAX_PATHS + 1,
+    )?;
+    let (evidence, evidence_payload_bytes, invalid_evidence) = exact_payload_usage(
+        connection,
+        "SELECT count(*), COALESCE(sum(payload_bytes), 0),
+                COALESCE(sum(invalid), 0)
+         FROM (
+             SELECT CASE WHEN typeof(path_value) = 'blob'
+                         THEN length(path_value) ELSE 0 END +
+                    CASE WHEN typeof(text_value) = 'text'
+                         THEN length(CAST(text_value AS BLOB)) ELSE 0 END
+                        AS payload_bytes,
+                    CASE WHEN
+                        typeof(evidence_kind) != 'text' OR
+                        length(CAST(evidence_kind AS BLOB)) NOT BETWEEN 1 AND 64 OR
+                        typeof(evidence_ordinal) != 'integer' OR
+                        NOT (
+                            (typeof(path_value) = 'null' AND length(path_value) IS NULL) OR
+                            (typeof(path_value) = 'blob' AND
+                             length(path_value) BETWEEN 1 AND 65536)
+                        ) OR
+                        NOT (
+                            (typeof(text_value) = 'null' AND
+                             length(CAST(text_value AS BLOB)) IS NULL) OR
+                            (typeof(text_value) = 'text' AND
+                             length(CAST(text_value AS BLOB)) BETWEEN 1 AND 4096)
+                        ) OR
+                        typeof(path_value_encoding) NOT IN ('null', 'integer') OR
+                        typeof(observed_unix_seconds) NOT IN ('null', 'integer') OR
+                        typeof(observed_nanoseconds) NOT IN ('null', 'integer') OR
+                        typeof(duration_seconds) NOT IN ('null', 'integer') OR
+                        typeof(duration_nanoseconds) NOT IN ('null', 'integer') OR
+                        typeof(observed_bytes) NOT IN ('null', 'integer') OR
+                        typeof(minimum_bytes) NOT IN ('null', 'integer')
+                    THEN 1 ELSE 0 END AS invalid
+             FROM candidate_evidence WHERE candidate_id = ?1 LIMIT ?2
+         )",
+        id,
+        MAX_EVIDENCE + 1,
+    )?;
+    let (blockers, invalid_blockers) = exact_validation_usage(
+        connection,
+        "SELECT count(*), COALESCE(sum(invalid), 0) FROM (
+             SELECT CASE WHEN typeof(blocker_ordinal) != 'integer' OR
+                                   typeof(blocker_kind) != 'text' OR
+                                   length(CAST(blocker_kind AS BLOB)) NOT BETWEEN 1 AND 64
+                         THEN 1 ELSE 0 END AS invalid
+             FROM candidate_blockers WHERE candidate_id = ?1 LIMIT ?2
+         )",
+        id,
+        MAX_BLOCKERS + 1,
+    )?;
+    let (claims, invalid_claims) = exact_validation_usage(
+        connection,
+        "SELECT count(*), COALESCE(sum(invalid), 0) FROM (
+             SELECT CASE WHEN
+                        typeof(claim.prior_review_status) != 'text' OR
+                        length(CAST(claim.prior_review_status AS BLOB)) NOT BETWEEN 1 AND 64 OR
+                        typeof(session.candidate_status_coupling_version) != 'integer' OR
+                        typeof(session.status) != 'text' OR
+                        length(CAST(session.status AS BLOB)) NOT BETWEEN 1 AND 64 OR
+                        typeof(session.record_format_version) != 'integer' OR
+                        typeof(item.candidate_id) != 'text' OR
+                        length(CAST(item.candidate_id AS BLOB)) NOT BETWEEN 1 AND 128 OR
+                        typeof(item.record_format_version) != 'integer'
+                    THEN 1 ELSE 0 END AS invalid
+             FROM candidate_plan_claims AS claim
+             LEFT JOIN cleanup_sessions AS session
+               ON session.session_id = claim.session_id
+             LEFT JOIN cleanup_items AS item
+               ON item.session_id = claim.session_id
+              AND item.item_ordinal = claim.item_ordinal
+             WHERE claim.candidate_id = ?1 LIMIT ?2
+         )",
+        id,
+        2,
+    )?;
+    if invalid_paths != 0
+        || invalid_evidence != 0
+        || invalid_blockers != 0
+        || invalid_claims != 0
+        || paths > MAX_PATHS as u64
+        || evidence > MAX_EVIDENCE as u64
+        || blockers > MAX_BLOCKERS as u64
+        || claims > 1
+    {
+        return Err(corrupt());
+    }
+    CandidateBatchUsage {
+        candidates: 1,
+        paths,
+        path_payload_bytes,
+        evidence,
+        evidence_payload_bytes,
+        blockers,
+    }
+    .ensure_within_budget(HistoryErrorKind::QueryLimitExceeded)
+}
+
+fn exact_validation_usage(
+    connection: &Connection,
+    sql: &str,
+    id: &CandidateId,
+    limit: usize,
+) -> Result<(u64, u64), HistoryError> {
+    let limit = i64::try_from(limit).map_err(|_| corrupt())?;
+    let (count, invalid) = connection
+        .query_row(sql, params![id.as_str(), limit], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+        })
+        .map_err(map_query_sql_error)?;
+    Ok((
+        u64::try_from(count).map_err(|_| corrupt())?,
+        u64::try_from(invalid).map_err(|_| corrupt())?,
+    ))
+}
+
+fn exact_payload_usage(
+    connection: &Connection,
+    sql: &str,
+    id: &CandidateId,
+    limit: usize,
+) -> Result<(u64, u64, u64), HistoryError> {
+    let limit = i64::try_from(limit).map_err(|_| corrupt())?;
+    let (count, bytes, invalid) = connection
+        .query_row(sql, params![id.as_str(), limit], |row| {
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, i64>(1)?,
@@ -4543,6 +4767,191 @@ fn batch_preflight_rejects_large_blob_in_integer_field_before_child_loading() {
         )
         .unwrap_err()
         .kind,
+        HistoryErrorKind::CorruptData
+    );
+}
+
+#[cfg(test)]
+fn exact_candidate_preflight_connection() -> Connection {
+    let connection = Connection::open_in_memory().unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE candidates (
+                 candidate_id, scan_id, rule_id, rule_revision, safety_tier,
+                 estimated_bytes, created_at_unix_ms, status,
+                 record_format_version, category, proposed_action,
+                 rule_schedule_eligible, newest_mtime_unix_seconds,
+                 newest_mtime_nanoseconds
+             );
+             CREATE TABLE candidate_paths (
+                 candidate_id, path_ordinal, observed_path,
+                 observed_path_encoding
+             );
+             CREATE TABLE candidate_evidence (
+                 candidate_id, evidence_ordinal, evidence_kind,
+                 path_value, path_value_encoding, text_value,
+                 observed_unix_seconds, observed_nanoseconds,
+                 duration_seconds, duration_nanoseconds,
+                 observed_bytes, minimum_bytes
+             );
+             CREATE TABLE candidate_blockers (
+                 candidate_id, blocker_ordinal, blocker_kind
+             );
+             CREATE TABLE candidate_plan_claims (
+                 candidate_id, prior_review_status, session_id, item_ordinal
+             );
+             CREATE TABLE cleanup_sessions (
+                 session_id, candidate_status_coupling_version, status,
+                 record_format_version
+             );
+             CREATE TABLE cleanup_items (
+                 session_id, item_ordinal, candidate_id, record_format_version
+             );",
+        )
+        .unwrap();
+    connection
+}
+
+#[cfg(test)]
+fn insert_exact_candidate_preflight_parent(connection: &Connection, id: &CandidateId) {
+    connection
+        .execute(
+            "INSERT INTO candidates (
+                 candidate_id, scan_id, rule_id, rule_revision, safety_tier,
+                 estimated_bytes, created_at_unix_ms, status,
+                 record_format_version, category, proposed_action,
+                 rule_schedule_eligible
+             ) VALUES (
+                 ?1, 'scan:exact-budget', 'fixture.exact-budget', 1,
+                 'informational', 1, 1, 'discovered', 2,
+                 'developer_artifact', 'reveal_only', 0
+             )",
+            [id.as_str()],
+        )
+        .unwrap();
+}
+
+#[test]
+fn exact_candidate_preflight_has_an_exact_aggregate_byte_boundary() {
+    let mut connection = exact_candidate_preflight_connection();
+    let id = CandidateId::new("candidate:exact-budget").unwrap();
+    insert_exact_candidate_preflight_parent(&connection, &id);
+    connection
+        .execute(
+            "INSERT INTO candidate_paths (
+                 candidate_id, path_ordinal, observed_path,
+                 observed_path_encoding
+             ) VALUES (?1, 0, x'2F', 1)",
+            [id.as_str()],
+        )
+        .unwrap();
+
+    let (evidence_count, evidence_payload_bytes) = (1..=MAX_EVIDENCE)
+        .find_map(|evidence_count| {
+            let fixed = CandidateBatchUsage {
+                candidates: 1,
+                paths: 1,
+                path_payload_bytes: 1,
+                evidence: evidence_count as u64,
+                ..CandidateBatchUsage::default()
+            }
+            .materialized_bytes(HistoryErrorKind::InternalState)
+            .unwrap();
+            let remaining_charge = MAX_CANDIDATE_BATCH_MATERIALIZED_BYTES.checked_sub(fixed)?;
+            if remaining_charge % MATERIALIZED_PAYLOAD_MULTIPLIER != 0 {
+                return None;
+            }
+            let payload_bytes = remaining_charge / MATERIALIZED_PAYLOAD_MULTIPLIER;
+            (payload_bytes >= evidence_count as u64
+                && payload_bytes <= evidence_count as u64 * MAX_STORED_PATH_BYTES as u64)
+                .then_some((evidence_count, payload_bytes))
+        })
+        .expect("the legal evidence cardinality must admit the exact byte boundary");
+
+    let transaction = connection.transaction().unwrap();
+    let mut remaining = evidence_payload_bytes;
+    let mut last_length = 0_u64;
+    for ordinal in 0..evidence_count {
+        let remaining_rows = (evidence_count - ordinal - 1) as u64;
+        let length = (remaining - remaining_rows).min(MAX_STORED_PATH_BYTES as u64);
+        assert!(length > 0);
+        transaction
+            .execute(
+                "INSERT INTO candidate_evidence (
+                     candidate_id, evidence_ordinal, evidence_kind,
+                     path_value, path_value_encoding
+                 ) VALUES (?1, ?2, 'matched_path', zeroblob(?3), 1)",
+                params![id.as_str(), ordinal as i64, length as i64],
+            )
+            .unwrap();
+        remaining -= length;
+        last_length = length;
+    }
+    assert_eq!(remaining, 0);
+    transaction.commit().unwrap();
+
+    ensure_stored_candidate_budget(&connection, &id).unwrap();
+    assert!(last_length < MAX_STORED_PATH_BYTES as u64);
+    connection
+        .execute(
+            "UPDATE candidate_evidence
+             SET path_value = zeroblob(?2)
+             WHERE candidate_id = ?1 AND evidence_ordinal = ?3",
+            params![
+                id.as_str(),
+                (last_length + 1) as i64,
+                (evidence_count - 1) as i64
+            ],
+        )
+        .unwrap();
+    assert_eq!(
+        ensure_stored_candidate_budget(&connection, &id)
+            .unwrap_err()
+            .kind,
+        HistoryErrorKind::QueryLimitExceeded
+    );
+}
+
+#[test]
+fn exact_candidate_preflight_rejects_large_blob_in_child_scalar_before_payload_loading() {
+    let connection = exact_candidate_preflight_connection();
+    let id = CandidateId::new("candidate:exact-hostile-scalar").unwrap();
+    insert_exact_candidate_preflight_parent(&connection, &id);
+    connection
+        .execute(
+            "INSERT INTO candidate_paths (
+                 candidate_id, path_ordinal, observed_path,
+                 observed_path_encoding
+             ) VALUES (?1, zeroblob(16777216), x'2F6F6B', 1)",
+            [id.as_str()],
+        )
+        .unwrap();
+
+    assert_eq!(
+        ensure_stored_candidate_budget(&connection, &id)
+            .unwrap_err()
+            .kind,
+        HistoryErrorKind::CorruptData
+    );
+}
+
+#[test]
+fn exact_candidate_preflight_rejects_large_blob_in_parent_scalar_before_child_loading() {
+    let connection = exact_candidate_preflight_connection();
+    let id = CandidateId::new("candidate:exact-hostile-parent").unwrap();
+    insert_exact_candidate_preflight_parent(&connection, &id);
+    connection
+        .execute(
+            "UPDATE candidates SET rule_revision = zeroblob(16777216)
+             WHERE candidate_id = ?1",
+            [id.as_str()],
+        )
+        .unwrap();
+
+    assert_eq!(
+        ensure_stored_candidate_budget(&connection, &id)
+            .unwrap_err()
+            .kind,
         HistoryErrorKind::CorruptData
     );
 }

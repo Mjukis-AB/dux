@@ -2360,9 +2360,10 @@ Tasks:
     reopen. Successful evaluations expose only candidate ID, rule, category,
     estimated bytes, newest mtime, safety/action policy, schedule eligibility,
     path count, evidence kinds, blockers, creation time, and historical status.
-    Exact paths and evidence payloads remain sealed for a future paged detail
-    boundary. A stored review, planned, or terminal status is an observation
-    only: this bridge cannot reconstruct a domain `Candidate` or `CleanupPlan`,
+    Exact paths and evidence payloads were left sealed for the following paged
+    detail boundary. A stored review, planned, or terminal status is an
+    observation only: this bridge cannot reconstruct a domain `Candidate` or
+    `CleanupPlan`,
     mutate review state, validate current evidence, approve cleanup, or reach
     an effect.
 
@@ -2371,10 +2372,51 @@ Tasks:
     NotRun, exhaustive candidate-status and failure mapping, newer-schema
     fencing, corrupt child rejection, exact aggregate-budget boundaries, and a
     schema-shaped over-budget graph rejected before payload decoding. The broad
-    persistence checkbox remains open for paged candidate path/evidence and
-    review-mutation surfaces, cleanup-history queries, planner/executor engine
-    lifecycle, and FFI/Swift/UI/CLI transport. History must never become a
-    planner witness.
+    persistence checkbox remained open for the following detail/review slice,
+    cleanup-history queries, planner/executor engine lifecycle, and
+    FFI/Swift/UI/CLI transport. History must never become a planner witness.
+  - Bounded candidate-review boundary sub-checkpoint completed 2026-07-17:
+    the core engine now exposes separate exact path and evidence pagers keyed
+    by both scan and candidate ID. Code-owned 1..=64 limits, strict immutable
+    cursors, exact totals, full evaluation/candidate validation, and the shared
+    SQLite VM/time plus 32 MiB decoded-materialization ceilings bound every
+    call. The exact-candidate loader now performs its own scalar/type/count/
+    encoded-byte preflight before any child payload is copied, including
+    hostile large values hidden in scalar columns; standalone candidate writes
+    apply the same charge so accepted observations remain reloadable.
+
+    Path pages are an explicit user-requested local disclosure. Each item
+    carries a display string plus the lossless accepted-host UTF-8 or
+    little-endian UTF-16 representation without exposing SQLite tags or a
+    `PathBuf` execution input. Evidence pages map all eight variants into a
+    distinct durable presentation type, so even a lossless historical fact
+    cannot satisfy planner validation. Candidate IDs remain path-derived
+    pseudonyms and neither IDs nor detail payloads are remote/AI-safe by
+    default.
+
+    `Select`, `ClearSelection`, `Dismiss`, and `Restore` are the only public
+    review commands. They accept no paths. The store validates the complete
+    exact candidate and source-scan binding, resolves discovered-versus-
+    selected dismissal inside the same immediate transaction, then preserves
+    the existing writer lease, compare-and-set, exact retry, and ambiguous-
+    commit reconciliation. Selection still requires a blocker-free cleanup
+    policy; current shipped Informational/RevealOnly candidates therefore
+    reject selection but may be dismissed and restored. Planned, evaluator-
+    owned, and journal-owned states cannot enter review. Dismissal creates no
+    exclusion, does not revoke an existing plan claim, and no command creates
+    a plan or effect.
+
+    Focused regressions cover paging/cursor/limit boundaries, lossless path
+    transport, all evidence variants, reopen, missing and non-successful scans,
+    source mismatch, closed/newer-schema sessions, corruption and over-budget
+    rejection, exact preflight byte boundaries, hostile parent/child scalar
+    blobs, select/clear/dismiss/restore idempotence, blocked selection,
+    terminal-owner refusal, concurrent select/dismiss convergence, and exact
+    post-commit adoption. Maximum-legal cleanup-history and active-journal
+    contracts also prove that the exact preflight does not consume their
+    enclosing aggregate query budget. The broad persistence checkbox remains
+    open for cleanup-history query surfaces, planner/executor engine lifecycle,
+    FFI/Swift/UI/CLI transport, and retention integration.
 - [x] Keep binary snapshots atomic and checksummed. Completed 2026-07-16:
   `dux-core::persistence::snapshot` now owns an independent crate-private v1
   full-tree wire rather than extending the legacy CLI cache. Its frozen

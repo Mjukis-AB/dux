@@ -5,11 +5,18 @@
 //! cleanup authority; FFI transport and cleanup execution remain separate
 //! boundaries.
 
+mod candidate_history;
 mod config;
 mod registry;
 mod settings;
 mod task;
 
+pub use candidate_history::{
+    CandidateDetailError, CandidateReviewCommand, CandidateReviewError, CandidateReviewResult,
+    DurableCandidateEvidence, DurableCandidateEvidenceItem, DurableCandidateEvidencePage,
+    DurableCandidatePathItem, DurableCandidatePathPage, DurableObservedPath, DurablePathEncoding,
+    MAX_CANDIDATE_DETAIL_PAGE_LIMIT,
+};
 pub use config::{EngineConfig, EngineConfigError, EngineConfigField, EngineConfigReason};
 pub use registry::EngineHandle;
 pub use settings::{

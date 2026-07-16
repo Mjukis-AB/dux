@@ -5,6 +5,21 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Added a bounded core candidate-review boundary. Exact path and evidence
+  pagers require both scan and candidate IDs, enforce 1..=64 pages and strict
+  immutable cursors, and return lossless accepted-host bytes plus display text
+  or typed presentation-only evidence. Exact-candidate reads now preflight
+  parent/child storage classes, counts, and the shared 32 MiB materialization
+  charge before payload decoding; standalone writes apply the same budget.
+  Semantic `Select`, `ClearSelection`, `Dismiss`, and `Restore` commands resolve
+  their source state and scan binding inside one writer-leased transaction.
+  Selection remains limited to blocker-free cleanup policy, while dismissal is
+  only review visibility and creates no exclusion, plan, approval, or effect.
+  Paging, all evidence variants, reopen, schema/lifecycle failures, hostile and
+  over-budget rows, exact post-commit adoption, terminal-state refusal, and a
+  concurrent select/dismiss race have focused coverage. Maximum-legal cleanup
+  history and active-journal records retain their existing shared query budget.
+  The boundary is core-only; FFI/Swift/UI/CLI transport remains later.
 - Added an exact-scan durable candidate-discovery read bridge. The core engine
   distinguishes a missing scan, a real scan with no evaluation, Pending,
   Succeeded, and typed Failed evaluation history. Before any payload-bearing
@@ -16,12 +31,13 @@ All notable changes to DUX will be documented in this file.
   misreporting a persistence failure. The complete stored graph is then
   validated before a path-free summary exposes
   policy, estimates, counts, typed evidence kinds/blockers, and historical
-  status. Exact paths and evidence payloads remain private. Reopen, lifecycle,
+  status. Exact paths and evidence payloads remain private to that summary;
+  the separate explicit local pager above owns their disclosure. Reopen,
+  lifecycle,
   version-skew, failure, exhaustive mapping, corruption, exact-budget, and
   over-budget preflight regressions cover the boundary. The DTO is observation
   only: it cannot reconstruct a candidate or cleanup plan, mutate review or
-  planning state, or reach an effect. Paged details and FFI/Swift/UI/CLI
-  transport remain later.
+  planning state, or reach an effect. FFI/Swift/UI/CLI transport remains later.
 - Added the core production snapshot-cap mutation boundary. One bounded batch
   holds the current-schema database lease before the snapshot writer lease,
   rebuilds the complete cap/latest-two/active-pin inventory, refuses new

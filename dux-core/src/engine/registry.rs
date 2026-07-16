@@ -7,6 +7,12 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use super::candidate_history::{
+    CandidateDetailError, CandidateReviewCommand, CandidateReviewError, CandidateReviewResult,
+    DurableCandidateEvidence, DurableCandidateEvidenceItem, DurableCandidateEvidencePage,
+    DurableCandidatePathItem, DurableCandidatePathPage, DurableObservedPath, DurablePathEncoding,
+    MAX_CANDIDATE_DETAIL_PAGE_LIMIT,
+};
 use super::config::EngineConfig;
 use super::settings::{
     SnapshotRetentionCap, SnapshotRetentionCapError, SnapshotRetentionCapSource,
@@ -25,8 +31,8 @@ use super::task::{
 };
 use crate::domain::{
     CANDIDATE_CATALOG_SCHEMA_VERSION, CANDIDATE_CATALOG_SHA256, CANDIDATE_CONTEXT_FORMAT_VERSION,
-    CANDIDATE_EVALUATOR_REVISION, CandidateEvaluationError, ScanCoverage, ScanId,
-    candidate_evaluation_context_digest_sha256, evaluate_completed_scan_candidates,
+    CANDIDATE_EVALUATOR_REVISION, CandidateEvaluationError, CandidateId, Evidence, ScanCoverage,
+    ScanId, candidate_evaluation_context_digest_sha256, evaluate_completed_scan_candidates,
     validate_bundled_candidate_catalog,
 };
 use crate::persistence::snapshot::from_scan::prepare_completed_scan;
@@ -36,9 +42,9 @@ use crate::persistence::snapshot::{
 use crate::persistence::{
     CandidateEvaluationCompletion, CandidateEvaluationFailureKind, CandidateEvaluationIdentity,
     CandidateEvaluationObservation, CandidateEvaluationRecord, CandidateEvaluationStatus,
-    CandidateHistoryStatus, CompleteCandidateRecord, HistoryErrorKind,
-    MAX_RECENT_SCAN_HISTORY_LIMIT, NewCandidateRecord, NewScanRecord, ScanCompletionRecord,
-    ScanCounts, ScanStatus, TerminalScanStatus,
+    CandidateHistoryStatus, CandidateReviewAction, CompleteCandidateRecord, HistoryErrorKind,
+    HostPathObservationEncoding, MAX_RECENT_SCAN_HISTORY_LIMIT, NewCandidateRecord, NewScanRecord,
+    ScanCompletionRecord, ScanCounts, ScanStatus, TerminalScanStatus, observe_host_path,
 };
 use crate::persistence::{DatabaseStatus, StoreCoordinator};
 use crate::persistence::{
@@ -676,6 +682,152 @@ impl EngineHandle {
             .load_candidate_evaluation_for_scan(scan_id)
             .map_err(|error| map_candidate_history_error(error.kind))?;
         public_candidate_history(scan_id, observation)
+    }
+
+    /// Return one bounded page of exact historical candidate paths. This is an
+    /// explicit local disclosure for presentation, not a validation or cleanup
+    /// capability.
+    pub fn candidate_path_page(
+        &self,
+        scan_id: &ScanId,
+        candidate_id: &CandidateId,
+        cursor: u16,
+        limit: u16,
+    ) -> Result<DurableCandidatePathPage, CandidateDetailError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(CandidateDetailError::Closed);
+        }
+        validate_candidate_detail_limit(limit)?;
+        let record = self.candidate_record_for_detail(scan_id, candidate_id)?;
+        let total_paths =
+            u16::try_from(record.paths().len()).map_err(|_| CandidateDetailError::InternalState)?;
+        let range = candidate_detail_range(cursor, limit, total_paths)?;
+        let paths = record.paths()[range.clone()]
+            .iter()
+            .enumerate()
+            .map(|(index, path)| {
+                let ordinal = range
+                    .start
+                    .checked_add(index)
+                    .and_then(|value| u16::try_from(value).ok())
+                    .ok_or(CandidateDetailError::InternalState)?;
+                Ok(DurableCandidatePathItem::new(
+                    ordinal,
+                    public_observed_path(path)?,
+                ))
+            })
+            .collect::<Result<Vec<_>, CandidateDetailError>>()?;
+        let next_cursor = next_candidate_detail_cursor(&range, total_paths)?;
+        let candidate = public_candidate_summary(scan_id, &record)
+            .map_err(map_candidate_history_to_detail_error)?;
+        Ok(DurableCandidatePathPage::new(
+            scan_id.clone(),
+            candidate,
+            cursor,
+            next_cursor,
+            total_paths,
+            paths,
+        ))
+    }
+
+    /// Return one bounded page of typed historical discovery evidence. The
+    /// DTO is intentionally distinct from planner evidence.
+    pub fn candidate_evidence_page(
+        &self,
+        scan_id: &ScanId,
+        candidate_id: &CandidateId,
+        cursor: u16,
+        limit: u16,
+    ) -> Result<DurableCandidateEvidencePage, CandidateDetailError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(CandidateDetailError::Closed);
+        }
+        validate_candidate_detail_limit(limit)?;
+        let record = self.candidate_record_for_detail(scan_id, candidate_id)?;
+        let total_evidence = u16::try_from(record.evidence().len())
+            .map_err(|_| CandidateDetailError::InternalState)?;
+        let range = candidate_detail_range(cursor, limit, total_evidence)?;
+        let evidence = record.evidence()[range.clone()]
+            .iter()
+            .enumerate()
+            .map(|(index, evidence)| {
+                let ordinal = range
+                    .start
+                    .checked_add(index)
+                    .and_then(|value| u16::try_from(value).ok())
+                    .ok_or(CandidateDetailError::InternalState)?;
+                Ok(DurableCandidateEvidenceItem::new(
+                    ordinal,
+                    public_candidate_evidence(evidence)?,
+                ))
+            })
+            .collect::<Result<Vec<_>, CandidateDetailError>>()?;
+        let next_cursor = next_candidate_detail_cursor(&range, total_evidence)?;
+        let candidate = public_candidate_summary(scan_id, &record)
+            .map_err(map_candidate_history_to_detail_error)?;
+        Ok(DurableCandidateEvidencePage::new(
+            scan_id.clone(),
+            candidate,
+            cursor,
+            next_cursor,
+            total_evidence,
+            evidence,
+        ))
+    }
+
+    /// Apply one semantic, scan-bound review command. Selection is user intent
+    /// only and cannot create a plan or authorize an effect.
+    pub fn review_candidate(
+        &self,
+        scan_id: &ScanId,
+        candidate_id: &CandidateId,
+        command: CandidateReviewCommand,
+    ) -> Result<CandidateReviewResult, CandidateReviewError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(CandidateReviewError::Closed);
+        }
+        let action = match command {
+            CandidateReviewCommand::Select => CandidateReviewAction::Select,
+            CandidateReviewCommand::ClearSelection => CandidateReviewAction::ClearSelection,
+            CandidateReviewCommand::Dismiss => CandidateReviewAction::Dismiss,
+            CandidateReviewCommand::Restore => CandidateReviewAction::Restore,
+        };
+        let status = self
+            .inner
+            .store
+            .review_candidate(scan_id, candidate_id, action)
+            .map_err(|error| map_candidate_review_error(error.kind))?;
+        Ok(CandidateReviewResult::new(
+            scan_id.clone(),
+            candidate_id.clone(),
+            public_candidate_status(status),
+        ))
+    }
+
+    fn candidate_record_for_detail(
+        &self,
+        scan_id: &ScanId,
+        candidate_id: &CandidateId,
+    ) -> Result<CompleteCandidateRecord, CandidateDetailError> {
+        let observation = self
+            .inner
+            .store
+            .load_candidate_evaluation_for_scan(scan_id)
+            .map_err(|error| map_candidate_detail_error(error.kind))?;
+        match observation {
+            CandidateEvaluationObservation::MissingScan => Err(CandidateDetailError::ScanNotFound),
+            CandidateEvaluationObservation::NotRun { .. }
+            | CandidateEvaluationObservation::Pending(_)
+            | CandidateEvaluationObservation::Failed(_) => {
+                Err(CandidateDetailError::EvaluationNotSucceeded)
+            }
+            CandidateEvaluationObservation::Succeeded(record) => record
+                .candidates()
+                .iter()
+                .find(|candidate| candidate.id() == candidate_id)
+                .cloned()
+                .ok_or(CandidateDetailError::CandidateNotFound),
+        }
     }
 
     pub fn lifecycle(&self) -> EngineLifecycle {
@@ -1725,6 +1877,152 @@ const fn map_candidate_history_error(kind: HistoryErrorKind) -> CandidateHistory
         | HistoryErrorKind::InvalidTransition
         | HistoryErrorKind::DatabaseUnavailable
         | HistoryErrorKind::OutcomeUnknown => CandidateHistoryError::Unavailable,
+    }
+}
+
+fn validate_candidate_detail_limit(limit: u16) -> Result<(), CandidateDetailError> {
+    if !(1..=MAX_CANDIDATE_DETAIL_PAGE_LIMIT).contains(&limit) {
+        return Err(CandidateDetailError::InvalidLimit {
+            maximum: MAX_CANDIDATE_DETAIL_PAGE_LIMIT,
+        });
+    }
+    Ok(())
+}
+
+fn candidate_detail_range(
+    cursor: u16,
+    limit: u16,
+    total: u16,
+) -> Result<std::ops::Range<usize>, CandidateDetailError> {
+    if cursor > total {
+        return Err(CandidateDetailError::CursorOutOfRange);
+    }
+    let start = usize::from(cursor);
+    let end = start
+        .checked_add(usize::from(limit))
+        .ok_or(CandidateDetailError::InternalState)?
+        .min(usize::from(total));
+    Ok(start..end)
+}
+
+fn next_candidate_detail_cursor(
+    range: &std::ops::Range<usize>,
+    total: u16,
+) -> Result<Option<u16>, CandidateDetailError> {
+    if range.end >= usize::from(total) {
+        return Ok(None);
+    }
+    Ok(Some(
+        u16::try_from(range.end).map_err(|_| CandidateDetailError::InternalState)?,
+    ))
+}
+
+fn public_observed_path(path: &Path) -> Result<DurableObservedPath, CandidateDetailError> {
+    let observation = observe_host_path(path).map_err(|_| CandidateDetailError::InternalState)?;
+    let encoding = match observation.encoding() {
+        HostPathObservationEncoding::Utf8 => DurablePathEncoding::Utf8,
+        HostPathObservationEncoding::Utf16LittleEndian => DurablePathEncoding::Utf16LittleEndian,
+    };
+    Ok(DurableObservedPath::new(
+        encoding,
+        observation.bytes().to_vec(),
+        path.display().to_string(),
+    ))
+}
+
+fn public_candidate_evidence(
+    evidence: &Evidence,
+) -> Result<DurableCandidateEvidence, CandidateDetailError> {
+    match evidence {
+        Evidence::MatchedPath { path } => Ok(DurableCandidateEvidence::MatchedPath {
+            path: public_observed_path(path)?,
+        }),
+        Evidence::RequiredMarker { path } => Ok(DurableCandidateEvidence::RequiredMarker {
+            path: public_observed_path(path)?,
+        }),
+        Evidence::ForbiddenMarkerAbsent { path } => {
+            Ok(DurableCandidateEvidence::ForbiddenMarkerAbsent {
+                path: public_observed_path(path)?,
+            })
+        }
+        Evidence::BundleIdentifier { path, identifier } => {
+            Ok(DurableCandidateEvidence::BundleIdentifier {
+                path: public_observed_path(path)?,
+                identifier: Arc::<str>::from(identifier.as_str()),
+            })
+        }
+        Evidence::MinimumAge {
+            newest_mtime,
+            minimum_age,
+        } => Ok(DurableCandidateEvidence::MinimumAge {
+            newest_mtime: *newest_mtime,
+            minimum_age: *minimum_age,
+        }),
+        Evidence::MinimumSize {
+            observed_bytes,
+            minimum_bytes,
+        } => Ok(DurableCandidateEvidence::MinimumSize {
+            observed_bytes: *observed_bytes,
+            minimum_bytes: *minimum_bytes,
+        }),
+        Evidence::InactiveProcess { identifier } => Ok(DurableCandidateEvidence::InactiveProcess {
+            identifier: Arc::<str>::from(identifier.as_str()),
+        }),
+        Evidence::CloudUploadComplete { path } => {
+            Ok(DurableCandidateEvidence::CloudUploadComplete {
+                path: public_observed_path(path)?,
+            })
+        }
+    }
+}
+
+const fn map_candidate_detail_error(kind: HistoryErrorKind) -> CandidateDetailError {
+    match kind {
+        HistoryErrorKind::IncompatibleSchema => CandidateDetailError::IncompatibleSchema,
+        HistoryErrorKind::QueryLimitExceeded => CandidateDetailError::QueryLimitExceeded,
+        HistoryErrorKind::Busy => CandidateDetailError::Busy,
+        HistoryErrorKind::UnsafeStorage => CandidateDetailError::UnsafeStorage,
+        HistoryErrorKind::CorruptData => CandidateDetailError::CorruptData,
+        HistoryErrorKind::InternalState => CandidateDetailError::InternalState,
+        HistoryErrorKind::NotFound => CandidateDetailError::CandidateNotFound,
+        HistoryErrorKind::InvalidInput
+        | HistoryErrorKind::AlreadyExists
+        | HistoryErrorKind::InvalidTransition
+        | HistoryErrorKind::DatabaseUnavailable
+        | HistoryErrorKind::OutcomeUnknown => CandidateDetailError::Unavailable,
+    }
+}
+
+const fn map_candidate_history_to_detail_error(
+    error: CandidateHistoryError,
+) -> CandidateDetailError {
+    match error {
+        CandidateHistoryError::Closed => CandidateDetailError::Closed,
+        CandidateHistoryError::ScanNotFound => CandidateDetailError::ScanNotFound,
+        CandidateHistoryError::IncompatibleSchema => CandidateDetailError::IncompatibleSchema,
+        CandidateHistoryError::Busy => CandidateDetailError::Busy,
+        CandidateHistoryError::UnsafeStorage => CandidateDetailError::UnsafeStorage,
+        CandidateHistoryError::QueryLimitExceeded => CandidateDetailError::QueryLimitExceeded,
+        CandidateHistoryError::CorruptData => CandidateDetailError::CorruptData,
+        CandidateHistoryError::Unavailable => CandidateDetailError::Unavailable,
+        CandidateHistoryError::InternalState => CandidateDetailError::InternalState,
+    }
+}
+
+const fn map_candidate_review_error(kind: HistoryErrorKind) -> CandidateReviewError {
+    match kind {
+        HistoryErrorKind::IncompatibleSchema => CandidateReviewError::IncompatibleSchema,
+        HistoryErrorKind::QueryLimitExceeded => CandidateReviewError::QueryLimitExceeded,
+        HistoryErrorKind::Busy => CandidateReviewError::Busy,
+        HistoryErrorKind::UnsafeStorage => CandidateReviewError::UnsafeStorage,
+        HistoryErrorKind::CorruptData => CandidateReviewError::CorruptData,
+        HistoryErrorKind::OutcomeUnknown => CandidateReviewError::OutcomeUnknown,
+        HistoryErrorKind::InternalState => CandidateReviewError::InternalState,
+        HistoryErrorKind::NotFound => CandidateReviewError::CandidateNotFound,
+        HistoryErrorKind::InvalidInput
+        | HistoryErrorKind::AlreadyExists
+        | HistoryErrorKind::InvalidTransition => CandidateReviewError::NotReviewable,
+        HistoryErrorKind::DatabaseUnavailable => CandidateReviewError::Unavailable,
     }
 }
 

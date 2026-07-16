@@ -23,6 +23,31 @@ pub(crate) struct EncodedBytes {
     pub(crate) bytes: Vec<u8>,
 }
 
+/// Lossless representation of one accepted host path for presentation
+/// transport. This deliberately hides the SQLite codec tags and remains an
+/// observation rather than a filesystem capability.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HostPathObservationEncoding {
+    Utf8,
+    Utf16LittleEndian,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct HostPathObservation {
+    encoding: HostPathObservationEncoding,
+    bytes: Vec<u8>,
+}
+
+impl HostPathObservation {
+    pub(crate) const fn encoding(&self) -> HostPathObservationEncoding {
+        self.encoding
+    }
+
+    pub(crate) fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CodecError {
     Empty,
@@ -55,6 +80,19 @@ pub(crate) fn decode_logical_key(value: &EncodedBytes) -> Result<String, CodecEr
         return Err(CodecError::TooLong);
     }
     String::from_utf8(value.bytes.clone()).map_err(|_| CodecError::InvalidEncoding)
+}
+
+pub(crate) fn observe_host_path(path: &Path) -> Result<HostPathObservation, CodecError> {
+    let encoded = encode_host_path(path)?;
+    let encoding = match encoded.encoding {
+        StoredEncoding::Utf8HostPath => HostPathObservationEncoding::Utf8,
+        StoredEncoding::Utf16LeHostPath => HostPathObservationEncoding::Utf16LittleEndian,
+        StoredEncoding::Utf8LogicalKey => return Err(CodecError::InvalidEncoding),
+    };
+    Ok(HostPathObservation {
+        encoding,
+        bytes: encoded.bytes,
+    })
 }
 
 #[cfg(unix)]

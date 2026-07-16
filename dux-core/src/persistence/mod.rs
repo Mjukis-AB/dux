@@ -73,6 +73,7 @@ pub(crate) use candidate_evaluation_history::{
 pub(crate) use candidate_history::{
     CandidateHistoryStatus, CompleteCandidateRecord, NewCandidateRecord,
 };
+pub(crate) use codec::{HostPathObservationEncoding, observe_host_path};
 pub(crate) use history::{
     HistoryErrorKind, MAX_RECENT_SCAN_HISTORY_LIMIT, NewScanRecord, ScanCompletionRecord,
     ScanCounts, ScanStatus, TerminalScanStatus,
@@ -84,6 +85,7 @@ pub(crate) use settings::{
 pub use snapshot::SnapshotOpenErrorKind;
 pub(crate) use snapshot_review_pin::SnapshotReviewPurpose;
 pub use status::{DATABASE_SCHEMA_VERSION, DatabaseAccess, DatabaseOpenErrorKind, DatabaseStatus};
+pub(crate) use store::CandidateReviewAction;
 pub(crate) use store::StoreCoordinator;
 
 #[cfg(test)]

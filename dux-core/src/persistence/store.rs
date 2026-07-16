@@ -15,8 +15,9 @@ use super::candidate_evaluation_history::{
 };
 use super::candidate_history::{
     CandidateEvaluationTransition, CandidateHistoryStatus, CandidateReviewTransition,
-    NewCandidateRecord, PreparedCandidate, StoredCandidateRecord, insert_candidate,
-    load_candidate_record, transition_candidate_evaluation, transition_candidate_review,
+    NewCandidateRecord, PreparedCandidate, StoredCandidateRecord,
+    ensure_prepared_candidate_batch_budget, insert_candidate, load_candidate_record,
+    transition_candidate_evaluation, transition_candidate_review,
 };
 use super::capacity_history::{
     CapacityPage, CapacityPageCursor, CapacityWriteOutcome, CapacityWriteReason,
@@ -52,6 +53,16 @@ const MIGRATION_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 
 static COORDINATORS: OnceLock<Mutex<HashMap<StoreIdentity, Weak<StoreCoordinator>>>> =
     OnceLock::new();
+
+/// Semantic user review intent. Persistence resolves the exact source status
+/// while holding the same transaction that performs the compare-and-set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CandidateReviewAction {
+    Select,
+    ClearSelection,
+    Dismiss,
+    Restore,
+}
 
 /// One serialized SQLite owner per physical store and process.
 pub(crate) struct StoreCoordinator {
@@ -1130,6 +1141,7 @@ impl StoreCoordinator {
         candidate: &NewCandidateRecord,
     ) -> Result<(), HistoryError> {
         let prepared = PreparedCandidate::prepare(candidate)?;
+        ensure_prepared_candidate_batch_budget(std::slice::from_ref(&prepared))?;
         let mut guard = self.lock_current_history_connection()?;
         let transaction = guard
             .connection
@@ -1182,6 +1194,73 @@ impl StoreCoordinator {
         transition: CandidateReviewTransition,
     ) -> Result<CandidateHistoryStatus, HistoryError> {
         self.transition_candidate_review_status_with_hook(id, transition, || Ok(()))
+    }
+
+    /// Apply one scan-bound semantic review command. The scan binding and the
+    /// discovered-versus-selected dismissal source are resolved inside the
+    /// mutation transaction; no engine pre-read can authorize this update.
+    pub(crate) fn review_candidate(
+        &self,
+        scan_id: &crate::domain::ScanId,
+        id: &crate::domain::CandidateId,
+        action: CandidateReviewAction,
+    ) -> Result<CandidateHistoryStatus, HistoryError> {
+        self.review_candidate_with_hook(scan_id, id, action, || Ok(()))
+    }
+
+    fn review_candidate_with_hook(
+        &self,
+        scan_id: &crate::domain::ScanId,
+        id: &crate::domain::CandidateId,
+        action: CandidateReviewAction,
+        after_commit: impl FnOnce() -> Result<(), HistoryError>,
+    ) -> Result<CandidateHistoryStatus, HistoryError> {
+        self.transition_candidate_status_with_hook(
+            id,
+            |transaction, id| {
+                let Some(record) = load_candidate_record(transaction, id)? else {
+                    return Err(HistoryError::new(HistoryErrorKind::NotFound));
+                };
+                let StoredCandidateRecord::Complete(candidate) = record else {
+                    return Err(HistoryError::new(HistoryErrorKind::InvalidTransition));
+                };
+                if candidate.source_scan_id() != scan_id {
+                    return Err(HistoryError::new(HistoryErrorKind::NotFound));
+                }
+                let transition = match action {
+                    CandidateReviewAction::Select => CandidateReviewTransition::Select,
+                    CandidateReviewAction::ClearSelection => {
+                        CandidateReviewTransition::ClearSelection
+                    }
+                    CandidateReviewAction::Restore => CandidateReviewTransition::Restore,
+                    CandidateReviewAction::Dismiss => match candidate.status() {
+                        CandidateHistoryStatus::Discovered | CandidateHistoryStatus::Dismissed => {
+                            CandidateReviewTransition::DismissDiscovered
+                        }
+                        CandidateHistoryStatus::Selected => {
+                            CandidateReviewTransition::DismissSelected
+                        }
+                        _ => {
+                            return Err(HistoryError::new(HistoryErrorKind::InvalidTransition));
+                        }
+                    },
+                };
+                transition_candidate_review(transaction, id, transition)
+            },
+            after_commit,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn review_candidate_after_commit_failure_for_test(
+        &self,
+        scan_id: &crate::domain::ScanId,
+        id: &crate::domain::CandidateId,
+        action: CandidateReviewAction,
+    ) -> Result<CandidateHistoryStatus, HistoryError> {
+        self.review_candidate_with_hook(scan_id, id, action, || {
+            Err(HistoryError::new(HistoryErrorKind::DatabaseUnavailable))
+        })
     }
 
     fn transition_candidate_review_status_with_hook(
