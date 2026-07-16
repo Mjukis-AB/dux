@@ -11,6 +11,10 @@ use super::candidate_history::{
     NewCandidateRecord, PreparedCandidate, StoredCandidateRecord, insert_candidate,
     load_candidate_record,
 };
+use super::cleanup_history::{
+    CleanupSessionId, NewCleanupSessionRecord, PreparedCleanupSession, StoredCleanupSessionRecord,
+    insert_cleanup_session, load_cleanup_session_record,
+};
 use super::history::{
     HistoryError, HistoryErrorKind, NewScanRecord, PreparedNewScan, PreparedScanCompletion,
     ScanCompletionRecord, ScanRecord, insert_scan_started, load_scan_record, map_write_sql_error,
@@ -348,6 +352,50 @@ impl StoreCoordinator {
     ) -> Result<Option<StoredCandidateRecord>, HistoryError> {
         let guard = self.lock_current_history_connection()?;
         load_candidate_record(&guard.connection, id)
+    }
+
+    /// Atomically freeze one review-data plan as a non-executable planned journal.
+    /// Callers reconcile an ambiguous post-commit failure by loading the exact
+    /// session ID before retrying.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "typed cleanup history is integrated by the later planner/executor slices"
+        )
+    )]
+    pub(crate) fn record_cleanup_session_planned(
+        &self,
+        session: &NewCleanupSessionRecord,
+    ) -> Result<(), HistoryError> {
+        let prepared = PreparedCleanupSession::prepare(session)?;
+        let mut guard = self.lock_current_history_connection()?;
+        let transaction = guard
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(map_write_sql_error)?;
+        insert_cleanup_session(&transaction, &prepared)?;
+        transaction.commit().map_err(map_write_sql_error)?;
+        self.paths
+            .repair_sqlite_sidecars()
+            .and_then(|()| self.paths.validate_all_existing())
+            .map_err(map_history_database_error)
+    }
+
+    /// Load an explicit legacy summary or one complete planned observation.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "typed cleanup history is integrated by the later planner/executor slices"
+        )
+    )]
+    pub(crate) fn load_cleanup_session(
+        &self,
+        id: &CleanupSessionId,
+    ) -> Result<Option<StoredCleanupSessionRecord>, HistoryError> {
+        let guard = self.lock_current_history_connection()?;
+        load_cleanup_session_record(&guard.connection, id)
     }
 
     #[cfg_attr(

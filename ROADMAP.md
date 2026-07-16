@@ -1976,6 +1976,27 @@ Tasks:
     64-blocker budgets, and oversized values before materialization. Status
     transitions, cleanup journaling, and lifecycle integration remain open, so
     the broad checkbox stays unchecked.
+  - Planned-cleanup journal sub-checkpoint completed 2026-07-16: a crate-private
+    boundary prepares and bounds an immutable cleanup plan before locking,
+    requires its scan and every format-2 candidate observation to exist and
+    match all frozen facts, and atomically inserts the format-2 session,
+    contiguous items/paths/evidence/warnings, and each proposed effect even in
+    dry-run mode. The bounded exact-ID reader returns a distinct complete
+    `planned` observation or explicit format-1 legacy summary; it checks SQLite
+    types and byte lengths before allocation, preserves legacy relative path
+    observations without treating them as actionable, and rejects child
+    pollution, gaps, over-limit records, malformed host paths/evidence,
+    dangling or mismatched dependencies, overlap, invalid plan lifetime,
+    estimate/warning drift, and mode/policy incompatibility. Six focused tests
+    cover reopen with all three dry-run proposed effects, missing/duplicate
+    rollback, legacy pollution, oversized rows/newer-schema skew, and the shared
+    query budget at 256 paths plus 512 evidence facts. It cannot reconstruct a
+    plan, claim an execution owner, transition or recover work, or perform an
+    effect. The next cleanup slice must first add a separate non-stealable
+    cross-process cleanup lock and process-instance liveness proof: heartbeat
+    age alone cannot safely authorize recovery while an old worker could still
+    mutate the filesystem. The broad checkbox remains open for execution-state
+    journaling and scan/evaluator/planner lifecycle integration.
 - [ ] Keep binary snapshots atomic and checksummed.
 - [ ] Add capacity sample storage.
 - [ ] Add typed scan coverage/issues.

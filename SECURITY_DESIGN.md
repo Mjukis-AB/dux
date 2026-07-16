@@ -419,6 +419,15 @@ renewal, crash recovery, and journal reconciliation; it cannot be broken merely
 because a second UI wants to proceed. App, bundled CLI, standalone CLI, and any
 future scheduler MUST NOT execute overlapping plans concurrently.
 
+The initial implementation uses one permanent store-wide cleanup lock, which
+safely dominates per-volume serialization until plans carry an authoritative
+stable volume scope. Its operating-system lock is non-expiring and MUST NOT be
+stolen because a heartbeat is old. "Bounded renewal" means a bounded cadence
+for owner-and-generation-fenced journal heartbeats before new effects, not a
+wall-clock lease expiry. Recovery additionally requires process-instance
+liveness evidence proving the previous owner is definitely gone; PID alone,
+heartbeat age, lock age, and unknown liveness are insufficient.
+
 Where the platform supports it, permanent
 removal uses descriptor-relative or handle-relative operations tied to the
 validated parent. A path-based fallback requires an explicit platform review
@@ -823,6 +832,21 @@ evidence, incompatible policy, and incomplete cloud-upload facts. It cannot
 construct a domain `Candidate`, change status, create a plan, or execute an
 effect.
 
+The implemented typed cleanup-history boundary likewise remains
+non-authoritative and currently accepts only an immutable domain plan for a
+`planned` journal. It prepares and bounds the full plan before locking, then
+requires the referenced scan and every format-2 candidate observation to
+exist and match the frozen source, rule, category, paths, estimates,
+nanosecond times, evidence, policy, scheduling flag, and absence of blockers.
+One immediate transaction stores the parent, contiguous items and paths, all
+evidence and warnings, and each proposed effect even in dry-run mode. Its
+bounded exact-ID reader returns either a complete planned observation or an
+explicit format-1 legacy summary; it checks storage types and lengths before
+allocation and rejects child pollution, gaps, limits, relative format-2 paths,
+overlap, incomplete cloud facts, mode/action mismatches, dangling dependencies,
+and time/warning/estimate drift. It cannot reconstruct `CleanupPlan`, claim an
+execution owner, transition or recover a journal, or reach an effect.
+
 Compatibility inspection and migration have both SQLite-VM-operation ceilings
 and deadlines sampled every 1,000 VM operations by SQLite's progress callback.
 Schema/ledger storage types and byte lengths are checked before Rust
@@ -973,8 +997,10 @@ Shared cleanup execution MUST be serialized even when scans use bounded
 parallelism. A cleanup session MUST be durably recorded before its first item.
 Each item MUST transition through valid journal states in a transaction or
 equivalent durable protocol.
-On restart, an incomplete session is reported as interrupted/unknown until live
-inspection reconciles it; DUX never assumes an in-flight syscall succeeded.
+On restart, an incomplete session is reported as `RecoveryRequired` or
+`OutcomeUnknown` until live inspection reconciles it; DUX never assumes an
+in-flight syscall succeeded. A terminal `interrupted` journal state is written
+only by explicit reconciliation, never merely because a process disappeared.
 
 Cancellation is a request, not proof that an operating-system call stopped.
 The executor checks cancellation between items and before effects, drains or
@@ -1158,12 +1184,12 @@ incident as a substitute for deterministic local evidence.
 | Legacy CLI deletion | Active arbitrary-descendant permanent path routed through a temporary core adapter; strict-target/volume/identity rechecks only; scanned-byte estimates labeled in CLI | Replace adapter with reviewed plan/approval/executor chain without weakening current checks |
 | Centralized executor | Production executor absent; temporary legacy adapter is containment only | Typed admission, cross-process lease, live revalidation, and journal required |
 | Engine/FFI task and plan API | Core handle, pre-worker SQLite compatibility handshake, and bounded per-session registry implemented for one read-only formatting batch; app architecture owns one session; UniFFI handle remains smoke-only, with no scan/task/plan DTOs or cleanup authority | FFI version rejection plus bounded scan/task/plan handles and cancellation |
-| SQLite compatibility store | Checksummed v1/v2 migrations with exact per-version fingerprints, lossless bounded path codec, bounded full/lightweight inspection, private atomic provisioning with durable initialization evidence, cross-platform process writer/version-race coverage, newer-schema read-only transition, rollback/WAL recovery, crate-private typed scan start/terminal-CAS/exact-ID history, explicit legacy summaries, a bounded typed candidate insert/load boundary, and normalized cleanup history capable of preserving frozen facts, proposed effects, and crash-recovery states are implemented; stored paths and policy remain non-authoritative observations | Scan task integration, candidate status lifecycle, typed cleanup CRUD with ordinal and owner-generation validation, retention, reconciliation, and bounded identity-safe abandoned-stage maintenance |
+| SQLite compatibility store | Checksummed v1/v2 migrations with exact per-version fingerprints, lossless bounded path codec, bounded full/lightweight inspection, private atomic provisioning with durable initialization evidence, cross-platform process writer/version-race coverage, newer-schema read-only transition, rollback/WAL recovery, crate-private typed scan and candidate history, explicit legacy summaries, and atomic bounded planned-cleanup insert/exact-ID load are implemented; stored paths and policy remain non-authoritative observations | Scan/evaluator/planner lifecycle integration, candidate status lifecycle, cleanup execution-state CRUD with ordinal and owner-generation validation, retention, reconciliation, and bounded identity-safe abandoned-stage maintenance |
 | Typed scan coverage/issues | Absent; current scanner counts/skips and permits relaxed flags | Required before any scan is described as complete or becomes plan input |
 | Cache semantic/input validation | Atomic write plus CRC/version only; full-file read before bounds | Bounded reads, tree/path semantics, private permissions, retention, and migration |
 | Hard-link accounting and policy | Absent; only non-authoritative path snapshots capture link count | Deduplicated scan accounting and explicit per-mode admission rules |
 | Forbidden destructive-call lint | Implemented with compiler-resolved Rust denial, cross-language repository scan, scoped annotations, self-tests, and CI | Keep exception set exact; remove legacy baseline during executor migration |
-| Durable operation journal/history | Absent | Required before shared executor ships |
+| Durable operation journal/history | Schema plus typed immutable `planned` insert/load implemented; no execution owner, transitions, lease coupling, or reconciliation | Cross-process cleanup lock and process-instance liveness, fenced state machine, crash reconciliation, and executor integration required before shared executor ships |
 | Private 0700/0600 stores | SQLite stage/final root, database, marker, and sidecars enforce ownership, no-follow identity, links, and Unix modes; macOS rejects final-object ACLs but accepts deny-only publication-parent ACLs; Windows uses exact protected DACLs plus handle-bound publication and a retained final-root rename guard; current binary cache remains non-private | Extend equivalent ownership and atomic-publication guarantees to snapshots, caches, logs, provider temp data, and bounded abandoned-stage maintenance |
 | Trash executor | Absent | Platform-native implementation and integration tests |
 | Cloud eviction | Absent | Supported API plus fully-uploaded/no-local-change evidence |

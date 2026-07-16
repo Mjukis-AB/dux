@@ -194,6 +194,16 @@ impl CleanupPlan {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn try_from_candidates_for_persistence_test(
+        id: CleanupPlanId,
+        created_at: SystemTime,
+        mode: CleanupMode,
+        candidates: &[Candidate],
+    ) -> Result<Self, CleanupPlanValidationError> {
+        Self::try_from_candidates(id, created_at, mode, candidates)
+    }
+
     pub fn id(&self) -> &CleanupPlanId {
         &self.id
     }

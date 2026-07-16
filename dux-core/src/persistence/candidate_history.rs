@@ -188,18 +188,19 @@ impl PreparedCandidate {
     }
 }
 
-struct PreparedEvidence {
-    kind: &'static str,
-    path: Option<EncodedBytes>,
-    text: Option<String>,
-    observed_time: Option<TimeParts>,
-    duration: Option<TimeParts>,
-    observed_bytes: Option<i64>,
-    minimum_bytes: Option<i64>,
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct PreparedEvidence {
+    pub(super) kind: &'static str,
+    pub(super) path: Option<EncodedBytes>,
+    pub(super) text: Option<String>,
+    pub(super) observed_time: Option<TimeParts>,
+    pub(super) duration: Option<TimeParts>,
+    pub(super) observed_bytes: Option<i64>,
+    pub(super) minimum_bytes: Option<i64>,
 }
 
 impl PreparedEvidence {
-    fn prepare(evidence: &Evidence) -> Result<Self, HistoryError> {
+    pub(super) fn prepare(evidence: &Evidence) -> Result<Self, HistoryError> {
         let mut prepared = Self {
             kind: evidence_kind_as_stored(evidence),
             path: None,
@@ -250,10 +251,10 @@ impl PreparedEvidence {
     }
 }
 
-#[derive(Clone, Copy)]
-struct TimeParts {
-    seconds: i64,
-    nanoseconds: i64,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct TimeParts {
+    pub(super) seconds: i64,
+    pub(super) nanoseconds: i64,
 }
 
 pub(super) fn insert_candidate(
@@ -363,7 +364,15 @@ pub(super) fn load_candidate_record(
     id: &CandidateId,
 ) -> Result<Option<StoredCandidateRecord>, HistoryError> {
     run_bounded_query(connection, || {
-        let raw = connection
+        load_candidate_record_within_budget(connection, id)
+    })
+}
+
+pub(super) fn load_candidate_record_within_budget(
+    connection: &Connection,
+    id: &CandidateId,
+) -> Result<Option<StoredCandidateRecord>, HistoryError> {
+    let raw = connection
             .query_row(
                 "SELECT record_format_version,
                         typeof(candidate_id), length(CAST(candidate_id AS BLOB)), candidate_id,
@@ -383,66 +392,65 @@ pub(super) fn load_candidate_record(
             )
             .optional()
             .map_err(map_query_sql_error)?;
-        let Some(raw) = raw else {
-            return Ok(None);
-        };
-        let common = decode_common(&raw)?;
-        ensure_source_scan_exists(connection, &common.source_scan_id)?;
-        match raw.record_format_version {
-            1 => Ok(Some(StoredCandidateRecord::LegacySummary({
-                if raw.category.is_some()
-                    || raw.action.is_some()
-                    || raw.rule_schedule_eligible.is_some()
-                    || raw.newest_mtime_seconds.is_some()
-                    || raw.newest_mtime_nanoseconds.is_some()
-                {
-                    return Err(corrupt());
-                }
-                ensure_no_candidate_children(connection, id)?;
-                LegacyCandidateSummary {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let common = decode_common(&raw)?;
+    ensure_source_scan_exists(connection, &common.source_scan_id)?;
+    match raw.record_format_version {
+        1 => Ok(Some(StoredCandidateRecord::LegacySummary({
+            if raw.category.is_some()
+                || raw.action.is_some()
+                || raw.rule_schedule_eligible.is_some()
+                || raw.newest_mtime_seconds.is_some()
+                || raw.newest_mtime_nanoseconds.is_some()
+            {
+                return Err(corrupt());
+            }
+            ensure_no_candidate_children(connection, id)?;
+            LegacyCandidateSummary {
+                id: common.id,
+                source_scan_id: common.source_scan_id,
+                rule: common.rule,
+                safety: common.safety,
+                estimated_bytes: common.estimated_bytes,
+                created_at: common.created_at,
+                status: common.status,
+            }
+        }))),
+        2 => {
+            let paths = load_paths(connection, id)?;
+            let evidence = load_evidence(connection, id)?;
+            let blockers = load_blockers(connection, id)?;
+            let category = category_from_stored(raw.category.as_deref().ok_or_else(corrupt)?)?;
+            let action = action_from_stored(raw.action.as_deref().ok_or_else(corrupt)?)?;
+            let schedule = raw.rule_schedule_eligible.ok_or_else(corrupt)?;
+            let rule_schedule_eligible = stored_bool(schedule)?;
+            validate_policy(common.safety, action, rule_schedule_eligible, corrupt)?;
+            let newest_mtime =
+                decode_optional_time(raw.newest_mtime_seconds, raw.newest_mtime_nanoseconds)?;
+            validate_complete_children(common.safety, action, &paths, &evidence)?;
+            Ok(Some(StoredCandidateRecord::Complete(
+                CompleteCandidateRecord {
                     id: common.id,
                     source_scan_id: common.source_scan_id,
                     rule: common.rule,
-                    safety: common.safety,
+                    category,
+                    paths,
                     estimated_bytes: common.estimated_bytes,
+                    newest_mtime,
+                    evidence,
+                    safety: common.safety,
+                    action,
+                    rule_schedule_eligible,
+                    blockers,
                     created_at: common.created_at,
                     status: common.status,
-                }
-            }))),
-            2 => {
-                let paths = load_paths(connection, id)?;
-                let evidence = load_evidence(connection, id)?;
-                let blockers = load_blockers(connection, id)?;
-                let category = category_from_stored(raw.category.as_deref().ok_or_else(corrupt)?)?;
-                let action = action_from_stored(raw.action.as_deref().ok_or_else(corrupt)?)?;
-                let schedule = raw.rule_schedule_eligible.ok_or_else(corrupt)?;
-                let rule_schedule_eligible = stored_bool(schedule)?;
-                validate_policy(common.safety, action, rule_schedule_eligible, corrupt)?;
-                let newest_mtime =
-                    decode_optional_time(raw.newest_mtime_seconds, raw.newest_mtime_nanoseconds)?;
-                validate_complete_children(common.safety, action, &paths, &evidence)?;
-                Ok(Some(StoredCandidateRecord::Complete(
-                    CompleteCandidateRecord {
-                        id: common.id,
-                        source_scan_id: common.source_scan_id,
-                        rule: common.rule,
-                        category,
-                        paths,
-                        estimated_bytes: common.estimated_bytes,
-                        newest_mtime,
-                        evidence,
-                        safety: common.safety,
-                        action,
-                        rule_schedule_eligible,
-                        blockers,
-                        created_at: common.created_at,
-                        status: common.status,
-                    },
-                )))
-            }
-            _ => Err(corrupt()),
+                },
+            )))
         }
-    })
+        _ => Err(corrupt()),
+    }
 }
 
 struct RawCandidateRow {
@@ -613,20 +621,20 @@ fn load_evidence(connection: &Connection, id: &CandidateId) -> Result<Vec<Eviden
     Ok(evidence)
 }
 
-struct RawEvidence {
-    kind: String,
-    path: Option<Vec<u8>>,
-    path_encoding: Option<i64>,
-    text: Option<String>,
-    observed_seconds: Option<i64>,
-    observed_nanoseconds: Option<i64>,
-    duration_seconds: Option<i64>,
-    duration_nanoseconds: Option<i64>,
-    observed_bytes: Option<i64>,
-    minimum_bytes: Option<i64>,
+pub(super) struct RawEvidence {
+    pub(super) kind: String,
+    pub(super) path: Option<Vec<u8>>,
+    pub(super) path_encoding: Option<i64>,
+    pub(super) text: Option<String>,
+    pub(super) observed_seconds: Option<i64>,
+    pub(super) observed_nanoseconds: Option<i64>,
+    pub(super) duration_seconds: Option<i64>,
+    pub(super) duration_nanoseconds: Option<i64>,
+    pub(super) observed_bytes: Option<i64>,
+    pub(super) minimum_bytes: Option<i64>,
 }
 
-fn decode_evidence(raw: RawEvidence) -> Result<Evidence, HistoryError> {
+pub(super) fn decode_evidence(raw: RawEvidence) -> Result<Evidence, HistoryError> {
     let no_path = raw.path.is_none() && raw.path_encoding.is_none();
     let no_text = raw.text.is_none();
     let no_observed_time = raw.observed_seconds.is_none() && raw.observed_nanoseconds.is_none();
@@ -787,7 +795,7 @@ fn validate_candidate(candidate: &Candidate, kind: HistoryErrorKind) -> Result<(
     .map_err(|_| HistoryError::new(kind))
 }
 
-fn validate_complete_children(
+pub(super) fn validate_complete_children(
     safety: SafetyTier,
     action: CandidateAction,
     paths: &[PathBuf],
@@ -813,7 +821,7 @@ fn validate_complete_children(
     Ok(())
 }
 
-fn validate_policy(
+pub(super) fn validate_policy(
     safety: SafetyTier,
     action: CandidateAction,
     schedule_eligible: bool,
@@ -827,7 +835,7 @@ fn validate_policy(
     Ok(())
 }
 
-fn validate_required_value(
+pub(super) fn validate_required_value(
     row: &Row<'_>,
     type_column: usize,
     length_column: usize,
@@ -842,7 +850,7 @@ fn validate_required_value(
     Ok(())
 }
 
-fn validate_optional_value(
+pub(super) fn validate_optional_value(
     row: &Row<'_>,
     type_column: usize,
     length_column: usize,
@@ -862,7 +870,7 @@ fn validate_optional_value(
     Ok(())
 }
 
-fn validate_null_value(
+pub(super) fn validate_null_value(
     row: &Row<'_>,
     type_column: usize,
     length_column: usize,
@@ -889,7 +897,7 @@ fn decode_required_evidence_path(
     decode_absolute_path(bytes.ok_or_else(corrupt)?, encoding.ok_or_else(corrupt)?)
 }
 
-fn decode_absolute_path(bytes: Vec<u8>, encoding: i64) -> Result<PathBuf, HistoryError> {
+pub(super) fn decode_absolute_path(bytes: Vec<u8>, encoding: i64) -> Result<PathBuf, HistoryError> {
     let encoding = match encoding {
         1 => StoredEncoding::Utf8HostPath,
         2 => StoredEncoding::Utf16LeHostPath,
@@ -902,14 +910,17 @@ fn decode_absolute_path(bytes: Vec<u8>, encoding: i64) -> Result<PathBuf, Histor
     Ok(path)
 }
 
-fn validate_text(value: &str, kind: HistoryErrorKind) -> Result<(), HistoryError> {
+pub(super) fn validate_text(value: &str, kind: HistoryErrorKind) -> Result<(), HistoryError> {
     if value.is_empty() || value.len() > MAX_TEXT_BYTES || value.chars().any(char::is_control) {
         return Err(HistoryError::new(kind));
     }
     Ok(())
 }
 
-fn time_parts(value: SystemTime, kind: HistoryErrorKind) -> Result<TimeParts, HistoryError> {
+pub(super) fn time_parts(
+    value: SystemTime,
+    kind: HistoryErrorKind,
+) -> Result<TimeParts, HistoryError> {
     let duration = value
         .duration_since(UNIX_EPOCH)
         .map_err(|_| HistoryError::new(kind))?;
@@ -933,7 +944,7 @@ fn decode_required_time(
     )
 }
 
-fn decode_optional_time(
+pub(super) fn decode_optional_time(
     seconds: Option<i64>,
     nanoseconds: Option<i64>,
 ) -> Result<Option<SystemTime>, HistoryError> {
@@ -982,15 +993,15 @@ fn unix_ms_to_system_time(value: i64) -> Result<SystemTime, HistoryError> {
         .ok_or_else(corrupt)
 }
 
-fn to_i64(value: u64, kind: HistoryErrorKind) -> Result<i64, HistoryError> {
+pub(super) fn to_i64(value: u64, kind: HistoryErrorKind) -> Result<i64, HistoryError> {
     i64::try_from(value).map_err(|_| HistoryError::new(kind))
 }
 
-fn from_i64(value: i64) -> Result<u64, HistoryError> {
+pub(super) fn from_i64(value: i64) -> Result<u64, HistoryError> {
     u64::try_from(value).map_err(|_| corrupt())
 }
 
-fn stored_bool(value: i64) -> Result<bool, HistoryError> {
+pub(super) fn stored_bool(value: i64) -> Result<bool, HistoryError> {
     match value {
         0 => Ok(false),
         1 => Ok(true),
@@ -998,7 +1009,7 @@ fn stored_bool(value: i64) -> Result<bool, HistoryError> {
     }
 }
 
-fn category_as_stored(value: CandidateCategory) -> &'static str {
+pub(super) fn category_as_stored(value: CandidateCategory) -> &'static str {
     match value {
         CandidateCategory::DeveloperArtifact => "developer_artifact",
         CandidateCategory::ApplicationCache => "application_cache",
@@ -1013,7 +1024,7 @@ fn category_as_stored(value: CandidateCategory) -> &'static str {
     }
 }
 
-fn category_from_stored(value: &str) -> Result<CandidateCategory, HistoryError> {
+pub(super) fn category_from_stored(value: &str) -> Result<CandidateCategory, HistoryError> {
     match value {
         "developer_artifact" => Ok(CandidateCategory::DeveloperArtifact),
         "application_cache" => Ok(CandidateCategory::ApplicationCache),
@@ -1029,7 +1040,7 @@ fn category_from_stored(value: &str) -> Result<CandidateCategory, HistoryError> 
     }
 }
 
-fn safety_as_stored(value: SafetyTier) -> &'static str {
+pub(super) fn safety_as_stored(value: SafetyTier) -> &'static str {
     match value {
         SafetyTier::SafeRegenerable => "safe_regenerable",
         SafetyTier::SafeEvictable => "safe_evictable",
@@ -1039,7 +1050,7 @@ fn safety_as_stored(value: SafetyTier) -> &'static str {
     }
 }
 
-fn safety_from_stored(value: &str) -> Result<SafetyTier, HistoryError> {
+pub(super) fn safety_from_stored(value: &str) -> Result<SafetyTier, HistoryError> {
     match value {
         "safe_regenerable" => Ok(SafetyTier::SafeRegenerable),
         "safe_evictable" => Ok(SafetyTier::SafeEvictable),
@@ -1050,7 +1061,7 @@ fn safety_from_stored(value: &str) -> Result<SafetyTier, HistoryError> {
     }
 }
 
-fn action_as_stored(value: CandidateAction) -> &'static str {
+pub(super) fn action_as_stored(value: CandidateAction) -> &'static str {
     match value {
         CandidateAction::RemoveKnownRegenerableContents => "remove_known_regenerable_contents",
         CandidateAction::EvictLocalCopy => "evict_local_copy",
@@ -1060,7 +1071,7 @@ fn action_as_stored(value: CandidateAction) -> &'static str {
     }
 }
 
-fn action_from_stored(value: &str) -> Result<CandidateAction, HistoryError> {
+pub(super) fn action_from_stored(value: &str) -> Result<CandidateAction, HistoryError> {
     match value {
         "remove_known_regenerable_contents" => Ok(CandidateAction::RemoveKnownRegenerableContents),
         "evict_local_copy" => Ok(CandidateAction::EvictLocalCopy),

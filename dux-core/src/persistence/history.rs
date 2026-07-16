@@ -479,7 +479,7 @@ fn from_i64(value: i64) -> Result<u64, HistoryError> {
     u64::try_from(value).map_err(|_| HistoryError::new(HistoryErrorKind::CorruptData))
 }
 
-fn system_time_to_unix_ms(
+pub(super) fn system_time_to_unix_ms(
     value: SystemTime,
     error_kind: HistoryErrorKind,
 ) -> Result<i64, HistoryError> {
@@ -490,7 +490,7 @@ fn system_time_to_unix_ms(
     i64::try_from(milliseconds).map_err(|_| HistoryError::new(error_kind))
 }
 
-fn unix_ms_to_system_time(value: i64) -> Result<SystemTime, HistoryError> {
+pub(super) fn unix_ms_to_system_time(value: i64) -> Result<SystemTime, HistoryError> {
     let milliseconds =
         u64::try_from(value).map_err(|_| HistoryError::new(HistoryErrorKind::CorruptData))?;
     UNIX_EPOCH

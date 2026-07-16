@@ -15,6 +15,14 @@ mod candidate_history;
     not(test),
     allow(
         dead_code,
+        reason = "typed cleanup history is integrated by the later planner/executor slices"
+    )
+)]
+mod cleanup_history;
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
         reason = "the frozen v1 byte codec is consumed by the next typed persistence slice"
     )
 )]

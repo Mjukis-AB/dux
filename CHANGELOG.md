@@ -5,6 +5,15 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Added crate-private planned cleanup journals on SQLite schema v2. One
+  immutable cleanup plan is prepared and bounded before locking, matched
+  exactly to complete persisted candidate observations, and atomically stored
+  with contiguous items, paths, evidence, warnings, and each proposed effect
+  even in dry-run mode. The exact-ID reader returns either an explicit legacy
+  summary or a complete non-executable planned observation, rejects malformed
+  or polluted children and newer schemas, and fits the shared query budget at
+  the 256-path/512-evidence limit. Execution, owner claims, recovery, and
+  journal transitions remain deliberately sealed.
 - Added crate-private typed candidate history on SQLite schema v2. Complete
   deterministic findings are inserted atomically with ordered bounded paths,
   evidence, and blockers, then loaded only as non-executable observation
