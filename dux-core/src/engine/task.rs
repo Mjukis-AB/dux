@@ -25,6 +25,7 @@ impl TaskId {
 pub enum TaskKind {
     FormatSizeBatch,
     Scan,
+    HistoryMaintenance,
 }
 
 /// Execution phase. Cancellation intent is reported separately until work is
@@ -53,6 +54,21 @@ pub enum TaskFailureKind {
     SnapshotRejected,
     PersistenceUnavailable,
     PersistenceOutcomeUnknown,
+    HistoryMaintenance(HistoryMaintenanceFailureKind),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum HistoryMaintenanceFailureKind {
+    InvalidClock,
+    IncompatibleSchema,
+    Busy,
+    UnsafeStorage,
+    BudgetExceeded,
+    CorruptData,
+    Unavailable,
+    OutcomeUnknown,
+    InternalState,
 }
 
 /// Authoritative current state for one retained task.
@@ -86,6 +102,14 @@ pub enum TaskEventKind {
     CandidateEvaluationStarted,
     CandidateEvaluationFinished {
         status: CandidateEvaluationTaskStatus,
+    },
+    HistoryMaintenanceBatchApplying,
+    HistoryMaintenanceBatchFinished {
+        daily_rollups_created: u32,
+        raw_samples_pruned: u32,
+        daily_rollups_pruned: u32,
+        ai_insights_pruned: u32,
+        has_more: bool,
     },
     CancellationRequested,
     Terminal {
@@ -121,6 +145,63 @@ pub struct FormattedSizeEntry {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FormatSizeBatchResult {
     entries: Arc<[FormattedSizeEntry]>,
+}
+
+/// Immutable, path-free outcome from one bounded history-maintenance batch.
+/// `has_more` asks an idle caller to schedule another task; one engine task
+/// never extends its writer transaction into an unbounded drain loop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HistoryMaintenanceResult {
+    observed_at: SystemTime,
+    daily_rollups_created: u32,
+    raw_samples_pruned: u32,
+    daily_rollups_pruned: u32,
+    ai_insights_pruned: u32,
+    has_more: bool,
+}
+
+impl HistoryMaintenanceResult {
+    pub(super) const fn new(
+        observed_at: SystemTime,
+        daily_rollups_created: u32,
+        raw_samples_pruned: u32,
+        daily_rollups_pruned: u32,
+        ai_insights_pruned: u32,
+        has_more: bool,
+    ) -> Self {
+        Self {
+            observed_at,
+            daily_rollups_created,
+            raw_samples_pruned,
+            daily_rollups_pruned,
+            ai_insights_pruned,
+            has_more,
+        }
+    }
+
+    pub const fn observed_at(&self) -> SystemTime {
+        self.observed_at
+    }
+
+    pub const fn daily_rollups_created(&self) -> u32 {
+        self.daily_rollups_created
+    }
+
+    pub const fn raw_samples_pruned(&self) -> u32 {
+        self.raw_samples_pruned
+    }
+
+    pub const fn daily_rollups_pruned(&self) -> u32 {
+        self.daily_rollups_pruned
+    }
+
+    pub const fn ai_insights_pruned(&self) -> u32 {
+        self.ai_insights_pruned
+    }
+
+    pub const fn has_more(&self) -> bool {
+        self.has_more
+    }
 }
 
 impl FormatSizeBatchResult {
@@ -360,6 +441,13 @@ pub enum CancelOutcome {
     Requested,
     AlreadyRequested,
     AlreadyTerminal,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HistoryMaintenanceStartOutcome {
+    Started(TaskId),
+    AlreadyActive(TaskId),
+    DeferredBusy,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

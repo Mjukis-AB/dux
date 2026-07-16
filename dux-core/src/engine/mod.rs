@@ -1,8 +1,8 @@
 //! Shared engine lifecycle and bounded task orchestration.
 //!
-//! The engine runs read-only formatting and durable full-scan tasks. It grants
-//! no cleanup authority; FFI task transport and cleanup execution remain
-//! separate boundaries.
+//! The engine runs read-only formatting, durable full-scan, and bounded
+//! DUX-owned history-maintenance tasks. It grants no cleanup authority; FFI
+//! task transport and cleanup execution remain separate boundaries.
 
 mod config;
 mod registry;
@@ -13,8 +13,9 @@ pub use registry::EngineHandle;
 pub use task::{
     CancelOutcome, CandidateEvaluationTaskFailureKind, CandidateEvaluationTaskStatus, CloseOutcome,
     DurableScanCounts, DurableScanCoverage, DurableScanStatus, DurableScanSummary, EngineLifecycle,
-    EngineOpenError, FormatSizeBatchResult, FormattedSizeEntry, RecentScanHistory,
-    ScanHistoryError, ScanRootErrorKind, ScanTaskCounts, ScanTaskResult, ScanTaskStatus,
-    StartTaskError, TaskAccessError, TaskEvent, TaskEventBatch, TaskEventKind, TaskFailureKind,
-    TaskId, TaskKind, TaskPhase, TaskSnapshot,
+    EngineOpenError, FormatSizeBatchResult, FormattedSizeEntry, HistoryMaintenanceFailureKind,
+    HistoryMaintenanceResult, HistoryMaintenanceStartOutcome, RecentScanHistory, ScanHistoryError,
+    ScanRootErrorKind, ScanTaskCounts, ScanTaskResult, ScanTaskStatus, StartTaskError,
+    TaskAccessError, TaskEvent, TaskEventBatch, TaskEventKind, TaskFailureKind, TaskId, TaskKind,
+    TaskPhase, TaskSnapshot,
 };

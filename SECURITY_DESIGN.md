@@ -1176,10 +1176,16 @@ sole private AI delete statement ID- and expiration-bound. It reconciles frozen
 postconditions after commit ambiguity. Fixed row, VM-operation, and
 deadline budgets return `has_more` rather than extending a writer transaction.
 
-Engine idle orchestration, pressure episodes, snapshot latest-two/pins/cap,
-orphan/temp/stage scavenging, and explicit user clear-data actions remain
-unimplemented. The complete policy and remaining prerequisites are in
-[`docs/RETENTION.md`](docs/RETENTION.md).
+The shared engine now owns a typed, path-free, idle-only history-maintenance
+task. Closed, duplicate, and foreground-busy calls resolve before SQLite
+access; an eligible call rechecks current-schema compatibility and admission,
+then runs exactly one bounded transaction. Cancellation and its Applying point
+of no return are linearized under the registry lock, so an earlier cancellation
+mutates nothing and a later request cannot falsify a committed outcome. The
+engine never self-enqueues from `has_more`. Native app/FFI idle scheduling,
+pressure episodes, snapshot latest-two/pins/cap, orphan/temp/stage scavenging,
+and explicit user clear-data actions remain unimplemented. The complete policy
+and remaining prerequisites are in [`docs/RETENTION.md`](docs/RETENTION.md).
 
 Clearing DUX data removes only DUX-owned stores after the same storage-root and
 symlink checks. It does not empty system Trash, provider caches, or user data.
@@ -1245,11 +1251,15 @@ The current core checkpoint owns one registry per engine session with fixed
 worker, queue, event, terminal-record, and input bounds; the application
 architecture owns one engine session. Startup validates and migrates one
 private SQLite store before workers are published, but exposes no raw SQL or
-domain persistence. Its only production task is a read-only formatting batch:
-it has no scan, AI, plan, or cleanup authority. Cancellation intent is recorded
-separately from the operation-reported outcome so a late request cannot falsely
-claim completed effects were rolled back, and engine `Closed` means every
-worker has quiesced.
+domain persistence. Typed production work currently includes read-only
+formatting, durable full scans with deterministic candidate evaluation, and one
+idle-only bounded history-maintenance batch. Maintenance resolves duplicate or
+busy preflight without SQLite, rechecks compatibility before admission, and
+publishes only path-free counts and `has_more`; it has no AI inference or
+classification, plan, or user-data cleanup authority. Cancellation intent is
+recorded separately from the operation-
+reported outcome so a late request cannot falsely claim completed effects were
+rolled back, and engine `Closed` means every worker has quiesced.
 The UniFFI `DuxEngine` remains a smoke-only lifecycle object; task IDs, event
 pages, results, and cancellation do not yet cross FFI.
 
@@ -1480,9 +1490,9 @@ incident as a substitute for deterministic local evidence.
 | macOS app cleanup | Absent | Entire cleanup release gate in §17.3 |
 | Legacy CLI deletion | Active arbitrary-descendant permanent path routed through a temporary core adapter; strict-target/volume/identity rechecks only; scanned-byte estimates labeled in CLI | Replace adapter with reviewed plan/approval/executor chain without weakening current checks |
 | Centralized executor | Production executor absent; temporary legacy adapter is containment only | Typed admission, integration with the existing cross-process lease/journal, and live target revalidation required |
-| Engine/FFI task and plan API | Core handle, pre-worker catalog/SQLite/snapshot compatibility handshake, bounded per-session registry, read-only formatting, durable full-scan plus deterministic candidate-evaluation tasks, and a bounded path-free recent-scan history DTO are implemented. Scan admission fences schema skew and overlapping session-local roots; direct cancellation reaches the scanner; typed results/events/history distinguish scan truth from discovery status and expose observations only. App architecture owns one session; CLI status/history consume the Rust DTO, UniFFI remains smoke-only, and no plan/cleanup authority exists | FFI version rejection plus bounded scan/history/plan transport and cancellation; planner lifecycle, priority, and cross-process scan leasing remain later |
+| Engine/FFI task and plan API | Core handle, pre-worker catalog/SQLite/snapshot compatibility handshake, bounded per-session registry, read-only formatting, durable full-scan plus deterministic candidate-evaluation tasks, a bounded path-free recent-scan history DTO, and a typed idle-only one-batch history-maintenance task are implemented. Scan admission fences schema skew and overlapping session-local roots; maintenance preflights closed/active/busy without SQLite, rechecks schema/admission, and linearizes cancellation with its Applying point of no return. Typed results/events/history expose observations and bounded counts only. App architecture owns one session; CLI status/history consume the Rust DTO, UniFFI remains smoke-only, and no plan/cleanup authority exists | FFI version rejection plus bounded scan/history/maintenance/plan transport and cancellation; native idle scheduling, planner lifecycle, priority, and cross-process scan leasing remain later |
 | SQLite compatibility store | Checksummed v1/v2/v3/v4 migrations with exact per-version fingerprints, lossless bounded path codec, bounded full/lightweight inspection, private atomic provisioning with durable initialization evidence, cross-platform process writer/version-race coverage, durable writer-locked cleanup-lock layout upgrade, private tri-state process-instance liveness evidence, newer-schema read-only transition, rollback/WAL recovery, engine-integrated scan lifecycle/coverage, atomic exact-snapshot candidate-evaluation batches, typed review state, sealed evaluator invalidation state, claim-preserving atomic planner/journal candidate projection, planned-cleanup history, exact expiry settlement, a bounded cleanup-lock-coupled owner-generation journal state machine, and authorizer-constrained bounded capacity/AI-cache retention are implemented; stored paths, status, and policy remain non-authoritative observations | Planner engine lifecycle and query surfaces, Windows host-scope proof, snapshot/orphan/temp/stage retention, executor integration, hard-process-death scan-row recovery, and bounded identity-safe abandoned-stage maintenance |
-| Capacity sample persistence | Typed raw SQLite-v2 writes and bounded latest/cursor reads are implemented with opaque stable volume IDs, separate ordinary/important availability, hourly routine suppression, immediate stored-pressure transitions, monotonic metadata, storage/schema-gated exact retry reconciliation, volume/sample interval checks, hostile-row validation, version-skew fencing, exact-last-observation UTC daily rollups, 30-day raw retention, and 365-complete-day daily retention; important-only UI observations are not persisted | Swift/engine/FFI/CLI wiring, Rust pressure evaluation/hysteresis, pressure episodes, and engine idle-maintenance orchestration |
+| Capacity sample persistence | Typed raw SQLite-v2 writes and bounded latest/cursor reads are implemented with opaque stable volume IDs, separate ordinary/important availability, hourly routine suppression, immediate stored-pressure transitions, monotonic metadata, storage/schema-gated exact retry reconciliation, volume/sample interval checks, hostile-row validation, version-skew fencing, exact-last-observation UTC daily rollups, 30-day raw retention, and 365-complete-day daily retention; important-only UI observations are not persisted. Core engine maintenance can run one bounded batch only while its session is idle | Swift/engine/FFI/CLI sampling wiring, Rust pressure evaluation/hysteresis, pressure episodes, and native app/FFI idle-periodic scheduling |
 | Binary full-tree snapshot store | Independent v1 wire has bounded pre-allocation, exact graph/path/aggregate/flag semantics, frozen golden digests, SHA-256 references, private marker-owned storage, unique temps, atomic no-replace publication, read-only final handles, database→snapshot lock ordering, version-skew fencing, and exact file-first scan-summary-plus-coverage reconciliation. Durable engine tasks publish only a completed-only fresh-scan converter's lossless canonical DFS nodes and fail-closed hard-link accounting; bytes remain non-authoritative | Explorer/FFI integration, last-complete selection, memory benchmarks, latest-two/2 GiB retention, active-review pins, abandoned-stage/temp maintenance, and native Windows sparse/compressed-allocation verification |
 | Typed scan coverage/issues | Implemented as bounded semantic domain values, authoritative scanner terminal outcomes, engine task results/events, atomic SQLite-v2 summary children, truthful fresh/legacy-cache CLI labels, and changed-hard-link observations; observations grant no plan or cleanup authority | FFI/Swift transport, paged Explorer details, and permission onboarding |
 | Cache semantic/input validation | Atomic write plus CRC/version only; full-file read before bounds | Bounded reads, tree/path semantics, private permissions, retention, and migration |

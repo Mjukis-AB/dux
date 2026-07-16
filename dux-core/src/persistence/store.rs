@@ -864,13 +864,6 @@ impl StoreCoordinator {
     /// Apply one bounded batch of automatic retention to DUX-owned capacity
     /// telemetry and expired AI cache rows. Cleanup, scan, candidate, outcome,
     /// schedule, and settings history are outside the SQL mutation allowlist.
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "the engine background-maintenance task is the next retention slice"
-        )
-    )]
     pub(crate) fn run_history_retention_batch(
         &self,
         observed_at: SystemTime,
@@ -1277,7 +1270,7 @@ impl StoreCoordinator {
     }
 
     #[cfg(test)]
-    pub(super) fn with_connection<T>(&self, inspect: impl FnOnce(&Connection) -> T) -> T {
+    pub(crate) fn with_connection<T>(&self, inspect: impl FnOnce(&Connection) -> T) -> T {
         let connection = self
             .connection
             .lock()

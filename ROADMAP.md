@@ -2508,9 +2508,29 @@ Tasks:
     Exact post-commit reconciliation, newer-schema fencing, boundary,
     idempotence, batch-cap, corruption/rollback, and forbidden-table tests cover
     the private store operation. [`docs/RETENTION.md`](docs/RETENTION.md) is the
-    normative policy. The broad item remains open for engine idle orchestration,
-    latest-two/pinned/2-GiB snapshot retention, orphan/temp/stage maintenance,
-    and explicit user clear-data actions.
+    normative policy.
+  - Engine orchestration sub-checkpoint completed 2026-07-16: the shared engine
+    now exposes one typed, path-free history-maintenance task admitted only at a
+    session-local idle boundary. Closed, duplicate, and busy requests are
+    resolved before SQLite access; eligibility and current-schema compatibility
+    are rechecked before admission. Each task samples its clock on the worker,
+    runs exactly one bounded store batch, reports typed counts and `has_more`,
+    and never self-enqueues a drain loop. Duplicate starts return the exact
+    active task ID, while foreground work returns `DeferredBusy` without
+    allocating a task record.
+
+    Cancellation/close and the `Applying` point of no return are ordered under
+    one registry lock: cancellation that wins performs no mutation, while a
+    request after `Applying` remains truthful intent and cannot rewrite a
+    committed success. Stable failure categories cover clock, schema, budget,
+    contention, storage, corruption, ambiguity, and internal state without
+    exposing paths. Tests cover event order, explicit `has_more` rescheduling,
+    two engine sessions sharing one store, corrupt-row rollback, schema races,
+    cancellation on both sides of the commit, duplicate/idle admission, panic
+    cleanup, and exclusive-marker release. The broad item remains open for
+    app/FFI idle and periodic scheduling, latest-two/pinned/2-GiB snapshot
+    retention, orphan/temp/stage maintenance, and explicit user clear-data
+    actions.
 - [x] Add engine integration tests with temporary HOME and database. Completed
   2026-07-16: an actual `dux-core` engine scans a fixture into an isolated
   platform-correct application-support/cache layout, closes to full worker

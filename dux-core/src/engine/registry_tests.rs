@@ -44,6 +44,40 @@ fn final_snapshot_count(config: &EngineConfig) -> usize {
         .count()
 }
 
+fn started_maintenance(outcome: HistoryMaintenanceStartOutcome) -> TaskId {
+    match outcome {
+        HistoryMaintenanceStartOutcome::Started(id) => id,
+        other => panic!("expected started maintenance, got {other:?}"),
+    }
+}
+
+fn seed_ai_insight(engine: &EngineHandle, id: &str, created_ms: i64, expires_ms: i64) {
+    let mut digest = [0_u8; 32];
+    for (destination, source) in digest.iter_mut().zip(id.as_bytes()) {
+        *destination = *source;
+    }
+    engine.inner.store.with_connection(|connection| {
+        connection
+            .execute(
+                "INSERT INTO ai_insights (
+                    insight_id, input_digest, provider, adapter_version,
+                    model_label, output_schema_version, output_payload,
+                    created_at_unix_ms, expires_at_unix_ms
+                 ) VALUES (?1, ?2, 'engine-test', '1', NULL, 1, x'01', ?3, ?4)",
+                rusqlite::params![id, digest, created_ms, expires_ms],
+            )
+            .unwrap();
+    });
+}
+
+fn ai_insight_count(engine: &EngineHandle) -> i64 {
+    engine.inner.store.with_connection(|connection| {
+        connection
+            .query_row("SELECT count(*) FROM ai_insights", [], |row| row.get(0))
+            .unwrap()
+    })
+}
+
 #[test]
 fn handle_is_send_sync_and_config_is_explicit() {
     fn assert_send_sync<T: Send + Sync>() {}
@@ -170,6 +204,10 @@ fn newer_database_never_provisions_missing_snapshot_storage() {
     std::fs::create_dir(&scan_root).unwrap();
     assert_eq!(
         engine.start_scan(scan_root),
+        Err(StartTaskError::ReadOnlyStore)
+    );
+    assert_eq!(
+        engine.start_history_maintenance(),
         Err(StartTaskError::ReadOnlyStore)
     );
     assert_eq!(
@@ -491,6 +529,488 @@ fn real_format_batch_runs_through_registry_and_publishes_immutable_result() {
             .events
             .iter()
             .any(|event| matches!(event.kind, TaskEventKind::Terminal { .. }))
+    );
+}
+
+#[test]
+fn history_maintenance_runs_one_typed_path_free_batch() {
+    let (_temp, engine) = engine_with_limits(RegistryLimits::testing(1, 2, 4, 8));
+    let observed = SystemTime::UNIX_EPOCH + Duration::from_millis(10_000);
+    seed_ai_insight(&engine, "ai:engine-one", 1, 9_999);
+
+    let id = started_maintenance(engine.start_history_maintenance_at(observed).unwrap());
+    let terminal = wait_terminal(&engine, id);
+    assert_eq!(terminal.kind, TaskKind::HistoryMaintenance);
+    assert_eq!(terminal.phase, TaskPhase::Succeeded);
+    assert!(terminal.result_available);
+    let result = engine.history_maintenance_result(id).unwrap().unwrap();
+    assert_eq!(result.observed_at(), observed);
+    assert_eq!(result.daily_rollups_created(), 0);
+    assert_eq!(result.raw_samples_pruned(), 0);
+    assert_eq!(result.daily_rollups_pruned(), 0);
+    assert_eq!(result.ai_insights_pruned(), 1);
+    assert!(!result.has_more());
+    assert_eq!(ai_insight_count(&engine), 0);
+    assert_eq!(
+        engine.format_size_batch_result(id).unwrap_err(),
+        TaskAccessError::WrongTaskKind
+    );
+    assert_eq!(
+        engine.scan_result(id).unwrap_err(),
+        TaskAccessError::WrongTaskKind
+    );
+
+    let events = engine.task_events(id, 0, 8).unwrap().events;
+    let applying = events
+        .iter()
+        .position(|event| matches!(event.kind, TaskEventKind::HistoryMaintenanceBatchApplying))
+        .unwrap();
+    let finished = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event.kind,
+                TaskEventKind::HistoryMaintenanceBatchFinished {
+                    daily_rollups_created: 0,
+                    raw_samples_pruned: 0,
+                    daily_rollups_pruned: 0,
+                    ai_insights_pruned: 1,
+                    has_more: false,
+                }
+            )
+        })
+        .unwrap();
+    let terminal_event = events
+        .iter()
+        .position(|event| matches!(event.kind, TaskEventKind::Terminal { .. }))
+        .unwrap();
+    assert!(applying < finished && finished < terminal_event);
+}
+
+#[test]
+fn history_maintenance_requires_explicit_idle_rescheduling_for_more_work() {
+    let (_temp, engine) = engine_with_limits(RegistryLimits::testing(1, 2, 4, 8));
+    let observed = SystemTime::UNIX_EPOCH + Duration::from_millis(10_000);
+    for index in 0..17 {
+        seed_ai_insight(&engine, &format!("ai:engine-bounded-{index:02}"), 1, 9_999);
+    }
+
+    let first = started_maintenance(engine.start_history_maintenance_at(observed).unwrap());
+    assert_eq!(wait_terminal(&engine, first).phase, TaskPhase::Succeeded);
+    let first_result = engine.history_maintenance_result(first).unwrap().unwrap();
+    assert_eq!(first_result.ai_insights_pruned(), 16);
+    assert!(first_result.has_more());
+    assert_eq!(ai_insight_count(&engine), 1);
+    assert_eq!(engine.inner.shared.lock_registry_recover().records.len(), 1);
+
+    let second = started_maintenance(engine.start_history_maintenance_at(observed).unwrap());
+    assert_eq!(wait_terminal(&engine, second).phase, TaskPhase::Succeeded);
+    let second_result = engine.history_maintenance_result(second).unwrap().unwrap();
+    assert_eq!(second_result.ai_insights_pruned(), 1);
+    assert!(!second_result.has_more());
+    assert_eq!(ai_insight_count(&engine), 0);
+}
+
+#[test]
+fn history_maintenance_is_safe_across_engine_sessions_sharing_one_store() {
+    let temp = TempDir::new().unwrap();
+    let config = config(&temp);
+    let first_engine =
+        EngineHandle::open_with_limits(config.clone(), RegistryLimits::testing(1, 2, 4, 8))
+            .unwrap();
+    let second_engine =
+        EngineHandle::open_with_limits(config, RegistryLimits::testing(1, 2, 4, 8)).unwrap();
+    let observed = SystemTime::UNIX_EPOCH + Duration::from_millis(10_000);
+    for index in 0..17 {
+        seed_ai_insight(
+            &first_engine,
+            &format!("ai:engine-shared-{index:02}"),
+            1,
+            9_999,
+        );
+    }
+
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let first_ready_tx = ready_tx.clone();
+    let first_release_rx = Arc::new(Mutex::new(release_rx));
+    let second_release_rx = Arc::clone(&first_release_rx);
+    let first = started_maintenance(
+        first_engine
+            .start_history_maintenance_with_test_hooks(
+                observed,
+                move || {
+                    first_ready_tx.send(()).unwrap();
+                    first_release_rx.lock().unwrap().recv().unwrap();
+                },
+                || {},
+            )
+            .unwrap(),
+    );
+    let second = started_maintenance(
+        second_engine
+            .start_history_maintenance_with_test_hooks(
+                observed,
+                move || {
+                    ready_tx.send(()).unwrap();
+                    second_release_rx.lock().unwrap().recv().unwrap();
+                },
+                || {},
+            )
+            .unwrap(),
+    );
+    ready_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    ready_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    release_tx.send(()).unwrap();
+    release_tx.send(()).unwrap();
+
+    assert_eq!(
+        wait_terminal(&first_engine, first).phase,
+        TaskPhase::Succeeded
+    );
+    assert_eq!(
+        wait_terminal(&second_engine, second).phase,
+        TaskPhase::Succeeded
+    );
+    let first_pruned = first_engine
+        .history_maintenance_result(first)
+        .unwrap()
+        .unwrap()
+        .ai_insights_pruned();
+    let second_pruned = second_engine
+        .history_maintenance_result(second)
+        .unwrap()
+        .unwrap()
+        .ai_insights_pruned();
+    assert_eq!(first_pruned + second_pruned, 17);
+    assert_eq!(ai_insight_count(&first_engine), 0);
+}
+
+#[test]
+fn corrupt_history_row_fails_typed_without_partial_mutation() {
+    let (_temp, engine) = engine_with_limits(RegistryLimits::testing(1, 2, 4, 8));
+    let observed = SystemTime::UNIX_EPOCH + Duration::from_millis(10_000);
+    seed_ai_insight(&engine, "ai:engine-corrupt", 1, 9_999);
+    engine.inner.store.with_connection(|connection| {
+        connection
+            .pragma_update(None, "ignore_check_constraints", true)
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE ai_insights SET output_schema_version = 0
+                 WHERE insight_id = 'ai:engine-corrupt'",
+                [],
+            )
+            .unwrap();
+        connection
+            .pragma_update(None, "ignore_check_constraints", false)
+            .unwrap();
+    });
+
+    let id = started_maintenance(engine.start_history_maintenance_at(observed).unwrap());
+    let terminal = wait_terminal(&engine, id);
+    assert_eq!(terminal.phase, TaskPhase::Failed);
+    assert_eq!(
+        terminal.failure,
+        Some(TaskFailureKind::HistoryMaintenance(
+            HistoryMaintenanceFailureKind::CorruptData
+        ))
+    );
+    assert!(!terminal.result_available);
+    assert_eq!(ai_insight_count(&engine), 1);
+}
+
+#[test]
+fn history_maintenance_is_idle_only_and_deduplicated() {
+    let (_temp, engine) = engine_with_limits(RegistryLimits::testing(1, 2, 4, 8));
+    let (foreground_started_tx, foreground_started_rx) = mpsc::channel();
+    let (foreground_release_tx, foreground_release_rx) = mpsc::channel();
+    let foreground = engine
+        .submit_test(Box::new(move |_| {
+            foreground_started_tx.send(()).unwrap();
+            foreground_release_rx.recv().unwrap();
+            WorkOutcome::Succeeded(TaskResult::TestOnly)
+        }))
+        .unwrap();
+    foreground_started_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    let foreground_record_count = engine.inner.shared.lock_registry_recover().records.len();
+    assert_eq!(
+        engine.start_history_maintenance().unwrap(),
+        HistoryMaintenanceStartOutcome::DeferredBusy
+    );
+    assert_eq!(
+        engine.inner.shared.lock_registry_recover().records.len(),
+        foreground_record_count
+    );
+    foreground_release_tx.send(()).unwrap();
+    wait_terminal(&engine, foreground);
+
+    let (maintenance_started_tx, maintenance_started_rx) = mpsc::channel();
+    let (maintenance_release_tx, maintenance_release_rx) = mpsc::channel();
+    let first = started_maintenance(
+        engine
+            .start_history_maintenance_with_test_hooks(
+                SystemTime::UNIX_EPOCH + Duration::from_millis(10_000),
+                move || {
+                    maintenance_started_tx.send(()).unwrap();
+                    maintenance_release_rx.recv().unwrap();
+                },
+                || {},
+            )
+            .unwrap(),
+    );
+    maintenance_started_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    let (store_locked_tx, store_locked_rx) = mpsc::channel();
+    let (store_release_tx, store_release_rx) = mpsc::channel();
+    let store = Arc::clone(&engine.inner.store);
+    let store_holder = std::thread::spawn(move || {
+        store.with_connection(|_| {
+            store_locked_tx.send(()).unwrap();
+            store_release_rx.recv().unwrap();
+        });
+    });
+    store_locked_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    let (duplicate_tx, duplicate_rx) = mpsc::channel();
+    let duplicate_engine = engine.clone();
+    let duplicate_request = std::thread::spawn(move || {
+        duplicate_tx
+            .send(duplicate_engine.start_history_maintenance())
+            .unwrap();
+    });
+    let duplicate = duplicate_rx.recv_timeout(Duration::from_secs(1));
+    store_release_tx.send(()).unwrap();
+    store_holder.join().unwrap();
+    duplicate_request.join().unwrap();
+    assert_eq!(
+        duplicate.unwrap().unwrap(),
+        HistoryMaintenanceStartOutcome::AlreadyActive(first)
+    );
+    assert_eq!(engine.inner.shared.lock_registry_recover().records.len(), 2);
+    maintenance_release_tx.send(()).unwrap();
+    assert_eq!(wait_terminal(&engine, first).phase, TaskPhase::Succeeded);
+}
+
+#[test]
+fn cancellation_before_history_batch_mutates_nothing_and_releases_admission() {
+    let (_temp, engine) = engine_with_limits(RegistryLimits::testing(1, 2, 4, 8));
+    let observed = SystemTime::UNIX_EPOCH + Duration::from_millis(10_000);
+    seed_ai_insight(&engine, "ai:engine-cancel-before", 1, 9_999);
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let id = started_maintenance(
+        engine
+            .start_history_maintenance_with_test_hooks(
+                observed,
+                move || {
+                    started_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                },
+                || {},
+            )
+            .unwrap(),
+    );
+    started_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    assert_eq!(engine.cancel_task(id).unwrap(), CancelOutcome::Requested);
+    release_tx.send(()).unwrap();
+    let terminal = wait_terminal(&engine, id);
+    assert_eq!(terminal.phase, TaskPhase::Cancelled);
+    assert!(!terminal.result_available);
+    assert_eq!(ai_insight_count(&engine), 1);
+    assert!(
+        engine
+            .task_events(id, 0, 8)
+            .unwrap()
+            .events
+            .iter()
+            .all(|event| !matches!(event.kind, TaskEventKind::HistoryMaintenanceBatchApplying))
+    );
+
+    let replacement = started_maintenance(engine.start_history_maintenance_at(observed).unwrap());
+    assert_eq!(
+        wait_terminal(&engine, replacement).phase,
+        TaskPhase::Succeeded
+    );
+    assert_eq!(ai_insight_count(&engine), 0);
+}
+
+#[test]
+fn cancellation_after_history_commit_is_intent_not_a_terminal_rewrite() {
+    let (_temp, engine) = engine_with_limits(RegistryLimits::testing(1, 2, 4, 8));
+    let observed = SystemTime::UNIX_EPOCH + Duration::from_millis(10_000);
+    seed_ai_insight(&engine, "ai:engine-cancel-after", 1, 9_999);
+    let (committed_tx, committed_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let id = started_maintenance(
+        engine
+            .start_history_maintenance_with_test_hooks(
+                observed,
+                || {},
+                move || {
+                    committed_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                },
+            )
+            .unwrap(),
+    );
+    committed_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    assert_eq!(ai_insight_count(&engine), 0);
+    assert_eq!(engine.cancel_task(id).unwrap(), CancelOutcome::Requested);
+    release_tx.send(()).unwrap();
+    let terminal = wait_terminal(&engine, id);
+    assert_eq!(terminal.phase, TaskPhase::Succeeded);
+    assert!(terminal.cancellation_requested);
+    assert_eq!(
+        engine
+            .history_maintenance_result(id)
+            .unwrap()
+            .unwrap()
+            .ai_insights_pruned(),
+        1
+    );
+}
+
+#[test]
+fn schema_upgrade_while_history_task_waits_fails_typed_without_mutation() {
+    let (_temp, engine) = engine_with_limits(RegistryLimits::testing(1, 2, 4, 8));
+    let observed = SystemTime::UNIX_EPOCH + Duration::from_millis(10_000);
+    seed_ai_insight(&engine, "ai:engine-version-race", 1, 9_999);
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let id = started_maintenance(
+        engine
+            .start_history_maintenance_with_test_hooks(
+                observed,
+                move || {
+                    started_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                },
+                || {},
+            )
+            .unwrap(),
+    );
+    started_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    let future = crate::persistence::DATABASE_SCHEMA_VERSION + 1;
+    engine.inner.store.with_connection(|connection| {
+        connection
+            .execute(
+                "INSERT INTO schema_migrations
+                 (version, name, checksum_sha256, applied_at_unix_ms)
+                 VALUES (?1, 'future-maintenance-race', zeroblob(32), 2)",
+                [i64::from(future)],
+            )
+            .unwrap();
+        connection
+            .pragma_update(None, "user_version", future)
+            .unwrap();
+    });
+    assert_eq!(
+        engine.start_history_maintenance().unwrap(),
+        HistoryMaintenanceStartOutcome::AlreadyActive(id)
+    );
+    release_tx.send(()).unwrap();
+
+    let terminal = wait_terminal(&engine, id);
+    assert_eq!(terminal.phase, TaskPhase::Failed);
+    assert_eq!(
+        terminal.failure,
+        Some(TaskFailureKind::HistoryMaintenance(
+            HistoryMaintenanceFailureKind::IncompatibleSchema
+        ))
+    );
+    assert!(!terminal.result_available);
+    assert_eq!(ai_insight_count(&engine), 1);
+}
+
+#[test]
+fn history_maintenance_failure_mapping_is_exhaustive_and_stable() {
+    for (input, expected) in [
+        (
+            HistoryErrorKind::InvalidInput,
+            HistoryMaintenanceFailureKind::InvalidClock,
+        ),
+        (
+            HistoryErrorKind::IncompatibleSchema,
+            HistoryMaintenanceFailureKind::IncompatibleSchema,
+        ),
+        (
+            HistoryErrorKind::QueryLimitExceeded,
+            HistoryMaintenanceFailureKind::BudgetExceeded,
+        ),
+        (HistoryErrorKind::Busy, HistoryMaintenanceFailureKind::Busy),
+        (
+            HistoryErrorKind::UnsafeStorage,
+            HistoryMaintenanceFailureKind::UnsafeStorage,
+        ),
+        (
+            HistoryErrorKind::CorruptData,
+            HistoryMaintenanceFailureKind::CorruptData,
+        ),
+        (
+            HistoryErrorKind::DatabaseUnavailable,
+            HistoryMaintenanceFailureKind::Unavailable,
+        ),
+        (
+            HistoryErrorKind::OutcomeUnknown,
+            HistoryMaintenanceFailureKind::OutcomeUnknown,
+        ),
+        (
+            HistoryErrorKind::InternalState,
+            HistoryMaintenanceFailureKind::InternalState,
+        ),
+        (
+            HistoryErrorKind::AlreadyExists,
+            HistoryMaintenanceFailureKind::InternalState,
+        ),
+        (
+            HistoryErrorKind::NotFound,
+            HistoryMaintenanceFailureKind::InternalState,
+        ),
+        (
+            HistoryErrorKind::InvalidTransition,
+            HistoryMaintenanceFailureKind::InternalState,
+        ),
+    ] {
+        assert_eq!(
+            map_history_maintenance_failure(input),
+            TaskFailureKind::HistoryMaintenance(expected)
+        );
+    }
+}
+
+#[test]
+fn invalid_maintenance_clock_fails_and_panic_releases_exclusive_admission() {
+    let (_temp, engine) = engine_with_limits(RegistryLimits::testing(1, 2, 4, 8));
+    let invalid = started_maintenance(
+        engine
+            .start_history_maintenance_at(SystemTime::UNIX_EPOCH - Duration::from_millis(1))
+            .unwrap(),
+    );
+    let invalid_terminal = wait_terminal(&engine, invalid);
+    assert_eq!(
+        invalid_terminal.failure,
+        Some(TaskFailureKind::HistoryMaintenance(
+            HistoryMaintenanceFailureKind::InvalidClock
+        ))
+    );
+
+    let panicking = started_maintenance(
+        engine
+            .start_history_maintenance_with_test_hooks(
+                SystemTime::UNIX_EPOCH + Duration::from_millis(10_000),
+                || panic!("maintenance hook panic"),
+                || {},
+            )
+            .unwrap(),
+    );
+    assert_eq!(wait_terminal(&engine, panicking).phase, TaskPhase::Failed);
+    let replacement = started_maintenance(
+        engine
+            .start_history_maintenance_at(SystemTime::UNIX_EPOCH + Duration::from_millis(10_000))
+            .unwrap(),
+    );
+    assert_eq!(
+        wait_terminal(&engine, replacement).phase,
+        TaskPhase::Succeeded
     );
 }
 

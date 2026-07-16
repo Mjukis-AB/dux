@@ -54,13 +54,6 @@ mod migrations;
     )
 )]
 mod process_liveness;
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "bounded retention integrates with the engine maintenance task in the next slice"
-    )
-)]
 mod retention;
 mod scan_coverage_history;
 pub(crate) mod snapshot;

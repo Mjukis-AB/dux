@@ -5,6 +5,18 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Added a typed, idle-only engine task for bounded history maintenance. Closed,
+  duplicate, and foreground-busy requests resolve before SQLite access;
+  eligible requests recheck schema and admission before allocating work. Each
+  worker task runs exactly one retention transaction and publishes path-free
+  mutation counts plus `has_more`, leaving later batches to an explicit idle
+  reschedule instead of monopolizing a worker or writer lease. Cancellation and
+  the Applying point of no return are now linearized under the registry lock:
+  an earlier cancellation mutates nothing, while a later request remains intent
+  without falsifying a committed success. Stable typed failures, shared-store
+  multi-session behavior, corruption rollback, schema races, both cancellation
+  sides, duplicate admission, and panic cleanup have focused coverage. Native
+  app/FFI scheduling and snapshot retention remain separate work.
 - Added the first bounded history-retention checkpoint. A private
   current-schema SQLite operation creates completed-day UTC capacity rollups
   from the exact last raw observation, retains raw samples for 30 exact days
@@ -16,7 +28,7 @@ All notable changes to DUX will be documented in this file.
   `has_more`. A mutation authorizer excludes scan, candidate,
   cleanup, rule-outcome, schedule, and settings history; fixed VM/deadline
   budgets and exact post-commit reconciliation make interruption and retry
-  fail closed. Snapshot retention and engine scheduling remain separate work.
+  fail closed. Snapshot retention and native app scheduling remain separate work.
 - Added the first noninteractive shared-engine CLI surfaces: `dux status` and
   `dux history [--limit 1..=200]`, each with explicit `--json`. A bounded,
   path-free core query validates complete scan/coverage records under one

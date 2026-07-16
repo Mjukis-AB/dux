@@ -11,10 +11,11 @@ use super::config::EngineConfig;
 use super::task::{
     CancelOutcome, CandidateEvaluationTaskFailureKind, CandidateEvaluationTaskStatus, CloseOutcome,
     DurableScanCounts, DurableScanCoverage, DurableScanStatus, DurableScanSummary, EngineLifecycle,
-    EngineOpenError, FormatSizeBatchResult, FormattedSizeEntry, RecentScanHistory,
-    ScanHistoryError, ScanRootErrorKind, ScanTaskCounts, ScanTaskResult, ScanTaskStatus,
-    StartTaskError, TaskAccessError, TaskEvent, TaskEventBatch, TaskEventKind, TaskFailureKind,
-    TaskId, TaskKind, TaskPhase, TaskSnapshot,
+    EngineOpenError, FormatSizeBatchResult, FormattedSizeEntry, HistoryMaintenanceFailureKind,
+    HistoryMaintenanceResult, HistoryMaintenanceStartOutcome, RecentScanHistory, ScanHistoryError,
+    ScanRootErrorKind, ScanTaskCounts, ScanTaskResult, ScanTaskStatus, StartTaskError,
+    TaskAccessError, TaskEvent, TaskEventBatch, TaskEventKind, TaskFailureKind, TaskId, TaskKind,
+    TaskPhase, TaskSnapshot,
 };
 use crate::domain::{
     CANDIDATE_CATALOG_SCHEMA_VERSION, CANDIDATE_CATALOG_SHA256, CANDIDATE_CONTEXT_FORMAT_VERSION,
@@ -116,6 +117,7 @@ impl CancellationFlag {
 enum TaskResult {
     FormatSizeBatch(Arc<FormatSizeBatchResult>),
     Scan(Arc<ScanTaskResult>),
+    HistoryMaintenance(Arc<HistoryMaintenanceResult>),
     #[cfg(test)]
     TestOnly,
 }
@@ -185,6 +187,36 @@ impl TaskContext {
         let mut registry = self.shared.lock_registry_recover();
         let event_limit = self.shared.limits.events_per_task;
         if let Some(record) = registry.records.get_mut(&self.id)
+            && !record.phase.is_terminal()
+        {
+            record.push_event(kind, event_limit);
+        }
+    }
+
+    /// Atomically order cancellation against the maintenance point of no
+    /// return. If cancellation wins the registry lock, no transaction starts;
+    /// if this method wins, the Applying event records that later cancellation
+    /// is intent and cannot rewrite a committed outcome.
+    fn try_begin_history_maintenance_batch(&self) -> bool {
+        let mut registry = self.shared.lock_registry_recover();
+        let event_limit = self.shared.limits.events_per_task;
+        if let Some(record) = registry.records.get_mut(&self.id)
+            && record.kind == TaskKind::HistoryMaintenance
+            && record.phase == TaskPhase::Running
+            && !record.cancellation_requested
+        {
+            record.push_event(TaskEventKind::HistoryMaintenanceBatchApplying, event_limit);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn report_history_maintenance_finished(&self, kind: TaskEventKind) {
+        let mut registry = self.shared.lock_registry_recover();
+        let event_limit = self.shared.limits.events_per_task;
+        if let Some(record) = registry.records.get_mut(&self.id)
+            && record.kind == TaskKind::HistoryMaintenance
             && !record.phase.is_terminal()
         {
             record.push_event(kind, event_limit);
@@ -290,6 +322,7 @@ struct Registry {
     running_tasks: usize,
     live_workers: usize,
     active_scan_roots: HashMap<PathBuf, TaskId>,
+    active_history_maintenance: Option<TaskId>,
 }
 
 impl Registry {
@@ -302,6 +335,7 @@ impl Registry {
             running_tasks: 0,
             live_workers: 0,
             active_scan_roots: HashMap::new(),
+            active_history_maintenance: None,
         }
     }
 
@@ -311,6 +345,17 @@ impl Registry {
             if let Some(expired) = self.terminal_order.pop_front() {
                 self.records.remove(&expired);
             }
+        }
+    }
+
+    fn release_task_exclusivity(&mut self, id: TaskId, kind: TaskKind, scan_scope: Option<&Path>) {
+        if let Some(scope) = scan_scope
+            && self.active_scan_roots.get(scope) == Some(&id)
+        {
+            self.active_scan_roots.remove(scope);
+        }
+        if kind == TaskKind::HistoryMaintenance && self.active_history_maintenance == Some(id) {
+            self.active_history_maintenance = None;
         }
     }
 }
@@ -342,10 +387,10 @@ impl Shared {
 
         let queued: Vec<_> = registry.queue.drain(..).map(|job| job.id).collect();
         for id in queued {
-            let scope = registry
+            let identity = registry
                 .records
                 .get(&id)
-                .and_then(|record| record.scan_scope.clone());
+                .map(|record| (record.kind, record.scan_scope.clone()));
             if let Some(record) = registry.records.get_mut(&id) {
                 record.request_cancellation(self.limits.events_per_task);
                 record.phase = TaskPhase::Cancelled;
@@ -356,10 +401,8 @@ impl Shared {
                     self.limits.events_per_task,
                 );
             }
-            if let Some(scope) = scope
-                && registry.active_scan_roots.get(&scope) == Some(&id)
-            {
-                registry.active_scan_roots.remove(&scope);
+            if let Some((kind, scope)) = identity {
+                registry.release_task_exclusivity(id, kind, scope.as_deref());
             }
             registry.retain_terminal(id, self.limits.retained_terminal_tasks);
         }
@@ -595,6 +638,124 @@ impl EngineHandle {
         )
     }
 
+    /// Start one bounded DUX-owned history-maintenance batch. This can roll up
+    /// and prune capacity telemetry and remove expired AI cache rows; it never
+    /// mutates cleanup history or user data. A successful result's `has_more`
+    /// flag lets an idle caller enqueue a later batch without monopolizing a
+    /// worker or writer lease.
+    pub fn start_history_maintenance(
+        &self,
+    ) -> Result<HistoryMaintenanceStartOutcome, StartTaskError> {
+        self.start_history_maintenance_with_hooks(SystemTime::now, || {}, || {})
+    }
+
+    #[cfg(test)]
+    fn start_history_maintenance_at(
+        &self,
+        observed_at: SystemTime,
+    ) -> Result<HistoryMaintenanceStartOutcome, StartTaskError> {
+        self.start_history_maintenance_with_hooks(move || observed_at, || {}, || {})
+    }
+
+    #[cfg(test)]
+    fn start_history_maintenance_with_test_hooks(
+        &self,
+        observed_at: SystemTime,
+        before_batch: impl FnOnce() + Send + 'static,
+        after_batch: impl FnOnce() + Send + 'static,
+    ) -> Result<HistoryMaintenanceStartOutcome, StartTaskError> {
+        self.start_history_maintenance_with_hooks(move || observed_at, before_batch, after_batch)
+    }
+
+    fn start_history_maintenance_with_hooks(
+        &self,
+        clock: impl FnOnce() -> SystemTime + Send + 'static,
+        before_batch: impl FnOnce() + Send + 'static,
+        after_batch: impl FnOnce() + Send + 'static,
+    ) -> Result<HistoryMaintenanceStartOutcome, StartTaskError> {
+        if let Some(outcome) = self.history_maintenance_preflight()? {
+            return Ok(outcome);
+        }
+        let status = self
+            .inner
+            .store
+            .status()
+            .map_err(|_| StartTaskError::PersistenceUnavailable)?;
+        if !matches!(
+            status.access,
+            crate::persistence::DatabaseAccess::ReadWriteCurrent
+        ) {
+            return Err(StartTaskError::ReadOnlyStore);
+        }
+        let store = Arc::clone(&self.inner.store);
+        self.submit_history_maintenance(Box::new(move |context| {
+            if context.is_cancellation_requested() {
+                return WorkOutcome::Cancelled(None);
+            }
+            let observed_at = clock();
+            before_batch();
+            if !context.try_begin_history_maintenance_batch() {
+                return WorkOutcome::Cancelled(None);
+            }
+            match store.run_history_retention_batch(observed_at) {
+                Ok(result) => {
+                    let result = Arc::new(HistoryMaintenanceResult::new(
+                        result.observed_at,
+                        result.daily_rollups_created,
+                        result.raw_samples_pruned,
+                        result.daily_rollups_pruned,
+                        result.ai_insights_pruned,
+                        result.has_more,
+                    ));
+                    // The transaction has committed. Cancellation requested
+                    // from this point onward remains intent and cannot
+                    // truthfully rewrite the successful durable outcome.
+                    after_batch();
+                    context.report_history_maintenance_finished(
+                        TaskEventKind::HistoryMaintenanceBatchFinished {
+                            daily_rollups_created: result.daily_rollups_created(),
+                            raw_samples_pruned: result.raw_samples_pruned(),
+                            daily_rollups_pruned: result.daily_rollups_pruned(),
+                            ai_insights_pruned: result.ai_insights_pruned(),
+                            has_more: result.has_more(),
+                        },
+                    );
+                    WorkOutcome::Succeeded(TaskResult::HistoryMaintenance(result))
+                }
+                Err(error) => {
+                    WorkOutcome::Failed(map_history_maintenance_failure(error.kind), None)
+                }
+            }
+        }))
+    }
+
+    /// Avoid touching SQLite for requests that are already known to be closed,
+    /// duplicate, or non-idle. Submission repeats these checks after the
+    /// compatibility probe so a foreground task cannot race maintenance into
+    /// a stale eligibility decision.
+    fn history_maintenance_preflight(
+        &self,
+    ) -> Result<Option<HistoryMaintenanceStartOutcome>, StartTaskError> {
+        let registry = self
+            .inner
+            .shared
+            .registry
+            .lock()
+            .map_err(|_| StartTaskError::InternalState)?;
+        if registry.lifecycle != EngineLifecycle::Open {
+            return Err(StartTaskError::Closed);
+        }
+        if let Some(existing) = registry.active_history_maintenance {
+            return Ok(Some(HistoryMaintenanceStartOutcome::AlreadyActive(
+                existing,
+            )));
+        }
+        if registry.running_tasks != 0 || !registry.queue.is_empty() {
+            return Ok(Some(HistoryMaintenanceStartOutcome::DeferredBusy));
+        }
+        Ok(None)
+    }
+
     /// Start one full, no-follow, same-filesystem scan. Root validation and
     /// overlapping-scope admission are synchronous; the durable scan ID is
     /// generated only after a worker starts, so queued cancellation leaves no
@@ -745,7 +906,9 @@ impl EngineHandle {
         }
         Ok(match &record.result {
             Some(TaskResult::FormatSizeBatch(result)) => Some(Arc::clone(result)),
-            Some(TaskResult::Scan(_)) => return Err(TaskAccessError::WrongTaskKind),
+            Some(TaskResult::Scan(_) | TaskResult::HistoryMaintenance(_)) => {
+                return Err(TaskAccessError::WrongTaskKind);
+            }
             #[cfg(test)]
             Some(TaskResult::TestOnly) => return Err(TaskAccessError::WrongTaskKind),
             None => None,
@@ -763,7 +926,32 @@ impl EngineHandle {
         }
         Ok(match &record.result {
             Some(TaskResult::Scan(result)) => Some(Arc::clone(result)),
-            Some(TaskResult::FormatSizeBatch(_)) => return Err(TaskAccessError::WrongTaskKind),
+            Some(TaskResult::FormatSizeBatch(_) | TaskResult::HistoryMaintenance(_)) => {
+                return Err(TaskAccessError::WrongTaskKind);
+            }
+            #[cfg(test)]
+            Some(TaskResult::TestOnly) => return Err(TaskAccessError::WrongTaskKind),
+            None => None,
+        })
+    }
+
+    pub fn history_maintenance_result(
+        &self,
+        id: TaskId,
+    ) -> Result<Option<Arc<HistoryMaintenanceResult>>, TaskAccessError> {
+        let registry = self.lock_open_registry()?;
+        let record = registry
+            .records
+            .get(&id)
+            .ok_or(TaskAccessError::UnknownTask)?;
+        if record.kind != TaskKind::HistoryMaintenance {
+            return Err(TaskAccessError::WrongTaskKind);
+        }
+        Ok(match &record.result {
+            Some(TaskResult::HistoryMaintenance(result)) => Some(Arc::clone(result)),
+            Some(TaskResult::FormatSizeBatch(_) | TaskResult::Scan(_)) => {
+                return Err(TaskAccessError::WrongTaskKind);
+            }
             #[cfg(test)]
             Some(TaskResult::TestOnly) => return Err(TaskAccessError::WrongTaskKind),
             None => None,
@@ -793,10 +981,10 @@ impl EngineHandle {
             let position = registry.queue.iter().position(|job| job.id == id);
             if let Some(position) = position {
                 registry.queue.remove(position);
-                let scope = registry
+                let identity = registry
                     .records
                     .get(&id)
-                    .and_then(|record| record.scan_scope.clone());
+                    .map(|record| (record.kind, record.scan_scope.clone()));
                 if let Some(record) = registry.records.get_mut(&id) {
                     record.request_cancellation(event_limit);
                     record.phase = TaskPhase::Cancelled;
@@ -807,10 +995,8 @@ impl EngineHandle {
                         event_limit,
                     );
                 }
-                if let Some(scope) = scope
-                    && registry.active_scan_roots.get(&scope) == Some(&id)
-                {
-                    registry.active_scan_roots.remove(&scope);
+                if let Some((kind, scope)) = identity {
+                    registry.release_task_exclusivity(id, kind, scope.as_deref());
                 }
                 registry.retain_terminal(id, self.inner.shared.limits.retained_terminal_tasks);
                 return Ok(CancelOutcome::CancelledBeforeStart);
@@ -892,6 +1078,42 @@ impl EngineHandle {
         registry.queue.push_back(Job { id, work });
         self.inner.shared.workers_ready.notify_one();
         Ok(id)
+    }
+
+    fn submit_history_maintenance(
+        &self,
+        work: Work,
+    ) -> Result<HistoryMaintenanceStartOutcome, StartTaskError> {
+        let mut registry = self
+            .inner
+            .shared
+            .registry
+            .lock()
+            .map_err(|_| StartTaskError::InternalState)?;
+        if registry.lifecycle != EngineLifecycle::Open {
+            return Err(StartTaskError::Closed);
+        }
+        if let Some(existing) = registry.active_history_maintenance {
+            return Ok(HistoryMaintenanceStartOutcome::AlreadyActive(existing));
+        }
+        // Retention is the lowest-priority engine work. Admit it only at an
+        // observed idle boundary; foreground work submitted afterward may run
+        // concurrently, but cannot be preempted into an in-flight transaction.
+        if registry.running_tasks != 0 || !registry.queue.is_empty() {
+            return Ok(HistoryMaintenanceStartOutcome::DeferredBusy);
+        }
+        let id = TASK_IDS.allocate()?;
+        let record = TaskRecord::new(
+            id,
+            TaskKind::HistoryMaintenance,
+            None,
+            self.inner.shared.limits.events_per_task,
+        );
+        registry.active_history_maintenance = Some(id);
+        registry.records.insert(id, record);
+        registry.queue.push_back(Job { id, work });
+        self.inner.shared.workers_ready.notify_one();
+        Ok(HistoryMaintenanceStartOutcome::Started(id))
     }
 
     fn lock_open_registry(&self) -> Result<std::sync::MutexGuard<'_, Registry>, TaskAccessError> {
@@ -1249,6 +1471,24 @@ const fn map_scan_history_error(kind: HistoryErrorKind) -> ScanHistoryError {
     }
 }
 
+const fn map_history_maintenance_failure(kind: HistoryErrorKind) -> TaskFailureKind {
+    let kind = match kind {
+        HistoryErrorKind::InvalidInput => HistoryMaintenanceFailureKind::InvalidClock,
+        HistoryErrorKind::IncompatibleSchema => HistoryMaintenanceFailureKind::IncompatibleSchema,
+        HistoryErrorKind::QueryLimitExceeded => HistoryMaintenanceFailureKind::BudgetExceeded,
+        HistoryErrorKind::Busy => HistoryMaintenanceFailureKind::Busy,
+        HistoryErrorKind::UnsafeStorage => HistoryMaintenanceFailureKind::UnsafeStorage,
+        HistoryErrorKind::CorruptData => HistoryMaintenanceFailureKind::CorruptData,
+        HistoryErrorKind::DatabaseUnavailable => HistoryMaintenanceFailureKind::Unavailable,
+        HistoryErrorKind::OutcomeUnknown => HistoryMaintenanceFailureKind::OutcomeUnknown,
+        HistoryErrorKind::AlreadyExists
+        | HistoryErrorKind::NotFound
+        | HistoryErrorKind::InvalidTransition
+        | HistoryErrorKind::InternalState => HistoryMaintenanceFailureKind::InternalState,
+    };
+    TaskFailureKind::HistoryMaintenance(kind)
+}
+
 const fn public_candidate_evaluation_failure(
     kind: CandidateEvaluationFailureKind,
 ) -> CandidateEvaluationTaskFailureKind {
@@ -1514,6 +1754,7 @@ fn finish_job(
         return;
     };
     let scan_scope = record.scan_scope.clone();
+    let kind = record.kind;
     record.scan_cancellation = None;
     record.result = None;
     record.failure = None;
@@ -1540,11 +1781,7 @@ fn finish_job(
     }
     let phase = record.phase;
     record.push_event(TaskEventKind::Terminal { phase }, event_limit);
-    if let Some(scope) = scan_scope
-        && registry.active_scan_roots.get(&scope) == Some(&id)
-    {
-        registry.active_scan_roots.remove(&scope);
-    }
+    registry.release_task_exclusivity(id, kind, scan_scope.as_deref());
     registry.running_tasks = registry.running_tasks.saturating_sub(1);
     registry.retain_terminal(id, shared.limits.retained_terminal_tasks);
     shared.lifecycle_changed.notify_all();
