@@ -5,6 +5,17 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Added a crate-private, versioned process-instance identity and tri-state
+  liveness probe as a prerequisite for cleanup-journal recovery. The bounded
+  128-byte owner representation binds PID and OS start time to a hashed macOS
+  boot-session or Linux boot/PID-namespace scope plus a random claim nonce.
+  Only a same-scope absence or start-token change is `DefinitelyGone`; changed
+  scope, malformed/partial OS evidence, permissions, and unsupported host proof
+  are `Unknown`. Windows can prove an exact live match through a retained
+  process handle but deliberately cannot prove death until a reliable host
+  scope exists. Native subprocess tests cover live owners plus graceful and
+  abrupt death. This checkpoint changes no journal state and grants no cleanup,
+  recovery, plan, or effect authority.
 - Added a crate-private, permanent store-wide cleanup-effect lock distinct from
   SQLite's writer lock. Existing owned stores provision the exact private
   control file only while holding the writer lock. It flushes the lock and

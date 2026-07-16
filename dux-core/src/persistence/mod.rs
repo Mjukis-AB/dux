@@ -36,6 +36,14 @@ mod codec;
 )]
 mod history;
 mod migrations;
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "process-instance liveness is consumed by the next fenced journal-transition slice"
+    )
+)]
+mod process_liveness;
 mod status;
 mod storage;
 mod store;

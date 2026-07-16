@@ -2016,9 +2016,32 @@ Tasks:
     owner death, writer-lock independence, and native Windows replacement denial
     for all retained controls. The guard proves only
     exclusion and has no plan, journal, owner, target, recovery, or effect
-    capability. Process-instance liveness proof and owner-generation-fenced
-    journal transitions remain the next cleanup slice; heartbeat age alone
-    still cannot authorize recovery while an old worker could mutate.
+    capability. The following liveness checkpoint is still required before any
+    owner-generation-fenced transition can use this exclusion primitive.
+  - Process-instance liveness sub-checkpoint completed 2026-07-16: a private,
+    strict, versioned owner identity fits the existing 128-byte journal field
+    and combines platform, PID, OS process-start token, a 128-bit random claim
+    nonce, and a SHA-256-scoped macOS boot session or Linux boot/PID namespace.
+    The nonce distinguishes claims but is never liveness evidence. The probe
+    returns `Alive`, `DefinitelyGone`, or `Unknown` rather than a boolean;
+    only matching reliable scope plus an absent PID or changed start token can
+    prove the old instance gone. Scope changes, partial/malformed OS data,
+    permission failures, unsupported platforms, and every other ambiguity stay
+    `Unknown`, so a database observed from another host cannot be recovered by
+    consulting that host's PID table. Windows retains a queried process handle
+    across creation-time and zero-time wait checks and can prove an exact live
+    match, but intentionally reports non-live observations as `Unknown` until
+    DUX has a reliable Windows host/boot scope. Pure regressions cover canonical
+    encoding, malformed and maximum-width fields, PID reuse, scope mismatch,
+    and unscoped behavior; native macOS/Linux subprocess coverage proves live,
+    graceful-death, and abrupt-death classification. The module is not exposed
+    through engine, FFI, CLI, Swift, AI, or cleanup execution and performs no
+    journal writes. Cleanup-lock-coupled owner/generation compare-and-set
+    transitions are the next slice; heartbeat age alone still cannot authorize
+    recovery while an old worker could mutate. Because the current scope folds
+    boot and host evidence together, a reboot also yields `Unknown`; recovery
+    across reboot needs separate stable local-host provenance and must not be
+    claimed by the next same-boot fencing slice.
 - [ ] Keep binary snapshots atomic and checksummed.
 - [ ] Add capacity sample storage.
 - [ ] Add typed scan coverage/issues.

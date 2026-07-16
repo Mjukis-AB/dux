@@ -18,6 +18,9 @@ use super::migrations::{
     panic_with_test_budget, schema_fingerprint, test_migrations, test_v1_schema_fingerprint,
     test_v2_schema_fingerprint, validate_compiled_migrations,
 };
+use super::process_liveness::current_process_instance;
+#[cfg(unix)]
+use super::process_liveness::{ProcessInstanceId, ProcessLiveness, probe_process_instance};
 use super::storage::SecureStorePaths;
 use super::*;
 
@@ -109,12 +112,16 @@ fn helper_path(name: &str) -> PathBuf {
 }
 
 fn publish_handshake(path: &Path) {
+    publish_bytes(path, b"ready");
+}
+
+fn publish_bytes(path: &Path, bytes: &[u8]) {
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(path)
         .unwrap();
-    file.write_all(b"ready").unwrap();
+    file.write_all(bytes).unwrap();
     file.sync_all().unwrap();
 }
 
@@ -293,6 +300,16 @@ fn helper_hold_cleanup_lock() {
     paths.validate_cleanup_lock_guard(&guard).unwrap();
 }
 
+fn helper_hold_process_instance() {
+    let identity_path = helper_path("DUX_PERSISTENCE_IDENTITY");
+    let ready = helper_path("DUX_PERSISTENCE_READY");
+    let release = helper_path("DUX_PERSISTENCE_RELEASE");
+    let identity = current_process_instance().unwrap();
+    publish_bytes(&identity_path, identity.as_str().as_bytes());
+    publish_handshake(&ready);
+    wait_for_handshake(&release);
+}
+
 #[test]
 #[ignore = "launched by the process-boundary persistence regressions"]
 fn sqlite_subprocess_helper() {
@@ -307,6 +324,7 @@ fn sqlite_subprocess_helper() {
         "upgrade-under-writer-lock" => helper_upgrade_while_holding_writer_lock(),
         "open-after-writer-lock-race" => helper_open_after_writer_lock_race(),
         "hold-cleanup-lock" => helper_hold_cleanup_lock(),
+        "hold-process-instance" => helper_hold_process_instance(),
         _ => panic!("unknown persistence helper mode"),
     }
 }
@@ -1487,6 +1505,40 @@ fn cleanup_lock_is_released_after_abrupt_process_death() {
     let paths = SecureStorePaths::prepare(&path).unwrap();
     let guard = paths.acquire_cleanup_lock(SUBPROCESS_TIMEOUT).unwrap();
     paths.validate_cleanup_lock_guard(&guard).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn process_instance_liveness_tracks_graceful_and_abrupt_death() {
+    for abrupt in [false, true] {
+        let temp = TempDir::new().unwrap();
+        let identity_path = temp.path().join("process-owner-identity");
+        let ready = temp.path().join("process-owner-ready");
+        let release = temp.path().join("process-owner-release");
+        let mut child = spawn_persistence_helper(
+            "hold-process-instance",
+            &[
+                ("DUX_PERSISTENCE_IDENTITY", &identity_path),
+                ("DUX_PERSISTENCE_READY", &ready),
+                ("DUX_PERSISTENCE_RELEASE", &release),
+            ],
+        );
+        wait_for_child_handshake(&mut child, &ready);
+        let encoded = std::fs::read_to_string(&identity_path).unwrap();
+        let identity = ProcessInstanceId::from_stored(&encoded).unwrap();
+        assert_eq!(probe_process_instance(&identity), ProcessLiveness::Alive);
+
+        if abrupt {
+            child.terminate_without_unwinding();
+        } else {
+            publish_handshake(&release);
+            child.wait_for_success();
+        }
+        assert_eq!(
+            probe_process_instance(&identity),
+            ProcessLiveness::DefinitelyGone
+        );
+    }
 }
 
 #[test]

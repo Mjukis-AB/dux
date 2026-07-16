@@ -428,6 +428,27 @@ wall-clock lease expiry. Recovery additionally requires process-instance
 liveness evidence proving the previous owner is definitely gone; PID alone,
 heartbeat age, lock age, and unknown liveness are insufficient.
 
+The implemented private liveness prerequisite uses a strict versioned owner
+identity no longer than the schema's 128-byte bound. It binds PID and the OS
+process-start token to a random claim nonce and, where reliable, a hashed boot
+or namespace scope. The nonce prevents accidental claim reuse but is never
+liveness evidence. A tri-state probe reports `Alive`, `DefinitelyGone`, or
+`Unknown`; only a same-scope absence or changed start token can prove death.
+Foreign/changed scope, malformed or partial platform data, permission failure,
+and unsupported proof remain `Unknown`. macOS uses its boot-session UUID plus
+`proc_pidinfo`; Linux uses boot ID plus the current PID-namespace identity and
+`/proc/<pid>/stat`. Windows retains a process handle across creation-time and
+nonblocking exit checks, but without a reliable host/boot scope it can prove
+only an exact live match and otherwise returns `Unknown`. The codec and probe
+are crate-private evidence only: they do not read heartbeat age, mutate a
+journal, claim a generation, obtain the cleanup lock, or authorize recovery or
+an effect.
+
+Because the current scoped token intentionally does not expose separate stable
+host provenance, a reboot changes scope and remains `Unknown`, just like a
+foreign host. Same-boot process death can feed the later fenced state machine;
+cross-reboot recovery requires an additional trusted local-host witness.
+
 The implemented storage primitive retains one exact private
 `<database>.cleanup.lock` separately from the SQLite writer marker. A
 filesystem-first upgrade flushes the lock and `.cleanup.lock.ready` control
@@ -880,6 +901,17 @@ Same-process and subprocess tests prove bounded contention and release; native
 Windows handles deny delete sharing to prevent path replacement. No history,
 FFI, CLI, Swift, AI, plan, or effect API can obtain this guard yet.
 
+The separate process-instance module supplies only the liveness evidence
+described in §6.7. Its native Unix subprocess regressions distinguish an exact
+live owner from both graceful and abrupt death in one reliable boot scope;
+pure tests keep PID reuse, scope mismatch, malformed identities, and Windows'
+unscoped non-live observations fail closed. It is not yet coupled to the lock
+or stored cleanup owners. The next journal API must acquire and revalidate the
+cleanup guard first, then compare-and-set the exact owner and generation in a
+short transaction; `Alive` and `Unknown` must leave the journal unchanged.
+That first transition API must remain same-boot only; it cannot interpret a
+changed scope as proof of reboot until stable host provenance is implemented.
+
 Compatibility inspection and migration have both SQLite-VM-operation ceilings
 and deadlines sampled every 1,000 VM operations by SQLite's progress callback.
 Schema/ledger storage types and byte lengths are checked before Rust
@@ -1217,12 +1249,12 @@ incident as a substitute for deterministic local evidence.
 | Legacy CLI deletion | Active arbitrary-descendant permanent path routed through a temporary core adapter; strict-target/volume/identity rechecks only; scanned-byte estimates labeled in CLI | Replace adapter with reviewed plan/approval/executor chain without weakening current checks |
 | Centralized executor | Production executor absent; temporary legacy adapter is containment only | Typed admission, cross-process lease, live revalidation, and journal required |
 | Engine/FFI task and plan API | Core handle, pre-worker SQLite compatibility handshake, and bounded per-session registry implemented for one read-only formatting batch; app architecture owns one session; UniFFI handle remains smoke-only, with no scan/task/plan DTOs or cleanup authority | FFI version rejection plus bounded scan/task/plan handles and cancellation |
-| SQLite compatibility store | Checksummed v1/v2 migrations with exact per-version fingerprints, lossless bounded path codec, bounded full/lightweight inspection, private atomic provisioning with durable initialization evidence, cross-platform process writer/version-race coverage, durable writer-locked cleanup-lock layout upgrade, newer-schema read-only transition, rollback/WAL recovery, crate-private typed scan and candidate history, explicit legacy summaries, and atomic bounded planned-cleanup insert/exact-ID load are implemented; stored paths and policy remain non-authoritative observations | Scan/evaluator/planner lifecycle integration, candidate status lifecycle, cleanup execution-state CRUD with ordinal and owner-generation validation, retention, reconciliation, and bounded identity-safe abandoned-stage maintenance |
+| SQLite compatibility store | Checksummed v1/v2 migrations with exact per-version fingerprints, lossless bounded path codec, bounded full/lightweight inspection, private atomic provisioning with durable initialization evidence, cross-platform process writer/version-race coverage, durable writer-locked cleanup-lock layout upgrade, private tri-state process-instance liveness evidence, newer-schema read-only transition, rollback/WAL recovery, crate-private typed scan and candidate history, explicit legacy summaries, and atomic bounded planned-cleanup insert/exact-ID load are implemented; stored paths and policy remain non-authoritative observations | Scan/evaluator/planner lifecycle integration, candidate status lifecycle, cleanup execution-state CRUD with ordinal and owner-generation validation, Windows host-scope proof, retention, reconciliation, and bounded identity-safe abandoned-stage maintenance |
 | Typed scan coverage/issues | Absent; current scanner counts/skips and permits relaxed flags | Required before any scan is described as complete or becomes plan input |
 | Cache semantic/input validation | Atomic write plus CRC/version only; full-file read before bounds | Bounded reads, tree/path semantics, private permissions, retention, and migration |
 | Hard-link accounting and policy | Absent; only non-authoritative path snapshots capture link count | Deduplicated scan accounting and explicit per-mode admission rules |
 | Forbidden destructive-call lint | Implemented with compiler-resolved Rust denial, cross-language repository scan, scoped annotations, self-tests, and CI | Keep exception set exact; remove legacy baseline during executor migration |
-| Durable operation journal/history | Schema plus typed immutable `planned` insert/load and a separate permanent store-wide cleanup OS lock are implemented; the lock has no history/plan/effect authority and there is no execution owner, transition, lease coupling, or reconciliation | Process-instance liveness, fenced state machine, crash reconciliation, and executor integration required before shared executor ships |
+| Durable operation journal/history | Schema plus typed immutable `planned` insert/load, a separate permanent store-wide cleanup OS lock, and private tri-state process-instance evidence are implemented; neither lock nor liveness has history/plan/effect authority and there is no execution owner, transition, lease coupling, or reconciliation | Cleanup-lock-coupled owner/generation fenced state machine, Windows host-scope proof, crash reconciliation, and executor integration required before shared executor ships |
 | Private 0700/0600 stores | SQLite stage/final root, database, marker, and sidecars enforce ownership, no-follow identity, links, and Unix modes; macOS rejects final-object ACLs but accepts deny-only publication-parent ACLs; Windows uses exact protected DACLs plus handle-bound publication and a retained final-root rename guard; current binary cache remains non-private | Extend equivalent ownership and atomic-publication guarantees to snapshots, caches, logs, provider temp data, and bounded abandoned-stage maintenance |
 | Trash executor | Absent | Platform-native implementation and integration tests |
 | Cloud eviction | Absent | Supported API plus fully-uploaded/no-local-change evidence |
