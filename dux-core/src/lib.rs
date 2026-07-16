@@ -29,10 +29,10 @@ pub use cache::{
 pub use domain::{
     ActivityGuard, BlockReason, CLEANUP_PLAN_VALIDITY, Candidate, CandidateAction,
     CandidateCategory, CandidateId, CandidateValidationError, CleanupMode, CleanupPlan,
-    CleanupPlanId, CleanupPlanItem, CleanupPlanValidationError, Evidence, EvidenceKind,
-    LocalizedTextKey, OperationStatus, PlanWarning, ProvenanceUrl, Rule, RuleDefinition,
-    RuleGuards, RuleId, RuleMatcher, RuleMatcherDefinition, RuleRef, RuleRevision, RuleScope,
-    RuleValidationError, SafetyTier, ScanId, StableIdError,
+    CleanupPlanId, CleanupPlanItem, CleanupPlanValidationError, DiskPressure, Evidence,
+    EvidenceKind, LocalizedTextKey, OperationStatus, PlanWarning, ProvenanceUrl, Rule,
+    RuleDefinition, RuleGuards, RuleId, RuleMatcher, RuleMatcherDefinition, RuleRef, RuleRevision,
+    RuleScope, RuleValidationError, SafetyTier, ScanId, StableIdError, VolumeId,
 };
 pub use engine::{
     CancelOutcome, CloseOutcome, EngineConfig, EngineConfigError, EngineConfigField,

@@ -802,6 +802,32 @@ atomic no-replace publication; published handles are reopened read-only by
 exact identity. The legacy cache still uses CRC. Both checks detect accidental
 corruption, not authenticity or confidentiality.
 
+Raw capacity history is non-authoritative local telemetry inside that SQLite
+boundary. Its stable volume ID is supplied as opaque evidence and is never
+derived from mutable mount paths, display names, or filesystem labels. The
+typed writer accepts only a positive SQLite-representable total, required
+ordinary available capacity, optional important-usage available capacity,
+bounded metadata, a losslessly encoded absolute mount path, and a canonical
+nonnegative millisecond timestamp. Ordinary and important-usage availability
+remain distinct and each is bounded by total capacity. If the UI can obtain
+important-usage capacity but not ordinary availability, that observation is
+shown ephemerally and is not persisted; DUX does not invent ordinary capacity
+to make a row fit.
+
+Capacity writes use the same connection-mutex → cross-process writer and
+current-schema lease → immediate-transaction order as other history. Volume
+metadata advances only with a non-stale observation. The persistence layer
+stores at most one routine raw sample per UTC hour but records a genuine change
+from the latest stored pressure immediately. A same-key retry is idempotent
+only after retained storage and the current schema revalidate, every sample fact
+matches, and its timestamp remains inside the volume's first/last-seen interval,
+including after an ambiguous commit. Differing collisions and out-of-order
+samples fail closed. Latest and cursor history queries have fixed page, SQLite-
+operation, and elapsed-time limits and validate storage classes, byte lengths,
+enum values, paths, times, volume-observation bounds, and integer ranges before
+returning data. These observations do not prove filesystem identity, scanned
+coverage, cleanup safety, or bytes freed.
+
 The implemented SQLite boundary provisions a previously absent DUX directory
 in an unpredictable private sibling stage. It creates and durably writes a
 fixed-length, versioned ownership marker plus an empty database before atomically publishing the
@@ -1020,6 +1046,11 @@ constrained kinds so retention cannot infer a sample's lifetime from timestamp
 shape. Scan coverage likewise records a constrained status separately from its
 optional quantitative estimate: unknown coverage remains `NULL`, never a
 misleading zero, while complete coverage is exactly 1000 permille.
+
+Only typed raw-sample persistence exists today. Daily-rollup creation, the
+30-day raw and one-year rollup deletion policies, pressure episodes, and all
+retention execution remain unimplemented; no current write path may claim that
+the documented retention windows are enforced.
 
 Clearing DUX data removes only DUX-owned stores after the same storage-root and
 symlink checks. It does not empty system Trash, provider caches, or user data.
@@ -1313,6 +1344,7 @@ incident as a substitute for deterministic local evidence.
 | Centralized executor | Production executor absent; temporary legacy adapter is containment only | Typed admission, integration with the existing cross-process lease/journal, and live target revalidation required |
 | Engine/FFI task and plan API | Core handle, pre-worker SQLite compatibility handshake, and bounded per-session registry implemented for one read-only formatting batch; app architecture owns one session; UniFFI handle remains smoke-only, with no scan/task/plan DTOs or cleanup authority | FFI version rejection plus bounded scan/task/plan handles and cancellation |
 | SQLite compatibility store | Checksummed v1/v2 migrations with exact per-version fingerprints, lossless bounded path codec, bounded full/lightweight inspection, private atomic provisioning with durable initialization evidence, cross-platform process writer/version-race coverage, durable writer-locked cleanup-lock layout upgrade, private tri-state process-instance liveness evidence, newer-schema read-only transition, rollback/WAL recovery, crate-private typed scan/candidate/planned-cleanup history, and a bounded cleanup-lock-coupled owner-generation journal state machine are implemented; stored paths and policy remain non-authoritative observations | Scan/evaluator/planner lifecycle integration, candidate status lifecycle, Windows host-scope proof, retention, executor integration, and bounded identity-safe abandoned-stage maintenance |
+| Capacity sample persistence | Typed raw SQLite-v2 writes and bounded latest/cursor reads are implemented with opaque stable volume IDs, separate ordinary/important availability, hourly routine suppression, immediate stored-pressure transitions, monotonic metadata, storage/schema-gated exact retry reconciliation, volume/sample interval checks, hostile-row validation, and version-skew fencing; important-only UI observations are not persisted | Swift/engine/FFI/CLI wiring, Rust pressure evaluation/hysteresis, daily rollups, pressure episodes, and retention |
 | Binary full-tree snapshot store | Independent v1 wire has bounded pre-allocation, exact graph/path/aggregate/flag semantics, frozen golden digests, SHA-256 references, private marker-owned storage, unique temps, atomic no-replace publication, read-only final handles, database→snapshot lock ordering, version-skew fencing, and exact file-first scan-summary reconciliation; bytes remain non-authoritative | Real scan-task/Explorer integration, last-complete selection, typed coverage/issues, memory benchmarks, latest-two/2 GiB retention, active-review pins, and abandoned-stage/temp maintenance |
 | Typed scan coverage/issues | Absent; current scanner counts/skips and permits relaxed flags | Required before any scan is described as complete or becomes plan input |
 | Cache semantic/input validation | Atomic write plus CRC/version only; full-file read before bounds | Bounded reads, tree/path semantics, private permissions, retention, and migration |

@@ -17,6 +17,7 @@ mod rule;
     )
 )]
 mod rule_document;
+mod volume;
 
 #[cfg(test)]
 pub(crate) use candidate::CandidateInput;
@@ -27,10 +28,11 @@ pub use cleanup_plan::{
 };
 pub use id::{
     CandidateId, CleanupPlanId, LocalizedTextKey, RuleId, RuleRef, RuleRevision, ScanId,
-    StableIdError,
+    StableIdError, VolumeId,
 };
 pub use policy::{CandidateAction, CandidateCategory, SafetyTier};
 pub use rule::{
     ActivityGuard, ProvenanceUrl, Rule, RuleDefinition, RuleGuards, RuleMatcher,
     RuleMatcherDefinition, RuleScope, RuleValidationError,
 };
+pub use volume::DiskPressure;

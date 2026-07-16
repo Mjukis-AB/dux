@@ -112,6 +112,7 @@ macro_rules! token_id {
 token_id!(CandidateId, "candidate ID");
 token_id!(CleanupPlanId, "cleanup plan ID");
 token_id!(ScanId, "scan ID");
+token_id!(VolumeId, "volume ID");
 
 macro_rules! dotted_id {
     ($name:ident, $kind:literal) => {
@@ -240,6 +241,8 @@ mod tests {
         assert!(CleanupPlanId::new("x".repeat(MAX_ID_BYTES + 1)).is_err());
         assert!(ScanId::new("scan one").is_err());
         assert!(ScanId::new("x".repeat(MAX_ID_BYTES + 1)).is_err());
+        assert!(VolumeId::new("volume:apfs-123").is_ok());
+        assert!(VolumeId::new("volume one").is_err());
     }
 
     #[test]

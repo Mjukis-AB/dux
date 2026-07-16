@@ -15,6 +15,14 @@ mod candidate_history;
     not(test),
     allow(
         dead_code,
+        reason = "typed capacity persistence integrates with the volume monitor in a later slice"
+    )
+)]
+mod capacity_history;
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
         reason = "typed cleanup history is integrated by the later planner/executor slices"
     )
 )]

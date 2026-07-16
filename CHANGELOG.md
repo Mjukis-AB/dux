@@ -5,6 +5,21 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Added typed raw capacity history on the existing SQLite v2 schema. Public
+  opaque volume IDs and pressure labels feed a crate-private persistence layer
+  that keeps required ordinary availability separate from optional
+  important-usage availability, validates positive bounded capacity facts and
+  lossless absolute mount observations, and never derives stable identity from
+  mutable volume metadata. A single current-schema, cross-process-serialized
+  transaction applies monotonic volume metadata, suppresses routine samples
+  after one per UTC hour, and immediately records actual stored-pressure
+  transitions. Exact collisions and ambiguous commits are reconciled only after
+  retained-storage/current-schema revalidation and a complete fact plus volume-
+  interval match; bounded latest/cursor reads reject hostile rows before
+  returning typed observations. Important-only UI samples are intentionally
+  not persisted because ordinary availability is not fabricated. Swift/engine/
+  FFI/CLI wiring, pressure evaluation, daily rollups, pressure episodes, and
+  retention remain separate work.
 - Added a crate-private immutable application snapshot subsystem separate from
   the legacy CLI cache. Its frozen v1 depth-first wire preserves lossless host
   names, exact graph and aggregate semantics, optional times and Unix identity,

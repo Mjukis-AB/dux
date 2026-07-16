@@ -11,6 +11,12 @@ use super::candidate_history::{
     NewCandidateRecord, PreparedCandidate, StoredCandidateRecord, insert_candidate,
     load_candidate_record,
 };
+use super::capacity_history::{
+    CapacityPage, CapacityPageCursor, CapacityWriteOutcome, CapacityWriteReason,
+    PreparedCapacitySample, RawCapacitySample, StoredCapacitySample, exact_raw_and_volume_match,
+    exact_volume_observation_match, load_latest_raw_capacity_sample, load_raw_capacity_page,
+    validate_capacity_volume, write_raw_capacity_sample,
+};
 use super::cleanup_history::{
     CleanupSessionId, NewCleanupSessionRecord, PreparedCleanupSession, StoredCleanupSessionRecord,
     insert_cleanup_session, load_cleanup_session_record,
@@ -251,6 +257,136 @@ impl StoreCoordinator {
             .validate_all_existing()
             .and_then(|()| self.paths.sqlite_path())
             .map_err(map_history_database_error)
+    }
+
+    /// Persist one raw capacity observation after applying cross-process
+    /// cadence admission. Capacity facts are telemetry only and never cleanup
+    /// authority.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "capacity persistence integrates with the volume monitor in a later slice"
+        )
+    )]
+    pub(crate) fn record_raw_capacity_sample(
+        &self,
+        sample: &RawCapacitySample,
+        reason: CapacityWriteReason,
+    ) -> Result<CapacityWriteOutcome, HistoryError> {
+        self.record_raw_capacity_sample_with_hook(sample, reason, || Ok(()))
+    }
+
+    fn record_raw_capacity_sample_with_hook(
+        &self,
+        sample: &RawCapacitySample,
+        reason: CapacityWriteReason,
+        after_commit: impl FnOnce() -> Result<(), HistoryError>,
+    ) -> Result<CapacityWriteOutcome, HistoryError> {
+        let prepared = PreparedCapacitySample::prepare(sample)?;
+        let mut guard = self.lock_current_history_connection()?;
+        let mut attempted_outcome = None;
+        let attempt = (|| {
+            let transaction = guard
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(map_write_sql_error)?;
+            let outcome = write_raw_capacity_sample(&transaction, &prepared, reason)?;
+            attempted_outcome = Some(outcome);
+            transaction.commit().map_err(map_write_sql_error)?;
+            after_commit()?;
+            self.revalidate_current_history_guard(&guard)?;
+            Ok(outcome)
+        })();
+        let failure = match attempt {
+            Ok(outcome) => return Ok(outcome),
+            Err(error) => error,
+        };
+
+        let Some(attempted_outcome) = attempted_outcome else {
+            return Err(failure);
+        };
+        if self.revalidate_current_history_guard(&guard).is_err() {
+            return Err(HistoryError::new(HistoryErrorKind::OutcomeUnknown));
+        }
+        let reconciled = match attempted_outcome {
+            CapacityWriteOutcome::Inserted | CapacityWriteOutcome::ExistingExact => {
+                exact_raw_and_volume_match(&guard.connection, &prepared)
+            }
+            CapacityWriteOutcome::Suppressed => {
+                exact_volume_observation_match(&guard.connection, &prepared)
+            }
+        };
+        match reconciled {
+            Ok(true) => Ok(attempted_outcome),
+            Ok(false) => Err(failure),
+            Err(_) => Err(HistoryError::new(HistoryErrorKind::OutcomeUnknown)),
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn record_raw_capacity_sample_after_commit_failure_for_test(
+        &self,
+        sample: &RawCapacitySample,
+        reason: CapacityWriteReason,
+    ) -> Result<CapacityWriteOutcome, HistoryError> {
+        self.record_raw_capacity_sample_with_hook(sample, reason, || {
+            Err(HistoryError::new(HistoryErrorKind::DatabaseUnavailable))
+        })
+    }
+
+    #[cfg(all(test, unix))]
+    pub(super) fn record_raw_capacity_sample_with_after_commit_hook_for_test(
+        &self,
+        sample: &RawCapacitySample,
+        reason: CapacityWriteReason,
+        after_commit: impl FnOnce() -> Result<(), HistoryError>,
+    ) -> Result<CapacityWriteOutcome, HistoryError> {
+        self.record_raw_capacity_sample_with_hook(sample, reason, after_commit)
+    }
+
+    /// Load the newest raw capacity observation for one stable volume.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "capacity history integrates with app status in a later slice"
+        )
+    )]
+    pub(crate) fn load_latest_raw_capacity_sample(
+        &self,
+        volume_id: &crate::domain::VolumeId,
+    ) -> Result<Option<StoredCapacitySample>, HistoryError> {
+        let guard = self.lock_current_history_connection()?;
+        let sample = load_latest_raw_capacity_sample(&guard.connection, volume_id)?;
+        let has_volume = validate_capacity_volume(&guard.connection, volume_id, sample.as_slice())?;
+        if sample.is_some() && !has_volume {
+            return Err(HistoryError::new(HistoryErrorKind::CorruptData));
+        }
+        Ok(sample)
+    }
+
+    /// Load one deterministic descending page of raw observations.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "capacity charts integrate with app history in a later slice"
+        )
+    )]
+    pub(crate) fn load_raw_capacity_page(
+        &self,
+        volume_id: &crate::domain::VolumeId,
+        cursor: Option<CapacityPageCursor>,
+        limit: usize,
+    ) -> Result<CapacityPage, HistoryError> {
+        let guard = self.lock_current_history_connection()?;
+        let page = load_raw_capacity_page(&guard.connection, volume_id, cursor, limit)?;
+        let has_volume = validate_capacity_volume(&guard.connection, volume_id, &page.samples)?;
+        if !page.samples.is_empty() && !has_volume {
+            return Err(HistoryError::new(HistoryErrorKind::CorruptData));
+        }
+        Ok(page)
     }
 
     /// Start one durable scan record. Stored paths are observations only.
@@ -528,6 +664,23 @@ impl StoreCoordinator {
             .repair_sqlite_sidecars()
             .and_then(|()| self.paths.validate_all_existing())
             .map_err(map_history_database_error)
+    }
+
+    fn revalidate_current_history_guard(
+        &self,
+        guard: &HistoryConnectionGuard<'_>,
+    ) -> Result<(), HistoryError> {
+        self.validate_history_guard(guard)?;
+        self.validate_history_storage_after_write()?;
+        match inspect_schema_for_status(&guard.connection).map_err(map_history_database_error)? {
+            SchemaState::Current => Ok(()),
+            SchemaState::Newer { .. } => {
+                Err(HistoryError::new(HistoryErrorKind::IncompatibleSchema))
+            }
+            SchemaState::Empty | SchemaState::Older { .. } => {
+                Err(HistoryError::new(HistoryErrorKind::CorruptData))
+            }
+        }
     }
 
     #[cfg_attr(

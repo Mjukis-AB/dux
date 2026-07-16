@@ -2139,7 +2139,41 @@ Tasks:
   last-complete selection, typed coverage/issues, latest-two/2 GiB retention,
   active-review pins, and abandoned-stage/temp scavenging remain later tasks
   and are not claimed by this checkpoint.
-- [ ] Add capacity sample storage.
+- [x] Add capacity sample storage. Completed 2026-07-16: the existing SQLite
+  schema-v2 `volumes` and `disk_samples` tables now have a typed Rust boundary
+  for raw, non-authoritative capacity observations. Public opaque `VolumeId`
+  and `DiskPressure` values constrain stable identity and semantic pressure
+  labels without exposing persistence internals. Stable volume IDs are supplied
+  evidence and are never synthesized from a mount path, display name, or
+  filesystem label. Each write requires a positive SQLite-representable total,
+  required ordinary available capacity, optional important-usage available
+  capacity, an absolute losslessly encoded mount path, millisecond-canonical
+  time, and bounded metadata; both availability values remain separate and
+  cannot exceed total capacity. A valid UI sample that has important-usage
+  capacity but no ordinary available capacity is deliberately not persisted;
+  the storage layer never fabricates the missing ordinary value.
+
+  One current-schema transaction under the coordinator connection and
+  cross-process writer lease monotonically inserts or refreshes volume metadata
+  and records the raw sample. Routine observations are suppressed after one per
+  UTC hour, while a real change from the latest stored pressure is written
+  immediately. Exact natural-key collisions and ambiguous post-commit failures
+  succeed only after retained storage and the current schema revalidate, every
+  stored sample fact matches, and the timestamp remains inside the volume's
+  first/last-seen interval; a differing collision, stale timestamp, schema-
+  version race, unsafe storage, or malformed value fails closed. Latest and
+  cursor-based history reads are page-bounded, protected by
+  SQLite VM/time budgets, deterministically ordered, and validate hostile
+  storage classes, lengths, enums, paths, timestamps, and numeric ranges before
+  returning typed observations. Process-style reopen, concurrent exact writers,
+  cadence/transition boundaries, exact retry reconciliation, before-first and
+  after-last metadata corruption, unsafe post-commit storage, hostile rows,
+  cursor continuity, and current-to-newer version fencing have focused coverage.
+
+  This checkpoint does not connect Swift, engine tasks, UniFFI, either CLI, or
+  the pressure evaluator. It does not create daily rollups, enforce the 30-day
+  raw-history policy, run retention, or persist pressure episodes. Those remain
+  later roadmap work.
 - [ ] Add typed scan coverage/issues.
 - [ ] Add JSON CLI status/history scaffolding.
 - [ ] Add history retention maintenance.
