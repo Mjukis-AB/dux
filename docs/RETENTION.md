@@ -102,10 +102,11 @@ not backfill old rows. Absence means that the immutable reference may still be
 opened; an exact tombstone means that it is logically unavailable even if its
 bytes remain. Tombstones cannot be updated or deleted, and malformed or
 mismatched rows are corruption rather than evidence of availability. DUX keeps
-all trigger programs disabled while inspecting an untrusted database and
-enables these exact update/delete guards only after the complete supported
-schema fingerprint has passed; unknown newer schemas remain trigger-disabled
-and read-only.
+all trigger programs disabled with depth zero while inspecting an untrusted
+database and enables depth one for exactly three migration-owned mutable guards
+only after the complete supported schema fingerprint has passed: these
+tombstone update/delete guards plus the schema-v6 review-pin update guard.
+Unknown newer schemas remain trigger-disabled and read-only.
 
 Every repository load now validates the current-schema database guard and
 queries that exact tombstone before opening the snapshot file. A tombstone
@@ -114,6 +115,43 @@ while the terminal scan row continues to explain which snapshot originally
 existed. The guarded retry path reuses its already-held database guard rather
 than reacquiring the connection mutex. This checkpoint deliberately exposes no
 production tombstone writer.
+
+Schema v6 defines an active review as an explicit expiring lease, never as a
+selected candidate or a planned cleanup session. `snapshot_review_pins` binds
+the exact succeeded snapshot identity to a canonical random 128-bit pin ID, a
+strict process-instance owner, an `explorer` or `cleanup_review` purpose,
+creation/renewal times, and an expiry exactly ten minutes after the last
+renewal. Identity, owner, purpose, and creation cannot change. Equality at the
+expiry boundary is inactive, and renewal cannot resurrect an expired row. V5
+upgrades create no pins because historical state does not prove a live review.
+
+The sealed core repository admits at most 64 live leases for one stable owner
+and 1,024 rows for one store. Acquisition generates bounded collision choices
+before locking, inspects the complete bounded population with explicit SQLite
+type, owner, parent, and tombstone validation, and prunes at most 64 expired
+rows. It then validates the exact parent/tombstone state and opens the immutable
+file while retaining the snapshot writer lock before committing the pin under
+the already-held database fence. The returned non-cloneable object retains the
+read-only file handle. Load verifies the exact unexpired row before decoding;
+renew uses exact compare-and-swap, and explicit release is exact and idempotent
+when pruning already removed that same pin. Acquire,
+renew, and release adopt an ambiguous commit only when its complete frozen
+postcondition matches.
+
+Dropping a review lease performs no SQLite write because destruction can occur
+during unwinding or while another persistence lock is held. The retained handle
+closes and the durable row expires naturally. Normal Explorer/review close will
+call explicit release once those app/FFI surfaces exist. Process liveness is not
+used to shorten a lease; expiry is the correctness boundary. Candidate status
+and cleanup execution remain separate facts and gain no retention or cleanup
+authority from this lease.
+
+An expired lease object can still own its retained file handle even after
+another process prunes the durable row. Its load and renewal always report
+expiry, including after that prune, and release remains idempotent. The future
+app/FFI owner must promptly release or drop the object after expiry or renewal
+failure: logical retention may unlink the name, but storage blocks can remain
+open until the retained handle closes.
 
 Future retention must validate eligibility and commit the tombstone first,
 then unlink through a retained, revalidated handle and durably flush the
@@ -125,7 +163,7 @@ Publication and retention share this lock order:
 2. cross-process writer/current-schema lease;
 3. snapshot writer lock.
 
-Snapshot retention is not enabled until active-review pins,
+Snapshot retention is not enabled until app/FFI review-lease ownership,
 latest-two-per-exact-root selection, retained-handle deletion, live
 temporary-file leases, the typed size cap, and bounded marker-owned stage
 scavenging all exist. Tombstone insertion, the final pin/eligibility recheck,

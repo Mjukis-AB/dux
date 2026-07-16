@@ -5,6 +5,22 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Added schema-v6 cross-process snapshot review leases. Exact succeeded
+  snapshot identities can now be pinned explicitly for Explorer or cleanup
+  review without treating durable candidate/session state as proof that a UI
+  is open. Pins use a stable process-instance owner, random 128-bit IDs, fixed
+  ten-minute expiry, monotonic renewal, idempotent exact release, immutable identity
+  guards, and no migration backfill. Acquisition validates the complete parent
+  and tombstone state, holds the database fence before the snapshot writer
+  lock, and returns a retained read-only file handle. The sealed core API caps
+  leases at 64 per owner and 1,024 per store, validates the complete bounded
+  population once per acquisition, prunes at most 64 expired rows, treats
+  expiry equality as inactive even after cross-process pruning, and
+  exact-reconciles ambiguous acquire/renew/release commits without adopting a
+  conflicting row. Explicit release removes the row or adopts its already-
+  absent postcondition; implicit drop performs no blocking write
+  and relies on expiry. App/FFI ownership, latest-two/cap selection, tombstone
+  insertion, and physical unlink remain disabled.
 - Added the schema-v5 prerequisite for safe snapshot retention. Immutable scan
   references now have a separate append-only tombstone bound by composite
   foreign key to their exact succeeded status, completion time, version,
@@ -16,8 +32,9 @@ All notable changes to DUX will be documented in this file.
   trigger-disabled posture. V4 upgrades fabricate no retirement state,
   terminal history remains unchanged, and guarded exact-retry loads avoid
   connection-lock reacquisition. No production tombstone writer or physical
-  unlink is enabled until latest-two selection, active-review pins, total-cap
-  accounting, and retained-handle deletion are implemented together.
+  unlink is enabled until latest-two selection, review-lease lifecycle
+  integration, total-cap accounting, and retained-handle deletion are
+  implemented together.
 - Added a typed, idle-only engine task for bounded history maintenance. Closed,
   duplicate, and foreground-busy requests resolve before SQLite access;
   eligible requests recheck schema and admission before allocating work. Each

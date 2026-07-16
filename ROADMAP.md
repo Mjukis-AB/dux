@@ -2382,8 +2382,8 @@ Tasks:
   compilation/regressions. The normative implementation reference is
   [`docs/SNAPSHOT_FORMAT.md`](docs/SNAPSHOT_FORMAT.md). Durable engine scan-task
   publication is now attached by the following checkpoint. Last-complete
-  selection, latest-two/2 GiB retention,
-  active-review pins, and abandoned-stage/temp scavenging remain later tasks
+  selection, latest-two/2 GiB retention, app/FFI review-lease binding, and
+  abandoned-stage/temp scavenging remain later tasks
   and are not claimed by this checkpoint. Typed coverage/issues and the
   completed-only fresh-scan converter were attached by following checkpoints
   without changing the v1 snapshot wire.
@@ -2549,12 +2549,41 @@ Tasks:
     valid-load, hostile-row, tombstone-before-file, reopen, and guarded-retry
     regressions cover the boundary.
 
+  - Snapshot active-review prerequisite completed 2026-07-16: schema v6 adds
+    an explicit mutable `snapshot_review_pins` lease relation instead of
+    inferring an open UI from candidate selection or cleanup-session state.
+    Every row is exact-composite-FK-bound to one succeeded snapshot, uses a
+    canonical random 128-bit ID, a strictly decoded process-instance owner,
+    an `explorer` or `cleanup_review` purpose, and a fixed ten-minute expiry.
+    Identity, owner, purpose, and creation are immutable; only monotonic exact
+    renewal and idempotent exact release are allowed. V5 upgrades fabricate no pins.
+
+    The sealed repository API uses one stable owner per repository, admits at
+    most 64 local/owner leases and 1,024 rows per store, inspects every bounded
+    row with explicit storage-class and relationship validation, prunes at most
+    64 expired rows during acquisition, and treats expiry equality as inactive.
+    It generates 16 collision-resistant IDs before locking, validates the
+    exact parent and tombstone state, then retains the snapshot writer lock
+    while inserting the pin under the existing database guard. The returned
+    non-cloneable lease owns a retained read-only file handle, can load, renew,
+    and explicitly release the exact row idempotently after expiry pruning,
+    and reconciles only exact
+    post-commit states. Drop never enters SQLite or inverts lock order; its row
+    expires naturally. Independent store reopen, arbitrary Explorer acquisition,
+    renewal/release/drop/equality including post-prune expiry, deterministic
+    collision retry within one prune pass, bounded pruning and population
+    limits, hostile rows, external newer-schema fencing,
+    read-only/tombstone/missing/corrupt files, post-commit ambiguity including
+    conflicting release state, and publication-lock contention have focused
+    coverage. An expired lease still retains its file handle until the future
+    app/FFI owner drops it; this is an explicit lifecycle gate before unlink.
+
     This checkpoint intentionally provides no production tombstone writer.
-    Latest-two-per-exact-root selection, active-review pins, the configurable
+    Latest-two-per-exact-root selection, the configurable
     2-GiB accounting/cap, retained-handle unlink and directory flush,
     post-commit orphan reconciliation, live temp leases, bounded marker-owned
-    temp/stage scavenging, app/FFI scheduling, and explicit clear-data actions
-    remain required before snapshot retention can run.
+    temp/stage scavenging, app/FFI lease ownership and scheduling, and explicit
+    clear-data actions remain required before snapshot retention can run.
 - [x] Add engine integration tests with temporary HOME and database. Completed
   2026-07-16: an actual `dux-core` engine scans a fixture into an isolated
   platform-correct application-support/cache layout, closes to full worker

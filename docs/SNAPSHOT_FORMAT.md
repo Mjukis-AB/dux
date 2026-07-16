@@ -304,10 +304,21 @@ bounded exact-ID lookup. A matching tombstone returns the distinct
 `SnapshotUnavailable` repository result before filesystem access. An invalid or
 identity-mismatched tombstone is corruption; absence permits the ordinary
 retained-file validation and full decode. No production code inserts
-tombstones yet. Future retention must establish latest-two and active-review
-pin eligibility under this lock order before committing a tombstone, then
-unlink only through a retained, identity-revalidated file handle and flush the
-directory.
+tombstones yet.
+
+Schema v6 adds an explicit cross-process review lease without changing the v1
+wire. A pin binds the exact succeeded snapshot tuple to a stable process owner,
+Explorer/cleanup-review purpose, and fixed ten-minute expiry. The sealed
+repository acquires the database fence before a locked snapshot open, commits
+the pin while both boundaries remain held, and returns the retained read-only
+file handle. Load verifies the exact live lease before decoding. Renewal cannot
+resurrect expiry; explicit release is exact and idempotent after bounded expiry
+pruning; implicit drop performs no database work and relies on expiry. An
+expired object must still be dropped to close its retained handle. Candidate
+and cleanup-session state never implies an open review. Future retention must
+recheck latest-two and these explicit active leases under the same lock order
+before committing a tombstone, then unlink only through a retained,
+identity-revalidated file handle and flush the directory.
 
 Initial snapshot-directory provisioning uses a private marker-complete sibling
 stage and atomic no-replace directory publication. A racing winner is reopened
@@ -347,8 +358,8 @@ This checkpoint does not implement:
 - cross-process overlapping-root scan leases or hard-process-death recovery of
   an engine scan left `running`;
 - FFI, Swift, or CLI scan/history transport;
-- latest-two-per-root selection, active-review pins, or a production tombstone
-  writer and retained-handle unlink;
+- latest-two-per-root selection, app/FFI review-lease ownership, or a production
+  tombstone writer and retained-handle unlink;
 - the configurable 2 GiB total-store retention policy and physical-orphan
   reconciliation;
 - bounded identity-safe scavenging for abandoned temps or provisioning stages;

@@ -21,7 +21,7 @@ use super::migrations::{
     apply_test_upgrade_chain, inspect_schema, inspect_schema_with_test_budget,
     panic_with_test_budget, schema_fingerprint, test_migrations, test_v1_schema_fingerprint,
     test_v2_schema_fingerprint, test_v3_schema_fingerprint, test_v4_schema_fingerprint,
-    test_v5_schema_fingerprint, validate_compiled_migrations,
+    test_v5_schema_fingerprint, test_v6_schema_fingerprint, validate_compiled_migrations,
 };
 use super::process_liveness::current_process_instance;
 #[cfg(unix)]
@@ -418,6 +418,32 @@ fn fresh_v4_schema() -> Connection {
     connection
 }
 
+fn fresh_v5_schema() -> Connection {
+    let connection = Connection::open_in_memory().unwrap();
+    for migration in &test_migrations()[..5] {
+        connection.execute_batch(migration.sql).unwrap();
+        connection
+            .execute(
+                "INSERT INTO schema_migrations (
+                     version, name, checksum_sha256, applied_at_unix_ms
+                 ) VALUES (?1, ?2, ?3, 1)",
+                params![
+                    i64::from(migration.version),
+                    migration.name,
+                    migration.checksum_sha256.as_slice(),
+                ],
+            )
+            .unwrap();
+        connection
+            .pragma_update(None, "application_id", DUX_APPLICATION_ID)
+            .unwrap();
+        connection
+            .pragma_update(None, "user_version", migration.version)
+            .unwrap();
+    }
+    connection
+}
+
 fn fresh_current_schema() -> Connection {
     let connection = Connection::open_in_memory().unwrap();
     for migration in test_migrations() {
@@ -674,10 +700,23 @@ fn embedded_v4_schema_fingerprint_matches_complete_chain() {
 
 #[test]
 fn embedded_v5_schema_fingerprint_matches_complete_chain() {
-    let connection = fresh_current_schema();
+    let connection = fresh_v5_schema();
     assert_eq!(
         schema_fingerprint(&connection).unwrap(),
         test_v5_schema_fingerprint()
+    );
+    assert_eq!(
+        inspect_schema(&connection).unwrap(),
+        SchemaState::Older { found: 5 }
+    );
+}
+
+#[test]
+fn embedded_v6_schema_fingerprint_matches_complete_chain() {
+    let connection = fresh_current_schema();
+    assert_eq!(
+        schema_fingerprint(&connection).unwrap(),
+        test_v6_schema_fingerprint()
     );
     assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
 }
@@ -847,6 +886,290 @@ fn v5_snapshot_tombstones_are_exact_append_only_history() {
 }
 
 #[test]
+fn populated_v5_upgrade_preserves_snapshot_and_fabricates_no_review_pin() {
+    let mut connection = fresh_v5_schema();
+    connection
+        .pragma_update(None, "foreign_keys", true)
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO scans (
+                 scan_id, root_path, root_path_encoding, started_at_unix_ms,
+                 completed_at_unix_ms, status, snapshot_version,
+                 snapshot_relative_path, snapshot_relative_path_encoding,
+                 snapshot_checksum_sha256, coverage_status, coverage_permille
+             ) VALUES (
+                 'scan:v5-review-pin', ?1, 1, 10, 20, 'succeeded', 1,
+                 ?2, 1, ?3, 'complete', 1000
+             )",
+            params![
+                b"/v5-review-pin".as_slice(),
+                b"snapshot-v5-review-pin.duxsnapshot".as_slice(),
+                [0x4d_u8; 32].as_slice(),
+            ],
+        )
+        .unwrap();
+
+    apply_pending_migrations(&mut connection, 30).unwrap();
+
+    assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
+    assert_eq!(
+        connection
+            .query_row("SELECT count(*) FROM snapshot_review_pins", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        0
+    );
+    let snapshot: (String, i64, Vec<u8>) = connection
+        .query_row(
+            "SELECT status, snapshot_version, snapshot_checksum_sha256
+             FROM scans WHERE scan_id = 'scan:v5-review-pin'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(snapshot, ("succeeded".to_owned(), 1, vec![0x4d; 32]));
+}
+
+#[test]
+fn v6_snapshot_review_pins_are_exact_bounded_renewable_leases() {
+    let connection = fresh_current_schema();
+    connection
+        .pragma_update(None, "foreign_keys", true)
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO scans (
+                 scan_id, root_path, root_path_encoding, started_at_unix_ms,
+                 completed_at_unix_ms, status, snapshot_version,
+                 snapshot_relative_path, snapshot_relative_path_encoding,
+                 snapshot_checksum_sha256, coverage_status, coverage_permille
+             ) VALUES (
+                 'scan:review-pin-shape', ?1, 1, 10, 20, 'succeeded', 1,
+                 ?2, 1, ?3, 'complete', 1000
+             )",
+            params![
+                b"/review-pin-shape".as_slice(),
+                b"snapshot-review-pin.duxsnapshot".as_slice(),
+                [0x7d_u8; 32].as_slice(),
+            ],
+        )
+        .unwrap();
+    let insert = "INSERT INTO snapshot_review_pins (
+            pin_id, record_format_version, scan_id, scan_status,
+            completed_at_unix_ms, snapshot_version, snapshot_relative_path,
+            snapshot_relative_path_encoding, snapshot_checksum_sha256,
+            owner_process_instance, purpose, created_at_unix_ms,
+            renewed_at_unix_ms, expires_at_unix_ms
+         ) VALUES (
+            ?1, 1, 'scan:review-pin-shape', 'succeeded', 20, 1, ?2, 1, ?3,
+            'process:fixture:1', ?4, ?5, ?6, ?7
+         )";
+    let path = b"snapshot-review-pin.duxsnapshot".as_slice();
+    let checksum = [0x7d_u8; 32];
+    for malformed_pin_id in [
+        "a".repeat(31),
+        "a".repeat(33),
+        "A".repeat(32),
+        "g".repeat(32),
+    ] {
+        assert!(
+            connection
+                .execute(
+                    insert,
+                    params![
+                        malformed_pin_id,
+                        path,
+                        checksum.as_slice(),
+                        "explorer",
+                        100,
+                        100,
+                        600100
+                    ],
+                )
+                .is_err()
+        );
+    }
+    for (purpose, created, renewed, expires) in [
+        ("other", 100, 100, 600100),
+        ("explorer", -1, 100, 600100),
+        ("explorer", 101, 100, 600100),
+        ("explorer", 100, 100, 600099),
+        ("explorer", 100, 100, 600101),
+    ] {
+        assert!(
+            connection
+                .execute(
+                    insert,
+                    params![
+                        "0123456789abcdef0123456789abcdef",
+                        path,
+                        checksum.as_slice(),
+                        purpose,
+                        created,
+                        renewed,
+                        expires,
+                    ],
+                )
+                .is_err()
+        );
+    }
+    assert!(
+        connection
+            .execute(
+                insert,
+                params![
+                    "0123456789abcdef0123456789abcdef",
+                    path,
+                    [0x6c_u8; 32].as_slice(),
+                    "explorer",
+                    100,
+                    100,
+                    600100,
+                ],
+            )
+            .is_err()
+    );
+
+    connection
+        .execute(
+            insert,
+            params![
+                "0123456789abcdef0123456789abcdef",
+                path,
+                checksum.as_slice(),
+                "cleanup_review",
+                100,
+                100,
+                600100,
+            ],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE snapshot_review_pins
+             SET renewed_at_unix_ms = 200, expires_at_unix_ms = 600200
+             WHERE pin_id = '0123456789abcdef0123456789abcdef'",
+            [],
+        )
+        .unwrap();
+    for invalid_update in [
+        "UPDATE snapshot_review_pins SET owner_process_instance = 'process:other:1'",
+        "UPDATE snapshot_review_pins SET purpose = 'explorer'",
+        "UPDATE snapshot_review_pins SET created_at_unix_ms = 101",
+        "UPDATE snapshot_review_pins SET renewed_at_unix_ms = 199, expires_at_unix_ms = 600199",
+        "UPDATE snapshot_review_pins SET renewed_at_unix_ms = 300, expires_at_unix_ms = 600299",
+    ] {
+        assert!(connection.execute(invalid_update, []).is_err());
+    }
+    assert!(
+        connection
+            .execute(
+                "UPDATE scans SET snapshot_checksum_sha256 = zeroblob(32)
+                 WHERE scan_id = 'scan:review-pin-shape'",
+                [],
+            )
+            .is_err()
+    );
+    connection
+        .execute(
+            "DELETE FROM snapshot_review_pins
+             WHERE pin_id = '0123456789abcdef0123456789abcdef'",
+            [],
+        )
+        .unwrap();
+    assert_eq!(
+        connection
+            .query_row("SELECT count(*) FROM snapshot_review_pins", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn verified_coordinator_enables_snapshot_review_pin_update_guard() {
+    let temp = TempDir::new().unwrap();
+    let store = StoreCoordinator::open(&database_path(&temp)).unwrap();
+
+    store.with_connection(|connection| {
+        assert!(
+            connection
+                .db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_ENABLE_TRIGGER)
+                .unwrap()
+        );
+        assert_eq!(
+            connection
+                .limit(rusqlite::limits::Limit::SQLITE_LIMIT_TRIGGER_DEPTH)
+                .unwrap(),
+            1
+        );
+        connection
+            .execute(
+                "INSERT INTO scans (
+                     scan_id, root_path, root_path_encoding, started_at_unix_ms,
+                     completed_at_unix_ms, status, snapshot_version,
+                     snapshot_relative_path, snapshot_relative_path_encoding,
+                     snapshot_checksum_sha256, coverage_status, coverage_permille
+                 ) VALUES (
+                     'scan:verified-review-pin-guard', ?1, 1, 10, 20, 'succeeded', 1,
+                     ?2, 1, ?3, 'complete', 1000
+                 )",
+                params![
+                    b"/verified-review-pin-guard".as_slice(),
+                    b"snapshot-verified-review-pin-guard.duxsnapshot".as_slice(),
+                    [0x5e_u8; 32].as_slice(),
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO snapshot_review_pins (
+                     pin_id, record_format_version, scan_id, scan_status,
+                     completed_at_unix_ms, snapshot_version, snapshot_relative_path,
+                     snapshot_relative_path_encoding, snapshot_checksum_sha256,
+                     owner_process_instance, purpose, created_at_unix_ms,
+                     renewed_at_unix_ms, expires_at_unix_ms
+                 ) VALUES (
+                     'abcdef0123456789abcdef0123456789', 1,
+                     'scan:verified-review-pin-guard', 'succeeded', 20, 1,
+                     ?1, 1, ?2, 'process:fixture:1', 'explorer', 100, 100, 600100
+                 )",
+                params![
+                    b"snapshot-verified-review-pin-guard.duxsnapshot".as_slice(),
+                    [0x5e_u8; 32].as_slice(),
+                ],
+            )
+            .unwrap();
+
+        let error = connection
+            .execute(
+                "UPDATE snapshot_review_pins
+                 SET owner_process_instance = 'process:fixture:2'
+                 WHERE pin_id = 'abcdef0123456789abcdef0123456789'",
+                [],
+            )
+            .unwrap_err();
+        assert_eq!(
+            error.sqlite_error_code(),
+            Some(rusqlite::ErrorCode::ConstraintViolation)
+        );
+        let owner: String = connection
+            .query_row(
+                "SELECT owner_process_instance
+                 FROM snapshot_review_pins
+                 WHERE pin_id = 'abcdef0123456789abcdef0123456789'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(owner, "process:fixture:1");
+    });
+}
+
+#[test]
 fn populated_v3_upgrade_adds_no_fabricated_candidate_evaluations() {
     let mut connection = fresh_v3_schema();
     connection
@@ -1013,7 +1336,7 @@ fn populated_v1_upgrade_preserves_legacy_candidate_and_cleanup_observations() {
     assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
     assert_eq!(
         schema_fingerprint(&connection).unwrap(),
-        test_v5_schema_fingerprint()
+        test_v6_schema_fingerprint()
     );
     let candidate: (i64, Option<String>, Option<String>) = connection
         .query_row(
@@ -1067,7 +1390,7 @@ fn populated_v1_upgrade_preserves_legacy_candidate_and_cleanup_observations() {
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
-    assert_eq!(versions, [1, 2, 3, 4, 5]);
+    assert_eq!(versions, [1, 2, 3, 4, 5, 6]);
 }
 
 #[test]

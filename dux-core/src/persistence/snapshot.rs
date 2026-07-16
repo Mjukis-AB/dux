@@ -3,21 +3,38 @@
 //! The legacy CLI cache is intentionally separate. Snapshot bytes may support
 //! presentation and discovery, but never path validation or cleanup authority.
 
+use std::cell::Cell;
 use std::io::{Seek, SeekFrom};
+use std::marker::PhantomData;
 use std::num::NonZeroU32;
 use std::sync::Arc;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use std::time::SystemTime;
 
+use rusqlite::TransactionBehavior;
+
 use crate::domain::{ScanCoverage, ScanId};
 
+use super::SnapshotReviewPurpose;
 use super::candidate_evaluation_history::{
     CandidateEvaluationCompletion, CandidateEvaluationIdentity, NewCandidateEvaluation,
 };
 use super::history::{
     HistoryError, HistoryErrorKind, ScanCompletionRecord, ScanCounts, ScanStatus,
+    system_time_to_unix_ms, unix_ms_to_system_time,
 };
+use super::process_liveness::{ProcessIdentityError, ProcessInstanceId, current_process_instance};
 use super::snapshot_retention::{SnapshotRetentionState, load_snapshot_retention_state};
+#[cfg(test)]
+use super::snapshot_review_pin::{MAX_ACTIVE_PINS, MAX_EXPIRED_PRUNE};
+use super::snapshot_review_pin::{
+    MAX_ACTIVE_PINS_PER_OWNER, PreparedSnapshotReviewPin, SNAPSHOT_REVIEW_PIN_ID_ATTEMPTS,
+    SnapshotReviewPinId, SnapshotReviewPinState, insert_snapshot_review_pin_candidates,
+    release_snapshot_review_pin, renew_snapshot_review_pin, snapshot_review_pin_exactly_matches,
+    snapshot_review_pin_state, validate_snapshot_review_pin,
+};
 use super::store::{HistoryConnectionGuard, StoreCoordinator};
 
 mod codec;
@@ -123,6 +140,11 @@ pub(crate) enum SnapshotRepositoryErrorKind {
     SnapshotUnavailable,
     IncompatibleVersion,
     ReferenceMismatch,
+    #[allow(
+        dead_code,
+        reason = "review leases are wired to Explorer/FFI in a later milestone slice"
+    )]
+    ReviewLeaseExpired,
     Codec(SnapshotCodecErrorKind),
     Storage(SnapshotStorageErrorKind),
     History(HistoryErrorKind),
@@ -171,11 +193,130 @@ fn map_history(error: HistoryError) -> SnapshotRepositoryError {
     repository_error(SnapshotRepositoryErrorKind::History(error.kind))
 }
 
+#[allow(
+    dead_code,
+    reason = "review leases are wired to Explorer/FFI in a later milestone slice"
+)]
+fn map_review_history(error: HistoryError) -> SnapshotRepositoryError {
+    match error.kind {
+        HistoryErrorKind::InvalidTransition => {
+            repository_error(SnapshotRepositoryErrorKind::ReviewLeaseExpired)
+        }
+        HistoryErrorKind::NotFound => {
+            repository_error(SnapshotRepositoryErrorKind::ReferenceMismatch)
+        }
+        _ => map_history(error),
+    }
+}
+
+fn map_process_identity(error: ProcessIdentityError) -> SnapshotRepositoryError {
+    let kind = match error {
+        ProcessIdentityError::InvalidEncoding => HistoryErrorKind::CorruptData,
+        ProcessIdentityError::ObservationUnavailable | ProcessIdentityError::RandomUnavailable => {
+            HistoryErrorKind::InternalState
+        }
+    };
+    repository_error(SnapshotRepositoryErrorKind::History(kind))
+}
+
 /// Coordinates bounded codec validation with immutable private publication.
 pub(crate) struct SnapshotRepository {
     database: Arc<StoreCoordinator>,
     store: Option<SecureSnapshotStore>,
     access: SnapshotStoreAccess,
+    #[allow(
+        dead_code,
+        reason = "review leases are wired to Explorer/FFI in a later milestone slice"
+    )]
+    review: Option<SnapshotReviewContext>,
+}
+
+#[allow(
+    dead_code,
+    reason = "review leases are wired to Explorer/FFI in a later milestone slice"
+)]
+struct SnapshotReviewContext {
+    owner: OnceLock<ProcessInstanceId>,
+    active_slots: Arc<AtomicUsize>,
+}
+
+#[allow(
+    dead_code,
+    reason = "review leases are wired to Explorer/FFI in a later milestone slice"
+)]
+struct SnapshotReviewSlot {
+    active_slots: Arc<AtomicUsize>,
+}
+
+#[allow(
+    dead_code,
+    reason = "review leases are wired to Explorer/FFI in a later milestone slice"
+)]
+impl SnapshotReviewContext {
+    fn owner(&self) -> Result<ProcessInstanceId, SnapshotRepositoryError> {
+        if let Some(owner) = self.owner.get() {
+            return Ok(owner.clone());
+        }
+        let candidate = current_process_instance().map_err(map_process_identity)?;
+        let _ = self.owner.set(candidate);
+        self.owner.get().cloned().ok_or_else(|| {
+            repository_error(SnapshotRepositoryErrorKind::History(
+                HistoryErrorKind::InternalState,
+            ))
+        })
+    }
+
+    fn reserve(&self) -> Result<SnapshotReviewSlot, SnapshotRepositoryError> {
+        self.active_slots
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+                (active < MAX_ACTIVE_PINS_PER_OWNER).then_some(active + 1)
+            })
+            .map_err(|_| {
+                repository_error(SnapshotRepositoryErrorKind::History(
+                    HistoryErrorKind::QueryLimitExceeded,
+                ))
+            })?;
+        Ok(SnapshotReviewSlot {
+            active_slots: Arc::clone(&self.active_slots),
+        })
+    }
+}
+
+impl Drop for SnapshotReviewSlot {
+    fn drop(&mut self) {
+        let previous = self.active_slots.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous > 0, "snapshot review slot underflow");
+    }
+}
+
+/// One exact, expiring snapshot review pin plus a retained immutable handle.
+///
+/// The lease is intentionally non-cloneable and not `Sync`. Dropping it never
+/// enters SQLite; an explicit release removes the durable row, while crashes
+/// and implicit drops remain conservatively pinned until the fixed expiry.
+#[allow(
+    dead_code,
+    reason = "review leases are wired to Explorer/FFI in a later milestone slice"
+)]
+#[must_use = "keep the lease alive during review or explicitly release it"]
+pub(crate) struct SnapshotReviewLease {
+    database: Arc<StoreCoordinator>,
+    retained: RetainedSnapshot,
+    reference: SnapshotReference,
+    pin: PreparedSnapshotReviewPin,
+    _slot: SnapshotReviewSlot,
+    _not_sync: PhantomData<Cell<()>>,
+    #[cfg(test)]
+    test_fault: Cell<SnapshotReviewTestFault>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SnapshotReviewTestFault {
+    None,
+    RenewAfterCommit,
+    ReleaseAfterCommit,
+    ReleaseAfterCommitConflicting,
 }
 
 impl SnapshotRepository {
@@ -183,6 +324,13 @@ impl SnapshotRepository {
         database: Arc<StoreCoordinator>,
         access: SnapshotStoreAccess,
     ) -> Result<Self, SnapshotRepositoryError> {
+        let review = match access {
+            SnapshotStoreAccess::ReadWrite => Some(SnapshotReviewContext {
+                owner: OnceLock::new(),
+                active_slots: Arc::new(AtomicUsize::new(0)),
+            }),
+            SnapshotStoreAccess::ReadOnly => None,
+        };
         let store = match access {
             SnapshotStoreAccess::ReadWrite => {
                 let _database_guard = database
@@ -202,6 +350,192 @@ impl SnapshotRepository {
             database,
             store,
             access,
+            review,
+        })
+    }
+
+    /// Acquire an explicit cross-process lease for one snapshot-backed UI
+    /// review. Candidate and cleanup-session state deliberately do not call
+    /// this implicitly.
+    #[allow(
+        dead_code,
+        reason = "review leases are wired to Explorer/FFI in a later milestone slice"
+    )]
+    pub(crate) fn acquire_review_lease(
+        &self,
+        reference: &SnapshotReference,
+        purpose: SnapshotReviewPurpose,
+        observed_at: SystemTime,
+    ) -> Result<SnapshotReviewLease, SnapshotRepositoryError> {
+        self.acquire_review_lease_with_hook(reference, purpose, observed_at, || Ok(()))
+    }
+
+    #[cfg(test)]
+    fn acquire_review_lease_after_commit_failure_for_test(
+        &self,
+        reference: &SnapshotReference,
+        purpose: SnapshotReviewPurpose,
+        observed_at: SystemTime,
+    ) -> Result<SnapshotReviewLease, SnapshotRepositoryError> {
+        self.acquire_review_lease_with_hook(reference, purpose, observed_at, || {
+            Err(HistoryError::new(HistoryErrorKind::DatabaseUnavailable))
+        })
+    }
+
+    fn acquire_review_lease_with_hook(
+        &self,
+        reference: &SnapshotReference,
+        purpose: SnapshotReviewPurpose,
+        observed_at: SystemTime,
+        after_commit: impl FnOnce() -> Result<(), HistoryError>,
+    ) -> Result<SnapshotReviewLease, SnapshotRepositoryError> {
+        self.acquire_review_lease_with_pin_id_source(
+            reference,
+            purpose,
+            observed_at,
+            || {
+                (0..SNAPSHOT_REVIEW_PIN_ID_ATTEMPTS)
+                    .map(|_| SnapshotReviewPinId::random())
+                    .collect::<Result<Vec<_>, _>>()
+            },
+            after_commit,
+        )
+    }
+
+    #[cfg(test)]
+    fn acquire_review_lease_with_pin_ids_for_test(
+        &self,
+        reference: &SnapshotReference,
+        purpose: SnapshotReviewPurpose,
+        observed_at: SystemTime,
+        pin_ids: Vec<SnapshotReviewPinId>,
+    ) -> Result<SnapshotReviewLease, SnapshotRepositoryError> {
+        self.acquire_review_lease_with_pin_id_source(
+            reference,
+            purpose,
+            observed_at,
+            || Ok(pin_ids),
+            || Ok(()),
+        )
+    }
+
+    fn acquire_review_lease_with_pin_id_source(
+        &self,
+        reference: &SnapshotReference,
+        purpose: SnapshotReviewPurpose,
+        observed_at: SystemTime,
+        pin_id_source: impl FnOnce() -> Result<Vec<SnapshotReviewPinId>, HistoryError>,
+        after_commit: impl FnOnce() -> Result<(), HistoryError>,
+    ) -> Result<SnapshotReviewLease, SnapshotRepositoryError> {
+        if self.access != SnapshotStoreAccess::ReadWrite {
+            return Err(repository_error(SnapshotRepositoryErrorKind::ReadOnly));
+        }
+        if reference.version() != SNAPSHOT_FORMAT_VERSION {
+            return Err(repository_error(
+                SnapshotRepositoryErrorKind::IncompatibleVersion,
+            ));
+        }
+        let context = self
+            .review
+            .as_ref()
+            .ok_or_else(|| repository_error(SnapshotRepositoryErrorKind::ReadOnly))?;
+        let owner = context.owner()?;
+        let slot = context.reserve()?;
+        // Generate fallible process-local material before either persistence
+        // lock. The stable owner is created once with the repository.
+        let pin_ids = pin_id_source().map_err(map_history)?;
+
+        let mut database_guard = self
+            .database
+            .lock_current_history_connection()
+            .map_err(map_history)?;
+        let scan = self
+            .database
+            .load_scan_with_guard(&database_guard, reference.scan_id())
+            .map_err(map_history)?
+            .ok_or_else(|| {
+                repository_error(SnapshotRepositoryErrorKind::History(
+                    HistoryErrorKind::NotFound,
+                ))
+            })?;
+        let completed_at = scan
+            .completed_at()
+            .ok_or_else(|| repository_error(SnapshotRepositoryErrorKind::ReferenceMismatch))?;
+        if scan.status() != ScanStatus::Succeeded || scan.snapshot() != Some(reference) {
+            return Err(repository_error(
+                SnapshotRepositoryErrorKind::ReferenceMismatch,
+            ));
+        }
+        match load_snapshot_retention_state(&database_guard.connection, reference)
+            .map_err(map_history)?
+        {
+            SnapshotRetentionState::Available => {}
+            SnapshotRetentionState::Tombstoned { .. } => {
+                return Err(repository_error(
+                    SnapshotRepositoryErrorKind::SnapshotUnavailable,
+                ));
+            }
+        }
+
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| repository_error(SnapshotRepositoryErrorKind::MissingStore))?;
+        let opened = store
+            .open_with_writer_lease(reference.file_name(), PUBLICATION_LOCK_TIMEOUT)
+            .map_err(map_storage)?
+            .ok_or_else(|| repository_error(SnapshotRepositoryErrorKind::MissingSnapshot))?;
+        let transaction = database_guard
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(super::history::map_write_sql_error)
+            .map_err(map_history)?;
+        let pins = pin_ids
+            .into_iter()
+            .map(|pin_id| {
+                PreparedSnapshotReviewPin::prepare(
+                    pin_id,
+                    reference,
+                    completed_at,
+                    owner.clone(),
+                    purpose,
+                    observed_at,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(map_history)?;
+        let pin = insert_snapshot_review_pin_candidates(&transaction, &pins)
+            .map_err(map_history)?
+            .ok_or_else(|| {
+                repository_error(SnapshotRepositoryErrorKind::History(
+                    HistoryErrorKind::InternalState,
+                ))
+            })?;
+        let write = transaction
+            .commit()
+            .map_err(super::history::map_write_sql_error)
+            .and_then(|()| after_commit())
+            .and_then(|()| {
+                self.database
+                    .revalidate_current_history_guard(&database_guard)
+            });
+        if let Err(failure) = write
+            && !reconcile_review_pin(&self.database, &database_guard, &pin)?
+        {
+            return Err(map_history(failure));
+        }
+        opened.retained().revalidate().map_err(map_storage)?;
+        let retained = opened.into_retained();
+        drop(database_guard);
+        Ok(SnapshotReviewLease {
+            database: Arc::clone(&self.database),
+            retained,
+            reference: reference.clone(),
+            pin,
+            _slot: slot,
+            _not_sync: PhantomData,
+            #[cfg(test)]
+            test_fault: Cell::new(SnapshotReviewTestFault::None),
         })
     }
 
@@ -602,6 +936,240 @@ impl SnapshotRepository {
     }
 }
 
+#[allow(
+    dead_code,
+    reason = "review leases are wired to Explorer/FFI in a later milestone slice"
+)]
+impl SnapshotReviewLease {
+    #[cfg(test)]
+    fn fail_next_renew_after_commit_for_test(&self) {
+        assert_eq!(self.test_fault.get(), SnapshotReviewTestFault::None);
+        self.test_fault
+            .set(SnapshotReviewTestFault::RenewAfterCommit);
+    }
+
+    #[cfg(test)]
+    fn fail_release_after_commit_for_test(&self) {
+        assert_eq!(self.test_fault.get(), SnapshotReviewTestFault::None);
+        self.test_fault
+            .set(SnapshotReviewTestFault::ReleaseAfterCommit);
+    }
+
+    #[cfg(test)]
+    fn replace_release_with_conflict_after_commit_for_test(&self) {
+        assert_eq!(self.test_fault.get(), SnapshotReviewTestFault::None);
+        self.test_fault
+            .set(SnapshotReviewTestFault::ReleaseAfterCommitConflicting);
+    }
+
+    pub(crate) fn reference(&self) -> &SnapshotReference {
+        &self.reference
+    }
+
+    pub(crate) fn purpose(&self) -> SnapshotReviewPurpose {
+        self.pin.purpose()
+    }
+
+    pub(crate) fn expires_at(&self) -> Result<SystemTime, SnapshotRepositoryError> {
+        unix_ms_to_system_time(self.pin.expires_at_unix_ms()).map_err(map_history)
+    }
+
+    /// Decode through the already-retained immutable handle after proving the
+    /// durable lease is still exact and unexpired. SQLite is released before
+    /// the potentially large decode.
+    pub(crate) fn load(
+        &self,
+        observed_at: SystemTime,
+    ) -> Result<SnapshotDocument, SnapshotRepositoryError> {
+        self.ensure_unexpired(observed_at)?;
+        let database_guard = self
+            .database
+            .lock_current_history_connection()
+            .map_err(map_history)?;
+        validate_snapshot_review_pin(&database_guard.connection, &self.pin, observed_at)
+            .map_err(map_review_history)?;
+        self.retained.revalidate().map_err(map_storage)?;
+        drop(database_guard);
+        decode_reference(&self.retained, &self.reference)
+    }
+
+    /// Extend this exact live lease by the fixed duration. Expired leases are
+    /// never resurrected; callers must reacquire through the repository.
+    pub(crate) fn renew(
+        &mut self,
+        observed_at: SystemTime,
+    ) -> Result<SystemTime, SnapshotRepositoryError> {
+        self.ensure_unexpired(observed_at)?;
+        let mut database_guard = self
+            .database
+            .lock_current_history_connection()
+            .map_err(map_history)?;
+        let transaction = database_guard
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(super::history::map_write_sql_error)
+            .map_err(map_history)?;
+        let renewed = renew_snapshot_review_pin(&transaction, &self.pin, observed_at)
+            .map_err(map_review_history)?;
+        let write = transaction
+            .commit()
+            .map_err(super::history::map_write_sql_error)
+            .and_then(|()| self.after_renew_commit())
+            .and_then(|()| {
+                self.database
+                    .revalidate_current_history_guard(&database_guard)
+            });
+        if let Err(failure) = write {
+            revalidate_review_reconciliation(&self.database, &database_guard)?;
+            if snapshot_review_pin_exactly_matches(&database_guard.connection, &renewed)
+                .map_err(|_| outcome_unknown())?
+            {
+                // The exact post-renewal tuple is the only state this call can
+                // have committed.
+            } else if snapshot_review_pin_exactly_matches(&database_guard.connection, &self.pin)
+                .map_err(|_| outcome_unknown())?
+            {
+                return Err(map_history(failure));
+            } else {
+                return Err(outcome_unknown());
+            }
+        }
+        self.pin = renewed;
+        self.expires_at()
+    }
+
+    /// Explicitly remove the exact durable pin. Consuming the lease guarantees
+    /// the retained handle and local slot are closed on both success and
+    /// failure. An unresolved row remains safe and expires naturally.
+    pub(crate) fn release(self) -> Result<(), SnapshotRepositoryError> {
+        let mut database_guard = self
+            .database
+            .lock_current_history_connection()
+            .map_err(map_history)?;
+        let transaction = database_guard
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(super::history::map_write_sql_error)
+            .map_err(map_history)?;
+        release_snapshot_review_pin(&transaction, &self.pin).map_err(map_review_history)?;
+        let write = transaction
+            .commit()
+            .map_err(super::history::map_write_sql_error)
+            .and_then(|()| self.after_release_commit(&database_guard.connection))
+            .and_then(|()| {
+                self.database
+                    .revalidate_current_history_guard(&database_guard)
+            });
+        if let Err(failure) = write {
+            revalidate_review_reconciliation(&self.database, &database_guard)?;
+            match snapshot_review_pin_state(&database_guard.connection, &self.pin)
+                .map_err(|_| outcome_unknown())?
+            {
+                SnapshotReviewPinState::Missing => {}
+                SnapshotReviewPinState::Exact => return Err(map_history(failure)),
+                SnapshotReviewPinState::Conflicting => return Err(outcome_unknown()),
+            }
+        }
+        Ok(())
+    }
+
+    fn after_renew_commit(&self) -> Result<(), HistoryError> {
+        #[cfg(test)]
+        if self.test_fault.replace(SnapshotReviewTestFault::None)
+            == SnapshotReviewTestFault::RenewAfterCommit
+        {
+            return Err(HistoryError::new(HistoryErrorKind::DatabaseUnavailable));
+        }
+        Ok(())
+    }
+
+    fn ensure_unexpired(&self, observed_at: SystemTime) -> Result<(), SnapshotRepositoryError> {
+        let observed_at_unix_ms =
+            system_time_to_unix_ms(observed_at, HistoryErrorKind::InvalidInput)
+                .map_err(map_history)?;
+        if observed_at_unix_ms >= self.pin.expires_at_unix_ms() {
+            Err(repository_error(
+                SnapshotRepositoryErrorKind::ReviewLeaseExpired,
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn after_release_commit(&self, connection: &rusqlite::Connection) -> Result<(), HistoryError> {
+        #[cfg(test)]
+        match self.test_fault.replace(SnapshotReviewTestFault::None) {
+            SnapshotReviewTestFault::ReleaseAfterCommit => {
+                return Err(HistoryError::new(HistoryErrorKind::DatabaseUnavailable));
+            }
+            SnapshotReviewTestFault::ReleaseAfterCommitConflicting => {
+                let conflicting_purpose = match self.pin.purpose() {
+                    SnapshotReviewPurpose::Explorer => "cleanup_review",
+                    SnapshotReviewPurpose::CleanupReview => "explorer",
+                };
+                connection
+                    .execute(
+                        "INSERT INTO snapshot_review_pins (
+                             pin_id, record_format_version, scan_id, scan_status,
+                             completed_at_unix_ms, snapshot_version,
+                             snapshot_relative_path, snapshot_relative_path_encoding,
+                             snapshot_checksum_sha256, owner_process_instance, purpose,
+                             created_at_unix_ms, renewed_at_unix_ms, expires_at_unix_ms
+                         )
+                         SELECT ?2, 1, scan_id, status, completed_at_unix_ms,
+                                snapshot_version, snapshot_relative_path,
+                                snapshot_relative_path_encoding,
+                                snapshot_checksum_sha256, ?3, ?4, ?5, ?6, ?7
+                         FROM scans WHERE scan_id = ?1",
+                        rusqlite::params![
+                            self.reference.scan_id().as_str(),
+                            self.pin.id().as_str(),
+                            self.pin.owner().as_str(),
+                            conflicting_purpose,
+                            self.pin.created_at_unix_ms(),
+                            self.pin.renewed_at_unix_ms(),
+                            self.pin.expires_at_unix_ms(),
+                        ],
+                    )
+                    .map_err(super::history::map_write_sql_error)?;
+                return Err(HistoryError::new(HistoryErrorKind::DatabaseUnavailable));
+            }
+            SnapshotReviewTestFault::None | SnapshotReviewTestFault::RenewAfterCommit => {}
+        }
+        #[cfg(not(test))]
+        let _ = connection;
+        Ok(())
+    }
+}
+
+fn reconcile_review_pin(
+    database: &StoreCoordinator,
+    guard: &HistoryConnectionGuard<'_>,
+    expected: &PreparedSnapshotReviewPin,
+) -> Result<bool, SnapshotRepositoryError> {
+    revalidate_review_reconciliation(database, guard)?;
+    match snapshot_review_pin_state(&guard.connection, expected).map_err(|_| outcome_unknown())? {
+        SnapshotReviewPinState::Missing => Ok(false),
+        SnapshotReviewPinState::Exact => Ok(true),
+        SnapshotReviewPinState::Conflicting => Err(outcome_unknown()),
+    }
+}
+
+fn revalidate_review_reconciliation(
+    database: &StoreCoordinator,
+    guard: &HistoryConnectionGuard<'_>,
+) -> Result<(), SnapshotRepositoryError> {
+    database
+        .revalidate_current_history_guard(guard)
+        .map_err(|_| outcome_unknown())
+}
+
+const fn outcome_unknown() -> SnapshotRepositoryError {
+    repository_error(SnapshotRepositoryErrorKind::History(
+        HistoryErrorKind::OutcomeUnknown,
+    ))
+}
+
 fn validate_retained_document(
     retained: &RetainedSnapshot,
     expected: &SnapshotDocument,
@@ -820,6 +1388,611 @@ mod tests {
         let repository =
             SnapshotRepository::open(Arc::clone(&store), SnapshotStoreAccess::ReadWrite).unwrap();
         (store, repository)
+    }
+
+    fn complete_snapshot(
+        store: &StoreCoordinator,
+        repository: &SnapshotRepository,
+        document: &SnapshotDocument,
+        root: &Path,
+        completed_at: SystemTime,
+    ) -> SnapshotReference {
+        store
+            .record_scan_started(
+                &NewScanRecord::try_new(
+                    document.metadata.scan_id.clone(),
+                    root.to_path_buf(),
+                    completed_at - Duration::from_secs(2),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        repository
+            .complete_scan(
+                completed_at,
+                counts_for(document),
+                &complete_coverage(),
+                document,
+            )
+            .unwrap()
+    }
+
+    fn review_pin_count(store: &StoreCoordinator) -> i64 {
+        store.with_connection(|connection| {
+            connection
+                .query_row("SELECT count(*) FROM snapshot_review_pins", [], |row| {
+                    row.get(0)
+                })
+                .unwrap()
+        })
+    }
+
+    #[test]
+    fn review_lease_is_explicit_renewable_and_drop_expires_without_writing() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let root = temp.path().join("scan-root");
+        let document = document("scan:snapshot-review-lease", &root);
+        let completed_at = UNIX_EPOCH + Duration::from_millis(1_750_000_002_000);
+        let observed_at = completed_at + Duration::from_secs(1);
+        let (store, repository) = open_repository(&database);
+        let reference = complete_snapshot(&store, &repository, &document, &root, completed_at);
+
+        let mut lease = repository
+            .acquire_review_lease(&reference, SnapshotReviewPurpose::Explorer, observed_at)
+            .unwrap();
+        assert_eq!(lease.reference(), &reference);
+        assert_eq!(lease.purpose(), SnapshotReviewPurpose::Explorer);
+        assert_eq!(
+            lease.expires_at().unwrap(),
+            observed_at + Duration::from_secs(10 * 60)
+        );
+        assert_eq!(lease.load(observed_at).unwrap(), document);
+        assert_eq!(review_pin_count(&store), 1);
+        assert_eq!(
+            lease
+                .renew(observed_at - Duration::from_millis(1))
+                .unwrap_err()
+                .kind,
+            SnapshotRepositoryErrorKind::History(HistoryErrorKind::InvalidInput)
+        );
+
+        let renewed_at = observed_at + Duration::from_secs(2 * 60);
+        let renewed_expiry = lease.renew(renewed_at).unwrap();
+        assert_eq!(renewed_expiry, renewed_at + Duration::from_secs(10 * 60));
+        assert_eq!(lease.load(renewed_at).unwrap(), document);
+        assert_eq!(
+            lease.load(renewed_expiry).unwrap_err().kind,
+            SnapshotRepositoryErrorKind::ReviewLeaseExpired
+        );
+        assert_eq!(
+            lease.renew(renewed_expiry).unwrap_err().kind,
+            SnapshotRepositoryErrorKind::ReviewLeaseExpired
+        );
+        lease.release().unwrap();
+        assert_eq!(review_pin_count(&store), 0);
+
+        let cross_repository = repository
+            .acquire_review_lease(&reference, SnapshotReviewPurpose::Explorer, observed_at)
+            .unwrap();
+        drop(repository);
+        let reopened =
+            SnapshotRepository::open(Arc::clone(&store), SnapshotStoreAccess::ReadWrite).unwrap();
+        assert_eq!(review_pin_count(&store), 1);
+        assert_eq!(cross_repository.load(observed_at).unwrap(), document);
+        cross_repository.release().unwrap();
+
+        let dropped = reopened
+            .acquire_review_lease(
+                &reference,
+                SnapshotReviewPurpose::CleanupReview,
+                observed_at,
+            )
+            .unwrap();
+        let dropped_expiry = dropped.expires_at().unwrap();
+        drop(dropped);
+        // Drop is close-only so it remains safe during unwinding or while a
+        // caller happens to own another persistence guard.
+        assert_eq!(review_pin_count(&store), 1);
+
+        let replacement = reopened
+            .acquire_review_lease(&reference, SnapshotReviewPurpose::Explorer, dropped_expiry)
+            .unwrap();
+        // Equality is expired, and acquisition prunes the stale coordination
+        // row before inserting its replacement.
+        assert_eq!(review_pin_count(&store), 1);
+        replacement.release().unwrap();
+        assert_eq!(review_pin_count(&store), 0);
+
+        let mut expired_while_retained = reopened
+            .acquire_review_lease(&reference, SnapshotReviewPurpose::Explorer, observed_at)
+            .unwrap();
+        let expired_at = expired_while_retained.expires_at().unwrap();
+        let concurrent =
+            SnapshotRepository::open(Arc::clone(&store), SnapshotStoreAccess::ReadWrite).unwrap();
+        let successor = concurrent
+            .acquire_review_lease(&reference, SnapshotReviewPurpose::Explorer, expired_at)
+            .unwrap();
+        assert_eq!(
+            expired_while_retained.load(expired_at).unwrap_err().kind,
+            SnapshotRepositoryErrorKind::ReviewLeaseExpired
+        );
+        assert_eq!(
+            expired_while_retained.renew(expired_at).unwrap_err().kind,
+            SnapshotRepositoryErrorKind::ReviewLeaseExpired
+        );
+        // Pruning by another repository already established the exact release
+        // postcondition, so releasing the old retained object is idempotent.
+        expired_while_retained.release().unwrap();
+        successor.release().unwrap();
+        assert_eq!(review_pin_count(&store), 0);
+    }
+
+    #[test]
+    fn review_lease_reconciles_exact_post_commit_outcomes() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let root = temp.path().join("scan-root");
+        let document = document("scan:snapshot-review-reconcile", &root);
+        let completed_at = UNIX_EPOCH + Duration::from_millis(1_750_000_002_000);
+        let observed_at = completed_at + Duration::from_secs(1);
+        let (store, repository) = open_repository(&database);
+        let reference = complete_snapshot(&store, &repository, &document, &root, completed_at);
+
+        let mut lease = repository
+            .acquire_review_lease_after_commit_failure_for_test(
+                &reference,
+                SnapshotReviewPurpose::Explorer,
+                observed_at,
+            )
+            .unwrap();
+        assert_eq!(review_pin_count(&store), 1);
+        assert_eq!(lease.load(observed_at).unwrap(), document);
+
+        lease.fail_next_renew_after_commit_for_test();
+        let renewed_at = observed_at + Duration::from_secs(60);
+        assert_eq!(
+            lease.renew(renewed_at).unwrap(),
+            renewed_at + Duration::from_secs(10 * 60)
+        );
+        lease.fail_release_after_commit_for_test();
+        lease.release().unwrap();
+        assert_eq!(review_pin_count(&store), 0);
+
+        let conflicting = repository
+            .acquire_review_lease(&reference, SnapshotReviewPurpose::Explorer, observed_at)
+            .unwrap();
+        conflicting.replace_release_with_conflict_after_commit_for_test();
+        assert_eq!(
+            conflicting.release().unwrap_err().kind,
+            SnapshotRepositoryErrorKind::History(HistoryErrorKind::OutcomeUnknown)
+        );
+        assert_eq!(review_pin_count(&store), 1);
+        store.with_connection(|connection| {
+            connection
+                .execute("DELETE FROM snapshot_review_pins", [])
+                .unwrap();
+        });
+    }
+
+    #[test]
+    fn review_lease_rejects_tombstones_and_hostile_active_pin_rows() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let root = temp.path().join("scan-root");
+        let document = document("scan:snapshot-review-hostile", &root);
+        let completed_at = UNIX_EPOCH + Duration::from_millis(1_750_000_002_000);
+        let observed_at = completed_at + Duration::from_secs(1);
+        let (store, repository) = open_repository(&database);
+        let reference = complete_snapshot(&store, &repository, &document, &root, completed_at);
+
+        let read_only =
+            SnapshotRepository::open(Arc::clone(&store), SnapshotStoreAccess::ReadOnly).unwrap();
+        assert_eq!(
+            read_only
+                .acquire_review_lease(&reference, SnapshotReviewPurpose::Explorer, observed_at,)
+                .err()
+                .unwrap()
+                .kind,
+            SnapshotRepositoryErrorKind::ReadOnly
+        );
+
+        store.with_connection(|connection| {
+            connection
+                .pragma_update(None, "ignore_check_constraints", true)
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO snapshot_review_pins (
+                         pin_id, record_format_version, scan_id, scan_status,
+                         completed_at_unix_ms, snapshot_version,
+                         snapshot_relative_path, snapshot_relative_path_encoding,
+                         snapshot_checksum_sha256, owner_process_instance, purpose,
+                         created_at_unix_ms, renewed_at_unix_ms, expires_at_unix_ms
+                     )
+                     SELECT 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 1, scan_id, status,
+                            completed_at_unix_ms, snapshot_version,
+                            snapshot_relative_path, snapshot_relative_path_encoding,
+                            snapshot_checksum_sha256, 'not-a-process-instance', 'explorer',
+                            ?2, ?2, ?2 + 600000
+                     FROM scans WHERE scan_id = ?1",
+                    rusqlite::params![
+                        reference.scan_id().as_str(),
+                        super::super::history::system_time_to_unix_ms(
+                            observed_at,
+                            HistoryErrorKind::InvalidInput,
+                        )
+                        .unwrap(),
+                    ],
+                )
+                .unwrap();
+            connection
+                .pragma_update(None, "ignore_check_constraints", false)
+                .unwrap();
+        });
+        assert_eq!(
+            repository
+                .acquire_review_lease(&reference, SnapshotReviewPurpose::Explorer, observed_at,)
+                .err()
+                .unwrap()
+                .kind,
+            SnapshotRepositoryErrorKind::History(HistoryErrorKind::CorruptData)
+        );
+
+        store.with_connection(|connection| {
+            connection
+                .execute(
+                    "DELETE FROM snapshot_review_pins
+                     WHERE pin_id = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'",
+                    [],
+                )
+                .unwrap();
+        });
+
+        let hostile_scan_id = "scan:snapshot-review-hostile-parent";
+        let owner = repository.review.as_ref().unwrap().owner().unwrap();
+        let observed_ms = super::super::history::system_time_to_unix_ms(
+            observed_at,
+            HistoryErrorKind::InvalidInput,
+        )
+        .unwrap();
+        store.with_connection(|connection| {
+            connection
+                .execute(
+                    "INSERT INTO scans (
+                         scan_id, volume_id, root_path, root_path_encoding,
+                         started_at_unix_ms, completed_at_unix_ms, status,
+                         snapshot_version, snapshot_relative_path,
+                         snapshot_relative_path_encoding, snapshot_checksum_sha256,
+                         directory_count, file_count, logical_bytes, allocated_bytes,
+                         coverage_status, coverage_permille, issue_count
+                     )
+                     SELECT ?2, volume_id, root_path, root_path_encoding,
+                            started_at_unix_ms, completed_at_unix_ms, status,
+                            snapshot_version, snapshot_relative_path,
+                            snapshot_relative_path_encoding, snapshot_checksum_sha256,
+                            directory_count, file_count, logical_bytes, allocated_bytes,
+                            coverage_status, coverage_permille, issue_count
+                     FROM scans WHERE scan_id = ?1",
+                    rusqlite::params![reference.scan_id().as_str(), hostile_scan_id],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO snapshot_review_pins (
+                         pin_id, record_format_version, scan_id, scan_status,
+                         completed_at_unix_ms, snapshot_version,
+                         snapshot_relative_path, snapshot_relative_path_encoding,
+                         snapshot_checksum_sha256, owner_process_instance, purpose,
+                         created_at_unix_ms, renewed_at_unix_ms, expires_at_unix_ms
+                     )
+                     SELECT 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 1, scan_id, status,
+                            completed_at_unix_ms, snapshot_version,
+                            snapshot_relative_path, snapshot_relative_path_encoding,
+                            snapshot_checksum_sha256, ?2, 'explorer', ?3, ?3, ?3 + 600000
+                     FROM scans WHERE scan_id = ?1",
+                    rusqlite::params![hostile_scan_id, owner.as_str(), observed_ms],
+                )
+                .unwrap();
+        });
+        assert_eq!(
+            repository
+                .acquire_review_lease(&reference, SnapshotReviewPurpose::Explorer, observed_at,)
+                .err()
+                .unwrap()
+                .kind,
+            SnapshotRepositoryErrorKind::History(HistoryErrorKind::CorruptData)
+        );
+        store.with_connection(|connection| {
+            connection
+                .execute(
+                    "DELETE FROM snapshot_review_pins WHERE scan_id = ?1",
+                    [hostile_scan_id],
+                )
+                .unwrap();
+            connection
+                .execute("DELETE FROM scans WHERE scan_id = ?1", [hostile_scan_id])
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO snapshot_retention_tombstones (
+                         scan_id, record_format_version, scan_status,
+                         completed_at_unix_ms, snapshot_version,
+                         snapshot_relative_path, snapshot_relative_path_encoding,
+                         snapshot_checksum_sha256, committed_at_unix_ms
+                     )
+                     SELECT scan_id, 1, status, completed_at_unix_ms,
+                            snapshot_version, snapshot_relative_path,
+                            snapshot_relative_path_encoding,
+                            snapshot_checksum_sha256, completed_at_unix_ms + 1
+                     FROM scans WHERE scan_id = ?1",
+                    [reference.scan_id().as_str()],
+                )
+                .unwrap();
+        });
+        assert_eq!(
+            repository
+                .acquire_review_lease(&reference, SnapshotReviewPurpose::Explorer, observed_at,)
+                .err()
+                .unwrap()
+                .kind,
+            SnapshotRepositoryErrorKind::SnapshotUnavailable
+        );
+    }
+
+    #[test]
+    fn review_lease_local_bound_is_fail_closed_and_releases_slots() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let root = temp.path().join("scan-root");
+        let document = document("scan:snapshot-review-bound", &root);
+        let completed_at = UNIX_EPOCH + Duration::from_millis(1_750_000_002_000);
+        let observed_at = completed_at + Duration::from_secs(1);
+        let (store, repository) = open_repository(&database);
+        let reference = complete_snapshot(&store, &repository, &document, &root, completed_at);
+
+        let mut leases = Vec::new();
+        for _ in 0..MAX_ACTIVE_PINS_PER_OWNER {
+            leases.push(
+                repository
+                    .acquire_review_lease(&reference, SnapshotReviewPurpose::Explorer, observed_at)
+                    .unwrap(),
+            );
+        }
+        assert_eq!(review_pin_count(&store), MAX_ACTIVE_PINS_PER_OWNER as i64);
+        assert_eq!(
+            repository
+                .acquire_review_lease(&reference, SnapshotReviewPurpose::Explorer, observed_at,)
+                .err()
+                .unwrap()
+                .kind,
+            SnapshotRepositoryErrorKind::History(HistoryErrorKind::QueryLimitExceeded)
+        );
+        leases.pop().unwrap().release().unwrap();
+        let replacement = repository
+            .acquire_review_lease(&reference, SnapshotReviewPurpose::Explorer, observed_at)
+            .unwrap();
+        drop(replacement);
+        drop(leases);
+        assert_eq!(review_pin_count(&store), MAX_ACTIVE_PINS_PER_OWNER as i64);
+    }
+
+    #[test]
+    fn review_population_pruning_is_bounded_and_oversize_fails_corrupt() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let root = temp.path().join("scan-root");
+        let document = document("scan:snapshot-review-population", &root);
+        let completed_at = UNIX_EPOCH + Duration::from_millis(1_750_000_002_000);
+        let observed_at = completed_at + Duration::from_secs(20 * 60);
+        let observed_ms = super::super::history::system_time_to_unix_ms(
+            observed_at,
+            HistoryErrorKind::InvalidInput,
+        )
+        .unwrap();
+        let (store, repository) = open_repository(&database);
+        let reference = complete_snapshot(&store, &repository, &document, &root, completed_at);
+        let owner = repository.review.as_ref().unwrap().owner().unwrap();
+        let owner_prefix = owner.as_str().rsplit_once(':').unwrap().0.to_owned();
+
+        let insert_population = |count: usize, expired: bool| {
+            store.with_connection(|connection| {
+                connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+                for ordinal in 1..=count {
+                    let id = format!("{ordinal:032x}");
+                    let row_owner = format!("{owner_prefix}:{ordinal:032x}");
+                    let renewed = if expired {
+                        observed_ms - 600_000
+                    } else {
+                        observed_ms
+                    };
+                    connection
+                        .execute(
+                            "INSERT INTO snapshot_review_pins (
+                                 pin_id, record_format_version, scan_id, scan_status,
+                                 completed_at_unix_ms, snapshot_version,
+                                 snapshot_relative_path, snapshot_relative_path_encoding,
+                                 snapshot_checksum_sha256, owner_process_instance, purpose,
+                                 created_at_unix_ms, renewed_at_unix_ms, expires_at_unix_ms
+                             )
+                             SELECT ?2, 1, scan_id, status, completed_at_unix_ms,
+                                    snapshot_version, snapshot_relative_path,
+                                    snapshot_relative_path_encoding,
+                                    snapshot_checksum_sha256, ?3, 'explorer', ?4, ?4, ?4 + 600000
+                             FROM scans WHERE scan_id = ?1",
+                            rusqlite::params![
+                                reference.scan_id().as_str(),
+                                id,
+                                row_owner,
+                                renewed,
+                            ],
+                        )
+                        .unwrap();
+                }
+                connection.execute_batch("COMMIT").unwrap();
+            });
+        };
+
+        insert_population(MAX_EXPIRED_PRUNE + 1, true);
+        let colliding =
+            SnapshotReviewPinId::from_stored(format!("{:032x}", MAX_EXPIRED_PRUNE + 1)).unwrap();
+        let unique =
+            SnapshotReviewPinId::from_stored("ffffffffffffffffffffffffffffffff".into()).unwrap();
+        let lease = repository
+            .acquire_review_lease_with_pin_ids_for_test(
+                &reference,
+                SnapshotReviewPurpose::Explorer,
+                observed_at,
+                vec![colliding, unique],
+            )
+            .unwrap();
+        // One bounded batch removes exactly 64 stale rows. The first prepared
+        // ID collides with the remaining sentinel and the second succeeds;
+        // collision retry must not run pruning a second time.
+        assert_eq!(review_pin_count(&store), 2);
+        lease.release().unwrap();
+        store.with_connection(|connection| {
+            connection
+                .execute("DELETE FROM snapshot_review_pins", [])
+                .unwrap();
+        });
+
+        insert_population(MAX_ACTIVE_PINS + 1, false);
+        assert_eq!(
+            repository
+                .acquire_review_lease(&reference, SnapshotReviewPurpose::Explorer, observed_at)
+                .err()
+                .unwrap()
+                .kind,
+            SnapshotRepositoryErrorKind::History(HistoryErrorKind::CorruptData)
+        );
+    }
+
+    #[test]
+    fn dropped_review_pin_survives_independent_store_reopen_until_expiry() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let root = temp.path().join("scan-root");
+        let document = document("scan:snapshot-review-store-reopen", &root);
+        let completed_at = UNIX_EPOCH + Duration::from_millis(1_750_000_002_000);
+        let observed_at = completed_at + Duration::from_secs(1);
+
+        let (reference, expiry) = {
+            let (store, repository) = open_repository(&database);
+            let reference = complete_snapshot(&store, &repository, &document, &root, completed_at);
+            let lease = repository
+                .acquire_review_lease(&reference, SnapshotReviewPurpose::Explorer, observed_at)
+                .unwrap();
+            let expiry = lease.expires_at().unwrap();
+            drop(lease);
+            assert_eq!(review_pin_count(&store), 1);
+            (reference, expiry)
+        };
+
+        let (reopened_store, reopened_repository) = open_repository(&database);
+        assert_eq!(review_pin_count(&reopened_store), 1);
+        let replacement = reopened_repository
+            .acquire_review_lease(&reference, SnapshotReviewPurpose::Explorer, expiry)
+            .unwrap();
+        assert_eq!(review_pin_count(&reopened_store), 1);
+        replacement.release().unwrap();
+        assert_eq!(review_pin_count(&reopened_store), 0);
+    }
+
+    #[test]
+    fn review_lease_operations_fail_closed_after_external_newer_schema() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let root = temp.path().join("scan-root");
+        let document = document("scan:snapshot-review-schema-fence", &root);
+        let completed_at = UNIX_EPOCH + Duration::from_millis(1_750_000_002_000);
+        let observed_at = completed_at + Duration::from_secs(1);
+        let (store, repository) = open_repository(&database);
+        let reference = complete_snapshot(&store, &repository, &document, &root, completed_at);
+        let mut lease = repository
+            .acquire_review_lease(&reference, SnapshotReviewPurpose::Explorer, observed_at)
+            .unwrap();
+
+        let current = super::super::status::DATABASE_SCHEMA_VERSION;
+        let future = current + 1;
+        let external = rusqlite::Connection::open(&database).unwrap();
+        external
+            .execute(
+                "INSERT INTO schema_migrations (
+                     version, name, checksum_sha256, applied_at_unix_ms
+                 ) VALUES (?1, 'test-future-review-schema', zeroblob(32), 1)",
+                [future],
+            )
+            .unwrap();
+        external
+            .pragma_update(None, "user_version", future)
+            .unwrap();
+        drop(external);
+
+        let incompatible =
+            SnapshotRepositoryErrorKind::History(HistoryErrorKind::IncompatibleSchema);
+        assert_eq!(
+            repository
+                .acquire_review_lease(&reference, SnapshotReviewPurpose::Explorer, observed_at)
+                .err()
+                .unwrap()
+                .kind,
+            incompatible
+        );
+        assert_eq!(
+            lease
+                .renew(observed_at + Duration::from_secs(1))
+                .unwrap_err()
+                .kind,
+            incompatible
+        );
+        assert_eq!(lease.release().unwrap_err().kind, incompatible);
+
+        let external = rusqlite::Connection::open(&database).unwrap();
+        external
+            .execute("DELETE FROM schema_migrations WHERE version = ?1", [future])
+            .unwrap();
+        external
+            .pragma_update(None, "user_version", current)
+            .unwrap();
+        drop(external);
+        store.with_connection(|connection| {
+            connection
+                .execute("DELETE FROM snapshot_review_pins", [])
+                .unwrap();
+        });
+    }
+
+    #[test]
+    fn review_acquisition_obeys_database_before_snapshot_lock_order() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let root = temp.path().join("scan-root");
+        let review_document = document("scan:snapshot-review-lock-order", &root);
+        let completed_at = UNIX_EPOCH + Duration::from_millis(1_750_000_002_000);
+        let observed_at = completed_at + Duration::from_secs(1);
+        let (store, repository) = open_repository(&database);
+        let reference =
+            complete_snapshot(&store, &repository, &review_document, &root, completed_at);
+
+        let orphan_root = temp.path().join("orphan-root");
+        let orphan_document = document("scan:snapshot-review-lock-orphan", &orphan_root);
+        let publication = repository
+            .publish_orphan_for_test(&orphan_document)
+            .unwrap();
+        assert_eq!(
+            repository
+                .acquire_review_lease(&reference, SnapshotReviewPurpose::Explorer, observed_at,)
+                .err()
+                .unwrap()
+                .kind,
+            SnapshotRepositoryErrorKind::Storage(SnapshotStorageErrorKind::Busy)
+        );
+        drop(publication);
+        let lease = repository
+            .acquire_review_lease(&reference, SnapshotReviewPurpose::Explorer, observed_at)
+            .unwrap();
+        lease.release().unwrap();
     }
 
     #[test]
@@ -1160,6 +2333,15 @@ mod tests {
             repository.load(&reference).unwrap_err().kind,
             SnapshotRepositoryErrorKind::Codec(_)
         ));
+        let observed_at = UNIX_EPOCH + Duration::from_millis(1_750_000_003_000);
+        let corrupt_lease = repository
+            .acquire_review_lease(&reference, SnapshotReviewPurpose::Explorer, observed_at)
+            .unwrap();
+        assert!(matches!(
+            corrupt_lease.load(observed_at).unwrap_err().kind,
+            SnapshotRepositoryErrorKind::Codec(_)
+        ));
+        corrupt_lease.release().unwrap();
 
         // DUX-DESTRUCTIVE: allow=test-snapshot-referenced-file-remove -- remove only this test-owned published fixture to prove a durable reference fails closed when its file disappears
         std::fs::remove_file(path).unwrap();
@@ -1167,6 +2349,15 @@ mod tests {
             repository.load(&reference).unwrap_err().kind,
             SnapshotRepositoryErrorKind::MissingSnapshot
         );
+        assert_eq!(
+            repository
+                .acquire_review_lease(&reference, SnapshotReviewPurpose::Explorer, observed_at,)
+                .err()
+                .unwrap()
+                .kind,
+            SnapshotRepositoryErrorKind::MissingSnapshot
+        );
+        assert_eq!(review_pin_count(&store), 0);
 
         store.with_connection(|connection| {
             connection

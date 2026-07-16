@@ -330,7 +330,21 @@ impl SecureSnapshotStore {
     }
 
     pub(crate) fn open(&self, name: &SnapshotFileName) -> Result<Option<RetainedSnapshot>> {
-        let lock = self.acquire_writer_lock(OPEN_LOCK_TIMEOUT)?;
+        Ok(self
+            .open_with_writer_lease(name, OPEN_LOCK_TIMEOUT)?
+            .map(SnapshotOpenLease::into_retained))
+    }
+
+    /// Open one immutable snapshot while retaining the store-wide writer
+    /// exclusion. Database-backed review pins use this to keep validation,
+    /// pin insertion, and the future retention tombstone boundary in one
+    /// database-before-snapshot critical section.
+    pub(crate) fn open_with_writer_lease(
+        &self,
+        name: &SnapshotFileName,
+        timeout: Duration,
+    ) -> Result<Option<SnapshotOpenLease>> {
+        let lock = self.acquire_writer_lock(timeout)?;
         self.validate_inventory(None)?;
         let Some((file, identity)) = platform::open_named_regular(
             &self.inner.directory,
@@ -349,8 +363,10 @@ impl SecureSnapshotStore {
             identity: Identity(identity),
         };
         retained.revalidate()?;
-        drop(lock);
-        Ok(Some(retained))
+        Ok(Some(SnapshotOpenLease {
+            retained,
+            _writer_lock: lock,
+        }))
     }
 
     pub(crate) fn stage(
@@ -628,6 +644,30 @@ impl RetainedSnapshot {
 pub(crate) struct SnapshotPublicationLease {
     retained: RetainedSnapshot,
     _writer_lock: SnapshotWriterLock,
+}
+
+/// A retained immutable snapshot plus the store-wide writer exclusion.
+///
+/// This type deliberately exposes no unlink operation. Its only purpose is to
+/// let the database layer commit a review pin before retention can acquire the
+/// same exclusion boundary.
+pub(crate) struct SnapshotOpenLease {
+    retained: RetainedSnapshot,
+    _writer_lock: SnapshotWriterLock,
+}
+
+impl SnapshotOpenLease {
+    #[allow(
+        dead_code,
+        reason = "retained review leases are wired to Explorer/FFI in a later milestone slice"
+    )]
+    pub(crate) fn retained(&self) -> &RetainedSnapshot {
+        &self.retained
+    }
+
+    pub(crate) fn into_retained(self) -> RetainedSnapshot {
+        self.retained
+    }
 }
 
 impl SnapshotPublicationLease {

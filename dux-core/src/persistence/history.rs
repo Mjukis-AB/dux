@@ -937,6 +937,17 @@ pub(super) fn run_bounded_query<T>(
     run_bounded_query_with_limits(connection, QUERY_MAX_CALLBACKS, QUERY_MAX_ELAPSED, query)
 }
 
+/// A larger fixed budget for bounded cross-process snapshot-pin population
+/// inspection. The legal table has up to 1,024 exact rows, so the smaller
+/// single-record history budget is insufficient even though this remains
+/// independently time and VM bounded.
+pub(super) fn run_bounded_snapshot_pin_query<T>(
+    connection: &Connection,
+    query: impl FnOnce() -> Result<T, HistoryError>,
+) -> Result<T, HistoryError> {
+    run_bounded_query_with_limits(connection, 50_000, Duration::from_secs(1), query)
+}
+
 fn run_bounded_recent_query<T>(
     connection: &Connection,
     limit: usize,

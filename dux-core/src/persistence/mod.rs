@@ -58,6 +58,7 @@ mod retention;
 mod scan_coverage_history;
 pub(crate) mod snapshot;
 mod snapshot_retention;
+mod snapshot_review_pin;
 mod status;
 mod storage;
 mod store;
@@ -73,6 +74,7 @@ pub(crate) use history::{
     ScanCounts, ScanStatus, TerminalScanStatus,
 };
 pub use snapshot::SnapshotOpenErrorKind;
+pub(crate) use snapshot_review_pin::SnapshotReviewPurpose;
 pub use status::{DATABASE_SCHEMA_VERSION, DatabaseAccess, DatabaseOpenErrorKind, DatabaseStatus};
 pub(crate) use store::StoreCoordinator;
 

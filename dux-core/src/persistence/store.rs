@@ -1188,7 +1188,7 @@ impl StoreCoordinator {
             .map_err(map_history_database_error)
     }
 
-    fn revalidate_current_history_guard(
+    pub(super) fn revalidate_current_history_guard(
         &self,
         guard: &HistoryConnectionGuard<'_>,
     ) -> Result<(), HistoryError> {
