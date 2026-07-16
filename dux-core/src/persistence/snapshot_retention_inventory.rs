@@ -2,12 +2,12 @@
 //!
 //! This is a policy observation, never retention authority. It deliberately
 //! exposes no tombstone writer, unlink handle, or temporary-file scavenger.
-//! The future mutation path must repeat every eligibility proof while holding
+//! The production mutation path repeats every eligibility proof while holding
 //! the same database-before-snapshot locks and an exact retained file handle.
 
 #![allow(
     dead_code,
-    reason = "the sealed inventory is wired to retention maintenance before app/FFI presentation"
+    reason = "sealed retention metadata remains internal before app/FFI presentation"
 )]
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -160,6 +160,61 @@ pub(crate) struct SnapshotRetentionInventory {
     pub(crate) non_evictable_over_cap: bool,
     /// True whenever a recognized temp can still be growing outside the lock.
     pub(crate) accounting_unstable: bool,
+}
+
+impl SnapshotRetentionInventory {
+    /// Return the first exact physical residual whose logical tombstone is
+    /// already durable. Residual removal is ordered by tombstone commit, then
+    /// immutable scan chronology and ID, so retries are deterministic without
+    /// treating age as deletion authority.
+    pub(crate) fn oldest_tombstoned_residual(&self) -> Option<&SnapshotRetentionEntry> {
+        self.entries
+            .iter()
+            .filter_map(|entry| {
+                if let SnapshotRetentionLogicalState::Tombstoned { committed_at } =
+                    entry.logical_state
+                {
+                    Some((entry, committed_at))
+                } else {
+                    None
+                }
+            })
+            .min_by(|(left, left_committed), (right, right_committed)| {
+                left_committed
+                    .cmp(right_committed)
+                    .then_with(|| left.completed_at.cmp(&right.completed_at))
+                    .then_with(|| left.started_at.cmp(&right.started_at))
+                    .then_with(|| left.scan_id.cmp(&right.scan_id))
+            })
+            .map(|(entry, _)| entry)
+    }
+
+    /// Resolve the inventory's already policy-sorted observation back to its
+    /// complete immutable entry. The mutation layer still reuses this same
+    /// locked inventory and repeats all database and physical validations.
+    pub(crate) fn oldest_eviction_candidate(&self) -> Option<&SnapshotRetentionEntry> {
+        let scan_id = &self.eviction_observations.first()?.scan_id;
+        self.entries.iter().find(|entry| &entry.scan_id == scan_id)
+    }
+
+    pub(crate) fn has_additional_work_after(&self, removed_scan_id: &ScanId) -> bool {
+        self.entries.iter().any(|entry| {
+            &entry.scan_id != removed_scan_id
+                && matches!(
+                    entry.logical_state,
+                    SnapshotRetentionLogicalState::Tombstoned { .. }
+                )
+        }) || (self.totals.store_total.charged_bytes.saturating_sub(
+            self.entries
+                .iter()
+                .find(|entry| &entry.scan_id == removed_scan_id)
+                .map_or(0, |entry| entry.usage.charged_bytes()),
+        ) > self.cap_bytes
+            && self
+                .eviction_observations
+                .iter()
+                .any(|candidate| &candidate.scan_id != removed_scan_id))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]

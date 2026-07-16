@@ -138,8 +138,9 @@ queries that exact tombstone before opening the snapshot file. A tombstone
 returns a distinct unavailable result and wins over a missing or corrupt file,
 while the terminal scan row continues to explain which snapshot originally
 existed. The guarded retry path reuses its already-held database guard rather
-than reacquiring the connection mutex. This checkpoint deliberately exposes no
-production tombstone writer.
+than reacquiring the connection mutex. The production writer described below
+can only append the complete exact row selected under the final locked policy
+boundary; it exposes no update or delete operation.
 
 Schema v6 defines an active review as an explicit expiring lease, never as a
 selected candidate or a planned cleanup session. `snapshot_review_pins` binds
@@ -279,26 +280,60 @@ reference. Exact snapshot loads still surface a requested missing file; a
 future diagnostic history pager must be separately bounded and must never feed
 cleanup authority without revalidation under the final locks.
 
-Future retention must validate eligibility and commit the tombstone first,
-then unlink through a retained, revalidated handle and durably flush the
-snapshot directory. A crash between the tombstone commit and unlink leaves a
-provable DUX-owned orphan; file-first deletion is forbidden.
+Production cap enforcement is a sealed, one-final-per-call repository batch.
+It acquires the current-schema database guard before the snapshot writer lease,
+freshly loads the cap, and rebuilds the complete physical/history, pin, and temp
+lease inventory inside that mutation boundary. A pre-existing physically
+present tombstoned residual is selected before any new victim, even when the
+store is now below cap. Otherwise a new tombstone is considered only when the
+charged store total exceeds the cap and accounting is stable: an active or
+unleased temp defers the batch. The deterministic oldest available observation
+is eligible only when it is outside the latest two for its exact losslessly
+encoded root and has no active review pin. Protected, orphan, temporary,
+control, and already tombstoned bytes are never normal victims. One batch never
+removes more than one final.
+
+The final inventory observation is still not sufficient by itself. Before
+retiring either a fresh victim or an existing tombstoned residual, DUX reopens
+the exact observed final read-only, requires the same filesystem identity and
+logical/allocated usage, fully decodes the bounded snapshot, and matches its
+scan ID and digest to immutable history. For a fresh victim it then prepares
+the complete succeeded parent tuple and commits one append-only tombstone. A
+commit-adjacent failure is adopted only when the complete stored row is exact;
+schema uncertainty returns outcome-unknown without touching the file. Only
+after an exact durable tombstone does DUX reopen the observed identity with
+deletion access while keeping the digest-validated read handle live, repeat
+identity, name, and usage checks, use descriptor-relative name unlink on Unix
+or handle disposition on Windows, and durably flush the snapshot directory.
+File-first deletion is forbidden.
+
+A crash or failure after tombstone commit leaves a logically unavailable
+physical residual. A later batch gives such debt priority but again requires
+the freshly observed identity, unchanged usage, and full snapshot digest before
+unlink. A same-name replacement after validation or a changed body therefore
+remains untouched by that batch; a later batch must observe and fully validate
+the then-current exact bytes before it can remove them. Malicious same-user
+name substitution during the final Unix syscall window is outside the private-
+store isolation guarantee documented in `SECURITY_DESIGN.md`.
+The tombstone and immutable scan history are retained permanently; successful
+physical removal never deletes either row. If unlink succeeds but directory
+sync is uncertain, the durable tombstone still prevents future loads and a
+later inventory safely retries only if the name is present again.
 Publication and retention share this lock order:
 
 1. SQLite connection mutex;
 2. cross-process writer/current-schema lease;
 3. snapshot writer lock.
 
-Snapshot retention is not enabled until app/FFI review-lease ownership,
-retained-handle final deletion, the final locked eligibility/tombstone writer,
-post-tombstone residual handling, and bounded marker-owned unleased-temp and
-provisioning-stage scavenging all exist.
-The implemented inventory ranks latest-two and reports cap observations but is
-not authority. Tombstone insertion, the final pin/latest-two/cap eligibility
-recheck, and retained-file acquisition must occur while holding the database
-and snapshot locks in the order above. A prior inventory report is not
-authority. A name prefix alone never proves that a temporary or stage directory
-belongs to DUX.
+Core cap enforcement, retained-handle final deletion, and exact tombstoned
+residual handling are implemented. Automatic production scheduling is not
+enabled until app/FFI owns the review-lease lifecycle and an idle scheduler can
+invoke one bounded batch at a time. Physical-orphan reconciliation, general
+terminal/unleased-temp and provisioning-stage scavenging, and explicit
+clear-data actions remain separate maintenance capabilities. A prior inventory
+report is never authority; the writer recomputes every proof under the lock
+order above. A name prefix alone never proves that a temporary or stage
+directory belongs to DUX.
 
 ## Failure and version behavior
 

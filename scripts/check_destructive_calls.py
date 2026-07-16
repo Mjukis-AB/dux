@@ -337,7 +337,13 @@ EXCEPTIONS = {
     "snapshot-current-temp-unlink": ExceptionSpec(
         "dux-core/src/persistence/snapshot/storage.rs", "rust-platform-delete"
     ),
+    "snapshot-observed-final-unlink": ExceptionSpec(
+        "dux-core/src/persistence/snapshot/storage.rs", "rust-platform-delete"
+    ),
     "snapshot-windows-current-temp-delete": ExceptionSpec(
+        "dux-core/src/persistence/snapshot/storage/windows.rs", "rust-platform-delete"
+    ),
+    "snapshot-windows-observed-final-delete": ExceptionSpec(
         "dux-core/src/persistence/snapshot/storage/windows.rs", "rust-platform-delete"
     ),
     "snapshot-windows-handle-publish": ExceptionSpec(
@@ -486,7 +492,9 @@ EXCEPTION_PRIMITIVES = {
     "snapshot-linux-no-replace-publish": "SYS_renameat2",
     "snapshot-macos-no-replace-publish": "renameatx_np",
     "snapshot-current-temp-unlink": "unlinkat",
+    "snapshot-observed-final-unlink": "unlinkat",
     "snapshot-windows-current-temp-delete": "SetFileInformationByHandle",
+    "snapshot-windows-observed-final-delete": "SetFileInformationByHandle",
     "snapshot-windows-handle-publish": "SetFileInformationByHandle",
     "test-snapshot-lock-helper-spawn": "Command::new",
     "test-snapshot-temp-lock-helper-spawn": "Command::new",

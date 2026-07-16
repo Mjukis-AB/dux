@@ -23,10 +23,14 @@ use super::candidate_evaluation_history::{
 };
 use super::history::{
     HistoryError, HistoryErrorKind, ScanCompletionRecord, ScanCounts, ScanStatus,
-    system_time_to_unix_ms, unix_ms_to_system_time,
+    map_write_sql_error, system_time_to_unix_ms, unix_ms_to_system_time,
 };
 use super::process_liveness::{ProcessIdentityError, ProcessInstanceId, current_process_instance};
-use super::snapshot_retention::{SnapshotRetentionState, load_snapshot_retention_state};
+use super::snapshot_retention::{
+    PreparedSnapshotRetentionTombstone, SnapshotRetentionState,
+    insert_snapshot_retention_tombstone, load_snapshot_retention_state,
+    reconcile_snapshot_retention_tombstone_insert,
+};
 use super::snapshot_retention_inventory::{
     SnapshotRetentionInventory, build_snapshot_retention_inventory,
 };
@@ -166,6 +170,27 @@ pub(crate) enum SnapshotRepositoryErrorKind {
 #[error("snapshot repository operation failed: {kind:?}")]
 pub(crate) struct SnapshotRepositoryError {
     pub(crate) kind: SnapshotRepositoryErrorKind,
+}
+
+/// One bounded production-retention decision. A batch removes at most one
+/// exact final so callers can yield between potentially slow filesystem
+/// durability operations.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SnapshotRetentionBatchResult {
+    pub(crate) outcome: SnapshotRetentionBatchOutcome,
+    pub(crate) cap_bytes: u64,
+    pub(crate) charged_bytes_before: u64,
+    pub(crate) charged_bytes_after: u64,
+    pub(crate) has_more: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SnapshotRetentionBatchOutcome {
+    UnderCap,
+    DeferredUnstable,
+    DeferredNoEligibleSnapshot,
+    RemovedTombstonedResidual { scan_id: ScanId, bytes: u64 },
+    TombstonedAndRemoved { scan_id: ScanId, bytes: u64 },
 }
 
 const fn repository_error(kind: SnapshotRepositoryErrorKind) -> SnapshotRepositoryError {
@@ -374,7 +399,7 @@ impl SnapshotRepository {
     /// is a retention-maintenance prerequisite, not a generic history query.
     #[allow(
         dead_code,
-        reason = "retention maintenance consumes the sealed inventory in the next slice"
+        reason = "sealed inventory diagnostics remain internal before app/FFI presentation"
     )]
     pub(crate) fn inspect_retention_inventory(
         &self,
@@ -387,9 +412,27 @@ impl SnapshotRepository {
             .database
             .lock_current_history_connection()
             .map_err(map_history)?;
+        let (inventory, storage) =
+            self.build_retention_inventory_with_guard(&database_guard, observed_at)?;
+        storage.revalidate().map_err(map_storage)?;
+        self.database
+            .revalidate_current_history_guard(&database_guard)
+            .map_err(map_history)?;
+        Ok(inventory)
+    }
+
+    fn build_retention_inventory_with_guard(
+        &self,
+        database_guard: &HistoryConnectionGuard<'_>,
+        observed_at: SystemTime,
+    ) -> Result<(SnapshotRetentionInventory, SnapshotStoreInventoryLease), SnapshotRepositoryError>
+    {
+        self.database
+            .validate_history_guard(database_guard)
+            .map_err(map_history)?;
         let cap_bytes = self
             .database
-            .load_snapshot_retention_cap_with_guard(&database_guard)
+            .load_snapshot_retention_cap_with_guard(database_guard)
             .map_err(map_history)?
             .cap_bytes;
         let store = self
@@ -416,11 +459,201 @@ impl SnapshotRepository {
             cap_bytes,
         )
         .map_err(map_history)?;
+        Ok((inventory, storage))
+    }
+
+    /// Apply at most one exact physical snapshot-retention mutation.
+    ///
+    /// Existing tombstoned residuals are retried before a new victim is
+    /// selected. A new tombstone is permitted only from a stable complete
+    /// inventory whose oldest candidate is neither latest-two nor actively
+    /// pinned. The database guard and snapshot writer lease remain held from
+    /// that proof through append-only tombstone commit and retained-handle
+    /// unlink.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "idle engine scheduling consumes this bounded batch in a later slice"
+        )
+    )]
+    pub(crate) fn enforce_retention_cap(
+        &self,
+        observed_at: SystemTime,
+    ) -> Result<SnapshotRetentionBatchResult, SnapshotRepositoryError> {
+        self.enforce_retention_cap_with_hook(observed_at, || Ok(()))
+    }
+
+    fn enforce_retention_cap_with_hook(
+        &self,
+        observed_at: SystemTime,
+        after_tombstone_commit: impl FnOnce() -> Result<(), HistoryError>,
+    ) -> Result<SnapshotRetentionBatchResult, SnapshotRepositoryError> {
+        if self.access != SnapshotStoreAccess::ReadWrite {
+            return Err(repository_error(SnapshotRepositoryErrorKind::ReadOnly));
+        }
+        let mut database_guard = self
+            .database
+            .lock_current_history_connection()
+            .map_err(map_history)?;
+        let (inventory, mut storage) =
+            self.build_retention_inventory_with_guard(&database_guard, observed_at)?;
         storage.revalidate().map_err(map_storage)?;
         self.database
             .revalidate_current_history_guard(&database_guard)
             .map_err(map_history)?;
-        Ok(inventory)
+
+        let cap_bytes = inventory.cap_bytes;
+        let charged_bytes_before = inventory.totals.store_total.charged_bytes;
+
+        // Logical unavailability is already durable for this exact identity,
+        // so residual retry does not depend on a fresh cap calculation.
+        if let Some(residual) = inventory.oldest_tombstoned_residual() {
+            let scan_id = residual.scan_id.clone();
+            let file_name = residual.reference.file_name().clone();
+            let expected_usage = residual.usage;
+            let has_more = inventory.has_additional_work_after(&scan_id);
+            let retained = storage
+                .retain_observed_final(&file_name)
+                .map_err(map_storage)?;
+            decode_reference(&retained, &residual.reference)?;
+            let removed = storage
+                .remove_observed_final(&retained)
+                .map_err(map_storage)?;
+            drop(retained);
+            if removed != expected_usage {
+                return Err(repository_error(SnapshotRepositoryErrorKind::Storage(
+                    SnapshotStorageErrorKind::InternalState,
+                )));
+            }
+            storage.revalidate().map_err(map_storage)?;
+            self.database
+                .revalidate_current_history_guard(&database_guard)
+                .map_err(map_history)?;
+            let bytes = removed.charged_bytes();
+            return Ok(SnapshotRetentionBatchResult {
+                outcome: SnapshotRetentionBatchOutcome::RemovedTombstonedResidual {
+                    scan_id,
+                    bytes,
+                },
+                cap_bytes,
+                charged_bytes_before,
+                charged_bytes_after: charged_bytes_before.saturating_sub(bytes),
+                has_more,
+            });
+        }
+
+        if charged_bytes_before <= cap_bytes {
+            return Ok(SnapshotRetentionBatchResult {
+                outcome: SnapshotRetentionBatchOutcome::UnderCap,
+                cap_bytes,
+                charged_bytes_before,
+                charged_bytes_after: charged_bytes_before,
+                has_more: false,
+            });
+        }
+        if inventory.accounting_unstable {
+            return Ok(SnapshotRetentionBatchResult {
+                outcome: SnapshotRetentionBatchOutcome::DeferredUnstable,
+                cap_bytes,
+                charged_bytes_before,
+                charged_bytes_after: charged_bytes_before,
+                has_more: true,
+            });
+        }
+        let Some(candidate) = inventory.oldest_eviction_candidate() else {
+            return Ok(SnapshotRetentionBatchResult {
+                outcome: SnapshotRetentionBatchOutcome::DeferredNoEligibleSnapshot,
+                cap_bytes,
+                charged_bytes_before,
+                charged_bytes_after: charged_bytes_before,
+                has_more: false,
+            });
+        };
+        if !candidate.is_eviction_observation() {
+            return Err(repository_error(SnapshotRepositoryErrorKind::History(
+                HistoryErrorKind::InternalState,
+            )));
+        }
+
+        let scan_id = candidate.scan_id.clone();
+        let file_name = candidate.reference.file_name().clone();
+        let expected_usage = candidate.usage;
+        let has_more = inventory.has_additional_work_after(&scan_id);
+        let tombstone = PreparedSnapshotRetentionTombstone::prepare(
+            &candidate.reference,
+            candidate.completed_at,
+            observed_at,
+        )
+        .map_err(map_history)?;
+
+        let retained = storage
+            .retain_observed_final(&file_name)
+            .map_err(map_storage)?;
+        decode_reference(&retained, &candidate.reference)?;
+        storage.revalidate().map_err(map_storage)?;
+        self.database
+            .revalidate_current_history_guard(&database_guard)
+            .map_err(map_history)?;
+
+        let transaction = database_guard
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(map_write_sql_error)
+            .map_err(map_history)?;
+        insert_snapshot_retention_tombstone(&transaction, &tombstone).map_err(map_history)?;
+        let commit_result = transaction
+            .commit()
+            .map_err(map_write_sql_error)
+            .and_then(|()| after_tombstone_commit())
+            .and_then(|()| {
+                self.database
+                    .revalidate_current_history_guard(&database_guard)
+            });
+        if let Err(failure) = commit_result {
+            if self
+                .database
+                .revalidate_current_history_guard(&database_guard)
+                .is_err()
+            {
+                return Err(outcome_unknown());
+            }
+            reconcile_snapshot_retention_tombstone_insert(
+                &database_guard.connection,
+                &tombstone,
+                failure,
+            )
+            .map_err(map_history)?;
+        } else {
+            reconcile_snapshot_retention_tombstone_insert(
+                &database_guard.connection,
+                &tombstone,
+                HistoryError::new(HistoryErrorKind::OutcomeUnknown),
+            )
+            .map_err(map_history)?;
+        }
+
+        let removed = storage
+            .remove_observed_final(&retained)
+            .map_err(map_storage)?;
+        drop(retained);
+        if removed != expected_usage {
+            return Err(repository_error(SnapshotRepositoryErrorKind::Storage(
+                SnapshotStorageErrorKind::InternalState,
+            )));
+        }
+        storage.revalidate().map_err(map_storage)?;
+        self.database
+            .revalidate_current_history_guard(&database_guard)
+            .map_err(map_history)?;
+        let bytes = removed.charged_bytes();
+        Ok(SnapshotRetentionBatchResult {
+            outcome: SnapshotRetentionBatchOutcome::TombstonedAndRemoved { scan_id, bytes },
+            cap_bytes,
+            charged_bytes_before,
+            charged_bytes_after: charged_bytes_before.saturating_sub(bytes),
+            has_more,
+        })
     }
 
     /// Acquire an explicit cross-process lease for one snapshot-backed UI
@@ -936,8 +1169,8 @@ impl SnapshotRepository {
     }
 
     /// Check logical availability under the database fence before acquiring a
-    /// retained file handle. Future retention must take the same database-first
-    /// order before its snapshot writer lock and unlink.
+    /// retained file handle. Retention takes the same database-first order
+    /// before its snapshot writer lock and unlink.
     fn open_available_with_guard(
         &self,
         database_guard: &HistoryConnectionGuard<'_>,
@@ -1507,6 +1740,11 @@ fn decode_reference(
     retained: &RetainedSnapshot,
     reference: &SnapshotReference,
 ) -> Result<SnapshotDocument, SnapshotRepositoryError> {
+    if reference.version() != SNAPSHOT_FORMAT_VERSION {
+        return Err(repository_error(
+            SnapshotRepositoryErrorKind::IncompatibleVersion,
+        ));
+    }
     let (document, digest) = decode_retained(retained)?;
     if digest != reference.digest() || &document.metadata.scan_id != reference.scan_id() {
         return Err(repository_error(
@@ -1733,6 +1971,18 @@ mod tests {
                 .query_row("SELECT count(*) FROM snapshot_temp_leases", [], |row| {
                     row.get(0)
                 })
+                .unwrap()
+        })
+    }
+
+    fn retention_tombstone_count(store: &StoreCoordinator) -> i64 {
+        store.with_connection(|connection| {
+            connection
+                .query_row(
+                    "SELECT count(*) FROM snapshot_retention_tombstones",
+                    [],
+                    |row| row.get(0),
+                )
                 .unwrap()
         })
     }
@@ -2600,6 +2850,472 @@ mod tests {
         assert_eq!(reopened_inventory.residual_temp_leases.len(), 1);
         drop(reopened_repository);
         drop(reopened_store);
+    }
+
+    #[test]
+    fn retention_cap_evicts_oldest_one_at_a_time_and_preserves_latest_two() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let root = temp.path().join("scan-root");
+        let base = UNIX_EPOCH + Duration::from_millis(1_750_000_005_000);
+        let (store, repository) = open_repository(&database);
+        let mut references = Vec::new();
+        for ordinal in 0..4_u64 {
+            let completed_at = base + Duration::from_secs(10 + ordinal);
+            let document = document(&format!("scan:cap-order-{ordinal}"), &root);
+            references.push(complete_snapshot(
+                &store,
+                &repository,
+                &document,
+                &root,
+                completed_at,
+            ));
+        }
+        let observed_at = base + Duration::from_secs(30);
+        store
+            .set_snapshot_retention_cap_at_for_test(0, observed_at)
+            .unwrap();
+
+        let first = repository
+            .enforce_retention_cap_with_hook(observed_at, || {
+                Err(HistoryError::new(HistoryErrorKind::DatabaseUnavailable))
+            })
+            .unwrap();
+        assert!(matches!(
+            first.outcome,
+            SnapshotRetentionBatchOutcome::TombstonedAndRemoved { ref scan_id, .. }
+                if scan_id == references[0].scan_id()
+        ));
+        assert!(first.charged_bytes_after < first.charged_bytes_before);
+        assert!(first.has_more);
+        assert_eq!(retention_tombstone_count(&store), 1);
+        assert_eq!(
+            repository.load(&references[0]).unwrap_err().kind,
+            SnapshotRepositoryErrorKind::SnapshotUnavailable
+        );
+        assert!(repository.load(&references[2]).is_ok());
+        assert!(repository.load(&references[3]).is_ok());
+
+        let second = repository
+            .enforce_retention_cap(observed_at + Duration::from_millis(1))
+            .unwrap();
+        assert!(matches!(
+            second.outcome,
+            SnapshotRetentionBatchOutcome::TombstonedAndRemoved { ref scan_id, .. }
+                if scan_id == references[1].scan_id()
+        ));
+        assert!(!second.has_more);
+        assert_eq!(retention_tombstone_count(&store), 2);
+
+        let protected_only = repository
+            .enforce_retention_cap(observed_at + Duration::from_millis(2))
+            .unwrap();
+        assert_eq!(
+            protected_only.outcome,
+            SnapshotRetentionBatchOutcome::DeferredNoEligibleSnapshot
+        );
+        assert_eq!(retention_tombstone_count(&store), 2);
+        assert!(repository.load(&references[2]).is_ok());
+        assert!(repository.load(&references[3]).is_ok());
+    }
+
+    #[test]
+    fn retention_cap_defers_for_active_temp_and_never_evicts_an_active_pin() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let root = temp.path().join("scan-root");
+        let base = UNIX_EPOCH + Duration::from_millis(1_750_000_006_000);
+        let (store, repository) = open_repository(&database);
+        let mut references = Vec::new();
+        for ordinal in 0..3_u64 {
+            let completed_at = base + Duration::from_secs(10 + ordinal);
+            let document = document(&format!("scan:cap-pin-{ordinal}"), &root);
+            references.push(complete_snapshot(
+                &store,
+                &repository,
+                &document,
+                &root,
+                completed_at,
+            ));
+        }
+        let observed_at = base + Duration::from_secs(30);
+        store
+            .set_snapshot_retention_cap_at_for_test(0, observed_at)
+            .unwrap();
+
+        let live_document = document("scan:cap-live-temp", &root);
+        store
+            .record_scan_started(
+                &NewScanRecord::try_new(
+                    live_document.metadata.scan_id.clone(),
+                    root.clone(),
+                    observed_at - Duration::from_secs(1),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let (staged, _, _) = repository.stage_document(&live_document).unwrap();
+        let unstable = repository.enforce_retention_cap(observed_at).unwrap();
+        assert_eq!(
+            unstable.outcome,
+            SnapshotRetentionBatchOutcome::DeferredUnstable
+        );
+        assert_eq!(retention_tombstone_count(&store), 0);
+        staged.abandon();
+
+        let pin = repository
+            .acquire_review_lease(
+                &references[0],
+                SnapshotReviewPurpose::CleanupReview,
+                observed_at + Duration::from_millis(1),
+            )
+            .unwrap();
+        let protected = repository
+            .enforce_retention_cap(observed_at + Duration::from_millis(2))
+            .unwrap();
+        assert_eq!(
+            protected.outcome,
+            SnapshotRetentionBatchOutcome::DeferredNoEligibleSnapshot
+        );
+        assert_eq!(retention_tombstone_count(&store), 0);
+        assert!(pin.load(observed_at + Duration::from_millis(3)).is_ok());
+        pin.release().unwrap();
+    }
+
+    #[test]
+    fn retention_cap_defers_for_an_unleased_temp() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let root = temp.path().join("scan-root");
+        let base = UNIX_EPOCH + Duration::from_millis(1_750_000_006_500);
+        let (store, repository) = open_repository(&database);
+        for ordinal in 0..3_u64 {
+            let completed_at = base + Duration::from_secs(10 + ordinal);
+            complete_snapshot(
+                &store,
+                &repository,
+                &document(&format!("scan:cap-unleased-{ordinal}"), &root),
+                &root,
+                completed_at,
+            );
+        }
+        let observed_at = base + Duration::from_secs(30);
+        store
+            .set_snapshot_retention_cap_at_for_test(0, observed_at)
+            .unwrap();
+        let unleased = repository
+            .store
+            .as_ref()
+            .unwrap()
+            .stage(
+                SnapshotFileName::from_scan_id(b"cap-unleased-temp"),
+                Duration::from_millis(100),
+            )
+            .unwrap();
+        unleased.abandon();
+
+        let result = repository.enforce_retention_cap(observed_at).unwrap();
+        assert_eq!(
+            result.outcome,
+            SnapshotRetentionBatchOutcome::DeferredUnstable
+        );
+        assert_eq!(retention_tombstone_count(&store), 0);
+        let inventory = repository
+            .inspect_retention_inventory(observed_at + Duration::from_millis(1))
+            .unwrap();
+        assert!(inventory.accounting_unstable);
+        assert!(matches!(
+            inventory.temporary_files.as_slice(),
+            [temporary]
+                if temporary.state
+                    == super::super::snapshot_retention_inventory::SnapshotTemporaryState::Unleased
+        ));
+    }
+
+    #[test]
+    fn retention_cap_can_retire_with_a_quiescent_row_bound_temp() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let root = temp.path().join("scan-root");
+        let base = UNIX_EPOCH + Duration::from_millis(1_750_000_006_750);
+        let (store, repository) = open_repository(&database);
+        let mut references = Vec::new();
+        for ordinal in 0..3_u64 {
+            let completed_at = base + Duration::from_secs(10 + ordinal);
+            references.push(complete_snapshot(
+                &store,
+                &repository,
+                &document(&format!("scan:cap-quiescent-{ordinal}"), &root),
+                &root,
+                completed_at,
+            ));
+        }
+        let observed_at = base + Duration::from_secs(30);
+        store
+            .set_snapshot_retention_cap_at_for_test(0, observed_at)
+            .unwrap();
+        let live_document = document("scan:cap-quiescent-temp", &root);
+        store
+            .record_scan_started(
+                &NewScanRecord::try_new(
+                    live_document.metadata.scan_id.clone(),
+                    root,
+                    observed_at - Duration::from_secs(1),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let (staged, _, _) = repository.stage_document(&live_document).unwrap();
+        staged.abandon();
+
+        let before = repository.inspect_retention_inventory(observed_at).unwrap();
+        assert!(!before.accounting_unstable);
+        assert!(matches!(
+            before.temporary_files.as_slice(),
+            [temporary]
+                if temporary.state
+                    == super::super::snapshot_retention_inventory::SnapshotTemporaryState::QuiescentAtObservation
+        ));
+        let result = repository.enforce_retention_cap(observed_at).unwrap();
+        assert!(matches!(
+            result.outcome,
+            SnapshotRetentionBatchOutcome::TombstonedAndRemoved { ref scan_id, .. }
+                if scan_id == references[0].scan_id()
+        ));
+        assert_eq!(retention_tombstone_count(&store), 1);
+        let after = repository
+            .inspect_retention_inventory(observed_at + Duration::from_millis(1))
+            .unwrap();
+        assert!(!after.accounting_unstable);
+        assert_eq!(after.temporary_files.len(), 1);
+    }
+
+    #[test]
+    fn retention_retries_tombstoned_residual_before_considering_the_cap() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let root = temp.path().join("scan-root");
+        let completed_at = UNIX_EPOCH + Duration::from_millis(1_750_000_007_000);
+        let (store, repository) = open_repository(&database);
+        let reference = complete_snapshot(
+            &store,
+            &repository,
+            &document("scan:cap-residual", &root),
+            &root,
+            completed_at,
+        );
+        store.with_connection(|connection| {
+            connection
+                .execute(
+                    "INSERT INTO snapshot_retention_tombstones (
+                         scan_id, record_format_version, scan_status,
+                         completed_at_unix_ms, snapshot_version,
+                         snapshot_relative_path, snapshot_relative_path_encoding,
+                         snapshot_checksum_sha256, committed_at_unix_ms
+                     )
+                     SELECT scan_id, 1, status, completed_at_unix_ms,
+                            snapshot_version, snapshot_relative_path,
+                            snapshot_relative_path_encoding,
+                            snapshot_checksum_sha256, completed_at_unix_ms + 1
+                     FROM scans WHERE scan_id = ?1",
+                    [reference.scan_id().as_str()],
+                )
+                .unwrap();
+        });
+        store
+            .set_snapshot_retention_cap_at_for_test(u64::MAX, completed_at)
+            .unwrap();
+
+        let result = repository
+            .enforce_retention_cap(completed_at + Duration::from_millis(2))
+            .unwrap();
+        assert!(matches!(
+            result.outcome,
+            SnapshotRetentionBatchOutcome::RemovedTombstonedResidual { ref scan_id, .. }
+                if scan_id == reference.scan_id()
+        ));
+        assert_eq!(retention_tombstone_count(&store), 1);
+        assert_eq!(
+            repository.load(&reference).unwrap_err().kind,
+            SnapshotRepositoryErrorKind::SnapshotUnavailable
+        );
+        let settled = repository
+            .enforce_retention_cap(completed_at + Duration::from_millis(3))
+            .unwrap();
+        assert_eq!(settled.outcome, SnapshotRetentionBatchOutcome::UnderCap);
+    }
+
+    #[test]
+    fn retention_never_removes_a_tombstoned_name_with_changed_snapshot_bytes() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let root = temp.path().join("scan-root");
+        let completed_at = UNIX_EPOCH + Duration::from_millis(1_750_000_007_500);
+        let (store, repository) = open_repository(&database);
+        let reference = complete_snapshot(
+            &store,
+            &repository,
+            &document("scan:cap-changed-residual", &root),
+            &root,
+            completed_at,
+        );
+        store.with_connection(|connection| {
+            connection
+                .execute(
+                    "INSERT INTO snapshot_retention_tombstones (
+                         scan_id, record_format_version, scan_status,
+                         completed_at_unix_ms, snapshot_version,
+                         snapshot_relative_path, snapshot_relative_path_encoding,
+                         snapshot_checksum_sha256, committed_at_unix_ms
+                     )
+                     SELECT scan_id, 1, status, completed_at_unix_ms,
+                            snapshot_version, snapshot_relative_path,
+                            snapshot_relative_path_encoding,
+                            snapshot_checksum_sha256, completed_at_unix_ms + 1
+                     FROM scans WHERE scan_id = ?1",
+                    [reference.scan_id().as_str()],
+                )
+                .unwrap();
+        });
+        let snapshot_path = database
+            .parent()
+            .unwrap()
+            .join("snapshots")
+            .join(reference.file_name().as_str());
+        let mut changed = fs::read(&snapshot_path).unwrap();
+        let last = changed.last_mut().unwrap();
+        *last ^= 0xff;
+        fs::write(&snapshot_path, changed).unwrap();
+
+        let error = repository
+            .enforce_retention_cap(completed_at + Duration::from_millis(2))
+            .unwrap_err();
+        assert!(matches!(
+            error.kind,
+            SnapshotRepositoryErrorKind::Codec(_) | SnapshotRepositoryErrorKind::ReferenceMismatch
+        ));
+        assert!(snapshot_path.exists());
+        assert_eq!(retention_tombstone_count(&store), 1);
+    }
+
+    #[test]
+    fn retention_revalidates_a_replacement_created_after_body_validation() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let root = temp.path().join("scan-root");
+        let base = UNIX_EPOCH + Duration::from_millis(1_750_000_007_750);
+        let (store, repository) = open_repository(&database);
+        let mut references = Vec::new();
+        for ordinal in 0..3_u64 {
+            let completed_at = base + Duration::from_secs(10 + ordinal);
+            references.push(complete_snapshot(
+                &store,
+                &repository,
+                &document(
+                    &format!("scan:cap-post-decode-replacement-{ordinal}"),
+                    &root,
+                ),
+                &root,
+                completed_at,
+            ));
+        }
+        let observed_at = base + Duration::from_secs(30);
+        store
+            .set_snapshot_retention_cap_at_for_test(0, observed_at)
+            .unwrap();
+        let snapshot_path = database
+            .parent()
+            .unwrap()
+            .join("snapshots")
+            .join(references[0].file_name().as_str());
+        let exact_bytes = fs::read(&snapshot_path).unwrap();
+
+        let error = repository
+            .enforce_retention_cap_with_hook(observed_at, || {
+                repository
+                    .store
+                    .as_ref()
+                    .unwrap()
+                    .replace_final_for_test(references[0].file_name(), &exact_bytes)
+                    .unwrap();
+                Ok(())
+            })
+            .unwrap_err();
+        assert_eq!(
+            error.kind,
+            SnapshotRepositoryErrorKind::Storage(SnapshotStorageErrorKind::UnsafeObject)
+        );
+        assert_eq!(fs::read(&snapshot_path).unwrap(), exact_bytes);
+        assert_eq!(retention_tombstone_count(&store), 1);
+
+        let retried = repository
+            .enforce_retention_cap(observed_at + Duration::from_millis(1))
+            .unwrap();
+        assert!(matches!(
+            retried.outcome,
+            SnapshotRetentionBatchOutcome::RemovedTombstonedResidual { ref scan_id, .. }
+                if scan_id == references[0].scan_id()
+        ));
+        assert!(!snapshot_path.exists());
+    }
+
+    #[test]
+    fn retention_commit_schema_race_leaves_a_safe_retryable_residual() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let root = temp.path().join("scan-root");
+        let base = UNIX_EPOCH + Duration::from_millis(1_750_000_008_000);
+        let (store, repository) = open_repository(&database);
+        let mut references = Vec::new();
+        for ordinal in 0..3_u64 {
+            let completed_at = base + Duration::from_secs(10 + ordinal);
+            let document = document(&format!("scan:cap-race-{ordinal}"), &root);
+            references.push(complete_snapshot(
+                &store,
+                &repository,
+                &document,
+                &root,
+                completed_at,
+            ));
+        }
+        let observed_at = base + Duration::from_secs(30);
+        store
+            .set_snapshot_retention_cap_at_for_test(0, observed_at)
+            .unwrap();
+        let expected_path = database
+            .parent()
+            .unwrap()
+            .join("snapshots")
+            .join(references[0].file_name().as_str());
+
+        let error = repository
+            .enforce_retention_cap_with_hook(observed_at, || {
+                install_future_schema(&database);
+                Ok(())
+            })
+            .unwrap_err();
+        assert_eq!(
+            error.kind,
+            SnapshotRepositoryErrorKind::History(HistoryErrorKind::OutcomeUnknown)
+        );
+        assert!(expected_path.exists());
+        assert_eq!(retention_tombstone_count(&store), 1);
+
+        restore_current_schema(&database);
+        assert_eq!(
+            repository.load(&references[0]).unwrap_err().kind,
+            SnapshotRepositoryErrorKind::SnapshotUnavailable
+        );
+        let retry = repository
+            .enforce_retention_cap(observed_at + Duration::from_millis(1))
+            .unwrap();
+        assert!(matches!(
+            retry.outcome,
+            SnapshotRetentionBatchOutcome::RemovedTombstonedResidual { ref scan_id, .. }
+                if scan_id == references[0].scan_id()
+        ));
+        assert!(!expected_path.exists());
+        assert_eq!(retention_tombstone_count(&store), 1);
     }
 
     #[test]

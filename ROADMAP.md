@@ -2693,12 +2693,46 @@ Tasks:
     provisioning-stage scavenging, tombstone insertion, final-file unlink,
     app/FFI ownership, scheduling, or cap enforcement.
 
-    Production retention still requires revalidation plus tombstone commit
-    under the final lock boundary,
-    retained-handle unlink and directory flush, post-commit residual/orphan
-    reconciliation, bounded marker-owned unleased-temp/provisioning-stage
-    scavenging, app/FFI lease ownership and idle scheduling, and explicit
-    clear-data actions.
+  - Core snapshot-cap enforcement sub-checkpoint completed 2026-07-16: one
+    sealed repository batch now holds the current-schema database guard before
+    one snapshot writer lease and rebuilds the complete physical/history,
+    settings, temp-lease, and review-pin inventory inside that final mutation
+    boundary. It removes at most one final per call. A pre-existing exact
+    tombstoned residual is handled first even when the store is below cap;
+    otherwise active or unleased temps defer new retirement, latest-two per
+    exact lossless root and active pins remain protected, and the deterministic
+    oldest eligible available snapshot is selected only while charged bytes
+    exceed the freshly loaded cap.
+
+    Before either path may unlink, the exact observed final is reopened
+    read-only, required to retain its identity and logical/allocated usage, and
+    fully decoded against the immutable scan ID and snapshot digest. New
+    retirement prepares and validates the complete succeeded parent tuple,
+    commits one append-only tombstone, exact-reconciles commit-adjacent failure,
+    and only then reopens the same observed identity with deletion access while
+    keeping the digest-validated read handle live. Retained/name identity and
+    usage are rechecked before descriptor-relative name unlink on Unix or
+    handle disposition on Windows, followed by a durable snapshot-directory
+    flush. The inventory lease remains valid after removal. A commit/schema
+    race therefore leaves a logically unavailable residual for the next batch;
+    changed bytes or a post-validation replacement are not removed by that
+    batch. Scan history and tombstones are never deleted or rewritten. As with
+    publication, malicious same-user name substitution remains outside the
+    private-store isolation guarantee on Unix.
+
+    Focused latest-two, oldest-first, active-pin, active/unleased-temp deferral,
+    quiescent-temp continuation, zero/max-cap, exact post-commit,
+    future-schema residual, changed-content,
+    post-validation replacement, retained-identity, directory-accounting, and
+    tombstone-writer regressions cover the slice.
+    Unix storage tests execute the unlink path and Windows MSVC compilation
+    covers its delete-capable retained handle; native Windows runtime remains
+    outstanding.
+
+    Production retention still requires app/FFI review-lease ownership and
+    idle scheduling, physical-orphan reconciliation, bounded marker-owned
+    terminal/unleased-temp and provisioning-stage scavenging, explicit
+    clear-data actions, and native Windows mutation-path runtime verification.
 - [x] Add engine integration tests with temporary HOME and database. Completed
   2026-07-16: an actual `dux-core` engine scans a fixture into an isolated
   platform-correct application-support/cache layout, closes to full worker

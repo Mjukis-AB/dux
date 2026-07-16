@@ -5,6 +5,25 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Added the core production snapshot-cap mutation boundary. One bounded batch
+  holds the current-schema database lease before the snapshot writer lease,
+  rebuilds the complete cap/latest-two/active-pin inventory, refuses new
+  retirement while active or unleased temps make accounting unstable, and
+  selects at most the deterministic oldest eligible snapshot. Before mutation
+  it reopens and fully decodes the exact observed final against the immutable
+  scan digest. It then commits an append-only exact tombstone before deleting
+  while keeping the digest-validated retained handle live, revalidating a
+  separate deletion handle, and durably syncing the snapshot directory.
+  Existing tombstoned physical residuals are retried first even below the cap;
+  changed bytes or post-validation replacements remain untouched by that
+  batch. Exact post-commit reconciliation, schema-race residual recovery,
+  latest-two, active-pin, active/unleased-temp deferral, quiescent-temp
+  continuation, one-victim, changed-content, post-validation replacement, Unix
+  identity, and Windows compile regressions cover the boundary. This remains a
+  sealed core-only batch: app/FFI review-lease ownership, idle scheduling,
+  orphan and
+  unleased-temp/stage scavenging, clear-data actions, and native Windows runtime
+  verification remain separate.
 - Added schema v8's durable snapshot temporary-file leases. Snapshot staging
   now reserves an exact recognized name while holding the permanent
   database-before-snapshot lock order, commits a bounded immutable lease row

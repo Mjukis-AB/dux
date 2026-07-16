@@ -328,10 +328,11 @@ impl SnapshotControlUsage {
 /// Holding this value excludes legitimate publishers for the entire period in
 /// which higher persistence layers match database references. Entry handles
 /// are opened and closed sequentially so the 2,048-entry bound does not become
-/// a file-descriptor requirement. Its only mutation is a narrow, identity-
-/// checked removal of one re-proven quiescent temp; higher persistence must
-/// first bind that exact name to durable same-scan retry authority. It offers
-/// no generic temp, final-snapshot, or user-data cleanup authority.
+/// a file-descriptor requirement. Its mutations are limited to one re-proven
+/// quiescent temp or one exact observed final; higher persistence must first
+/// bind either name to durable same-scan or tombstone authority. The storage
+/// type itself offers no generic temp, snapshot-policy, or user-data cleanup
+/// authority.
 pub(crate) struct SnapshotStoreInventoryLease {
     store: Arc<StoreInner>,
     entries: Vec<SnapshotInventoryEntry>,
@@ -419,6 +420,122 @@ impl SnapshotStoreInventoryLease {
         )?;
         platform::remove_retained_temp(&self.store.directory, name, &file, identity)?;
         platform::sync_directory(&self.store.directory)
+    }
+
+    /// Retain one exact final from this inventory observation for content
+    /// validation while the caller continues to own writer exclusion.
+    ///
+    /// This grants no deletion authority. The returned handle is read-only and
+    /// is admitted only when the typed name, identity, usage, retained object,
+    /// and current directory entry all still match this lease's observation.
+    pub(crate) fn retain_observed_final(
+        &self,
+        name: &SnapshotFileName,
+    ) -> Result<RetainedSnapshot> {
+        let observed = self
+            .entries
+            .iter()
+            .find(|entry| {
+                matches!(
+                    &entry.kind,
+                    SnapshotInventoryEntryKind::Final(observed) if observed == name
+                )
+            })
+            .ok_or_else(unsafe_inventory_object)?;
+        let Some((file, identity)) = platform::open_named_regular(
+            &self.store.directory,
+            &self.store.path,
+            name.as_str(),
+            false,
+        )?
+        else {
+            return Err(unsafe_inventory_object());
+        };
+        if Identity(identity) != observed.identity || snapshot_file_usage(&file)? != observed.usage
+        {
+            return Err(unsafe_inventory_object());
+        }
+        let retained = RetainedSnapshot {
+            store: Arc::clone(&self.store),
+            name: name.clone(),
+            file,
+            identity: Identity(identity),
+        };
+        retained.revalidate()?;
+        if snapshot_file_usage(&retained.file)? != observed.usage {
+            return Err(unsafe_inventory_object());
+        }
+        Ok(retained)
+    }
+
+    /// Remove one exact final that was observed by this inventory lease.
+    ///
+    /// Higher persistence layers must establish tombstone and retention-policy
+    /// authority before calling this storage-only capability. The typed final
+    /// handle must match this lease's retained observation and remain live for
+    /// the complete call. The entry is reopened no-follow with deletion access
+    /// where the platform requires it, and its identity plus complete usage
+    /// must remain unchanged before unlink.
+    pub(crate) fn remove_observed_final(
+        &mut self,
+        retained: &RetainedSnapshot,
+    ) -> Result<SnapshotFileUsage> {
+        if !Arc::ptr_eq(&self.store, &retained.store) {
+            return Err(unsafe_inventory_object());
+        }
+        let name = &retained.name;
+        let position = self
+            .entries
+            .iter()
+            .position(|entry| {
+                matches!(
+                    &entry.kind,
+                    SnapshotInventoryEntryKind::Final(observed) if observed == name
+                )
+            })
+            .ok_or_else(unsafe_inventory_object)?;
+        let observed = &self.entries[position];
+        if retained.identity != observed.identity
+            || snapshot_file_usage(&retained.file)? != observed.usage
+        {
+            return Err(unsafe_inventory_object());
+        }
+        retained.revalidate()?;
+        let Some((file, identity)) = platform::open_named_final_for_removal(
+            &self.store.directory,
+            &self.store.path,
+            name.as_str(),
+        )?
+        else {
+            return Err(unsafe_inventory_object());
+        };
+        if Identity(identity) != observed.identity || snapshot_file_usage(&file)? != observed.usage
+        {
+            return Err(unsafe_inventory_object());
+        }
+        platform::validate_retained(&file, identity, platform::Kind::RegularFile, true)?;
+        platform::validate_named(
+            &self.store.directory,
+            name.as_str(),
+            &file,
+            identity,
+            platform::Kind::RegularFile,
+        )?;
+        if snapshot_file_usage(&file)? != observed.usage {
+            return Err(unsafe_inventory_object());
+        }
+        platform::remove_retained_final(&self.store.directory, name.as_str(), &file, identity)?;
+        platform::sync_directory(&self.store.directory)?;
+
+        let removed = self.entries.remove(position).usage;
+        self.entries_usage = self
+            .entries
+            .iter()
+            .try_fold(SnapshotFileUsage::default(), |total, entry| {
+                total.checked_add(entry.usage)
+            })?;
+        self.total_usage = self.entries_usage.checked_add(self.controls.total())?;
+        Ok(removed)
     }
 }
 
@@ -620,9 +737,46 @@ impl SecureSnapshotStore {
             .map(SnapshotOpenLease::into_retained))
     }
 
+    /// Simulate a malicious same-user replacement that ignores the advisory
+    /// writer lease so higher-layer retention tests can exercise fail-closed
+    /// post-validation behavior without exposing a production capability.
+    #[cfg(test)]
+    pub(super) fn replace_final_for_test(
+        &self,
+        name: &SnapshotFileName,
+        bytes: &[u8],
+    ) -> Result<()> {
+        let Some((current, identity)) = platform::open_named_final_for_removal(
+            &self.inner.directory,
+            &self.inner.path,
+            name.as_str(),
+        )?
+        else {
+            return Err(unsafe_inventory_object());
+        };
+        platform::remove_retained_final(&self.inner.directory, name.as_str(), &current, identity)?;
+        platform::sync_directory(&self.inner.directory)?;
+        drop(current);
+        let Some((mut replacement, _)) = platform::create_private_file_exclusive(
+            &self.inner.directory,
+            &self.inner.path,
+            name.as_str(),
+        )?
+        else {
+            return Err(unsafe_inventory_object());
+        };
+        replacement
+            .write_all(bytes)
+            .map_err(|_| SnapshotStorageError::new(SnapshotStorageErrorKind::Unavailable))?;
+        replacement
+            .sync_all()
+            .map_err(|_| SnapshotStorageError::new(SnapshotStorageErrorKind::Unavailable))?;
+        platform::sync_directory(&self.inner.directory)
+    }
+
     /// Open one immutable snapshot while retaining the store-wide writer
     /// exclusion. Database-backed review pins use this to keep validation,
-    /// pin insertion, and the future retention tombstone boundary in one
+    /// pin insertion, and the retention tombstone boundary in one
     /// database-before-snapshot critical section.
     pub(crate) fn open_with_writer_lease(
         &self,
@@ -1696,6 +1850,14 @@ mod platform {
         open_named_regular(directory, directory_path, name, true)
     }
 
+    pub(super) fn open_named_final_for_removal(
+        directory: &File,
+        directory_path: &Path,
+        name: &str,
+    ) -> Result<Option<(File, Identity)>> {
+        open_named_regular(directory, directory_path, name, false)
+    }
+
     pub(super) fn identity(file: &File, kind: Kind) -> Result<Identity> {
         let status = fstat(file).map_err(|_| unavailable_for(kind))?;
         let expected_type = match kind {
@@ -1949,6 +2111,19 @@ mod platform {
         use nix::unistd::{UnlinkatFlags, unlinkat};
         validate_named(directory, name, file, expected, Kind::RegularFile)?;
         // DUX-DESTRUCTIVE: allow=snapshot-current-temp-unlink -- remove only the current call's retained create-new private snapshot temp after exact identity revalidation
+        unlinkat(directory, name, UnlinkatFlags::NoRemoveDir)
+            .map_err(|_| SnapshotStorageError::new(SnapshotStorageErrorKind::Unavailable))
+    }
+
+    pub(super) fn remove_retained_final(
+        directory: &File,
+        name: &str,
+        file: &File,
+        expected: Identity,
+    ) -> Result<()> {
+        use nix::unistd::{UnlinkatFlags, unlinkat};
+        validate_named(directory, name, file, expected, Kind::RegularFile)?;
+        // DUX-DESTRUCTIVE: allow=snapshot-observed-final-unlink -- remove only an exact typed final observed under the retained inventory writer lease after identity and usage revalidation
         unlinkat(directory, name, UnlinkatFlags::NoRemoveDir)
             .map_err(|_| SnapshotStorageError::new(SnapshotStorageErrorKind::Unavailable))
     }
@@ -2279,6 +2454,214 @@ mod tests {
         );
         drop(inventory);
         staged.abort().unwrap();
+    }
+
+    #[test]
+    fn inventory_lease_retains_exact_final_and_rejects_same_name_replacement() {
+        let temp = TempDir::new().unwrap();
+        private_database_root(&temp);
+        let store = open_rw(&database_path(&temp));
+        let exact_name = SnapshotFileName::from_scan_id(b"retention-retain-exact");
+        let replaced_name = SnapshotFileName::from_scan_id(b"retention-retain-replaced");
+        for (name, bytes) in [
+            (exact_name.clone(), b"exact retained bytes".as_slice()),
+            (replaced_name.clone(), b"same-size-old".as_slice()),
+        ] {
+            let mut staged = store.stage(name, Duration::from_millis(100)).unwrap();
+            staged.write_all(bytes).unwrap();
+            drop(staged.publish_no_replace().unwrap());
+        }
+
+        let inventory = store
+            .inventory_with_writer_lease(Duration::from_millis(100))
+            .unwrap();
+        let retained = inventory.retain_observed_final(&exact_name).unwrap();
+        assert_eq!(retained.name(), &exact_name);
+        assert_eq!(retained.len().unwrap(), 20);
+        let mut exact_bytes = Vec::new();
+        retained
+            .try_clone_file()
+            .unwrap()
+            .read_to_end(&mut exact_bytes)
+            .unwrap();
+        assert_eq!(exact_bytes, b"exact retained bytes");
+        retained.revalidate().unwrap();
+        drop(retained);
+
+        let (original, original_identity) = platform::open_named_final_for_removal(
+            &store.inner.directory,
+            &store.inner.path,
+            replaced_name.as_str(),
+        )
+        .unwrap()
+        .unwrap();
+        platform::remove_retained_final(
+            &store.inner.directory,
+            replaced_name.as_str(),
+            &original,
+            original_identity,
+        )
+        .unwrap();
+        platform::sync_directory(&store.inner.directory).unwrap();
+        drop(original);
+        let (mut replacement, _) = platform::create_private_file_exclusive(
+            &store.inner.directory,
+            &store.inner.path,
+            replaced_name.as_str(),
+        )
+        .unwrap()
+        .unwrap();
+        replacement.write_all(b"same-size-new").unwrap();
+        replacement.sync_all().unwrap();
+        drop(replacement);
+
+        assert_eq!(
+            inventory
+                .retain_observed_final(&replaced_name)
+                .err()
+                .unwrap()
+                .kind(),
+            SnapshotStorageErrorKind::UnsafeObject
+        );
+    }
+
+    #[test]
+    fn inventory_lease_removes_only_the_exact_observed_final_and_stays_valid() {
+        let temp = TempDir::new().unwrap();
+        private_database_root(&temp);
+        let database = database_path(&temp);
+        let store = open_rw(&database);
+        let removed_name = SnapshotFileName::from_scan_id(b"retention-remove-final");
+        let retained_name = SnapshotFileName::from_scan_id(b"retention-keep-final");
+        for (name, bytes) in [
+            (removed_name.clone(), b"removed snapshot".as_slice()),
+            (retained_name.clone(), b"retained snapshot".as_slice()),
+        ] {
+            let mut staged = store.stage(name, Duration::from_millis(100)).unwrap();
+            staged.write_all(bytes).unwrap();
+            drop(staged.publish_no_replace().unwrap());
+        }
+
+        let snapshot_root = database.parent().unwrap().join(DIRECTORY_NAME);
+        let mut inventory = store
+            .inventory_with_writer_lease(Duration::from_millis(100))
+            .unwrap();
+        let expected_usage = inventory
+            .entries()
+            .iter()
+            .find(|entry| entry.name() == removed_name.as_str())
+            .unwrap()
+            .usage();
+        let before_total = inventory.total_usage();
+
+        let retained = inventory.retain_observed_final(&removed_name).unwrap();
+        assert_eq!(
+            inventory.remove_observed_final(&retained).unwrap(),
+            expected_usage
+        );
+        drop(retained);
+        assert!(!snapshot_root.join(removed_name.as_str()).exists());
+        assert!(snapshot_root.join(retained_name.as_str()).exists());
+        assert!(
+            inventory
+                .entries()
+                .iter()
+                .all(|entry| entry.name() != removed_name.as_str())
+        );
+        assert_eq!(
+            inventory.total_usage().logical_bytes(),
+            before_total.logical_bytes() - expected_usage.logical_bytes()
+        );
+        inventory.revalidate().unwrap();
+
+        let never_observed = SnapshotFileName::from_scan_id(b"retention-never-observed");
+        assert_eq!(
+            inventory
+                .retain_observed_final(&never_observed)
+                .err()
+                .unwrap()
+                .kind(),
+            SnapshotStorageErrorKind::UnsafeObject
+        );
+        assert!(snapshot_root.join(retained_name.as_str()).exists());
+    }
+
+    #[test]
+    fn inventory_lease_rejects_changed_usage_and_replaced_final_identity() {
+        let temp = TempDir::new().unwrap();
+        private_database_root(&temp);
+        let database = database_path(&temp);
+        let store = open_rw(&database);
+        let changed_name = SnapshotFileName::from_scan_id(b"retention-changed-final");
+        let replacement_name = SnapshotFileName::from_scan_id(b"retention-replaced-final");
+        for name in [&changed_name, &replacement_name] {
+            let mut staged = store
+                .stage((*name).clone(), Duration::from_millis(100))
+                .unwrap();
+            staged.write_all(b"fixed snapshot bytes").unwrap();
+            drop(staged.publish_no_replace().unwrap());
+        }
+
+        let snapshot_root = database.parent().unwrap().join(DIRECTORY_NAME);
+        let mut inventory = store
+            .inventory_with_writer_lease(Duration::from_millis(100))
+            .unwrap();
+        let changed_retained = inventory.retain_observed_final(&changed_name).unwrap();
+        let replacement_retained = inventory.retain_observed_final(&replacement_name).unwrap();
+        let mut changed = fs::OpenOptions::new()
+            .append(true)
+            .open(snapshot_root.join(changed_name.as_str()))
+            .unwrap();
+        changed.write_all(b"changed").unwrap();
+        changed.sync_all().unwrap();
+        drop(changed);
+        assert_eq!(
+            inventory
+                .remove_observed_final(&changed_retained)
+                .unwrap_err()
+                .kind(),
+            SnapshotStorageErrorKind::UnsafeObject
+        );
+        assert!(snapshot_root.join(changed_name.as_str()).exists());
+
+        let (original, original_identity) = platform::open_named_final_for_removal(
+            &store.inner.directory,
+            &store.inner.path,
+            replacement_name.as_str(),
+        )
+        .unwrap()
+        .unwrap();
+        platform::remove_retained_final(
+            &store.inner.directory,
+            replacement_name.as_str(),
+            &original,
+            original_identity,
+        )
+        .unwrap();
+        platform::sync_directory(&store.inner.directory).unwrap();
+        drop(original);
+        let (mut replacement, _) = platform::create_private_file_exclusive(
+            &store.inner.directory,
+            &store.inner.path,
+            replacement_name.as_str(),
+        )
+        .unwrap()
+        .unwrap();
+        replacement.write_all(b"fixed snapshot bytes").unwrap();
+        replacement.sync_all().unwrap();
+        drop(replacement);
+
+        assert_eq!(
+            inventory
+                .remove_observed_final(&replacement_retained)
+                .unwrap_err()
+                .kind(),
+            SnapshotStorageErrorKind::UnsafeObject
+        );
+        assert_eq!(
+            fs::read(snapshot_root.join(replacement_name.as_str())).unwrap(),
+            b"fixed snapshot bytes"
+        );
     }
 
     #[test]

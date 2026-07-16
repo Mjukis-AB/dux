@@ -314,8 +314,9 @@ file, the repository holds a current-schema database guard and performs one
 bounded exact-ID lookup. A matching tombstone returns the distinct
 `SnapshotUnavailable` repository result before filesystem access. An invalid or
 identity-mismatched tombstone is corruption; absence permits the ordinary
-retained-file validation and full decode. No production code inserts
-tombstones yet.
+retained-file validation and full decode. The sealed cap writer can append only
+the complete exact tombstone selected under the final database-before-snapshot
+lock boundary; no production path updates or deletes one.
 
 Schema v6 adds an explicit cross-process review lease without changing the v1
 wire. A pin binds the exact succeeded snapshot tuple to a stable process owner,
@@ -326,10 +327,10 @@ file handle. Load verifies the exact live lease before decoding. Renewal cannot
 resurrect expiry; explicit release is exact and idempotent after bounded expiry
 pruning; implicit drop performs no database work and relies on expiry. An
 expired object must still be dropped to close its retained handle. Candidate
-and cleanup-session state never implies an open review. Future retention must
-recheck latest-two and these explicit active leases under the same lock order
-before committing a tombstone, then unlink only through a retained,
-identity-revalidated file handle and flush the directory.
+and cleanup-session state never implies an open review. The cap writer rechecks
+latest-two and these explicit active leases under the
+same lock order before committing a tombstone, keeps the digest-validated
+handle live through identity-revalidated deletion, and flushes the directory.
 
 Schema v7 adds a partial SQLite lookup index over the lossless snapshot-name
 encoding, snapshot-name bytes, and scan ID for rows with a snapshot reference.
@@ -359,12 +360,33 @@ row-bound active, row-bound quiescent-at-observation, or unleased; row-only
 residuals are reported separately. Active and unleased temps keep accounting
 unstable, and every physical class remains charged and non-evictable.
 Quiescence is not unlink authority. Latest-two/cap results are observations
-that a future writer must recompute under the final database and snapshot lock
-boundary.
+that the production writer recomputes under the final database and snapshot
+lock boundary.
 The effective cap comes from the typed `snapshot_retention` database setting;
 absence means 2 GiB. Inventory reads it under the current-schema database guard
 before taking the snapshot lock. This does not change snapshot v1 bytes, and a
 cached settings value never grants retention authority.
+
+One production cap batch removes at most one final. It rebuilds the complete
+inventory while retaining the current-schema database guard and snapshot
+writer lease. Existing tombstoned physical residuals are selected first. A new
+victim is considered only when charged bytes exceed the fresh cap and
+accounting is stable; active or unleased temps defer the operation. Latest-two
+per exact encoded root, active pins, controls, temps, physical orphans, and
+already tombstoned bytes are never normal candidates. Available candidates are
+ordered oldest completion, oldest start, then scan ID.
+
+Before either fresh retirement or residual retry, the final is reopened from
+the locked observation, required to keep exact filesystem identity and
+logical/allocation usage, fully decoded, and matched to the immutable scan ID
+and body digest. For a new victim the complete append-only tombstone commits
+first and any commit-adjacent failure is adopted only after an exact row match.
+The writer then reopens the same observed identity with deletion access,
+rechecks retained handle, name, and usage, unlinks it, and syncs the directory.
+A schema race after commit leaves a logically unavailable physical residual.
+A later batch repeats identity, usage, and full-content validation, so changed
+or same-name replacement bytes are not removed. Scan and tombstone history are
+never deleted.
 
 An exact same-scan retry is the sole implemented temp reconciliation. With the
 database guard held before the snapshot writer lock, it returns busy for a
@@ -426,9 +448,8 @@ This checkpoint does not implement:
 - cross-process overlapping-root scan leases or hard-process-death recovery of
   an engine scan left `running`;
 - FFI, Swift, or CLI scan/history transport;
-- latest-two-per-root selection, app/FFI review-lease ownership, or a production
-  tombstone writer and retained-handle unlink;
-- production total-store cap enforcement and physical-orphan reconciliation;
+- app/FFI review-lease ownership and idle cap-batch scheduling;
+- physical-orphan reconciliation;
 - general terminal-row, unleased-temp, or provisioning-stage scavenging beyond
   the exact same-scan residual retry;
 - native Windows sparse/compressed-allocation runtime verification and bounded

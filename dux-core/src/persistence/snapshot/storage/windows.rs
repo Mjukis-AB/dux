@@ -250,6 +250,25 @@ pub(super) fn open_named_temp_for_removal(
     Ok(Some((file, identity)))
 }
 
+pub(super) fn open_named_final_for_removal(
+    directory: &File,
+    _directory_path: &Path,
+    name: &str,
+) -> Result<Option<(File, Identity)>> {
+    let Some(file) = open_relative(
+        directory,
+        name,
+        Kind::RegularFile,
+        private_file_access(false) | DELETE,
+        SHARE_ALL,
+    )?
+    else {
+        return Ok(None);
+    };
+    let identity = validate_private(&file, Kind::RegularFile, None, true)?;
+    Ok(Some((file, identity)))
+}
+
 pub(super) fn identity(file: &File, kind: Kind) -> Result<Identity> {
     validate_structure(file, kind, None, matches!(kind, Kind::RegularFile))
 }
@@ -500,6 +519,33 @@ pub(super) fn remove_retained_temp(
     // access and the fixed disposition buffer is live for the synchronous call.
     let removed = unsafe {
         // DUX-DESTRUCTIVE: allow=snapshot-windows-current-temp-delete -- unlink only the current publication call's retained create-new private temp after exact handle-relative identity revalidation
+        windows_sys::Win32::Storage::FileSystem::SetFileInformationByHandle(
+            file.as_raw_handle(),
+            DELETE_DISPOSITION_CLASS,
+            (&raw const disposition).cast(),
+            size_of::<DeleteDisposition>() as u32,
+        )
+    };
+    if removed == 0 {
+        return Err(unavailable());
+    }
+    validate_private(file, Kind::RegularFile, Some(expected), false).map(drop)
+}
+
+pub(super) fn remove_retained_final(
+    directory: &File,
+    name: &str,
+    file: &File,
+    expected: Identity,
+) -> Result<()> {
+    validate_named(directory, name, file, expected, Kind::RegularFile)?;
+    let disposition = DeleteDisposition {
+        flags: DELETE_DISPOSITION_FLAG | POSIX_DISPOSITION_FLAG,
+    };
+    // SAFETY: the retained exact-identity final handle has DELETE access and
+    // the fixed disposition buffer is live for the synchronous call.
+    let removed = unsafe {
+        // DUX-DESTRUCTIVE: allow=snapshot-windows-observed-final-delete -- delete only an exact typed final observed under the retained inventory writer lease after identity and usage revalidation
         windows_sys::Win32::Storage::FileSystem::SetFileInformationByHandle(
             file.as_raw_handle(),
             DELETE_DISPOSITION_CLASS,
