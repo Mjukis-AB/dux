@@ -5,6 +5,18 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Added a persistence-internal, evaluator-owned candidate invalidation
+  boundary. Exact source-state commands can mark `discovered`, `selected`, or
+  `dismissed` observations unavailable, and can conclusively mark those states
+  plus `unavailable` observations stale. Unavailable can refine to stale but
+  never the reverse, and both states are terminal for the old scan-bound
+  observation; neither review nor evaluator commands can revive it or enter
+  planner/journal states. Full candidate facts and the succeeded source scan
+  are bounded and validated
+  before compare-and-set, exact retries and commit ambiguity reconcile safely,
+  and review/evaluator races have one winner. The command remains sealed inside
+  persistence until a deterministic evaluator supplies it; no engine, FFI, UI,
+  CLI, or AI caller exists yet.
 - Added a typed, crate-private candidate review-state boundary. Complete
   format-2 candidates can move between `discovered` and `selected`, from either
   exact source state to `dismissed`, and explicitly restore dismissal to

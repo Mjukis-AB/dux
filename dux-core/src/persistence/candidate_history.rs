@@ -83,6 +83,54 @@ pub(crate) enum CandidateReviewTransition {
     Restore,
 }
 
+/// Evaluator-owned invalidation of one scan-bound observation. These terminal
+/// projections cannot be used to select, plan, or complete cleanup work.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum CandidateEvaluationTransition {
+    DiscoveredToStale,
+    SelectedToStale,
+    DismissedToStale,
+    UnavailableToStale,
+    DiscoveredToUnavailable,
+    SelectedToUnavailable,
+    DismissedToUnavailable,
+}
+
+impl CandidateEvaluationTransition {
+    fn statuses(self) -> (CandidateHistoryStatus, CandidateHistoryStatus) {
+        match self {
+            Self::DiscoveredToStale => (
+                CandidateHistoryStatus::Discovered,
+                CandidateHistoryStatus::Stale,
+            ),
+            Self::SelectedToStale => (
+                CandidateHistoryStatus::Selected,
+                CandidateHistoryStatus::Stale,
+            ),
+            Self::DismissedToStale => (
+                CandidateHistoryStatus::Dismissed,
+                CandidateHistoryStatus::Stale,
+            ),
+            Self::UnavailableToStale => (
+                CandidateHistoryStatus::Unavailable,
+                CandidateHistoryStatus::Stale,
+            ),
+            Self::DiscoveredToUnavailable => (
+                CandidateHistoryStatus::Discovered,
+                CandidateHistoryStatus::Unavailable,
+            ),
+            Self::SelectedToUnavailable => (
+                CandidateHistoryStatus::Selected,
+                CandidateHistoryStatus::Unavailable,
+            ),
+            Self::DismissedToUnavailable => (
+                CandidateHistoryStatus::Dismissed,
+                CandidateHistoryStatus::Unavailable,
+            ),
+        }
+    }
+}
+
 impl CandidateReviewTransition {
     fn statuses(self) -> (CandidateHistoryStatus, CandidateHistoryStatus) {
         match self {
@@ -425,16 +473,40 @@ pub(super) fn transition_candidate_review(
     id: &CandidateId,
     transition: CandidateReviewTransition,
 ) -> Result<(CandidateHistoryStatus, CandidateHistoryStatus), HistoryError> {
+    let (previous, next) = transition.statuses();
+    transition_candidate_status(transaction, id, previous, next, |candidate| {
+        transition.validate_candidate(candidate)
+    })
+}
+
+pub(super) fn transition_candidate_evaluation(
+    transaction: &Transaction<'_>,
+    id: &CandidateId,
+    transition: CandidateEvaluationTransition,
+) -> Result<(CandidateHistoryStatus, CandidateHistoryStatus), HistoryError> {
+    let (previous, next) = transition.statuses();
+    transition_candidate_status(transaction, id, previous, next, |_| Ok(()))
+}
+
+fn transition_candidate_status(
+    transaction: &Transaction<'_>,
+    id: &CandidateId,
+    previous: CandidateHistoryStatus,
+    next: CandidateHistoryStatus,
+    validate: impl FnOnce(&CompleteCandidateRecord) -> Result<(), HistoryError>,
+) -> Result<(CandidateHistoryStatus, CandidateHistoryStatus), HistoryError> {
     let Some(record) = load_candidate_record(transaction, id)? else {
         return Err(HistoryError::new(HistoryErrorKind::NotFound));
     };
     let StoredCandidateRecord::Complete(candidate) = record else {
         return Err(HistoryError::new(HistoryErrorKind::InvalidTransition));
     };
-    let (previous, next) = transition.statuses();
-    transition.validate_candidate(&candidate)?;
+    validate(&candidate)?;
     if candidate.status == next {
         return Ok((previous, next));
+    }
+    if candidate.status != previous {
+        return Err(HistoryError::new(HistoryErrorKind::InvalidTransition));
     }
     let changed = transaction
         .execute(
@@ -1534,6 +1606,182 @@ mod tests {
     }
 
     #[test]
+    fn evaluator_status_is_source_typed_terminal_and_unavailable_refines_to_stale() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let root = temp.path().join("root");
+        let store = StoreCoordinator::open(&database).unwrap();
+        let scan_id = "scan:evaluator-status";
+        start_and_finish_scan(&store, &root, scan_id);
+        let policy = rule(
+            "fixture.candidate.evaluator-status",
+            CandidateCategory::ApplicationCache,
+            SafetyTier::SafeRegenerable,
+            CandidateAction::RemoveKnownRegenerableContents,
+            false,
+        );
+        let cases = [
+            (
+                "discovered-stale",
+                None,
+                CandidateEvaluationTransition::DiscoveredToStale,
+                CandidateHistoryStatus::Stale,
+            ),
+            (
+                "selected-stale",
+                Some(CandidateReviewTransition::Select),
+                CandidateEvaluationTransition::SelectedToStale,
+                CandidateHistoryStatus::Stale,
+            ),
+            (
+                "dismissed-stale",
+                Some(CandidateReviewTransition::DismissDiscovered),
+                CandidateEvaluationTransition::DismissedToStale,
+                CandidateHistoryStatus::Stale,
+            ),
+            (
+                "discovered-unavailable",
+                None,
+                CandidateEvaluationTransition::DiscoveredToUnavailable,
+                CandidateHistoryStatus::Unavailable,
+            ),
+            (
+                "selected-unavailable",
+                Some(CandidateReviewTransition::Select),
+                CandidateEvaluationTransition::SelectedToUnavailable,
+                CandidateHistoryStatus::Unavailable,
+            ),
+            (
+                "dismissed-unavailable",
+                Some(CandidateReviewTransition::DismissDiscovered),
+                CandidateEvaluationTransition::DismissedToUnavailable,
+                CandidateHistoryStatus::Unavailable,
+            ),
+        ];
+
+        for (label, review, transition, target) in cases {
+            let id = persist_review_candidate(
+                &store,
+                &root,
+                &format!("candidate:evaluator-{label}"),
+                scan_id,
+                &policy,
+                Vec::new(),
+            );
+            if let Some(review) = review {
+                store
+                    .transition_candidate_review_status(&id, review)
+                    .unwrap();
+            }
+            let before = load_complete(&store, &id);
+            assert_eq!(
+                store
+                    .transition_candidate_evaluation_status(&id, transition)
+                    .unwrap(),
+                target
+            );
+            assert_eq!(
+                store
+                    .transition_candidate_evaluation_status(&id, transition)
+                    .unwrap(),
+                target
+            );
+            let mut expected = before;
+            expected.status = target;
+            assert_eq!(load_complete(&store, &id), expected);
+            assert_eq!(
+                store
+                    .transition_candidate_review_status(&id, CandidateReviewTransition::Select)
+                    .unwrap_err()
+                    .kind,
+                HistoryErrorKind::InvalidTransition
+            );
+        }
+
+        let refined = persist_review_candidate(
+            &store,
+            &root,
+            "candidate:evaluator-refined",
+            scan_id,
+            &policy,
+            Vec::new(),
+        );
+        store
+            .transition_candidate_evaluation_status(
+                &refined,
+                CandidateEvaluationTransition::DiscoveredToUnavailable,
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .transition_candidate_evaluation_status(
+                    &refined,
+                    CandidateEvaluationTransition::UnavailableToStale,
+                )
+                .unwrap(),
+            CandidateHistoryStatus::Stale
+        );
+        assert_eq!(
+            store
+                .transition_candidate_evaluation_status(
+                    &refined,
+                    CandidateEvaluationTransition::DiscoveredToUnavailable,
+                )
+                .unwrap_err()
+                .kind,
+            HistoryErrorKind::InvalidTransition
+        );
+
+        let wrong_source = persist_review_candidate(
+            &store,
+            &root,
+            "candidate:evaluator-wrong-source",
+            scan_id,
+            &policy,
+            Vec::new(),
+        );
+        assert_eq!(
+            store
+                .transition_candidate_evaluation_status(
+                    &wrong_source,
+                    CandidateEvaluationTransition::SelectedToStale,
+                )
+                .unwrap_err()
+                .kind,
+            HistoryErrorKind::InvalidTransition
+        );
+        assert_eq!(
+            load_complete(&store, &wrong_source).status,
+            CandidateHistoryStatus::Discovered
+        );
+
+        let reconciled = persist_review_candidate(
+            &store,
+            &root,
+            "candidate:evaluator-reconciled",
+            scan_id,
+            &policy,
+            Vec::new(),
+        );
+        assert_eq!(
+            store
+                .transition_candidate_evaluation_status_after_commit_failure_for_test(
+                    &reconciled,
+                    CandidateEvaluationTransition::DiscoveredToStale,
+                )
+                .unwrap(),
+            CandidateHistoryStatus::Stale
+        );
+
+        drop(store);
+        let reopened = StoreCoordinator::open(&database).unwrap();
+        assert_eq!(
+            load_complete(&reopened, &reconciled).status,
+            CandidateHistoryStatus::Stale
+        );
+    }
+
+    #[test]
     fn review_selection_rejects_blocked_and_non_cleanup_candidates_without_erasing_facts() {
         let temp = TempDir::new().unwrap();
         let store = StoreCoordinator::open(&temp.path().join("store/dux.sqlite3")).unwrap();
@@ -1605,6 +1853,15 @@ mod tests {
                     )
                     .unwrap(),
                 CandidateHistoryStatus::Dismissed
+            );
+            assert_eq!(
+                store
+                    .transition_candidate_evaluation_status(
+                        id,
+                        CandidateEvaluationTransition::DismissedToStale,
+                    )
+                    .unwrap(),
+                CandidateHistoryStatus::Stale
             );
         }
         assert_eq!(
@@ -1829,6 +2086,110 @@ mod tests {
             load_complete(&store, &raced).status,
             CandidateHistoryStatus::Selected | CandidateHistoryStatus::Dismissed
         ));
+
+        let evaluator_race = persist_review_candidate(
+            &store,
+            &root,
+            "candidate:review-evaluator-race",
+            "scan:review-race",
+            &policy,
+            Vec::new(),
+        );
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let review_store = std::sync::Arc::clone(&store);
+        let review_id = evaluator_race.clone();
+        let review_barrier = std::sync::Arc::clone(&barrier);
+        let review = std::thread::spawn(move || {
+            review_barrier.wait();
+            review_store
+                .transition_candidate_review_status(&review_id, CandidateReviewTransition::Select)
+        });
+        let evaluator_store = std::sync::Arc::clone(&store);
+        let evaluator_id = evaluator_race.clone();
+        let evaluator_barrier = std::sync::Arc::clone(&barrier);
+        let evaluator = std::thread::spawn(move || {
+            evaluator_barrier.wait();
+            evaluator_store.transition_candidate_evaluation_status(
+                &evaluator_id,
+                CandidateEvaluationTransition::DiscoveredToStale,
+            )
+        });
+        barrier.wait();
+        let results = [review.join().unwrap(), evaluator.join().unwrap()];
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| {
+                    result
+                        .as_ref()
+                        .is_err_and(|error| error.kind == HistoryErrorKind::InvalidTransition)
+                })
+                .count(),
+            1
+        );
+        assert!(matches!(
+            load_complete(&store, &evaluator_race).status,
+            CandidateHistoryStatus::Selected | CandidateHistoryStatus::Stale
+        ));
+
+        let evaluator_refinement = persist_review_candidate(
+            &store,
+            &root,
+            "candidate:evaluator-refinement-race",
+            "scan:review-race",
+            &policy,
+            Vec::new(),
+        );
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let unavailable_store = std::sync::Arc::clone(&store);
+        let unavailable_id = evaluator_refinement.clone();
+        let unavailable_barrier = std::sync::Arc::clone(&barrier);
+        let unavailable = std::thread::spawn(move || {
+            unavailable_barrier.wait();
+            unavailable_store.transition_candidate_evaluation_status(
+                &unavailable_id,
+                CandidateEvaluationTransition::DiscoveredToUnavailable,
+            )
+        });
+        let stale_store = std::sync::Arc::clone(&store);
+        let stale_id = evaluator_refinement.clone();
+        let stale_barrier = std::sync::Arc::clone(&barrier);
+        let stale = std::thread::spawn(move || {
+            stale_barrier.wait();
+            stale_store.transition_candidate_evaluation_status(
+                &stale_id,
+                CandidateEvaluationTransition::DiscoveredToStale,
+            )
+        });
+        barrier.wait();
+        let results = [unavailable.join().unwrap(), stale.join().unwrap()];
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| {
+                    result
+                        .as_ref()
+                        .is_err_and(|error| error.kind == HistoryErrorKind::InvalidTransition)
+                })
+                .count(),
+            1
+        );
+        if load_complete(&store, &evaluator_refinement).status
+            == CandidateHistoryStatus::Unavailable
+        {
+            store
+                .transition_candidate_evaluation_status(
+                    &evaluator_refinement,
+                    CandidateEvaluationTransition::UnavailableToStale,
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            load_complete(&store, &evaluator_refinement).status,
+            CandidateHistoryStatus::Stale
+        );
     }
 
     #[cfg(unix)]
@@ -1879,8 +2240,56 @@ mod tests {
         });
     }
 
+    #[cfg(unix)]
     #[test]
-    fn review_status_refuses_missing_legacy_corrupt_and_lifecycle_owned_rows() {
+    fn evaluator_status_exact_match_cannot_mask_unsafe_post_commit_storage() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let marker = database.with_extension("sqlite3.writer.lock");
+        let store = StoreCoordinator::open(&database).unwrap();
+        let root = temp.path().join("root");
+        start_and_finish_scan(&store, &root, "scan:evaluator-unsafe");
+        let policy = rule(
+            "fixture.candidate.evaluator-unsafe",
+            CandidateCategory::ApplicationCache,
+            SafetyTier::SafeRegenerable,
+            CandidateAction::RemoveKnownRegenerableContents,
+            false,
+        );
+        let id = persist_review_candidate(
+            &store,
+            &root,
+            "candidate:evaluator-unsafe",
+            "scan:evaluator-unsafe",
+            &policy,
+            Vec::new(),
+        );
+
+        let error = store
+            .transition_candidate_evaluation_status_with_after_commit_hook_for_test(
+                &id,
+                CandidateEvaluationTransition::DiscoveredToStale,
+                || {
+                    std::fs::write(&marker, b"NOT-A-DUX-MARKER")
+                        .map_err(|_| HistoryError::new(HistoryErrorKind::InternalState))
+                },
+            )
+            .unwrap_err();
+        assert_eq!(error.kind, HistoryErrorKind::OutcomeUnknown);
+        store.with_connection(|connection| {
+            let durable: String = connection
+                .query_row(
+                    "SELECT status FROM candidates WHERE candidate_id = ?1",
+                    [id.as_str()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(durable, "stale");
+        });
+    }
+
+    #[test]
+    fn candidate_status_boundaries_refuse_missing_legacy_corrupt_and_foreign_owned_rows() {
         let temp = TempDir::new().unwrap();
         let store = StoreCoordinator::open(&temp.path().join("store/dux.sqlite3")).unwrap();
         let root = temp.path().join("root");
@@ -1889,6 +2298,16 @@ mod tests {
         assert_eq!(
             store
                 .transition_candidate_review_status(&missing, CandidateReviewTransition::Select,)
+                .unwrap_err()
+                .kind,
+            HistoryErrorKind::NotFound
+        );
+        assert_eq!(
+            store
+                .transition_candidate_evaluation_status(
+                    &missing,
+                    CandidateEvaluationTransition::DiscoveredToStale,
+                )
                 .unwrap_err()
                 .kind,
             HistoryErrorKind::NotFound
@@ -1910,6 +2329,16 @@ mod tests {
         assert_eq!(
             store
                 .transition_candidate_review_status(&legacy, CandidateReviewTransition::Select)
+                .unwrap_err()
+                .kind,
+            HistoryErrorKind::InvalidTransition
+        );
+        assert_eq!(
+            store
+                .transition_candidate_evaluation_status(
+                    &legacy,
+                    CandidateEvaluationTransition::DiscoveredToStale,
+                )
                 .unwrap_err()
                 .kind,
             HistoryErrorKind::InvalidTransition
@@ -1962,6 +2391,19 @@ mod tests {
                 HistoryErrorKind::InvalidTransition,
                 "review API accepted lifecycle-owned {status} status"
             );
+            if matches!(status, "planned" | "completed" | "failed") {
+                assert_eq!(
+                    store
+                        .transition_candidate_evaluation_status(
+                            &lifecycle,
+                            CandidateEvaluationTransition::DiscoveredToStale,
+                        )
+                        .unwrap_err()
+                        .kind,
+                    HistoryErrorKind::InvalidTransition,
+                    "evaluator API accepted planner/journal-owned {status} status"
+                );
+            }
         }
 
         let corrupt = persist_review_candidate(
@@ -1983,6 +2425,16 @@ mod tests {
         assert_eq!(
             store
                 .transition_candidate_review_status(&corrupt, CandidateReviewTransition::Select,)
+                .unwrap_err()
+                .kind,
+            HistoryErrorKind::CorruptData
+        );
+        assert_eq!(
+            store
+                .transition_candidate_evaluation_status(
+                    &corrupt,
+                    CandidateEvaluationTransition::DiscoveredToStale,
+                )
                 .unwrap_err()
                 .kind,
             HistoryErrorKind::CorruptData
@@ -2900,6 +3352,16 @@ mod tests {
         assert_eq!(
             store
                 .record_candidate_discovered(&candidate)
+                .unwrap_err()
+                .kind,
+            HistoryErrorKind::IncompatibleSchema
+        );
+        assert_eq!(
+            store
+                .transition_candidate_evaluation_status(
+                    &CandidateId::new("candidate:future-evaluator").unwrap(),
+                    CandidateEvaluationTransition::DiscoveredToStale,
+                )
                 .unwrap_err()
                 .kind,
             HistoryErrorKind::IncompatibleSchema

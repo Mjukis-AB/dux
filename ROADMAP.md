@@ -2018,6 +2018,40 @@ Tasks:
     projection, not an event timeline. Evaluator-owned stale/unavailable,
     planner-atomic planned, journal-derived completed/failed, and engine/FFI/UI
     transport remain open, so the broad persistence checkbox stays unchecked.
+  - Candidate evaluator-status sub-checkpoint completed 2026-07-16: a sealed
+    persistence-internal command boundary now owns invalidation of one complete
+    scan-bound observation. Exact source commands permit `discovered`,
+    `selected`, or `dismissed` to become `unavailable`, and permit those three
+    states plus `unavailable` to become conclusively `stale`. Exact target
+    retries are idempotent. Neither terminal state can return to review or
+    become planned. Stale cannot become unavailable; unavailable can be
+    conclusively refined to stale with a fresh exact-source command. Concurrent
+    unavailable/stale commands have one compare-and-set winner, after which a
+    reloaded unavailable observation converges through that explicit refinement
+    edge. A later successful evaluation must create a new candidate ID tied to
+    its new succeeded scan rather than reviving old evidence.
+
+    Every command full-decodes the bounded format-2 candidate and its succeeded
+    source scan before an exact status compare-and-set under the coordinator and
+    cross-process writer lease. Missing, legacy, corrupt, wrong status-source,
+    planner-owned, journal-owned, and newer-schema records fail closed. Shared
+    post-commit reconciliation adopts only the exact target while retained
+    storage and the current schema remain valid. Focused tests cover every
+    source/target edge, exact retries, stale refinement including a concurrent
+    unavailable/stale race, wrong-status-source refusal, blocked and non-cleanup
+    candidate invalidation, missing/legacy/corrupt/planner/journal rows,
+    immutable-fact preservation, process-style reopen, injected commit
+    ambiguity, unsafe-storage ambiguity, and review-versus-evaluator races.
+
+    This boundary is deliberately `persistence`-private and has no engine, FFI,
+    Swift, CLI, AI, or production evaluator caller yet, so stored status still
+    grants no authority. Planner/journal coupling also remains open and must not
+    directly overwrite schema-v2 `discovered`/`selected` rows: doing so loses
+    prior review intent and strands dry-run, cancelled, or expired plans. The
+    next lifecycle schema must preserve a crash-durable active plan claim and
+    the exact prior review state before atomically introducing `planned`, then
+    derive terminal candidate state from the journal. The broad persistence
+    checkbox therefore stays unchecked.
   - Planned-cleanup journal sub-checkpoint completed 2026-07-16: a crate-private
     boundary prepares and bounds an immutable cleanup plan before locking,
     requires its scan and every format-2 candidate observation to exist and

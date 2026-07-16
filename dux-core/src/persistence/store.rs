@@ -8,8 +8,9 @@ use rusqlite::limits::Limit;
 use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 
 use super::candidate_history::{
-    CandidateHistoryStatus, CandidateReviewTransition, NewCandidateRecord, PreparedCandidate,
-    StoredCandidateRecord, insert_candidate, load_candidate_record, transition_candidate_review,
+    CandidateEvaluationTransition, CandidateHistoryStatus, CandidateReviewTransition,
+    NewCandidateRecord, PreparedCandidate, StoredCandidateRecord, insert_candidate,
+    load_candidate_record, transition_candidate_evaluation, transition_candidate_review,
 };
 use super::capacity_history::{
     CapacityPage, CapacityPageCursor, CapacityWriteOutcome, CapacityWriteReason,
@@ -644,12 +645,61 @@ impl StoreCoordinator {
         transition: CandidateReviewTransition,
         after_commit: impl FnOnce() -> Result<(), HistoryError>,
     ) -> Result<CandidateHistoryStatus, HistoryError> {
+        self.transition_candidate_status_with_hook(
+            id,
+            |transaction, id| transition_candidate_review(transaction, id, transition),
+            after_commit,
+        )
+    }
+
+    /// Persist one evaluator-owned terminal disposition for a scan-bound
+    /// candidate observation. This cannot enter plan or execution states.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "candidate evaluator transport integrates with the evaluator task slice"
+        )
+    )]
+    pub(super) fn transition_candidate_evaluation_status(
+        &self,
+        id: &crate::domain::CandidateId,
+        transition: CandidateEvaluationTransition,
+    ) -> Result<CandidateHistoryStatus, HistoryError> {
+        self.transition_candidate_evaluation_status_with_hook(id, transition, || Ok(()))
+    }
+
+    fn transition_candidate_evaluation_status_with_hook(
+        &self,
+        id: &crate::domain::CandidateId,
+        transition: CandidateEvaluationTransition,
+        after_commit: impl FnOnce() -> Result<(), HistoryError>,
+    ) -> Result<CandidateHistoryStatus, HistoryError> {
+        self.transition_candidate_status_with_hook(
+            id,
+            |transaction, id| transition_candidate_evaluation(transaction, id, transition),
+            after_commit,
+        )
+    }
+
+    fn transition_candidate_status_with_hook(
+        &self,
+        id: &crate::domain::CandidateId,
+        transition: impl FnOnce(
+            &rusqlite::Transaction<'_>,
+            &crate::domain::CandidateId,
+        ) -> Result<
+            (CandidateHistoryStatus, CandidateHistoryStatus),
+            HistoryError,
+        >,
+        after_commit: impl FnOnce() -> Result<(), HistoryError>,
+    ) -> Result<CandidateHistoryStatus, HistoryError> {
         let mut guard = self.lock_current_history_connection()?;
         let transaction = guard
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(map_write_sql_error)?;
-        let (expected, target) = transition_candidate_review(&transaction, id, transition)?;
+        let (expected, target) = transition(&transaction, id)?;
         let failure = match transaction
             .commit()
             .map_err(map_write_sql_error)
@@ -673,6 +723,27 @@ impl StoreCoordinator {
             Ok(Some(_)) => Err(HistoryError::new(HistoryErrorKind::InvalidTransition)),
             Ok(None) | Err(_) => Err(HistoryError::new(HistoryErrorKind::OutcomeUnknown)),
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn transition_candidate_evaluation_status_after_commit_failure_for_test(
+        &self,
+        id: &crate::domain::CandidateId,
+        transition: CandidateEvaluationTransition,
+    ) -> Result<CandidateHistoryStatus, HistoryError> {
+        self.transition_candidate_evaluation_status_with_hook(id, transition, || {
+            Err(HistoryError::new(HistoryErrorKind::DatabaseUnavailable))
+        })
+    }
+
+    #[cfg(all(test, unix))]
+    pub(super) fn transition_candidate_evaluation_status_with_after_commit_hook_for_test(
+        &self,
+        id: &crate::domain::CandidateId,
+        transition: CandidateEvaluationTransition,
+        after_commit: impl FnOnce() -> Result<(), HistoryError>,
+    ) -> Result<CandidateHistoryStatus, HistoryError> {
+        self.transition_candidate_evaluation_status_with_hook(id, transition, after_commit)
     }
 
     #[cfg(test)]
