@@ -5,6 +5,16 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Added checksummed SQLite schema v2 for complete, non-authoritative candidate
+  and cleanup history. The atomic v1→v2 migration preserves legacy summaries
+  under an explicit legacy format without inventing absent facts; new records
+  have normalized ordered path/evidence/blocker data, nanosecond plan facts,
+  frozen per-item proposed actions, multi-path operation journals, warnings,
+  and owner-generation crash-recovery state. Exact per-version object
+  inventories and fingerprints, populated legacy migration coverage, and
+  fail-closed semantic constraints protect version skew and malformed rows.
+  This schema grants no cleanup authority; typed candidate/session APIs and
+  executor reconciliation remain separate checkpoints.
 - Added the first typed persistence layer for non-authoritative scan history.
   Crate-private start, terminal compare-and-set, and exact-ID load operations
   preserve stable IDs, lossless accepted host-codec absolute roots, checked times and byte counts,

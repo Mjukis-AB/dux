@@ -125,18 +125,30 @@ pub(crate) struct Migration {
     pub(crate) sql: &'static str,
 }
 
-const MIGRATIONS: [Migration; 1] = [Migration {
-    version: 1,
-    name: "initial-storage-schema",
-    checksum_sha256: [
-        0xb8, 0x0e, 0x49, 0x87, 0x60, 0x77, 0xda, 0x7f, 0xac, 0x81, 0x27, 0xb0, 0x09, 0xb4, 0xe7,
-        0x2c, 0xb2, 0xd7, 0x77, 0x2c, 0x02, 0xfb, 0x3d, 0xb0, 0xe9, 0x93, 0xaa, 0x1a, 0x63, 0xfb,
-        0x70, 0x27,
-    ],
-    sql: include_str!("../../migrations/0001_initial.sql"),
-}];
+const MIGRATIONS: [Migration; 2] = [
+    Migration {
+        version: 1,
+        name: "initial-storage-schema",
+        checksum_sha256: [
+            0xb8, 0x0e, 0x49, 0x87, 0x60, 0x77, 0xda, 0x7f, 0xac, 0x81, 0x27, 0xb0, 0x09, 0xb4,
+            0xe7, 0x2c, 0xb2, 0xd7, 0x77, 0x2c, 0x02, 0xfb, 0x3d, 0xb0, 0xe9, 0x93, 0xaa, 0x1a,
+            0x63, 0xfb, 0x70, 0x27,
+        ],
+        sql: include_str!("../../migrations/0001_initial.sql"),
+    },
+    Migration {
+        version: 2,
+        name: "candidate-cleanup-history",
+        checksum_sha256: [
+            0xab, 0x94, 0x9c, 0x4e, 0x6c, 0xbd, 0x09, 0x18, 0x50, 0x57, 0x99, 0x6f, 0x77, 0x4c,
+            0x0e, 0x64, 0xed, 0xf4, 0xa4, 0x1f, 0x3c, 0x6b, 0x1f, 0xb5, 0x04, 0x23, 0x53, 0xc6,
+            0x90, 0xea, 0xfe, 0x95,
+        ],
+        sql: include_str!("../../migrations/0002_candidate_cleanup_history.sql"),
+    },
+];
 
-const EXPECTED_SCHEMA_OBJECTS: [(&str, &str); 24] = [
+const V1_EXPECTED_SCHEMA_OBJECTS: [(&str, &str); 24] = [
     ("index", "ai_insights_by_expiration"),
     ("index", "ai_insights_by_identity"),
     ("index", "candidates_by_scan_status"),
@@ -163,11 +175,53 @@ const EXPECTED_SCHEMA_OBJECTS: [(&str, &str); 24] = [
     ("table", "volumes"),
 ];
 
+const V2_EXPECTED_SCHEMA_OBJECTS: [(&str, &str); 33] = [
+    ("index", "ai_insights_by_expiration"),
+    ("index", "ai_insights_by_identity"),
+    ("index", "candidates_by_scan_status"),
+    ("index", "candidates_by_scan_time"),
+    ("index", "cleanup_items_by_session"),
+    ("index", "cleanup_sessions_by_recovery"),
+    ("index", "cleanup_sessions_by_time"),
+    ("index", "disk_samples_by_kind_time"),
+    ("index", "disk_samples_by_volume_kind_time"),
+    ("index", "rule_outcomes_by_rule_time"),
+    ("index", "scan_issues_by_scan_kind"),
+    ("index", "scans_by_started"),
+    ("index", "scans_by_volume_time"),
+    ("index", "schedules_by_next_run"),
+    ("table", "ai_insights"),
+    ("table", "candidate_blockers"),
+    ("table", "candidate_evidence"),
+    ("table", "candidate_paths"),
+    ("table", "candidates"),
+    ("table", "cleanup_item_evidence"),
+    ("table", "cleanup_item_paths"),
+    ("table", "cleanup_items"),
+    ("table", "cleanup_plan_warnings"),
+    ("table", "cleanup_sessions"),
+    ("table", "disk_samples"),
+    ("table", "rule_outcomes"),
+    ("table", "scan_aggregates"),
+    ("table", "scan_issues"),
+    ("table", "scans"),
+    ("table", "schedules"),
+    ("table", "schema_migrations"),
+    ("table", "settings"),
+    ("table", "volumes"),
+];
+
 // Canonical sqlite_schema representation produced by v1. A mismatch rejects
 // supported databases rather than guessing about drift.
 const V1_SCHEMA_FINGERPRINT: [u8; 32] = [
     0xd3, 0x24, 0xcb, 0x24, 0x32, 0xa3, 0xaa, 0x35, 0xc6, 0x82, 0x01, 0x7d, 0x4f, 0x87, 0xac, 0x5e,
     0xae, 0xc1, 0xb1, 0xef, 0x2b, 0xe4, 0x2f, 0x0a, 0x3a, 0xfd, 0x58, 0xf8, 0x94, 0x08, 0x6b, 0x12,
+];
+
+// Canonical sqlite_schema representation produced by the complete v2 chain.
+const V2_SCHEMA_FINGERPRINT: [u8; 32] = [
+    0x80, 0xb2, 0x54, 0x60, 0x81, 0x1e, 0x96, 0x19, 0xd1, 0x38, 0x1d, 0x75, 0x89, 0x6c, 0x98, 0xae,
+    0x18, 0x87, 0x36, 0x9a, 0xdb, 0x0d, 0xeb, 0x8c, 0xa7, 0x91, 0x6d, 0x07, 0xa3, 0xb8, 0x44, 0x83,
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -444,14 +498,27 @@ fn validate_supported_schema(
     clock: InspectionClock,
 ) -> Result<(), DatabaseOpenError> {
     match version {
-        1 => validate_v1_schema(connection, clock),
+        1 => validate_schema(
+            connection,
+            clock,
+            &V1_EXPECTED_SCHEMA_OBJECTS,
+            V1_SCHEMA_FINGERPRINT,
+        ),
+        2 => validate_schema(
+            connection,
+            clock,
+            &V2_EXPECTED_SCHEMA_OBJECTS,
+            V2_SCHEMA_FINGERPRINT,
+        ),
         _ => Err(corrupt_error()),
     }
 }
 
-fn validate_v1_schema(
+fn validate_schema(
     connection: &Connection,
     clock: InspectionClock,
+    expected_objects: &[(&str, &str)],
+    expected_fingerprint: [u8; 32],
 ) -> Result<(), DatabaseOpenError> {
     let mut statement = connection
         .prepare(
@@ -462,7 +529,7 @@ fn validate_v1_schema(
         )
         .map_err(map_inspection_error)?;
     let mut rows = statement.query([]).map_err(map_inspection_error)?;
-    let mut actual = Vec::with_capacity(EXPECTED_SCHEMA_OBJECTS.len());
+    let mut actual = Vec::with_capacity(expected_objects.len());
     while let Some(row) = rows.next().map_err(map_inspection_error)? {
         clock.checkpoint()?;
         let type_storage: String = row.get(0).map_err(map_inspection_error)?;
@@ -473,7 +540,7 @@ fn validate_v1_schema(
             || !(1..=MAX_SCHEMA_TYPE_BYTES).contains(&type_length)
             || name_storage != "text"
             || !(1..=MAX_SCHEMA_NAME_BYTES).contains(&name_length)
-            || actual.len() >= EXPECTED_SCHEMA_OBJECTS.len()
+            || actual.len() >= expected_objects.len()
         {
             return Err(corrupt_error());
         }
@@ -484,8 +551,8 @@ fn validate_v1_schema(
         }
         actual.push((object_type, name));
     }
-    if actual.len() != EXPECTED_SCHEMA_OBJECTS.len()
-        || actual.iter().zip(EXPECTED_SCHEMA_OBJECTS).any(
+    if actual.len() != expected_objects.len()
+        || actual.iter().zip(expected_objects).any(
             |((actual_type, actual_name), (expected_type, expected_name))| {
                 actual_type != expected_type || actual_name != expected_name
             },
@@ -495,7 +562,7 @@ fn validate_v1_schema(
     }
 
     let fingerprint = schema_fingerprint_with_clock(connection, clock)?;
-    if fingerprint != V1_SCHEMA_FINGERPRINT {
+    if fingerprint != expected_fingerprint {
         return Err(corrupt_error());
     }
     Ok(())
@@ -693,6 +760,11 @@ pub(super) fn test_migrations() -> &'static [Migration] {
 #[cfg(test)]
 pub(super) const fn test_v1_schema_fingerprint() -> [u8; 32] {
     V1_SCHEMA_FINGERPRINT
+}
+
+#[cfg(test)]
+pub(super) const fn test_v2_schema_fingerprint() -> [u8; 32] {
+    V2_SCHEMA_FINGERPRINT
 }
 
 #[cfg(test)]

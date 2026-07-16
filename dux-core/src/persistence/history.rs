@@ -572,6 +572,7 @@ fn map_query_sql_error(error: rusqlite::Error) -> HistoryError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::DATABASE_SCHEMA_VERSION;
     use crate::persistence::StoreCoordinator;
     use tempfile::TempDir;
 
@@ -808,11 +809,13 @@ mod tests {
                 .execute(
                     "INSERT INTO schema_migrations
                      (version, name, checksum_sha256, applied_at_unix_ms)
-                     VALUES (2, 'future-schema', zeroblob(32), 2)",
-                    [],
+                     VALUES (?1, 'future-schema', zeroblob(32), 2)",
+                    [i64::from(DATABASE_SCHEMA_VERSION + 1)],
                 )
                 .unwrap();
-            connection.pragma_update(None, "user_version", 2).unwrap();
+            connection
+                .pragma_update(None, "user_version", DATABASE_SCHEMA_VERSION + 1)
+                .unwrap();
         });
 
         let scan = started("scan:blocked", temp.path().join("root"), 0);

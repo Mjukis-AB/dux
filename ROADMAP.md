@@ -1936,6 +1936,26 @@ Tasks:
     v1 cleanup rows cannot preserve multi-path plan items or a dry-run's
     proposed Trash/permanent/eviction effect. Those facts require a subsequent
     schema migration before candidate or cleanup history can round-trip safely.
+  - Candidate/cleanup schema sub-checkpoint completed 2026-07-16: checksummed
+    schema v2 transactionally rebuilds the three lossy v1 history tables while
+    preserving every legacy summary as explicit format 1, never fabricating
+    missing paths, policy, or evidence. Format 2 candidates can preserve exact
+    ordered lossless accepted-host paths, all typed evidence variants and
+    blockers, category, safety/action policy, scheduling policy, and nanosecond
+    timestamps. Cleanup sessions freeze source scan and exact plan lifetime;
+    item/path/evidence/warning journals preserve multi-path plans and each
+    proposed Trash, permanent-safe, or cloud-eviction effect even for dry runs.
+    Owner/generation, heartbeat, cancellation, `effect_started`, and
+    `outcome_unknown` fields reserve fail-closed crash recovery without treating
+    process death as success or interruption. Exhaustive SQL checks constrain
+    enum shapes, evidence nullability, policy pairs, path encodings, journal
+    timing, and format separation. Separate exact v1/v2 object inventories and
+    fingerprints, clean-chain and populated-upgrade tests, malformed v2
+    regressions, and a 128-character multibyte legacy error prove compatibility.
+    These rows remain sensitive historical observations, never planner or
+    executor authority. The broad item stays open until typed candidate and
+    cleanup APIs reject missing/noncontiguous child records and integrate with
+    scan/cleanup lifecycles.
 - [ ] Keep binary snapshots atomic and checksummed.
 - [ ] Add capacity sample storage.
 - [ ] Add typed scan coverage/issues.

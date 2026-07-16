@@ -796,6 +796,22 @@ at most 32,768 host units, including the corresponding 65,536-byte UTF-16
 representation. Semantic status, pressure, tier, mode, trigger, and category
 values are constrained self-describing text rather than implicit enum ordinals.
 
+Schema v2 rebuilds candidate and cleanup history into explicitly versioned
+record formats. Migrated v1 rows remain format-1 summaries with every original
+value preserved and every unavailable fact left `NULL`; no loader may
+reconstruct them as complete candidates or plans. Format-2 candidate child
+tables preserve ordered accepted-host path observations, typed evidence, and
+blockers. Cleanup sessions and item/path journals freeze the source scan, exact
+plan lifetime, policy/action, warnings, and proposed effect even when the mode
+is dry-run. Recovery fields distinguish owner generations, heartbeats,
+`effect_started`, and `outcome_unknown`; process death alone MUST NOT mark a
+session successful, failed, or interrupted. Future recovery updates must claim
+a new generation transactionally and compare-and-set every journal write
+against owner plus generation. All persisted facts remain historical
+observations: they are not canonical path witnesses, current evidence,
+approval, or executor capabilities, and they do not add an AI/history-to-plan
+authority edge.
+
 Compatibility inspection and migration have both SQLite-VM-operation ceilings
 and deadlines sampled every 1,000 VM operations by SQLite's progress callback.
 Schema/ledger storage types and byte lengths are checked before Rust
@@ -1131,7 +1147,7 @@ incident as a substitute for deterministic local evidence.
 | Legacy CLI deletion | Active arbitrary-descendant permanent path routed through a temporary core adapter; strict-target/volume/identity rechecks only; scanned-byte estimates labeled in CLI | Replace adapter with reviewed plan/approval/executor chain without weakening current checks |
 | Centralized executor | Production executor absent; temporary legacy adapter is containment only | Typed admission, cross-process lease, live revalidation, and journal required |
 | Engine/FFI task and plan API | Core handle, pre-worker SQLite compatibility handshake, and bounded per-session registry implemented for one read-only formatting batch; app architecture owns one session; UniFFI handle remains smoke-only, with no scan/task/plan DTOs or cleanup authority | FFI version rejection plus bounded scan/task/plan handles and cancellation |
-| SQLite compatibility store | Checksummed v1 migration/fingerprint, lossless bounded path codec, bounded full/lightweight inspection, private atomic provisioning with durable initialization evidence, cross-platform process writer/version-race coverage, newer-schema read-only transition, rollback/WAL recovery, and crate-private typed scan start/terminal-CAS/exact-ID history are implemented; stored paths remain non-authoritative observations | Scan task integration, candidate/cleanup schemas that preserve frozen facts and proposed effects, retention, and bounded identity-safe abandoned-stage maintenance |
+| SQLite compatibility store | Checksummed v1/v2 migrations with exact per-version fingerprints, lossless bounded path codec, bounded full/lightweight inspection, private atomic provisioning with durable initialization evidence, cross-platform process writer/version-race coverage, newer-schema read-only transition, rollback/WAL recovery, crate-private typed scan start/terminal-CAS/exact-ID history, explicit legacy summaries, and normalized candidate/cleanup history capable of preserving frozen facts, proposed effects, and crash-recovery states are implemented; stored paths and policy remain non-authoritative observations | Scan task integration, typed candidate/cleanup CRUD with ordinal and owner-generation validation, retention, reconciliation, and bounded identity-safe abandoned-stage maintenance |
 | Typed scan coverage/issues | Absent; current scanner counts/skips and permits relaxed flags | Required before any scan is described as complete or becomes plan input |
 | Cache semantic/input validation | Atomic write plus CRC/version only; full-file read before bounds | Bounded reads, tree/path semantics, private permissions, retention, and migration |
 | Hard-link accounting and policy | Absent; only non-authoritative path snapshots capture link count | Deduplicated scan accounting and explicit per-mode admission rules |

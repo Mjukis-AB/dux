@@ -16,7 +16,7 @@ use super::migrations::{
     DUX_APPLICATION_ID, Migration, SchemaState, apply_pending_migrations, apply_test_chain,
     apply_test_upgrade_chain, inspect_schema, inspect_schema_with_test_budget,
     panic_with_test_budget, schema_fingerprint, test_migrations, test_v1_schema_fingerprint,
-    validate_compiled_migrations,
+    test_v2_schema_fingerprint, validate_compiled_migrations,
 };
 use super::storage::SecureStorePaths;
 use super::*;
@@ -33,6 +33,7 @@ fn initialization_path(database: &Path) -> PathBuf {
 
 const SUBPROCESS_TIMEOUT: Duration = Duration::from_secs(10);
 const SUBPROCESS_HELPER_TEST: &str = "persistence::tests::sqlite_subprocess_helper";
+const FUTURE_SCHEMA_VERSION: u32 = DATABASE_SCHEMA_VERSION + 1;
 
 struct TestChild {
     child: Child,
@@ -226,11 +227,13 @@ fn helper_upgrade_while_holding_writer_lock() {
         .execute(
             "INSERT INTO schema_migrations \
              (version, name, checksum_sha256, applied_at_unix_ms) \
-             VALUES (2, 'subprocess-future-schema', zeroblob(32), 2)",
-            [],
+             VALUES (?1, 'subprocess-future-schema', zeroblob(32), 2)",
+            [i64::from(FUTURE_SCHEMA_VERSION)],
         )
         .unwrap();
-    connection.pragma_update(None, "user_version", 2).unwrap();
+    connection
+        .pragma_update(None, "user_version", FUTURE_SCHEMA_VERSION)
+        .unwrap();
     drop(connection);
     publish_handshake(&ready);
     wait_for_handshake(&helper_path("DUX_PERSISTENCE_RELEASE"));
@@ -253,9 +256,9 @@ fn helper_open_after_writer_lock_race() {
     assert_eq!(
         store.status().unwrap(),
         DatabaseStatus {
-            schema_version: 2,
+            schema_version: FUTURE_SCHEMA_VERSION,
             access: DatabaseAccess::ReadOnlyNewer {
-                found: 2,
+                found: FUTURE_SCHEMA_VERSION,
                 supported: DATABASE_SCHEMA_VERSION,
             },
         }
@@ -302,26 +305,28 @@ fn fresh_v1_schema() -> Connection {
 }
 
 fn fresh_current_schema() -> Connection {
-    let connection = fresh_v1_schema();
-    let migration = &test_migrations()[0];
-    connection
-        .execute(
-            "INSERT INTO schema_migrations (
-                 version, name, checksum_sha256, applied_at_unix_ms
-             ) VALUES (?1, ?2, ?3, 1)",
-            params![
-                i64::from(migration.version),
-                migration.name,
-                migration.checksum_sha256.as_slice(),
-            ],
-        )
-        .unwrap();
-    connection
-        .pragma_update(None, "application_id", DUX_APPLICATION_ID)
-        .unwrap();
-    connection
-        .pragma_update(None, "user_version", migration.version)
-        .unwrap();
+    let connection = Connection::open_in_memory().unwrap();
+    for migration in test_migrations() {
+        connection.execute_batch(migration.sql).unwrap();
+        connection
+            .execute(
+                "INSERT INTO schema_migrations (
+                     version, name, checksum_sha256, applied_at_unix_ms
+                 ) VALUES (?1, ?2, ?3, 1)",
+                params![
+                    i64::from(migration.version),
+                    migration.name,
+                    migration.checksum_sha256.as_slice(),
+                ],
+            )
+            .unwrap();
+        connection
+            .pragma_update(None, "application_id", DUX_APPLICATION_ID)
+            .unwrap();
+        connection
+            .pragma_update(None, "user_version", migration.version)
+            .unwrap();
+    }
     connection
 }
 
@@ -338,6 +343,310 @@ fn embedded_v1_schema_fingerprint_matches_migration() {
         schema_fingerprint(&connection).unwrap(),
         test_v1_schema_fingerprint()
     );
+}
+
+#[test]
+fn embedded_v2_schema_fingerprint_matches_complete_chain() {
+    let connection = fresh_current_schema();
+    assert_eq!(
+        schema_fingerprint(&connection).unwrap(),
+        test_v2_schema_fingerprint()
+    );
+    assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
+}
+
+#[test]
+fn populated_v1_upgrade_preserves_legacy_candidate_and_cleanup_observations() {
+    let mut connection = fresh_v1_schema();
+    connection
+        .pragma_update(None, "foreign_keys", true)
+        .unwrap();
+    let v1 = &test_migrations()[0];
+    connection
+        .execute(
+            "INSERT INTO schema_migrations (
+                 version, name, checksum_sha256, applied_at_unix_ms
+             ) VALUES (1, ?1, ?2, 1)",
+            params![v1.name, v1.checksum_sha256.as_slice()],
+        )
+        .unwrap();
+    connection
+        .pragma_update(None, "application_id", DUX_APPLICATION_ID)
+        .unwrap();
+    connection.pragma_update(None, "user_version", 1).unwrap();
+    connection
+        .execute(
+            "INSERT INTO scans (
+                 scan_id, root_path, root_path_encoding, started_at_unix_ms, status
+             ) VALUES ('scan:legacy', ?1, 1, 10, 'succeeded')",
+            [b"/legacy-root".as_slice()],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO candidates (
+                 candidate_id, scan_id, rule_id, rule_revision, safety_tier,
+                 estimated_bytes, created_at_unix_ms, status
+             ) VALUES (
+                 'candidate:legacy', 'scan:legacy', 'fixture.legacy', 7,
+                 'review_required', 4096, 11, 'dismissed'
+             )",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO cleanup_sessions (
+                 session_id, plan_id, started_at_unix_ms, completed_at_unix_ms, mode,
+                 estimated_bytes, verified_capacity_delta_bytes, trigger_source, status
+             ) VALUES (
+                 'session:legacy', 'plan:legacy', 12, 13, 'dry_run',
+                 4096, 0, 'manual', 'dry_run'
+             )",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO cleanup_items (
+                 item_id, session_id, item_ordinal, rule_id, rule_revision,
+                 target_path, target_path_encoding, estimated_bytes, final_status,
+                 error_category
+             ) VALUES (
+                 41, 'session:legacy', 0, 'fixture.legacy', 7,
+                 ?1, 1, 4096, 'dry_run', ?2
+             )",
+            params![b"/legacy-root/cache".as_slice(), "é".repeat(128)],
+        )
+        .unwrap();
+
+    apply_pending_migrations(&mut connection, 20).unwrap();
+
+    assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
+    assert_eq!(
+        schema_fingerprint(&connection).unwrap(),
+        test_v2_schema_fingerprint()
+    );
+    let candidate: (i64, Option<String>, Option<String>) = connection
+        .query_row(
+            "SELECT record_format_version, category, proposed_action
+             FROM candidates WHERE candidate_id = 'candidate:legacy'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(candidate, (1, None, None));
+    let session: (i64, Option<String>) = connection
+        .query_row(
+            "SELECT record_format_version, source_scan_id
+             FROM cleanup_sessions WHERE session_id = 'session:legacy'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(session, (1, None));
+    let item: (i64, Vec<u8>, i64, Option<String>, Option<String>) = connection
+        .query_row(
+            "SELECT record_format_version, legacy_target_path,
+                    legacy_target_path_encoding, candidate_id, error_category
+             FROM cleanup_items WHERE item_id = 41",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        item,
+        (
+            1,
+            b"/legacy-root/cache".to_vec(),
+            1,
+            None,
+            Some("é".repeat(128))
+        )
+    );
+    let versions: Vec<i64> = connection
+        .prepare("SELECT version FROM schema_migrations ORDER BY version")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(versions, [1, 2]);
+}
+
+#[test]
+fn v2_history_constraints_reject_incomplete_or_incompatible_facts() {
+    let connection = fresh_current_schema();
+    connection
+        .pragma_update(None, "foreign_keys", true)
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO scans (
+                 scan_id, root_path, root_path_encoding, started_at_unix_ms, status
+             ) VALUES ('scan:v2', ?1, 1, 10, 'succeeded')",
+            [b"/v2-root".as_slice()],
+        )
+        .unwrap();
+
+    assert!(
+        connection
+            .execute(
+                "INSERT INTO candidates (
+                     candidate_id, scan_id, rule_id, rule_revision, safety_tier,
+                     estimated_bytes, created_at_unix_ms, status, record_format_version
+                 ) VALUES (
+                     'candidate:incomplete', 'scan:v2', 'fixture.v2', 1,
+                     'safe_regenerable', 8, 11, 'discovered', 2
+                 )",
+                [],
+            )
+            .is_err()
+    );
+    assert!(
+        connection
+            .execute(
+                "INSERT INTO candidates (
+                     candidate_id, scan_id, rule_id, rule_revision, safety_tier,
+                     estimated_bytes, created_at_unix_ms, status, record_format_version,
+                     category, proposed_action, rule_schedule_eligible
+                 ) VALUES (
+                     'candidate:wrong-pair', 'scan:v2', 'fixture.v2', 1,
+                     'safe_evictable', 8, 11, 'discovered', 2,
+                     'cloud_file', 'remove_known_regenerable_contents', 0
+                 )",
+                [],
+            )
+            .is_err()
+    );
+    connection
+        .execute(
+            "INSERT INTO candidates (
+                 candidate_id, scan_id, rule_id, rule_revision, safety_tier,
+                 estimated_bytes, created_at_unix_ms, status, record_format_version,
+                 category, proposed_action, rule_schedule_eligible,
+                 newest_mtime_unix_seconds, newest_mtime_nanoseconds
+             ) VALUES (
+                 'candidate:v2', 'scan:v2', 'fixture.v2', 1,
+                 'safe_regenerable', 8, 11, 'discovered', 2,
+                 'developer_artifact', 'remove_known_regenerable_contents', 1,
+                 20, 123456789
+             )",
+            [],
+        )
+        .unwrap();
+    assert!(
+        connection
+            .execute(
+                "INSERT INTO candidate_evidence (
+                     candidate_id, evidence_ordinal, evidence_kind,
+                     observed_unix_seconds, duration_seconds, duration_nanoseconds
+                 ) VALUES ('candidate:v2', 0, 'minimum_age', 20, 30, 0)",
+                [],
+            )
+            .is_err()
+    );
+    connection
+        .execute(
+            "INSERT INTO candidate_evidence (
+                 candidate_id, evidence_ordinal, evidence_kind,
+                 observed_unix_seconds, observed_nanoseconds,
+                 duration_seconds, duration_nanoseconds
+             ) VALUES ('candidate:v2', 0, 'minimum_age', 20, 1, 30, 2)",
+            [],
+        )
+        .unwrap();
+
+    assert!(
+        connection
+            .execute(
+                "INSERT INTO cleanup_sessions (
+                     session_id, plan_id, started_at_unix_ms, mode, estimated_bytes,
+                     trigger_source, status, record_format_version, source_scan_id,
+                     plan_created_at_unix_seconds, plan_created_at_nanoseconds,
+                     plan_expires_at_unix_seconds, plan_expires_at_nanoseconds,
+                     cancellation_requested
+                 ) VALUES (
+                     'session:expired', 'plan:expired', 40, 'dry_run', 8,
+                     'manual', 'planned', 2, 'scan:v2', 50, 1, 49, 999999999, 0
+                 )",
+                [],
+            )
+            .is_err()
+    );
+    connection
+        .execute(
+            "INSERT INTO cleanup_sessions (
+                 session_id, plan_id, started_at_unix_ms, mode, estimated_bytes,
+                 trigger_source, status, record_format_version, source_scan_id,
+                 plan_created_at_unix_seconds, plan_created_at_nanoseconds,
+                 plan_expires_at_unix_seconds, plan_expires_at_nanoseconds,
+                 cancellation_requested
+             ) VALUES (
+                 'session:v2', 'plan:v2', 40, 'dry_run', 8,
+                 'manual', 'planned', 2, 'scan:v2', 50, 1, 60, 2, 0
+             )",
+            [],
+        )
+        .unwrap();
+    assert!(
+        connection
+            .execute(
+                "INSERT INTO cleanup_items (
+                     session_id, item_ordinal, rule_id, rule_revision, estimated_bytes,
+                     final_status, record_format_version, candidate_id, category,
+                     safety_tier, proposed_action, rule_schedule_eligible
+                 ) VALUES (
+                     'session:v2', 0, 'fixture.v2', 1, 8, 'planned', 2,
+                     'candidate:v2', 'developer_artifact', 'safe_evictable',
+                     'remove_known_regenerable_contents', 0
+                 )",
+                [],
+            )
+            .is_err()
+    );
+    connection
+        .execute(
+            "INSERT INTO cleanup_items (
+                 session_id, item_ordinal, rule_id, rule_revision, estimated_bytes,
+                 final_status, record_format_version, candidate_id, category,
+                 safety_tier, proposed_action, rule_schedule_eligible
+             ) VALUES (
+                 'session:v2', 0, 'fixture.v2', 1, 8, 'planned', 2,
+                 'candidate:v2', 'developer_artifact', 'safe_regenerable',
+                 'remove_known_regenerable_contents', 1
+             )",
+            [],
+        )
+        .unwrap();
+    assert!(
+        connection
+            .execute(
+                "INSERT INTO cleanup_item_paths (
+                     session_id, item_ordinal, path_ordinal, target_path,
+                     target_path_encoding, status
+                 ) VALUES ('session:v2', 0, 0, ?1, 1, 'effect_started')",
+                [b"/v2-root/cache".as_slice()],
+            )
+            .is_err()
+    );
+    connection
+        .execute(
+            "INSERT INTO cleanup_item_paths (
+                 session_id, item_ordinal, path_ordinal, target_path,
+                 target_path_encoding, status
+             ) VALUES ('session:v2', 0, 0, ?1, 1, 'planned')",
+            [b"/v2-root/cache".as_slice()],
+        )
+        .unwrap();
 }
 
 #[test]
@@ -654,11 +963,13 @@ fn newer_database_without_initialization_evidence_remains_read_only_and_untouche
         .execute(
             "INSERT INTO schema_migrations \
              (version, name, checksum_sha256, applied_at_unix_ms) \
-             VALUES (2, 'future-without-sentinel', zeroblob(32), 2)",
-            [],
+             VALUES (?1, 'future-without-sentinel', zeroblob(32), 2)",
+            [i64::from(FUTURE_SCHEMA_VERSION)],
         )
         .unwrap();
-    connection.pragma_update(None, "user_version", 2).unwrap();
+    connection
+        .pragma_update(None, "user_version", FUTURE_SCHEMA_VERSION)
+        .unwrap();
     drop(connection);
     drop(paths);
 
@@ -666,7 +977,7 @@ fn newer_database_without_initialization_evidence_remains_read_only_and_untouche
     assert_eq!(
         store.status().unwrap().access,
         DatabaseAccess::ReadOnlyNewer {
-            found: 2,
+            found: FUTURE_SCHEMA_VERSION,
             supported: DATABASE_SCHEMA_VERSION,
         }
     );
@@ -755,19 +1066,21 @@ fn live_coordinator_refreshes_to_read_only_after_external_upgrade() {
         .execute(
             "INSERT INTO schema_migrations \
              (version, name, checksum_sha256, applied_at_unix_ms) \
-             VALUES (2, 'future-schema', zeroblob(32), 2)",
-            [],
+             VALUES (?1, 'future-schema', zeroblob(32), 2)",
+            [i64::from(FUTURE_SCHEMA_VERSION)],
         )
         .unwrap();
-    connection.pragma_update(None, "user_version", 2).unwrap();
+    connection
+        .pragma_update(None, "user_version", FUTURE_SCHEMA_VERSION)
+        .unwrap();
     drop(connection);
 
     assert_eq!(
         first.status().unwrap(),
         DatabaseStatus {
-            schema_version: 2,
+            schema_version: FUTURE_SCHEMA_VERSION,
             access: DatabaseAccess::ReadOnlyNewer {
-                found: 2,
+                found: FUTURE_SCHEMA_VERSION,
                 supported: DATABASE_SCHEMA_VERSION,
             },
         }
@@ -793,7 +1106,10 @@ fn live_coordinator_refreshes_to_read_only_after_external_upgrade() {
     assert!(Arc::ptr_eq(&first, &second));
     assert!(matches!(
         second.status().unwrap().access,
-        DatabaseAccess::ReadOnlyNewer { found: 2, .. }
+        DatabaseAccess::ReadOnlyNewer {
+            found: FUTURE_SCHEMA_VERSION,
+            ..
+        }
     ));
 }
 
@@ -901,21 +1217,23 @@ fn newer_valid_dux_schema_opens_strictly_read_only() {
         .execute(
             "INSERT INTO schema_migrations \
              (version, name, checksum_sha256, applied_at_unix_ms) \
-             VALUES (2, 'future-schema', zeroblob(32), 2)",
-            [],
+             VALUES (?1, 'future-schema', zeroblob(32), 2)",
+            [i64::from(FUTURE_SCHEMA_VERSION)],
         )
         .unwrap();
-    connection.pragma_update(None, "user_version", 2).unwrap();
+    connection
+        .pragma_update(None, "user_version", FUTURE_SCHEMA_VERSION)
+        .unwrap();
     drop(connection);
 
     let store = StoreCoordinator::open(&path).unwrap();
     assert_eq!(
         store.status().unwrap(),
         DatabaseStatus {
-            schema_version: 2,
+            schema_version: FUTURE_SCHEMA_VERSION,
             access: DatabaseAccess::ReadOnlyNewer {
-                found: 2,
-                supported: 1,
+                found: FUTURE_SCHEMA_VERSION,
+                supported: DATABASE_SCHEMA_VERSION,
             },
         }
     );
@@ -1117,11 +1435,13 @@ fn upgrade_between_probe_and_writer_lock_never_opens_newer_schema_for_write() {
             .execute(
                 "INSERT INTO schema_migrations \
                  (version, name, checksum_sha256, applied_at_unix_ms) \
-                 VALUES (2, 'racing-future-schema', zeroblob(32), 2)",
-                [],
+                 VALUES (?1, 'racing-future-schema', zeroblob(32), 2)",
+                [i64::from(FUTURE_SCHEMA_VERSION)],
             )
             .unwrap();
-        connection.pragma_update(None, "user_version", 2).unwrap();
+        connection
+            .pragma_update(None, "user_version", FUTURE_SCHEMA_VERSION)
+            .unwrap();
         Ok(())
     })
     .unwrap();
@@ -1129,10 +1449,10 @@ fn upgrade_between_probe_and_writer_lock_never_opens_newer_schema_for_write() {
     assert_eq!(
         store.status().unwrap(),
         DatabaseStatus {
-            schema_version: 2,
+            schema_version: FUTURE_SCHEMA_VERSION,
             access: DatabaseAccess::ReadOnlyNewer {
-                found: 2,
-                supported: 1,
+                found: FUTURE_SCHEMA_VERSION,
+                supported: DATABASE_SCHEMA_VERSION,
             },
         }
     );
