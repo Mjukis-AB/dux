@@ -5,6 +5,26 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Added deterministic, durable candidate discovery to successful engine scans.
+  A build-time and engine-open-validated SHA-256-bound catalog converts only a
+  fresh completed traversal's existing marker-verified developer artifacts
+  into stable scan-bound observations. All initial rules are selected-root,
+  Informational, RevealOnly, unschedulable, and explicitly blocked by unresolved
+  protected-path authority; partial coverage remains a separate blocker. The
+  evaluator has stable lossless-path IDs and ordering, binds exact catalog and
+  versioned context identity, and stops at its 4,096-result bound without first
+  materializing every match. Checksummed SQLite schema v4 binds one evaluation
+  to the exact immutable snapshot. Normal snapshot publication atomically
+  commits scan success, terminal evaluation state, and the complete candidate
+  batch or typed failure, with exact ambiguity reconciliation, hostile-row
+  validation, all-or-nothing inserts, and bounded set-based loading proven at
+  the exact 4,096-candidate cap across process-style reopen. Late
+  cancellation observed before discovery's final checkpoint cancels discovery
+  without falsifying an already-completed scan; later requests remain recorded
+  as intent without rewriting the terminal batch;
+  non-successful scans do not create evaluations. Task results and events expose
+  only path-free discovery status, and no planner, cleanup, AI, or filesystem
+  authority is added.
 - Added checksummed SQLite schema v3 and crash-durable candidate/plan claims.
   New plans atomically freeze their graph, move only exact discovered/selected
   candidates to planned, and preserve each prior review state behind one

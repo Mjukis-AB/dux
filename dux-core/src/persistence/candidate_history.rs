@@ -4,7 +4,7 @@
 //! comparison. They are not current filesystem evidence, planner input, or an
 //! executable capability. Migrated v1 summaries remain explicitly incomplete.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -498,6 +498,26 @@ pub(super) fn insert_candidate(
     Ok(())
 }
 
+pub(super) fn complete_candidate_matches_new(
+    stored: &CompleteCandidateRecord,
+    expected: &NewCandidateRecord,
+) -> bool {
+    let candidate = expected.candidate();
+    stored.id == *candidate.id()
+        && stored.source_scan_id == *candidate.source_scan_id()
+        && stored.rule == *candidate.rule()
+        && stored.category == candidate.category()
+        && stored.paths == candidate.paths()
+        && stored.estimated_bytes == candidate.estimated_bytes()
+        && stored.newest_mtime == candidate.newest_mtime()
+        && stored.evidence == candidate.evidence()
+        && stored.safety == candidate.safety()
+        && stored.action == candidate.action()
+        && stored.rule_schedule_eligible == candidate.rule_marks_schedule_eligible()
+        && stored.blockers == candidate.blockers()
+        && stored.created_at == expected.created_at()
+}
+
 pub(super) fn transition_candidate_review(
     transaction: &Transaction<'_>,
     id: &CandidateId,
@@ -616,6 +636,116 @@ pub(super) fn load_candidate_record_within_budget(
     id: &CandidateId,
 ) -> Result<Option<StoredCandidateRecord>, HistoryError> {
     load_candidate_record_within_budget_and_hook(connection, id, |_| Ok(()))
+}
+
+/// Load one evaluator-owned scan batch without issuing one parent/child query
+/// per candidate. The caller owns the shared query progress budget, so every
+/// statement is set-based and carries a SQL-side upper bound before rows are
+/// materialized.
+pub(super) fn load_complete_candidate_batch_within_budget(
+    connection: &Connection,
+    scan_id: &ScanId,
+    maximum: usize,
+) -> Result<Vec<CompleteCandidateRecord>, HistoryError> {
+    let row_limit =
+        i64::try_from(maximum.checked_add(1).ok_or_else(corrupt)?).map_err(|_| corrupt())?;
+    let mut statement = connection
+        .prepare(
+            "SELECT record_format_version,
+                    typeof(candidate_id), length(CAST(candidate_id AS BLOB)), candidate_id,
+                    typeof(scan_id), length(CAST(scan_id AS BLOB)), scan_id,
+                    typeof(rule_id), length(CAST(rule_id AS BLOB)), rule_id,
+                    rule_revision,
+                    typeof(safety_tier), length(CAST(safety_tier AS BLOB)), safety_tier,
+                    estimated_bytes, created_at_unix_ms,
+                    typeof(status), length(CAST(status AS BLOB)), status,
+                    typeof(category), length(CAST(category AS BLOB)), category,
+                    typeof(proposed_action), length(CAST(proposed_action AS BLOB)), proposed_action,
+                    rule_schedule_eligible,
+                    newest_mtime_unix_seconds, newest_mtime_nanoseconds
+             FROM candidates INDEXED BY candidates_by_scan_time
+             WHERE scan_id = ?1
+             ORDER BY created_at_unix_ms DESC, candidate_id
+             LIMIT ?2",
+        )
+        .map_err(map_query_sql_error)?;
+    let mut rows = statement
+        .query(params![scan_id.as_str(), row_limit])
+        .map_err(map_query_sql_error)?;
+    let mut batch = Vec::with_capacity(maximum.min(256));
+    let mut indices = HashMap::with_capacity(maximum.min(256));
+    while let Some(row) = rows.next().map_err(map_query_sql_error)? {
+        if batch.len() >= maximum {
+            return Err(corrupt());
+        }
+        let raw = raw_candidate_row(row).map_err(map_query_sql_error)?;
+        if raw.record_format_version != 2 {
+            return Err(corrupt());
+        }
+        let common = decode_common(&raw)?;
+        if common.source_scan_id != *scan_id || indices.contains_key(&common.id) {
+            return Err(corrupt());
+        }
+        let category = category_from_stored(raw.category.as_deref().ok_or_else(corrupt)?)?;
+        let action = action_from_stored(raw.action.as_deref().ok_or_else(corrupt)?)?;
+        let rule_schedule_eligible = stored_bool(raw.rule_schedule_eligible.ok_or_else(corrupt)?)?;
+        validate_policy(common.safety, action, rule_schedule_eligible, corrupt)?;
+        let newest_mtime =
+            decode_optional_time(raw.newest_mtime_seconds, raw.newest_mtime_nanoseconds)?;
+        let index = batch.len();
+        indices.insert(common.id.clone(), index);
+        batch.push(BatchCandidate {
+            common,
+            category,
+            action,
+            rule_schedule_eligible,
+            newest_mtime,
+            paths: Vec::new(),
+            evidence: Vec::new(),
+            blockers: Vec::new(),
+        });
+    }
+    drop(rows);
+    drop(statement);
+    if batch.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    load_batch_paths(connection, scan_id, maximum, &indices, &mut batch)?;
+    load_batch_evidence(connection, scan_id, maximum, &indices, &mut batch)?;
+    load_batch_blockers(connection, scan_id, maximum, &indices, &mut batch)?;
+    validate_batch_plan_claims(connection, scan_id, maximum, &indices, &batch)?;
+
+    batch
+        .into_iter()
+        .map(|candidate| {
+            if candidate.paths.is_empty() || candidate.evidence.is_empty() {
+                return Err(corrupt());
+            }
+            validate_complete_children(
+                candidate.common.safety,
+                candidate.action,
+                &candidate.paths,
+                &candidate.evidence,
+            )?;
+            Ok(CompleteCandidateRecord {
+                id: candidate.common.id,
+                source_scan_id: candidate.common.source_scan_id,
+                rule: candidate.common.rule,
+                category: candidate.category,
+                paths: candidate.paths,
+                estimated_bytes: candidate.common.estimated_bytes,
+                newest_mtime: candidate.newest_mtime,
+                evidence: candidate.evidence,
+                safety: candidate.common.safety,
+                action: candidate.action,
+                rule_schedule_eligible: candidate.rule_schedule_eligible,
+                blockers: candidate.blockers,
+                created_at: candidate.common.created_at,
+                status: candidate.common.status,
+            })
+        })
+        .collect()
 }
 
 fn load_candidate_record_within_budget_and_hook(
@@ -834,6 +964,17 @@ struct DecodedCommon {
     status: CandidateHistoryStatus,
 }
 
+struct BatchCandidate {
+    common: DecodedCommon,
+    category: CandidateCategory,
+    action: CandidateAction,
+    rule_schedule_eligible: bool,
+    newest_mtime: Option<SystemTime>,
+    paths: Vec<PathBuf>,
+    evidence: Vec<Evidence>,
+    blockers: Vec<BlockReason>,
+}
+
 fn decode_common(raw: &RawCandidateRow) -> Result<DecodedCommon, HistoryError> {
     let id = CandidateId::new(raw.id.clone()).map_err(|_| corrupt())?;
     let source_scan_id = ScanId::new(raw.source_scan_id.clone()).map_err(|_| corrupt())?;
@@ -849,6 +990,317 @@ fn decode_common(raw: &RawCandidateRow) -> Result<DecodedCommon, HistoryError> {
         created_at: unix_ms_to_system_time(raw.created_at_unix_ms)?,
         status: CandidateHistoryStatus::from_stored(&raw.status)?,
     })
+}
+
+fn batch_child_limit(maximum: usize, per_candidate: usize) -> Result<i64, HistoryError> {
+    i64::try_from(
+        maximum
+            .checked_mul(per_candidate)
+            .and_then(|value| value.checked_add(1))
+            .ok_or_else(corrupt)?,
+    )
+    .map_err(|_| corrupt())
+}
+
+fn batch_parent_limit(maximum: usize) -> Result<i64, HistoryError> {
+    i64::try_from(maximum.checked_add(1).ok_or_else(corrupt)?).map_err(|_| corrupt())
+}
+
+fn load_batch_paths(
+    connection: &Connection,
+    scan_id: &ScanId,
+    maximum: usize,
+    indices: &HashMap<CandidateId, usize>,
+    batch: &mut [BatchCandidate],
+) -> Result<(), HistoryError> {
+    let mut statement = connection
+        .prepare(
+            "WITH batch(candidate_id) AS MATERIALIZED (
+                 SELECT candidate_id
+                 FROM candidates INDEXED BY candidates_by_scan_time
+                 WHERE scan_id = ?1
+                 ORDER BY created_at_unix_ms DESC, candidate_id
+                 LIMIT ?2
+             ), bounded_path AS MATERIALIZED (
+                 SELECT path.candidate_id, path.path_ordinal,
+                        path.observed_path, path.observed_path_encoding
+                 FROM batch
+                 JOIN candidate_paths AS path USING (candidate_id)
+                 LIMIT ?3
+             )
+             SELECT typeof(candidate_id),
+                    length(CAST(candidate_id AS BLOB)), candidate_id,
+                    path_ordinal, typeof(observed_path),
+                    length(observed_path), observed_path,
+                    observed_path_encoding
+             FROM bounded_path
+             ORDER BY candidate_id, path_ordinal",
+        )
+        .map_err(map_query_sql_error)?;
+    let mut rows = statement
+        .query(params![
+            scan_id.as_str(),
+            batch_parent_limit(maximum)?,
+            batch_child_limit(maximum, MAX_PATHS)?,
+        ])
+        .map_err(map_query_sql_error)?;
+    while let Some(row) = rows.next().map_err(map_query_sql_error)? {
+        validate_required_value(row, 0, 1, "text", MAX_STORED_ID_BYTES)
+            .map_err(map_query_sql_error)?;
+        validate_required_value(row, 4, 5, "blob", MAX_STORED_PATH_BYTES)
+            .map_err(map_query_sql_error)?;
+        let id = CandidateId::new(row.get::<_, String>(2).map_err(map_query_sql_error)?)
+            .map_err(|_| corrupt())?;
+        let index = *indices.get(&id).ok_or_else(corrupt)?;
+        let paths = &mut batch[index].paths;
+        if paths.len() >= MAX_PATHS
+            || row.get::<_, i64>(3).map_err(map_query_sql_error)? != paths.len() as i64
+        {
+            return Err(corrupt());
+        }
+        let path = decode_absolute_path(
+            row.get(6).map_err(map_query_sql_error)?,
+            row.get(7).map_err(map_query_sql_error)?,
+        )?;
+        if paths.contains(&path) {
+            return Err(corrupt());
+        }
+        paths.push(path);
+    }
+    Ok(())
+}
+
+fn load_batch_evidence(
+    connection: &Connection,
+    scan_id: &ScanId,
+    maximum: usize,
+    indices: &HashMap<CandidateId, usize>,
+    batch: &mut [BatchCandidate],
+) -> Result<(), HistoryError> {
+    let mut statement = connection
+        .prepare(
+            "WITH batch(candidate_id) AS MATERIALIZED (
+                 SELECT candidate_id
+                 FROM candidates INDEXED BY candidates_by_scan_time
+                 WHERE scan_id = ?1
+                 ORDER BY created_at_unix_ms DESC, candidate_id
+                 LIMIT ?2
+             ), bounded_evidence AS MATERIALIZED (
+                 SELECT evidence.candidate_id, evidence.evidence_ordinal,
+                        evidence.evidence_kind, evidence.path_value,
+                        evidence.path_value_encoding, evidence.text_value,
+                        evidence.observed_unix_seconds, evidence.observed_nanoseconds,
+                        evidence.duration_seconds, evidence.duration_nanoseconds,
+                        evidence.observed_bytes, evidence.minimum_bytes
+                 FROM batch
+                 JOIN candidate_evidence AS evidence USING (candidate_id)
+                 LIMIT ?3
+             )
+             SELECT typeof(candidate_id),
+                    length(CAST(candidate_id AS BLOB)), candidate_id,
+                    evidence_ordinal, typeof(evidence_kind),
+                    length(CAST(evidence_kind AS BLOB)), evidence_kind,
+                    typeof(path_value), length(path_value), path_value,
+                    path_value_encoding, typeof(text_value),
+                    length(CAST(text_value AS BLOB)), text_value,
+                    observed_unix_seconds, observed_nanoseconds,
+                    duration_seconds, duration_nanoseconds,
+                    observed_bytes, minimum_bytes
+             FROM bounded_evidence
+             ORDER BY candidate_id, evidence_ordinal",
+        )
+        .map_err(map_query_sql_error)?;
+    let mut rows = statement
+        .query(params![
+            scan_id.as_str(),
+            batch_parent_limit(maximum)?,
+            batch_child_limit(maximum, MAX_EVIDENCE)?,
+        ])
+        .map_err(map_query_sql_error)?;
+    while let Some(row) = rows.next().map_err(map_query_sql_error)? {
+        validate_required_value(row, 0, 1, "text", MAX_STORED_ID_BYTES)
+            .map_err(map_query_sql_error)?;
+        validate_required_value(row, 4, 5, "text", MAX_STORED_POLICY_BYTES)
+            .map_err(map_query_sql_error)?;
+        validate_optional_value(row, 7, 8, "blob", MAX_STORED_PATH_BYTES)
+            .map_err(map_query_sql_error)?;
+        validate_optional_value(row, 11, 12, "text", MAX_STORED_TEXT_BYTES)
+            .map_err(map_query_sql_error)?;
+        let id = CandidateId::new(row.get::<_, String>(2).map_err(map_query_sql_error)?)
+            .map_err(|_| corrupt())?;
+        let index = *indices.get(&id).ok_or_else(corrupt)?;
+        let evidence = &mut batch[index].evidence;
+        if evidence.len() >= MAX_EVIDENCE
+            || row.get::<_, i64>(3).map_err(map_query_sql_error)? != evidence.len() as i64
+        {
+            return Err(corrupt());
+        }
+        evidence.push(decode_evidence(RawEvidence {
+            kind: row.get(6).map_err(map_query_sql_error)?,
+            path: row.get(9).map_err(map_query_sql_error)?,
+            path_encoding: row.get(10).map_err(map_query_sql_error)?,
+            text: row.get(13).map_err(map_query_sql_error)?,
+            observed_seconds: row.get(14).map_err(map_query_sql_error)?,
+            observed_nanoseconds: row.get(15).map_err(map_query_sql_error)?,
+            duration_seconds: row.get(16).map_err(map_query_sql_error)?,
+            duration_nanoseconds: row.get(17).map_err(map_query_sql_error)?,
+            observed_bytes: row.get(18).map_err(map_query_sql_error)?,
+            minimum_bytes: row.get(19).map_err(map_query_sql_error)?,
+        })?);
+    }
+    Ok(())
+}
+
+fn load_batch_blockers(
+    connection: &Connection,
+    scan_id: &ScanId,
+    maximum: usize,
+    indices: &HashMap<CandidateId, usize>,
+    batch: &mut [BatchCandidate],
+) -> Result<(), HistoryError> {
+    let mut statement = connection
+        .prepare(
+            "WITH batch(candidate_id) AS MATERIALIZED (
+                 SELECT candidate_id
+                 FROM candidates INDEXED BY candidates_by_scan_time
+                 WHERE scan_id = ?1
+                 ORDER BY created_at_unix_ms DESC, candidate_id
+                 LIMIT ?2
+             ), bounded_blocker AS MATERIALIZED (
+                 SELECT blocker.candidate_id, blocker.blocker_ordinal,
+                        blocker.blocker_kind
+                 FROM batch
+                 JOIN candidate_blockers AS blocker USING (candidate_id)
+                 LIMIT ?3
+             )
+             SELECT typeof(candidate_id),
+                    length(CAST(candidate_id AS BLOB)), candidate_id,
+                    blocker_ordinal, typeof(blocker_kind),
+                    length(CAST(blocker_kind AS BLOB)), blocker_kind
+             FROM bounded_blocker
+             ORDER BY candidate_id, blocker_ordinal",
+        )
+        .map_err(map_query_sql_error)?;
+    let mut rows = statement
+        .query(params![
+            scan_id.as_str(),
+            batch_parent_limit(maximum)?,
+            batch_child_limit(maximum, MAX_BLOCKERS)?,
+        ])
+        .map_err(map_query_sql_error)?;
+    while let Some(row) = rows.next().map_err(map_query_sql_error)? {
+        validate_required_value(row, 0, 1, "text", MAX_STORED_ID_BYTES)
+            .map_err(map_query_sql_error)?;
+        validate_required_value(row, 4, 5, "text", MAX_STORED_POLICY_BYTES)
+            .map_err(map_query_sql_error)?;
+        let id = CandidateId::new(row.get::<_, String>(2).map_err(map_query_sql_error)?)
+            .map_err(|_| corrupt())?;
+        let index = *indices.get(&id).ok_or_else(corrupt)?;
+        let blockers = &mut batch[index].blockers;
+        if blockers.len() >= MAX_BLOCKERS
+            || row.get::<_, i64>(3).map_err(map_query_sql_error)? != blockers.len() as i64
+        {
+            return Err(corrupt());
+        }
+        blockers.push(blocker_from_stored(
+            &row.get::<_, String>(6).map_err(map_query_sql_error)?,
+        )?);
+    }
+    Ok(())
+}
+
+fn validate_batch_plan_claims(
+    connection: &Connection,
+    scan_id: &ScanId,
+    maximum: usize,
+    indices: &HashMap<CandidateId, usize>,
+    batch: &[BatchCandidate],
+) -> Result<(), HistoryError> {
+    let mut statement = connection
+        .prepare(
+            "WITH batch(candidate_id) AS MATERIALIZED (
+                 SELECT candidate_id
+                 FROM candidates INDEXED BY candidates_by_scan_time
+                 WHERE scan_id = ?1
+                 ORDER BY created_at_unix_ms DESC, candidate_id
+                 LIMIT ?2
+             ), bounded_claim AS MATERIALIZED (
+                 SELECT claim.candidate_id, claim.prior_review_status,
+                        session.candidate_status_coupling_version,
+                        session.status AS session_status,
+                        session.record_format_version AS session_record_format_version,
+                        item.candidate_id AS item_candidate_id,
+                        item.record_format_version AS item_record_format_version
+                 FROM batch
+                 JOIN candidate_plan_claims AS claim USING (candidate_id)
+                 LEFT JOIN cleanup_sessions AS session
+                   ON session.session_id = claim.session_id
+                 LEFT JOIN cleanup_items AS item
+                   ON item.session_id = claim.session_id
+                  AND item.item_ordinal = claim.item_ordinal
+                 LIMIT ?3
+             )
+             SELECT typeof(candidate_id),
+                    length(CAST(candidate_id AS BLOB)), candidate_id,
+                    typeof(prior_review_status),
+                    length(CAST(prior_review_status AS BLOB)), prior_review_status,
+                    candidate_status_coupling_version,
+                    typeof(session_status), length(CAST(session_status AS BLOB)),
+                    session_status, session_record_format_version,
+                    typeof(item_candidate_id), length(CAST(item_candidate_id AS BLOB)),
+                    item_candidate_id, item_record_format_version
+             FROM bounded_claim
+             ORDER BY candidate_id",
+        )
+        .map_err(map_query_sql_error)?;
+    let mut rows = statement
+        .query(params![
+            scan_id.as_str(),
+            batch_parent_limit(maximum)?,
+            batch_parent_limit(maximum)?,
+        ])
+        .map_err(map_query_sql_error)?;
+    let mut claimed = HashSet::with_capacity(batch.len().min(256));
+    while let Some(row) = rows.next().map_err(map_query_sql_error)? {
+        validate_required_value(row, 0, 1, "text", MAX_STORED_ID_BYTES)
+            .map_err(map_query_sql_error)?;
+        validate_required_value(row, 3, 4, "text", MAX_STORED_POLICY_BYTES)
+            .map_err(map_query_sql_error)?;
+        validate_required_value(row, 7, 8, "text", MAX_STORED_POLICY_BYTES)
+            .map_err(map_query_sql_error)?;
+        validate_required_value(row, 11, 12, "text", MAX_STORED_ID_BYTES)
+            .map_err(map_query_sql_error)?;
+        let id = CandidateId::new(row.get::<_, String>(2).map_err(map_query_sql_error)?)
+            .map_err(|_| corrupt())?;
+        let index = *indices.get(&id).ok_or_else(corrupt)?;
+        let prior: String = row.get(5).map_err(map_query_sql_error)?;
+        let coupling: Option<i64> = row.get(6).map_err(map_query_sql_error)?;
+        let session_status: String = row.get(9).map_err(map_query_sql_error)?;
+        let session_version: Option<i64> = row.get(10).map_err(map_query_sql_error)?;
+        let item_candidate_id: String = row.get(13).map_err(map_query_sql_error)?;
+        let item_version: Option<i64> = row.get(14).map_err(map_query_sql_error)?;
+        if batch[index].common.status != CandidateHistoryStatus::Planned
+            || !claimed.insert(id.clone())
+            || CandidatePriorReviewStatus::from_stored(&prior).is_err()
+            || coupling != Some(2)
+            || !matches!(
+                session_status.as_str(),
+                "planned" | "running" | "recovering"
+            )
+            || session_version != Some(2)
+            || item_candidate_id != id.as_str()
+            || item_version != Some(2)
+        {
+            return Err(corrupt());
+        }
+    }
+    if batch.iter().any(|candidate| {
+        (candidate.common.status == CandidateHistoryStatus::Planned)
+            != claimed.contains(&candidate.common.id)
+    }) {
+        return Err(corrupt());
+    }
+    Ok(())
 }
 
 fn load_paths(connection: &Connection, id: &CandidateId) -> Result<Vec<PathBuf>, HistoryError> {

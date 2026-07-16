@@ -264,7 +264,6 @@ impl ScanRecord {
         self.started_at
     }
 
-    #[cfg(test)]
     pub(crate) fn completed_at(&self) -> Option<SystemTime> {
         self.completed_at
     }

@@ -11,8 +11,8 @@ mod task;
 pub use config::{EngineConfig, EngineConfigError, EngineConfigField, EngineConfigReason};
 pub use registry::EngineHandle;
 pub use task::{
-    CancelOutcome, CloseOutcome, EngineLifecycle, EngineOpenError, FormatSizeBatchResult,
-    FormattedSizeEntry, ScanRootErrorKind, ScanTaskCounts, ScanTaskResult, ScanTaskStatus,
-    StartTaskError, TaskAccessError, TaskEvent, TaskEventBatch, TaskEventKind, TaskFailureKind,
-    TaskId, TaskKind, TaskPhase, TaskSnapshot,
+    CancelOutcome, CandidateEvaluationTaskFailureKind, CandidateEvaluationTaskStatus, CloseOutcome,
+    EngineLifecycle, EngineOpenError, FormatSizeBatchResult, FormattedSizeEntry, ScanRootErrorKind,
+    ScanTaskCounts, ScanTaskResult, ScanTaskStatus, StartTaskError, TaskAccessError, TaskEvent,
+    TaskEventBatch, TaskEventKind, TaskFailureKind, TaskId, TaskKind, TaskPhase, TaskSnapshot,
 };

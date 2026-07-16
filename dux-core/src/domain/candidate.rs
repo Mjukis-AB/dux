@@ -114,13 +114,6 @@ pub(crate) struct CandidateInput {
 }
 
 impl CandidateInput {
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "candidate assembly remains internal until the deterministic rule evaluator lands"
-        )
-    )]
     pub(crate) fn new(
         id: CandidateId,
         paths: Vec<PathBuf>,
@@ -161,13 +154,6 @@ impl Candidate {
     /// override safety, action, scheduling, category, ID, or revision. It does
     /// not validate filesystem paths. A future validator/planner must do that
     /// before any cleanup plan can exist.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "candidate assembly remains internal until the deterministic rule evaluator lands"
-        )
-    )]
     pub(crate) fn try_from_rule(
         rule: &Rule,
         input: CandidateInput,

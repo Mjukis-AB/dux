@@ -9,21 +9,27 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::config::EngineConfig;
 use super::task::{
-    CancelOutcome, CloseOutcome, EngineLifecycle, EngineOpenError, FormatSizeBatchResult,
-    FormattedSizeEntry, ScanRootErrorKind, ScanTaskCounts, ScanTaskResult, ScanTaskStatus,
-    StartTaskError, TaskAccessError, TaskEvent, TaskEventBatch, TaskEventKind, TaskFailureKind,
-    TaskId, TaskKind, TaskPhase, TaskSnapshot,
+    CancelOutcome, CandidateEvaluationTaskFailureKind, CandidateEvaluationTaskStatus, CloseOutcome,
+    EngineLifecycle, EngineOpenError, FormatSizeBatchResult, FormattedSizeEntry, ScanRootErrorKind,
+    ScanTaskCounts, ScanTaskResult, ScanTaskStatus, StartTaskError, TaskAccessError, TaskEvent,
+    TaskEventBatch, TaskEventKind, TaskFailureKind, TaskId, TaskKind, TaskPhase, TaskSnapshot,
 };
-use crate::domain::{ScanCoverage, ScanId};
+use crate::domain::{
+    CANDIDATE_CATALOG_SCHEMA_VERSION, CANDIDATE_CATALOG_SHA256, CANDIDATE_CONTEXT_FORMAT_VERSION,
+    CANDIDATE_EVALUATOR_REVISION, CandidateEvaluationError, ScanCoverage, ScanId,
+    candidate_evaluation_context_digest_sha256, evaluate_completed_scan_candidates,
+    validate_bundled_candidate_catalog,
+};
 use crate::persistence::snapshot::from_scan::prepare_completed_scan;
 use crate::persistence::snapshot::{
     HostValue, SnapshotRepository, SnapshotRepositoryErrorKind, SnapshotStoreAccess,
 };
-use crate::persistence::{DatabaseStatus, StoreCoordinator};
 use crate::persistence::{
-    HistoryErrorKind, NewScanRecord, ScanCompletionRecord, ScanCounts, ScanStatus,
-    TerminalScanStatus,
+    CandidateEvaluationCompletion, CandidateEvaluationFailureKind, CandidateEvaluationIdentity,
+    HistoryErrorKind, NewCandidateRecord, NewScanRecord, ScanCompletionRecord, ScanCounts,
+    ScanStatus, TerminalScanStatus,
 };
+use crate::persistence::{DatabaseStatus, StoreCoordinator};
 use crate::scanner::{CancellationToken, ScanConfig, ScanMessage, ScanTermination, Scanner};
 
 const FORMAT_BATCH_LIMIT: usize = 256;
@@ -156,6 +162,24 @@ impl TaskContext {
         let Some(kind) = kind else {
             return;
         };
+        let mut registry = self.shared.lock_registry_recover();
+        let event_limit = self.shared.limits.events_per_task;
+        if let Some(record) = registry.records.get_mut(&self.id)
+            && !record.phase.is_terminal()
+        {
+            record.push_event(kind, event_limit);
+        }
+    }
+
+    fn report_candidate_evaluation_started(&self) {
+        self.report_candidate_event(TaskEventKind::CandidateEvaluationStarted);
+    }
+
+    fn report_candidate_evaluation_finished(&self, status: CandidateEvaluationTaskStatus) {
+        self.report_candidate_event(TaskEventKind::CandidateEvaluationFinished { status });
+    }
+
+    fn report_candidate_event(&self, kind: TaskEventKind) {
         let mut registry = self.shared.lock_registry_recover();
         let event_limit = self.shared.limits.events_per_task;
         if let Some(record) = registry.records.get_mut(&self.id)
@@ -404,6 +428,8 @@ impl EngineHandle {
         limits: RegistryLimits,
         between_status_and_snapshot_open: impl FnOnce(),
     ) -> Result<Self, EngineOpenError> {
+        validate_bundled_candidate_catalog()
+            .map_err(|_| EngineOpenError::CandidateCatalogInvalid)?;
         // Durable storage is validated and migrated before any worker becomes
         // observable, so a failed open cannot leave a live partial engine.
         let store = StoreCoordinator::open(config.database_path())
@@ -508,13 +534,24 @@ impl EngineHandle {
     /// generated only after a worker starts, so queued cancellation leaves no
     /// history row.
     pub fn start_scan(&self, root: PathBuf) -> Result<TaskId, StartTaskError> {
-        self.start_scan_with_hook(root, |_| {})
+        self.start_scan_with_hooks(root, |_| {}, || {}, || {})
     }
 
+    #[cfg(test)]
     fn start_scan_with_hook(
         &self,
         root: PathBuf,
         before_traversal: impl FnOnce(&ScanId) + Send + 'static,
+    ) -> Result<TaskId, StartTaskError> {
+        self.start_scan_with_hooks(root, before_traversal, || {}, || {})
+    }
+
+    fn start_scan_with_hooks(
+        &self,
+        root: PathBuf,
+        before_traversal: impl FnOnce(&ScanId) + Send + 'static,
+        before_candidate_evaluation: impl FnOnce() + Send + 'static,
+        before_candidate_persistence: impl FnOnce() + Send + 'static,
     ) -> Result<TaskId, StartTaskError> {
         let canonical_root = prepare_scan_root(&root)?;
         let status = self
@@ -534,7 +571,15 @@ impl EngineHandle {
             TaskKind::Scan,
             Some(canonical_root.clone()),
             Box::new(move |context| {
-                run_scan_task(context, canonical_root, store, snapshots, before_traversal)
+                run_scan_task(
+                    context,
+                    canonical_root,
+                    store,
+                    snapshots,
+                    before_traversal,
+                    before_candidate_evaluation,
+                    before_candidate_persistence,
+                )
             }),
         )
     }
@@ -546,6 +591,24 @@ impl EngineHandle {
         before_traversal: impl FnOnce(&ScanId) + Send + 'static,
     ) -> Result<TaskId, StartTaskError> {
         self.start_scan_with_hook(root, before_traversal)
+    }
+
+    #[cfg(test)]
+    fn start_scan_with_before_candidate_evaluation_hook(
+        &self,
+        root: PathBuf,
+        before_candidate_evaluation: impl FnOnce() + Send + 'static,
+    ) -> Result<TaskId, StartTaskError> {
+        self.start_scan_with_hooks(root, |_| {}, before_candidate_evaluation, || {})
+    }
+
+    #[cfg(test)]
+    fn start_scan_with_before_candidate_persistence_hook(
+        &self,
+        root: PathBuf,
+        before_candidate_persistence: impl FnOnce() + Send + 'static,
+    ) -> Result<TaskId, StartTaskError> {
+        self.start_scan_with_hooks(root, |_| {}, || {}, before_candidate_persistence)
     }
 
     pub fn task_snapshot(&self, id: TaskId) -> Result<TaskSnapshot, TaskAccessError> {
@@ -919,14 +982,13 @@ impl DurableScanGuard {
             return Err(self.map_settle_failure(error.kind));
         }
         self.settled = true;
-        Ok(Arc::new(ScanTaskResult::new(
+        Ok(Arc::new(ScanTaskResult::without_snapshot(
             self.id.clone(),
             self.started_at,
             completed_at,
             result_status,
             public_counts(counts),
             coverage,
-            false,
         )))
     }
 
@@ -974,12 +1036,167 @@ fn failed_scan_outcome(
     }
 }
 
+fn prepare_candidate_evaluation(
+    context: &TaskContext,
+    scan_id: &ScanId,
+    artifact: &crate::scanner::CompletedScanArtifact,
+    scheduled_at: SystemTime,
+) -> Result<
+    (
+        CandidateEvaluationIdentity,
+        CandidateEvaluationCompletion,
+        CandidateEvaluationTaskStatus,
+    ),
+    TaskFailureKind,
+> {
+    let identity = CandidateEvaluationIdentity::try_new(
+        CANDIDATE_EVALUATOR_REVISION,
+        CANDIDATE_CATALOG_SCHEMA_VERSION,
+        CANDIDATE_CATALOG_SHA256,
+        CANDIDATE_CONTEXT_FORMAT_VERSION,
+        candidate_evaluation_context_digest_sha256(scan_id, artifact),
+    )
+    .map_err(|_| TaskFailureKind::InternalFailure)?;
+    context.report_candidate_evaluation_started();
+    if context.is_cancellation_requested() {
+        return failed_candidate_evaluation(
+            identity,
+            completion_time(scheduled_at),
+            CandidateEvaluationFailureKind::Cancelled,
+        );
+    }
+
+    let batch = match evaluate_completed_scan_candidates(scan_id, artifact) {
+        Ok(batch) => batch,
+        Err(error) => {
+            let kind = map_candidate_evaluation_error(error);
+            return failed_candidate_evaluation(identity, completion_time(scheduled_at), kind);
+        }
+    };
+    if context.is_cancellation_requested() {
+        return failed_candidate_evaluation(
+            identity,
+            completion_time(scheduled_at),
+            CandidateEvaluationFailureKind::Cancelled,
+        );
+    }
+
+    let observed_identity = CandidateEvaluationIdentity::try_new(
+        batch.evaluator_revision(),
+        batch.catalog_schema_version(),
+        batch.catalog_digest_sha256(),
+        batch.context_format_version(),
+        batch.context_digest_sha256(),
+    )
+    .map_err(|_| TaskFailureKind::InternalFailure)?;
+    if observed_identity != identity {
+        return failed_candidate_evaluation(
+            identity,
+            completion_time(scheduled_at),
+            CandidateEvaluationFailureKind::ContextInvalid,
+        );
+    }
+
+    let evaluated_at = completion_time(scheduled_at);
+    let candidates = batch
+        .into_candidates()
+        .iter()
+        .map(|candidate| NewCandidateRecord::try_from_candidate(candidate, evaluated_at))
+        .collect::<Result<Vec<_>, _>>();
+    let candidates = match candidates {
+        Ok(candidates) => candidates,
+        Err(_) => {
+            return failed_candidate_evaluation(
+                identity,
+                evaluated_at,
+                CandidateEvaluationFailureKind::CandidateInvalid,
+            );
+        }
+    };
+    let candidate_count =
+        u32::try_from(candidates.len()).map_err(|_| TaskFailureKind::InternalFailure)?;
+    let completion = CandidateEvaluationCompletion::succeeded(evaluated_at, candidates)
+        .map_err(|_| TaskFailureKind::InternalFailure)?;
+    Ok((
+        identity,
+        completion,
+        CandidateEvaluationTaskStatus::Succeeded { candidate_count },
+    ))
+}
+
+fn failed_candidate_evaluation(
+    identity: CandidateEvaluationIdentity,
+    completed_at: SystemTime,
+    kind: CandidateEvaluationFailureKind,
+) -> Result<
+    (
+        CandidateEvaluationIdentity,
+        CandidateEvaluationCompletion,
+        CandidateEvaluationTaskStatus,
+    ),
+    TaskFailureKind,
+> {
+    let completion = CandidateEvaluationCompletion::failed(completed_at, kind)
+        .map_err(|_| TaskFailureKind::InternalFailure)?;
+    Ok((
+        identity,
+        completion,
+        CandidateEvaluationTaskStatus::Failed {
+            kind: public_candidate_evaluation_failure(kind),
+        },
+    ))
+}
+
+const fn map_candidate_evaluation_error(
+    error: CandidateEvaluationError,
+) -> CandidateEvaluationFailureKind {
+    match error {
+        CandidateEvaluationError::InvalidBundledCatalog => {
+            CandidateEvaluationFailureKind::CatalogInvalid
+        }
+        CandidateEvaluationError::InvalidArtifactProjection => {
+            CandidateEvaluationFailureKind::EvaluationFailed
+        }
+        CandidateEvaluationError::CandidateLimitExceeded { .. } => {
+            CandidateEvaluationFailureKind::LimitExceeded
+        }
+        CandidateEvaluationError::InvalidCandidate(_) => {
+            CandidateEvaluationFailureKind::CandidateInvalid
+        }
+    }
+}
+
+const fn public_candidate_evaluation_failure(
+    kind: CandidateEvaluationFailureKind,
+) -> CandidateEvaluationTaskFailureKind {
+    match kind {
+        CandidateEvaluationFailureKind::Cancelled => CandidateEvaluationTaskFailureKind::Cancelled,
+        CandidateEvaluationFailureKind::CatalogInvalid => {
+            CandidateEvaluationTaskFailureKind::CatalogInvalid
+        }
+        CandidateEvaluationFailureKind::ContextInvalid => {
+            CandidateEvaluationTaskFailureKind::ContextInvalid
+        }
+        CandidateEvaluationFailureKind::EvaluationFailed => {
+            CandidateEvaluationTaskFailureKind::EvaluationFailed
+        }
+        CandidateEvaluationFailureKind::CandidateInvalid => {
+            CandidateEvaluationTaskFailureKind::CandidateInvalid
+        }
+        CandidateEvaluationFailureKind::LimitExceeded => {
+            CandidateEvaluationTaskFailureKind::LimitExceeded
+        }
+    }
+}
+
 fn run_scan_task(
     context: TaskContext,
     admitted_root: PathBuf,
     store: Arc<StoreCoordinator>,
     snapshots: Arc<SnapshotRepository>,
     before_traversal: impl FnOnce(&ScanId),
+    before_candidate_evaluation: impl FnOnce(),
+    before_candidate_persistence: impl FnOnce(),
 ) -> WorkOutcome {
     if prepare_scan_root(&admitted_root).ok().as_deref() != Some(admitted_root.as_path()) {
         return WorkOutcome::Failed(TaskFailureKind::ScanRootChanged, None);
@@ -1070,18 +1287,44 @@ fn run_scan_task(
                     return failed_scan_outcome(TaskFailureKind::SnapshotRejected, result);
                 }
             };
+            before_candidate_evaluation();
+            let (evaluation_identity, evaluation, evaluation_status) =
+                match prepare_candidate_evaluation(&context, start.id(), &artifact, completed_at) {
+                    Ok(evaluation) => evaluation,
+                    Err(failure) => {
+                        let result = durable.settle(
+                            TerminalScanStatus::Failed,
+                            ScanTaskStatus::Failed,
+                            completed_at,
+                            ScanCounts::default(),
+                            ScanCoverage::unknown(),
+                        );
+                        return failed_scan_outcome(failure, result);
+                    }
+                };
             let (document, counts, coverage) = prepared.into_parts();
-            match snapshots.complete_scan(completed_at, counts, &coverage, &document) {
+            // Candidate evaluation's final cancellation observation has
+            // passed. Requests after this point remain truthful task intent
+            // but cannot rewrite the immutable terminal batch being committed.
+            before_candidate_persistence();
+            match snapshots.complete_scan_with_candidate_evaluation(
+                completed_at,
+                counts,
+                &coverage,
+                &document,
+                &evaluation_identity,
+                &evaluation,
+            ) {
                 Ok(_) => {
                     durable.disarm();
-                    WorkOutcome::Succeeded(TaskResult::Scan(Arc::new(ScanTaskResult::new(
+                    context.report_candidate_evaluation_finished(evaluation_status);
+                    WorkOutcome::Succeeded(TaskResult::Scan(Arc::new(ScanTaskResult::succeeded(
                         start.id().clone(),
                         start.started_at(),
                         completed_at,
-                        ScanTaskStatus::Succeeded,
                         public_counts(counts),
                         coverage,
-                        true,
+                        evaluation_status,
                     ))))
                 }
                 Err(error) => settle_after_snapshot_error(error.kind, &mut durable, completed_at),

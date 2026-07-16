@@ -2281,8 +2281,64 @@ Tasks:
     kind checks, and scope release. Scope exclusion is intentionally
     engine-session-local; cross-process scan leases, last-complete/history query
     APIs, FFI/Swift/CLI transport, hard-process-death recovery of a running row,
-    and retention remain later work. The broad persistence checkbox stays open
-    for candidate status plus evaluator/planner lifecycle integration.
+    and retention remain later work. Candidate evaluation is attached by the
+    following checkpoint.
+  - Deterministic candidate-evaluation lifecycle sub-checkpoint completed
+    2026-07-16: a build-time and engine-open-validated SHA-256-bound catalog
+    now maps the existing marker-verified M0 developer-artifact projection into
+    stable, scan-bound candidates. All eleven initial rules explicitly use the
+    selected scan root scope, are Informational/RevealOnly, are never
+    schedule-eligible, and every result carries unresolved `ProtectedPath`;
+    incomplete traversal adds a separate coverage blocker. The catalog's exact
+    matcher arrays, policy, scope, revision, provenance-bearing rule documents,
+    and fixed byte digest are validated before an engine can publish workers.
+    Production evaluation accepts only the fresh completed-scan type-state
+    witness used to build the same immutable snapshot, not a public or
+    cache-reconstructed `DiskTree`. Candidate IDs and ordering are deterministic
+    across arena insertion order and bind scan ID, rule revision, and lossless
+    native target path. A versioned context digest additionally binds evaluator
+    revision, exact catalog, selected root, coverage facts, and the explicit
+    unresolved protection policy. The 4,096-result limit stops at the first
+    excess match without first materializing an unbounded projection.
+
+    Checksummed schema v4 adds one strict evaluation record per succeeded scan,
+    binding evaluator/catalog/context identity to the exact snapshot version
+    and digest. It distinguishes pending, succeeded, and typed failed states;
+    migration fabricates no evaluations for historical scans. Normal engine
+    scans compute a terminal discovery result before publication, then commit
+    the succeeded scan summary, evaluation identity, entire candidate batch or
+    typed failure, and terminal state in one immediate SQLite transaction after
+    the immutable file is durable. Thus no normal crash boundary can expose a
+    succeeded scan without its evaluation result. A reserved pending-only API
+    exists for a future recovery worker but is not claimed as operationally
+    restartable until snapshot-to-evaluator reconstruction and bounded pending
+    queries land.
+
+    Exact retry and ambiguous-commit reconciliation compare the scan,
+    snapshot, identity, normalized times, terminal state, and complete unordered
+    candidate set. Batch insertion validates source scan and unique IDs before
+    locking and rolls back every candidate on any later failure. Bounded reads
+    use set-based parent/child/claim queries instead of N+1 loading, validate
+    storage classes, format, terminal time order, snapshot binding, candidate
+    count, and every complete child record, and reopen the exact 4,096-candidate
+    maximum within a dedicated fixed VM/time budget. Standalone legacy
+    candidate insertion is refused for any scan that owns an evaluation row,
+    preventing post-terminal batch drift. Cancellation observed after the
+    scanner's Completed claim but before discovery's final cancellation
+    checkpoint records discovery as Cancelled while the scan, snapshot, and
+    overall scan task remain truthfully succeeded. Requests accepted after that
+    point of no return remain visible as task intent but cannot rewrite the
+    already-produced terminal batch. Public task results and
+    ordered events expose NotRun, candidate count, or a path-free typed failure;
+    non-successful traversals create no evaluation.
+
+    Focused tests cover zero and marker-matched batches, process-style reopen,
+    late cancellation, exact retry, sub-millisecond post-commit ambiguity,
+    cross-scan and duplicate rejection, complete rollback, typed failure,
+    hostile rows, pending reservation, standalone insertion sealing, and
+    non-success traversal exclusion. The broad persistence checkbox remains
+    open for planner/executor engine lifecycle integration, bounded history
+    query surfaces, and retention maintenance.
 - [x] Keep binary snapshots atomic and checksummed. Completed 2026-07-16:
   `dux-core::persistence::snapshot` now owns an independent crate-private v1
   full-tree wire rather than extending the legacy CLI cache. Its frozen

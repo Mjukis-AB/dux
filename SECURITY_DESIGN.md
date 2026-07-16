@@ -2,7 +2,7 @@
 
 Status: normative design and implementation gate
 
-Last reviewed: 2026-07-15
+Last reviewed: 2026-07-16
 
 Applies to: `dux-core`, `dux-cli`, `dux-ffi`, and the direct-download macOS app
 
@@ -207,6 +207,18 @@ complete authority chain because trusted home/volume discovery, stable rule
 scope grants, plan-time source witnesses, full platform ancestry guarantees,
 and executor-time mutation revalidation do not yet exist.
 
+The shared engine now runs one deterministic discovery evaluator for every
+fresh successfully completed scan. Its exact bundled catalog is checked during
+the crate build and again before engine storage or workers are published.
+Production evaluation accepts only the same completed-scan type-state witness
+used to create the immutable snapshot. The current catalog contains only
+selected-scan-root developer-artifact observations backed by the independently
+implemented M0 marker projection. Every rule is Informational, RevealOnly, and
+unschedulable, and every emitted candidate retains `ProtectedPath` because
+trusted protected-root and volume authority is deliberately unresolved. These
+rows are durable discovery history, not current filesystem evidence or cleanup
+authority.
+
 The existing CLI still offers permanent deletion, but its filesystem effect is
 now centralized in the temporary core-owned
 `dux-core/src/cleanup/legacy_cli.rs` adapter. The CLI can only prepare an opaque,
@@ -342,6 +354,20 @@ Each rule candidate binds at least:
 - independently derived target identity and estimated allocated bytes.
 
 Candidates are observations. A “no known blockers” state is not approval.
+
+Current implementation checkpoint: evaluator revision 1 binds the exact
+catalog bytes, selected scan root, source scan, lossless path bytes, and
+structured coverage into deterministic IDs and a versioned context digest.
+It validates every declared catalog matcher array and policy field, then relies
+on the existing marker classifier's separately tested, sometimes stronger
+evidence checks. It orders output independently of arena insertion order and
+fails at the first match beyond 4,096 without truncation or unbounded result
+materialization. The production entry point is crate-private and requires a
+fresh `CompletedScanArtifact`; public/cached trees cannot mint persisted
+results. Because authoritative volume identity, canonical ancestry, and a
+protected-root grant are not yet present, the current findings remain
+Informational/RevealOnly with `ProtectedPath` even when scan coverage is
+complete. They cannot enter the current cleanup planner.
 
 ### 6.3 Protected-root and sensitive-category policy
 
@@ -956,6 +982,30 @@ and storage-gated ambiguity reconciliation as review state. It is not currently
 constructible by engine, FFI, Swift, CLI, AI, or any evaluator module. This
 prevents a generic ID-only lifecycle setter from becoming an authority edge.
 
+Schema v4 adds a strict one-to-one candidate-evaluation ledger for succeeded
+scans. Each row binds the evaluator revision, exact catalog schema and SHA-256,
+versioned context digest, and exact immutable snapshot version and digest. A
+terminal success count must equal its complete bounded candidate set; pending
+and typed failure states must contain none. The normal engine path first makes
+the snapshot file durable, then one `BEGIN IMMEDIATE` transaction changes the
+scan to succeeded, inserts its evaluation identity, inserts the entire candidate
+batch or no batch, and writes the terminal evaluation state. A failure at any
+later candidate rolls back the scan transition and every earlier insert, so a
+normal engine crash cannot leave a succeeded scan without its discovery result.
+Historical scans are not backfilled with fabricated evaluation rows.
+
+The bounded loader uses SQL-limited set-based parent and child reads under a
+dedicated fixed maximum-batch VM/time budget, and revalidates storage classes,
+record format, time ordering, succeeded-scan and exact-snapshot binding, status
+shape, count, IDs, and every complete candidate child. Exact retry and
+ambiguous-commit adoption compare the
+full scan completion, request identity, normalized terminal time, failure kind,
+and candidate set. A standalone legacy candidate insert is rejected whenever
+the source scan already owns an evaluation, preventing post-terminal batch
+drift. Pending-only primitives remain sealed and reserved for a future recovery
+worker; no operational restart claim is made until a persisted snapshot can be
+reconstructed into bounded evaluator input and pending work can be queried.
+
 Schema v3 implements planner/journal candidate coupling without a lossy status
 overwrite. Every newly inserted plan is coupling version 2 and atomically
 freezes its complete graph, compare-and-sets only an exact `discovered` or
@@ -1405,13 +1455,13 @@ incident as a substitute for deterministic local evidence.
 | Strict lexical/live path evidence | Implemented, crate-private and non-authoritative | Bind trusted scan/volume/rule witnesses and executor revalidation |
 | Protected-root registry | Implemented text-only policy; production construction sealed | Trusted OS home/profile/mount discovery and stable rule grants |
 | Dangerous-path corpus and fuzzing | Implemented | Keep cross-platform and promote every crash regression |
-| Rule schema/loader | Implemented for private synthetic fixtures | Signed bundled source, independently researched rules, provenance tests |
-| Candidate and cleanup-plan records | Implemented as non-executable domain data | Connect only through deterministic evaluator and planner-owned witnesses |
+| Rule schema/loader | Strict schema plus a build-time digest/policy-gated and strict load-time-validated informational discovery catalog; initial rules are independently sourced, selected-root, RevealOnly, blocked, and unschedulable | Developer ID signing must cover catalog bytes; safe-regenerable rules require separate provenance, live-guard, protected-root, and adversarial review |
+| Candidate and cleanup-plan records | Completed fresh scans now create deterministic, snapshot-bound, durable informational candidate batches; cleanup plans remain non-executable domain/history data | Add trusted volume/protected-root witnesses and connect planning only through planner-owned current-validation types |
 | macOS app cleanup | Absent | Entire cleanup release gate in §17.3 |
 | Legacy CLI deletion | Active arbitrary-descendant permanent path routed through a temporary core adapter; strict-target/volume/identity rechecks only; scanned-byte estimates labeled in CLI | Replace adapter with reviewed plan/approval/executor chain without weakening current checks |
 | Centralized executor | Production executor absent; temporary legacy adapter is containment only | Typed admission, integration with the existing cross-process lease/journal, and live target revalidation required |
-| Engine/FFI task and plan API | Core handle, pre-worker SQLite/snapshot compatibility handshake, bounded per-session registry, read-only formatting, and durable full-scan tasks are implemented. Scan admission fences schema skew and overlapping session-local roots; direct cancellation reaches the scanner; typed results/events expose observations only. App architecture owns one session; UniFFI remains smoke-only and no plan/cleanup authority exists | FFI version rejection plus bounded scan/history/plan DTOs and cancellation transport; priority and cross-process scan leasing remain later |
-| SQLite compatibility store | Checksummed v1/v2/v3 migrations with exact per-version fingerprints, lossless bounded path codec, bounded full/lightweight inspection, private atomic provisioning with durable initialization evidence, cross-platform process writer/version-race coverage, durable writer-locked cleanup-lock layout upgrade, private tri-state process-instance liveness evidence, newer-schema read-only transition, rollback/WAL recovery, engine-integrated scan lifecycle/coverage, succeeded-scan-bound candidate observations, typed review state, sealed evaluator invalidation state, claim-preserving atomic planner/journal candidate projection, planned-cleanup history, exact expiry settlement, and a bounded cleanup-lock-coupled owner-generation journal state machine are implemented; stored paths, status, and policy remain non-authoritative observations | Deterministic evaluator integration, evaluator/planner engine lifecycle integration, Windows host-scope proof, retention, executor integration, hard-process-death scan-row recovery, and bounded identity-safe abandoned-stage maintenance |
+| Engine/FFI task and plan API | Core handle, pre-worker catalog/SQLite/snapshot compatibility handshake, bounded per-session registry, read-only formatting, and durable full-scan plus deterministic candidate-evaluation tasks are implemented. Scan admission fences schema skew and overlapping session-local roots; direct cancellation reaches the scanner; typed results/events distinguish scan truth from discovery status and expose observations only. App architecture owns one session; UniFFI remains smoke-only and no plan/cleanup authority exists | FFI version rejection plus bounded scan/history/plan DTOs and cancellation transport; planner lifecycle, priority, and cross-process scan leasing remain later |
+| SQLite compatibility store | Checksummed v1/v2/v3/v4 migrations with exact per-version fingerprints, lossless bounded path codec, bounded full/lightweight inspection, private atomic provisioning with durable initialization evidence, cross-platform process writer/version-race coverage, durable writer-locked cleanup-lock layout upgrade, private tri-state process-instance liveness evidence, newer-schema read-only transition, rollback/WAL recovery, engine-integrated scan lifecycle/coverage, atomic exact-snapshot candidate-evaluation batches, typed review state, sealed evaluator invalidation state, claim-preserving atomic planner/journal candidate projection, planned-cleanup history, exact expiry settlement, and a bounded cleanup-lock-coupled owner-generation journal state machine are implemented; stored paths, status, and policy remain non-authoritative observations | Planner engine lifecycle and query surfaces, Windows host-scope proof, retention, executor integration, hard-process-death scan-row recovery, and bounded identity-safe abandoned-stage maintenance |
 | Capacity sample persistence | Typed raw SQLite-v2 writes and bounded latest/cursor reads are implemented with opaque stable volume IDs, separate ordinary/important availability, hourly routine suppression, immediate stored-pressure transitions, monotonic metadata, storage/schema-gated exact retry reconciliation, volume/sample interval checks, hostile-row validation, and version-skew fencing; important-only UI observations are not persisted | Swift/engine/FFI/CLI wiring, Rust pressure evaluation/hysteresis, daily rollups, pressure episodes, and retention |
 | Binary full-tree snapshot store | Independent v1 wire has bounded pre-allocation, exact graph/path/aggregate/flag semantics, frozen golden digests, SHA-256 references, private marker-owned storage, unique temps, atomic no-replace publication, read-only final handles, database→snapshot lock ordering, version-skew fencing, and exact file-first scan-summary-plus-coverage reconciliation. Durable engine tasks publish only a completed-only fresh-scan converter's lossless canonical DFS nodes and fail-closed hard-link accounting; bytes remain non-authoritative | Explorer/FFI integration, last-complete selection, memory benchmarks, latest-two/2 GiB retention, active-review pins, abandoned-stage/temp maintenance, and native Windows sparse/compressed-allocation verification |
 | Typed scan coverage/issues | Implemented as bounded semantic domain values, authoritative scanner terminal outcomes, engine task results/events, atomic SQLite-v2 summary children, truthful fresh/legacy-cache CLI labels, and changed-hard-link observations; observations grant no plan or cleanup authority | FFI/Swift transport, paged Explorer details, and permission onboarding |

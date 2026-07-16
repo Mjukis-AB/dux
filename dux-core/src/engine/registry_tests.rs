@@ -249,6 +249,10 @@ fn completed_scan_publishes_durable_snapshot_and_survives_reopen() {
     );
     assert_eq!(result.status(), ScanTaskStatus::Succeeded);
     assert!(result.snapshot_available());
+    assert_eq!(
+        result.candidate_evaluation(),
+        CandidateEvaluationTaskStatus::Succeeded { candidate_count: 0 }
+    );
     assert_eq!(result.counts().logical_bytes, 7);
     assert_eq!(result.counts().file_count, 1);
     assert_eq!(result.counts().directory_count, 2);
@@ -264,6 +268,16 @@ fn completed_scan_publishes_durable_snapshot_and_survives_reopen() {
     assert_eq!(durable.root(), root.canonicalize().unwrap());
     assert_eq!(durable.counts().logical_bytes, 7);
     assert_eq!(durable.coverage(), result.coverage());
+    assert_eq!(
+        engine
+            .inner
+            .store
+            .load_candidate_evaluation(&scan_id)
+            .unwrap()
+            .unwrap()
+            .status(),
+        crate::persistence::CandidateEvaluationStatus::Succeeded { candidate_count: 0 }
+    );
     let reference = durable.snapshot().unwrap().clone();
     let document = engine.inner.snapshots.load(&reference).unwrap();
     assert_eq!(document.metadata.scan_id, scan_id);
@@ -281,6 +295,30 @@ fn completed_scan_publishes_durable_snapshot_and_survives_reopen() {
             .iter()
             .any(|event| matches!(event.kind, TaskEventKind::ScanProgress { .. }))
     );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.kind, TaskEventKind::CandidateEvaluationStarted))
+    );
+    assert!(events.iter().any(|event| matches!(
+        event.kind,
+        TaskEventKind::CandidateEvaluationFinished {
+            status: CandidateEvaluationTaskStatus::Succeeded { candidate_count: 0 }
+        }
+    )));
+    let sequence_for = |predicate: fn(&TaskEventKind) -> bool| {
+        events
+            .iter()
+            .find(|event| predicate(&event.kind))
+            .unwrap()
+            .sequence
+    };
+    let finalizing = sequence_for(|kind| matches!(kind, TaskEventKind::ScanFinalizing));
+    let evaluating = sequence_for(|kind| matches!(kind, TaskEventKind::CandidateEvaluationStarted));
+    let evaluated =
+        sequence_for(|kind| matches!(kind, TaskEventKind::CandidateEvaluationFinished { .. }));
+    let terminal_event = sequence_for(|kind| matches!(kind, TaskEventKind::Terminal { .. }));
+    assert!(finalizing < evaluating && evaluating < evaluated && evaluated < terminal_event);
 
     engine.close();
     assert!(engine.wait_until_closed(TEST_TIMEOUT));
@@ -289,6 +327,195 @@ fn completed_scan_publishes_durable_snapshot_and_survives_reopen() {
     let durable = reopened.inner.store.load_scan(&scan_id).unwrap().unwrap();
     let reference = durable.snapshot().unwrap();
     assert_eq!(reopened.inner.snapshots.load(reference).unwrap(), document);
+    assert_eq!(
+        reopened
+            .inner
+            .store
+            .load_candidate_evaluation(&scan_id)
+            .unwrap()
+            .unwrap()
+            .status(),
+        crate::persistence::CandidateEvaluationStatus::Succeeded { candidate_count: 0 }
+    );
+}
+
+#[test]
+fn completed_scan_persists_marker_verified_discovery_batch_across_reopen() {
+    let temp = TempDir::new().unwrap();
+    let config = config(&temp);
+    let root = temp.path().join("scan-root");
+    let project = root.join("project");
+    let target = project.join("target");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::write(project.join("Cargo.toml"), b"[package]\nname='fixture'\n").unwrap();
+    std::fs::write(target.join("object"), vec![7_u8; 8 * 1024]).unwrap();
+    let engine =
+        EngineHandle::open_with_limits(config.clone(), RegistryLimits::testing(1, 4, 8, 16))
+            .unwrap();
+
+    let task = engine.start_scan(root).unwrap();
+    let terminal = wait_terminal(&engine, task);
+    assert_eq!(terminal.phase, TaskPhase::Succeeded);
+    let result = engine.scan_result(task).unwrap().unwrap();
+    assert_eq!(
+        result.candidate_evaluation(),
+        CandidateEvaluationTaskStatus::Succeeded { candidate_count: 1 }
+    );
+    let scan_id = result.scan_id().clone();
+    let evaluation = engine
+        .inner
+        .store
+        .load_candidate_evaluation(&scan_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        evaluation.status(),
+        crate::persistence::CandidateEvaluationStatus::Succeeded { candidate_count: 1 }
+    );
+    let candidate = &evaluation.candidates()[0];
+    assert_eq!(candidate.source_scan_id, scan_id);
+    assert_eq!(candidate.rule.id().as_str(), "developer.rust.target");
+    assert_eq!(candidate.paths, [target.canonicalize().unwrap()]);
+    assert!(candidate.estimated_bytes > 0);
+    assert_eq!(candidate.safety, crate::SafetyTier::Informational);
+    assert_eq!(candidate.action, crate::CandidateAction::RevealOnly);
+    assert!(!candidate.rule_schedule_eligible);
+    assert_eq!(candidate.blockers, [crate::BlockReason::ProtectedPath]);
+    assert!(candidate.evidence.iter().any(|evidence| matches!(
+        evidence,
+        crate::Evidence::RequiredMarker { path }
+            if path.file_name().is_some_and(|name| name == "Cargo.toml")
+    )));
+
+    engine.close();
+    assert!(engine.wait_until_closed(TEST_TIMEOUT));
+    drop(engine);
+    let reopened = EngineHandle::open(config).unwrap();
+    let reopened_evaluation = reopened
+        .inner
+        .store
+        .load_candidate_evaluation(&scan_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(reopened_evaluation, evaluation);
+}
+
+#[test]
+fn candidate_limit_failure_maps_to_the_public_discovery_status() {
+    let kind = map_candidate_evaluation_error(CandidateEvaluationError::CandidateLimitExceeded {
+        observed_at_least: crate::domain::MAX_EVALUATED_CANDIDATES + 1,
+        maximum: crate::domain::MAX_EVALUATED_CANDIDATES,
+    });
+    assert_eq!(kind, CandidateEvaluationFailureKind::LimitExceeded);
+    let identity = CandidateEvaluationIdentity::try_new(1, 1, [1; 32], 1, [2; 32]).unwrap();
+    let (_, _, status) =
+        failed_candidate_evaluation(identity, SystemTime::UNIX_EPOCH, kind).unwrap();
+    assert_eq!(
+        status,
+        CandidateEvaluationTaskStatus::Failed {
+            kind: CandidateEvaluationTaskFailureKind::LimitExceeded
+        }
+    );
+}
+
+#[test]
+fn cancellation_after_completed_traversal_cancels_discovery_not_scan() {
+    let temp = TempDir::new().unwrap();
+    let config = config(&temp);
+    let root = temp.path().join("scan-root");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("payload"), b"payload").unwrap();
+    let engine =
+        EngineHandle::open_with_limits(config.clone(), RegistryLimits::testing(1, 2, 4, 16))
+            .unwrap();
+    let (reached_tx, reached_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let task = engine
+        .start_scan_with_before_candidate_evaluation_hook(root, move || {
+            reached_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        })
+        .unwrap();
+    reached_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+
+    assert_eq!(engine.cancel_task(task).unwrap(), CancelOutcome::Requested);
+    release_tx.send(()).unwrap();
+    let terminal = wait_terminal(&engine, task);
+    assert_eq!(terminal.phase, TaskPhase::Succeeded);
+    assert!(terminal.cancellation_requested);
+    let result = engine.scan_result(task).unwrap().unwrap();
+    assert_eq!(result.status(), ScanTaskStatus::Succeeded);
+    assert!(result.snapshot_available());
+    assert_eq!(
+        result.candidate_evaluation(),
+        CandidateEvaluationTaskStatus::Failed {
+            kind: CandidateEvaluationTaskFailureKind::Cancelled
+        }
+    );
+    let durable = engine
+        .inner
+        .store
+        .load_scan(result.scan_id())
+        .unwrap()
+        .unwrap();
+    assert_eq!(durable.status(), ScanStatus::Succeeded);
+    assert!(durable.snapshot().is_some());
+    let evaluation = engine
+        .inner
+        .store
+        .load_candidate_evaluation(result.scan_id())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        evaluation.status(),
+        crate::persistence::CandidateEvaluationStatus::Failed {
+            kind: CandidateEvaluationFailureKind::Cancelled
+        }
+    );
+    assert!(evaluation.candidates().is_empty());
+    assert_eq!(final_snapshot_count(&config), 1);
+}
+
+#[test]
+fn cancellation_after_discovery_checkpoint_is_intent_not_a_terminal_rewrite() {
+    let temp = TempDir::new().unwrap();
+    let config = config(&temp);
+    let root = temp.path().join("scan-root");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("payload"), b"payload").unwrap();
+    let engine =
+        EngineHandle::open_with_limits(config, RegistryLimits::testing(1, 2, 4, 16)).unwrap();
+    let (reached_tx, reached_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let task = engine
+        .start_scan_with_before_candidate_persistence_hook(root, move || {
+            reached_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        })
+        .unwrap();
+    reached_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+
+    assert_eq!(engine.cancel_task(task).unwrap(), CancelOutcome::Requested);
+    release_tx.send(()).unwrap();
+    let terminal = wait_terminal(&engine, task);
+    assert_eq!(terminal.phase, TaskPhase::Succeeded);
+    assert!(terminal.cancellation_requested);
+    let result = engine.scan_result(task).unwrap().unwrap();
+    assert_eq!(result.status(), ScanTaskStatus::Succeeded);
+    assert_eq!(
+        result.candidate_evaluation(),
+        CandidateEvaluationTaskStatus::Succeeded { candidate_count: 0 }
+    );
+    assert_eq!(
+        engine
+            .inner
+            .store
+            .load_candidate_evaluation(result.scan_id())
+            .unwrap()
+            .unwrap()
+            .status(),
+        crate::persistence::CandidateEvaluationStatus::Succeeded { candidate_count: 0 }
+    );
 }
 
 #[test]
@@ -322,6 +549,10 @@ fn running_scan_cancellation_is_durable_and_publishes_no_snapshot() {
     assert_eq!(result.scan_id(), &scan_id);
     assert_eq!(result.status(), ScanTaskStatus::Cancelled);
     assert!(!result.snapshot_available());
+    assert_eq!(
+        result.candidate_evaluation(),
+        CandidateEvaluationTaskStatus::NotRun
+    );
     assert_eq!(result.counts(), ScanTaskCounts::default());
     assert!(
         result
@@ -333,6 +564,14 @@ fn running_scan_cancellation_is_durable_and_publishes_no_snapshot() {
     let durable = engine.inner.store.load_scan(&scan_id).unwrap().unwrap();
     assert_eq!(durable.status(), ScanStatus::Cancelled);
     assert!(durable.snapshot().is_none());
+    assert!(
+        engine
+            .inner
+            .store
+            .load_candidate_evaluation(&scan_id)
+            .unwrap()
+            .is_none()
+    );
     assert_eq!(final_snapshot_count(&config), 0);
 }
 
@@ -370,9 +609,21 @@ fn scanner_failure_is_durable_and_publishes_no_snapshot() {
     assert_eq!(result.status(), ScanTaskStatus::Failed);
     assert_eq!(result.scan_id(), &scan_id);
     assert!(!result.snapshot_available());
+    assert_eq!(
+        result.candidate_evaluation(),
+        CandidateEvaluationTaskStatus::NotRun
+    );
     let durable = engine.inner.store.load_scan(&scan_id).unwrap().unwrap();
     assert_eq!(durable.status(), ScanStatus::Failed);
     assert!(durable.snapshot().is_none());
+    assert!(
+        engine
+            .inner
+            .store
+            .load_candidate_evaluation(&scan_id)
+            .unwrap()
+            .is_none()
+    );
     assert_eq!(final_snapshot_count(&config), 0);
 }
 

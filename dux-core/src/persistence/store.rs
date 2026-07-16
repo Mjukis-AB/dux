@@ -7,6 +7,11 @@ use rusqlite::config::DbConfig;
 use rusqlite::limits::Limit;
 use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 
+use super::candidate_evaluation_history::{
+    CandidateEvaluationCompletion, CandidateEvaluationRecord, NewCandidateEvaluation,
+    PreparedCandidateEvaluation, insert_candidate_evaluation_pending, load_candidate_evaluation,
+    load_candidate_evaluation_within_budget,
+};
 use super::candidate_history::{
     CandidateEvaluationTransition, CandidateHistoryStatus, CandidateReviewTransition,
     NewCandidateRecord, PreparedCandidate, StoredCandidateRecord, insert_candidate,
@@ -560,6 +565,275 @@ impl StoreCoordinator {
         )
     }
 
+    /// Atomically mark a scan succeeded and schedule its exact evaluation.
+    /// This pending-only path is reserved for a future asynchronous/recovery
+    /// protocol; normal engine scans use the terminal combined path below.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "reserved for a future asynchronous evaluation recovery protocol"
+        )
+    )]
+    pub(super) fn record_scan_finished_and_schedule_evaluation_reconciled_with_guard(
+        &self,
+        guard: &mut HistoryConnectionGuard<'_>,
+        completion: &ScanCompletionRecord,
+        request: &NewCandidateEvaluation,
+    ) -> Result<(), HistoryError> {
+        self.record_scan_finished_and_schedule_evaluation_with_hook(
+            guard,
+            completion,
+            request,
+            || Ok(()),
+        )
+    }
+
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "reserved for a future asynchronous evaluation recovery protocol"
+        )
+    )]
+    fn record_scan_finished_and_schedule_evaluation_with_hook(
+        &self,
+        guard: &mut HistoryConnectionGuard<'_>,
+        completion: &ScanCompletionRecord,
+        request: &NewCandidateEvaluation,
+        after_commit: impl FnOnce() -> Result<(), HistoryError>,
+    ) -> Result<(), HistoryError> {
+        self.validate_history_guard(guard)?;
+        if completion.id() != request.scan_id() {
+            return Err(HistoryError::new(HistoryErrorKind::InvalidInput));
+        }
+        let prepared_completion = PreparedScanCompletion::prepare(completion)?;
+        let prepared_evaluation = PreparedCandidateEvaluation::prepare(request)?;
+        let failure = {
+            let transaction = guard
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(map_write_sql_error)?;
+            let attempted = update_scan_finished(&transaction, &prepared_completion)
+                .and_then(|()| {
+                    insert_candidate_evaluation_pending(&transaction, &prepared_evaluation)
+                })
+                .and_then(|()| transaction.commit().map_err(map_write_sql_error))
+                .and_then(|()| after_commit())
+                .and_then(|()| self.revalidate_current_history_guard(guard));
+            match attempted {
+                Ok(()) => return Ok(()),
+                Err(failure) => failure,
+            }
+        };
+        self.reconcile_scan_and_evaluation(guard, completion, request, None, failure)
+    }
+
+    /// Atomically commit the immutable snapshot reference and the evaluator's
+    /// complete terminal output. No crash can expose a succeeded scan without
+    /// its corresponding evaluation result.
+    pub(super) fn record_scan_finished_with_evaluation_reconciled_with_guard(
+        &self,
+        guard: &mut HistoryConnectionGuard<'_>,
+        completion: &ScanCompletionRecord,
+        request: &NewCandidateEvaluation,
+        evaluation: &CandidateEvaluationCompletion,
+    ) -> Result<(), HistoryError> {
+        self.record_scan_finished_with_evaluation_and_hook(
+            guard,
+            completion,
+            request,
+            evaluation,
+            || Ok(()),
+        )
+    }
+
+    fn record_scan_finished_with_evaluation_and_hook(
+        &self,
+        guard: &mut HistoryConnectionGuard<'_>,
+        completion: &ScanCompletionRecord,
+        request: &NewCandidateEvaluation,
+        evaluation: &CandidateEvaluationCompletion,
+        after_commit: impl FnOnce() -> Result<(), HistoryError>,
+    ) -> Result<(), HistoryError> {
+        self.validate_history_guard(guard)?;
+        if completion.id() != request.scan_id() {
+            return Err(HistoryError::new(HistoryErrorKind::InvalidInput));
+        }
+        evaluation.validate_for_request(request)?;
+        let prepared_completion = PreparedScanCompletion::prepare(completion)?;
+        let prepared_evaluation = PreparedCandidateEvaluation::prepare(request)?;
+        let candidates = evaluation.prepare_candidates()?;
+        let failure = {
+            let transaction = guard
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(map_write_sql_error)?;
+            let attempted = update_scan_finished(&transaction, &prepared_completion)
+                .and_then(|()| {
+                    insert_candidate_evaluation_pending(&transaction, &prepared_evaluation)
+                })
+                .and_then(|()| evaluation.finalize(&transaction, request, &candidates))
+                .and_then(|()| transaction.commit().map_err(map_write_sql_error))
+                .and_then(|()| after_commit())
+                .and_then(|()| self.revalidate_current_history_guard(guard));
+            match attempted {
+                Ok(()) => return Ok(()),
+                Err(failure) => failure,
+            }
+        };
+        self.reconcile_scan_and_evaluation(guard, completion, request, Some(evaluation), failure)
+    }
+
+    fn reconcile_scan_and_evaluation(
+        &self,
+        guard: &HistoryConnectionGuard<'_>,
+        completion: &ScanCompletionRecord,
+        request: &NewCandidateEvaluation,
+        terminal: Option<&CandidateEvaluationCompletion>,
+        failure: HistoryError,
+    ) -> Result<(), HistoryError> {
+        if self.revalidate_current_history_guard(guard).is_err() {
+            return Err(HistoryError::new(HistoryErrorKind::OutcomeUnknown));
+        }
+        let scan = load_scan_record(&guard.connection, completion.id());
+        let evaluation = load_candidate_evaluation(&guard.connection, request.scan_id());
+        match (scan, evaluation) {
+            (Ok(Some(scan)), Ok(Some(evaluation)))
+                if scan.exactly_matches_completion(completion)
+                    && evaluation.exactly_matches_request(request)
+                    && terminal.is_none() =>
+            {
+                Ok(())
+            }
+            (Ok(Some(scan)), Ok(Some(evaluation)))
+                if scan.exactly_matches_completion(completion)
+                    && terminal.is_some_and(|terminal| {
+                        terminal.exactly_matches_record(&evaluation, request)
+                    }) =>
+            {
+                Ok(())
+            }
+            (Ok(Some(scan)), Ok(None)) if scan.status() == super::history::ScanStatus::Running => {
+                Err(failure)
+            }
+            (Ok(Some(scan)), Ok(None)) if scan.exactly_matches_completion(completion) => {
+                Err(HistoryError::new(HistoryErrorKind::OutcomeUnknown))
+            }
+            (Ok(Some(_)), Ok(_)) => Err(HistoryError::new(HistoryErrorKind::InvalidTransition)),
+            (Ok(None), Ok(None)) => Err(HistoryError::new(HistoryErrorKind::NotFound)),
+            _ => Err(HistoryError::new(HistoryErrorKind::OutcomeUnknown)),
+        }
+    }
+
+    /// Finish a previously scheduled evaluation in one all-or-nothing write.
+    #[allow(
+        dead_code,
+        reason = "reserved for a future asynchronous evaluation recovery protocol"
+    )]
+    pub(crate) fn record_candidate_evaluation_completed_reconciled(
+        &self,
+        request: &NewCandidateEvaluation,
+        evaluation: &CandidateEvaluationCompletion,
+    ) -> Result<(), HistoryError> {
+        self.record_candidate_evaluation_completed_with_hook(request, evaluation, || Ok(()))
+    }
+
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "reserved for a future asynchronous evaluation recovery protocol"
+        )
+    )]
+    fn record_candidate_evaluation_completed_with_hook(
+        &self,
+        request: &NewCandidateEvaluation,
+        evaluation: &CandidateEvaluationCompletion,
+        after_commit: impl FnOnce() -> Result<(), HistoryError>,
+    ) -> Result<(), HistoryError> {
+        evaluation.validate_for_request(request)?;
+        let candidates = evaluation.prepare_candidates()?;
+        let mut guard = self.lock_current_history_connection()?;
+        let failure = {
+            let transaction = guard
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(map_write_sql_error)?;
+            let attempted = evaluation
+                .finalize(&transaction, request, &candidates)
+                .and_then(|()| transaction.commit().map_err(map_write_sql_error))
+                .and_then(|()| after_commit())
+                .and_then(|()| self.revalidate_current_history_guard(&guard));
+            match attempted {
+                Ok(()) => return Ok(()),
+                Err(failure) => failure,
+            }
+        };
+        if self.revalidate_current_history_guard(&guard).is_err() {
+            return Err(HistoryError::new(HistoryErrorKind::OutcomeUnknown));
+        }
+        match load_candidate_evaluation(&guard.connection, request.scan_id()) {
+            Ok(Some(record)) if evaluation.exactly_matches_record(&record, request) => Ok(()),
+            Ok(Some(record))
+                if record.exactly_matches_request(request)
+                    && record.status()
+                        == super::candidate_evaluation_history::CandidateEvaluationStatus::Pending =>
+            {
+                Err(failure)
+            }
+            Ok(Some(_)) => Err(HistoryError::new(HistoryErrorKind::InvalidTransition)),
+            Ok(None) => Err(HistoryError::new(HistoryErrorKind::NotFound)),
+            Err(_) => Err(HistoryError::new(HistoryErrorKind::OutcomeUnknown)),
+        }
+    }
+
+    /// Load one exact, bounded evaluation and its complete candidate batch.
+    pub(crate) fn load_candidate_evaluation(
+        &self,
+        scan_id: &crate::domain::ScanId,
+    ) -> Result<Option<CandidateEvaluationRecord>, HistoryError> {
+        let guard = self.lock_current_history_connection()?;
+        load_candidate_evaluation(&guard.connection, scan_id)
+    }
+
+    pub(super) fn load_candidate_evaluation_with_guard(
+        &self,
+        guard: &HistoryConnectionGuard<'_>,
+        scan_id: &crate::domain::ScanId,
+    ) -> Result<Option<CandidateEvaluationRecord>, HistoryError> {
+        self.validate_history_guard(guard)?;
+        load_candidate_evaluation(&guard.connection, scan_id)
+    }
+
+    #[cfg(test)]
+    pub(super) fn record_scan_finished_with_evaluation_after_commit_failure_for_test(
+        &self,
+        completion: &ScanCompletionRecord,
+        request: &NewCandidateEvaluation,
+        evaluation: &CandidateEvaluationCompletion,
+    ) -> Result<(), HistoryError> {
+        let mut guard = self.lock_current_history_connection()?;
+        self.record_scan_finished_with_evaluation_and_hook(
+            &mut guard,
+            completion,
+            request,
+            evaluation,
+            || Err(HistoryError::new(HistoryErrorKind::DatabaseUnavailable)),
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn record_candidate_evaluation_completed_after_commit_failure_for_test(
+        &self,
+        request: &NewCandidateEvaluation,
+        evaluation: &CandidateEvaluationCompletion,
+    ) -> Result<(), HistoryError> {
+        self.record_candidate_evaluation_completed_with_hook(request, evaluation, || {
+            Err(HistoryError::new(HistoryErrorKind::DatabaseUnavailable))
+        })
+    }
+
     /// Load at most one typed scan observation by its stable ID.
     pub(crate) fn load_scan(
         &self,
@@ -598,6 +872,14 @@ impl StoreCoordinator {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(map_write_sql_error)?;
+        if load_candidate_evaluation_within_budget(
+            &transaction,
+            candidate.candidate().source_scan_id(),
+        )?
+        .is_some()
+        {
+            return Err(HistoryError::new(HistoryErrorKind::InvalidTransition));
+        }
         insert_candidate(&transaction, &prepared)?;
         transaction.commit().map_err(map_write_sql_error)?;
         self.paths

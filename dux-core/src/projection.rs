@@ -183,41 +183,65 @@ pub fn project_build_artifacts_at(
     threshold: StaleThreshold,
     now: SystemTime,
 ) -> Vec<BuildArtifactEntry> {
+    collect_build_artifacts_at(tree, threshold, now, None)
+        .expect("an unbounded artifact projection cannot reach a match limit")
+}
+
+/// Internal bounded variant for callers that must fail closed without first
+/// materializing every match in a potentially multi-million-node snapshot.
+pub(crate) fn project_build_artifacts_bounded_at(
+    tree: &DiskTree,
+    threshold: StaleThreshold,
+    now: SystemTime,
+    maximum_matches: usize,
+) -> Result<Vec<BuildArtifactEntry>, usize> {
+    collect_build_artifacts_at(tree, threshold, now, Some(maximum_matches))
+}
+
+fn collect_build_artifacts_at(
+    tree: &DiskTree,
+    threshold: StaleThreshold,
+    now: SystemTime,
+    maximum_matches: Option<usize>,
+) -> Result<Vec<BuildArtifactEntry>, usize> {
     let total_size = tree.total_size();
     let root_path = tree.root_path();
-    let mut entries = tree
-        .iter()
-        .filter_map(|node| {
-            let classification = classify_artifact(tree, node.id)?;
-            if has_classified_ancestor(tree, node.id) {
-                return None;
-            }
+    let mut entries = Vec::new();
+    for node in tree.iter() {
+        let Some(classification) = classify_artifact(tree, node.id) else {
+            continue;
+        };
+        if has_classified_ancestor(tree, node.id) {
+            continue;
+        }
+        if maximum_matches.is_some_and(|maximum| entries.len() == maximum) {
+            return Err(entries.len().saturating_add(1));
+        }
 
-            let newest_mtime = newest_descendant_mtime(tree, node.id);
-            Some(BuildArtifactEntry {
-                node_id: node.id,
-                relative_path: node
-                    .path
-                    .strip_prefix(root_path)
-                    .unwrap_or(&node.path)
-                    .to_string_lossy()
-                    .to_string(),
-                size: node.size,
-                percentage: size_percentage(node.size, total_size),
-                kind: classification.kind,
-                evidence_paths: classification
-                    .evidence_node_ids
-                    .into_iter()
-                    .filter_map(|id| tree.get(id).map(|evidence| evidence.path.clone()))
-                    .collect(),
-                is_stale: threshold.is_stale_at(newest_mtime, now),
-                newest_mtime,
-            })
-        })
-        .collect::<Vec<_>>();
+        let newest_mtime = newest_descendant_mtime(tree, node.id);
+        entries.push(BuildArtifactEntry {
+            node_id: node.id,
+            relative_path: node
+                .path
+                .strip_prefix(root_path)
+                .unwrap_or(&node.path)
+                .to_string_lossy()
+                .to_string(),
+            size: node.size,
+            percentage: size_percentage(node.size, total_size),
+            kind: classification.kind,
+            evidence_paths: classification
+                .evidence_node_ids
+                .into_iter()
+                .filter_map(|id| tree.get(id).map(|evidence| evidence.path.clone()))
+                .collect(),
+            is_stale: threshold.is_stale_at(newest_mtime, now),
+            newest_mtime,
+        });
+    }
 
     entries.sort_by_key(|entry| Reverse(entry.size));
-    entries
+    Ok(entries)
 }
 
 pub fn refresh_artifact_staleness_at(
@@ -279,23 +303,57 @@ fn regular_sibling_named(tree: &DiskTree, parent: NodeId, names: &[&str]) -> Opt
 }
 
 fn regular_child_named(tree: &DiskTree, parent: NodeId, names: &[&str]) -> Option<NodeId> {
-    tree.get(parent)?.children.iter().copied().find(|child_id| {
-        tree.get(*child_id).is_some_and(|child| {
-            child.kind == NodeKind::File
-                && !child.path_is_symlink
-                && names.contains(&child.name.as_str())
+    let children = &tree.get(parent)?.children;
+    names.iter().find_map(|name| {
+        children.iter().copied().find(|child_id| {
+            tree.get(*child_id).is_some_and(|child| {
+                child.kind == NodeKind::File
+                    && !child.path_is_symlink
+                    && child.name.as_str() == *name
+            })
         })
     })
 }
 
 fn regular_python_sibling(tree: &DiskTree, parent: NodeId) -> Option<NodeId> {
-    tree.get(parent)?.children.iter().copied().find(|child_id| {
-        tree.get(*child_id).is_some_and(|child| {
-            child.kind == NodeKind::File
-                && !child.path_is_symlink
-                && PathBuf::from(&child.name)
-                    .extension()
-                    .is_some_and(|extension| extension == "py")
+    tree.get(parent)?
+        .children
+        .iter()
+        .copied()
+        .filter(|child_id| {
+            tree.get(*child_id).is_some_and(|child| {
+                child.kind == NodeKind::File
+                    && !child.path_is_symlink
+                    && PathBuf::from(&child.name)
+                        .extension()
+                        .is_some_and(|extension| extension == "py")
+            })
         })
-    })
+        .min_by(|left, right| {
+            tree.get(*left)
+                .map(|node| native_path_bytes(&node.path))
+                .cmp(&tree.get(*right).map(|node| native_path_bytes(&node.path)))
+        })
+}
+
+#[cfg(unix)]
+fn native_path_bytes(path: &std::path::Path) -> Vec<u8> {
+    use std::os::unix::ffi::OsStrExt;
+
+    path.as_os_str().as_bytes().to_vec()
+}
+
+#[cfg(windows)]
+fn native_path_bytes(path: &std::path::Path) -> Vec<u8> {
+    use std::os::windows::ffi::OsStrExt;
+
+    path.as_os_str()
+        .encode_wide()
+        .flat_map(u16::to_le_bytes)
+        .collect()
+}
+
+#[cfg(not(any(unix, windows)))]
+fn native_path_bytes(path: &std::path::Path) -> Vec<u8> {
+    path.as_os_str().to_string_lossy().as_bytes().to_vec()
 }

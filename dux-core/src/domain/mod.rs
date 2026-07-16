@@ -5,6 +5,7 @@
 //! at later boundaries and must not infer authority from these values.
 
 mod candidate;
+mod candidate_evaluator;
 mod cleanup_plan;
 mod id;
 mod policy;
@@ -23,6 +24,12 @@ mod volume;
 #[cfg(test)]
 pub(crate) use candidate::CandidateInput;
 pub use candidate::{BlockReason, Candidate, CandidateValidationError, Evidence, EvidenceKind};
+pub(crate) use candidate_evaluator::{
+    CANDIDATE_CATALOG_SCHEMA_VERSION, CANDIDATE_CATALOG_SHA256, CANDIDATE_CONTEXT_FORMAT_VERSION,
+    CANDIDATE_EVALUATOR_REVISION, CandidateEvaluationError, MAX_EVALUATED_CANDIDATES,
+    candidate_evaluation_context_digest_sha256, evaluate_completed_scan_candidates,
+    validate_bundled_candidate_catalog,
+};
 pub use cleanup_plan::{
     CLEANUP_PLAN_VALIDITY, CleanupMode, CleanupPlan, CleanupPlanItem, CleanupPlanValidationError,
     OperationStatus, PlanWarning,

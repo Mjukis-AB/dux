@@ -83,6 +83,10 @@ pub enum TaskEventKind {
         errors: u64,
     },
     ScanFinalizing,
+    CandidateEvaluationStarted,
+    CandidateEvaluationFinished {
+        status: CandidateEvaluationTaskStatus,
+    },
     CancellationRequested,
     Terminal {
         phase: TaskPhase,
@@ -151,6 +155,33 @@ pub enum ScanTaskStatus {
     Interrupted,
 }
 
+/// Stable, path-free reason why deterministic discovery produced no candidate
+/// batch. This never changes the succeeded scan or grants cleanup authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CandidateEvaluationTaskFailureKind {
+    Cancelled,
+    CatalogInvalid,
+    ContextInvalid,
+    EvaluationFailed,
+    CandidateInvalid,
+    LimitExceeded,
+}
+
+/// Terminal discovery state attached to a retained scan result. Non-successful
+/// traversals never run candidate evaluation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CandidateEvaluationTaskStatus {
+    NotRun,
+    Succeeded {
+        candidate_count: u32,
+    },
+    Failed {
+        kind: CandidateEvaluationTaskFailureKind,
+    },
+}
+
 /// Immutable, non-authoritative durable result for one engine scan task.
 /// Paths and tree nodes remain behind the paged snapshot APIs added later.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -162,17 +193,17 @@ pub struct ScanTaskResult {
     counts: ScanTaskCounts,
     coverage: ScanCoverage,
     snapshot_available: bool,
+    candidate_evaluation: CandidateEvaluationTaskStatus,
 }
 
 impl ScanTaskResult {
-    pub(super) fn new(
+    pub(super) fn without_snapshot(
         scan_id: ScanId,
         started_at: SystemTime,
         completed_at: SystemTime,
         status: ScanTaskStatus,
         counts: ScanTaskCounts,
         coverage: ScanCoverage,
-        snapshot_available: bool,
     ) -> Self {
         Self {
             scan_id,
@@ -181,7 +212,28 @@ impl ScanTaskResult {
             status,
             counts,
             coverage,
-            snapshot_available,
+            snapshot_available: false,
+            candidate_evaluation: CandidateEvaluationTaskStatus::NotRun,
+        }
+    }
+
+    pub(super) fn succeeded(
+        scan_id: ScanId,
+        started_at: SystemTime,
+        completed_at: SystemTime,
+        counts: ScanTaskCounts,
+        coverage: ScanCoverage,
+        candidate_evaluation: CandidateEvaluationTaskStatus,
+    ) -> Self {
+        Self {
+            scan_id,
+            started_at,
+            completed_at,
+            status: ScanTaskStatus::Succeeded,
+            counts,
+            coverage,
+            snapshot_available: true,
+            candidate_evaluation,
         }
     }
 
@@ -212,6 +264,10 @@ impl ScanTaskResult {
     pub fn snapshot_available(&self) -> bool {
         self.snapshot_available
     }
+
+    pub fn candidate_evaluation(&self) -> CandidateEvaluationTaskStatus {
+        self.candidate_evaluation
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -238,6 +294,8 @@ pub enum CloseOutcome {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum EngineOpenError {
+    #[error("the embedded candidate catalog is invalid")]
+    CandidateCatalogInvalid,
     #[error("engine database is unavailable: {0:?}")]
     Database(crate::persistence::DatabaseOpenErrorKind),
     #[error("engine snapshot storage is unavailable: {0:?}")]

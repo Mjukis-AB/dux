@@ -11,6 +11,9 @@ use std::time::SystemTime;
 
 use crate::domain::{ScanCoverage, ScanId};
 
+use super::candidate_evaluation_history::{
+    CandidateEvaluationCompletion, CandidateEvaluationIdentity, NewCandidateEvaluation,
+};
 use super::history::{
     HistoryError, HistoryErrorKind, ScanCompletionRecord, ScanCounts, ScanStatus,
 };
@@ -315,12 +318,50 @@ impl SnapshotRepository {
     /// Publish the immutable file before exact-CASing the durable scan summary.
     /// A published file without a DB row is a harmless retention orphan; the
     /// reverse ordering is forbidden.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "preserved for callers that explicitly opt out of candidate evaluation"
+        )
+    )]
     pub(crate) fn complete_scan(
         &self,
         completed_at: SystemTime,
         counts: ScanCounts,
         coverage: &ScanCoverage,
         document: &SnapshotDocument,
+    ) -> Result<SnapshotReference, SnapshotRepositoryError> {
+        self.complete_scan_inner(completed_at, counts, coverage, document, None)
+    }
+
+    /// Publish a snapshot and atomically commit the succeeded scan plus the
+    /// evaluator's complete terminal discovery output.
+    pub(crate) fn complete_scan_with_candidate_evaluation(
+        &self,
+        completed_at: SystemTime,
+        counts: ScanCounts,
+        coverage: &ScanCoverage,
+        document: &SnapshotDocument,
+        identity: &CandidateEvaluationIdentity,
+        evaluation: &CandidateEvaluationCompletion,
+    ) -> Result<SnapshotReference, SnapshotRepositoryError> {
+        self.complete_scan_inner(
+            completed_at,
+            counts,
+            coverage,
+            document,
+            Some((identity, evaluation)),
+        )
+    }
+
+    fn complete_scan_inner(
+        &self,
+        completed_at: SystemTime,
+        counts: ScanCounts,
+        coverage: &ScanCoverage,
+        document: &SnapshotDocument,
+        evaluation: Option<(&CandidateEvaluationIdentity, &CandidateEvaluationCompletion)>,
     ) -> Result<SnapshotReference, SnapshotRepositoryError> {
         if self.access != SnapshotStoreAccess::ReadWrite {
             return Err(repository_error(SnapshotRepositoryErrorKind::ReadOnly));
@@ -339,6 +380,11 @@ impl SnapshotRepository {
             return Err(repository_error(
                 SnapshotRepositoryErrorKind::ReferenceMismatch,
             ));
+        }
+        if let Some((_, terminal)) = evaluation {
+            terminal
+                .validate_for_scan(&document.metadata.scan_id, completed_at)
+                .map_err(map_history)?;
         }
         let current = self
             .database
@@ -383,6 +429,23 @@ impl SnapshotRepository {
                 return Err(repository_error(
                     SnapshotRepositoryErrorKind::ReferenceMismatch,
                 ));
+            }
+            if let Some((identity, terminal)) = evaluation {
+                let request =
+                    NewCandidateEvaluation::try_new(identity.clone(), reference, completed_at)
+                        .map_err(map_history)?;
+                let stored = self
+                    .database
+                    .load_candidate_evaluation(request.scan_id())
+                    .map_err(map_history)?
+                    .ok_or_else(|| {
+                        repository_error(SnapshotRepositoryErrorKind::ReferenceMismatch)
+                    })?;
+                if !terminal.exactly_matches_record(&stored, &request) {
+                    return Err(repository_error(
+                        SnapshotRepositoryErrorKind::ReferenceMismatch,
+                    ));
+                }
             }
             return Ok(reference.clone());
         }
@@ -445,6 +508,23 @@ impl SnapshotRepository {
                     SnapshotRepositoryErrorKind::ReferenceMismatch,
                 ));
             }
+            if let Some((identity, terminal)) = evaluation {
+                let request =
+                    NewCandidateEvaluation::try_new(identity.clone(), reference, completed_at)
+                        .map_err(map_history)?;
+                let stored = self
+                    .database
+                    .load_candidate_evaluation_with_guard(&database_guard, request.scan_id())
+                    .map_err(map_history)?
+                    .ok_or_else(|| {
+                        repository_error(SnapshotRepositoryErrorKind::ReferenceMismatch)
+                    })?;
+                if !terminal.exactly_matches_record(&stored, &request) {
+                    return Err(repository_error(
+                        SnapshotRepositoryErrorKind::ReferenceMismatch,
+                    ));
+                }
+            }
             return Ok(reference.clone());
         }
         if current.status() != ScanStatus::Running || current.snapshot().is_some() {
@@ -463,9 +543,26 @@ impl SnapshotRepository {
             published.reference().clone(),
         )
         .map_err(map_history)?;
-        self.database
-            .record_scan_finished_reconciled_with_guard(&mut database_guard, &completion)
+        if let Some((identity, terminal)) = evaluation {
+            let request = NewCandidateEvaluation::try_new(
+                identity.clone(),
+                published.reference(),
+                completed_at,
+            )
             .map_err(map_history)?;
+            self.database
+                .record_scan_finished_with_evaluation_reconciled_with_guard(
+                    &mut database_guard,
+                    &completion,
+                    &request,
+                    terminal,
+                )
+                .map_err(map_history)?;
+        } else {
+            self.database
+                .record_scan_finished_reconciled_with_guard(&mut database_guard, &completion)
+                .map_err(map_history)?;
+        }
         published.revalidate()?;
         Ok(published.reference().clone())
     }
@@ -514,6 +611,12 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::domain::{
+        BlockReason, Candidate, CandidateAction, CandidateCategory, CandidateId, CandidateInput,
+        Evidence, LocalizedTextKey, ProvenanceUrl, Rule, RuleDefinition, RuleGuards, RuleId,
+        RuleMatcher, RuleMatcherDefinition, RuleRef, RuleRevision, RuleScope, SafetyTier,
+    };
+    use crate::persistence::candidate_history::{NewCandidateRecord, StoredCandidateRecord};
     use crate::persistence::history::NewScanRecord;
     use crate::{CoveragePermille, ScanIssue, ScanIssueKind};
 
@@ -580,6 +683,61 @@ mod tests {
             logical_bytes: 10,
             allocated_bytes: Some(16),
         }
+    }
+
+    fn evaluation_identity(seed: u8) -> CandidateEvaluationIdentity {
+        CandidateEvaluationIdentity::try_new(1, 1, [seed; 32], 1, [seed.wrapping_add(1); 32])
+            .unwrap()
+    }
+
+    fn candidate(scan_id: &ScanId, id: &str, path: &Path) -> NewCandidateRecord {
+        let rule = Rule::try_new(RuleDefinition {
+            reference: RuleRef::new(
+                RuleId::new("fixture.snapshot-evaluation").unwrap(),
+                RuleRevision::new(1).unwrap(),
+            ),
+            title_key: LocalizedTextKey::new("fixture.snapshot-evaluation.title").unwrap(),
+            category: CandidateCategory::DeveloperArtifact,
+            scope: RuleScope::SelectedScanRoot,
+            matcher: RuleMatcher::try_new(RuleMatcherDefinition {
+                path_component: Some("artifact.o".to_owned()),
+                required_ancestor_markers_any: Vec::new(),
+                required_markers_all: Vec::new(),
+                forbidden_markers_any: Vec::new(),
+                exact_bundle_identifiers: Vec::new(),
+                excluded_descendants: Vec::new(),
+                protected_descendants: Vec::new(),
+            })
+            .unwrap(),
+            guards: RuleGuards::try_new(None, 0, Vec::new(), false).unwrap(),
+            safety: SafetyTier::Informational,
+            action: CandidateAction::RevealOnly,
+            schedule_eligible: false,
+            explanation_key: LocalizedTextKey::new("fixture.snapshot-evaluation.explanation")
+                .unwrap(),
+            provenance: vec![ProvenanceUrl::new("https://example.com/dux-fixture").unwrap()],
+        })
+        .unwrap();
+        let candidate = Candidate::try_from_rule(
+            &rule,
+            CandidateInput::new(
+                CandidateId::new(id).unwrap(),
+                vec![path.to_path_buf()],
+                10,
+                None,
+                vec![Evidence::MatchedPath {
+                    path: path.to_path_buf(),
+                }],
+                vec![BlockReason::ProtectedPath],
+                scan_id.clone(),
+            ),
+        )
+        .unwrap();
+        NewCandidateRecord::try_from_candidate(
+            &candidate,
+            UNIX_EPOCH + Duration::from_millis(1_750_000_002_500),
+        )
+        .unwrap()
     }
 
     fn complete_coverage() -> ScanCoverage {
@@ -680,7 +838,7 @@ mod tests {
             .record_scan_started(
                 &NewScanRecord::try_new(
                     document.metadata.scan_id.clone(),
-                    root,
+                    root.clone(),
                     UNIX_EPOCH + Duration::from_millis(1_750_000_000_000),
                 )
                 .unwrap(),
@@ -770,7 +928,7 @@ mod tests {
             .record_scan_started(
                 &NewScanRecord::try_new(
                     document.metadata.scan_id.clone(),
-                    root,
+                    root.clone(),
                     UNIX_EPOCH + Duration::from_millis(1_750_000_000_000),
                 )
                 .unwrap(),
@@ -915,6 +1073,668 @@ mod tests {
                 .unwrap()
                 .status(),
             ScanStatus::Running
+        );
+    }
+
+    #[test]
+    fn scan_and_terminal_candidate_batch_commit_atomically_and_retry_exactly() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let root = temp.path().join("scan-root");
+        let document = document("scan:evaluation-success", &root);
+        let completed_at = UNIX_EPOCH + Duration::from_millis(1_750_000_002_000);
+        let evaluation_completed_at = completed_at + Duration::from_millis(500);
+        let terminal = CandidateEvaluationCompletion::succeeded(
+            evaluation_completed_at,
+            vec![candidate(
+                &document.metadata.scan_id,
+                "candidate:evaluation-success",
+                &root.join("artifact.o"),
+            )],
+        )
+        .unwrap();
+        let identity = evaluation_identity(7);
+
+        {
+            let (store, repository) = open_repository(&database);
+            store
+                .record_scan_started(
+                    &NewScanRecord::try_new(
+                        document.metadata.scan_id.clone(),
+                        root.clone(),
+                        UNIX_EPOCH + Duration::from_millis(1_750_000_000_000),
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+            let reference = repository
+                .complete_scan_with_candidate_evaluation(
+                    completed_at,
+                    counts(),
+                    &complete_coverage(),
+                    &document,
+                    &identity,
+                    &terminal,
+                )
+                .unwrap();
+            assert_eq!(
+                repository
+                    .complete_scan_with_candidate_evaluation(
+                        completed_at,
+                        counts(),
+                        &complete_coverage(),
+                        &document,
+                        &identity,
+                        &terminal,
+                    )
+                    .unwrap(),
+                reference
+            );
+            assert_eq!(
+                store
+                    .load_candidate_evaluation(&document.metadata.scan_id)
+                    .unwrap()
+                    .unwrap()
+                    .status(),
+                super::super::candidate_evaluation_history::CandidateEvaluationStatus::Succeeded {
+                    candidate_count: 1
+                }
+            );
+            assert!(matches!(
+                store
+                    .load_candidate(&CandidateId::new("candidate:evaluation-success").unwrap())
+                    .unwrap(),
+                Some(StoredCandidateRecord::Complete(_))
+            ));
+        }
+
+        let (store, repository) = open_repository(&database);
+        repository
+            .complete_scan_with_candidate_evaluation(
+                completed_at,
+                counts(),
+                &complete_coverage(),
+                &document,
+                &identity,
+                &terminal,
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .load_scan(&document.metadata.scan_id)
+                .unwrap()
+                .unwrap()
+                .status(),
+            ScanStatus::Succeeded
+        );
+        assert_eq!(
+            repository
+                .complete_scan_with_candidate_evaluation(
+                    completed_at,
+                    counts(),
+                    &complete_coverage(),
+                    &document,
+                    &evaluation_identity(9),
+                    &terminal,
+                )
+                .unwrap_err()
+                .kind,
+            SnapshotRepositoryErrorKind::ReferenceMismatch
+        );
+    }
+
+    #[test]
+    fn maximum_candidate_evaluation_batch_loads_after_reopen_within_query_budget() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let root = temp.path().join("scan-root");
+        let document = document("scan:evaluation-maximum-batch", &root);
+        let completed_at = UNIX_EPOCH + Duration::from_millis(1_750_000_002_000);
+        let evaluation_completed_at = completed_at + Duration::from_millis(500);
+        let candidates = (0..crate::domain::MAX_EVALUATED_CANDIDATES)
+            .map(|index| {
+                candidate(
+                    &document.metadata.scan_id,
+                    &format!("candidate:maximum:{index:04}"),
+                    &root.join(format!("artifact-{index:04}.o")),
+                )
+            })
+            .collect();
+        let terminal =
+            CandidateEvaluationCompletion::succeeded(evaluation_completed_at, candidates).unwrap();
+
+        {
+            let (store, repository) = open_repository(&database);
+            store
+                .record_scan_started(
+                    &NewScanRecord::try_new(
+                        document.metadata.scan_id.clone(),
+                        root,
+                        UNIX_EPOCH + Duration::from_millis(1_750_000_000_000),
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+            repository
+                .complete_scan_with_candidate_evaluation(
+                    completed_at,
+                    counts(),
+                    &complete_coverage(),
+                    &document,
+                    &evaluation_identity(8),
+                    &terminal,
+                )
+                .unwrap();
+        }
+
+        let (store, _repository) = open_repository(&database);
+        let evaluation = store
+            .load_candidate_evaluation(&document.metadata.scan_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            evaluation.status(),
+            super::super::candidate_evaluation_history::CandidateEvaluationStatus::Succeeded {
+                candidate_count: crate::domain::MAX_EVALUATED_CANDIDATES as u32,
+            }
+        );
+        assert_eq!(
+            evaluation.candidates().len(),
+            crate::domain::MAX_EVALUATED_CANDIDATES
+        );
+    }
+
+    #[test]
+    fn typed_evaluation_failure_is_terminal_and_contains_no_candidates() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let root = temp.path().join("scan-root");
+        let document = document("scan:evaluation-failed", &root);
+        let completed_at = UNIX_EPOCH + Duration::from_millis(1_750_000_002_000);
+        let terminal = CandidateEvaluationCompletion::failed(
+            completed_at + Duration::from_millis(1),
+            super::super::candidate_evaluation_history::CandidateEvaluationFailureKind::Cancelled,
+        )
+        .unwrap();
+        let (store, repository) = open_repository(&database);
+        store
+            .record_scan_started(
+                &NewScanRecord::try_new(
+                    document.metadata.scan_id.clone(),
+                    root.clone(),
+                    UNIX_EPOCH + Duration::from_millis(1_750_000_000_000),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        repository
+            .complete_scan_with_candidate_evaluation(
+                completed_at,
+                counts(),
+                &complete_coverage(),
+                &document,
+                &evaluation_identity(11),
+                &terminal,
+            )
+            .unwrap();
+        let stored_evaluation = store
+            .load_candidate_evaluation(&document.metadata.scan_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            stored_evaluation.status(),
+            super::super::candidate_evaluation_history::CandidateEvaluationStatus::Failed {
+                kind: super::super::candidate_evaluation_history::CandidateEvaluationFailureKind::Cancelled
+            }
+        );
+        assert!(stored_evaluation.candidates().is_empty());
+        assert_eq!(
+            store
+                .record_candidate_discovered(&candidate(
+                    &document.metadata.scan_id,
+                    "candidate:after-failed-evaluation",
+                    &root.join("artifact.o"),
+                ))
+                .unwrap_err()
+                .kind,
+            HistoryErrorKind::InvalidTransition
+        );
+    }
+
+    #[test]
+    fn hostile_terminal_time_and_record_format_are_rejected_by_loader() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let root = temp.path().join("scan-root");
+        let document = document("scan:evaluation-corrupt-row", &root);
+        let completed_at = UNIX_EPOCH + Duration::from_millis(1_750_000_002_000);
+        let terminal = CandidateEvaluationCompletion::succeeded(
+            completed_at + Duration::from_millis(500),
+            Vec::new(),
+        )
+        .unwrap();
+        let (store, repository) = open_repository(&database);
+        store
+            .record_scan_started(
+                &NewScanRecord::try_new(
+                    document.metadata.scan_id.clone(),
+                    root,
+                    UNIX_EPOCH + Duration::from_millis(1_750_000_000_000),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        repository
+            .complete_scan_with_candidate_evaluation(
+                completed_at,
+                counts(),
+                &complete_coverage(),
+                &document,
+                &evaluation_identity(12),
+                &terminal,
+            )
+            .unwrap();
+
+        store.with_connection(|connection| {
+            connection
+                .pragma_update(None, "ignore_check_constraints", true)
+                .unwrap();
+            connection
+                .execute(
+                    "UPDATE candidate_evaluations
+                     SET completed_at_unix_ms = scheduled_at_unix_ms - 1
+                     WHERE scan_id = ?1",
+                    [document.metadata.scan_id.as_str()],
+                )
+                .unwrap();
+            connection
+                .pragma_update(None, "ignore_check_constraints", false)
+                .unwrap();
+        });
+        assert_eq!(
+            store
+                .load_candidate_evaluation(&document.metadata.scan_id)
+                .unwrap_err()
+                .kind,
+            HistoryErrorKind::CorruptData
+        );
+
+        store.with_connection(|connection| {
+            connection
+                .pragma_update(None, "ignore_check_constraints", true)
+                .unwrap();
+            connection
+                .execute(
+                    "UPDATE candidate_evaluations
+                     SET completed_at_unix_ms = ?2, record_format_version = 2
+                     WHERE scan_id = ?1",
+                    rusqlite::params![document.metadata.scan_id.as_str(), 1_750_000_002_500_i64],
+                )
+                .unwrap();
+            connection
+                .pragma_update(None, "ignore_check_constraints", false)
+                .unwrap();
+        });
+        assert_eq!(
+            store
+                .load_candidate_evaluation(&document.metadata.scan_id)
+                .unwrap_err()
+                .kind,
+            HistoryErrorKind::CorruptData
+        );
+    }
+
+    #[test]
+    fn candidate_created_time_must_match_terminal_evaluation_time() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let root = temp.path().join("scan-root");
+        let document = document("scan:evaluation-candidate-time", &root);
+        let completed_at = UNIX_EPOCH + Duration::from_millis(1_750_000_002_000);
+        let evaluation_completed_at = completed_at + Duration::from_millis(500);
+        let terminal = CandidateEvaluationCompletion::succeeded(
+            evaluation_completed_at,
+            vec![candidate(
+                &document.metadata.scan_id,
+                "candidate:evaluation-candidate-time",
+                &root.join("artifact.o"),
+            )],
+        )
+        .unwrap();
+        let (store, repository) = open_repository(&database);
+        store
+            .record_scan_started(
+                &NewScanRecord::try_new(
+                    document.metadata.scan_id.clone(),
+                    root,
+                    UNIX_EPOCH + Duration::from_millis(1_750_000_000_000),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        repository
+            .complete_scan_with_candidate_evaluation(
+                completed_at,
+                counts(),
+                &complete_coverage(),
+                &document,
+                &evaluation_identity(14),
+                &terminal,
+            )
+            .unwrap();
+
+        store.with_connection(|connection| {
+            connection
+                .execute(
+                    "UPDATE candidates
+                     SET created_at_unix_ms = created_at_unix_ms + 1
+                     WHERE scan_id = ?1",
+                    [document.metadata.scan_id.as_str()],
+                )
+                .unwrap();
+        });
+        assert_eq!(
+            store
+                .load_candidate_evaluation(&document.metadata.scan_id)
+                .unwrap_err()
+                .kind,
+            HistoryErrorKind::CorruptData
+        );
+    }
+
+    #[test]
+    fn late_candidate_collision_rolls_back_scan_evaluation_and_earlier_candidate() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let prior_root = temp.path().join("prior-root");
+        let prior = document("scan:evaluation-prior", &prior_root);
+        let root = temp.path().join("scan-root");
+        let target = document("scan:evaluation-rollback", &root);
+        let completed_at = UNIX_EPOCH + Duration::from_millis(1_750_000_002_000);
+        let (store, repository) = open_repository(&database);
+
+        store
+            .record_scan_started(
+                &NewScanRecord::try_new(
+                    prior.metadata.scan_id.clone(),
+                    prior_root.clone(),
+                    UNIX_EPOCH + Duration::from_millis(1_750_000_000_000),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        repository
+            .complete_scan(completed_at, counts(), &complete_coverage(), &prior)
+            .unwrap();
+        store
+            .record_candidate_discovered(&candidate(
+                &prior.metadata.scan_id,
+                "candidate:collision",
+                &prior_root.join("artifact.o"),
+            ))
+            .unwrap();
+
+        store
+            .record_scan_started(
+                &NewScanRecord::try_new(
+                    target.metadata.scan_id.clone(),
+                    root.clone(),
+                    UNIX_EPOCH + Duration::from_millis(1_750_000_000_000),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let mismatched_time_terminal = CandidateEvaluationCompletion::succeeded(
+            completed_at + Duration::from_millis(250),
+            vec![candidate(
+                &target.metadata.scan_id,
+                "candidate:mismatched-evaluation-time",
+                &root.join("mismatched-time.o"),
+            )],
+        )
+        .unwrap();
+        assert_eq!(
+            repository
+                .complete_scan_with_candidate_evaluation(
+                    completed_at,
+                    counts(),
+                    &complete_coverage(),
+                    &target,
+                    &evaluation_identity(13),
+                    &mismatched_time_terminal,
+                )
+                .unwrap_err()
+                .kind,
+            SnapshotRepositoryErrorKind::History(HistoryErrorKind::InvalidInput)
+        );
+        let cross_scan_terminal = CandidateEvaluationCompletion::succeeded(
+            completed_at + Duration::from_millis(250),
+            vec![candidate(
+                &prior.metadata.scan_id,
+                "candidate:cross-scan",
+                &root.join("cross-scan.o"),
+            )],
+        )
+        .unwrap();
+        assert_eq!(
+            repository
+                .complete_scan_with_candidate_evaluation(
+                    completed_at,
+                    counts(),
+                    &complete_coverage(),
+                    &target,
+                    &evaluation_identity(13),
+                    &cross_scan_terminal,
+                )
+                .unwrap_err()
+                .kind,
+            SnapshotRepositoryErrorKind::History(HistoryErrorKind::InvalidInput)
+        );
+        let terminal = CandidateEvaluationCompletion::succeeded(
+            completed_at + Duration::from_millis(500),
+            vec![
+                candidate(
+                    &target.metadata.scan_id,
+                    "candidate:inserted-first",
+                    &root.join("first.o"),
+                ),
+                candidate(
+                    &target.metadata.scan_id,
+                    "candidate:collision",
+                    &root.join("artifact.o"),
+                ),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            repository
+                .complete_scan_with_candidate_evaluation(
+                    completed_at,
+                    counts(),
+                    &complete_coverage(),
+                    &target,
+                    &evaluation_identity(13),
+                    &terminal,
+                )
+                .unwrap_err()
+                .kind,
+            SnapshotRepositoryErrorKind::History(HistoryErrorKind::AlreadyExists)
+        );
+        assert_eq!(
+            store
+                .load_scan(&target.metadata.scan_id)
+                .unwrap()
+                .unwrap()
+                .status(),
+            ScanStatus::Running
+        );
+        assert!(
+            store
+                .load_candidate_evaluation(&target.metadata.scan_id)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .load_candidate(&CandidateId::new("candidate:inserted-first").unwrap())
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn exact_post_commit_failure_reconciles_full_terminal_output() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let root = temp.path().join("scan-root");
+        let document = document("scan:evaluation-ambiguous", &root);
+        let completed_at = UNIX_EPOCH + Duration::from_millis(1_750_000_002_000);
+        let (store, repository) = open_repository(&database);
+        store
+            .record_scan_started(
+                &NewScanRecord::try_new(
+                    document.metadata.scan_id.clone(),
+                    root,
+                    UNIX_EPOCH + Duration::from_millis(1_750_000_000_000),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let published = repository.publish_orphan_for_test(&document).unwrap();
+        let completion = ScanCompletionRecord::try_succeeded_with_snapshot_and_coverage(
+            document.metadata.scan_id.clone(),
+            completed_at,
+            counts(),
+            complete_coverage(),
+            published.reference().clone(),
+        )
+        .unwrap();
+        let request = NewCandidateEvaluation::try_new(
+            evaluation_identity(15),
+            published.reference(),
+            completed_at,
+        )
+        .unwrap();
+        let terminal = CandidateEvaluationCompletion::succeeded(
+            completed_at + Duration::from_millis(1) + Duration::from_nanos(789),
+            Vec::new(),
+        )
+        .unwrap();
+        store
+            .record_scan_finished_with_evaluation_after_commit_failure_for_test(
+                &completion,
+                &request,
+                &terminal,
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .load_candidate_evaluation(&document.metadata.scan_id)
+                .unwrap()
+                .unwrap()
+                .status(),
+            super::super::candidate_evaluation_history::CandidateEvaluationStatus::Succeeded {
+                candidate_count: 0
+            }
+        );
+    }
+
+    #[test]
+    fn pending_evaluation_loads_and_standalone_terminal_commit_reconciles() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let root = temp.path().join("scan-root");
+        let document = document("scan:evaluation-pending", &root);
+        let completed_at = UNIX_EPOCH + Duration::from_millis(1_750_000_002_000);
+        let (store, repository) = open_repository(&database);
+        store
+            .record_scan_started(
+                &NewScanRecord::try_new(
+                    document.metadata.scan_id.clone(),
+                    root.clone(),
+                    UNIX_EPOCH + Duration::from_millis(1_750_000_000_000),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let published = repository.publish_orphan_for_test(&document).unwrap();
+        let completion = ScanCompletionRecord::try_succeeded_with_snapshot_and_coverage(
+            document.metadata.scan_id.clone(),
+            completed_at,
+            counts(),
+            complete_coverage(),
+            published.reference().clone(),
+        )
+        .unwrap();
+        let request = NewCandidateEvaluation::try_new(
+            evaluation_identity(17),
+            published.reference(),
+            completed_at,
+        )
+        .unwrap();
+        {
+            let mut guard = store.lock_current_history_connection().unwrap();
+            store
+                .record_scan_finished_and_schedule_evaluation_reconciled_with_guard(
+                    &mut guard,
+                    &completion,
+                    &request,
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            store
+                .load_candidate_evaluation(&document.metadata.scan_id)
+                .unwrap()
+                .unwrap()
+                .status(),
+            super::super::candidate_evaluation_history::CandidateEvaluationStatus::Pending
+        );
+        assert_eq!(
+            store
+                .record_candidate_discovered(&candidate(
+                    &document.metadata.scan_id,
+                    "candidate:while-pending",
+                    &root.join("artifact.o"),
+                ))
+                .unwrap_err()
+                .kind,
+            HistoryErrorKind::InvalidTransition
+        );
+        let terminal = CandidateEvaluationCompletion::succeeded(
+            completed_at + Duration::from_millis(500),
+            vec![candidate(
+                &document.metadata.scan_id,
+                "candidate:pending",
+                &root.join("artifact.o"),
+            )],
+        )
+        .unwrap();
+        store
+            .record_candidate_evaluation_completed_after_commit_failure_for_test(
+                &request, &terminal,
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .load_candidate_evaluation(&document.metadata.scan_id)
+                .unwrap()
+                .unwrap()
+                .status(),
+            super::super::candidate_evaluation_history::CandidateEvaluationStatus::Succeeded {
+                candidate_count: 1
+            }
+        );
+        assert_eq!(
+            store
+                .record_candidate_discovered(&candidate(
+                    &document.metadata.scan_id,
+                    "candidate:after-succeeded-evaluation",
+                    &root.join("other.o"),
+                ))
+                .unwrap_err()
+                .kind,
+            HistoryErrorKind::InvalidTransition
         );
     }
 }

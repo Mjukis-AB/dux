@@ -20,7 +20,8 @@ use super::migrations::{
     DUX_APPLICATION_ID, Migration, SchemaState, apply_pending_migrations, apply_test_chain,
     apply_test_upgrade_chain, inspect_schema, inspect_schema_with_test_budget,
     panic_with_test_budget, schema_fingerprint, test_migrations, test_v1_schema_fingerprint,
-    test_v2_schema_fingerprint, test_v3_schema_fingerprint, validate_compiled_migrations,
+    test_v2_schema_fingerprint, test_v3_schema_fingerprint, test_v4_schema_fingerprint,
+    validate_compiled_migrations,
 };
 use super::process_liveness::current_process_instance;
 #[cfg(unix)]
@@ -365,6 +366,32 @@ fn fresh_v2_schema() -> Connection {
     connection
 }
 
+fn fresh_v3_schema() -> Connection {
+    let connection = Connection::open_in_memory().unwrap();
+    for migration in &test_migrations()[..3] {
+        connection.execute_batch(migration.sql).unwrap();
+        connection
+            .execute(
+                "INSERT INTO schema_migrations (
+                     version, name, checksum_sha256, applied_at_unix_ms
+                 ) VALUES (?1, ?2, ?3, 1)",
+                params![
+                    i64::from(migration.version),
+                    migration.name,
+                    migration.checksum_sha256.as_slice(),
+                ],
+            )
+            .unwrap();
+        connection
+            .pragma_update(None, "application_id", DUX_APPLICATION_ID)
+            .unwrap();
+        connection
+            .pragma_update(None, "user_version", migration.version)
+            .unwrap();
+    }
+    connection
+}
+
 fn fresh_current_schema() -> Connection {
     let connection = Connection::open_in_memory().unwrap();
     for migration in test_migrations() {
@@ -595,12 +622,122 @@ fn embedded_v2_schema_fingerprint_matches_complete_chain() {
 
 #[test]
 fn embedded_v3_schema_fingerprint_matches_complete_chain() {
-    let connection = fresh_current_schema();
+    let connection = fresh_v3_schema();
     assert_eq!(
         schema_fingerprint(&connection).unwrap(),
         test_v3_schema_fingerprint()
     );
+    assert_eq!(
+        inspect_schema(&connection).unwrap(),
+        SchemaState::Older { found: 3 }
+    );
+}
+
+#[test]
+fn embedded_v4_schema_fingerprint_matches_complete_chain() {
+    let connection = fresh_current_schema();
+    assert_eq!(
+        schema_fingerprint(&connection).unwrap(),
+        test_v4_schema_fingerprint()
+    );
     assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
+}
+
+#[test]
+fn populated_v3_upgrade_adds_no_fabricated_candidate_evaluations() {
+    let mut connection = fresh_v3_schema();
+    connection
+        .pragma_update(None, "foreign_keys", true)
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO scans (
+                 scan_id, root_path, root_path_encoding, started_at_unix_ms,
+                 completed_at_unix_ms, status, coverage_status, coverage_permille
+             ) VALUES ('scan:v3-evaluation', ?1, 1, 10, 20, 'succeeded', 'complete', 1000)",
+            [b"/v3-evaluation".as_slice()],
+        )
+        .unwrap();
+
+    apply_pending_migrations(&mut connection, 30).unwrap();
+
+    assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
+    let count: i64 = connection
+        .query_row("SELECT count(*) FROM candidate_evaluations", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(count, 0);
+}
+
+#[test]
+fn v4_candidate_evaluation_constraints_are_terminal_shape_strict() {
+    let connection = fresh_current_schema();
+    connection
+        .pragma_update(None, "foreign_keys", true)
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO scans (
+                 scan_id, root_path, root_path_encoding, started_at_unix_ms,
+                 completed_at_unix_ms, status, snapshot_version,
+                 snapshot_relative_path, snapshot_relative_path_encoding,
+                 snapshot_checksum_sha256, coverage_status, coverage_permille
+             ) VALUES (
+                 'scan:evaluation-shape', ?1, 1, 10, 20, 'succeeded', 1,
+                 ?2, 1, zeroblob(32), 'complete', 1000
+             )",
+            params![
+                b"/evaluation-shape".as_slice(),
+                b"snapshot-evaluation-shape.duxsnapshot".as_slice()
+            ],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO candidate_evaluations (
+                 scan_id, record_format_version, evaluator_revision,
+                 rule_catalog_schema_version, rule_catalog_sha256,
+                 context_format_version, context_sha256,
+                 snapshot_version, snapshot_sha256, scheduled_at_unix_ms,
+                 status
+             ) VALUES (
+                 'scan:evaluation-shape', 1, 1, 1, zeroblob(32),
+                 1, zeroblob(32), 1, zeroblob(32), 20, 'pending'
+             )",
+            [],
+        )
+        .unwrap();
+
+    assert!(
+        connection
+            .execute(
+                "UPDATE candidate_evaluations
+                 SET status = 'succeeded', completed_at_unix_ms = 21
+                 WHERE scan_id = 'scan:evaluation-shape'",
+                [],
+            )
+            .is_err()
+    );
+    assert!(
+        connection
+            .execute(
+                "UPDATE candidate_evaluations
+                 SET status = 'failed', completed_at_unix_ms = 21,
+                     failure_kind = 'not_closed'
+                 WHERE scan_id = 'scan:evaluation-shape'",
+                [],
+            )
+            .is_err()
+    );
+    assert!(
+        connection
+            .execute(
+                "DELETE FROM scans WHERE scan_id = 'scan:evaluation-shape'",
+                [],
+            )
+            .is_err()
+    );
 }
 
 #[test]
@@ -673,7 +810,7 @@ fn populated_v1_upgrade_preserves_legacy_candidate_and_cleanup_observations() {
     assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
     assert_eq!(
         schema_fingerprint(&connection).unwrap(),
-        test_v3_schema_fingerprint()
+        test_v4_schema_fingerprint()
     );
     let candidate: (i64, Option<String>, Option<String>) = connection
         .query_row(
@@ -727,7 +864,7 @@ fn populated_v1_upgrade_preserves_legacy_candidate_and_cleanup_observations() {
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
-    assert_eq!(versions, [1, 2, 3]);
+    assert_eq!(versions, [1, 2, 3, 4]);
 }
 
 #[test]

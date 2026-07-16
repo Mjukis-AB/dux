@@ -3,6 +3,7 @@
 //! Raw SQL and connections remain private. Typed history values are
 //! presentation observations only and never cleanup authority.
 
+mod candidate_evaluation_history;
 #[cfg_attr(
     not(test),
     allow(
@@ -59,6 +60,12 @@ mod status;
 mod storage;
 mod store;
 
+#[cfg(test)]
+pub(crate) use candidate_evaluation_history::CandidateEvaluationStatus;
+pub(crate) use candidate_evaluation_history::{
+    CandidateEvaluationCompletion, CandidateEvaluationFailureKind, CandidateEvaluationIdentity,
+};
+pub(crate) use candidate_history::NewCandidateRecord;
 pub(crate) use history::{
     HistoryErrorKind, NewScanRecord, ScanCompletionRecord, ScanCounts, ScanStatus,
     TerminalScanStatus,
