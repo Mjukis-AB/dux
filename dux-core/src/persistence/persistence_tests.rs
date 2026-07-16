@@ -21,7 +21,7 @@ use super::migrations::{
     apply_test_upgrade_chain, inspect_schema, inspect_schema_with_test_budget,
     panic_with_test_budget, schema_fingerprint, test_migrations, test_v1_schema_fingerprint,
     test_v2_schema_fingerprint, test_v3_schema_fingerprint, test_v4_schema_fingerprint,
-    validate_compiled_migrations,
+    test_v5_schema_fingerprint, validate_compiled_migrations,
 };
 use super::process_liveness::current_process_instance;
 #[cfg(unix)]
@@ -392,6 +392,32 @@ fn fresh_v3_schema() -> Connection {
     connection
 }
 
+fn fresh_v4_schema() -> Connection {
+    let connection = Connection::open_in_memory().unwrap();
+    for migration in &test_migrations()[..4] {
+        connection.execute_batch(migration.sql).unwrap();
+        connection
+            .execute(
+                "INSERT INTO schema_migrations (
+                     version, name, checksum_sha256, applied_at_unix_ms
+                 ) VALUES (?1, ?2, ?3, 1)",
+                params![
+                    i64::from(migration.version),
+                    migration.name,
+                    migration.checksum_sha256.as_slice(),
+                ],
+            )
+            .unwrap();
+        connection
+            .pragma_update(None, "application_id", DUX_APPLICATION_ID)
+            .unwrap();
+        connection
+            .pragma_update(None, "user_version", migration.version)
+            .unwrap();
+    }
+    connection
+}
+
 fn fresh_current_schema() -> Connection {
     let connection = Connection::open_in_memory().unwrap();
     for migration in test_migrations() {
@@ -635,12 +661,189 @@ fn embedded_v3_schema_fingerprint_matches_complete_chain() {
 
 #[test]
 fn embedded_v4_schema_fingerprint_matches_complete_chain() {
-    let connection = fresh_current_schema();
+    let connection = fresh_v4_schema();
     assert_eq!(
         schema_fingerprint(&connection).unwrap(),
         test_v4_schema_fingerprint()
     );
+    assert_eq!(
+        inspect_schema(&connection).unwrap(),
+        SchemaState::Older { found: 4 }
+    );
+}
+
+#[test]
+fn embedded_v5_schema_fingerprint_matches_complete_chain() {
+    let connection = fresh_current_schema();
+    assert_eq!(
+        schema_fingerprint(&connection).unwrap(),
+        test_v5_schema_fingerprint()
+    );
     assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
+}
+
+#[test]
+fn populated_v4_upgrade_preserves_snapshot_and_fabricates_no_tombstone() {
+    let mut connection = fresh_v4_schema();
+    connection
+        .pragma_update(None, "foreign_keys", true)
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO scans (
+                 scan_id, root_path, root_path_encoding, started_at_unix_ms,
+                 completed_at_unix_ms, status, snapshot_version,
+                 snapshot_relative_path, snapshot_relative_path_encoding,
+                 snapshot_checksum_sha256, coverage_status, coverage_permille
+             ) VALUES (
+                 'scan:v4-snapshot', ?1, 1, 10, 20, 'succeeded', 1,
+                 ?2, 1, ?3, 'complete', 1000
+             )",
+            params![
+                b"/v4-snapshot".as_slice(),
+                b"snapshot-v4.duxsnapshot".as_slice(),
+                [0x5a_u8; 32].as_slice(),
+            ],
+        )
+        .unwrap();
+
+    apply_pending_migrations(&mut connection, 30).unwrap();
+
+    assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
+    let snapshot: (String, i64, Vec<u8>, i64, Vec<u8>) = connection
+        .query_row(
+            "SELECT status, snapshot_version, snapshot_relative_path,
+                    snapshot_relative_path_encoding, snapshot_checksum_sha256
+             FROM scans WHERE scan_id = 'scan:v4-snapshot'",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        snapshot,
+        (
+            "succeeded".to_owned(),
+            1,
+            b"snapshot-v4.duxsnapshot".to_vec(),
+            1,
+            vec![0x5a; 32],
+        )
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT count(*) FROM snapshot_retention_tombstones",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn v5_snapshot_tombstones_are_exact_append_only_history() {
+    let connection = fresh_current_schema();
+    connection
+        .pragma_update(None, "foreign_keys", true)
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO scans (
+                 scan_id, root_path, root_path_encoding, started_at_unix_ms,
+                 completed_at_unix_ms, status, snapshot_version,
+                 snapshot_relative_path, snapshot_relative_path_encoding,
+                 snapshot_checksum_sha256, coverage_status, coverage_permille
+             ) VALUES (
+                 'scan:tombstone-shape', ?1, 1, 10, 20, 'succeeded', 1,
+                 ?2, 1, ?3, 'complete', 1000
+             )",
+            params![
+                b"/tombstone-shape".as_slice(),
+                b"snapshot-tombstone.duxsnapshot".as_slice(),
+                [0x6b_u8; 32].as_slice(),
+            ],
+        )
+        .unwrap();
+    let insert = "INSERT INTO snapshot_retention_tombstones (
+            scan_id, record_format_version, scan_status, completed_at_unix_ms,
+            snapshot_version, snapshot_relative_path,
+            snapshot_relative_path_encoding, snapshot_checksum_sha256,
+            committed_at_unix_ms
+         ) VALUES (
+            'scan:tombstone-shape', 1, 'succeeded', 20, 1, ?1, 1, ?2, ?3
+         )";
+    assert!(
+        connection
+            .execute(
+                insert,
+                params![
+                    b"snapshot-tombstone.duxsnapshot".as_slice(),
+                    [0x6b_u8; 32].as_slice(),
+                    19_i64,
+                ],
+            )
+            .is_err()
+    );
+    assert!(
+        connection
+            .execute(
+                insert,
+                params![
+                    b"snapshot-tombstone.duxsnapshot".as_slice(),
+                    [0x7c_u8; 32].as_slice(),
+                    21_i64,
+                ],
+            )
+            .is_err()
+    );
+    connection
+        .execute(
+            insert,
+            params![
+                b"snapshot-tombstone.duxsnapshot".as_slice(),
+                [0x6b_u8; 32].as_slice(),
+                21_i64,
+            ],
+        )
+        .unwrap();
+
+    assert!(
+        connection
+            .execute(
+                "UPDATE snapshot_retention_tombstones
+                 SET committed_at_unix_ms = 22
+                 WHERE scan_id = 'scan:tombstone-shape'",
+                [],
+            )
+            .is_err()
+    );
+    assert!(
+        connection
+            .execute(
+                "DELETE FROM snapshot_retention_tombstones
+                 WHERE scan_id = 'scan:tombstone-shape'",
+                [],
+            )
+            .is_err()
+    );
+    assert!(
+        connection
+            .execute(
+                "UPDATE scans SET snapshot_checksum_sha256 = zeroblob(32)
+                 WHERE scan_id = 'scan:tombstone-shape'",
+                [],
+            )
+            .is_err()
+    );
 }
 
 #[test]
@@ -810,7 +1013,7 @@ fn populated_v1_upgrade_preserves_legacy_candidate_and_cleanup_observations() {
     assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
     assert_eq!(
         schema_fingerprint(&connection).unwrap(),
-        test_v4_schema_fingerprint()
+        test_v5_schema_fingerprint()
     );
     let candidate: (i64, Option<String>, Option<String>) = connection
         .query_row(
@@ -864,7 +1067,7 @@ fn populated_v1_upgrade_preserves_legacy_candidate_and_cleanup_observations() {
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
-    assert_eq!(versions, [1, 2, 3, 4]);
+    assert_eq!(versions, [1, 2, 3, 4, 5]);
 }
 
 #[test]

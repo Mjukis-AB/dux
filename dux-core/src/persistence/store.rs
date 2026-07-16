@@ -163,6 +163,7 @@ impl StoreCoordinator {
             connection
         };
         apply_pending_migrations(&mut connection, unix_time_ms()?)?;
+        enable_verified_schema_triggers(&connection)?;
         configure_write_ahead_log(&connection)?;
         paths.repair_sqlite_sidecars()?;
         paths.validate_all_existing()?;
@@ -1370,6 +1371,25 @@ fn configure_connection(connection: &Connection, read_only: bool) -> Result<(), 
         .map_err(map_configuration_error)?;
     if !read_only {
         configure_full_synchronous(connection)?;
+    }
+    Ok(())
+}
+
+/// Keep trigger programs inert while an untrusted database is inspected. Only
+/// the exact supported schema fingerprint may activate the small, migration-
+/// owned trigger set; newer schemas remain on a separately configured
+/// trigger-disabled read-only connection.
+fn enable_verified_schema_triggers(connection: &Connection) -> Result<(), DatabaseOpenError> {
+    connection
+        .set_limit(Limit::SQLITE_LIMIT_TRIGGER_DEPTH, 1)
+        .map_err(map_configuration_error)?;
+    let enabled = connection
+        .set_db_config(DbConfig::SQLITE_DBCONFIG_ENABLE_TRIGGER, true)
+        .map_err(map_configuration_error)?;
+    if !enabled {
+        return Err(DatabaseOpenError::new(
+            DatabaseOpenErrorKind::DatabaseUnavailable,
+        ));
     }
     Ok(())
 }

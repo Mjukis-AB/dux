@@ -5,6 +5,19 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Added the schema-v5 prerequisite for safe snapshot retention. Immutable scan
+  references now have a separate append-only tombstone bound by composite
+  foreign key to their exact succeeded status, completion time, version,
+  losslessly encoded relative name, and digest. Repository loads perform a
+  bounded tombstone lookup under the current-schema database guard before file
+  open, return a distinct unavailable result for a match, and reject malformed
+  or mismatched rows as corruption. Update/delete guards activate only after
+  the exact schema fingerprint passes; untrusted and newer schemas retain the
+  trigger-disabled posture. V4 upgrades fabricate no retirement state,
+  terminal history remains unchanged, and guarded exact-retry loads avoid
+  connection-lock reacquisition. No production tombstone writer or physical
+  unlink is enabled until latest-two selection, active-review pins, total-cap
+  accounting, and retained-handle deletion are implemented together.
 - Added a typed, idle-only engine task for bounded history maintenance. Closed,
   duplicate, and foreground-busy requests resolve before SQLite access;
   eligible requests recheck schema and admission before allocating work. Each
@@ -16,7 +29,8 @@ All notable changes to DUX will be documented in this file.
   without falsifying a committed success. Stable typed failures, shared-store
   multi-session behavior, corruption rollback, schema races, both cancellation
   sides, duplicate admission, and panic cleanup have focused coverage. Native
-  app/FFI scheduling and snapshot retention remain separate work.
+  app/FFI scheduling and production snapshot selection/unlink remain separate
+  work.
 - Added the first bounded history-retention checkpoint. A private
   current-schema SQLite operation creates completed-day UTC capacity rollups
   from the exact last raw observation, retains raw samples for 30 exact days
@@ -28,7 +42,8 @@ All notable changes to DUX will be documented in this file.
   `has_more`. A mutation authorizer excludes scan, candidate,
   cleanup, rule-outcome, schedule, and settings history; fixed VM/deadline
   budgets and exact post-commit reconciliation make interruption and retry
-  fail closed. Snapshot retention and native app scheduling remain separate work.
+  fail closed. Production snapshot selection/unlink and native app scheduling
+  remain separate work.
 - Added the first noninteractive shared-engine CLI surfaces: `dux status` and
   `dux history [--limit 1..=200]`, each with explicit `--json`. A bounded,
   path-free core query validates complete scan/coverage records under one

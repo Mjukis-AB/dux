@@ -297,6 +297,18 @@ reference an unpublished file. A potentially ambiguous post-commit storage
 failure is reconciled by exact scan ID, status, canonical completion time,
 counts, version, name, and digest rather than by retrying with changed facts.
 
+Schema v5 adds an append-only logical-retirement tombstone without changing the
+v1 snapshot wire or the immutable scan reference. Before opening a referenced
+file, the repository holds a current-schema database guard and performs one
+bounded exact-ID lookup. A matching tombstone returns the distinct
+`SnapshotUnavailable` repository result before filesystem access. An invalid or
+identity-mismatched tombstone is corruption; absence permits the ordinary
+retained-file validation and full decode. No production code inserts
+tombstones yet. Future retention must establish latest-two and active-review
+pin eligibility under this lock order before committing a tombstone, then
+unlink only through a retained, identity-revalidated file handle and flush the
+directory.
+
 Initial snapshot-directory provisioning uses a private marker-complete sibling
 stage and atomic no-replace directory publication. A racing winner is reopened
 and fully validated. Losing or interrupted stages and recognized snapshot temps
@@ -313,8 +325,9 @@ are deliberately not recursively scavenged in this checkpoint.
   before snapshot provisioning and every later mutation.
 - Existing successful summaries retry only when every frozen completion fact
   and the fully decoded referenced document match exactly.
-- Missing or corrupt referenced files fail closed; history remains an
-  observation and is not silently rewritten.
+- A schema-v5 tombstone makes the reference logically unavailable before file
+  open; malformed tombstones and missing or corrupt available files fail
+  closed. History remains an observation and is not silently rewritten.
 - Engine scan admission refreshes current-schema write authority and excludes
   overlapping canonical roots within one engine session. It creates the random
   durable scan ID only after dequeue, exact-reconciles the start, and publishes
@@ -334,8 +347,10 @@ This checkpoint does not implement:
 - cross-process overlapping-root scan leases or hard-process-death recovery of
   an engine scan left `running`;
 - FFI, Swift, or CLI scan/history transport;
-- latest-two-per-root retention or active-review pins;
-- the configurable 2 GiB total-store retention policy;
+- latest-two-per-root selection, active-review pins, or a production tombstone
+  writer and retained-handle unlink;
+- the configurable 2 GiB total-store retention policy and physical-orphan
+  reconciliation;
 - bounded identity-safe scavenging for abandoned temps or provisioning stages;
 - native Windows sparse/compressed-allocation runtime verification and bounded
   accounting probes for slow filesystem drivers;

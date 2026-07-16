@@ -2531,6 +2531,30 @@ Tasks:
     app/FFI idle and periodic scheduling, latest-two/pinned/2-GiB snapshot
     retention, orphan/temp/stage maintenance, and explicit user clear-data
     actions.
+  - Snapshot logical-availability prerequisite completed 2026-07-16: schema v5
+    adds an append-only `snapshot_retention_tombstones` relation whose exact
+    succeeded scan ID, completion time, snapshot version, losslessly encoded
+    relative name, and digest are foreign-key-bound to the immutable terminal
+    scan reference. Migration from v4 fabricates no tombstones; update/delete
+    guards are activated only after the exact supported schema fingerprint and
+    preserve the historical transition; untrusted/newer schemas retain the
+    existing trigger-disabled read-only posture. The bounded loader validates
+    storage classes and lengths, treats a mismatched row as corruption, and
+    checks logical availability under a current-schema database guard before
+    opening the retained file. Exact tombstones return a distinct unavailable
+    result while the valid referenced bytes still exist, while the scan row
+    remains immutable and explainable. The already-guarded publication
+    retry path reuses its guard and cannot deadlock by reacquiring the
+    connection mutex. Migration fingerprint/constraint, v4 upgrade,
+    valid-load, hostile-row, tombstone-before-file, reopen, and guarded-retry
+    regressions cover the boundary.
+
+    This checkpoint intentionally provides no production tombstone writer.
+    Latest-two-per-exact-root selection, active-review pins, the configurable
+    2-GiB accounting/cap, retained-handle unlink and directory flush,
+    post-commit orphan reconciliation, live temp leases, bounded marker-owned
+    temp/stage scavenging, app/FFI scheduling, and explicit clear-data actions
+    remain required before snapshot retention can run.
 - [x] Add engine integration tests with temporary HOME and database. Completed
   2026-07-16: an actual `dux-core` engine scans a fixture into an isolated
   platform-correct application-support/cache layout, closes to full worker

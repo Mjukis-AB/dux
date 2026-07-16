@@ -125,7 +125,7 @@ pub(crate) struct Migration {
     pub(crate) sql: &'static str,
 }
 
-const MIGRATIONS: [Migration; 4] = [
+const MIGRATIONS: [Migration; 5] = [
     Migration {
         version: 1,
         name: "initial-storage-schema",
@@ -165,6 +165,16 @@ const MIGRATIONS: [Migration; 4] = [
             0x4f, 0x4f, 0x98, 0x44,
         ],
         sql: include_str!("../../migrations/0004_candidate_evaluations.sql"),
+    },
+    Migration {
+        version: 5,
+        name: "snapshot-retention-tombstones",
+        checksum_sha256: [
+            0x53, 0x29, 0x31, 0xf0, 0xe8, 0x70, 0x8b, 0x89, 0xf0, 0xca, 0xb2, 0x61, 0xf5, 0x48,
+            0x42, 0x1e, 0x53, 0x9a, 0x4d, 0xfb, 0x06, 0x83, 0x5a, 0x68, 0xa7, 0xbc, 0x59, 0xda,
+            0x38, 0x28, 0x18, 0x0d,
+        ],
+        sql: include_str!("../../migrations/0005_snapshot_retention_tombstones.sql"),
     },
 ];
 
@@ -307,6 +317,50 @@ const V4_EXPECTED_SCHEMA_OBJECTS: [(&str, &str); 36] = [
     ("table", "volumes"),
 ];
 
+const V5_EXPECTED_SCHEMA_OBJECTS: [(&str, &str); 41] = [
+    ("index", "ai_insights_by_expiration"),
+    ("index", "ai_insights_by_identity"),
+    ("index", "candidate_evaluations_by_status"),
+    ("index", "candidates_by_scan_status"),
+    ("index", "candidates_by_scan_time"),
+    ("index", "cleanup_items_by_session"),
+    ("index", "cleanup_sessions_by_recovery"),
+    ("index", "cleanup_sessions_by_time"),
+    ("index", "disk_samples_by_kind_time"),
+    ("index", "disk_samples_by_volume_kind_time"),
+    ("index", "rule_outcomes_by_rule_time"),
+    ("index", "scan_issues_by_scan_kind"),
+    ("index", "scans_by_started"),
+    ("index", "scans_by_volume_time"),
+    ("index", "scans_snapshot_identity"),
+    ("index", "schedules_by_next_run"),
+    ("index", "snapshot_retention_tombstones_by_commit"),
+    ("table", "ai_insights"),
+    ("table", "candidate_blockers"),
+    ("table", "candidate_evaluations"),
+    ("table", "candidate_evidence"),
+    ("table", "candidate_paths"),
+    ("table", "candidate_plan_claims"),
+    ("table", "candidates"),
+    ("table", "cleanup_item_evidence"),
+    ("table", "cleanup_item_paths"),
+    ("table", "cleanup_items"),
+    ("table", "cleanup_plan_warnings"),
+    ("table", "cleanup_sessions"),
+    ("table", "disk_samples"),
+    ("table", "rule_outcomes"),
+    ("table", "scan_aggregates"),
+    ("table", "scan_issues"),
+    ("table", "scans"),
+    ("table", "schedules"),
+    ("table", "schema_migrations"),
+    ("table", "settings"),
+    ("table", "snapshot_retention_tombstones"),
+    ("table", "volumes"),
+    ("trigger", "snapshot_retention_tombstones_delete_guard"),
+    ("trigger", "snapshot_retention_tombstones_update_guard"),
+];
+
 // Canonical sqlite_schema representation produced by v1. A mismatch rejects
 // supported databases rather than guessing about drift.
 const V1_SCHEMA_FINGERPRINT: [u8; 32] = [
@@ -330,6 +384,12 @@ const V3_SCHEMA_FINGERPRINT: [u8; 32] = [
 const V4_SCHEMA_FINGERPRINT: [u8; 32] = [
     0x40, 0x08, 0x26, 0x87, 0x4a, 0x1b, 0x11, 0x67, 0x31, 0x53, 0xae, 0xfb, 0xea, 0x87, 0x25, 0x60,
     0x8e, 0xdf, 0xd0, 0xf9, 0x38, 0xb0, 0x03, 0x07, 0x86, 0xa1, 0x24, 0xef, 0x5e, 0x9c, 0xee, 0x05,
+];
+
+// Canonical sqlite_schema representation produced by the complete v5 chain.
+const V5_SCHEMA_FINGERPRINT: [u8; 32] = [
+    0x79, 0xb8, 0x22, 0x61, 0x3a, 0x33, 0x1d, 0xb0, 0xab, 0xb5, 0x07, 0xe6, 0x3a, 0x3c, 0xe4, 0x0e,
+    0x69, 0x80, 0xb6, 0x5b, 0x3e, 0xde, 0x64, 0xf2, 0xbe, 0xe0, 0xd9, 0x26, 0x49, 0x7c, 0xf4, 0x43,
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -630,6 +690,12 @@ fn validate_supported_schema(
             &V4_EXPECTED_SCHEMA_OBJECTS,
             V4_SCHEMA_FINGERPRINT,
         ),
+        5 => validate_schema(
+            connection,
+            clock,
+            &V5_EXPECTED_SCHEMA_OBJECTS,
+            V5_SCHEMA_FINGERPRINT,
+        ),
         _ => Err(corrupt_error()),
     }
 }
@@ -895,6 +961,11 @@ pub(super) const fn test_v3_schema_fingerprint() -> [u8; 32] {
 #[cfg(test)]
 pub(super) const fn test_v4_schema_fingerprint() -> [u8; 32] {
     V4_SCHEMA_FINGERPRINT
+}
+
+#[cfg(test)]
+pub(super) const fn test_v5_schema_fingerprint() -> [u8; 32] {
+    V5_SCHEMA_FINGERPRINT
 }
 
 #[cfg(test)]

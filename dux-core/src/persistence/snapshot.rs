@@ -17,6 +17,7 @@ use super::candidate_evaluation_history::{
 use super::history::{
     HistoryError, HistoryErrorKind, ScanCompletionRecord, ScanCounts, ScanStatus,
 };
+use super::snapshot_retention::{SnapshotRetentionState, load_snapshot_retention_state};
 use super::store::{HistoryConnectionGuard, StoreCoordinator};
 
 mod codec;
@@ -119,6 +120,7 @@ pub(crate) enum SnapshotRepositoryErrorKind {
     ReadOnly,
     MissingStore,
     MissingSnapshot,
+    SnapshotUnavailable,
     IncompatibleVersion,
     ReferenceMismatch,
     Codec(SnapshotCodecErrorKind),
@@ -293,26 +295,58 @@ impl SnapshotRepository {
         &self,
         reference: &SnapshotReference,
     ) -> Result<SnapshotDocument, SnapshotRepositoryError> {
+        let database_guard = self
+            .database
+            .lock_current_history_connection()
+            .map_err(map_history)?;
+        let retained = self.open_available_with_guard(&database_guard, reference)?;
+        drop(database_guard);
+        decode_reference(&retained, reference)
+    }
+
+    fn load_with_guard(
+        &self,
+        database_guard: &HistoryConnectionGuard<'_>,
+        reference: &SnapshotReference,
+    ) -> Result<SnapshotDocument, SnapshotRepositoryError> {
+        let retained = self.open_available_with_guard(database_guard, reference)?;
+        decode_reference(&retained, reference)
+    }
+
+    /// Check logical availability under the database fence before acquiring a
+    /// retained file handle. Future retention must take the same database-first
+    /// order before its snapshot writer lock and unlink.
+    fn open_available_with_guard(
+        &self,
+        database_guard: &HistoryConnectionGuard<'_>,
+        reference: &SnapshotReference,
+    ) -> Result<RetainedSnapshot, SnapshotRepositoryError> {
         if reference.version() != SNAPSHOT_FORMAT_VERSION {
             return Err(repository_error(
                 SnapshotRepositoryErrorKind::IncompatibleVersion,
             ));
         }
+        self.database
+            .validate_history_guard(database_guard)
+            .map_err(map_history)?;
+        match load_snapshot_retention_state(&database_guard.connection, reference)
+            .map_err(map_history)?
+        {
+            SnapshotRetentionState::Available => {}
+            SnapshotRetentionState::Tombstoned { .. } => {
+                return Err(repository_error(
+                    SnapshotRepositoryErrorKind::SnapshotUnavailable,
+                ));
+            }
+        }
         let store = self
             .store
             .as_ref()
             .ok_or_else(|| repository_error(SnapshotRepositoryErrorKind::MissingStore))?;
-        let retained = store
+        store
             .open(reference.file_name())
             .map_err(map_storage)?
-            .ok_or_else(|| repository_error(SnapshotRepositoryErrorKind::MissingSnapshot))?;
-        let (document, digest) = decode_retained(&retained)?;
-        if digest != reference.digest() || &document.metadata.scan_id != reference.scan_id() {
-            return Err(repository_error(
-                SnapshotRepositoryErrorKind::ReferenceMismatch,
-            ));
-        }
-        Ok(document)
+            .ok_or_else(|| repository_error(SnapshotRepositoryErrorKind::MissingSnapshot))
     }
 
     /// Publish the immutable file before exact-CASing the durable scan summary.
@@ -502,7 +536,7 @@ impl SnapshotRepository {
             )
             .map_err(map_history)?;
             if !current.exactly_matches_completion(&completion)
-                || &self.load(reference)? != document
+                || &self.load_with_guard(&database_guard, reference)? != document
             {
                 return Err(repository_error(
                     SnapshotRepositoryErrorKind::ReferenceMismatch,
@@ -600,6 +634,19 @@ fn decode_retained(
     let decoded = decode_snapshot(&mut file).map_err(map_codec)?;
     retained.revalidate().map_err(map_storage)?;
     Ok(decoded)
+}
+
+fn decode_reference(
+    retained: &RetainedSnapshot,
+    reference: &SnapshotReference,
+) -> Result<SnapshotDocument, SnapshotRepositoryError> {
+    let (document, digest) = decode_retained(retained)?;
+    if digest != reference.digest() || &document.metadata.scan_id != reference.scan_id() {
+        return Err(repository_error(
+            SnapshotRepositoryErrorKind::ReferenceMismatch,
+        ));
+    }
+    Ok(document)
 }
 
 #[cfg(test)]
@@ -827,6 +874,167 @@ mod tests {
     }
 
     #[test]
+    fn committed_tombstone_blocks_valid_snapshot_and_survives_reopen() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let root = temp.path().join("scan-root");
+        let document = document("scan:snapshot-tombstoned", &root);
+        let completed_at = UNIX_EPOCH + Duration::from_millis(1_750_000_002_000);
+        let (store, repository) = open_repository(&database);
+        store
+            .record_scan_started(
+                &NewScanRecord::try_new(
+                    document.metadata.scan_id.clone(),
+                    root,
+                    UNIX_EPOCH + Duration::from_millis(1_750_000_000_000),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let reference = repository
+            .complete_scan(completed_at, counts(), &complete_coverage(), &document)
+            .unwrap();
+        let snapshot_path = database
+            .parent()
+            .unwrap()
+            .join("snapshots")
+            .join(reference.file_name().as_str());
+        assert!(snapshot_path.is_file());
+        let guard = store.lock_current_history_connection().unwrap();
+        assert_eq!(
+            repository.load_with_guard(&guard, &reference).unwrap(),
+            document
+        );
+        drop(guard);
+
+        store.with_connection(|connection| {
+            connection
+                .execute(
+                    "INSERT INTO snapshot_retention_tombstones (
+                         scan_id, record_format_version, scan_status,
+                         completed_at_unix_ms, snapshot_version,
+                         snapshot_relative_path, snapshot_relative_path_encoding,
+                         snapshot_checksum_sha256, committed_at_unix_ms
+                     )
+                     SELECT scan_id, 1, status, completed_at_unix_ms,
+                            snapshot_version, snapshot_relative_path,
+                            snapshot_relative_path_encoding,
+                            snapshot_checksum_sha256, completed_at_unix_ms + 1
+                     FROM scans WHERE scan_id = ?1",
+                    [reference.scan_id().as_str()],
+                )
+                .unwrap();
+            assert!(
+                connection
+                    .execute(
+                        "UPDATE snapshot_retention_tombstones
+                         SET committed_at_unix_ms = committed_at_unix_ms + 1
+                         WHERE scan_id = ?1",
+                        [reference.scan_id().as_str()],
+                    )
+                    .is_err()
+            );
+            assert!(
+                connection
+                    .execute(
+                        "DELETE FROM snapshot_retention_tombstones WHERE scan_id = ?1",
+                        [reference.scan_id().as_str()],
+                    )
+                    .is_err()
+            );
+        });
+
+        assert!(snapshot_path.is_file());
+        assert_eq!(
+            repository.load(&reference).unwrap_err().kind,
+            SnapshotRepositoryErrorKind::SnapshotUnavailable
+        );
+        let guard = store.lock_current_history_connection().unwrap();
+        assert_eq!(
+            repository
+                .load_with_guard(&guard, &reference)
+                .unwrap_err()
+                .kind,
+            SnapshotRepositoryErrorKind::SnapshotUnavailable
+        );
+        drop(guard);
+        let durable = store.load_scan(reference.scan_id()).unwrap().unwrap();
+        assert_eq!(durable.snapshot(), Some(&reference));
+        drop(repository);
+        drop(store);
+
+        let (reopened_store, reopened) = open_repository(&database);
+        assert_eq!(
+            reopened.load(&reference).unwrap_err().kind,
+            SnapshotRepositoryErrorKind::SnapshotUnavailable
+        );
+        assert_eq!(
+            reopened_store
+                .load_scan(reference.scan_id())
+                .unwrap()
+                .unwrap()
+                .snapshot(),
+            Some(&reference)
+        );
+    }
+
+    #[test]
+    fn tombstone_mismatched_from_parent_scan_fails_corrupt_before_opening_snapshot() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let root = temp.path().join("scan-root");
+        let document = document("scan:snapshot-hostile-tombstone", &root);
+        let (store, repository) = open_repository(&database);
+        store
+            .record_scan_started(
+                &NewScanRecord::try_new(
+                    document.metadata.scan_id.clone(),
+                    root,
+                    UNIX_EPOCH + Duration::from_millis(1_750_000_000_000),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let reference = repository
+            .complete_scan(
+                UNIX_EPOCH + Duration::from_millis(1_750_000_002_000),
+                counts(),
+                &complete_coverage(),
+                &document,
+            )
+            .unwrap();
+        store.with_connection(|connection| {
+            connection
+                .pragma_update(None, "foreign_keys", false)
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO snapshot_retention_tombstones (
+                         scan_id, record_format_version, scan_status,
+                         completed_at_unix_ms, snapshot_version,
+                         snapshot_relative_path, snapshot_relative_path_encoding,
+                         snapshot_checksum_sha256, committed_at_unix_ms
+                     )
+                     SELECT scan_id, 1, status, completed_at_unix_ms + 1,
+                            snapshot_version, snapshot_relative_path,
+                            snapshot_relative_path_encoding,
+                            snapshot_checksum_sha256, completed_at_unix_ms + 2
+                     FROM scans WHERE scan_id = ?1",
+                    [reference.scan_id().as_str()],
+                )
+                .unwrap();
+            connection
+                .pragma_update(None, "foreign_keys", true)
+                .unwrap();
+        });
+
+        assert_eq!(
+            repository.load(&reference).unwrap_err().kind,
+            SnapshotRepositoryErrorKind::History(HistoryErrorKind::CorruptData)
+        );
+    }
+
+    #[test]
     fn orphan_publication_is_adopted_only_after_exact_collision_validation() {
         let temp = TempDir::new().unwrap();
         let database = temp.path().join("store/dux.sqlite3");
@@ -958,6 +1166,29 @@ mod tests {
         assert_eq!(
             repository.load(&reference).unwrap_err().kind,
             SnapshotRepositoryErrorKind::MissingSnapshot
+        );
+
+        store.with_connection(|connection| {
+            connection
+                .execute(
+                    "INSERT INTO snapshot_retention_tombstones (
+                         scan_id, record_format_version, scan_status,
+                         completed_at_unix_ms, snapshot_version,
+                         snapshot_relative_path, snapshot_relative_path_encoding,
+                         snapshot_checksum_sha256, committed_at_unix_ms
+                     )
+                     SELECT scan_id, 1, status, completed_at_unix_ms,
+                            snapshot_version, snapshot_relative_path,
+                            snapshot_relative_path_encoding,
+                            snapshot_checksum_sha256, completed_at_unix_ms + 1
+                     FROM scans WHERE scan_id = ?1",
+                    [reference.scan_id().as_str()],
+                )
+                .unwrap();
+        });
+        assert_eq!(
+            repository.load(&reference).unwrap_err().kind,
+            SnapshotRepositoryErrorKind::SnapshotUnavailable
         );
     }
 

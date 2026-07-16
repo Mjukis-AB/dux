@@ -94,23 +94,44 @@ active pins remain protected even if protected bytes alone exceed the cap.
 
 Terminal scan summaries and their original snapshot references are immutable.
 Snapshot retention is therefore not allowed to clear or rewrite that historical
-tuple. Before enabling referenced-snapshot eviction, a migration and accepted
-design must add a separate, mutable availability registry or tombstone keyed by
-the exact immutable snapshot identity. Retention must commit the availability
-transition first, then unlink through a retained, revalidated handle. History
-continues to explain which snapshot originally existed while loaders consult
-the availability state before opening it. A crash between the registry commit
-and unlink leaves a provable orphan; file-first deletion is forbidden.
+tuple. Schema v5 implements the prerequisite as an append-only
+`snapshot_retention_tombstones` table keyed by scan ID and foreign-key-bound to
+the complete immutable snapshot identity: succeeded status, completion time,
+snapshot version, losslessly encoded relative name, and SHA-256 digest. It does
+not backfill old rows. Absence means that the immutable reference may still be
+opened; an exact tombstone means that it is logically unavailable even if its
+bytes remain. Tombstones cannot be updated or deleted, and malformed or
+mismatched rows are corruption rather than evidence of availability. DUX keeps
+all trigger programs disabled while inspecting an untrusted database and
+enables these exact update/delete guards only after the complete supported
+schema fingerprint has passed; unknown newer schemas remain trigger-disabled
+and read-only.
+
+Every repository load now validates the current-schema database guard and
+queries that exact tombstone before opening the snapshot file. A tombstone
+returns a distinct unavailable result and wins over a missing or corrupt file,
+while the terminal scan row continues to explain which snapshot originally
+existed. The guarded retry path reuses its already-held database guard rather
+than reacquiring the connection mutex. This checkpoint deliberately exposes no
+production tombstone writer.
+
+Future retention must validate eligibility and commit the tombstone first,
+then unlink through a retained, revalidated handle and durably flush the
+snapshot directory. A crash between the tombstone commit and unlink leaves a
+provable DUX-owned orphan; file-first deletion is forbidden.
 Publication and retention share this lock order:
 
 1. SQLite connection mutex;
 2. cross-process writer/current-schema lease;
 3. snapshot writer lock.
 
-Snapshot retention is not enabled until active-review pins, the separate
-availability representation and migration, retained-handle deletion, live
+Snapshot retention is not enabled until active-review pins,
+latest-two-per-exact-root selection, retained-handle deletion, live
 temporary-file leases, the typed size cap, and bounded marker-owned stage
-scavenging all exist. A name prefix alone never proves that a temporary or stage
+scavenging all exist. Tombstone insertion, the final pin/eligibility recheck,
+and retained-file acquisition must occur while holding the database and
+snapshot locks in the order above. A prior unlocked eligibility observation is
+not authority. A name prefix alone never proves that a temporary or stage
 directory belongs to DUX.
 
 ## Failure and version behavior

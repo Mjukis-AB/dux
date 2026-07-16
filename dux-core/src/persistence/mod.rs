@@ -57,6 +57,7 @@ mod process_liveness;
 mod retention;
 mod scan_coverage_history;
 pub(crate) mod snapshot;
+mod snapshot_retention;
 mod status;
 mod storage;
 mod store;
