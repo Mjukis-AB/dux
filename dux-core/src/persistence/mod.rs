@@ -1,7 +1,7 @@
 //! Private, versioned SQLite storage owned by the shared engine.
 //!
-//! This checkpoint installs schema and compatibility infrastructure only. It
-//! exposes no raw SQL, domain writes, cleanup authority, or history queries.
+//! Raw SQL and connections remain private. Typed history values are
+//! presentation observations only and never cleanup authority.
 
 #[cfg_attr(
     not(test),
@@ -11,6 +11,14 @@
     )
 )]
 mod codec;
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "typed scan persistence is integrated by the later scan task slice"
+    )
+)]
+mod history;
 mod migrations;
 mod status;
 mod storage;

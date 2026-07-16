@@ -1922,6 +1922,20 @@ Tasks:
   status only: domain CRUD, history queries, retention, binary snapshots,
   CLI/FFI transport, and real cleanup authority remain subsequent tasks.
 - [ ] Add scan/session/candidate/cleanup persistence.
+  - Scan-history sub-checkpoint completed 2026-07-16: crate-private typed
+    operations durably insert a running scan, compare-and-set it exactly once
+    to a terminal summary, and load one validated record by stable ID. Writes
+    hold the coordinator connection and cross-process lease, re-inspect exact
+    schema compatibility before `BEGIN IMMEDIATE`, preserve lossless accepted
+    host-codec absolute path bytes and checked time/count values, and reject duplicates, missing
+    scans, invalid time order, and terminal rewrites. Exact-ID reads have fixed
+    SQLite VM/deadline limits, decode every field into typed values, treat
+    malformed lifecycle rows as corrupt observations, and survive coordinator
+    teardown/reopen. No scan task calls this layer yet, and the broad item stays
+    open: v1 candidate rows cannot preserve paths/evidence/blockers/action, and
+    v1 cleanup rows cannot preserve multi-path plan items or a dry-run's
+    proposed Trash/permanent/eviction effect. Those facts require a subsequent
+    schema migration before candidate or cleanup history can round-trip safely.
 - [ ] Keep binary snapshots atomic and checksummed.
 - [ ] Add capacity sample storage.
 - [ ] Add typed scan coverage/issues.

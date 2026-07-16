@@ -5,6 +5,14 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Added the first typed persistence layer for non-authoritative scan history.
+  Crate-private start, terminal compare-and-set, and exact-ID load operations
+  preserve stable IDs, lossless accepted host-codec absolute roots, checked times and byte counts,
+  reject duplicate or terminal rewrites, recheck schema compatibility while
+  holding the coordinator and cross-process writer lease, and bound SQLite
+  read work. Completed summaries survive coordinator teardown and reopen; this
+  does not yet expose scan APIs to the engine, persist snapshots, or make
+  historical paths actionable.
 - Added a versioned private SQLite foundation owned by the shared engine. A
   checksummed v1 `STRICT` schema covers all planned aggregate/history tables
   with bounded fields, constrained semantic text, and a tested lossless
@@ -24,8 +32,8 @@ All notable changes to DUX will be documented in this file.
   owner-only DACLs, handle-relative stage creation, handle-bound publication, a
   retained final-root rename guard, and exact SQLite-sidecar DACL repair. Real
   Unix crash regressions, cross-platform writer/version-race coverage, and native macOS/Windows
-  storage tests cover the platform-specific boundaries. No domain CRUD or
-  cleanup authority is exposed by this checkpoint.
+  storage tests cover the platform-specific boundaries. No cleanup authority
+  is exposed by this checkpoint.
 - Added the shared core engine handle and bounded per-session FIFO task registry with explicit disjoint storage paths, fixed workers/queue/event/result retention, opaque non-reused task IDs, typed cancellation and terminal state, panic containment, nonblocking close with quiescence, and a bounded read-only formatting operation. The application architecture owns one session; the UniFFI engine remains smoke-only, and no scan, domain-persistence operation, AI, plan, or cleanup authority is exposed by this checkpoint.
 - Added a temporary core-owned adapter for the legacy CLI permanent-delete path. Single and batch requests consume opaque target-bound plans through one guarded effect boundary, and repository policy prevents the adapter from being exposed through FFI or the macOS app.
 - Added a CI-enforced destructive-call boundary: compiler-resolved per-platform Rust filesystem/process denials plus a cross-language repository scanner with one-use registered exceptions, executable/shebang discovery, release enforcement, and executable policy tests. The XCFramework builder now rejects arbitrary destinations and symlinked output parents before any build tool or destructive mutation runs.

@@ -1,12 +1,17 @@
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rusqlite::config::DbConfig;
 use rusqlite::limits::Limit;
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 
+use super::history::{
+    HistoryError, HistoryErrorKind, NewScanRecord, PreparedNewScan, PreparedScanCompletion,
+    ScanCompletionRecord, ScanRecord, insert_scan_started, load_scan_record, map_write_sql_error,
+    update_scan_finished,
+};
 use super::migrations::{
     SchemaState, apply_pending_migrations, inspect_schema, inspect_schema_for_status,
 };
@@ -14,7 +19,7 @@ use super::status::{
     DATABASE_SCHEMA_VERSION, DatabaseAccess, DatabaseOpenError, DatabaseOpenErrorKind,
     DatabaseStatus,
 };
-use super::storage::{SecureStorePaths, StoreIdentity};
+use super::storage::{SecureStorePaths, StoreIdentity, WriterLockGuard};
 
 const DATABASE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const MIGRATION_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
@@ -27,6 +32,20 @@ pub(crate) struct StoreCoordinator {
     status: Mutex<DatabaseStatus>,
     paths: SecureStorePaths,
     connection: Mutex<Connection>,
+}
+
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "typed scan persistence is integrated by the later scan task slice"
+    )
+)]
+struct HistoryConnectionGuard<'a> {
+    // Struct fields drop in declaration order: release the cross-process lease
+    // before another in-process caller can acquire the connection mutex.
+    _writer_lock: WriterLockGuard,
+    connection: MutexGuard<'a, Connection>,
 }
 
 impl StoreCoordinator {
@@ -214,6 +233,118 @@ impl StoreCoordinator {
         Ok(self.cached_status())
     }
 
+    /// Start one durable scan record. Stored paths are observations only.
+    /// A database/storage error after commit can have an ambiguous outcome;
+    /// callers reconcile by loading this exact scan ID before retrying.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "typed scan persistence is integrated by the later scan task slice"
+        )
+    )]
+    pub(crate) fn record_scan_started(&self, scan: &NewScanRecord) -> Result<(), HistoryError> {
+        let prepared = PreparedNewScan::prepare(scan)?;
+        let mut guard = self.lock_current_history_connection()?;
+        let transaction = guard
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(map_write_sql_error)?;
+        insert_scan_started(&transaction, &prepared)?;
+        transaction.commit().map_err(map_write_sql_error)?;
+        self.paths
+            .repair_sqlite_sidecars()
+            .and_then(|()| self.paths.validate_all_existing())
+            .map_err(map_history_database_error)
+    }
+
+    /// Compare-and-set one running scan to a terminal durable summary.
+    /// A database/storage error after commit can have an ambiguous outcome;
+    /// callers reconcile by loading this exact scan ID before retrying.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "typed scan persistence is integrated by the later scan task slice"
+        )
+    )]
+    pub(crate) fn record_scan_finished(
+        &self,
+        completion: &ScanCompletionRecord,
+    ) -> Result<(), HistoryError> {
+        let prepared = PreparedScanCompletion::prepare(completion)?;
+        let mut guard = self.lock_current_history_connection()?;
+        let transaction = guard
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(map_write_sql_error)?;
+        update_scan_finished(&transaction, &prepared)?;
+        transaction.commit().map_err(map_write_sql_error)?;
+        self.paths
+            .repair_sqlite_sidecars()
+            .and_then(|()| self.paths.validate_all_existing())
+            .map_err(map_history_database_error)
+    }
+
+    /// Load at most one typed scan observation by its stable ID.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "typed scan persistence is integrated by the later scan task slice"
+        )
+    )]
+    pub(crate) fn load_scan(
+        &self,
+        id: &crate::domain::ScanId,
+    ) -> Result<Option<ScanRecord>, HistoryError> {
+        let guard = self.lock_current_history_connection()?;
+        load_scan_record(&guard.connection, id)
+    }
+
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "typed scan persistence is integrated by the later scan task slice"
+        )
+    )]
+    fn lock_current_history_connection(&self) -> Result<HistoryConnectionGuard<'_>, HistoryError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| HistoryError::new(HistoryErrorKind::InternalState))?;
+        let writer_lock = self
+            .paths
+            .acquire_writer_lock(MIGRATION_LOCK_TIMEOUT)
+            .map_err(map_history_database_error)?;
+        self.paths
+            .repair_sqlite_sidecars()
+            .and_then(|()| self.paths.validate_all_existing())
+            .map_err(map_history_database_error)?;
+        let schema = inspect_schema_for_status(&connection).map_err(map_history_database_error)?;
+        match schema {
+            SchemaState::Current
+                if matches!(
+                    self.cached_status().access,
+                    DatabaseAccess::ReadWriteCurrent
+                ) =>
+            {
+                Ok(HistoryConnectionGuard {
+                    _writer_lock: writer_lock,
+                    connection,
+                })
+            }
+            SchemaState::Newer { .. } => {
+                Err(HistoryError::new(HistoryErrorKind::IncompatibleSchema))
+            }
+            SchemaState::Current => Err(HistoryError::new(HistoryErrorKind::InternalState)),
+            SchemaState::Empty | SchemaState::Older { .. } => {
+                Err(HistoryError::new(HistoryErrorKind::CorruptData))
+            }
+        }
+    }
+
     fn cached_status(&self) -> DatabaseStatus {
         *self
             .status
@@ -238,6 +369,32 @@ impl StoreCoordinator {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         inspect(&connection)
     }
+}
+
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "typed scan persistence is integrated by the later scan task slice"
+    )
+)]
+fn map_history_database_error(error: DatabaseOpenError) -> HistoryError {
+    let kind = match error.kind {
+        DatabaseOpenErrorKind::Busy => HistoryErrorKind::Busy,
+        DatabaseOpenErrorKind::CorruptDatabase | DatabaseOpenErrorKind::UnrecognizedDatabase => {
+            HistoryErrorKind::CorruptData
+        }
+        DatabaseOpenErrorKind::OwnershipMismatch
+        | DatabaseOpenErrorKind::UnsafeStorageRoot
+        | DatabaseOpenErrorKind::UnsafeStorageObject
+        | DatabaseOpenErrorKind::UnsafePermissions => HistoryErrorKind::UnsafeStorage,
+        DatabaseOpenErrorKind::InternalState => HistoryErrorKind::InternalState,
+        DatabaseOpenErrorKind::InspectionLimitExceeded => HistoryErrorKind::QueryLimitExceeded,
+        DatabaseOpenErrorKind::StorageRootUnavailable
+        | DatabaseOpenErrorKind::DatabaseUnavailable
+        | DatabaseOpenErrorKind::MigrationFailed => HistoryErrorKind::DatabaseUnavailable,
+    };
+    HistoryError::new(kind)
 }
 
 fn open_connection(path: &Path, read_only: bool) -> Result<Connection, DatabaseOpenError> {
