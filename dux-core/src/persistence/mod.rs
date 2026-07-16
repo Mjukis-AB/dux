@@ -23,6 +23,14 @@ mod cleanup_history;
     not(test),
     allow(
         dead_code,
+        reason = "cleanup journal state integrates with the engine executor in a later slice"
+    )
+)]
+mod cleanup_journal;
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
         reason = "the frozen v1 byte codec is consumed by the next typed persistence slice"
     )
 )]

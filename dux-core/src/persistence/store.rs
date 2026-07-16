@@ -27,7 +27,7 @@ use super::status::{
     DATABASE_SCHEMA_VERSION, DatabaseAccess, DatabaseOpenError, DatabaseOpenErrorKind,
     DatabaseStatus,
 };
-use super::storage::{SecureStorePaths, StoreIdentity, WriterLockGuard};
+use super::storage::{CleanupLockGuard, SecureStorePaths, StoreIdentity, WriterLockGuard};
 
 const DATABASE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const MIGRATION_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
@@ -49,11 +49,11 @@ pub(crate) struct StoreCoordinator {
         reason = "typed scan persistence is integrated by the later scan task slice"
     )
 )]
-struct HistoryConnectionGuard<'a> {
+pub(super) struct HistoryConnectionGuard<'a> {
     // Struct fields drop in declaration order: release the cross-process lease
     // before another in-process caller can acquire the connection mutex.
     _writer_lock: WriterLockGuard,
-    connection: MutexGuard<'a, Connection>,
+    pub(super) connection: MutexGuard<'a, Connection>,
 }
 
 impl StoreCoordinator {
@@ -398,6 +398,38 @@ impl StoreCoordinator {
         load_cleanup_session_record(&guard.connection, id)
     }
 
+    /// Acquire the store-wide cleanup exclusion before any journal connection
+    /// or writer lease. This remains an exclusion primitive only; the journal
+    /// layer must separately bind a typed owner and generation.
+    pub(super) fn acquire_cleanup_lock_for_journal(
+        &self,
+        timeout: Duration,
+    ) -> Result<CleanupLockGuard, HistoryError> {
+        self.paths
+            .acquire_cleanup_lock(timeout)
+            .map_err(map_history_database_error)
+    }
+
+    /// Revalidate a held cleanup control without granting target or effect
+    /// authority. Journal callers invoke this before every short transaction.
+    pub(super) fn validate_cleanup_lock_for_journal(
+        &self,
+        guard: &CleanupLockGuard,
+    ) -> Result<(), HistoryError> {
+        self.paths
+            .validate_cleanup_lock_guard(guard)
+            .map_err(map_history_database_error)
+    }
+
+    /// Repair and revalidate SQLite sidecars after a committed journal write.
+    /// A failure here makes the commit outcome ambiguous to the caller.
+    pub(super) fn validate_history_storage_after_write(&self) -> Result<(), HistoryError> {
+        self.paths
+            .repair_sqlite_sidecars()
+            .and_then(|()| self.paths.validate_all_existing())
+            .map_err(map_history_database_error)
+    }
+
     #[cfg_attr(
         not(test),
         allow(
@@ -405,7 +437,9 @@ impl StoreCoordinator {
             reason = "typed scan persistence is integrated by the later scan task slice"
         )
     )]
-    fn lock_current_history_connection(&self) -> Result<HistoryConnectionGuard<'_>, HistoryError> {
+    pub(super) fn lock_current_history_connection(
+        &self,
+    ) -> Result<HistoryConnectionGuard<'_>, HistoryError> {
         let connection = self
             .connection
             .lock()
@@ -474,7 +508,7 @@ impl StoreCoordinator {
         reason = "typed scan persistence is integrated by the later scan task slice"
     )
 )]
-fn map_history_database_error(error: DatabaseOpenError) -> HistoryError {
+pub(super) fn map_history_database_error(error: DatabaseOpenError) -> HistoryError {
     let kind = match error.kind {
         DatabaseOpenErrorKind::Busy => HistoryErrorKind::Busy,
         DatabaseOpenErrorKind::CorruptDatabase | DatabaseOpenErrorKind::UnrecognizedDatabase => {

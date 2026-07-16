@@ -1,0 +1,986 @@
+//! Cleanup-lock-coupled access to the mutable operation journal.
+//!
+//! The raw SQL state machine lives in the parent module and is reachable only
+//! through these non-cloneable wrappers. Holding a claim proves process/store
+//! exclusion and an exact database owner generation; it still grants no path,
+//! plan, approval, or filesystem-effect authority.
+
+use std::cell::Cell;
+use std::fmt;
+use std::marker::PhantomData;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
+
+use rusqlite::{Transaction, TransactionBehavior};
+
+use super::{
+    ActivePhase, CleanupJournal, EffectOutcome, ExecutionFence, JournalLifecycle, PathStatus,
+    ReconciledOutcome, RecoveryAssessment, TerminalSessionStatus, ValidationOutcome,
+    assess_recovery, begin_path_validation, cancel_effect_before_call, claim_planned,
+    claim_recovery, finish_effect, finish_path_validation, load_cleanup_journal,
+    mark_effect_started, reconcile_unknown_outcome, record_heartbeat, request_cancellation,
+    resume_recovery, settle_cancellation, terminalize,
+};
+use crate::persistence::cleanup_history::CleanupSessionId;
+use crate::persistence::history::{
+    HistoryError, HistoryErrorKind, system_time_to_unix_ms, unix_ms_to_system_time,
+};
+use crate::persistence::process_liveness::{
+    ProcessIdentityError, ProcessInstanceId, current_process_instance,
+};
+use crate::persistence::storage::CleanupLockGuard;
+use crate::persistence::store::StoreCoordinator;
+
+/// A held store-wide cleanup lock before a journal owner has been claimed.
+///
+/// The lease is deliberately non-cloneable and dropping it performs no journal
+/// write. A crashed or abandoned active owner remains recoverable only through
+/// the conservative process-liveness protocol.
+pub(in crate::persistence) struct CleanupJournalLease {
+    guard: CleanupLockGuard,
+    store: Arc<StoreCoordinator>,
+    owner: ProcessInstanceId,
+    // Claims may move to an engine worker but must not be shared concurrently.
+    // The future engine-level cleanup mutex remains a separate outer boundary.
+    _not_sync: PhantomData<Cell<()>>,
+}
+
+/// One exact active owner generation bound to the held cleanup lock.
+pub(in crate::persistence) struct CleanupJournalClaim {
+    lease: CleanupJournalLease,
+    fence: ExecutionFence,
+    phase: ActivePhase,
+    pending_effect_start: Cell<Option<PendingEffectStart>>,
+    #[cfg(test)]
+    test_fault: Cell<TestJournalFault>,
+}
+
+pub(in crate::persistence) enum RecoveryClaimResult {
+    Claimed(Box<CleanupJournalClaim>),
+    OwnerAlive,
+    LivenessUnknown,
+    NotRecoverable,
+}
+
+enum RecoveryDecision {
+    Claimed(ExecutionFence),
+    OwnerAlive,
+    LivenessUnknown,
+    NotRecoverable,
+}
+
+/// A failed owner-claim attempt retains the cleanup lease so an ambiguous
+/// commit can be reconciled without abandoning a live owner in the database.
+#[must_use = "retain the lease and reconcile or deliberately release it"]
+pub(in crate::persistence) struct JournalLeaseFailure {
+    lease: CleanupJournalLease,
+    error: HistoryError,
+}
+
+impl JournalLeaseFailure {
+    pub(super) fn kind(&self) -> HistoryErrorKind {
+        self.error.kind
+    }
+
+    pub(super) fn into_lease(self) -> CleanupJournalLease {
+        self.lease
+    }
+}
+
+impl fmt::Debug for JournalLeaseFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("JournalLeaseFailure")
+            .field("error", &self.error)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Durable pre-effect journal receipt. It is evidence of ordering only and is
+/// not target identity, validation, approval, or effect authority.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::persistence) struct EffectStartReceipt {
+    fence: ExecutionFence,
+    item_ordinal: usize,
+    path_ordinal: usize,
+    ordered_at: SystemTime,
+    started_at: SystemTime,
+}
+
+#[derive(Clone, Copy)]
+struct PendingEffectStart {
+    item_ordinal: usize,
+    path_ordinal: usize,
+    ordered_at: SystemTime,
+}
+
+struct JournalWriteFailure {
+    error: HistoryError,
+    may_have_committed: bool,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TestJournalFault {
+    None,
+    FailAfterCommitThenReconcileRead,
+    FailReconcileRead,
+}
+
+impl StoreCoordinator {
+    pub(super) fn acquire_cleanup_journal_lease(
+        self: &Arc<Self>,
+        timeout: Duration,
+    ) -> Result<CleanupJournalLease, HistoryError> {
+        let guard = self.acquire_cleanup_lock_for_journal(timeout)?;
+        self.validate_cleanup_lock_for_journal(&guard)?;
+        let owner = current_process_instance().map_err(map_process_identity_error)?;
+        Ok(CleanupJournalLease {
+            guard,
+            store: Arc::clone(self),
+            owner,
+            _not_sync: PhantomData,
+        })
+    }
+}
+
+impl CleanupJournalLease {
+    pub(super) fn load(
+        &self,
+        session_id: &CleanupSessionId,
+    ) -> Result<Option<CleanupJournal>, HistoryError> {
+        self.store.validate_cleanup_lock_for_journal(&self.guard)?;
+        let connection = self.store.lock_current_history_connection()?;
+        self.store.validate_cleanup_lock_for_journal(&self.guard)?;
+        load_cleanup_journal(&connection.connection, session_id)
+    }
+
+    pub(super) fn claim_planned(
+        self,
+        session_id: &CleanupSessionId,
+        claimed_at: SystemTime,
+    ) -> Result<CleanupJournalClaim, JournalLeaseFailure> {
+        let attempt = canonical_input_time(claimed_at).and_then(|expected_heartbeat| {
+            let owner = self.owner.clone();
+            let expected = ExecutionFence {
+                session_id: session_id.clone(),
+                owner: owner.clone(),
+                generation: 1,
+            };
+            match self.write(|transaction| {
+                let fence = claim_planned(transaction, session_id, owner, claimed_at)?;
+                let claimed = load_cleanup_journal(transaction, session_id)?
+                    .ok_or_else(|| HistoryError::new(HistoryErrorKind::NotFound))?;
+                ensure_active(&claimed, &fence, ActivePhase::Running)?;
+                Ok(fence)
+            }) {
+                Ok(fence) => Ok(fence),
+                Err(error) => {
+                    // A commit error or post-commit storage failure is
+                    // outcome-ambiguous. The lease's random owner is unique,
+                    // so this exact state can only be our committed claim.
+                    if self.load(session_id).ok().flatten().is_some_and(|journal| {
+                        active_matches(
+                            &journal,
+                            &expected,
+                            ActivePhase::Running,
+                            Some(expected_heartbeat),
+                            Some(false),
+                        )
+                    }) {
+                        Ok(expected)
+                    } else {
+                        Err(error)
+                    }
+                }
+            }
+        });
+        match attempt {
+            Ok(fence) => Ok(CleanupJournalClaim {
+                lease: self,
+                fence,
+                phase: ActivePhase::Running,
+                pending_effect_start: Cell::new(None),
+                #[cfg(test)]
+                test_fault: Cell::new(TestJournalFault::None),
+            }),
+            Err(error) => Err(JournalLeaseFailure { lease: self, error }),
+        }
+    }
+
+    /// Attempt same-scope recovery while retaining the cleanup lock but never
+    /// a database connection during the operating-system liveness probe.
+    pub(super) fn try_recover(
+        self,
+        session_id: &CleanupSessionId,
+        claimed_at: SystemTime,
+    ) -> Result<RecoveryClaimResult, JournalLeaseFailure> {
+        let decision = canonical_input_time(claimed_at).and_then(|expected_heartbeat| {
+            let Some(snapshot) = self.load(session_id)? else {
+                return Ok(RecoveryDecision::NotRecoverable);
+            };
+            let JournalLifecycle::Active {
+                phase,
+                fence: observed_fence,
+                heartbeat_at: _,
+                cancellation_requested,
+            } = &snapshot.lifecycle
+            else {
+                return Ok(RecoveryDecision::NotRecoverable);
+            };
+            // Retry reconciliation after an ambiguous recovery commit. This
+            // lease's owner nonce cannot have been selected by another claim.
+            if observed_fence.owner == self.owner && *phase == ActivePhase::Recovering {
+                return Ok(RecoveryDecision::Claimed(observed_fence.clone()));
+            }
+            match assess_recovery(&snapshot)? {
+                RecoveryAssessment::OwnerAlive => Ok(RecoveryDecision::OwnerAlive),
+                RecoveryAssessment::LivenessUnknown => Ok(RecoveryDecision::LivenessUnknown),
+                RecoveryAssessment::Recoverable(permit) => {
+                    let expected = ExecutionFence {
+                        session_id: session_id.clone(),
+                        owner: self.owner.clone(),
+                        generation: observed_fence.generation.checked_add(1).ok_or_else(|| {
+                            HistoryError::new(HistoryErrorKind::InvalidTransition)
+                        })?,
+                    };
+                    let owner = self.owner.clone();
+                    match self
+                        .write(|transaction| claim_recovery(transaction, permit, owner, claimed_at))
+                    {
+                        Ok(fence) => Ok(RecoveryDecision::Claimed(fence)),
+                        Err(error) => {
+                            if self.load(session_id).ok().flatten().is_some_and(|journal| {
+                                active_matches(
+                                    &journal,
+                                    &expected,
+                                    ActivePhase::Recovering,
+                                    Some(expected_heartbeat),
+                                    Some(*cancellation_requested),
+                                )
+                            }) {
+                                Ok(RecoveryDecision::Claimed(expected))
+                            } else {
+                                Err(error)
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        match decision {
+            Ok(RecoveryDecision::Claimed(fence)) => Ok(RecoveryClaimResult::Claimed(Box::new(
+                CleanupJournalClaim {
+                    lease: self,
+                    fence,
+                    phase: ActivePhase::Recovering,
+                    pending_effect_start: Cell::new(None),
+                    #[cfg(test)]
+                    test_fault: Cell::new(TestJournalFault::None),
+                },
+            ))),
+            Ok(RecoveryDecision::OwnerAlive) => Ok(RecoveryClaimResult::OwnerAlive),
+            Ok(RecoveryDecision::LivenessUnknown) => Ok(RecoveryClaimResult::LivenessUnknown),
+            Ok(RecoveryDecision::NotRecoverable) => Ok(RecoveryClaimResult::NotRecoverable),
+            Err(error) => Err(JournalLeaseFailure { lease: self, error }),
+        }
+    }
+
+    fn write<T>(
+        &self,
+        operation: impl FnOnce(&Transaction<'_>) -> Result<T, HistoryError>,
+    ) -> Result<T, HistoryError> {
+        self.write_classified(operation)
+            .map_err(|failure| failure.error)
+    }
+
+    fn write_classified<T>(
+        &self,
+        operation: impl FnOnce(&Transaction<'_>) -> Result<T, HistoryError>,
+    ) -> Result<T, JournalWriteFailure> {
+        self.store
+            .validate_cleanup_lock_for_journal(&self.guard)
+            .map_err(definite_write_failure)?;
+        let mut connection = self
+            .store
+            .lock_current_history_connection()
+            .map_err(definite_write_failure)?;
+        // Connection and writer acquisition may wait. Revalidate the retained
+        // cleanup control after that wait and before BEGIN IMMEDIATE.
+        self.store
+            .validate_cleanup_lock_for_journal(&self.guard)
+            .map_err(definite_write_failure)?;
+        let transaction = connection
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(super::map_write_sql_error)
+            .map_err(definite_write_failure)?;
+        let output = operation(&transaction).map_err(definite_write_failure)?;
+        self.store
+            .validate_cleanup_lock_for_journal(&self.guard)
+            .map_err(definite_write_failure)?;
+        transaction
+            .commit()
+            .map_err(super::map_write_sql_error)
+            .map_err(ambiguous_write_failure)?;
+        drop(connection);
+        self.store
+            .validate_history_storage_after_write()
+            .map_err(ambiguous_write_failure)?;
+        Ok(output)
+    }
+}
+
+impl CleanupJournalClaim {
+    #[cfg(test)]
+    pub(super) fn fail_next_write_after_commit_and_reconcile_read_for_test(&self) {
+        assert_eq!(self.test_fault.get(), TestJournalFault::None);
+        self.test_fault
+            .set(TestJournalFault::FailAfterCommitThenReconcileRead);
+    }
+
+    pub(super) fn snapshot(&self) -> Result<CleanupJournal, HistoryError> {
+        #[cfg(test)]
+        if self.test_fault.get() == TestJournalFault::FailReconcileRead {
+            self.test_fault.set(TestJournalFault::None);
+            return Err(HistoryError::new(HistoryErrorKind::DatabaseUnavailable));
+        }
+        self.lease
+            .load(&self.fence.session_id)?
+            .ok_or_else(|| HistoryError::new(HistoryErrorKind::NotFound))
+    }
+
+    pub(super) fn heartbeat(&self, heartbeat_at: SystemTime) -> Result<(), HistoryError> {
+        let heartbeat_at = canonical_input_time(heartbeat_at)?;
+        match self
+            .write_active(|transaction| record_heartbeat(transaction, &self.fence, heartbeat_at))
+        {
+            Ok(()) => Ok(()),
+            Err(_)
+                if self.snapshot().ok().is_some_and(|journal| {
+                    active_matches(&journal, &self.fence, self.phase, Some(heartbeat_at), None)
+                }) =>
+            {
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    pub(super) fn request_cancellation(&self) -> Result<(), HistoryError> {
+        match self.write_active(|transaction| request_cancellation(transaction, &self.fence)) {
+            Ok(()) => Ok(()),
+            Err(_)
+                if self.snapshot().ok().is_some_and(|journal| {
+                    active_matches(&journal, &self.fence, self.phase, None, Some(true))
+                }) =>
+            {
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    pub(super) fn begin_validation(
+        &self,
+        item_ordinal: usize,
+        path_ordinal: usize,
+    ) -> Result<(), HistoryError> {
+        self.require_phase(ActivePhase::Running)?;
+        let write = self.write_active(|transaction| {
+            begin_path_validation(transaction, &self.fence, item_ordinal, path_ordinal)
+        });
+        reconcile_unit_path_write(
+            self,
+            write,
+            item_ordinal,
+            path_ordinal,
+            PathExpectation {
+                status: PathStatus::Validating,
+                effect_started_at: None,
+                completed_at: None,
+                error_category: None,
+                exact_error: true,
+            },
+        )
+    }
+
+    pub(super) fn finish_validation(
+        &self,
+        item_ordinal: usize,
+        path_ordinal: usize,
+        outcome: ValidationOutcome,
+        error_category: Option<&str>,
+        completed_at: SystemTime,
+    ) -> Result<(), HistoryError> {
+        self.require_phase(ActivePhase::Running)?;
+        let completed_at = canonical_input_time(completed_at)?;
+        let write = self.write_active(|transaction| {
+            finish_path_validation(
+                transaction,
+                &self.fence,
+                item_ordinal,
+                path_ordinal,
+                outcome,
+                error_category,
+                completed_at,
+            )
+        });
+        reconcile_unit_path_write(
+            self,
+            write,
+            item_ordinal,
+            path_ordinal,
+            PathExpectation {
+                status: PathStatus::from(outcome),
+                effect_started_at: None,
+                completed_at: Some(completed_at),
+                error_category,
+                exact_error: true,
+            },
+        )
+    }
+
+    pub(super) fn mark_effect_started(
+        &self,
+        item_ordinal: usize,
+        path_ordinal: usize,
+        started_at: SystemTime,
+    ) -> Result<EffectStartReceipt, HistoryError> {
+        self.require_phase(ActivePhase::Running)?;
+        let pending = self.pending_effect_start.get();
+        if pending.is_some_and(|pending| {
+            pending.item_ordinal != item_ordinal || pending.path_ordinal != path_ordinal
+        }) {
+            return Err(HistoryError::new(HistoryErrorKind::InvalidTransition));
+        }
+        let ordered_at = pending.map_or(started_at, |pending| pending.ordered_at);
+        let persisted_started_at = canonical_input_time(ordered_at)?;
+        let write = self.write_active_classified(|transaction| {
+            mark_effect_started(
+                transaction,
+                &self.fence,
+                item_ordinal,
+                path_ordinal,
+                ordered_at,
+            )
+        });
+        let receipt = EffectStartReceipt {
+            fence: self.fence.clone(),
+            item_ordinal,
+            path_ordinal,
+            ordered_at,
+            started_at: persisted_started_at,
+        };
+        match write {
+            Ok(()) => {
+                self.pending_effect_start.set(None);
+                Ok(receipt)
+            }
+            Err(failure) if pending.is_some() || failure.may_have_committed => {
+                self.pending_effect_start.set(Some(PendingEffectStart {
+                    item_ordinal,
+                    path_ordinal,
+                    ordered_at,
+                }));
+                match self.reconcile_effect_start(item_ordinal, path_ordinal, ordered_at) {
+                    Ok(receipt) => {
+                        self.pending_effect_start.set(None);
+                        Ok(receipt)
+                    }
+                    Err(_) => Err(failure.error),
+                }
+            }
+            Err(failure) => Err(failure.error),
+        }
+    }
+
+    /// Reconcile an ambiguous pre-effect commit. A receipt is returned only if
+    /// the exact current owner/generation/path row proves the intended durable
+    /// `EffectStarted` state. No filesystem effect is attempted here.
+    fn reconcile_effect_start(
+        &self,
+        item_ordinal: usize,
+        path_ordinal: usize,
+        started_at: SystemTime,
+    ) -> Result<EffectStartReceipt, HistoryError> {
+        self.require_phase(ActivePhase::Running)?;
+        let ordered_at = started_at;
+        let started_at = canonical_input_time(started_at)?;
+        let journal = self.snapshot()?;
+        ensure_active(&journal, &self.fence, self.phase)?;
+        let path = journal_path(&journal, item_ordinal, path_ordinal)?;
+        if path.status != PathStatus::EffectStarted
+            || path.attempt_generation != Some(self.fence.generation)
+            || path.effect_started_at != Some(started_at)
+            || path.completed_at.is_some()
+        {
+            return Err(HistoryError::new(HistoryErrorKind::InvalidTransition));
+        }
+        self.lease
+            .store
+            .validate_cleanup_lock_for_journal(&self.lease.guard)?;
+        Ok(EffectStartReceipt {
+            fence: self.fence.clone(),
+            item_ordinal,
+            path_ordinal,
+            ordered_at,
+            started_at,
+        })
+    }
+
+    /// Revalidate the exact durable receipt and cleanup control immediately
+    /// before a future centralized executor performs the operating-system call.
+    pub(super) fn revalidate_effect_receipt(
+        &self,
+        receipt: &EffectStartReceipt,
+    ) -> Result<(), HistoryError> {
+        self.validate_receipt(receipt)?;
+        let journal = self.snapshot()?;
+        if !active_matches(
+            &journal,
+            &self.fence,
+            ActivePhase::Running,
+            None,
+            Some(false),
+        ) {
+            return Err(HistoryError::new(HistoryErrorKind::InvalidTransition));
+        }
+        let path = journal_path(&journal, receipt.item_ordinal, receipt.path_ordinal)?;
+        if path.status != PathStatus::EffectStarted
+            || path.attempt_generation != Some(self.fence.generation)
+            || path.effect_started_at != Some(receipt.started_at)
+        {
+            return Err(HistoryError::new(HistoryErrorKind::InvalidTransition));
+        }
+        // This is deliberately the last operation. The future executor must
+        // call its reviewed effect primitive immediately after it returns.
+        self.lease
+            .store
+            .validate_cleanup_lock_for_journal(&self.lease.guard)
+    }
+
+    /// Settle a durable effect intent after cancellation wins final
+    /// revalidation and before the caller invokes the OS primitive.
+    pub(super) fn cancel_effect_before_call(
+        &self,
+        receipt: &EffectStartReceipt,
+        completed_at: SystemTime,
+    ) -> Result<(), HistoryError> {
+        self.validate_receipt(receipt)?;
+        self.require_phase(ActivePhase::Running)?;
+        if completed_at < receipt.ordered_at {
+            return Err(HistoryError::new(HistoryErrorKind::InvalidTransition));
+        }
+        let completed_at = canonical_input_time(completed_at)?;
+        let write = self.write_active(|transaction| {
+            cancel_effect_before_call(
+                transaction,
+                &self.fence,
+                receipt.item_ordinal,
+                receipt.path_ordinal,
+                completed_at,
+            )
+        });
+        reconcile_unit_path_write(
+            self,
+            write,
+            receipt.item_ordinal,
+            receipt.path_ordinal,
+            PathExpectation {
+                status: PathStatus::Interrupted,
+                effect_started_at: None,
+                completed_at: Some(completed_at),
+                error_category: None,
+                exact_error: true,
+            },
+        )
+    }
+
+    pub(super) fn finish_effect(
+        &mut self,
+        receipt: &EffectStartReceipt,
+        outcome: EffectOutcome,
+        error_category: Option<&str>,
+        completed_at: SystemTime,
+    ) -> Result<(), HistoryError> {
+        self.validate_receipt(receipt)?;
+        self.require_phase(ActivePhase::Running)?;
+        if completed_at < receipt.ordered_at {
+            return Err(HistoryError::new(HistoryErrorKind::InvalidTransition));
+        }
+        let completed_at = canonical_input_time(completed_at)?;
+        let write = self.write_active(|transaction| {
+            finish_effect(
+                transaction,
+                &self.fence,
+                receipt.item_ordinal,
+                receipt.path_ordinal,
+                outcome,
+                error_category,
+                completed_at,
+            )
+        });
+        if let Err(error) = write {
+            let reconciled = self.snapshot().ok().map(|journal| {
+                let expected_phase = if outcome == EffectOutcome::OutcomeUnknown {
+                    ActivePhase::Recovering
+                } else {
+                    ActivePhase::Running
+                };
+                ensure_active(&journal, &self.fence, expected_phase)
+                    .ok()
+                    .and_then(|()| {
+                        journal_path(&journal, receipt.item_ordinal, receipt.path_ordinal).ok()
+                    })
+                    .is_some_and(|path| {
+                        path.status == effect_outcome_status(outcome)
+                            && path.attempt_generation == Some(self.fence.generation)
+                            && path.effect_started_at == Some(receipt.started_at)
+                            && path.completed_at == Some(completed_at)
+                            && path.error_category.as_deref() == error_category
+                    })
+            });
+            if reconciled != Some(true) {
+                return Err(error);
+            }
+        }
+        if outcome == EffectOutcome::OutcomeUnknown {
+            self.phase = ActivePhase::Recovering;
+        }
+        Ok(())
+    }
+
+    pub(super) fn reconcile_unknown(
+        &self,
+        item_ordinal: usize,
+        path_ordinal: usize,
+        outcome: ReconciledOutcome,
+        error_category: Option<&str>,
+        completed_at: SystemTime,
+    ) -> Result<(), HistoryError> {
+        self.require_phase(ActivePhase::Recovering)?;
+        let completed_at = canonical_input_time(completed_at)?;
+        let effect_started_at = journal_path(&self.snapshot()?, item_ordinal, path_ordinal)?
+            .effect_started_at
+            .ok_or_else(|| HistoryError::new(HistoryErrorKind::InvalidTransition))?;
+        let write = self.write_active(|transaction| {
+            reconcile_unknown_outcome(
+                transaction,
+                &self.fence,
+                item_ordinal,
+                path_ordinal,
+                outcome,
+                error_category,
+                completed_at,
+            )
+        });
+        reconcile_unit_path_write(
+            self,
+            write,
+            item_ordinal,
+            path_ordinal,
+            PathExpectation {
+                status: PathStatus::from(outcome),
+                effect_started_at: Some(effect_started_at),
+                completed_at: Some(completed_at),
+                error_category,
+                exact_error: true,
+            },
+        )
+    }
+
+    pub(super) fn settle_cancellation(&self, completed_at: SystemTime) -> Result<(), HistoryError> {
+        let completed_at = canonical_input_time(completed_at)?;
+        match self
+            .write_active(|transaction| settle_cancellation(transaction, &self.fence, completed_at))
+        {
+            Ok(()) => Ok(()),
+            Err(_)
+                if self.snapshot().ok().is_some_and(|journal| {
+                    active_matches(&journal, &self.fence, self.phase, None, Some(true))
+                        && !journal
+                            .items
+                            .iter()
+                            .flat_map(|item| &item.paths)
+                            .any(|path| {
+                                matches!(path.status, PathStatus::Planned | PathStatus::Validating)
+                            })
+                }) =>
+            {
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    pub(super) fn resume_recovery(&mut self) -> Result<(), HistoryError> {
+        self.require_phase(ActivePhase::Recovering)?;
+        if self.snapshot().ok().is_some_and(|journal| {
+            active_matches(
+                &journal,
+                &self.fence,
+                ActivePhase::Running,
+                None,
+                Some(false),
+            )
+        }) {
+            self.phase = ActivePhase::Running;
+            return Ok(());
+        }
+        match self.write_active(|transaction| resume_recovery(transaction, &self.fence)) {
+            Ok(()) => {
+                self.phase = ActivePhase::Running;
+                Ok(())
+            }
+            Err(_)
+                if self.snapshot().ok().is_some_and(|journal| {
+                    active_matches(
+                        &journal,
+                        &self.fence,
+                        ActivePhase::Running,
+                        None,
+                        Some(false),
+                    )
+                }) =>
+            {
+                self.phase = ActivePhase::Running;
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    pub(super) fn terminalize(
+        &mut self,
+        completed_at: SystemTime,
+        verified_capacity_delta_bytes: Option<i64>,
+    ) -> Result<TerminalSessionStatus, HistoryError> {
+        let completed_at = canonical_input_time(completed_at)?;
+        if let Some(status) = reconciled_terminal(
+            self.snapshot().ok().as_ref(),
+            &self.fence,
+            completed_at,
+            verified_capacity_delta_bytes,
+        ) {
+            return Ok(status);
+        }
+        match self.write_active(|transaction| {
+            terminalize(
+                transaction,
+                &self.fence,
+                completed_at,
+                verified_capacity_delta_bytes,
+            )
+        }) {
+            Ok(status) => Ok(status),
+            Err(error) => reconciled_terminal(
+                self.snapshot().ok().as_ref(),
+                &self.fence,
+                completed_at,
+                verified_capacity_delta_bytes,
+            )
+            .ok_or(error),
+        }
+    }
+
+    fn write_active<T>(
+        &self,
+        operation: impl FnOnce(&Transaction<'_>) -> Result<T, HistoryError>,
+    ) -> Result<T, HistoryError> {
+        self.write_active_classified(operation)
+            .map_err(|failure| failure.error)
+    }
+
+    fn write_active_classified<T>(
+        &self,
+        operation: impl FnOnce(&Transaction<'_>) -> Result<T, HistoryError>,
+    ) -> Result<T, JournalWriteFailure> {
+        let result = self.lease.write_classified(|transaction| {
+            let journal = load_cleanup_journal(transaction, &self.fence.session_id)?
+                .ok_or_else(|| HistoryError::new(HistoryErrorKind::NotFound))?;
+            ensure_active(&journal, &self.fence, self.phase)?;
+            let output = operation(transaction)?;
+            load_cleanup_journal(transaction, &self.fence.session_id)?
+                .ok_or_else(|| HistoryError::new(HistoryErrorKind::NotFound))?;
+            Ok(output)
+        });
+        #[cfg(test)]
+        if result.is_ok()
+            && self.test_fault.get() == TestJournalFault::FailAfterCommitThenReconcileRead
+        {
+            self.test_fault.set(TestJournalFault::FailReconcileRead);
+            return Err(ambiguous_write_failure(HistoryError::new(
+                HistoryErrorKind::DatabaseUnavailable,
+            )));
+        }
+        result
+    }
+
+    fn require_phase(&self, expected: ActivePhase) -> Result<(), HistoryError> {
+        if self.phase == expected {
+            Ok(())
+        } else {
+            Err(HistoryError::new(HistoryErrorKind::InvalidTransition))
+        }
+    }
+
+    fn validate_receipt(&self, receipt: &EffectStartReceipt) -> Result<(), HistoryError> {
+        if receipt.fence == self.fence {
+            Ok(())
+        } else {
+            Err(HistoryError::new(HistoryErrorKind::InvalidTransition))
+        }
+    }
+}
+
+struct PathExpectation<'error> {
+    status: PathStatus,
+    effect_started_at: Option<SystemTime>,
+    completed_at: Option<SystemTime>,
+    error_category: Option<&'error str>,
+    exact_error: bool,
+}
+
+fn reconcile_unit_path_write(
+    claim: &CleanupJournalClaim,
+    write: Result<(), HistoryError>,
+    item_ordinal: usize,
+    path_ordinal: usize,
+    expected: PathExpectation<'_>,
+) -> Result<(), HistoryError> {
+    match write {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let reconciled = claim.snapshot().ok().is_some_and(|journal| {
+                active_matches(&journal, &claim.fence, claim.phase, None, None)
+                    && journal_path(&journal, item_ordinal, path_ordinal)
+                        .ok()
+                        .is_some_and(|path| {
+                            path.status == expected.status
+                                && path.attempt_generation == Some(claim.fence.generation)
+                                && path.effect_started_at == expected.effect_started_at
+                                && path.completed_at == expected.completed_at
+                                && (!expected.exact_error
+                                    || path.error_category.as_deref() == expected.error_category)
+                        })
+            });
+            if reconciled { Ok(()) } else { Err(error) }
+        }
+    }
+}
+
+fn canonical_input_time(value: SystemTime) -> Result<SystemTime, HistoryError> {
+    unix_ms_to_system_time(system_time_to_unix_ms(
+        value,
+        HistoryErrorKind::InvalidInput,
+    )?)
+}
+
+fn definite_write_failure(error: HistoryError) -> JournalWriteFailure {
+    JournalWriteFailure {
+        error,
+        may_have_committed: false,
+    }
+}
+
+fn ambiguous_write_failure(error: HistoryError) -> JournalWriteFailure {
+    JournalWriteFailure {
+        error,
+        may_have_committed: true,
+    }
+}
+
+fn active_matches(
+    journal: &CleanupJournal,
+    fence: &ExecutionFence,
+    phase: ActivePhase,
+    heartbeat_at: Option<SystemTime>,
+    cancellation_requested: Option<bool>,
+) -> bool {
+    matches!(
+        journal.lifecycle,
+        JournalLifecycle::Active {
+            phase: loaded_phase,
+            fence: ref loaded_fence,
+            heartbeat_at: loaded_heartbeat,
+            cancellation_requested: loaded_cancellation,
+        } if loaded_phase == phase
+            && loaded_fence == fence
+            && heartbeat_at.is_none_or(|expected| loaded_heartbeat == expected)
+            && cancellation_requested.is_none_or(|expected| loaded_cancellation == expected)
+    )
+}
+
+fn reconciled_terminal(
+    journal: Option<&CleanupJournal>,
+    fence: &ExecutionFence,
+    completed_at: SystemTime,
+    verified_capacity_delta_bytes: Option<i64>,
+) -> Option<TerminalSessionStatus> {
+    let JournalLifecycle::Terminal {
+        status,
+        fence: loaded_fence,
+        completed_at: loaded_completed_at,
+        verified_capacity_delta_bytes: loaded_delta,
+        ..
+    } = &journal?.lifecycle
+    else {
+        return None;
+    };
+    (*loaded_fence == *fence
+        && *loaded_completed_at == completed_at
+        && *loaded_delta == verified_capacity_delta_bytes)
+        .then_some(*status)
+}
+
+fn ensure_active(
+    journal: &CleanupJournal,
+    fence: &ExecutionFence,
+    phase: ActivePhase,
+) -> Result<(), HistoryError> {
+    if matches!(
+        journal.lifecycle,
+        JournalLifecycle::Active {
+            phase: loaded_phase,
+            fence: ref loaded_fence,
+            ..
+        } if loaded_phase == phase && loaded_fence == fence
+    ) {
+        Ok(())
+    } else {
+        Err(HistoryError::new(HistoryErrorKind::InvalidTransition))
+    }
+}
+
+fn journal_path(
+    journal: &CleanupJournal,
+    item_ordinal: usize,
+    path_ordinal: usize,
+) -> Result<&super::JournalPath, HistoryError> {
+    journal
+        .items
+        .get(item_ordinal)
+        .and_then(|item| item.paths.get(path_ordinal))
+        .ok_or_else(|| HistoryError::new(HistoryErrorKind::InvalidInput))
+}
+
+fn map_process_identity_error(error: ProcessIdentityError) -> HistoryError {
+    let kind = match error {
+        ProcessIdentityError::InvalidEncoding => HistoryErrorKind::InternalState,
+        ProcessIdentityError::ObservationUnavailable | ProcessIdentityError::RandomUnavailable => {
+            HistoryErrorKind::DatabaseUnavailable
+        }
+    };
+    HistoryError::new(kind)
+}
+
+fn effect_outcome_status(outcome: EffectOutcome) -> PathStatus {
+    match outcome {
+        EffectOutcome::Trashed => PathStatus::Trashed,
+        EffectOutcome::Removed => PathStatus::Removed,
+        EffectOutcome::Evicted => PathStatus::Evicted,
+        EffectOutcome::Failed => PathStatus::Failed,
+        EffectOutcome::OutcomeUnknown => PathStatus::OutcomeUnknown,
+    }
+}

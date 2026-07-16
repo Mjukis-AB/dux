@@ -658,6 +658,65 @@ fn decode_planned_session(
     {
         return Err(corrupt());
     }
+    decode_frozen_session(connection, common, raw, true, true)
+}
+
+/// Decode the immutable format-2 plan facts without interpreting mutable
+/// journal columns. The journal decoder calls this inside its own bounded
+/// query, then validates every session/item/path lifecycle column separately.
+/// Candidate retention must not make crash recovery impossible, so only the
+/// pristine planned reader requires the current candidate rows to match.
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "execution-state journal integration is crate-private until the executor slice"
+    )
+)]
+pub(super) fn load_frozen_cleanup_session_within_budget(
+    connection: &Connection,
+    id: &CleanupSessionId,
+    require_candidate_match: bool,
+) -> Result<Option<PlannedCleanupSessionRecord>, HistoryError> {
+    let raw = connection
+        .query_row(
+            "SELECT record_format_version,
+                    typeof(session_id), length(CAST(session_id AS BLOB)), session_id,
+                    typeof(plan_id), length(CAST(plan_id AS BLOB)), plan_id,
+                    started_at_unix_ms, completed_at_unix_ms,
+                    typeof(mode), length(CAST(mode AS BLOB)), mode,
+                    estimated_bytes, verified_capacity_delta_bytes,
+                    typeof(trigger_source), length(CAST(trigger_source AS BLOB)), trigger_source,
+                    typeof(status), length(CAST(status AS BLOB)), status,
+                    typeof(source_scan_id), length(CAST(source_scan_id AS BLOB)), source_scan_id,
+                    plan_created_at_unix_seconds, plan_created_at_nanoseconds,
+                    plan_expires_at_unix_seconds, plan_expires_at_nanoseconds,
+                    typeof(execution_owner_id), length(CAST(execution_owner_id AS BLOB)),
+                    execution_owner_id, execution_generation, last_heartbeat_at_unix_ms,
+                    cancellation_requested
+             FROM cleanup_sessions WHERE session_id = ?1",
+            [id.as_str()],
+            raw_session_row,
+        )
+        .optional()
+        .map_err(map_query_sql_error)?;
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    if raw.record_format_version != 2 {
+        return Err(corrupt());
+    }
+    let common = decode_session_common(&raw)?;
+    decode_frozen_session(connection, common, &raw, false, require_candidate_match).map(Some)
+}
+
+fn decode_frozen_session(
+    connection: &Connection,
+    common: DecodedSessionCommon,
+    raw: &RawSessionRow,
+    require_pristine_children: bool,
+    require_candidate_match: bool,
+) -> Result<PlannedCleanupSessionRecord, HistoryError> {
     let source_scan_id =
         ScanId::new(raw.source_scan_id.clone().ok_or_else(corrupt)?).map_err(|_| corrupt())?;
     let plan_created_at =
@@ -683,7 +742,13 @@ fn decode_planned_session(
     if scan_exists.is_none() {
         return Err(corrupt());
     }
-    let items = load_planned_items(connection, &common.session_id, &source_scan_id)?;
+    let items = load_v2_items(
+        connection,
+        &common.session_id,
+        &source_scan_id,
+        require_pristine_children,
+        require_candidate_match,
+    )?;
     if items
         .iter()
         .any(|item| !mode_accepts(common.mode, item.safety, item.proposed_action))
@@ -818,10 +883,12 @@ fn ensure_no_v2_cleanup_children(
     Ok(())
 }
 
-fn load_planned_items(
+fn load_v2_items(
     connection: &Connection,
     session_id: &CleanupSessionId,
     source_scan_id: &ScanId,
+    require_pristine: bool,
+    require_candidate_match: bool,
 ) -> Result<Vec<PlannedCleanupItemRecord>, HistoryError> {
     let mut statement = connection
         .prepare(
@@ -876,8 +943,7 @@ fn load_planned_items(
         let legacy_path: Option<Vec<u8>> = row.get(15).map_err(map_query_sql_error)?;
         let legacy_encoding: Option<i64> = row.get(16).map_err(map_query_sql_error)?;
         if version != 2
-            || status != "planned"
-            || error.is_some()
+            || (require_pristine && (status != "planned" || error.is_some()))
             || legacy_path.is_some()
             || legacy_encoding.is_some()
         {
@@ -899,7 +965,13 @@ fn load_planned_items(
             action_from_stored(&row.get::<_, String>(28).map_err(map_query_sql_error)?)?;
         let schedule = stored_bool(row.get(29).map_err(map_query_sql_error)?)?;
         validate_policy(safety, proposed_action, schedule, corrupt)?;
-        let paths = load_planned_paths(connection, session_id, items.len(), &mut total_paths)?;
+        let paths = load_v2_paths(
+            connection,
+            session_id,
+            items.len(),
+            &mut total_paths,
+            require_pristine,
+        )?;
         let evidence =
             load_item_evidence(connection, session_id, items.len(), &mut total_evidence)?;
         validate_complete_children(safety, proposed_action, &paths, &evidence)?;
@@ -919,7 +991,9 @@ fn load_planned_items(
             proposed_action,
             rule_schedule_eligible: schedule,
         };
-        ensure_loaded_item_matches_candidate(connection, &item, source_scan_id)?;
+        if require_candidate_match {
+            ensure_loaded_item_matches_candidate(connection, &item, source_scan_id)?;
+        }
         items.push(item);
     }
     if items.is_empty() {
@@ -962,11 +1036,12 @@ fn ensure_no_orphan_v2_children(
     Ok(())
 }
 
-fn load_planned_paths(
+fn load_v2_paths(
     connection: &Connection,
     session_id: &CleanupSessionId,
     item_ordinal: usize,
     total: &mut usize,
+    require_pristine: bool,
 ) -> Result<Vec<PathBuf>, HistoryError> {
     let mut statement = connection
         .prepare(
@@ -1001,11 +1076,12 @@ fn load_planned_paths(
         let error: Option<String> = row.get(11).map_err(map_query_sql_error)?;
         let effect: Option<i64> = row.get(12).map_err(map_query_sql_error)?;
         let completed: Option<i64> = row.get(13).map_err(map_query_sql_error)?;
-        if attempt.is_some()
-            || status != "planned"
-            || error.is_some()
-            || effect.is_some()
-            || completed.is_some()
+        if require_pristine
+            && (attempt.is_some()
+                || status != "planned"
+                || error.is_some()
+                || effect.is_some()
+                || completed.is_some())
         {
             return Err(corrupt());
         }

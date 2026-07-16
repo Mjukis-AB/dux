@@ -446,8 +446,9 @@ an effect.
 
 Because the current scoped token intentionally does not expose separate stable
 host provenance, a reboot changes scope and remains `Unknown`, just like a
-foreign host. Same-boot process death can feed the later fenced state machine;
-cross-reboot recovery requires an additional trusted local-host witness.
+foreign host. Same-boot process death now feeds the fenced journal state
+machine; cross-reboot recovery requires an additional trusted local-host
+witness.
 
 The implemented storage primitive retains one exact private
 `<database>.cleanup.lock` separately from the SQLite writer marker. A
@@ -462,8 +463,9 @@ repeat that check immediately before each effect. Windows retains both cleanup
 controls without delete sharing so a locked file cannot be displaced. Unix
 continues to rely on identity revalidation and the documented same-user storage
 boundary. This guard is storage exclusion only—not a lease owner, approval,
-recovery witness, plan capability, or effect capability—and is not yet coupled
-to cleanup journals or an executor.
+recovery witness, plan capability, or effect capability. The private journal
+lease now retains and revalidates it while separately proving owner/generation;
+it remains uncoupled from every executor.
 
 Where the platform supports it, permanent
 removal uses descriptor-relative or handle-relative operations tied to the
@@ -856,9 +858,10 @@ blockers. Cleanup sessions and item/path journals freeze the source scan, exact
 plan lifetime, policy/action, warnings, and proposed effect even when the mode
 is dry-run. Recovery fields distinguish owner generations, heartbeats,
 `effect_started`, and `outcome_unknown`; process death alone MUST NOT mark a
-session successful, failed, or interrupted. Future recovery updates must claim
-a new generation transactionally and compare-and-set every journal write
-against owner plus generation. All persisted facts remain historical
+session successful, failed, or interrupted. The private mutable-journal layer
+claims a new generation transactionally and compare-and-sets every journal
+write against owner plus generation while retaining the cleanup lock. All
+persisted facts remain historical
 observations: they are not canonical path witnesses, current evidence,
 approval, or executor capabilities, and they do not add an AI/history-to-plan
 authority edge.
@@ -890,27 +893,58 @@ and time/warning/estimate drift. It cannot reconstruct `CleanupPlan`, claim an
 execution owner, transition or recover a journal, or reach an effect.
 
 The storage layer also implements the permanent store-wide cleanup exclusion
-primitive required before execution-state journaling. Its immutable lock and
-ready control are exact root entries, provisioned for legacy owned stores only
-while the writer lock is held and flushed before the root-ownership marker's
-durable layout-v2 transition. Both are retained with private no-follow identity
+primitive used by execution-state journaling. Its immutable lock and ready
+control are exact root entries, provisioned for legacy owned stores only while
+the writer lock is held and flushed before the root-ownership marker's durable
+layout-v2 transition. Both are retained with private no-follow identity
 evidence and never recreated after that transition.
-The cleanup and writer locks remain independent so a future holder can perform
-short fenced journal transactions in the required cleanup-before-writer order.
-Same-process and subprocess tests prove bounded contention and release; native
-Windows handles deny delete sharing to prevent path replacement. No history,
-FFI, CLI, Swift, AI, plan, or effect API can obtain this guard yet.
+The cleanup and writer locks remain independent so the sealed journal lease
+performs short fenced transactions in the required cleanup-before-writer order;
+the future executor must preserve that ordering beneath its engine cleanup
+mutex. Same-process and subprocess tests prove bounded contention and release;
+native Windows handles deny delete sharing to prevent path replacement. No
+history, FFI, CLI, Swift, AI, plan, or effect API can obtain this guard; only
+the sealed mutable-journal lease couples it to an owner-generation claim.
 
 The separate process-instance module supplies only the liveness evidence
 described in §6.7. Its native Unix subprocess regressions distinguish an exact
 live owner from both graceful and abrupt death in one reliable boot scope;
 pure tests keep PID reuse, scope mismatch, malformed identities, and Windows'
-unscoped non-live observations fail closed. It is not yet coupled to the lock
-or stored cleanup owners. The next journal API must acquire and revalidate the
-cleanup guard first, then compare-and-set the exact owner and generation in a
-short transaction; `Alive` and `Unknown` must leave the journal unchanged.
-That first transition API must remain same-boot only; it cannot interpret a
+unscoped non-live observations fail closed. The mutable-journal lease now
+couples that evidence to the held cleanup lock and stored owner only after
+dropping all database locks: `DefinitelyGone` supplies a one-use in-memory
+permit whose stale phase, owner, generation, heartbeat, and cancellation bit
+must all match again in the recovery transaction. `Alive` and `Unknown` leave
+the journal unchanged. Recovery remains same-boot only and cannot interpret a
 changed scope as proof of reboot until stable host provenance is implemented.
+
+The implemented execution-state journal remains crate-private and performs no
+effect. Its non-cloneable, non-shareable lease acquires and revalidates the
+cleanup lock before the connection mutex, writer lock, and each short immediate
+transaction, then generates the only owner identity accepted for a new claim.
+A pristine, unexpired plan becomes generation one; every child update is also
+fenced through its exact parent owner and generation. Heartbeats are monotonic
+progress evidence, never expiry authority. Cancellation request, settlement,
+and terminal derivation are distinct, and terminal rows retain immutable
+owner-generation provenance. Failed or ambiguous capability-changing calls
+retain their lease/claim and reconcile exact typed post-state before retry.
+
+Before a future OS call, `effect_started` must commit durably and an exact typed
+receipt must be issued after that commit or ambiguity-reconciled, then
+revalidated against the complete journal graph, the absence of cancellation,
+and the retained cleanup control. The receipt
+uses the database's millisecond timestamp canonically while retaining its finer
+ordering instant, so completion cannot precede intent. Cancellation that wins
+this final boundary records a known no-call interruption and clears effect
+provenance. Commit ambiguity never authorizes retrying an OS effect. Recovery
+increments the generation in the same transaction that claims the stale row,
+resets `validating` paths to pristine `planned`, maps `effect_started` paths to
+`outcome_unknown` with their effect time preserved, and enters a recovery-only
+phase that forbids new validation or effects. Unknown outcomes must be
+explicitly reconciled before remaining planned work can resume. This is journal
+ordering evidence only: the future centralized executor must still supply
+current plan approval, trusted target witnesses, live safety revalidation, and
+the immediately following reviewed effect call.
 
 Compatibility inspection and migration have both SQLite-VM-operation ceilings
 and deadlines sampled every 1,000 VM operations by SQLite's progress callback.
@@ -1247,14 +1281,14 @@ incident as a substitute for deterministic local evidence.
 | Candidate and cleanup-plan records | Implemented as non-executable domain data | Connect only through deterministic evaluator and planner-owned witnesses |
 | macOS app cleanup | Absent | Entire cleanup release gate in §17.3 |
 | Legacy CLI deletion | Active arbitrary-descendant permanent path routed through a temporary core adapter; strict-target/volume/identity rechecks only; scanned-byte estimates labeled in CLI | Replace adapter with reviewed plan/approval/executor chain without weakening current checks |
-| Centralized executor | Production executor absent; temporary legacy adapter is containment only | Typed admission, cross-process lease, live revalidation, and journal required |
+| Centralized executor | Production executor absent; temporary legacy adapter is containment only | Typed admission, integration with the existing cross-process lease/journal, and live target revalidation required |
 | Engine/FFI task and plan API | Core handle, pre-worker SQLite compatibility handshake, and bounded per-session registry implemented for one read-only formatting batch; app architecture owns one session; UniFFI handle remains smoke-only, with no scan/task/plan DTOs or cleanup authority | FFI version rejection plus bounded scan/task/plan handles and cancellation |
-| SQLite compatibility store | Checksummed v1/v2 migrations with exact per-version fingerprints, lossless bounded path codec, bounded full/lightweight inspection, private atomic provisioning with durable initialization evidence, cross-platform process writer/version-race coverage, durable writer-locked cleanup-lock layout upgrade, private tri-state process-instance liveness evidence, newer-schema read-only transition, rollback/WAL recovery, crate-private typed scan and candidate history, explicit legacy summaries, and atomic bounded planned-cleanup insert/exact-ID load are implemented; stored paths and policy remain non-authoritative observations | Scan/evaluator/planner lifecycle integration, candidate status lifecycle, cleanup execution-state CRUD with ordinal and owner-generation validation, Windows host-scope proof, retention, reconciliation, and bounded identity-safe abandoned-stage maintenance |
+| SQLite compatibility store | Checksummed v1/v2 migrations with exact per-version fingerprints, lossless bounded path codec, bounded full/lightweight inspection, private atomic provisioning with durable initialization evidence, cross-platform process writer/version-race coverage, durable writer-locked cleanup-lock layout upgrade, private tri-state process-instance liveness evidence, newer-schema read-only transition, rollback/WAL recovery, crate-private typed scan/candidate/planned-cleanup history, and a bounded cleanup-lock-coupled owner-generation journal state machine are implemented; stored paths and policy remain non-authoritative observations | Scan/evaluator/planner lifecycle integration, candidate status lifecycle, Windows host-scope proof, retention, executor integration, and bounded identity-safe abandoned-stage maintenance |
 | Typed scan coverage/issues | Absent; current scanner counts/skips and permits relaxed flags | Required before any scan is described as complete or becomes plan input |
 | Cache semantic/input validation | Atomic write plus CRC/version only; full-file read before bounds | Bounded reads, tree/path semantics, private permissions, retention, and migration |
 | Hard-link accounting and policy | Absent; only non-authoritative path snapshots capture link count | Deduplicated scan accounting and explicit per-mode admission rules |
 | Forbidden destructive-call lint | Implemented with compiler-resolved Rust denial, cross-language repository scan, scoped annotations, self-tests, and CI | Keep exception set exact; remove legacy baseline during executor migration |
-| Durable operation journal/history | Schema plus typed immutable `planned` insert/load, a separate permanent store-wide cleanup OS lock, and private tri-state process-instance evidence are implemented; neither lock nor liveness has history/plan/effect authority and there is no execution owner, transition, lease coupling, or reconciliation | Cleanup-lock-coupled owner/generation fenced state machine, Windows host-scope proof, crash reconciliation, and executor integration required before shared executor ships |
+| Durable operation journal/history | Schema, typed immutable `planned` insert/load, permanent cleanup OS lock, tri-state process evidence, and a private cleanup-lock-coupled owner/generation state machine are implemented. It covers validation, durable effect intent, outcomes, cancellation, terminal derivation, same-scope death recovery, and explicit unknown reconciliation without performing an effect | Windows host-scope proof, cross-reboot policy, engine lifecycle and centralized-executor integration required before shared executor ships |
 | Private 0700/0600 stores | SQLite stage/final root, database, marker, and sidecars enforce ownership, no-follow identity, links, and Unix modes; macOS rejects final-object ACLs but accepts deny-only publication-parent ACLs; Windows uses exact protected DACLs plus handle-bound publication and a retained final-root rename guard; current binary cache remains non-private | Extend equivalent ownership and atomic-publication guarantees to snapshots, caches, logs, provider temp data, and bounded abandoned-stage maintenance |
 | Trash executor | Absent | Platform-native implementation and integration tests |
 | Cloud eviction | Absent | Supported API plus fully-uploaded/no-local-change evidence |

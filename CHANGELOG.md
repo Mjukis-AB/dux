@@ -5,6 +5,25 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Added a crate-private cleanup-lock-coupled operation-journal state machine.
+  A non-cloneable, non-shareable lease generates and owns the process identity,
+  claims pristine plans as generation one, and fences every heartbeat,
+  cancellation, validation, effect-intent, reconciliation, recovery, and
+  terminal transition by the exact owner and generation. Full bounded loads
+  validate the immutable plan and complete dynamic graph before use.
+  Same-scope recovery writes only after `DefinitelyGone`, exact-CASes the stale
+  claim, increments its generation, resets in-progress `validating` work, and
+  preserves interrupted effects as `outcome_unknown`; live and unknown owners
+  are journal-state no-ops.
+  Millisecond-canonical effect-start receipts retain finer ordering time, are
+  commit-issued or ambiguity-reconciled and cleanup-lock-revalidated, and
+  reject late cancellation before a future OS call. Failed capability changes
+  retain their lease/claim
+  for exact retry reconciliation; fault injection proves an ambiguous committed
+  effect intent cannot be retried with a substituted fine-grained timestamp.
+  No executor, filesystem effect, FFI, CLI, Swift, or AI authority is
+  introduced; focused regressions cover every outcome, cancellation,
+  corruption, lock exclusion, and native death recovery.
 - Added a crate-private, versioned process-instance identity and tri-state
   liveness probe as a prerequisite for cleanup-journal recovery. The bounded
   128-byte owner representation binds PID and OS start time to a hashed macOS
@@ -35,8 +54,9 @@ All notable changes to DUX will be documented in this file.
   even in dry-run mode. The exact-ID reader returns either an explicit legacy
   summary or a complete non-executable planned observation, rejects malformed
   or polluted children and newer schemas, and fits the shared query budget at
-  the 256-path/512-evidence limit. Execution, owner claims, recovery, and
-  journal transitions remain deliberately sealed.
+  the 256-path/512-evidence limit. This immutable history boundary itself
+  exposes no execution, owner, recovery, or transition authority; the separate
+  sealed mutable-journal layer is described above.
 - Added crate-private typed candidate history on SQLite schema v2. Complete
   deterministic findings are inserted atomically with ordered bounded paths,
   evidence, and blockers, then loaded only as non-executable observation

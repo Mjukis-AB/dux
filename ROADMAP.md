@@ -1976,9 +1976,11 @@ Tasks:
     reopen, all evidence and blocker variants, exhaustive mappings, legacy
     pollution, missing scans, duplicate rollback, invalid inputs, malformed
     ordinals and evidence, newer-schema skew, maximum 256-path/512-evidence/
-    64-blocker budgets, and oversized values before materialization. Status
-    transitions, cleanup journaling, and lifecycle integration remain open, so
-    the broad checkbox stays unchecked.
+    64-blocker budgets, and oversized values before materialization. At this
+    checkpoint, status transitions, cleanup journaling, and lifecycle
+    integration remained open. The subsequent journal slice closed the
+    execution-state portion; the broad checkbox stays unchecked for candidate
+    status and scan/evaluator/planner lifecycle integration.
   - Planned-cleanup journal sub-checkpoint completed 2026-07-16: a crate-private
     boundary prepares and bounds an immutable cleanup plan before locking,
     requires its scan and every format-2 candidate observation to exist and
@@ -1995,8 +1997,9 @@ Tasks:
     rollback, legacy pollution, oversized rows/newer-schema skew, and the shared
     query budget at 256 paths plus 512 evidence facts. It cannot reconstruct a
     plan, claim an execution owner, transition or recover work, or perform an
-    effect. The broad checkbox remains open for execution-state journaling and
-    scan/evaluator/planner lifecycle integration.
+    effect. At this checkpoint, the broad checkbox remained open for
+    execution-state journaling and scan/evaluator/planner lifecycle integration;
+    the subsequent journal slice closed the execution-state portion.
   - Cleanup-lock storage sub-checkpoint completed 2026-07-16: every secured
     store now retains a distinct exact-marker `<database>.cleanup.lock` with a
     bounded, non-expiring OS lock and independent same-process exclusion.
@@ -2016,8 +2019,8 @@ Tasks:
     owner death, writer-lock independence, and native Windows replacement denial
     for all retained controls. The guard proves only
     exclusion and has no plan, journal, owner, target, recovery, or effect
-    capability. The following liveness checkpoint is still required before any
-    owner-generation-fenced transition can use this exclusion primitive.
+    capability. At this checkpoint, liveness evidence was still required before
+    any owner-generation-fenced transition could use this exclusion primitive.
   - Process-instance liveness sub-checkpoint completed 2026-07-16: a private,
     strict, versioned owner identity fits the existing 128-byte journal field
     and combines platform, PID, OS process-start token, a 128-bit random claim
@@ -2037,11 +2040,60 @@ Tasks:
     graceful-death, and abrupt-death classification. The module is not exposed
     through engine, FFI, CLI, Swift, AI, or cleanup execution and performs no
     journal writes. Cleanup-lock-coupled owner/generation compare-and-set
-    transitions are the next slice; heartbeat age alone still cannot authorize
-    recovery while an old worker could mutate. Because the current scope folds
+    transitions are implemented by the following slice; heartbeat age alone
+    still cannot authorize recovery while an old worker could mutate. Because
+    the current scope folds
     boot and host evidence together, a reboot also yields `Unknown`; recovery
     across reboot needs separate stable local-host provenance and must not be
-    claimed by the next same-boot fencing slice.
+    claimed by that same-boot fencing slice.
+  - Cleanup-journal state-machine sub-checkpoint completed 2026-07-16: a
+    crate-private, non-cloneable and non-shareable journal lease now owns the
+    retained store-wide cleanup lock and an internally generated
+    process-instance identity before it can claim a pristine plan as
+    generation one. Every read and short `BEGIN IMMEDIATE` write revalidates
+    that lock in cleanup-before-connection-before-writer order; every session,
+    item, and path transition compare-and-sets the exact owner and generation.
+    Typed transitions keep heartbeat evidence separate from expiry,
+    cancellation request separate from acknowledgement, and derive item and
+    session results from the complete path graph. A durable `effect_started`
+    receipt is millisecond-canonical, retains its finer ordering instant, and
+    can be issued or ambiguity-reconciled only after commit. It must be
+    revalidated with no cancellation request and the held cleanup control
+    immediately before a future executor call; this checkpoint performs no
+    filesystem effect.
+
+    The bounded full-graph reader validates immutable plan facts plus every
+    mutable lifecycle field, ordinal, generation, timestamp, effect provenance,
+    mode-compatible outcome, error key, and derived parent result. Terminal
+    rows retain their owner/generation provenance and are immutable. Recovery
+    probes liveness outside all database locks and writes only for same-scope
+    `DefinitelyGone`: one transaction exact-CASes the stale phase, owner,
+    generation, heartbeat, and cancellation bit, increments the generation,
+    resets in-progress `validating` work to `planned`, and converts every
+    interrupted effect to `outcome_unknown` without guessing its result.
+    `Alive` and `Unknown` leave mutable journal fields byte-for-byte unchanged;
+    recovering claims prohibit new validation/effects until unknown outcomes
+    are reconciled and the remaining plan is explicitly resumed or cancelled.
+    A cancellation arriving after
+    durable effect intent blocks final revalidation and can record a known
+    no-call interruption without retaining false effect provenance. Reboot and
+    Windows death recovery remain sealed because their current scope evidence
+    is insufficient.
+
+    Twenty-eight focused tests cover all validation/effect/reconciliation
+    outcomes, exact plan expiry and generation fencing, cancellation settlement
+    and late-cancellation races, sub-millisecond timestamps, malformed effect
+    provenance, corrupt attempts and terminal times, cleanup-lock contention,
+    live/foreign-scope recovery refusal, durable effect receipts, unknown-
+    outcome sealing, and native same-scope `DefinitelyGone` generation-two
+    recovery/resume. Claim failures retain the lease, state-changing retries
+    reconcile exact post-state, and a fault-injected ambiguous effect-start
+    commit proves retries cannot substitute a different fine-grained instant
+    within the same persisted millisecond. Premature terminalization cannot
+    abandon a live-owned session. The state machine remains absent from engine,
+    FFI, CLI, Swift, AI, and every effect primitive. The broad persistence item
+    stays open for candidate status and scan/evaluator/planner lifecycle
+    integration.
 - [ ] Keep binary snapshots atomic and checksummed.
 - [ ] Add capacity sample storage.
 - [ ] Add typed scan coverage/issues.
