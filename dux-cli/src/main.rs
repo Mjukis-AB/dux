@@ -1,9 +1,12 @@
 mod app;
+mod cli;
+mod noninteractive;
 mod tui;
 mod ui;
 
 use std::io::{self, stdout};
 use std::path::PathBuf;
+use std::process::ExitCode;
 use std::thread::JoinHandle;
 use std::time::SystemTime;
 
@@ -27,44 +30,34 @@ use ui::{
     HelpView, LargeFilesView, MultiDeleteProgressView, ProgressView, Theme, TreeView,
 };
 
-/// DUX - Interactive Terminal Disk Usage Analyzer
-#[derive(Parser, Debug)]
-#[command(name = "dux")]
-#[command(about = "An interactive, DaisyDisk-like terminal disk usage analyzer")]
-#[command(version)]
-struct Args {
-    /// Path to analyze (defaults to current directory)
-    #[arg(default_value = ".")]
-    path: PathBuf,
+use cli::{Cli, Command, TuiArgs};
 
-    /// Maximum depth to scan
-    #[arg(short, long)]
-    max_depth: Option<usize>,
+fn main() -> ExitCode {
+    if let Err(error) = color_eyre::install() {
+        eprintln!("Error: failed to initialize diagnostics: {error}");
+        return ExitCode::from(70);
+    }
 
-    /// Follow symbolic links
-    #[arg(short, long)]
-    follow_symlinks: bool,
-
-    /// Cross filesystem boundaries
-    #[arg(short = 'x', long)]
-    cross_filesystems: bool,
-
-    /// Disable cache (always perform fresh scan)
-    #[arg(long)]
-    no_cache: bool,
+    let cli = Cli::parse();
+    match cli.command {
+        Some(Command::Status(args)) => noninteractive::run_status(args.json),
+        Some(Command::History(args)) => noninteractive::run_history(args.json, args.limit),
+        None => match run_tui(cli.tui) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("Error: {error:#}");
+                ExitCode::FAILURE
+            }
+        },
+    }
 }
 
-fn main() -> Result<()> {
-    color_eyre::install()?;
-
-    let args = Args::parse();
-
+fn run_tui(args: TuiArgs) -> Result<()> {
     // Resolve path
-    let path = args
-        .path
-        .clone()
+    let requested_path = args.path();
+    let path = requested_path
         .canonicalize()
-        .unwrap_or(args.path.clone());
+        .unwrap_or(requested_path.clone());
 
     // Validate path
     if !path.exists() {
@@ -97,7 +90,7 @@ fn main() -> Result<()> {
 fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     path: PathBuf,
-    args: &Args,
+    args: &TuiArgs,
 ) -> Result<()> {
     let theme = Theme::default();
     let mut state = AppState::new(path.clone());

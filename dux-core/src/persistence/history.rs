@@ -19,9 +19,13 @@ use super::snapshot::SnapshotReference;
 const QUERY_PROGRESS_INTERVAL: i32 = 100;
 const QUERY_MAX_CALLBACKS: u64 = 1_000;
 const QUERY_MAX_ELAPSED: Duration = Duration::from_millis(250);
+const RECENT_QUERY_BASE_CALLBACKS: u64 = 1_000;
+const RECENT_QUERY_CALLBACKS_PER_SCAN: u64 = 400;
+const RECENT_QUERY_MAX_ELAPSED: Duration = Duration::from_secs(5);
 const MAX_STORED_ID_BYTES: i64 = 128;
 const MAX_STORED_PATH_BYTES: i64 = 65_536;
 const MAX_STORED_STATUS_BYTES: i64 = 16;
+pub(crate) const MAX_RECENT_SCAN_HISTORY_LIMIT: usize = 200;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ScanStatus {
@@ -250,7 +254,6 @@ pub(crate) struct ScanRecord {
 }
 
 impl ScanRecord {
-    #[cfg(test)]
     pub(crate) fn id(&self) -> &ScanId {
         &self.id
     }
@@ -259,7 +262,6 @@ impl ScanRecord {
         &self.root
     }
 
-    #[cfg(test)]
     pub(crate) fn started_at(&self) -> SystemTime {
         self.started_at
     }
@@ -272,12 +274,10 @@ impl ScanRecord {
         self.status
     }
 
-    #[cfg(test)]
     pub(crate) fn counts(&self) -> ScanCounts {
         self.counts
     }
 
-    #[cfg(test)]
     pub(crate) fn coverage(&self) -> &ScanCoverage {
         &self.coverage
     }
@@ -304,6 +304,22 @@ impl ScanRecord {
             && self.counts == completion.counts
             && self.coverage == completion.coverage
             && self.snapshot == completion.snapshot
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RecentScanRecords {
+    records: Vec<ScanRecord>,
+    has_more: bool,
+}
+
+impl RecentScanRecords {
+    pub(crate) fn records(&self) -> &[ScanRecord] {
+        &self.records
+    }
+
+    pub(crate) const fn has_more(&self) -> bool {
+        self.has_more
     }
 }
 
@@ -587,6 +603,65 @@ pub(super) fn load_scan_record_within_budget(
     raw.map(|raw| decode_scan_row(connection, raw)).transpose()
 }
 
+/// Load one bounded recent-history page. The parent rows are selected in one
+/// query, then each selected raw row is passed through the same full decoder as
+/// an exact-ID read. Coverage child queries therefore share one VM/time budget.
+/// The dedicated budget is sized from the declared page bound and the legal
+/// 256-issue maximum per scan; the composition can decode no more than 200
+/// parents and 51,200 children rather than exposing a generic unbounded N+1
+/// surface.
+pub(super) fn load_recent_scan_records(
+    connection: &Connection,
+    limit: usize,
+) -> Result<RecentScanRecords, HistoryError> {
+    if !(1..=MAX_RECENT_SCAN_HISTORY_LIMIT).contains(&limit) {
+        return Err(HistoryError::new(HistoryErrorKind::InvalidInput));
+    }
+    let row_limit =
+        i64::try_from(limit + 1).map_err(|_| HistoryError::new(HistoryErrorKind::InvalidInput))?;
+    run_bounded_recent_query(connection, limit, || {
+        let mut statement = connection
+            .prepare(
+                "SELECT typeof(scan_id), length(CAST(scan_id AS BLOB)), scan_id,
+                        typeof(root_path), length(root_path), root_path,
+                        root_path_encoding, started_at_unix_ms, completed_at_unix_ms,
+                        typeof(status), length(CAST(status AS BLOB)), status,
+                        directory_count, file_count, logical_bytes, allocated_bytes,
+                        typeof(coverage_status), length(CAST(coverage_status AS BLOB)),
+                        coverage_status, typeof(coverage_permille), coverage_permille,
+                        typeof(issue_count), issue_count,
+                        typeof(snapshot_version), snapshot_version,
+                        typeof(snapshot_relative_path), length(snapshot_relative_path),
+                        snapshot_relative_path,
+                        typeof(snapshot_relative_path_encoding), snapshot_relative_path_encoding,
+                        typeof(snapshot_checksum_sha256), length(snapshot_checksum_sha256),
+                        snapshot_checksum_sha256
+                 FROM scans
+                 ORDER BY started_at_unix_ms DESC, scan_id ASC
+                 LIMIT ?1",
+            )
+            .map_err(map_query_sql_error)?;
+        let mut rows = statement.query([row_limit]).map_err(map_query_sql_error)?;
+        let mut raw_records = Vec::with_capacity(limit + 1);
+        while let Some(row) = rows.next().map_err(map_query_sql_error)? {
+            if raw_records.len() > limit {
+                return Err(HistoryError::new(HistoryErrorKind::CorruptData));
+            }
+            raw_records.push(raw_scan_row(row).map_err(map_query_sql_error)?);
+        }
+        drop(rows);
+        drop(statement);
+
+        let has_more = raw_records.len() > limit;
+        raw_records.truncate(limit);
+        let records = raw_records
+            .into_iter()
+            .map(|raw| decode_scan_row(connection, raw))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(RecentScanRecords { records, has_more })
+    })
+}
+
 struct RawScanRow {
     id: String,
     root: Vec<u8>,
@@ -859,6 +934,32 @@ pub(super) fn run_bounded_query<T>(
     connection: &Connection,
     query: impl FnOnce() -> Result<T, HistoryError>,
 ) -> Result<T, HistoryError> {
+    run_bounded_query_with_limits(connection, QUERY_MAX_CALLBACKS, QUERY_MAX_ELAPSED, query)
+}
+
+fn run_bounded_recent_query<T>(
+    connection: &Connection,
+    limit: usize,
+    query: impl FnOnce() -> Result<T, HistoryError>,
+) -> Result<T, HistoryError> {
+    let limit =
+        u64::try_from(limit).map_err(|_| HistoryError::new(HistoryErrorKind::InvalidInput))?;
+    let maximum_callbacks = RECENT_QUERY_BASE_CALLBACKS
+        .saturating_add(RECENT_QUERY_CALLBACKS_PER_SCAN.saturating_mul(limit));
+    run_bounded_query_with_limits(
+        connection,
+        maximum_callbacks,
+        RECENT_QUERY_MAX_ELAPSED,
+        query,
+    )
+}
+
+fn run_bounded_query_with_limits<T>(
+    connection: &Connection,
+    maximum_callbacks: u64,
+    maximum_elapsed: Duration,
+    query: impl FnOnce() -> Result<T, HistoryError>,
+) -> Result<T, HistoryError> {
     let started_at = Instant::now();
     let mut callbacks = 0_u64;
     connection
@@ -866,7 +967,7 @@ pub(super) fn run_bounded_query<T>(
             QUERY_PROGRESS_INTERVAL,
             Some(move || {
                 callbacks = callbacks.saturating_add(1);
-                callbacks >= QUERY_MAX_CALLBACKS || started_at.elapsed() >= QUERY_MAX_ELAPSED
+                callbacks >= maximum_callbacks || started_at.elapsed() >= maximum_elapsed
             }),
         )
         .map_err(|_| HistoryError::new(HistoryErrorKind::DatabaseUnavailable))?;
@@ -877,7 +978,7 @@ pub(super) fn run_bounded_query<T>(
     let result = query();
     guard.remove()?;
     let value = result?;
-    if started_at.elapsed() >= QUERY_MAX_ELAPSED {
+    if started_at.elapsed() >= maximum_elapsed {
         return Err(HistoryError::new(HistoryErrorKind::QueryLimitExceeded));
     }
     Ok(value)

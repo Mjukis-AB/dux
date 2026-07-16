@@ -172,9 +172,277 @@ fn newer_database_never_provisions_missing_snapshot_storage() {
         engine.start_scan(scan_root),
         Err(StartTaskError::ReadOnlyStore)
     );
+    assert_eq!(
+        engine.recent_scan_history(1),
+        Err(ScanHistoryError::IncompatibleSchema)
+    );
     assert!(!config.snapshots_directory().exists());
     engine.close();
     assert!(engine.wait_until_closed(TEST_TIMEOUT));
+}
+
+#[test]
+fn recent_scan_history_is_empty_bounded_and_closed_with_typed_errors() {
+    let (_temp, engine) = engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    assert_eq!(
+        engine.recent_scan_history(1).unwrap(),
+        RecentScanHistory {
+            scans: Vec::new(),
+            has_more: false,
+        }
+    );
+    for limit in [0, crate::persistence::MAX_RECENT_SCAN_HISTORY_LIMIT + 1] {
+        assert_eq!(
+            engine.recent_scan_history(limit),
+            Err(ScanHistoryError::InvalidLimit {
+                max: crate::persistence::MAX_RECENT_SCAN_HISTORY_LIMIT,
+            })
+        );
+    }
+    engine.close();
+    assert!(engine.wait_until_closed(TEST_TIMEOUT));
+    assert_eq!(engine.recent_scan_history(1), Err(ScanHistoryError::Closed));
+}
+
+#[test]
+fn recent_scan_history_orders_ties_reports_more_and_exposes_only_succeeded_counts() {
+    let (_temp, engine) = engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let root = engine.config().cache_directory().join("history-root");
+    let base = SystemTime::UNIX_EPOCH + Duration::from_millis(1_750_000_000_000);
+    for (id, offset) in [
+        ("scan:history-a", 1_u64),
+        ("scan:history-b", 2),
+        ("scan:history-c", 2),
+    ] {
+        engine
+            .inner
+            .store
+            .record_scan_started(
+                &NewScanRecord::try_new(
+                    ScanId::new(id).unwrap(),
+                    root.join(id),
+                    base + Duration::from_millis(offset),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+    }
+    engine
+        .inner
+        .store
+        .record_scan_finished_reconciled(
+            &ScanCompletionRecord::try_new(
+                ScanId::new("scan:history-c").unwrap(),
+                base + Duration::from_millis(3),
+                TerminalScanStatus::Succeeded,
+                ScanCounts {
+                    directory_count: 7,
+                    file_count: 11,
+                    logical_bytes: 13,
+                    allocated_bytes: Some(17),
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+    let page = engine.recent_scan_history(2).unwrap();
+    assert!(page.has_more);
+    assert_eq!(
+        page.scans
+            .iter()
+            .map(|scan| scan.scan_id.as_str())
+            .collect::<Vec<_>>(),
+        ["scan:history-b", "scan:history-c"]
+    );
+    assert_eq!(page.scans[0].status, DurableScanStatus::Running);
+    assert_eq!(page.scans[0].counts, None);
+    assert_eq!(page.scans[1].status, DurableScanStatus::Succeeded);
+    assert_eq!(
+        page.scans[1].counts,
+        Some(DurableScanCounts {
+            directory_count: 7,
+            file_count: 11,
+            logical_bytes: 13,
+            allocated_bytes: Some(17),
+        })
+    );
+    assert!(!page.scans[1].snapshot_recorded);
+    assert_eq!(
+        page.scans[1].coverage.status,
+        crate::ScanCoverageStatus::Unknown
+    );
+    assert_eq!(page.scans[1].coverage.issue_record_count, 0);
+    assert_eq!(page.scans[1].coverage.issue_occurrence_count, 0);
+
+    let complete = engine.recent_scan_history(3).unwrap();
+    assert!(!complete.has_more);
+    assert_eq!(complete.scans.len(), 3);
+}
+
+#[test]
+fn recent_scan_history_exact_limit_uses_one_bounded_page_and_more_sentinel() {
+    let (_temp, engine) = engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let root = engine.config().cache_directory().join("history-limit-root");
+    let base = SystemTime::UNIX_EPOCH + Duration::from_millis(1_750_000_000_000);
+    for index in 0..=crate::persistence::MAX_RECENT_SCAN_HISTORY_LIMIT {
+        engine
+            .inner
+            .store
+            .record_scan_started(
+                &NewScanRecord::try_new(
+                    ScanId::new(format!("scan:history-limit:{index:03}")).unwrap(),
+                    root.join(format!("root-{index:03}")),
+                    base + Duration::from_millis(index as u64),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+    }
+
+    let page = engine
+        .recent_scan_history(crate::persistence::MAX_RECENT_SCAN_HISTORY_LIMIT)
+        .unwrap();
+    assert_eq!(
+        page.scans.len(),
+        crate::persistence::MAX_RECENT_SCAN_HISTORY_LIMIT
+    );
+    assert!(page.has_more);
+    assert_eq!(page.scans[0].scan_id.as_str(), "scan:history-limit:200");
+    assert_eq!(
+        page.scans.last().unwrap().scan_id.as_str(),
+        "scan:history-limit:001"
+    );
+}
+
+#[test]
+fn recent_scan_history_accepts_the_legal_maximum_coverage_page() {
+    use crate::domain::{
+        CoveragePermille, MAX_SCAN_ISSUES, ScanCoverage, ScanIssue, ScanIssueKind,
+    };
+
+    let (_temp, engine) = engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let parent = engine
+        .config()
+        .cache_directory()
+        .join("history-full-coverage");
+    let base = SystemTime::UNIX_EPOCH + Duration::from_millis(1_750_000_000_000);
+    for index in 0..crate::persistence::MAX_RECENT_SCAN_HISTORY_LIMIT {
+        let id = ScanId::new(format!("scan:history-full:{index:03}")).unwrap();
+        let root = parent.join(format!("root-{index:03}"));
+        engine
+            .inner
+            .store
+            .record_scan_started(
+                &NewScanRecord::try_new(
+                    id.clone(),
+                    root.clone(),
+                    base + Duration::from_millis(index as u64),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let issues = (0..MAX_SCAN_ISSUES)
+            .map(|issue_index| {
+                ScanIssue::try_new(
+                    ScanIssueKind::MetadataError,
+                    Some(root.join(format!("issue-{issue_index:03}"))),
+                    1,
+                )
+                .unwrap()
+            })
+            .collect();
+        let coverage =
+            ScanCoverage::try_from_terminal(Some(CoveragePermille::new(500).unwrap()), issues)
+                .unwrap();
+        engine
+            .inner
+            .store
+            .record_scan_finished_reconciled(
+                &ScanCompletionRecord::try_new_with_coverage(
+                    id,
+                    base + Duration::from_millis(1_000 + index as u64),
+                    TerminalScanStatus::Succeeded,
+                    ScanCounts::default(),
+                    coverage,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+    }
+
+    let page = engine
+        .recent_scan_history(crate::persistence::MAX_RECENT_SCAN_HISTORY_LIMIT)
+        .unwrap();
+    assert_eq!(page.scans.len(), 200);
+    assert!(!page.has_more);
+    assert!(page.scans.iter().all(|scan| {
+        scan.coverage.issue_record_count == MAX_SCAN_ISSUES
+            && scan.coverage.issue_occurrence_count == MAX_SCAN_ISSUES as u64
+    }));
+}
+
+#[test]
+fn recent_scan_history_survives_process_style_reopen() {
+    let temp = TempDir::new().unwrap();
+    let config = config(&temp);
+    let scan_id = ScanId::new("scan:history-reopen").unwrap();
+    {
+        let engine = EngineHandle::open(config.clone()).unwrap();
+        engine
+            .inner
+            .store
+            .record_scan_started(
+                &NewScanRecord::try_new(
+                    scan_id.clone(),
+                    temp.path().join("history-reopen-root"),
+                    SystemTime::UNIX_EPOCH + Duration::from_millis(1_750_000_000_000),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        engine.close();
+        assert!(engine.wait_until_closed(TEST_TIMEOUT));
+    }
+
+    let reopened = EngineHandle::open(config).unwrap();
+    let page = reopened.recent_scan_history(1).unwrap();
+    assert_eq!(page.scans.len(), 1);
+    assert_eq!(page.scans[0].scan_id, scan_id);
+    assert_eq!(page.scans[0].status, DurableScanStatus::Running);
+}
+
+#[test]
+fn recent_scan_history_rejects_corrupt_selected_coverage_row() {
+    let (_temp, engine) = engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let scan_id = ScanId::new("scan:history-corrupt-coverage").unwrap();
+    engine
+        .inner
+        .store
+        .record_scan_started(
+            &NewScanRecord::try_new(
+                scan_id.clone(),
+                engine
+                    .config()
+                    .cache_directory()
+                    .join("history-corrupt-root"),
+                SystemTime::UNIX_EPOCH + Duration::from_millis(1_750_000_000_000),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let connection = rusqlite::Connection::open(engine.config().database_path()).unwrap();
+    connection
+        .execute(
+            "UPDATE scans SET issue_count = 1 WHERE scan_id = ?1",
+            [scan_id.as_str()],
+        )
+        .unwrap();
+    drop(connection);
+    assert_eq!(
+        engine.recent_scan_history(1),
+        Err(ScanHistoryError::CorruptData)
+    );
 }
 
 #[test]

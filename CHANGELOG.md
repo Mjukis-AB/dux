@@ -5,6 +5,25 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Added the first noninteractive shared-engine CLI surfaces: `dux status` and
+  `dux history [--limit 1..=200]`, each with explicit `--json`. A bounded,
+  path-free core query validates complete scan/coverage records under one
+  SQLite VM/time budget, orders newest scans deterministically, reports a
+  limit-plus-one `has_more` sentinel, survives process reopen, rejects hostile
+  selected rows, and exposes measured counts only for succeeded scans. JSON
+  schema v1 versions every object, distinguishes a newer read-only database
+  from empty history, preserves unknown allocation/coverage semantics, emits
+  structured path-free runtime errors to stderr, and has golden contract tests.
+  The history budget covers the legal maximum page of 200 scans with 256
+  coverage records each, while retaining a fixed VM/deadline ceiling. A
+  completely fresh platform HOME is prepared safely before the core validates
+  and publishes its private store.
+  The existing `dux [PATH]` TUI and flags remain the default; explicit relative
+  or `--` paths disambiguate directories named `status` or `history`. This is
+  inspection-only and adds no cleanup or AI authority. A real subprocess test
+  scans into an isolated temporary HOME/database, quiesces the first engine,
+  and proves both commands reopen and report the same durable scan without
+  terminal controls or path disclosure.
 - Added deterministic, durable candidate discovery to successful engine scans.
   A build-time and engine-open-validated SHA-256-bound catalog converts only a
   fresh completed traversal's existing marker-verified developer artifacts

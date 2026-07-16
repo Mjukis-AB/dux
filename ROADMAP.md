@@ -2463,9 +2463,45 @@ Tasks:
   remain in their later roadmap items. Full logical/allocated/hard-link
   accounting is attached to the completed-only fresh-scan snapshot converter
   described above.
-- [ ] Add JSON CLI status/history scaffolding.
+- [x] Add JSON CLI status/history scaffolding. Completed 2026-07-16: the
+  existing `dux [PATH]` TUI remains the default while explicit `status` and
+  `history [--limit 1..=200]` commands dispatch before terminal raw mode. Both
+  have human output and opt-in JSON schema v1; every serialized object is
+  versioned, paths and storage locations are deliberately absent, unknown
+  allocation/coverage remain null, non-successful SQLite count defaults are
+  not presented as measurements, and a newer read-only database is distinct
+  from an empty history. Runtime JSON errors are path-free stderr objects with
+  stable categories and nonzero status; broken pipes exit cleanly. Reserved
+  command-name directories remain reachable through `./name` or `-- name`.
+
+  `EngineHandle::recent_scan_history` supplies the shared, non-authoritative
+  DTO: one fixed-budget query selects at most 200 plus a `has_more` sentinel in
+  start-descending/ID-ascending order backed by `scans_by_started`, passes each
+  selected row through
+  the strict full scan/coverage decoder, exposes counts only for success, never
+  opens snapshot files or candidate batches, survives process-style reopen,
+  and maps corruption, schema skew, contention, unsafe storage, and resource
+  limits to typed path-free failures. Its dedicated fixed ceiling is sized for
+  the legal maximum of 200 parents and 51,200 coverage children without
+  weakening the smaller exact-record budget. Parser, boundary, hostile-row,
+  maximum-child, reopen, null-semantics, newer-schema, and exact golden JSON
+  tests cover the slice.
+  [`docs/CLI_JSON.md`](docs/CLI_JSON.md) is the normative v1 contract.
 - [ ] Add history retention maintenance.
-- [ ] Add engine integration tests with temporary HOME and database.
+- [x] Add engine integration tests with temporary HOME and database. Completed
+  2026-07-16: an actual `dux-core` engine scans a fixture into an isolated
+  platform-correct application-support/cache layout, closes to full worker
+  quiescence, and separately launched `dux status --json` and
+  `dux history --json --limit 1` processes reopen that database and report the
+  same succeeded scan and snapshot reference. A separate completely fresh-HOME
+  process proves the adapter prepares missing standard data/cache parents while
+  the core still owns private-store validation and publication. The subprocess
+  regressions also prove every emitted object is versioned, forbidden
+  scan/storage keys remain absent recursively, stdout has no terminal controls,
+  stderr stays empty on success, and invalid limits exit 2 without entering the
+  TUI or writing stdout. Existing engine tests independently cover restart,
+  corrupt selected rows, the full 200-by-256 coverage bound, newer-schema
+  read-only behavior, and deterministic same-time order.
 
 Exit criteria:
 

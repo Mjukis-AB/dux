@@ -2,7 +2,7 @@ use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use crate::domain::{ScanCoverage, ScanId};
+use crate::domain::{CoveragePermille, ScanCoverage, ScanCoverageStatus, ScanId};
 
 /// Opaque, non-durable identifier scoped to one running DUX process.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -144,6 +144,83 @@ pub struct ScanTaskCounts {
     pub file_count: u64,
     pub logical_bytes: u64,
     pub allocated_bytes: Option<u64>,
+}
+
+/// Durable lifecycle stored for one scan. `Queued` is retained because schema
+/// v1 permits historical queued rows even though the current engine persists a
+/// scan only when its worker starts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DurableScanStatus {
+    Queued,
+    Running,
+    Succeeded,
+    Failed,
+    Cancelled,
+    Interrupted,
+}
+
+/// Trustworthy terminal counts from a succeeded durable scan.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DurableScanCounts {
+    pub directory_count: u64,
+    pub file_count: u64,
+    pub logical_bytes: u64,
+    pub allocated_bytes: Option<u64>,
+}
+
+/// Path-free summary of a fully validated durable coverage report. Individual
+/// issue paths remain behind later paged inspection APIs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DurableScanCoverage {
+    pub status: ScanCoverageStatus,
+    pub measured_permille: Option<CoveragePermille>,
+    pub issue_record_count: usize,
+    pub issue_occurrence_count: u64,
+}
+
+/// Path-free durable scan observation. `snapshot_recorded` means SQLite holds
+/// a validated immutable snapshot reference; this API does not open that file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DurableScanSummary {
+    pub scan_id: ScanId,
+    pub started_at: SystemTime,
+    pub completed_at: Option<SystemTime>,
+    pub status: DurableScanStatus,
+    pub counts: Option<DurableScanCounts>,
+    pub coverage: DurableScanCoverage,
+    pub snapshot_recorded: bool,
+}
+
+/// Newest durable scans in stable start-descending, ID-ascending order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecentScanHistory {
+    pub scans: Vec<DurableScanSummary>,
+    pub has_more: bool,
+}
+
+/// Path-free failure taxonomy for the durable recent-history boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum ScanHistoryError {
+    #[error("scan history limit must be between 1 and {max}")]
+    InvalidLimit { max: usize },
+    #[error("engine session is closed")]
+    Closed,
+    #[error("the durable store schema is newer than this engine")]
+    IncompatibleSchema,
+    #[error("the durable store is busy")]
+    Busy,
+    #[error("the durable store is unsafe")]
+    UnsafeStorage,
+    #[error("the scan history query exceeded its fixed resource budget")]
+    QueryLimitExceeded,
+    #[error("durable scan history is corrupt")]
+    CorruptData,
+    #[error("durable scan history is unavailable")]
+    Unavailable,
+    #[error("engine history state is unavailable")]
+    InternalState,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

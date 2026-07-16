@@ -37,10 +37,12 @@ pub use domain::{
 };
 pub use engine::{
     CancelOutcome, CandidateEvaluationTaskFailureKind, CandidateEvaluationTaskStatus, CloseOutcome,
-    EngineConfig, EngineConfigError, EngineConfigField, EngineConfigReason, EngineHandle,
-    EngineLifecycle, EngineOpenError, FormatSizeBatchResult, FormattedSizeEntry, ScanRootErrorKind,
-    ScanTaskCounts, ScanTaskResult, ScanTaskStatus, StartTaskError, TaskAccessError, TaskEvent,
-    TaskEventBatch, TaskEventKind, TaskFailureKind, TaskId, TaskKind, TaskPhase, TaskSnapshot,
+    DurableScanCounts, DurableScanCoverage, DurableScanStatus, DurableScanSummary, EngineConfig,
+    EngineConfigError, EngineConfigField, EngineConfigReason, EngineHandle, EngineLifecycle,
+    EngineOpenError, FormatSizeBatchResult, FormattedSizeEntry, RecentScanHistory,
+    ScanHistoryError, ScanRootErrorKind, ScanTaskCounts, ScanTaskResult, ScanTaskStatus,
+    StartTaskError, TaskAccessError, TaskEvent, TaskEventBatch, TaskEventKind, TaskFailureKind,
+    TaskId, TaskKind, TaskPhase, TaskSnapshot,
 };
 pub use error::{DuxError, Result};
 pub use persistence::{

@@ -67,8 +67,8 @@ pub(crate) use candidate_evaluation_history::{
 };
 pub(crate) use candidate_history::NewCandidateRecord;
 pub(crate) use history::{
-    HistoryErrorKind, NewScanRecord, ScanCompletionRecord, ScanCounts, ScanStatus,
-    TerminalScanStatus,
+    HistoryErrorKind, MAX_RECENT_SCAN_HISTORY_LIMIT, NewScanRecord, ScanCompletionRecord,
+    ScanCounts, ScanStatus, TerminalScanStatus,
 };
 pub use snapshot::SnapshotOpenErrorKind;
 pub use status::{DATABASE_SCHEMA_VERSION, DatabaseAccess, DatabaseOpenErrorKind, DatabaseStatus};

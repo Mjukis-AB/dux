@@ -29,8 +29,8 @@ use super::cleanup_history::{
 };
 use super::history::{
     HistoryError, HistoryErrorKind, NewScanRecord, PreparedNewScan, PreparedScanCompletion,
-    ScanCompletionRecord, ScanRecord, insert_scan_started, load_scan_record, map_write_sql_error,
-    update_scan_finished,
+    RecentScanRecords, ScanCompletionRecord, ScanRecord, insert_scan_started,
+    load_recent_scan_records, load_scan_record, map_write_sql_error, update_scan_finished,
 };
 use super::migrations::{
     SchemaState, apply_pending_migrations, inspect_schema, inspect_schema_for_status,
@@ -850,6 +850,14 @@ impl StoreCoordinator {
     ) -> Result<Option<ScanRecord>, HistoryError> {
         self.validate_history_guard(guard)?;
         load_scan_record(&guard.connection, id)
+    }
+
+    pub(crate) fn load_recent_scans(
+        &self,
+        limit: usize,
+    ) -> Result<RecentScanRecords, HistoryError> {
+        let guard = self.lock_current_history_connection()?;
+        load_recent_scan_records(&guard.connection, limit)
     }
 
     /// Insert one complete deterministic candidate observation atomically.

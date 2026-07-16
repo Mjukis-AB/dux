@@ -10,9 +10,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use super::config::EngineConfig;
 use super::task::{
     CancelOutcome, CandidateEvaluationTaskFailureKind, CandidateEvaluationTaskStatus, CloseOutcome,
-    EngineLifecycle, EngineOpenError, FormatSizeBatchResult, FormattedSizeEntry, ScanRootErrorKind,
-    ScanTaskCounts, ScanTaskResult, ScanTaskStatus, StartTaskError, TaskAccessError, TaskEvent,
-    TaskEventBatch, TaskEventKind, TaskFailureKind, TaskId, TaskKind, TaskPhase, TaskSnapshot,
+    DurableScanCounts, DurableScanCoverage, DurableScanStatus, DurableScanSummary, EngineLifecycle,
+    EngineOpenError, FormatSizeBatchResult, FormattedSizeEntry, RecentScanHistory,
+    ScanHistoryError, ScanRootErrorKind, ScanTaskCounts, ScanTaskResult, ScanTaskStatus,
+    StartTaskError, TaskAccessError, TaskEvent, TaskEventBatch, TaskEventKind, TaskFailureKind,
+    TaskId, TaskKind, TaskPhase, TaskSnapshot,
 };
 use crate::domain::{
     CANDIDATE_CATALOG_SCHEMA_VERSION, CANDIDATE_CATALOG_SHA256, CANDIDATE_CONTEXT_FORMAT_VERSION,
@@ -26,8 +28,8 @@ use crate::persistence::snapshot::{
 };
 use crate::persistence::{
     CandidateEvaluationCompletion, CandidateEvaluationFailureKind, CandidateEvaluationIdentity,
-    HistoryErrorKind, NewCandidateRecord, NewScanRecord, ScanCompletionRecord, ScanCounts,
-    ScanStatus, TerminalScanStatus,
+    HistoryErrorKind, MAX_RECENT_SCAN_HISTORY_LIMIT, NewCandidateRecord, NewScanRecord,
+    ScanCompletionRecord, ScanCounts, ScanStatus, TerminalScanStatus,
 };
 use crate::persistence::{DatabaseStatus, StoreCoordinator};
 use crate::scanner::{CancellationToken, ScanConfig, ScanMessage, ScanTermination, Scanner};
@@ -490,6 +492,70 @@ impl EngineHandle {
         &self,
     ) -> Result<DatabaseStatus, crate::persistence::DatabaseOpenErrorKind> {
         self.inner.store.status().map_err(|error| error.kind)
+    }
+
+    /// Load a bounded, path-free page of durable scan observations. This reads
+    /// only SQLite metadata and never opens snapshots or candidate records.
+    pub fn recent_scan_history(&self, limit: usize) -> Result<RecentScanHistory, ScanHistoryError> {
+        if !(1..=MAX_RECENT_SCAN_HISTORY_LIMIT).contains(&limit) {
+            return Err(ScanHistoryError::InvalidLimit {
+                max: MAX_RECENT_SCAN_HISTORY_LIMIT,
+            });
+        }
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(ScanHistoryError::Closed);
+        }
+        let page = self
+            .inner
+            .store
+            .load_recent_scans(limit)
+            .map_err(|error| map_scan_history_error(error.kind))?;
+        let scans = page
+            .records()
+            .iter()
+            .map(|record| {
+                let status = match record.status() {
+                    ScanStatus::Queued => DurableScanStatus::Queued,
+                    ScanStatus::Running => DurableScanStatus::Running,
+                    ScanStatus::Succeeded => DurableScanStatus::Succeeded,
+                    ScanStatus::Failed => DurableScanStatus::Failed,
+                    ScanStatus::Cancelled => DurableScanStatus::Cancelled,
+                    ScanStatus::Interrupted => DurableScanStatus::Interrupted,
+                };
+                let counts = (record.status() == ScanStatus::Succeeded).then(|| {
+                    let counts = record.counts();
+                    DurableScanCounts {
+                        directory_count: counts.directory_count,
+                        file_count: counts.file_count,
+                        logical_bytes: counts.logical_bytes,
+                        allocated_bytes: counts.allocated_bytes,
+                    }
+                });
+                let coverage = record.coverage();
+                DurableScanSummary {
+                    scan_id: record.id().clone(),
+                    started_at: record.started_at(),
+                    completed_at: record.completed_at(),
+                    status,
+                    counts,
+                    coverage: DurableScanCoverage {
+                        status: coverage.status(),
+                        measured_permille: coverage.measured_permille(),
+                        issue_record_count: coverage.issues().len(),
+                        issue_occurrence_count: coverage
+                            .issues()
+                            .iter()
+                            .map(|issue| u64::from(issue.occurrence_count()))
+                            .sum(),
+                    },
+                    snapshot_recorded: record.snapshot().is_some(),
+                }
+            })
+            .collect();
+        Ok(RecentScanHistory {
+            scans,
+            has_more: page.has_more(),
+        })
     }
 
     pub fn lifecycle(&self) -> EngineLifecycle {
@@ -1163,6 +1229,23 @@ const fn map_candidate_evaluation_error(
         CandidateEvaluationError::InvalidCandidate(_) => {
             CandidateEvaluationFailureKind::CandidateInvalid
         }
+    }
+}
+
+const fn map_scan_history_error(kind: HistoryErrorKind) -> ScanHistoryError {
+    match kind {
+        HistoryErrorKind::IncompatibleSchema => ScanHistoryError::IncompatibleSchema,
+        HistoryErrorKind::QueryLimitExceeded => ScanHistoryError::QueryLimitExceeded,
+        HistoryErrorKind::Busy => ScanHistoryError::Busy,
+        HistoryErrorKind::UnsafeStorage => ScanHistoryError::UnsafeStorage,
+        HistoryErrorKind::CorruptData => ScanHistoryError::CorruptData,
+        HistoryErrorKind::InternalState => ScanHistoryError::InternalState,
+        HistoryErrorKind::InvalidInput
+        | HistoryErrorKind::AlreadyExists
+        | HistoryErrorKind::NotFound
+        | HistoryErrorKind::InvalidTransition
+        | HistoryErrorKind::DatabaseUnavailable
+        | HistoryErrorKind::OutcomeUnknown => ScanHistoryError::Unavailable,
     }
 }
 

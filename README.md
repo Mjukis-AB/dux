@@ -71,7 +71,19 @@ dux -f /path
 
 # Cross filesystem boundaries
 dux -x /path
+
+# Inspect the shared durable engine in human-readable form
+dux status
+dux history --limit 20
+
+# Stable, versioned machine-readable inspection
+dux status --json
+dux history --json --limit 20
 ```
+
+The inspection JSON contract and its privacy/compatibility guarantees are
+documented in [docs/CLI_JSON.md](docs/CLI_JSON.md). Use `dux ./status` or
+`dux -- status` when a directory literally has a reserved command name.
 
 ## Keyboard Navigation
 

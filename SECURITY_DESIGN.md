@@ -1247,10 +1247,19 @@ text or unwind through Swift. Callback/event tests cover retention, completion,
 cancellation, reentrancy, stale generations, and cycle avoidance before real
 engine work crosses the boundary.
 
-The future CLI JSON surface is inspection-only until shared cleanup migration.
-Every object MUST have a schema version, errors MUST use stderr and nonzero
-status, and golden tests prevent accidental contract drift. No JSON command accepts an executable
-AI-produced plan or arbitrary permanent-cleanup path.
+The implemented `dux status` and recent scan-only `dux history` JSON surfaces
+are inspection-only. Their public engine DTO is path-free, page-bounded, and
+validates the selected parent and complete coverage children under a fixed
+SQLite budget sized for the legal 200-parent/51,200-child maximum without
+opening snapshot files or candidate batches. The CLI adapter prepares missing
+standard platform parents on first use, but the core independently validates
+the exact publication parent and owns private-store staging/publication. Every JSON
+object has a schema version; output explicitly declares no path disclosure;
+runtime errors use stderr and nonzero status; and golden tests prevent
+accidental contract drift. A newer database reports compatibility but does not
+query unknown history layout. No JSON command accepts a cleanup target, plan,
+approval, executable AI output, or arbitrary permanent-cleanup path. The
+normative serialization/null/error contract is `docs/CLI_JSON.md`.
 
 ### 14.1 Optional CLI installation
 
@@ -1460,7 +1469,7 @@ incident as a substitute for deterministic local evidence.
 | macOS app cleanup | Absent | Entire cleanup release gate in §17.3 |
 | Legacy CLI deletion | Active arbitrary-descendant permanent path routed through a temporary core adapter; strict-target/volume/identity rechecks only; scanned-byte estimates labeled in CLI | Replace adapter with reviewed plan/approval/executor chain without weakening current checks |
 | Centralized executor | Production executor absent; temporary legacy adapter is containment only | Typed admission, integration with the existing cross-process lease/journal, and live target revalidation required |
-| Engine/FFI task and plan API | Core handle, pre-worker catalog/SQLite/snapshot compatibility handshake, bounded per-session registry, read-only formatting, and durable full-scan plus deterministic candidate-evaluation tasks are implemented. Scan admission fences schema skew and overlapping session-local roots; direct cancellation reaches the scanner; typed results/events distinguish scan truth from discovery status and expose observations only. App architecture owns one session; UniFFI remains smoke-only and no plan/cleanup authority exists | FFI version rejection plus bounded scan/history/plan DTOs and cancellation transport; planner lifecycle, priority, and cross-process scan leasing remain later |
+| Engine/FFI task and plan API | Core handle, pre-worker catalog/SQLite/snapshot compatibility handshake, bounded per-session registry, read-only formatting, durable full-scan plus deterministic candidate-evaluation tasks, and a bounded path-free recent-scan history DTO are implemented. Scan admission fences schema skew and overlapping session-local roots; direct cancellation reaches the scanner; typed results/events/history distinguish scan truth from discovery status and expose observations only. App architecture owns one session; CLI status/history consume the Rust DTO, UniFFI remains smoke-only, and no plan/cleanup authority exists | FFI version rejection plus bounded scan/history/plan transport and cancellation; planner lifecycle, priority, and cross-process scan leasing remain later |
 | SQLite compatibility store | Checksummed v1/v2/v3/v4 migrations with exact per-version fingerprints, lossless bounded path codec, bounded full/lightweight inspection, private atomic provisioning with durable initialization evidence, cross-platform process writer/version-race coverage, durable writer-locked cleanup-lock layout upgrade, private tri-state process-instance liveness evidence, newer-schema read-only transition, rollback/WAL recovery, engine-integrated scan lifecycle/coverage, atomic exact-snapshot candidate-evaluation batches, typed review state, sealed evaluator invalidation state, claim-preserving atomic planner/journal candidate projection, planned-cleanup history, exact expiry settlement, and a bounded cleanup-lock-coupled owner-generation journal state machine are implemented; stored paths, status, and policy remain non-authoritative observations | Planner engine lifecycle and query surfaces, Windows host-scope proof, retention, executor integration, hard-process-death scan-row recovery, and bounded identity-safe abandoned-stage maintenance |
 | Capacity sample persistence | Typed raw SQLite-v2 writes and bounded latest/cursor reads are implemented with opaque stable volume IDs, separate ordinary/important availability, hourly routine suppression, immediate stored-pressure transitions, monotonic metadata, storage/schema-gated exact retry reconciliation, volume/sample interval checks, hostile-row validation, and version-skew fencing; important-only UI observations are not persisted | Swift/engine/FFI/CLI wiring, Rust pressure evaluation/hysteresis, daily rollups, pressure episodes, and retention |
 | Binary full-tree snapshot store | Independent v1 wire has bounded pre-allocation, exact graph/path/aggregate/flag semantics, frozen golden digests, SHA-256 references, private marker-owned storage, unique temps, atomic no-replace publication, read-only final handles, database→snapshot lock ordering, version-skew fencing, and exact file-first scan-summary-plus-coverage reconciliation. Durable engine tasks publish only a completed-only fresh-scan converter's lossless canonical DFS nodes and fail-closed hard-link accounting; bytes remain non-authoritative | Explorer/FFI integration, last-complete selection, memory benchmarks, latest-two/2 GiB retention, active-review pins, abandoned-stage/temp maintenance, and native Windows sparse/compressed-allocation verification |

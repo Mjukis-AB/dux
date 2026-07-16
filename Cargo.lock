@@ -716,6 +716,8 @@ dependencies = [
  "dirs",
  "dux-core",
  "ratatui",
+ "serde",
+ "serde_json",
  "tempfile",
 ]
 

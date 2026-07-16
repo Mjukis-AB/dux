@@ -270,6 +270,11 @@ EXCEPTIONS = {
         "dux-core/src/cleanup/legacy_cli.rs", "rust-filesystem-effect", "test:replaced_ancestor_cannot_redirect_delete_outside_scan_root"
     ),
     "finder-reveal": ExceptionSpec("dux-cli/src/app/state.rs", "rust-process-spawn", "open_in_finder"),
+    "test-cli-inspection-spawn": ExceptionSpec(
+        "dux-cli/tests/inspection_cli.rs",
+        "rust-process-spawn",
+        "run_in_home",
+    ),
     "test-persistence-helper-spawn": ExceptionSpec(
         "dux-core/src/persistence/persistence_tests.rs",
         "rust-process-spawn",
@@ -432,6 +437,7 @@ EXCEPTION_PRIMITIVES = {
     "test-delete-changed-evidence": "rename",
     "test-delete-replaced-ancestor": "rename",
     "finder-reveal": "Command::new",
+    "test-cli-inspection-spawn": "Command::new",
     "test-persistence-helper-spawn": "Command::new",
     "test-persistence-displace-shm": "rename",
     "test-persistence-truncate-owned-database": "set_len",
@@ -483,6 +489,7 @@ CLIPPY_SUPPRESSION_COUNTS = {
     "dux-core/src/persistence/storage/windows.rs": 2,
     "dux-core/src/persistence/snapshot/storage.rs": 3,
     "dux-core/src/persistence/snapshot.rs": 1,
+    "dux-cli/tests/inspection_cli.rs": 1,
 }
 
 CLIPPY_PRODUCT_SUPPRESSION_SYMBOLS = {
