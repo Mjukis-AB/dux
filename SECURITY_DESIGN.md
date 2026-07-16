@@ -956,14 +956,38 @@ and storage-gated ambiguity reconciliation as review state. It is not currently
 constructible by engine, FFI, Swift, CLI, AI, or any evaluator module. This
 prevents a generic ID-only lifecycle setter from becoming an authority edge.
 
-Planner/journal candidate coupling cannot safely be implemented as a direct
-schema-v2 status overwrite. `planned` would erase whether review state was
-`discovered` or `selected`, leaving no crash-durable way to restore dry-run or
-effect-free cancellation and no exact active-session claim. A later schema must
-preserve both the candidate/session claim and prior review state in the same
-transaction as plan insertion before journal terminal state can project back
-to the candidate. Until then, planner/journal-owned candidate states remain
-unimplemented rather than lossy.
+Schema v3 implements planner/journal candidate coupling without a lossy status
+overwrite. Every newly inserted plan is coupling version 2 and atomically
+freezes its complete graph, compare-and-sets only an exact `discovered` or
+`selected` candidate to `planned`, and inserts a strict claim binding that
+candidate to one session/item plus its prior review state. Candidate and item
+foreign-key ownership edges are delete-restricted. A planned candidate is a
+valid observation only while exactly one bounded format-2 claim points to a
+coupled `planned`, `running`, or `recovering` session and its matching item;
+every non-planned status must have no claim. This projection and stored graph
+remain history, not execution authority.
+
+Terminal journal derivation settles each candidate and deletes its exact claim
+inside the same transaction as the immutable terminal session. A mode-correct
+real effect becomes `completed`. Dry-run and fully effect-free cancellation
+restore the claim's exact `discovered` or `selected` value. Every other terminal
+item becomes `failed`; partial sessions project each item independently.
+Running, recovering, effect-started, and outcome-unknown work retain `planned`
+and the claim. Once a claim is settled, restored review state may legitimately
+change again through review or evaluator commands, so immutable terminal
+history never depends on the candidate's later mutable projection.
+
+Pristine expiry is settled only by a cleanup-lock-owned history operation. The
+exact expiry boundary rejects every item/path with `plan_expired`, projects all
+candidates to `failed`, removes all claims, and records generation-one terminal
+provenance atomically; it does not create a running claim or effect receipt.
+The persisted millisecond is rounded upward so the terminal observation cannot
+appear earlier than the nanosecond expiry proof, while an observation even one
+instant before expiry is refused. Ambiguous commits retain the lease and adopt
+only the exact terminal owner/time/graph. Schema-v2 format-2 sessions migrate as
+explicit coupling version 1 with no fabricated claims: pristine rows cannot be
+newly claimed, while already-active rows may recover or terminalize without a
+retroactive candidate projection.
 
 The implemented typed cleanup-history boundary likewise remains
 non-authoritative and currently accepts only an immutable domain plan for a
@@ -1387,7 +1411,7 @@ incident as a substitute for deterministic local evidence.
 | Legacy CLI deletion | Active arbitrary-descendant permanent path routed through a temporary core adapter; strict-target/volume/identity rechecks only; scanned-byte estimates labeled in CLI | Replace adapter with reviewed plan/approval/executor chain without weakening current checks |
 | Centralized executor | Production executor absent; temporary legacy adapter is containment only | Typed admission, integration with the existing cross-process lease/journal, and live target revalidation required |
 | Engine/FFI task and plan API | Core handle, pre-worker SQLite/snapshot compatibility handshake, bounded per-session registry, read-only formatting, and durable full-scan tasks are implemented. Scan admission fences schema skew and overlapping session-local roots; direct cancellation reaches the scanner; typed results/events expose observations only. App architecture owns one session; UniFFI remains smoke-only and no plan/cleanup authority exists | FFI version rejection plus bounded scan/history/plan DTOs and cancellation transport; priority and cross-process scan leasing remain later |
-| SQLite compatibility store | Checksummed v1/v2 migrations with exact per-version fingerprints, lossless bounded path codec, bounded full/lightweight inspection, private atomic provisioning with durable initialization evidence, cross-platform process writer/version-race coverage, durable writer-locked cleanup-lock layout upgrade, private tri-state process-instance liveness evidence, newer-schema read-only transition, rollback/WAL recovery, engine-integrated scan lifecycle/coverage, succeeded-scan-bound candidate observations, typed review state, sealed evaluator invalidation state, planned-cleanup history, and a bounded cleanup-lock-coupled owner-generation journal state machine are implemented; stored paths, status, and policy remain non-authoritative observations | Deterministic evaluator integration, claim-preserving planner/journal-coupled candidate state, evaluator/planner engine lifecycle integration, Windows host-scope proof, retention, executor integration, hard-process-death scan-row recovery, and bounded identity-safe abandoned-stage maintenance |
+| SQLite compatibility store | Checksummed v1/v2/v3 migrations with exact per-version fingerprints, lossless bounded path codec, bounded full/lightweight inspection, private atomic provisioning with durable initialization evidence, cross-platform process writer/version-race coverage, durable writer-locked cleanup-lock layout upgrade, private tri-state process-instance liveness evidence, newer-schema read-only transition, rollback/WAL recovery, engine-integrated scan lifecycle/coverage, succeeded-scan-bound candidate observations, typed review state, sealed evaluator invalidation state, claim-preserving atomic planner/journal candidate projection, planned-cleanup history, exact expiry settlement, and a bounded cleanup-lock-coupled owner-generation journal state machine are implemented; stored paths, status, and policy remain non-authoritative observations | Deterministic evaluator integration, evaluator/planner engine lifecycle integration, Windows host-scope proof, retention, executor integration, hard-process-death scan-row recovery, and bounded identity-safe abandoned-stage maintenance |
 | Capacity sample persistence | Typed raw SQLite-v2 writes and bounded latest/cursor reads are implemented with opaque stable volume IDs, separate ordinary/important availability, hourly routine suppression, immediate stored-pressure transitions, monotonic metadata, storage/schema-gated exact retry reconciliation, volume/sample interval checks, hostile-row validation, and version-skew fencing; important-only UI observations are not persisted | Swift/engine/FFI/CLI wiring, Rust pressure evaluation/hysteresis, daily rollups, pressure episodes, and retention |
 | Binary full-tree snapshot store | Independent v1 wire has bounded pre-allocation, exact graph/path/aggregate/flag semantics, frozen golden digests, SHA-256 references, private marker-owned storage, unique temps, atomic no-replace publication, read-only final handles, database→snapshot lock ordering, version-skew fencing, and exact file-first scan-summary-plus-coverage reconciliation. Durable engine tasks publish only a completed-only fresh-scan converter's lossless canonical DFS nodes and fail-closed hard-link accounting; bytes remain non-authoritative | Explorer/FFI integration, last-complete selection, memory benchmarks, latest-two/2 GiB retention, active-review pins, abandoned-stage/temp maintenance, and native Windows sparse/compressed-allocation verification |
 | Typed scan coverage/issues | Implemented as bounded semantic domain values, authoritative scanner terminal outcomes, engine task results/events, atomic SQLite-v2 summary children, truthful fresh/legacy-cache CLI labels, and changed-hard-link observations; observations grant no plan or cleanup authority | FFI/Swift transport, paged Explorer details, and permission onboarding |

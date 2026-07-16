@@ -2045,13 +2045,65 @@ Tasks:
 
     This boundary is deliberately `persistence`-private and has no engine, FFI,
     Swift, CLI, AI, or production evaluator caller yet, so stored status still
-    grants no authority. Planner/journal coupling also remains open and must not
-    directly overwrite schema-v2 `discovered`/`selected` rows: doing so loses
-    prior review intent and strands dry-run, cancelled, or expired plans. The
-    next lifecycle schema must preserve a crash-durable active plan claim and
-    the exact prior review state before atomically introducing `planned`, then
-    derive terminal candidate state from the journal. The broad persistence
-    checkbox therefore stays unchecked.
+    grants no authority. At this sub-checkpoint planner/journal coupling was
+    still open and could not directly overwrite schema-v2
+    `discovered`/`selected` rows without losing prior review intent and
+    stranding dry-run, cancelled, or expired plans. The following schema-v3
+    sub-checkpoint closes that persistence gap; engine integration remains
+    open.
+  - Candidate-plan claim coupling sub-checkpoint completed 2026-07-16:
+    checksummed schema v3 adds an explicit per-session coupling version and a
+    strict one-candidate-to-one-plan-item claim table. Existing schema-v2
+    sessions migrate as coupling version 1 with no fabricated claim or prior
+    review state; new sessions use coupling version 2. Both candidate and item
+    ownership edges are delete-restricted, and exact v1/v2/v3 object
+    inventories, fingerprints, populated upgrades, and format-2 pristine,
+    running, recovering, and terminal migration fixtures keep compatibility
+    explicit.
+
+    New plan insertion now full-validates every succeeded-scan-bound candidate
+    before one immediate transaction freezes the session graph, compare-and-
+    sets only `discovered` or `selected` candidates to `planned`, and records
+    each exact prior review state. A second incompatible candidate, duplicate
+    claim, or competing plan rolls back the complete graph and every earlier
+    projection. Candidate reads require exactly one bounded, format-2 claim
+    while status is `planned`, reject claims on every other state, and validate
+    joined storage classes, byte bounds, parent coupling, active lifecycle, and
+    item identity before materializing values. Legacy uncoupled pristine plans
+    cannot enter the new generation-one claim path.
+
+    Journal terminalization derives candidate projection per complete item in
+    the same transaction that freezes the terminal session and removes its
+    exact claim. Mode-correct real effects become `completed`; dry-run and a
+    fully effect-free cancelled item restore its exact `discovered` or
+    `selected` state; every rejected, changed, unavailable, interrupted,
+    skipped, mixed-failure, or failed terminal item becomes `failed`.
+    `effect_started`, `outcome_unknown`, running, and recovering work retains
+    `planned` plus its claim and cannot counterfeit completion. Restored review
+    state remains a live projection after settlement, so later dismissal or
+    evaluator invalidation does not corrupt immutable terminal cleanup history.
+
+    A cleanup-lock-owned expiry settlement closes the otherwise stranded
+    pristine-plan case without granting effect authority. It accepts the exact
+    nanosecond expiry boundary, records a millisecond ceiling that cannot appear
+    earlier than that boundary, rejects every item/path with `plan_expired`,
+    projects candidates to `failed`, deletes claims, and writes generation-one
+    terminal provenance atomically. One instant before expiry is refused.
+    Failure on a later candidate rolls the entire settlement back, while
+    injected post-commit ambiguity is adopted only for the same owner, rounded
+    time, rejected graph, and candidate/claim transaction. Existing active
+    uncoupled sessions remain recoverable and terminalizable without retroactive
+    candidate projection.
+
+    Focused regressions cover exact D/S preservation, late review refusal,
+    competing plans, all success/failure/dry-run/cancellation projections,
+    partial completion, outcome-unknown retention, missing/oversized/wrong-
+    version claims, exact expiry, multi-item rollback, ambiguous terminal and
+    expiry commits, immutable-history readability after later candidate state
+    changes, maximum bounded graphs, and v2 migration lifecycles. This layer
+    remains crate-private and performs no filesystem effect. The broad
+    persistence checkbox stays open for deterministic evaluator/planner engine
+    lifecycle integration, history query surfaces, and retention.
   - Planned-cleanup journal sub-checkpoint completed 2026-07-16: a crate-private
     boundary prepares and bounds an immutable cleanup plan before locking,
     requires its scan and every format-2 candidate observation to exist and

@@ -125,7 +125,7 @@ pub(crate) struct Migration {
     pub(crate) sql: &'static str,
 }
 
-const MIGRATIONS: [Migration; 2] = [
+const MIGRATIONS: [Migration; 3] = [
     Migration {
         version: 1,
         name: "initial-storage-schema",
@@ -145,6 +145,16 @@ const MIGRATIONS: [Migration; 2] = [
             0x90, 0xea, 0xfe, 0x95,
         ],
         sql: include_str!("../../migrations/0002_candidate_cleanup_history.sql"),
+    },
+    Migration {
+        version: 3,
+        name: "candidate-plan-claims",
+        checksum_sha256: [
+            0xc2, 0x14, 0xbb, 0x41, 0xd9, 0xb7, 0x69, 0xd3, 0xa0, 0xab, 0x95, 0xa5, 0x1e, 0xed,
+            0x31, 0x94, 0x0b, 0x18, 0xfd, 0x1e, 0x61, 0x27, 0xd8, 0xea, 0xc7, 0xe6, 0x4d, 0xe0,
+            0xeb, 0x34, 0x8b, 0x92,
+        ],
+        sql: include_str!("../../migrations/0003_candidate_plan_claims.sql"),
     },
 ];
 
@@ -211,6 +221,43 @@ const V2_EXPECTED_SCHEMA_OBJECTS: [(&str, &str); 33] = [
     ("table", "volumes"),
 ];
 
+const V3_EXPECTED_SCHEMA_OBJECTS: [(&str, &str); 34] = [
+    ("index", "ai_insights_by_expiration"),
+    ("index", "ai_insights_by_identity"),
+    ("index", "candidates_by_scan_status"),
+    ("index", "candidates_by_scan_time"),
+    ("index", "cleanup_items_by_session"),
+    ("index", "cleanup_sessions_by_recovery"),
+    ("index", "cleanup_sessions_by_time"),
+    ("index", "disk_samples_by_kind_time"),
+    ("index", "disk_samples_by_volume_kind_time"),
+    ("index", "rule_outcomes_by_rule_time"),
+    ("index", "scan_issues_by_scan_kind"),
+    ("index", "scans_by_started"),
+    ("index", "scans_by_volume_time"),
+    ("index", "schedules_by_next_run"),
+    ("table", "ai_insights"),
+    ("table", "candidate_blockers"),
+    ("table", "candidate_evidence"),
+    ("table", "candidate_paths"),
+    ("table", "candidate_plan_claims"),
+    ("table", "candidates"),
+    ("table", "cleanup_item_evidence"),
+    ("table", "cleanup_item_paths"),
+    ("table", "cleanup_items"),
+    ("table", "cleanup_plan_warnings"),
+    ("table", "cleanup_sessions"),
+    ("table", "disk_samples"),
+    ("table", "rule_outcomes"),
+    ("table", "scan_aggregates"),
+    ("table", "scan_issues"),
+    ("table", "scans"),
+    ("table", "schedules"),
+    ("table", "schema_migrations"),
+    ("table", "settings"),
+    ("table", "volumes"),
+];
+
 // Canonical sqlite_schema representation produced by v1. A mismatch rejects
 // supported databases rather than guessing about drift.
 const V1_SCHEMA_FINGERPRINT: [u8; 32] = [
@@ -222,6 +269,12 @@ const V1_SCHEMA_FINGERPRINT: [u8; 32] = [
 const V2_SCHEMA_FINGERPRINT: [u8; 32] = [
     0x80, 0xb2, 0x54, 0x60, 0x81, 0x1e, 0x96, 0x19, 0xd1, 0x38, 0x1d, 0x75, 0x89, 0x6c, 0x98, 0xae,
     0x18, 0x87, 0x36, 0x9a, 0xdb, 0x0d, 0xeb, 0x8c, 0xa7, 0x91, 0x6d, 0x07, 0xa3, 0xb8, 0x44, 0x83,
+];
+
+// Canonical sqlite_schema representation produced by the complete v3 chain.
+const V3_SCHEMA_FINGERPRINT: [u8; 32] = [
+    0x44, 0x7c, 0xdb, 0xf5, 0x33, 0xbb, 0xdc, 0x51, 0x0b, 0xc9, 0x7f, 0x19, 0x77, 0x73, 0x37, 0x6e,
+    0x66, 0xf3, 0x49, 0x36, 0x0e, 0xa9, 0x82, 0xfd, 0x97, 0x8c, 0xb8, 0xea, 0xdc, 0xc9, 0x06, 0x7c,
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -510,6 +563,12 @@ fn validate_supported_schema(
             &V2_EXPECTED_SCHEMA_OBJECTS,
             V2_SCHEMA_FINGERPRINT,
         ),
+        3 => validate_schema(
+            connection,
+            clock,
+            &V3_EXPECTED_SCHEMA_OBJECTS,
+            V3_SCHEMA_FINGERPRINT,
+        ),
         _ => Err(corrupt_error()),
     }
 }
@@ -765,6 +824,11 @@ pub(super) const fn test_v1_schema_fingerprint() -> [u8; 32] {
 #[cfg(test)]
 pub(super) const fn test_v2_schema_fingerprint() -> [u8; 32] {
     V2_SCHEMA_FINGERPRINT
+}
+
+#[cfg(test)]
+pub(super) const fn test_v3_schema_fingerprint() -> [u8; 32] {
+    V3_SCHEMA_FINGERPRINT
 }
 
 #[cfg(test)]

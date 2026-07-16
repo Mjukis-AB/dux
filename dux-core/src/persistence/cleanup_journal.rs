@@ -12,7 +12,7 @@ mod tests;
 
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
@@ -22,12 +22,12 @@ use crate::domain::{
 };
 
 use super::candidate_history::{
-    RawEvidence, action_from_stored, category_from_stored, decode_absolute_path, decode_evidence,
-    decode_optional_time, from_i64, safety_from_stored, stored_bool, validate_complete_children,
-    validate_policy,
+    CandidatePlanSettlement, RawEvidence, action_from_stored, category_from_stored,
+    decode_absolute_path, decode_evidence, decode_optional_time, from_i64, safety_from_stored,
+    settle_planned_candidate, stored_bool, validate_complete_children, validate_policy,
 };
 use super::cleanup_history::{
-    CleanupSessionId, CleanupTrigger, PlannedCleanupItemRecord,
+    CandidateStatusCoupling, CleanupSessionId, CleanupTrigger, PlannedCleanupItemRecord,
     load_frozen_cleanup_session_within_budget,
 };
 use super::history::{
@@ -41,6 +41,7 @@ const MAX_TOTAL_PATHS: usize = 256;
 const MAX_TOTAL_EVIDENCE: usize = 512;
 const MAX_WARNINGS: usize = 5;
 const MAX_ERROR_BYTES: usize = 128;
+const PLAN_EXPIRED_ERROR: &str = "plan_expired";
 
 /// The active parent-row fence copied into every journal mutation.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -223,6 +224,7 @@ pub(super) struct CleanupJournal {
     pub(super) mode: CleanupMode,
     pub(super) estimated_bytes: u64,
     pub(super) trigger: CleanupTrigger,
+    pub(super) candidate_status_coupling: CandidateStatusCoupling,
     pub(super) warnings: Vec<PlanWarning>,
     pub(super) lifecycle: JournalLifecycle,
     pub(super) items: Vec<JournalItem>,
@@ -358,7 +360,8 @@ fn claim_planned(
 ) -> Result<ExecutionFence, HistoryError> {
     let graph = load_cleanup_journal(transaction, session_id)?
         .ok_or_else(|| HistoryError::new(HistoryErrorKind::NotFound))?;
-    if graph.lifecycle != JournalLifecycle::Planned
+    if graph.candidate_status_coupling != CandidateStatusCoupling::PlanClaimsV1
+        || graph.lifecycle != JournalLifecycle::Planned
         || claimed_at < graph.started_at
         || graph.plan_expires_at <= claimed_at
     {
@@ -384,6 +387,97 @@ fn claim_planned(
         owner,
         generation: 1,
     })
+}
+
+/// Settle an exact pristine plan at or after expiry without granting effect
+/// authority. The cleanup lock still supplies exclusion, and generation one is
+/// retained only as terminal history provenance.
+fn expire_planned(
+    transaction: &Transaction<'_>,
+    session_id: &CleanupSessionId,
+    owner: ProcessInstanceId,
+    observed_at: SystemTime,
+) -> Result<ExecutionFence, HistoryError> {
+    let journal = load_cleanup_journal(transaction, session_id)?
+        .ok_or_else(|| HistoryError::new(HistoryErrorKind::NotFound))?;
+    if journal.candidate_status_coupling != CandidateStatusCoupling::PlanClaimsV1
+        || journal.lifecycle != JournalLifecycle::Planned
+        || observed_at < journal.plan_expires_at
+    {
+        return Err(invalid_transition());
+    }
+    let settled_at = canonical_expiry_settlement_time(observed_at)?;
+    let completed = system_time_to_unix_ms(settled_at, HistoryErrorKind::InvalidInput)?;
+    let path_count = journal
+        .items
+        .iter()
+        .map(|item| item.paths.len())
+        .sum::<usize>();
+    let changed_paths = transaction
+        .execute(
+            "UPDATE cleanup_item_paths
+             SET attempt_generation = 1, status = 'rejected',
+                 error_category = ?2, completed_at_unix_ms = ?3
+             WHERE session_id = ?1 AND status = 'planned'
+               AND attempt_generation IS NULL AND error_category IS NULL
+               AND effect_started_at_unix_ms IS NULL AND completed_at_unix_ms IS NULL",
+            params![session_id.as_str(), PLAN_EXPIRED_ERROR, completed],
+        )
+        .map_err(map_write_sql_error)?;
+    if changed_paths != path_count {
+        return Err(invalid_transition());
+    }
+    let changed_items = transaction
+        .execute(
+            "UPDATE cleanup_items
+             SET final_status = 'rejected', error_category = ?2
+             WHERE session_id = ?1 AND record_format_version = 2
+               AND final_status = 'planned' AND error_category IS NULL",
+            params![session_id.as_str(), PLAN_EXPIRED_ERROR],
+        )
+        .map_err(map_write_sql_error)?;
+    if changed_items != journal.items.len() {
+        return Err(invalid_transition());
+    }
+    for item in &journal.items {
+        settle_candidate_plan_claim(transaction, &journal, item, CandidatePlanSettlement::Failed)?;
+    }
+    let changed = transaction
+        .execute(
+            "UPDATE cleanup_sessions
+             SET status = 'rejected', completed_at_unix_ms = ?3,
+                 execution_owner_id = ?2, execution_generation = 1,
+                 last_heartbeat_at_unix_ms = ?3
+             WHERE session_id = ?1 AND record_format_version = 2
+               AND candidate_status_coupling_version = 2
+               AND status = 'planned' AND completed_at_unix_ms IS NULL
+               AND verified_capacity_delta_bytes IS NULL
+               AND execution_owner_id IS NULL AND execution_generation IS NULL
+               AND last_heartbeat_at_unix_ms IS NULL AND cancellation_requested = 0",
+            params![session_id.as_str(), owner.as_str(), completed],
+        )
+        .map_err(map_write_sql_error)?;
+    require_one(changed)?;
+    Ok(ExecutionFence {
+        session_id: session_id.clone(),
+        owner,
+        generation: 1,
+    })
+}
+
+fn canonical_expiry_settlement_time(value: SystemTime) -> Result<SystemTime, HistoryError> {
+    let elapsed = value
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| HistoryError::new(HistoryErrorKind::InvalidInput))?;
+    let floor = system_time_to_unix_ms(value, HistoryErrorKind::InvalidInput)?;
+    let milliseconds = if elapsed.subsec_nanos() % 1_000_000 == 0 {
+        floor
+    } else {
+        floor
+            .checked_add(1)
+            .ok_or_else(|| HistoryError::new(HistoryErrorKind::InvalidInput))?
+    };
+    unix_ms_to_system_time(milliseconds)
 }
 
 fn record_heartbeat(
@@ -706,14 +800,14 @@ fn resume_recovery(
         .ok_or_else(|| HistoryError::new(HistoryErrorKind::NotFound))?;
     let JournalLifecycle::Active {
         phase: ActivePhase::Recovering,
-        fence: loaded_fence,
+        fence: ref loaded_fence,
         cancellation_requested: false,
         ..
     } = journal.lifecycle
     else {
         return Err(invalid_transition());
     };
-    if loaded_fence != *fence
+    if loaded_fence != fence
         || !journal
             .items
             .iter()
@@ -757,7 +851,7 @@ fn settle_cancellation(
     let journal = load_cleanup_journal(transaction, &fence.session_id)?
         .ok_or_else(|| HistoryError::new(HistoryErrorKind::NotFound))?;
     let JournalLifecycle::Active {
-        fence: loaded_fence,
+        fence: ref loaded_fence,
         heartbeat_at,
         cancellation_requested: true,
         ..
@@ -765,7 +859,7 @@ fn settle_cancellation(
     else {
         return Err(invalid_transition());
     };
-    if loaded_fence != *fence || completed_at < journal.started_at || completed_at < heartbeat_at {
+    if loaded_fence != fence || completed_at < journal.started_at || completed_at < heartbeat_at {
         return Err(invalid_transition());
     }
     let now = system_time_to_unix_ms(completed_at, HistoryErrorKind::InvalidInput)?;
@@ -867,7 +961,7 @@ fn terminalize(
     let journal = load_cleanup_journal(transaction, &fence.session_id)?
         .ok_or_else(|| HistoryError::new(HistoryErrorKind::NotFound))?;
     let JournalLifecycle::Active {
-        fence: loaded_fence,
+        fence: ref loaded_fence,
         heartbeat_at,
         cancellation_requested,
         ..
@@ -875,7 +969,7 @@ fn terminalize(
     else {
         return Err(invalid_transition());
     };
-    if loaded_fence != *fence {
+    if loaded_fence != fence {
         return Err(invalid_transition());
     }
     let statuses = journal
@@ -894,6 +988,9 @@ fn terminalize(
             .any(|path_completed| path_completed > completed_at)
     {
         return Err(invalid_transition());
+    }
+    if journal.candidate_status_coupling == CandidateStatusCoupling::PlanClaimsV1 {
+        settle_candidate_plan_claims(transaction, &journal, status)?;
     }
     let completed = system_time_to_unix_ms(completed_at, HistoryErrorKind::InvalidInput)?;
     let generation = to_generation(fence.generation)?;
@@ -919,6 +1016,63 @@ fn terminalize(
             .map_err(map_write_sql_error)?,
     )?;
     Ok(status)
+}
+
+fn settle_candidate_plan_claims(
+    transaction: &Transaction<'_>,
+    journal: &CleanupJournal,
+    session_status: TerminalSessionStatus,
+) -> Result<(), HistoryError> {
+    for item in &journal.items {
+        let prior = item.frozen.prior_review_status.ok_or_else(corrupt)?;
+        let settlement = match item.status {
+            PathStatus::Trashed | PathStatus::Removed | PathStatus::Evicted => {
+                CandidatePlanSettlement::Completed
+            }
+            PathStatus::DryRun => CandidatePlanSettlement::Restore(prior),
+            PathStatus::Interrupted | PathStatus::Skipped
+                if session_status == TerminalSessionStatus::Cancelled =>
+            {
+                CandidatePlanSettlement::Restore(prior)
+            }
+            PathStatus::Skipped
+            | PathStatus::Rejected
+            | PathStatus::Failed
+            | PathStatus::ChangedSincePlan
+            | PathStatus::Interrupted
+            | PathStatus::Unavailable => CandidatePlanSettlement::Failed,
+            PathStatus::Planned
+            | PathStatus::Validating
+            | PathStatus::EffectStarted
+            | PathStatus::OutcomeUnknown => return Err(invalid_transition()),
+        };
+        settle_candidate_plan_claim(transaction, journal, item, settlement)?;
+    }
+    Ok(())
+}
+
+fn settle_candidate_plan_claim(
+    transaction: &Transaction<'_>,
+    journal: &CleanupJournal,
+    item: &JournalItem,
+    settlement: CandidatePlanSettlement,
+) -> Result<(), HistoryError> {
+    let prior = item.frozen.prior_review_status.ok_or_else(corrupt)?;
+    settle_planned_candidate(transaction, &item.frozen.candidate_id, settlement)?;
+    let deleted = transaction
+        .execute(
+            "DELETE FROM candidate_plan_claims
+             WHERE candidate_id = ?1 AND session_id = ?2
+               AND item_ordinal = ?3 AND prior_review_status = ?4",
+            params![
+                item.frozen.candidate_id.as_str(),
+                journal.session_id.as_str(),
+                item.frozen.ordinal as i64,
+                prior.as_stored(),
+            ],
+        )
+        .map_err(map_write_sql_error)?;
+    require_one(deleted)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1440,8 +1594,15 @@ fn load_cleanup_journal_within_budget(
         return Err(corrupt());
     }
     let mut totals = LoadTotals::default();
-    let items = load_items(connection, session_id, &mut totals)?;
+    let mut items = load_items(connection, session_id, &mut totals)?;
     let warnings = load_warnings(connection, session_id)?;
+
+    if items.len() != frozen.items.len() {
+        return Err(corrupt());
+    }
+    for (item, frozen_item) in items.iter_mut().zip(&frozen.items) {
+        item.frozen.prior_review_status = frozen_item.prior_review_status;
+    }
 
     let frozen_items = items
         .iter()
@@ -1485,6 +1646,7 @@ fn load_cleanup_journal_within_budget(
         mode,
         estimated_bytes,
         trigger,
+        candidate_status_coupling: frozen.candidate_status_coupling,
         warnings,
         lifecycle,
         items,
@@ -1670,6 +1832,7 @@ fn load_items(
             safety,
             proposed_action,
             rule_schedule_eligible: schedule,
+            prior_review_status: None,
         };
         items.push(JournalItem {
             frozen,

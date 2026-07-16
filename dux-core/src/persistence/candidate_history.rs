@@ -56,7 +56,7 @@ impl CandidateHistoryStatus {
         }
     }
 
-    fn from_stored(value: &str) -> Result<Self, HistoryError> {
+    pub(super) fn from_stored(value: &str) -> Result<Self, HistoryError> {
         match value {
             "discovered" => Ok(Self::Discovered),
             "selected" => Ok(Self::Selected),
@@ -129,6 +129,36 @@ impl CandidateEvaluationTransition {
             ),
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum CandidatePriorReviewStatus {
+    Discovered,
+    Selected,
+}
+
+impl CandidatePriorReviewStatus {
+    pub(super) fn as_stored(self) -> &'static str {
+        match self {
+            Self::Discovered => "discovered",
+            Self::Selected => "selected",
+        }
+    }
+
+    pub(super) fn from_stored(value: &str) -> Result<Self, HistoryError> {
+        match value {
+            "discovered" => Ok(Self::Discovered),
+            "selected" => Ok(Self::Selected),
+            _ => Err(corrupt()),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum CandidatePlanSettlement {
+    Restore(CandidatePriorReviewStatus),
+    Completed,
+    Failed,
 }
 
 impl CandidateReviewTransition {
@@ -522,6 +552,56 @@ fn transition_candidate_status(
     Ok((previous, next))
 }
 
+pub(super) fn mark_candidate_planned(
+    transaction: &Transaction<'_>,
+    candidate: &CompleteCandidateRecord,
+) -> Result<CandidatePriorReviewStatus, HistoryError> {
+    if !candidate.action.is_cleanup_operation() || !candidate.blockers.is_empty() {
+        return Err(HistoryError::new(HistoryErrorKind::InvalidTransition));
+    }
+    let prior = match candidate.status {
+        CandidateHistoryStatus::Discovered => CandidatePriorReviewStatus::Discovered,
+        CandidateHistoryStatus::Selected => CandidatePriorReviewStatus::Selected,
+        _ => return Err(HistoryError::new(HistoryErrorKind::InvalidTransition)),
+    };
+    let changed = transaction
+        .execute(
+            "UPDATE candidates
+             SET status = 'planned'
+             WHERE candidate_id = ?1 AND record_format_version = 2 AND status = ?2",
+            params![candidate.id.as_str(), prior.as_stored()],
+        )
+        .map_err(map_write_sql_error)?;
+    if changed != 1 {
+        return Err(HistoryError::new(HistoryErrorKind::InvalidTransition));
+    }
+    Ok(prior)
+}
+
+pub(super) fn settle_planned_candidate(
+    transaction: &Transaction<'_>,
+    id: &CandidateId,
+    settlement: CandidatePlanSettlement,
+) -> Result<(), HistoryError> {
+    let target = match settlement {
+        CandidatePlanSettlement::Restore(prior) => prior.as_stored(),
+        CandidatePlanSettlement::Completed => "completed",
+        CandidatePlanSettlement::Failed => "failed",
+    };
+    let changed = transaction
+        .execute(
+            "UPDATE candidates
+             SET status = ?2
+             WHERE candidate_id = ?1 AND record_format_version = 2 AND status = 'planned'",
+            params![id.as_str(), target],
+        )
+        .map_err(map_write_sql_error)?;
+    if changed != 1 {
+        return Err(HistoryError::new(HistoryErrorKind::InvalidTransition));
+    }
+    Ok(())
+}
+
 pub(super) fn load_candidate_record(
     connection: &Connection,
     id: &CandidateId,
@@ -603,6 +683,7 @@ fn load_candidate_record_within_budget_and_hook(
             let newest_mtime =
                 decode_optional_time(raw.newest_mtime_seconds, raw.newest_mtime_nanoseconds)?;
             validate_complete_children(common.safety, action, &paths, &evidence)?;
+            validate_candidate_plan_claim_state(connection, &common.id, common.status)?;
             Ok(Some(StoredCandidateRecord::Complete(
                 CompleteCandidateRecord {
                     id: common.id,
@@ -624,6 +705,70 @@ fn load_candidate_record_within_budget_and_hook(
         }
         _ => Err(corrupt()),
     }
+}
+
+fn validate_candidate_plan_claim_state(
+    connection: &Connection,
+    id: &CandidateId,
+    status: CandidateHistoryStatus,
+) -> Result<(), HistoryError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT typeof(claim.prior_review_status),
+                    length(CAST(claim.prior_review_status AS BLOB)),
+                    claim.prior_review_status,
+                    session.candidate_status_coupling_version,
+                    typeof(session.status), length(CAST(session.status AS BLOB)),
+                    session.status, session.record_format_version,
+                    typeof(item.candidate_id), length(CAST(item.candidate_id AS BLOB)),
+                    item.candidate_id, item.record_format_version
+             FROM candidate_plan_claims AS claim
+             LEFT JOIN cleanup_sessions AS session
+               ON session.session_id = claim.session_id
+             LEFT JOIN cleanup_items AS item
+               ON item.session_id = claim.session_id
+              AND item.item_ordinal = claim.item_ordinal
+             WHERE claim.candidate_id = ?1
+             LIMIT 2",
+        )
+        .map_err(map_query_sql_error)?;
+    let mut rows = statement
+        .query([id.as_str()])
+        .map_err(map_query_sql_error)?;
+    let first = rows.next().map_err(map_query_sql_error)?;
+    if status != CandidateHistoryStatus::Planned {
+        return if first.is_none() {
+            Ok(())
+        } else {
+            Err(corrupt())
+        };
+    }
+    let row = first.ok_or_else(corrupt)?;
+    validate_required_value(row, 0, 1, "text", MAX_STORED_POLICY_BYTES)
+        .map_err(map_query_sql_error)?;
+    validate_required_value(row, 4, 5, "text", MAX_STORED_POLICY_BYTES)
+        .map_err(map_query_sql_error)?;
+    validate_required_value(row, 8, 9, "text", MAX_STORED_ID_BYTES).map_err(map_query_sql_error)?;
+    let prior: String = row.get(2).map_err(map_query_sql_error)?;
+    let coupling: Option<i64> = row.get(3).map_err(map_query_sql_error)?;
+    let session_status: String = row.get(6).map_err(map_query_sql_error)?;
+    let session_version: Option<i64> = row.get(7).map_err(map_query_sql_error)?;
+    let item_candidate_id: String = row.get(10).map_err(map_query_sql_error)?;
+    let item_version: Option<i64> = row.get(11).map_err(map_query_sql_error)?;
+    if CandidatePriorReviewStatus::from_stored(&prior).is_err()
+        || coupling != Some(2)
+        || !matches!(
+            session_status.as_str(),
+            "planned" | "running" | "recovering"
+        )
+        || session_version != Some(2)
+        || item_candidate_id != id.as_str()
+        || item_version != Some(2)
+        || rows.next().map_err(map_query_sql_error)?.is_some()
+    {
+        return Err(corrupt());
+    }
+    Ok(())
 }
 
 struct RawCandidateRow {
@@ -2380,6 +2525,11 @@ mod tests {
                     )
                     .unwrap();
             });
+            let expected = if status == "planned" {
+                HistoryErrorKind::CorruptData
+            } else {
+                HistoryErrorKind::InvalidTransition
+            };
             assert_eq!(
                 store
                     .transition_candidate_review_status(
@@ -2388,7 +2538,7 @@ mod tests {
                     )
                     .unwrap_err()
                     .kind,
-                HistoryErrorKind::InvalidTransition,
+                expected,
                 "review API accepted lifecycle-owned {status} status"
             );
             if matches!(status, "planned" | "completed" | "failed") {
@@ -2400,7 +2550,7 @@ mod tests {
                         )
                         .unwrap_err()
                         .kind,
-                    HistoryErrorKind::InvalidTransition,
+                    expected,
                     "evaluator API accepted planner/journal-owned {status} status"
                 );
             }

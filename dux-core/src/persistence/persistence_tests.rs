@@ -8,6 +8,10 @@ use std::time::{Duration, Instant};
 use rusqlite::{Connection, OpenFlags, params};
 use tempfile::TempDir;
 
+use super::cleanup_history::{
+    CandidateStatusCoupling, CleanupSessionId, StoredCleanupSessionRecord,
+    load_frozen_cleanup_session_within_budget,
+};
 use super::codec::{
     CodecError, EncodedBytes, StoredEncoding, decode_host_path, decode_logical_key,
     encode_host_path, encode_logical_key,
@@ -16,7 +20,7 @@ use super::migrations::{
     DUX_APPLICATION_ID, Migration, SchemaState, apply_pending_migrations, apply_test_chain,
     apply_test_upgrade_chain, inspect_schema, inspect_schema_with_test_budget,
     panic_with_test_budget, schema_fingerprint, test_migrations, test_v1_schema_fingerprint,
-    test_v2_schema_fingerprint, validate_compiled_migrations,
+    test_v2_schema_fingerprint, test_v3_schema_fingerprint, validate_compiled_migrations,
 };
 use super::process_liveness::current_process_instance;
 #[cfg(unix)]
@@ -335,6 +339,32 @@ fn fresh_v1_schema() -> Connection {
     connection
 }
 
+fn fresh_v2_schema() -> Connection {
+    let connection = Connection::open_in_memory().unwrap();
+    for migration in &test_migrations()[..2] {
+        connection.execute_batch(migration.sql).unwrap();
+        connection
+            .execute(
+                "INSERT INTO schema_migrations (
+                     version, name, checksum_sha256, applied_at_unix_ms
+                 ) VALUES (?1, ?2, ?3, 1)",
+                params![
+                    i64::from(migration.version),
+                    migration.name,
+                    migration.checksum_sha256.as_slice(),
+                ],
+            )
+            .unwrap();
+        connection
+            .pragma_update(None, "application_id", DUX_APPLICATION_ID)
+            .unwrap();
+        connection
+            .pragma_update(None, "user_version", migration.version)
+            .unwrap();
+    }
+    connection
+}
+
 fn fresh_current_schema() -> Connection {
     let connection = Connection::open_in_memory().unwrap();
     for migration in test_migrations() {
@@ -361,6 +391,180 @@ fn fresh_current_schema() -> Connection {
     connection
 }
 
+fn install_v2_schema(connection: &Connection) {
+    for migration in &test_migrations()[..2] {
+        connection.execute_batch(migration.sql).unwrap();
+        connection
+            .execute(
+                "INSERT INTO schema_migrations (
+                     version, name, checksum_sha256, applied_at_unix_ms
+                 ) VALUES (?1, ?2, ?3, 1)",
+                params![
+                    i64::from(migration.version),
+                    migration.name,
+                    migration.checksum_sha256.as_slice(),
+                ],
+            )
+            .unwrap();
+        connection
+            .pragma_update(None, "application_id", DUX_APPLICATION_ID)
+            .unwrap();
+        connection
+            .pragma_update(None, "user_version", migration.version)
+            .unwrap();
+    }
+}
+
+fn insert_v2_format2_cleanup_session(
+    connection: &Connection,
+    label: &str,
+    status: &str,
+    owner: &str,
+) {
+    let session_id = format!("session:v2-{label}");
+    let plan_id = format!("plan:v2-{label}");
+    let candidate_id = format!("candidate:v2-{label}");
+    let target = format!("/v2/{label}/cache").into_bytes();
+    let (completed_at, capacity_delta, execution_owner, execution_generation, heartbeat) =
+        match status {
+            "planned" => (None, None, None, None, None),
+            "running" | "recovering" => (None, None, Some(owner), Some(1_i64), Some(1_000_600_i64)),
+            "completed" => (
+                Some(1_000_800_i64),
+                Some(8_i64),
+                Some(owner),
+                Some(1_i64),
+                Some(1_000_600_i64),
+            ),
+            _ => panic!("unsupported v2 cleanup fixture status: {status}"),
+        };
+    let (item_status, attempt_generation, effect_started, path_completed) = if status == "completed"
+    {
+        (
+            "removed",
+            Some(1_i64),
+            Some(1_000_700_i64),
+            Some(1_000_750_i64),
+        )
+    } else {
+        ("planned", None, None, None)
+    };
+
+    connection
+        .execute(
+            "INSERT INTO candidates (
+                 candidate_id, scan_id, rule_id, rule_revision, safety_tier,
+                 estimated_bytes, created_at_unix_ms, status, record_format_version,
+                 category, proposed_action, rule_schedule_eligible
+             ) VALUES (
+                 ?1, 'scan:v2-lifecycle', 'fixture.v2-lifecycle', 1,
+                 'safe_regenerable', 8, 999000, 'discovered', 2,
+                 'application_cache', 'remove_known_regenerable_contents', 0
+             )",
+            [&candidate_id],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO candidate_paths (
+                 candidate_id, path_ordinal, observed_path, observed_path_encoding
+             ) VALUES (?1, 0, ?2, 1)",
+            params![candidate_id, target.as_slice()],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO candidate_evidence (
+                 candidate_id, evidence_ordinal, evidence_kind,
+                 path_value, path_value_encoding
+             ) VALUES (?1, 0, 'matched_path', ?2, 1)",
+            params![candidate_id, target.as_slice()],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO cleanup_sessions (
+                 session_id, plan_id, started_at_unix_ms, completed_at_unix_ms, mode,
+                 estimated_bytes, verified_capacity_delta_bytes, trigger_source, status,
+                 record_format_version, source_scan_id,
+                 plan_created_at_unix_seconds, plan_created_at_nanoseconds,
+                 plan_expires_at_unix_seconds, plan_expires_at_nanoseconds,
+                 execution_owner_id, execution_generation, last_heartbeat_at_unix_ms,
+                 cancellation_requested
+             ) VALUES (
+                 ?1, ?2, 1000500, ?3, 'permanent_safe', 8, ?4, 'manual', ?5, 2,
+                 'scan:v2-lifecycle', 1000, 0, 1900, 0, ?6, ?7, ?8, 0
+             )",
+            params![
+                session_id,
+                plan_id,
+                completed_at,
+                capacity_delta,
+                status,
+                execution_owner,
+                execution_generation,
+                heartbeat,
+            ],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO cleanup_items (
+                 session_id, item_ordinal, rule_id, rule_revision, estimated_bytes,
+                 final_status, record_format_version, candidate_id, category, safety_tier,
+                 proposed_action, rule_schedule_eligible
+             ) VALUES (
+                 ?1, 0, 'fixture.v2-lifecycle', 1, 8, ?2, 2, ?3,
+                 'application_cache', 'safe_regenerable',
+                 'remove_known_regenerable_contents', 0
+             )",
+            params![session_id, item_status, candidate_id],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO cleanup_item_paths (
+                 session_id, item_ordinal, path_ordinal, target_path,
+                 target_path_encoding, attempt_generation, status,
+                 effect_started_at_unix_ms, completed_at_unix_ms
+             ) VALUES (?1, 0, 0, ?2, 1, ?3, ?4, ?5, ?6)",
+            params![
+                session_id,
+                target.as_slice(),
+                attempt_generation,
+                item_status,
+                effect_started,
+                path_completed,
+            ],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO cleanup_item_evidence (
+                 session_id, item_ordinal, evidence_ordinal, evidence_kind,
+                 path_value, path_value_encoding
+             ) VALUES (?1, 0, 0, 'matched_path', ?2, 1)",
+            params![session_id, target.as_slice()],
+        )
+        .unwrap();
+    for (ordinal, warning) in [
+        "estimated_bytes_unverified",
+        "permanent_removal_cannot_be_undone",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        connection
+            .execute(
+                "INSERT INTO cleanup_plan_warnings (
+                     session_id, warning_ordinal, warning_kind
+                 ) VALUES (?1, ?2, ?3)",
+                params![session_id, ordinal as i64, warning],
+            )
+            .unwrap();
+    }
+}
+
 #[test]
 fn compiled_migration_chain_and_embedded_checksum_are_valid() {
     validate_compiled_migrations().unwrap();
@@ -378,10 +582,23 @@ fn embedded_v1_schema_fingerprint_matches_migration() {
 
 #[test]
 fn embedded_v2_schema_fingerprint_matches_complete_chain() {
-    let connection = fresh_current_schema();
+    let connection = fresh_v2_schema();
     assert_eq!(
         schema_fingerprint(&connection).unwrap(),
         test_v2_schema_fingerprint()
+    );
+    assert_eq!(
+        inspect_schema(&connection).unwrap(),
+        SchemaState::Older { found: 2 }
+    );
+}
+
+#[test]
+fn embedded_v3_schema_fingerprint_matches_complete_chain() {
+    let connection = fresh_current_schema();
+    assert_eq!(
+        schema_fingerprint(&connection).unwrap(),
+        test_v3_schema_fingerprint()
     );
     assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
 }
@@ -456,7 +673,7 @@ fn populated_v1_upgrade_preserves_legacy_candidate_and_cleanup_observations() {
     assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
     assert_eq!(
         schema_fingerprint(&connection).unwrap(),
-        test_v2_schema_fingerprint()
+        test_v3_schema_fingerprint()
     );
     let candidate: (i64, Option<String>, Option<String>) = connection
         .query_row(
@@ -510,7 +727,386 @@ fn populated_v1_upgrade_preserves_legacy_candidate_and_cleanup_observations() {
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
-    assert_eq!(versions, [1, 2]);
+    assert_eq!(versions, [1, 2, 3]);
+}
+
+#[test]
+fn populated_v2_upgrade_defaults_existing_sessions_and_creates_no_claims() {
+    let mut connection = fresh_v2_schema();
+    connection
+        .pragma_update(None, "foreign_keys", true)
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO cleanup_sessions (
+                 session_id, plan_id, started_at_unix_ms, completed_at_unix_ms, mode,
+                 estimated_bytes, verified_capacity_delta_bytes, trigger_source, status,
+                 record_format_version
+             ) VALUES (
+                 'session:v2-existing', 'plan:v2-existing', 12, 13, 'dry_run',
+                 4096, 0, 'manual', 'dry_run', 1
+             )",
+            [],
+        )
+        .unwrap();
+
+    apply_pending_migrations(&mut connection, 20).unwrap();
+
+    assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
+    let coupling_version: i64 = connection
+        .query_row(
+            "SELECT candidate_status_coupling_version
+             FROM cleanup_sessions WHERE session_id = 'session:v2-existing'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(coupling_version, 1);
+    let claim_count: i64 = connection
+        .query_row("SELECT COUNT(*) FROM candidate_plan_claims", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(claim_count, 0);
+}
+
+#[test]
+fn v2_format2_cleanup_lifecycles_migrate_as_explicitly_uncoupled_history() {
+    let temp = TempDir::new().unwrap();
+    let path = database_path(&temp);
+    let paths = SecureStorePaths::prepare(&path).unwrap();
+    let sqlite_path = paths.sqlite_path().unwrap();
+    let connection = Connection::open(sqlite_path).unwrap();
+    install_v2_schema(&connection);
+    connection
+        .pragma_update(None, "foreign_keys", true)
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO scans (
+                 scan_id, root_path, root_path_encoding, started_at_unix_ms,
+                 completed_at_unix_ms, status
+             ) VALUES ('scan:v2-lifecycle', ?1, 1, 998000, 999000, 'succeeded')",
+            [b"/v2".as_slice()],
+        )
+        .unwrap();
+    let owner = current_process_instance().unwrap();
+    for (label, status) in [
+        ("planned", "planned"),
+        ("running", "running"),
+        ("recovering", "recovering"),
+        ("terminal", "completed"),
+    ] {
+        insert_v2_format2_cleanup_session(&connection, label, status, owner.as_str());
+    }
+    drop(connection);
+    drop(paths);
+
+    let store = StoreCoordinator::open(&path).unwrap();
+    assert_eq!(
+        store.status().unwrap(),
+        DatabaseStatus {
+            schema_version: DATABASE_SCHEMA_VERSION,
+            access: DatabaseAccess::ReadWriteCurrent,
+        }
+    );
+    store.with_connection(|connection| {
+        let migrated: Vec<(String, i64)> = connection
+            .prepare(
+                "SELECT session_id, candidate_status_coupling_version
+                 FROM cleanup_sessions
+                 WHERE session_id LIKE 'session:v2-%'
+                 ORDER BY session_id",
+            )
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            migrated,
+            [
+                ("session:v2-planned".into(), 1),
+                ("session:v2-recovering".into(), 1),
+                ("session:v2-running".into(), 1),
+                ("session:v2-terminal".into(), 1),
+            ]
+        );
+        let claim_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM candidate_plan_claims", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(claim_count, 0);
+        let projected_statuses: Vec<String> = connection
+            .prepare(
+                "SELECT status FROM candidates
+                 WHERE candidate_id LIKE 'candidate:v2-%'
+                 ORDER BY candidate_id",
+            )
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(projected_statuses, ["discovered"; 4]);
+    });
+
+    let planned_id = CleanupSessionId::new("session:v2-planned").unwrap();
+    let Some(StoredCleanupSessionRecord::Planned(planned)) =
+        store.load_cleanup_session(&planned_id).unwrap()
+    else {
+        panic!("migrated pristine v2 session did not decode as a plan");
+    };
+    assert_eq!(
+        planned.candidate_status_coupling,
+        CandidateStatusCoupling::LegacyUncoupled
+    );
+    assert_eq!(planned.items.len(), 1);
+    assert_eq!(planned.items[0].prior_review_status, None);
+
+    store.with_connection(|connection| {
+        let newly_claimable: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM cleanup_sessions
+                 WHERE session_id = ?1 AND record_format_version = 2
+                   AND candidate_status_coupling_version = 2
+                   AND status = 'planned' AND completed_at_unix_ms IS NULL
+                   AND verified_capacity_delta_bytes IS NULL
+                   AND execution_owner_id IS NULL AND execution_generation IS NULL
+                   AND last_heartbeat_at_unix_ms IS NULL AND cancellation_requested = 0",
+                [planned_id.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(newly_claimable, 0);
+
+        for session in [
+            "session:v2-running",
+            "session:v2-recovering",
+            "session:v2-terminal",
+        ] {
+            let id = CleanupSessionId::new(session).unwrap();
+            let frozen = load_frozen_cleanup_session_within_budget(connection, &id, false)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                frozen.candidate_status_coupling,
+                CandidateStatusCoupling::LegacyUncoupled
+            );
+            assert_eq!(frozen.items.len(), 1);
+            assert_eq!(frozen.items[0].prior_review_status, None);
+        }
+        let mutable_lifecycles: Vec<(String, String, Option<i64>, Option<i64>)> = connection
+            .prepare(
+                "SELECT session_id, status, execution_generation, completed_at_unix_ms
+                 FROM cleanup_sessions
+                 WHERE session_id IN (
+                     'session:v2-running', 'session:v2-recovering', 'session:v2-terminal'
+                 )
+                 ORDER BY session_id",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            mutable_lifecycles,
+            [
+                (
+                    "session:v2-recovering".into(),
+                    "recovering".into(),
+                    Some(1),
+                    None
+                ),
+                ("session:v2-running".into(), "running".into(), Some(1), None),
+                (
+                    "session:v2-terminal".into(),
+                    "completed".into(),
+                    Some(1),
+                    Some(1_000_800),
+                ),
+            ]
+        );
+        let post_read_statuses: Vec<String> = connection
+            .prepare(
+                "SELECT status FROM candidates
+                 WHERE candidate_id LIKE 'candidate:v2-%'
+                 ORDER BY candidate_id",
+            )
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(post_read_statuses, ["discovered"; 4]);
+        let planned_state: (String, Option<String>, Option<i64>) = connection
+            .query_row(
+                "SELECT status, execution_owner_id, execution_generation
+                 FROM cleanup_sessions WHERE session_id = ?1",
+                [planned_id.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(planned_state, ("planned".into(), None, None));
+    });
+}
+
+#[test]
+fn v3_candidate_plan_claim_constraints_preserve_both_ownership_edges() {
+    let connection = fresh_current_schema();
+    connection
+        .pragma_update(None, "foreign_keys", true)
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO scans (
+                 scan_id, root_path, root_path_encoding, started_at_unix_ms, status
+             ) VALUES ('scan:v3-claims', ?1, 1, 10, 'succeeded')",
+            [b"/v3-claims".as_slice()],
+        )
+        .unwrap();
+    for candidate_id in ["candidate:v3-first", "candidate:v3-second"] {
+        connection
+            .execute(
+                "INSERT INTO candidates (
+                     candidate_id, scan_id, rule_id, rule_revision, safety_tier,
+                     estimated_bytes, created_at_unix_ms, status, record_format_version
+                 ) VALUES (?1, 'scan:v3-claims', 'fixture.v3', 1,
+                     'review_required', 8, 11, 'discovered', 1)",
+                [candidate_id],
+            )
+            .unwrap();
+    }
+    connection
+        .execute(
+            "INSERT INTO cleanup_sessions (
+                 session_id, plan_id, started_at_unix_ms, mode, estimated_bytes,
+                 trigger_source, status, record_format_version
+             ) VALUES (
+                 'session:v3-claims', 'plan:v3-claims', 12, 'dry_run', 8,
+                 'manual', 'planned', 1
+             )",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO cleanup_items (
+                 item_id, session_id, item_ordinal, rule_id, rule_revision,
+                 estimated_bytes, final_status, record_format_version,
+                 legacy_target_path, legacy_target_path_encoding
+             ) VALUES (
+                 1, 'session:v3-claims', 0, 'fixture.v3', 1,
+                 8, 'planned', 1, ?1, 1
+             )",
+            [b"/v3-claims/cache".as_slice()],
+        )
+        .unwrap();
+
+    let default_coupling: i64 = connection
+        .query_row(
+            "SELECT candidate_status_coupling_version
+             FROM cleanup_sessions WHERE session_id = 'session:v3-claims'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(default_coupling, 1);
+    connection
+        .execute(
+            "UPDATE cleanup_sessions SET candidate_status_coupling_version = 2
+             WHERE session_id = 'session:v3-claims'",
+            [],
+        )
+        .unwrap();
+    assert!(
+        connection
+            .execute(
+                "UPDATE cleanup_sessions SET candidate_status_coupling_version = 3
+                 WHERE session_id = 'session:v3-claims'",
+                [],
+            )
+            .is_err()
+    );
+    assert!(
+        connection
+            .execute(
+                "INSERT INTO candidate_plan_claims (
+                     candidate_id, session_id, item_ordinal, prior_review_status
+                 ) VALUES ('candidate:v3-first', 'session:v3-claims', 0, 'dismissed')",
+                [],
+            )
+            .is_err()
+    );
+    assert!(
+        connection
+            .execute(
+                "INSERT INTO candidate_plan_claims (
+                     candidate_id, session_id, item_ordinal, prior_review_status
+                 ) VALUES ('candidate:v3-first', 'session:v3-claims', 1, 'discovered')",
+                [],
+            )
+            .is_err()
+    );
+    connection
+        .execute(
+            "INSERT INTO candidate_plan_claims (
+                 candidate_id, session_id, item_ordinal, prior_review_status
+             ) VALUES ('candidate:v3-first', 'session:v3-claims', 0, 'selected')",
+            [],
+        )
+        .unwrap();
+    assert!(
+        connection
+            .execute(
+                "INSERT INTO candidate_plan_claims (
+                     candidate_id, session_id, item_ordinal, prior_review_status
+                 ) VALUES ('candidate:v3-second', 'session:v3-claims', 0, 'discovered')",
+                [],
+            )
+            .is_err()
+    );
+    assert!(
+        connection
+            .execute(
+                "DELETE FROM candidates WHERE candidate_id = 'candidate:v3-first'",
+                [],
+            )
+            .is_err()
+    );
+
+    assert!(
+        connection
+            .execute(
+                "DELETE FROM cleanup_items
+                 WHERE session_id = 'session:v3-claims' AND item_ordinal = 0",
+                [],
+            )
+            .is_err()
+    );
+    let claim_count: i64 = connection
+        .query_row("SELECT COUNT(*) FROM candidate_plan_claims", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(claim_count, 1);
+    connection
+        .execute(
+            "DELETE FROM candidate_plan_claims WHERE candidate_id = 'candidate:v3-first'",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "DELETE FROM cleanup_items
+             WHERE session_id = 'session:v3-claims' AND item_ordinal = 0",
+            [],
+        )
+        .unwrap();
 }
 
 #[test]

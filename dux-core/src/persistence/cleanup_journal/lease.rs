@@ -17,7 +17,7 @@ use super::{
     ActivePhase, CleanupJournal, EffectOutcome, ExecutionFence, JournalLifecycle, PathStatus,
     ReconciledOutcome, RecoveryAssessment, TerminalSessionStatus, ValidationOutcome,
     assess_recovery, begin_path_validation, cancel_effect_before_call, claim_planned,
-    claim_recovery, finish_effect, finish_path_validation, load_cleanup_journal,
+    claim_recovery, expire_planned, finish_effect, finish_path_validation, load_cleanup_journal,
     mark_effect_started, reconcile_unknown_outcome, record_heartbeat, request_cancellation,
     resume_recovery, settle_cancellation, terminalize,
 };
@@ -127,6 +127,11 @@ enum TestJournalFault {
     FailReconcileRead,
 }
 
+#[cfg(test)]
+thread_local! {
+    static LEASE_TEST_FAULT: Cell<TestJournalFault> = const { Cell::new(TestJournalFault::None) };
+}
+
 impl StoreCoordinator {
     pub(super) fn acquire_cleanup_journal_lease(
         self: &Arc<Self>,
@@ -145,10 +150,28 @@ impl StoreCoordinator {
 }
 
 impl CleanupJournalLease {
+    #[cfg(test)]
+    pub(super) fn fail_next_write_after_commit_and_reconcile_read_for_test(&self) {
+        LEASE_TEST_FAULT.with(|fault| {
+            assert_eq!(fault.get(), TestJournalFault::None);
+            fault.set(TestJournalFault::FailAfterCommitThenReconcileRead);
+        });
+    }
+
     pub(super) fn load(
         &self,
         session_id: &CleanupSessionId,
     ) -> Result<Option<CleanupJournal>, HistoryError> {
+        #[cfg(test)]
+        if LEASE_TEST_FAULT.with(|fault| {
+            let should_fail = fault.get() == TestJournalFault::FailReconcileRead;
+            if should_fail {
+                fault.set(TestJournalFault::None);
+            }
+            should_fail
+        }) {
+            return Err(HistoryError::new(HistoryErrorKind::DatabaseUnavailable));
+        }
         self.store.validate_cleanup_lock_for_journal(&self.guard)?;
         let connection = self.store.lock_current_history_connection()?;
         self.store.validate_cleanup_lock_for_journal(&self.guard)?;
@@ -204,6 +227,48 @@ impl CleanupJournalLease {
                 #[cfg(test)]
                 test_fault: Cell::new(TestJournalFault::None),
             }),
+            Err(error) => Err(JournalLeaseFailure { lease: self, error }),
+        }
+    }
+
+    /// Settle a pristine plan at its exact expiry or later. This creates only
+    /// rejected history and failed candidate projections; it never grants a
+    /// running claim or filesystem-effect authority.
+    pub(super) fn expire_planned(
+        self,
+        session_id: &CleanupSessionId,
+        observed_at: SystemTime,
+    ) -> Result<TerminalSessionStatus, JournalLeaseFailure> {
+        let attempt =
+            super::canonical_expiry_settlement_time(observed_at).and_then(|completed_at| {
+                let expected = ExecutionFence {
+                    session_id: session_id.clone(),
+                    owner: self.owner.clone(),
+                    generation: 1,
+                };
+                match self.write(|transaction| {
+                    let fence =
+                        expire_planned(transaction, session_id, self.owner.clone(), observed_at)?;
+                    let settled = load_cleanup_journal(transaction, session_id)?
+                        .ok_or_else(|| HistoryError::new(HistoryErrorKind::NotFound))?;
+                    if !expired_terminal_matches(&settled, &fence, completed_at) {
+                        return Err(HistoryError::new(HistoryErrorKind::InvalidTransition));
+                    }
+                    Ok(())
+                }) {
+                    Ok(()) => Ok(TerminalSessionStatus::Rejected),
+                    Err(_)
+                        if self.load(session_id).ok().flatten().is_some_and(|journal| {
+                            expired_terminal_matches(&journal, &expected, completed_at)
+                        }) =>
+                    {
+                        Ok(TerminalSessionStatus::Rejected)
+                    }
+                    Err(error) => Err(error),
+                }
+            });
+        match attempt {
+            Ok(status) => Ok(status),
             Err(error) => Err(JournalLeaseFailure { lease: self, error }),
         }
     }
@@ -327,6 +392,18 @@ impl CleanupJournalLease {
         self.store
             .validate_history_storage_after_write()
             .map_err(ambiguous_write_failure)?;
+        #[cfg(test)]
+        if LEASE_TEST_FAULT.with(|fault| {
+            let should_fail = fault.get() == TestJournalFault::FailAfterCommitThenReconcileRead;
+            if should_fail {
+                fault.set(TestJournalFault::FailReconcileRead);
+            }
+            should_fail
+        }) {
+            return Err(ambiguous_write_failure(HistoryError::new(
+                HistoryErrorKind::DatabaseUnavailable,
+            )));
+        }
         Ok(output)
     }
 }
@@ -910,6 +987,36 @@ fn active_matches(
             && heartbeat_at.is_none_or(|expected| loaded_heartbeat == expected)
             && cancellation_requested.is_none_or(|expected| loaded_cancellation == expected)
     )
+}
+
+fn expired_terminal_matches(
+    journal: &CleanupJournal,
+    fence: &ExecutionFence,
+    completed_at: SystemTime,
+) -> bool {
+    matches!(
+        journal.lifecycle,
+        JournalLifecycle::Terminal {
+            status: TerminalSessionStatus::Rejected,
+            fence: ref loaded_fence,
+            heartbeat_at,
+            completed_at: loaded_completed_at,
+            verified_capacity_delta_bytes: None,
+            cancellation_requested: false,
+        } if loaded_fence == fence
+            && heartbeat_at == completed_at
+            && loaded_completed_at == completed_at
+    ) && journal.items.iter().all(|item| {
+        item.status == PathStatus::Rejected
+            && item.error_category.as_deref() == Some(super::PLAN_EXPIRED_ERROR)
+            && item.paths.iter().all(|path| {
+                path.status == PathStatus::Rejected
+                    && path.attempt_generation == Some(fence.generation)
+                    && path.error_category.as_deref() == Some(super::PLAN_EXPIRED_ERROR)
+                    && path.effect_started_at.is_none()
+                    && path.completed_at == Some(completed_at)
+            })
+    })
 }
 
 fn reconciled_terminal(

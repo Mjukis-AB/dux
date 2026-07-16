@@ -12,7 +12,10 @@ use crate::domain::{
     Rule, RuleDefinition, RuleGuards, RuleMatcher, RuleMatcherDefinition, RuleScope,
 };
 use crate::persistence::StoreCoordinator;
-use crate::persistence::candidate_history::NewCandidateRecord;
+use crate::persistence::candidate_history::{
+    CandidateEvaluationTransition, CandidateHistoryStatus, CandidateReviewTransition,
+    NewCandidateRecord, StoredCandidateRecord,
+};
 use crate::persistence::cleanup_history::{
     CleanupSessionId, CleanupTrigger, NewCleanupSessionRecord,
 };
@@ -34,6 +37,15 @@ struct Fixture {
 
 impl Fixture {
     fn new(mode: CleanupMode, action: CandidateAction, item_count: usize) -> Self {
+        Self::new_with_selected(mode, action, item_count, &[])
+    }
+
+    fn new_with_selected(
+        mode: CleanupMode,
+        action: CandidateAction,
+        item_count: usize,
+        selected: &[usize],
+    ) -> Self {
         let temp = TempDir::new().unwrap();
         let database = temp.path().join("store").join("dux.sqlite3");
         let root = temp.path().join("root");
@@ -61,6 +73,14 @@ impl Fixture {
                         UNIX_EPOCH + Duration::from_secs(1_750_000_002 + index as u64),
                     )
                     .unwrap(),
+                )
+                .unwrap();
+        }
+        for index in selected {
+            store
+                .transition_candidate_review_status(
+                    candidates[*index].id(),
+                    CandidateReviewTransition::Select,
                 )
                 .unwrap();
         }
@@ -109,6 +129,58 @@ impl Fixture {
     fn execute(&self, sql: &str, values: impl rusqlite::Params) {
         let connection = self.store.lock_current_history_connection().unwrap();
         connection.connection.execute(sql, values).unwrap();
+    }
+
+    fn candidate_status(&self, index: usize) -> CandidateHistoryStatus {
+        let id = CandidateId::new(format!("candidate:journal-{index}")).unwrap();
+        let Some(StoredCandidateRecord::Complete(candidate)) =
+            self.store.load_candidate(&id).unwrap()
+        else {
+            panic!("candidate was not a complete record");
+        };
+        candidate.status
+    }
+
+    fn claim_count(&self) -> i64 {
+        self.store.with_connection(|connection| {
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM candidate_plan_claims WHERE session_id = ?1",
+                    [self.session_id.as_str()],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        })
+    }
+
+    fn make_legacy_uncoupled(&self, candidate_status: &str) {
+        self.store.with_connection(|connection| {
+            let transaction = connection.unchecked_transaction().unwrap();
+            transaction
+                .execute(
+                    "UPDATE candidates SET status = ?2
+                     WHERE candidate_id IN (
+                         SELECT candidate_id FROM cleanup_items WHERE session_id = ?1
+                     )",
+                    params![self.session_id.as_str(), candidate_status],
+                )
+                .unwrap();
+            transaction
+                .execute(
+                    "DELETE FROM candidate_plan_claims WHERE session_id = ?1",
+                    [self.session_id.as_str()],
+                )
+                .unwrap();
+            transaction
+                .execute(
+                    "UPDATE cleanup_sessions
+                     SET candidate_status_coupling_version = 1
+                     WHERE session_id = ?1",
+                    [self.session_id.as_str()],
+                )
+                .unwrap();
+            transaction.commit().unwrap();
+        });
     }
 }
 
@@ -289,6 +361,128 @@ fn pristine_claim_uses_generation_one_and_rejects_the_exact_expiry() {
 }
 
 #[test]
+fn exact_expiry_rejects_pristine_plan_and_fails_candidates_without_effect_authority() {
+    let fixture = Fixture::new_with_selected(
+        CleanupMode::PermanentSafe,
+        CandidateAction::RemoveKnownRegenerableContents,
+        2,
+        &[1],
+    );
+    let failure = fixture
+        .lease()
+        .expire_planned(
+            &fixture.session_id,
+            fixture.expires_at - Duration::from_nanos(1),
+        )
+        .unwrap_err();
+    assert_eq!(failure.kind(), HistoryErrorKind::InvalidTransition);
+    assert_eq!(fixture.candidate_status(0), CandidateHistoryStatus::Planned);
+    assert_eq!(fixture.candidate_status(1), CandidateHistoryStatus::Planned);
+    assert_eq!(fixture.claim_count(), 2);
+
+    assert_eq!(
+        failure
+            .into_lease()
+            .expire_planned(&fixture.session_id, fixture.expires_at)
+            .unwrap(),
+        TerminalSessionStatus::Rejected
+    );
+    let snapshot = fixture.lease().load(&fixture.session_id).unwrap().unwrap();
+    assert!(matches!(
+        snapshot.lifecycle,
+        JournalLifecycle::Terminal {
+            status: TerminalSessionStatus::Rejected,
+            cancellation_requested: false,
+            ..
+        }
+    ));
+    assert!(snapshot.items.iter().all(|item| {
+        item.status == PathStatus::Rejected
+            && item.error_category.as_deref() == Some(PLAN_EXPIRED_ERROR)
+            && item.paths.iter().all(|path| {
+                path.status == PathStatus::Rejected
+                    && path.attempt_generation == Some(1)
+                    && path.error_category.as_deref() == Some(PLAN_EXPIRED_ERROR)
+                    && path.effect_started_at.is_none()
+                    && path.completed_at.is_some()
+            })
+    }));
+    assert_eq!(fixture.candidate_status(0), CandidateHistoryStatus::Failed);
+    assert_eq!(fixture.candidate_status(1), CandidateHistoryStatus::Failed);
+    assert_eq!(fixture.claim_count(), 0);
+}
+
+#[test]
+fn ambiguous_expiry_commit_retries_only_the_exact_terminal_projection() {
+    let fixture = Fixture::new(
+        CleanupMode::PermanentSafe,
+        CandidateAction::RemoveKnownRegenerableContents,
+        1,
+    );
+    let lease = fixture.lease();
+    lease.fail_next_write_after_commit_and_reconcile_read_for_test();
+    let failure = lease
+        .expire_planned(&fixture.session_id, fixture.expires_at)
+        .unwrap_err();
+    assert_eq!(failure.kind(), HistoryErrorKind::DatabaseUnavailable);
+    assert_eq!(fixture.candidate_status(0), CandidateHistoryStatus::Failed);
+    assert_eq!(fixture.claim_count(), 0);
+
+    assert_eq!(
+        failure
+            .into_lease()
+            .expire_planned(&fixture.session_id, fixture.expires_at)
+            .unwrap(),
+        TerminalSessionStatus::Rejected
+    );
+    let snapshot = fixture.lease().load(&fixture.session_id).unwrap().unwrap();
+    assert!(matches!(
+        snapshot.lifecycle,
+        JournalLifecycle::Terminal {
+            status: TerminalSessionStatus::Rejected,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn expiry_failure_on_a_later_candidate_rolls_back_every_projection_and_path() {
+    let fixture = Fixture::new(
+        CleanupMode::PermanentSafe,
+        CandidateAction::RemoveKnownRegenerableContents,
+        2,
+    );
+    fixture.execute(
+        "CREATE TEMP TRIGGER fail_second_expiry_candidate
+         BEFORE UPDATE OF status ON candidates
+         WHEN OLD.candidate_id = 'candidate:journal-1' AND NEW.status = 'failed'
+         BEGIN SELECT RAISE(ABORT, 'injected expiry failure'); END",
+        [],
+    );
+    let failure = fixture
+        .lease()
+        .expire_planned(&fixture.session_id, fixture.expires_at)
+        .unwrap_err();
+    assert_eq!(failure.kind(), HistoryErrorKind::DatabaseUnavailable);
+    let snapshot = failure
+        .into_lease()
+        .load(&fixture.session_id)
+        .unwrap()
+        .unwrap();
+    assert!(matches!(snapshot.lifecycle, JournalLifecycle::Planned));
+    assert!(snapshot.items.iter().all(|item| {
+        item.status == PathStatus::Planned
+            && item
+                .paths
+                .iter()
+                .all(|path| path.status == PathStatus::Planned)
+    }));
+    assert_eq!(fixture.candidate_status(0), CandidateHistoryStatus::Planned);
+    assert_eq!(fixture.candidate_status(1), CandidateHistoryStatus::Planned);
+    assert_eq!(fixture.claim_count(), 2);
+}
+
+#[test]
 fn failed_claim_retains_a_readable_lease_until_deliberately_released() {
     let fixture = Fixture::new(
         CleanupMode::PermanentSafe,
@@ -331,6 +525,66 @@ fn failed_claim_retains_a_readable_lease_until_deliberately_released() {
             ..
         } if fence.generation == 1
     ));
+}
+
+#[test]
+fn migrated_uncoupled_plans_cannot_be_newly_claimed_but_active_work_can_finish() {
+    let pristine = Fixture::new(
+        CleanupMode::DryRun,
+        CandidateAction::RemoveKnownRegenerableContents,
+        1,
+    );
+    pristine.make_legacy_uncoupled("discovered");
+    let failure = pristine
+        .lease()
+        .claim_planned(
+            &pristine.session_id,
+            pristine.started_at + Duration::from_secs(1),
+        )
+        .err()
+        .unwrap();
+    assert_eq!(failure.kind(), HistoryErrorKind::InvalidTransition);
+    let retained = failure.into_lease();
+    let snapshot = retained.load(&pristine.session_id).unwrap().unwrap();
+    assert_eq!(
+        snapshot.candidate_status_coupling,
+        CandidateStatusCoupling::LegacyUncoupled
+    );
+    assert!(matches!(snapshot.lifecycle, JournalLifecycle::Planned));
+    drop(retained);
+    assert_eq!(
+        pristine.candidate_status(0),
+        CandidateHistoryStatus::Discovered
+    );
+    assert_eq!(pristine.claim_count(), 0);
+
+    let active = Fixture::new_with_selected(
+        CleanupMode::DryRun,
+        CandidateAction::RemoveKnownRegenerableContents,
+        1,
+        &[0],
+    );
+    let mut claim = active.claim();
+    active.make_legacy_uncoupled("selected");
+    claim.begin_validation(0, 0).unwrap();
+    claim
+        .finish_validation(
+            0,
+            0,
+            ValidationOutcome::DryRun,
+            None,
+            active.started_at + Duration::from_secs(2),
+        )
+        .unwrap();
+    assert_eq!(
+        claim
+            .terminalize(active.started_at + Duration::from_secs(3), None)
+            .unwrap(),
+        TerminalSessionStatus::DryRun
+    );
+    drop(claim);
+    assert_eq!(active.candidate_status(0), CandidateHistoryStatus::Selected);
+    assert_eq!(active.claim_count(), 0);
 }
 
 #[test]
@@ -440,11 +694,15 @@ fn maximum_legal_active_journal_fits_the_shared_query_budget() {
 
 #[test]
 fn dry_run_validates_every_path_and_terminalizes_without_an_effect() {
-    let fixture = Fixture::new(
+    let fixture = Fixture::new_with_selected(
         CleanupMode::DryRun,
         CandidateAction::RemoveKnownRegenerableContents,
         2,
+        &[1],
     );
+    assert_eq!(fixture.candidate_status(0), CandidateHistoryStatus::Planned);
+    assert_eq!(fixture.candidate_status(1), CandidateHistoryStatus::Planned);
+    assert_eq!(fixture.claim_count(), 2);
     let mut claim = fixture.claim();
     for item in 0..2 {
         claim.begin_validation(item, 0).unwrap();
@@ -482,6 +740,38 @@ fn dry_run_validates_every_path_and_terminalizes_without_an_effect() {
                     && path.completed_at.is_some()
             })
     }));
+    assert_eq!(
+        fixture.candidate_status(0),
+        CandidateHistoryStatus::Discovered
+    );
+    assert_eq!(
+        fixture.candidate_status(1),
+        CandidateHistoryStatus::Selected
+    );
+    assert_eq!(fixture.claim_count(), 0);
+    fixture
+        .store
+        .transition_candidate_evaluation_status(
+            &CandidateId::new("candidate:journal-1").unwrap(),
+            CandidateEvaluationTransition::SelectedToUnavailable,
+        )
+        .unwrap();
+    assert_eq!(
+        fixture.candidate_status(1),
+        CandidateHistoryStatus::Unavailable
+    );
+    assert!(matches!(
+        fixture
+            .lease()
+            .load(&fixture.session_id)
+            .unwrap()
+            .unwrap()
+            .lifecycle,
+        JournalLifecycle::Terminal {
+            status: TerminalSessionStatus::DryRun,
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -523,6 +813,12 @@ fn effect_receipt_revalidates_and_only_the_compatible_outcome_completes() {
             .unwrap(),
         TerminalSessionStatus::Completed
     );
+    drop(claim);
+    assert_eq!(
+        fixture.candidate_status(0),
+        CandidateHistoryStatus::Completed
+    );
+    assert_eq!(fixture.claim_count(), 0);
 }
 
 #[test]
@@ -570,14 +866,18 @@ fn unknown_effect_atomically_enters_recovery_and_blocks_new_work() {
             .kind,
         HistoryErrorKind::InvalidTransition
     );
+    assert_eq!(fixture.candidate_status(0), CandidateHistoryStatus::Planned);
+    assert_eq!(fixture.candidate_status(1), CandidateHistoryStatus::Planned);
+    assert_eq!(fixture.claim_count(), 2);
 }
 
 #[test]
 fn cancellation_settlement_interrupts_remaining_work_and_terminalizes_cancelled() {
-    let fixture = Fixture::new(
+    let fixture = Fixture::new_with_selected(
         CleanupMode::PermanentSafe,
         CandidateAction::RemoveKnownRegenerableContents,
         2,
+        &[1],
     );
     let mut claim = fixture.claim();
     claim.begin_validation(0, 0).unwrap();
@@ -614,6 +914,34 @@ fn cancellation_settlement_interrupts_remaining_work_and_terminalizes_cancelled(
                 path.status == PathStatus::Interrupted && path.attempt_generation == Some(1)
             }))
     );
+    assert_eq!(
+        fixture.candidate_status(0),
+        CandidateHistoryStatus::Discovered
+    );
+    assert_eq!(
+        fixture.candidate_status(1),
+        CandidateHistoryStatus::Selected
+    );
+    assert_eq!(fixture.claim_count(), 0);
+    fixture
+        .store
+        .transition_candidate_review_status(
+            &CandidateId::new("candidate:journal-1").unwrap(),
+            CandidateReviewTransition::DismissSelected,
+        )
+        .unwrap();
+    assert!(matches!(
+        fixture
+            .lease()
+            .load(&fixture.session_id)
+            .unwrap()
+            .unwrap()
+            .lifecycle,
+        JournalLifecycle::Terminal {
+            status: TerminalSessionStatus::Cancelled,
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -643,6 +971,62 @@ fn loader_rejects_stale_or_newer_attempts_for_active_work() {
         "UPDATE cleanup_item_paths SET attempt_generation = 1 WHERE session_id = ?1",
         [fixture.session_id.as_str()],
     );
+    assert_eq!(
+        fixture.lease().load(&fixture.session_id).unwrap_err().kind,
+        HistoryErrorKind::CorruptData
+    );
+}
+
+#[test]
+fn planned_candidate_and_journal_both_reject_a_missing_claim() {
+    let fixture = Fixture::new(
+        CleanupMode::PermanentSafe,
+        CandidateAction::RemoveKnownRegenerableContents,
+        1,
+    );
+    fixture.execute(
+        "DELETE FROM candidate_plan_claims WHERE session_id = ?1",
+        [fixture.session_id.as_str()],
+    );
+    let id = CandidateId::new("candidate:journal-0").unwrap();
+    assert_eq!(
+        fixture.store.load_candidate(&id).unwrap_err().kind,
+        HistoryErrorKind::CorruptData
+    );
+    assert_eq!(
+        fixture.lease().load(&fixture.session_id).unwrap_err().kind,
+        HistoryErrorKind::CorruptData
+    );
+}
+
+#[test]
+fn claim_loader_rejects_wrong_candidate_version_and_oversized_prior_state() {
+    let fixture = Fixture::new(
+        CleanupMode::PermanentSafe,
+        CandidateAction::RemoveKnownRegenerableContents,
+        1,
+    );
+    fixture.execute("PRAGMA ignore_check_constraints = ON", []);
+    fixture.execute(
+        "UPDATE candidates SET record_format_version = 1
+         WHERE candidate_id = 'candidate:journal-0'",
+        [],
+    );
+    assert_eq!(
+        fixture.lease().load(&fixture.session_id).unwrap_err().kind,
+        HistoryErrorKind::CorruptData
+    );
+    fixture.execute(
+        "UPDATE candidates SET record_format_version = 2
+         WHERE candidate_id = 'candidate:journal-0'",
+        [],
+    );
+    fixture.execute(
+        "UPDATE candidate_plan_claims SET prior_review_status = ?1
+         WHERE session_id = ?2",
+        params!["x".repeat(129), fixture.session_id.as_str()],
+    );
+    fixture.execute("PRAGMA ignore_check_constraints = OFF", []);
     assert_eq!(
         fixture.lease().load(&fixture.session_id).unwrap_err().kind,
         HistoryErrorKind::CorruptData
@@ -788,6 +1172,14 @@ fn every_non_effect_validation_outcome_is_durable_and_terminal() {
             .unwrap(),
         TerminalSessionStatus::Failed
     );
+    drop(claim);
+    for item in 0..6 {
+        assert_eq!(
+            fixture.candidate_status(item),
+            CandidateHistoryStatus::Failed
+        );
+    }
+    assert_eq!(fixture.claim_count(), 0);
 }
 
 #[test]
@@ -816,6 +1208,9 @@ fn effect_outcomes_cover_eviction_and_explicit_failure() {
             .unwrap(),
         TerminalSessionStatus::Completed
     );
+    drop(evict_claim);
+    assert_eq!(evict.candidate_status(0), CandidateHistoryStatus::Completed);
+    assert_eq!(evict.claim_count(), 0);
 
     let failed = Fixture::new(
         CleanupMode::PermanentSafe,
@@ -841,6 +1236,54 @@ fn effect_outcomes_cover_eviction_and_explicit_failure() {
             .unwrap(),
         TerminalSessionStatus::Failed
     );
+    drop(failed_claim);
+    assert_eq!(failed.candidate_status(0), CandidateHistoryStatus::Failed);
+    assert_eq!(failed.claim_count(), 0);
+}
+
+#[test]
+fn partial_completion_projects_each_candidate_from_its_own_item_result() {
+    let fixture = Fixture::new(
+        CleanupMode::PermanentSafe,
+        CandidateAction::RemoveKnownRegenerableContents,
+        2,
+    );
+    let mut claim = fixture.claim();
+    claim.begin_validation(0, 0).unwrap();
+    let receipt = claim
+        .mark_effect_started(0, 0, fixture.started_at + Duration::from_secs(2))
+        .unwrap();
+    claim
+        .finish_effect(
+            &receipt,
+            EffectOutcome::Removed,
+            None,
+            fixture.started_at + Duration::from_secs(3),
+        )
+        .unwrap();
+    claim.begin_validation(1, 0).unwrap();
+    claim
+        .finish_validation(
+            1,
+            0,
+            ValidationOutcome::Failed,
+            Some("validation_failed"),
+            fixture.started_at + Duration::from_secs(4),
+        )
+        .unwrap();
+    assert_eq!(
+        claim
+            .terminalize(fixture.started_at + Duration::from_secs(5), Some(90))
+            .unwrap(),
+        TerminalSessionStatus::PartiallyCompleted
+    );
+    drop(claim);
+    assert_eq!(
+        fixture.candidate_status(0),
+        CandidateHistoryStatus::Completed
+    );
+    assert_eq!(fixture.candidate_status(1), CandidateHistoryStatus::Failed);
+    assert_eq!(fixture.claim_count(), 0);
 }
 
 #[test]
@@ -1103,6 +1546,46 @@ fn ambiguous_effect_start_retry_retains_the_original_fine_grained_instant() {
 }
 
 #[test]
+fn ambiguous_terminal_commit_reconciles_candidate_projection_and_claim_removal() {
+    let fixture = Fixture::new_with_selected(
+        CleanupMode::DryRun,
+        CandidateAction::RemoveKnownRegenerableContents,
+        1,
+        &[0],
+    );
+    let mut claim = fixture.claim();
+    claim.begin_validation(0, 0).unwrap();
+    claim
+        .finish_validation(
+            0,
+            0,
+            ValidationOutcome::DryRun,
+            None,
+            fixture.started_at + Duration::from_secs(2),
+        )
+        .unwrap();
+    claim.fail_next_write_after_commit_and_reconcile_read_for_test();
+    assert_eq!(
+        claim
+            .terminalize(fixture.started_at + Duration::from_secs(3), None)
+            .unwrap_err()
+            .kind,
+        HistoryErrorKind::DatabaseUnavailable
+    );
+    assert_eq!(
+        fixture.candidate_status(0),
+        CandidateHistoryStatus::Selected
+    );
+    assert_eq!(fixture.claim_count(), 0);
+    assert_eq!(
+        claim
+            .terminalize(fixture.started_at + Duration::from_secs(3), None)
+            .unwrap(),
+        TerminalSessionStatus::DryRun
+    );
+}
+
+#[test]
 fn effect_completion_before_its_receipt_is_rejected_without_losing_the_claim() {
     let fixture = Fixture::new(
         CleanupMode::PermanentSafe,
@@ -1175,6 +1658,12 @@ fn cancellation_after_effect_intent_blocks_the_call_and_records_known_no_effect(
             .unwrap(),
         TerminalSessionStatus::Cancelled
     );
+    drop(claim);
+    assert_eq!(
+        fixture.candidate_status(0),
+        CandidateHistoryStatus::Discovered
+    );
+    assert_eq!(fixture.claim_count(), 0);
 }
 
 #[test]
@@ -1202,6 +1691,9 @@ fn cancellation_requested_after_every_path_was_skipped_preserves_rejected_result
             .unwrap(),
         TerminalSessionStatus::Rejected
     );
+    drop(claim);
+    assert_eq!(fixture.candidate_status(0), CandidateHistoryStatus::Failed);
+    assert_eq!(fixture.claim_count(), 0);
 }
 
 #[test]

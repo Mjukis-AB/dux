@@ -17,12 +17,13 @@ use crate::domain::{
 };
 
 use super::candidate_history::{
-    CandidateHistoryStatus, CompleteCandidateRecord, PreparedEvidence, RawEvidence,
-    StoredCandidateRecord, TimeParts, action_as_stored, action_from_stored, category_as_stored,
-    category_from_stored, decode_absolute_path, decode_evidence, decode_optional_time, from_i64,
-    load_candidate_record_within_budget, safety_as_stored, safety_from_stored, stored_bool,
-    time_parts, to_i64, validate_complete_children, validate_null_value, validate_optional_value,
-    validate_policy, validate_required_value,
+    CandidateHistoryStatus, CandidatePriorReviewStatus, CompleteCandidateRecord, PreparedEvidence,
+    RawEvidence, StoredCandidateRecord, TimeParts, action_as_stored, action_from_stored,
+    category_as_stored, category_from_stored, decode_absolute_path, decode_evidence,
+    decode_optional_time, from_i64, load_candidate_record_within_budget, mark_candidate_planned,
+    safety_as_stored, safety_from_stored, stored_bool, time_parts, to_i64,
+    validate_complete_children, validate_null_value, validate_optional_value, validate_policy,
+    validate_required_value,
 };
 use super::codec::{EncodedBytes, StoredEncoding, decode_host_path, encode_host_path};
 use super::history::{
@@ -167,6 +168,7 @@ pub(crate) struct PlannedCleanupSessionRecord {
     pub(crate) mode: CleanupMode,
     pub(crate) estimated_bytes: u64,
     pub(crate) trigger: CleanupTrigger,
+    pub(super) candidate_status_coupling: CandidateStatusCoupling,
     pub(crate) items: Vec<PlannedCleanupItemRecord>,
     pub(crate) warnings: Vec<PlanWarning>,
 }
@@ -184,6 +186,13 @@ pub(crate) struct PlannedCleanupItemRecord {
     pub(crate) safety: SafetyTier,
     pub(crate) proposed_action: CandidateAction,
     pub(crate) rule_schedule_eligible: bool,
+    pub(super) prior_review_status: Option<CandidatePriorReviewStatus>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum CandidateStatusCoupling {
+    LegacyUncoupled,
+    PlanClaimsV1,
 }
 
 pub(super) struct PreparedCleanupSession {
@@ -287,7 +296,20 @@ pub(super) fn insert_cleanup_session(
     transaction: &Transaction<'_>,
     session: &PreparedCleanupSession,
 ) -> Result<(), HistoryError> {
-    ensure_dependencies_match(transaction, session)?;
+    let conflicts: i64 = transaction
+        .query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM cleanup_sessions
+                 WHERE session_id = ?1 OR plan_id = ?2
+             )",
+            params![session.session_id, session.plan_id],
+            |row| row.get(0),
+        )
+        .map_err(map_query_sql_error)?;
+    if conflicts != 0 {
+        return Err(HistoryError::new(HistoryErrorKind::AlreadyExists));
+    }
+    let candidates = ensure_dependencies_match(transaction, session)?;
     let changed = transaction
         .execute(
             "INSERT INTO cleanup_sessions (
@@ -295,10 +317,10 @@ pub(super) fn insert_cleanup_session(
                  trigger_source, status, record_format_version, source_scan_id,
                  plan_created_at_unix_seconds, plan_created_at_nanoseconds,
                  plan_expires_at_unix_seconds, plan_expires_at_nanoseconds,
-                 cancellation_requested
+                 cancellation_requested, candidate_status_coupling_version
              ) VALUES (
                  ?1, ?2, ?3, ?4, ?5, ?6, 'planned', 2, ?7,
-                 ?8, ?9, ?10, ?11, 0
+                 ?8, ?9, ?10, ?11, 0, 2
              ) ON CONFLICT DO NOTHING",
             params![
                 session.session_id,
@@ -401,13 +423,33 @@ pub(super) fn insert_cleanup_session(
             )
             .map_err(map_write_sql_error)?;
     }
+    for (item_ordinal, candidate) in candidates.iter().enumerate() {
+        let prior = mark_candidate_planned(transaction, candidate)?;
+        let changed = transaction
+            .execute(
+                "INSERT INTO candidate_plan_claims (
+                     candidate_id, session_id, item_ordinal, prior_review_status
+                 ) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT DO NOTHING",
+                params![
+                    candidate.id.as_str(),
+                    session.session_id,
+                    item_ordinal as i64,
+                    prior.as_stored(),
+                ],
+            )
+            .map_err(map_write_sql_error)?;
+        if changed != 1 {
+            return Err(HistoryError::new(HistoryErrorKind::InvalidTransition));
+        }
+    }
     Ok(())
 }
 
 fn ensure_dependencies_match(
     connection: &Connection,
     session: &PreparedCleanupSession,
-) -> Result<(), HistoryError> {
+) -> Result<Vec<CompleteCandidateRecord>, HistoryError> {
     let scan_exists: Option<i64> = connection
         .query_row(
             "SELECT 1 FROM scans WHERE scan_id = ?1",
@@ -419,6 +461,7 @@ fn ensure_dependencies_match(
     if scan_exists.is_none() {
         return Err(HistoryError::new(HistoryErrorKind::NotFound));
     }
+    let mut candidates = Vec::with_capacity(session.items.len());
     for item in &session.items {
         let id = CandidateId::new(item.candidate_id.clone()).map_err(|_| invalid())?;
         let Some(StoredCandidateRecord::Complete(candidate)) =
@@ -429,8 +472,9 @@ fn ensure_dependencies_match(
         if !prepared_item_matches_candidate(item, &candidate, &session.source_scan_id)? {
             return Err(HistoryError::new(HistoryErrorKind::InvalidInput));
         }
+        candidates.push(candidate);
     }
-    Ok(())
+    Ok(candidates)
 }
 
 fn prepared_item_matches_candidate(
@@ -498,7 +542,7 @@ fn load_within_budget(
                     plan_expires_at_unix_seconds, plan_expires_at_nanoseconds,
                     typeof(execution_owner_id), length(CAST(execution_owner_id AS BLOB)),
                     execution_owner_id, execution_generation, last_heartbeat_at_unix_ms,
-                    cancellation_requested
+                    cancellation_requested, candidate_status_coupling_version
              FROM cleanup_sessions WHERE session_id = ?1",
             [id.as_str()],
             raw_session_row,
@@ -540,6 +584,7 @@ struct RawSessionRow {
     execution_generation: Option<i64>,
     last_heartbeat_unix_ms: Option<i64>,
     cancellation_requested: Option<i64>,
+    candidate_status_coupling_version: i64,
 }
 
 fn raw_session_row(row: &Row<'_>) -> rusqlite::Result<RawSessionRow> {
@@ -580,6 +625,7 @@ fn raw_session_row(row: &Row<'_>) -> rusqlite::Result<RawSessionRow> {
         execution_generation: row.get(30)?,
         last_heartbeat_unix_ms: row.get(31)?,
         cancellation_requested: row.get(32)?,
+        candidate_status_coupling_version: row.get(33)?,
     })
 }
 
@@ -617,6 +663,7 @@ fn decode_legacy_session(
         || raw.execution_generation.is_some()
         || raw.last_heartbeat_unix_ms.is_some()
         || raw.cancellation_requested.is_some()
+        || raw.candidate_status_coupling_version != 1
     {
         return Err(corrupt());
     }
@@ -693,7 +740,7 @@ pub(super) fn load_frozen_cleanup_session_within_budget(
                     plan_expires_at_unix_seconds, plan_expires_at_nanoseconds,
                     typeof(execution_owner_id), length(CAST(execution_owner_id AS BLOB)),
                     execution_owner_id, execution_generation, last_heartbeat_at_unix_ms,
-                    cancellation_requested
+                    cancellation_requested, candidate_status_coupling_version
              FROM cleanup_sessions WHERE session_id = ?1",
             [id.as_str()],
             raw_session_row,
@@ -717,6 +764,11 @@ fn decode_frozen_session(
     require_pristine_children: bool,
     require_candidate_match: bool,
 ) -> Result<PlannedCleanupSessionRecord, HistoryError> {
+    let candidate_status_coupling = match raw.candidate_status_coupling_version {
+        1 => CandidateStatusCoupling::LegacyUncoupled,
+        2 => CandidateStatusCoupling::PlanClaimsV1,
+        _ => return Err(corrupt()),
+    };
     let source_scan_id =
         ScanId::new(raw.source_scan_id.clone().ok_or_else(corrupt)?).map_err(|_| corrupt())?;
     let plan_created_at =
@@ -742,13 +794,19 @@ fn decode_frozen_session(
     if scan_exists.is_none() {
         return Err(corrupt());
     }
-    let items = load_v2_items(
+    let mut items = load_v2_items(connection, &common.session_id, require_pristine_children)?;
+    load_candidate_plan_claims(
         connection,
         &common.session_id,
-        &source_scan_id,
-        require_pristine_children,
-        require_candidate_match,
+        &raw.status,
+        candidate_status_coupling,
+        &mut items,
     )?;
+    if require_candidate_match {
+        for item in &items {
+            ensure_loaded_item_matches_candidate(connection, item, &source_scan_id)?;
+        }
+    }
     if items
         .iter()
         .any(|item| !mode_accepts(common.mode, item.safety, item.proposed_action))
@@ -779,6 +837,7 @@ fn decode_frozen_session(
         mode: common.mode,
         estimated_bytes: common.estimated_bytes,
         trigger: common.trigger,
+        candidate_status_coupling,
         items,
         warnings,
     })
@@ -871,6 +930,7 @@ fn ensure_no_v2_cleanup_children(
             "SELECT 1 FROM cleanup_item_paths WHERE session_id = ?1
              UNION ALL SELECT 1 FROM cleanup_item_evidence WHERE session_id = ?1
              UNION ALL SELECT 1 FROM cleanup_plan_warnings WHERE session_id = ?1
+             UNION ALL SELECT 1 FROM candidate_plan_claims WHERE session_id = ?1
              LIMIT 1",
             [session_id.as_str()],
             |row| row.get(0),
@@ -886,9 +946,7 @@ fn ensure_no_v2_cleanup_children(
 fn load_v2_items(
     connection: &Connection,
     session_id: &CleanupSessionId,
-    source_scan_id: &ScanId,
     require_pristine: bool,
-    require_candidate_match: bool,
 ) -> Result<Vec<PlannedCleanupItemRecord>, HistoryError> {
     let mut statement = connection
         .prepare(
@@ -990,10 +1048,8 @@ fn load_v2_items(
             safety,
             proposed_action,
             rule_schedule_eligible: schedule,
+            prior_review_status: None,
         };
-        if require_candidate_match {
-            ensure_loaded_item_matches_candidate(connection, &item, source_scan_id)?;
-        }
         items.push(item);
     }
     if items.is_empty() {
@@ -1001,6 +1057,68 @@ fn load_v2_items(
     }
     ensure_no_orphan_v2_children(connection, session_id)?;
     Ok(items)
+}
+
+fn load_candidate_plan_claims(
+    connection: &Connection,
+    session_id: &CleanupSessionId,
+    session_status: &str,
+    coupling: CandidateStatusCoupling,
+    items: &mut [PlannedCleanupItemRecord],
+) -> Result<(), HistoryError> {
+    let claims_required = coupling == CandidateStatusCoupling::PlanClaimsV1
+        && matches!(session_status, "planned" | "running" | "recovering");
+    let mut statement = connection
+        .prepare(
+            "SELECT claim.item_ordinal,
+                    typeof(claim.candidate_id),
+                    length(CAST(claim.candidate_id AS BLOB)), claim.candidate_id,
+                    typeof(claim.prior_review_status),
+                    length(CAST(claim.prior_review_status AS BLOB)),
+                    claim.prior_review_status,
+                    typeof(candidate.status), length(CAST(candidate.status AS BLOB)),
+                    candidate.status, candidate.record_format_version
+             FROM candidate_plan_claims AS claim
+             LEFT JOIN candidates AS candidate ON candidate.candidate_id = claim.candidate_id
+             WHERE claim.session_id = ?1
+             ORDER BY claim.item_ordinal
+             LIMIT 65",
+        )
+        .map_err(map_query_sql_error)?;
+    let mut rows = statement
+        .query([session_id.as_str()])
+        .map_err(map_query_sql_error)?;
+    let mut count = 0_usize;
+    while let Some(row) = rows.next().map_err(map_query_sql_error)? {
+        if !claims_required || count >= items.len() || count >= MAX_ITEMS {
+            return Err(corrupt());
+        }
+        let ordinal: i64 = row.get(0).map_err(map_query_sql_error)?;
+        if ordinal != count as i64 || items[count].ordinal != count {
+            return Err(corrupt());
+        }
+        validate_required_value(row, 1, 2, "text", MAX_ID_BYTES).map_err(map_query_sql_error)?;
+        validate_required_value(row, 4, 5, "text", MAX_POLICY_BYTES)
+            .map_err(map_query_sql_error)?;
+        validate_required_value(row, 7, 8, "text", MAX_POLICY_BYTES)
+            .map_err(map_query_sql_error)?;
+        let candidate_id: String = row.get(3).map_err(map_query_sql_error)?;
+        let prior: String = row.get(6).map_err(map_query_sql_error)?;
+        let candidate_status: String = row.get(9).map_err(map_query_sql_error)?;
+        let candidate_version: Option<i64> = row.get(10).map_err(map_query_sql_error)?;
+        if candidate_id != items[count].candidate_id.as_str()
+            || candidate_status != "planned"
+            || candidate_version != Some(2)
+        {
+            return Err(corrupt());
+        }
+        items[count].prior_review_status = Some(CandidatePriorReviewStatus::from_stored(&prior)?);
+        count += 1;
+    }
+    if claims_required && count != items.len() {
+        return Err(corrupt());
+    }
+    Ok(())
 }
 
 fn ensure_no_orphan_v2_children(
@@ -1308,6 +1426,7 @@ fn derive_warnings_from_plan(plan: &CleanupPlan) -> Vec<PlanWarning> {
             safety: item.safety(),
             proposed_action: item.action(),
             rule_schedule_eligible: item.rule_marks_schedule_eligible(),
+            prior_review_status: None,
         })
         .collect::<Vec<_>>();
     derive_warnings(plan.mode(), &items)
@@ -1502,6 +1621,8 @@ fn corrupt() -> HistoryError {
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Barrier};
+    use std::thread;
     use std::time::{Duration, UNIX_EPOCH};
 
     use tempfile::TempDir;
@@ -1632,6 +1753,14 @@ mod tests {
         .unwrap()
     }
 
+    fn candidate_status(store: &StoreCoordinator, id: &CandidateId) -> CandidateHistoryStatus {
+        let Some(StoredCandidateRecord::Complete(candidate)) = store.load_candidate(id).unwrap()
+        else {
+            panic!("candidate was not a complete record");
+        };
+        candidate.status
+    }
+
     #[test]
     fn planned_dry_run_round_trip_preserves_every_proposed_effect_after_reopen() {
         let temp = TempDir::new().unwrap();
@@ -1706,7 +1835,14 @@ mod tests {
         assert_eq!(stored.mode, CleanupMode::DryRun);
         assert_eq!(stored.estimated_bytes, 60);
         assert_eq!(stored.trigger, CleanupTrigger::Manual);
+        assert_eq!(
+            stored.candidate_status_coupling,
+            CandidateStatusCoupling::PlanClaimsV1
+        );
         assert_eq!(stored.items.len(), 3);
+        assert!(stored.items.iter().all(|item| {
+            item.prior_review_status == Some(CandidatePriorReviewStatus::Discovered)
+        }));
         assert_eq!(
             stored.items[0].proposed_action,
             CandidateAction::RemoveKnownRegenerableContents
@@ -1764,12 +1900,30 @@ mod tests {
                 .unwrap(),
             )
             .unwrap();
-        store
+        let error = store
             .transition_candidate_review_status(
                 selected.id(),
                 CandidateReviewTransition::DismissSelected,
             )
-            .unwrap();
+            .unwrap_err();
+        assert_eq!(error.kind, HistoryErrorKind::InvalidTransition);
+        let Some(StoredCandidateRecord::Complete(stored_candidate)) =
+            store.load_candidate(selected.id()).unwrap()
+        else {
+            panic!("planned candidate was not complete");
+        };
+        assert_eq!(stored_candidate.status, CandidateHistoryStatus::Planned);
+        store.with_connection(|connection| {
+            let prior: String = connection
+                .query_row(
+                    "SELECT prior_review_status FROM candidate_plan_claims
+                     WHERE candidate_id = ?1",
+                    [selected.id().as_str()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(prior, "selected");
+        });
         assert!(matches!(
             store.load_cleanup_session(&selected_session).unwrap(),
             Some(StoredCleanupSessionRecord::Planned(_))
@@ -1890,6 +2044,7 @@ mod tests {
                 "cleanup_items",
                 "cleanup_item_paths",
                 "cleanup_item_evidence",
+                "candidate_plan_claims",
             ] {
                 let count: i64 = connection
                     .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
@@ -1898,6 +2053,174 @@ mod tests {
                     .unwrap();
                 assert_eq!(count, 1, "unexpected rows in {table}");
             }
+        });
+    }
+
+    #[test]
+    fn incompatible_later_candidate_rolls_back_the_entire_plan_claim() {
+        let temp = TempDir::new().unwrap();
+        let store = StoreCoordinator::open(&temp.path().join("store/dux.sqlite3")).unwrap();
+        let root = temp.path().join("root");
+        let scan_id = "scan:cleanup-claim-rollback";
+        start_scan(&store, &root, scan_id);
+        let policy = rule(
+            "fixture.cleanup.claim-rollback",
+            CandidateCategory::ApplicationCache,
+            SafetyTier::SafeRegenerable,
+            CandidateAction::RemoveKnownRegenerableContents,
+        );
+        let candidates = [
+            candidate(
+                "candidate:cleanup-claim-rollback-0",
+                scan_id,
+                &policy,
+                root.join("cleanup-fixture-0"),
+                10,
+            ),
+            candidate(
+                "candidate:cleanup-claim-rollback-1",
+                scan_id,
+                &policy,
+                root.join("cleanup-fixture-1"),
+                20,
+            ),
+        ];
+        persist_candidate(&store, &candidates[0], 1_750_000_002);
+        persist_candidate(&store, &candidates[1], 1_750_000_003);
+        store
+            .transition_candidate_review_status(
+                candidates[1].id(),
+                CandidateReviewTransition::DismissDiscovered,
+            )
+            .unwrap();
+        let record = NewCleanupSessionRecord::try_from_plan(
+            CleanupSessionId::new("session:cleanup-claim-rollback").unwrap(),
+            &plan(
+                "plan:cleanup-claim-rollback",
+                CleanupMode::PermanentSafe,
+                &candidates,
+            ),
+            UNIX_EPOCH + Duration::from_secs(1_750_000_011),
+            CleanupTrigger::Manual,
+        )
+        .unwrap();
+        assert_eq!(
+            store
+                .record_cleanup_session_planned(&record)
+                .unwrap_err()
+                .kind,
+            HistoryErrorKind::InvalidInput
+        );
+        assert_eq!(
+            candidate_status(&store, candidates[0].id()),
+            CandidateHistoryStatus::Discovered
+        );
+        assert_eq!(
+            candidate_status(&store, candidates[1].id()),
+            CandidateHistoryStatus::Dismissed
+        );
+        store.with_connection(|connection| {
+            let sessions: i64 = connection
+                .query_row("SELECT COUNT(*) FROM cleanup_sessions", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            let claims: i64 = connection
+                .query_row("SELECT COUNT(*) FROM candidate_plan_claims", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!((sessions, claims), (0, 0));
+        });
+    }
+
+    #[test]
+    fn competing_plans_create_exactly_one_candidate_claim() {
+        let temp = TempDir::new().unwrap();
+        let store = StoreCoordinator::open(&temp.path().join("store/dux.sqlite3")).unwrap();
+        let root = temp.path().join("root");
+        let scan_id = "scan:cleanup-claim-race";
+        start_scan(&store, &root, scan_id);
+        let policy = rule(
+            "fixture.cleanup.claim-race",
+            CandidateCategory::ApplicationCache,
+            SafetyTier::SafeRegenerable,
+            CandidateAction::RemoveKnownRegenerableContents,
+        );
+        let candidate = candidate(
+            "candidate:cleanup-claim-race",
+            scan_id,
+            &policy,
+            root.join("cleanup-fixture"),
+            10,
+        );
+        persist_candidate(&store, &candidate, 1_750_000_002);
+        let records = [
+            NewCleanupSessionRecord::try_from_plan(
+                CleanupSessionId::new("session:cleanup-claim-race-a").unwrap(),
+                &plan(
+                    "plan:cleanup-claim-race-a",
+                    CleanupMode::PermanentSafe,
+                    std::slice::from_ref(&candidate),
+                ),
+                UNIX_EPOCH + Duration::from_secs(1_750_000_011),
+                CleanupTrigger::Manual,
+            )
+            .unwrap(),
+            NewCleanupSessionRecord::try_from_plan(
+                CleanupSessionId::new("session:cleanup-claim-race-b").unwrap(),
+                &plan(
+                    "plan:cleanup-claim-race-b",
+                    CleanupMode::PermanentSafe,
+                    std::slice::from_ref(&candidate),
+                ),
+                UNIX_EPOCH + Duration::from_secs(1_750_000_012),
+                CleanupTrigger::LowDisk,
+            )
+            .unwrap(),
+        ];
+        let barrier = Arc::new(Barrier::new(3));
+        let workers = records
+            .into_iter()
+            .map(|record| {
+                let store = Arc::clone(&store);
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    store.record_cleanup_session_planned(&record)
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+        let results = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter_map(|result| result.as_ref().err())
+                .map(|error| error.kind)
+                .collect::<Vec<_>>(),
+            vec![HistoryErrorKind::InvalidInput]
+        );
+        assert_eq!(
+            candidate_status(&store, candidate.id()),
+            CandidateHistoryStatus::Planned
+        );
+        store.with_connection(|connection| {
+            let sessions: i64 = connection
+                .query_row("SELECT COUNT(*) FROM cleanup_sessions", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            let claims: i64 = connection
+                .query_row("SELECT COUNT(*) FROM candidate_plan_claims", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!((sessions, claims), (1, 1));
         });
     }
 

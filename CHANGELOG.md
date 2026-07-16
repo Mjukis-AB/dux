@@ -5,6 +5,22 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Added checksummed SQLite schema v3 and crash-durable candidate/plan claims.
+  New plans atomically freeze their graph, move only exact discovered/selected
+  candidates to planned, and preserve each prior review state behind one
+  delete-restricted session/item claim. Journal terminalization now projects
+  each candidate in the same transaction: real success becomes completed,
+  dry-run and fully effect-free cancellation restore exact review state, and
+  every other terminal result becomes failed; outcome-unknown retains the
+  claim. A cleanup-lock-owned exact-expiry path records rejected
+  `plan_expired` history and failed candidates without creating execution or
+  effect authority, including rounded time, rollback, and ambiguous-commit
+  handling. Migrated v2 sessions remain explicitly uncoupled, so pristine
+  legacy plans cannot be newly claimed while already-active history can finish
+  without fabricated candidate state. Bounded hostile-row, race, partial-
+  result, later-review-state, maximum-graph, and lifecycle migration tests
+  cover the coupling. The boundary remains persistence-private and performs no
+  filesystem effect.
 - Added a persistence-internal, evaluator-owned candidate invalidation
   boundary. Exact source-state commands can mark `discovered`, `selected`, or
   `dismissed` observations unavailable, and can conclusively mark those states
@@ -27,8 +43,9 @@ All notable changes to DUX will be documented in this file.
   compare-and-set, post-commit ambiguity is reconciled only while current
   secured storage remains valid, and legacy/corrupt/newer-schema rows fail
   closed. Complete candidates now also require a durably succeeded source scan
-  on insert and load. Evaluator-owned stale/unavailable state and atomic
-  planner/journal-owned planned/completed/failed state remain separate work.
+  on insert and load. Evaluator and planner/journal lifecycle ownership are now
+  separate sealed persistence boundaries; engine and product transport remain
+  later work.
 - Added durable full scans to the shared engine. Scan admission canonicalizes
   and snapshot-bounds roots, fences newer read-only schemas, excludes
   overlapping root scopes within one engine session, and creates no durable ID
