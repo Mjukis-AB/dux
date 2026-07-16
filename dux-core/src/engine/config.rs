@@ -102,7 +102,7 @@ impl EngineConfig {
 }
 
 #[cfg(not(windows))]
-fn paths_overlap(left: &Path, right: &Path) -> bool {
+pub(super) fn paths_overlap(left: &Path, right: &Path) -> bool {
     left == right || left.starts_with(right) || right.starts_with(left)
 }
 
@@ -112,7 +112,7 @@ fn paths_equal(left: &Path, right: &Path) -> bool {
 }
 
 #[cfg(windows)]
-fn paths_overlap(left: &Path, right: &Path) -> bool {
+pub(super) fn paths_overlap(left: &Path, right: &Path) -> bool {
     windows_path_is_prefix(left, right) || windows_path_is_prefix(right, left)
 }
 
@@ -454,5 +454,17 @@ mod tests {
         .unwrap_err();
         assert_eq!(error.field, EngineConfigField::Snapshots);
         assert_eq!(error.reason, EngineConfigReason::UnexpectedLayout);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_canonical_scan_scopes_compare_verbatim_prefixes_case_insensitively() {
+        let root = Path::new(r"\\?\C:\Users\Alice\Projects");
+        let descendant = Path::new(r"\\?\c:\users\ALICE\projects\dux");
+        let sibling = Path::new(r"\\?\C:\Users\Alice\Other");
+
+        assert!(paths_overlap(root, descendant));
+        assert!(paths_overlap(descendant, root));
+        assert!(!paths_overlap(root, sibling));
     }
 }

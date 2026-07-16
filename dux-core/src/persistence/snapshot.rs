@@ -17,13 +17,6 @@ use super::history::{
 use super::store::{HistoryConnectionGuard, StoreCoordinator};
 
 mod codec;
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "fresh-scan conversion is consumed by the next M2 durable engine task slice"
-    )
-)]
 pub(crate) mod from_scan;
 mod storage;
 

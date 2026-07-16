@@ -583,6 +583,7 @@ pub(crate) struct RetainedSnapshot {
 }
 
 impl RetainedSnapshot {
+    #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
     pub(crate) fn name(&self) -> &SnapshotFileName {
         &self.name
     }

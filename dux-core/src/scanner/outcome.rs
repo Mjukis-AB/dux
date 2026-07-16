@@ -19,13 +19,6 @@ pub struct ScanOutcome {
     tree: DiskTree,
     coverage: ScanCoverage,
     termination: ScanTermination,
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "consumed by the staged durable engine scan task in the next M2 slice"
-        )
-    )]
     fresh_facts: Option<FreshScanFacts>,
 }
 
@@ -79,13 +72,6 @@ impl ScanOutcome {
         self.termination
     }
 
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "consumed by the staged durable engine scan task in the next M2 slice"
-        )
-    )]
     pub(crate) fn into_completed_artifact(self) -> Option<CompletedScanArtifact> {
         if self.termination != ScanTermination::Completed {
             return None;

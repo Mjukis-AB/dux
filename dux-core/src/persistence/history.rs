@@ -132,6 +132,7 @@ impl NewScanRecord {
         &self.id
     }
 
+    #[cfg(test)]
     pub(crate) fn root(&self) -> &Path {
         &self.root
     }
@@ -225,10 +226,12 @@ impl ScanCompletionRecord {
         &self.id
     }
 
+    #[cfg(test)]
     pub(crate) fn completed_at(&self) -> SystemTime {
         self.completed_at
     }
 
+    #[cfg(test)]
     pub(crate) fn counts(&self) -> ScanCounts {
         self.counts
     }
@@ -247,6 +250,7 @@ pub(crate) struct ScanRecord {
 }
 
 impl ScanRecord {
+    #[cfg(test)]
     pub(crate) fn id(&self) -> &ScanId {
         &self.id
     }
@@ -255,10 +259,12 @@ impl ScanRecord {
         &self.root
     }
 
+    #[cfg(test)]
     pub(crate) fn started_at(&self) -> SystemTime {
         self.started_at
     }
 
+    #[cfg(test)]
     pub(crate) fn completed_at(&self) -> Option<SystemTime> {
         self.completed_at
     }
@@ -267,16 +273,29 @@ impl ScanRecord {
         self.status
     }
 
+    #[cfg(test)]
     pub(crate) fn counts(&self) -> ScanCounts {
         self.counts
     }
 
+    #[cfg(test)]
     pub(crate) fn coverage(&self) -> &ScanCoverage {
         &self.coverage
     }
 
     pub(crate) fn snapshot(&self) -> Option<&SnapshotReference> {
         self.snapshot.as_ref()
+    }
+
+    pub(crate) fn exactly_matches_start(&self, start: &NewScanRecord) -> bool {
+        self.id == start.id
+            && self.root == start.root
+            && self.started_at == start.started_at
+            && self.completed_at.is_none()
+            && self.status == ScanStatus::Running
+            && self.counts == ScanCounts::default()
+            && self.coverage.status() == ScanCoverageStatus::Unknown
+            && self.snapshot.is_none()
     }
 
     pub(crate) fn exactly_matches_completion(&self, completion: &ScanCompletionRecord) -> bool {
@@ -988,6 +1007,25 @@ mod tests {
         assert_eq!(completed.status(), ScanStatus::Succeeded);
         assert_eq!(completed.completed_at(), Some(finish.completed_at()));
         assert_eq!(completed.counts(), finish.counts());
+    }
+
+    #[test]
+    fn committed_scan_start_reconciles_an_injected_post_commit_failure() {
+        let temp = TempDir::new().unwrap();
+        let store = StoreCoordinator::open(&temp.path().join("store/dux.sqlite3")).unwrap();
+        let start = started("scan:ambiguous-start", temp.path().join("root"), 0);
+
+        store
+            .record_scan_started_reconciled_after_commit_failure_for_test(&start)
+            .unwrap();
+        store.record_scan_started_reconciled(&start).unwrap();
+        assert!(
+            store
+                .load_scan(start.id())
+                .unwrap()
+                .unwrap()
+                .exactly_matches_start(&start)
+        );
     }
 
     #[test]

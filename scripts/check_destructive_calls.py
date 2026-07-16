@@ -307,6 +307,11 @@ EXCEPTIONS = {
     "test-protected-replaced-root": ExceptionSpec(
         "dux-core/src/path_validation/protected.rs", "rust-filesystem-effect", "test:replacement_scan_root_at_the_same_path_rejects_old_target_evidence"
     ),
+    "test-engine-move-scan-root": ExceptionSpec(
+        "dux-core/src/engine/registry_tests.rs",
+        "rust-filesystem-effect",
+        "test:scanner_failure_is_durable_and_publishes_no_snapshot",
+    ),
     "storage-root-handle-publish": ExceptionSpec(
         "dux-core/src/persistence/storage/windows.rs",
         "rust-platform-delete",
@@ -438,6 +443,7 @@ EXCEPTION_PRIMITIVES = {
     "test-cache-first-temp-remove": "remove_file",
     "test-cache-second-temp-remove": "remove_file",
     "test-protected-replaced-root": "rename",
+    "test-engine-move-scan-root": "rename",
     "storage-root-handle-publish": "SetFileInformationByHandle",
     "storage-root-linux-publish": "SYS_renameat2",
     "storage-root-macos-publish": "renameatx_np",
@@ -471,6 +477,7 @@ CLIPPY_SUPPRESSION_COUNTS = {
     "dux-cli/src/app/state.rs": 3,
     "dux-core/src/cache/mod.rs": 2,
     "dux-core/src/path_validation/protected.rs": 1,
+    "dux-core/src/engine/registry_tests.rs": 1,
     "dux-core/src/persistence/persistence_tests.rs": 3,
     "dux-core/src/persistence/storage.rs": 1,
     "dux-core/src/persistence/storage/windows.rs": 2,

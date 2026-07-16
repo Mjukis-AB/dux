@@ -1,5 +1,8 @@
 use std::num::NonZeroU64;
 use std::sync::Arc;
+use std::time::SystemTime;
+
+use crate::domain::{ScanCoverage, ScanId};
 
 /// Opaque, non-durable identifier scoped to one running DUX process.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -18,8 +21,10 @@ impl TaskId {
 
 /// Closed set of engine-owned task kinds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TaskKind {
     FormatSizeBatch,
+    Scan,
 }
 
 /// Execution phase. Cancellation intent is reported separately until work is
@@ -40,8 +45,14 @@ impl TaskPhase {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TaskFailureKind {
     InternalFailure,
+    ScanRootChanged,
+    ScanFailed,
+    SnapshotRejected,
+    PersistenceUnavailable,
+    PersistenceOutcomeUnknown,
 }
 
 /// Authoritative current state for one retained task.
@@ -57,12 +68,25 @@ pub struct TaskSnapshot {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TaskEventKind {
     Queued,
     Started,
-    Progress { completed: u64, total: u64 },
+    Progress {
+        completed: u64,
+        total: u64,
+    },
+    ScanProgress {
+        files: u64,
+        directories: u64,
+        known_allocated_bytes: u64,
+        errors: u64,
+    },
+    ScanFinalizing,
     CancellationRequested,
-    Terminal { phase: TaskPhase },
+    Terminal {
+        phase: TaskPhase,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -107,6 +131,89 @@ impl FormatSizeBatchResult {
     }
 }
 
+/// Frozen counts from one durable scan summary. Non-successful scans retain
+/// zero counts and unknown allocation rather than presenting an unfinalized
+/// partial tree as an exact total.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ScanTaskCounts {
+    pub directory_count: u64,
+    pub file_count: u64,
+    pub logical_bytes: u64,
+    pub allocated_bytes: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ScanTaskStatus {
+    Succeeded,
+    Failed,
+    Cancelled,
+    Interrupted,
+}
+
+/// Immutable, non-authoritative durable result for one engine scan task.
+/// Paths and tree nodes remain behind the paged snapshot APIs added later.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScanTaskResult {
+    scan_id: ScanId,
+    started_at: SystemTime,
+    completed_at: SystemTime,
+    status: ScanTaskStatus,
+    counts: ScanTaskCounts,
+    coverage: ScanCoverage,
+    snapshot_available: bool,
+}
+
+impl ScanTaskResult {
+    pub(super) fn new(
+        scan_id: ScanId,
+        started_at: SystemTime,
+        completed_at: SystemTime,
+        status: ScanTaskStatus,
+        counts: ScanTaskCounts,
+        coverage: ScanCoverage,
+        snapshot_available: bool,
+    ) -> Self {
+        Self {
+            scan_id,
+            started_at,
+            completed_at,
+            status,
+            counts,
+            coverage,
+            snapshot_available,
+        }
+    }
+
+    pub fn scan_id(&self) -> &ScanId {
+        &self.scan_id
+    }
+
+    pub fn started_at(&self) -> SystemTime {
+        self.started_at
+    }
+
+    pub fn completed_at(&self) -> SystemTime {
+        self.completed_at
+    }
+
+    pub fn status(&self) -> ScanTaskStatus {
+        self.status
+    }
+
+    pub fn counts(&self) -> ScanTaskCounts {
+        self.counts
+    }
+
+    pub fn coverage(&self) -> &ScanCoverage {
+        &self.coverage
+    }
+
+    pub fn snapshot_available(&self) -> bool {
+        self.snapshot_available
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EngineLifecycle {
     Open,
@@ -140,6 +247,7 @@ pub enum EngineOpenError {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum StartTaskError {
     #[error("engine session is closed")]
     Closed,
@@ -147,10 +255,33 @@ pub enum StartTaskError {
     QueueFull,
     #[error("task input exceeds the fixed limit of {limit} items")]
     InputTooLarge { limit: u16 },
+    #[error("scan root is invalid or unavailable: {reason:?}")]
+    InvalidScanRoot { reason: ScanRootErrorKind },
+    #[error("a scan for this filesystem object is already active as task {existing:?}")]
+    ScanAlreadyActive { existing: TaskId },
+    #[error("the durable engine store is read-only")]
+    ReadOnlyStore,
+    #[error("the durable engine store is unavailable")]
+    PersistenceUnavailable,
     #[error("engine task identifiers are exhausted")]
     TaskIdExhausted,
     #[error("engine task registry is unavailable")]
     InternalState,
+}
+
+/// Path-free scan-root validation categories suitable for UI and FFI mapping.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ScanRootErrorKind {
+    InvalidPath,
+    Missing,
+    AccessDenied,
+    NotDirectory,
+    Symlink,
+    ChangedDuringValidation,
+    IdentityUnavailable,
+    UnsupportedPlatform,
+    Unavailable,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]

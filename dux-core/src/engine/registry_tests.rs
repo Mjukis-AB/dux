@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use tempfile::TempDir;
 
@@ -36,10 +36,19 @@ fn wait_terminal(engine: &EngineHandle, id: TaskId) -> TaskSnapshot {
     }
 }
 
+fn final_snapshot_count(config: &EngineConfig) -> usize {
+    std::fs::read_dir(config.snapshots_directory())
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with("snapshot-"))
+        .count()
+}
+
 #[test]
 fn handle_is_send_sync_and_config_is_explicit() {
     fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<EngineHandle>();
+    assert_send_sync::<SnapshotRepository>();
 
     let temp = TempDir::new().unwrap();
     let expected = config(&temp);
@@ -54,6 +63,32 @@ fn handle_is_send_sync_and_config_is_explicit() {
     );
     engine.close();
     assert!(engine.wait_until_closed(TEST_TIMEOUT));
+}
+
+#[test]
+fn ambiguous_terminal_persistence_disarms_changed_fact_fallback() {
+    let (_temp, engine) = engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let start = NewScanRecord::try_new(
+        ScanId::new("scan:ambiguous-terminal").unwrap(),
+        engine.config().cache_directory().join("root"),
+        SystemTime::now(),
+    )
+    .unwrap();
+    let mut guard = DurableScanGuard::new(Arc::clone(&engine.inner.store), &start);
+
+    assert_eq!(
+        guard.map_settle_failure(HistoryErrorKind::OutcomeUnknown),
+        TaskFailureKind::PersistenceOutcomeUnknown
+    );
+    assert!(guard.settled);
+
+    guard.settled = false;
+    assert_eq!(
+        guard.map_settle_failure(HistoryErrorKind::DatabaseUnavailable),
+        TaskFailureKind::PersistenceUnavailable
+    );
+    assert!(!guard.settled);
+    guard.disarm();
 }
 
 #[test]
@@ -131,6 +166,13 @@ fn newer_database_never_provisions_missing_snapshot_storage() {
         crate::persistence::DatabaseAccess::ReadOnlyNewer { found, .. } if found == future
     ));
     assert!(!config.snapshots_directory().exists());
+    let scan_root = temp.path().join("scan-root");
+    std::fs::create_dir(&scan_root).unwrap();
+    assert_eq!(
+        engine.start_scan(scan_root),
+        Err(StartTaskError::ReadOnlyStore)
+    );
+    assert!(!config.snapshots_directory().exists());
     engine.close();
     assert!(engine.wait_until_closed(TEST_TIMEOUT));
 }
@@ -182,6 +224,387 @@ fn real_format_batch_runs_through_registry_and_publishes_immutable_result() {
             .iter()
             .any(|event| matches!(event.kind, TaskEventKind::Terminal { .. }))
     );
+}
+
+#[test]
+fn completed_scan_publishes_durable_snapshot_and_survives_reopen() {
+    let temp = TempDir::new().unwrap();
+    let config = config(&temp);
+    let root = temp.path().join("scan-root");
+    std::fs::create_dir_all(root.join("nested")).unwrap();
+    std::fs::write(root.join("nested/payload"), b"payload").unwrap();
+    let engine =
+        EngineHandle::open_with_limits(config.clone(), RegistryLimits::testing(1, 4, 8, 16))
+            .unwrap();
+
+    let task = engine.start_scan(root.clone()).unwrap();
+    let terminal = wait_terminal(&engine, task);
+    assert_eq!(terminal.kind, TaskKind::Scan);
+    assert_eq!(terminal.phase, TaskPhase::Succeeded);
+    assert!(terminal.result_available);
+    let result = engine.scan_result(task).unwrap().unwrap();
+    assert_eq!(
+        engine.format_size_batch_result(task).unwrap_err(),
+        TaskAccessError::WrongTaskKind
+    );
+    assert_eq!(result.status(), ScanTaskStatus::Succeeded);
+    assert!(result.snapshot_available());
+    assert_eq!(result.counts().logical_bytes, 7);
+    assert_eq!(result.counts().file_count, 1);
+    assert_eq!(result.counts().directory_count, 2);
+    assert_ne!(
+        result.coverage().status(),
+        crate::ScanCoverageStatus::Unknown
+    );
+    let scan_id = result.scan_id().clone();
+    let durable = engine.inner.store.load_scan(&scan_id).unwrap().unwrap();
+    assert_eq!(durable.status(), ScanStatus::Succeeded);
+    assert_eq!(durable.started_at(), result.started_at());
+    assert_eq!(durable.completed_at(), Some(result.completed_at()));
+    assert_eq!(durable.root(), root.canonicalize().unwrap());
+    assert_eq!(durable.counts().logical_bytes, 7);
+    assert_eq!(durable.coverage(), result.coverage());
+    let reference = durable.snapshot().unwrap().clone();
+    let document = engine.inner.snapshots.load(&reference).unwrap();
+    assert_eq!(document.metadata.scan_id, scan_id);
+    assert_eq!(document.metadata.totals.logical_bytes, 7);
+    assert_eq!(document.nodes.len(), 3);
+    assert_eq!(final_snapshot_count(&config), 1);
+    let events = engine.task_events(task, 0, 16).unwrap().events;
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.kind, TaskEventKind::ScanFinalizing))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.kind, TaskEventKind::ScanProgress { .. }))
+    );
+
+    engine.close();
+    assert!(engine.wait_until_closed(TEST_TIMEOUT));
+    drop(engine);
+    let reopened = EngineHandle::open(config).unwrap();
+    let durable = reopened.inner.store.load_scan(&scan_id).unwrap().unwrap();
+    let reference = durable.snapshot().unwrap();
+    assert_eq!(reopened.inner.snapshots.load(reference).unwrap(), document);
+}
+
+#[test]
+fn running_scan_cancellation_is_durable_and_publishes_no_snapshot() {
+    let temp = TempDir::new().unwrap();
+    let config = config(&temp);
+    let root = temp.path().join("scan-root");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("payload"), b"payload").unwrap();
+    let engine =
+        EngineHandle::open_with_limits(config.clone(), RegistryLimits::testing(1, 2, 4, 16))
+            .unwrap();
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let task = engine
+        .start_scan_with_before_traversal_hook(root, move |scan_id| {
+            started_tx.send(scan_id.clone()).unwrap();
+            release_rx.recv().unwrap();
+        })
+        .unwrap();
+    let scan_id = started_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+
+    assert_eq!(engine.cancel_task(task).unwrap(), CancelOutcome::Requested);
+    assert_eq!(engine.scan_result(task).unwrap(), None);
+    release_tx.send(()).unwrap();
+    let terminal = wait_terminal(&engine, task);
+    assert_eq!(terminal.phase, TaskPhase::Cancelled);
+    assert!(terminal.cancellation_requested);
+    assert!(terminal.result_available);
+    let result = engine.scan_result(task).unwrap().unwrap();
+    assert_eq!(result.scan_id(), &scan_id);
+    assert_eq!(result.status(), ScanTaskStatus::Cancelled);
+    assert!(!result.snapshot_available());
+    assert_eq!(result.counts(), ScanTaskCounts::default());
+    assert!(
+        result
+            .coverage()
+            .issues()
+            .iter()
+            .any(|issue| { issue.kind() == crate::ScanIssueKind::Cancelled })
+    );
+    let durable = engine.inner.store.load_scan(&scan_id).unwrap().unwrap();
+    assert_eq!(durable.status(), ScanStatus::Cancelled);
+    assert!(durable.snapshot().is_none());
+    assert_eq!(final_snapshot_count(&config), 0);
+}
+
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test moves only a TempDir-owned scan root to force a deterministic scanner failure"
+)]
+fn scanner_failure_is_durable_and_publishes_no_snapshot() {
+    let temp = TempDir::new().unwrap();
+    let config = config(&temp);
+    let root = temp.path().join("scan-root");
+    let moved = temp.path().join("moved-root");
+    std::fs::create_dir(&root).unwrap();
+    let engine =
+        EngineHandle::open_with_limits(config.clone(), RegistryLimits::testing(1, 2, 4, 16))
+            .unwrap();
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let task = engine
+        .start_scan_with_before_traversal_hook(root.clone(), move |scan_id| {
+            started_tx.send(scan_id.clone()).unwrap();
+            release_rx.recv().unwrap();
+        })
+        .unwrap();
+    let scan_id = started_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    // DUX-DESTRUCTIVE: allow=test-engine-move-scan-root -- move only this TempDir-owned root so the real scanner observes a deterministic missing-root failure
+    std::fs::rename(&root, moved).unwrap();
+    release_tx.send(()).unwrap();
+
+    let terminal = wait_terminal(&engine, task);
+    assert_eq!(terminal.phase, TaskPhase::Failed);
+    assert_eq!(terminal.failure, Some(TaskFailureKind::ScanFailed));
+    let result = engine.scan_result(task).unwrap().unwrap();
+    assert_eq!(result.status(), ScanTaskStatus::Failed);
+    assert_eq!(result.scan_id(), &scan_id);
+    assert!(!result.snapshot_available());
+    let durable = engine.inner.store.load_scan(&scan_id).unwrap().unwrap();
+    assert_eq!(durable.status(), ScanStatus::Failed);
+    assert!(durable.snapshot().is_none());
+    assert_eq!(final_snapshot_count(&config), 0);
+}
+
+#[test]
+fn queued_scan_cancellation_never_starts_or_persists() {
+    let temp = TempDir::new().unwrap();
+    let config = config(&temp);
+    let root = temp.path().join("scan-root");
+    std::fs::create_dir(&root).unwrap();
+    let engine =
+        EngineHandle::open_with_limits(config.clone(), RegistryLimits::testing(1, 2, 4, 8))
+            .unwrap();
+    let (blocker_started_tx, blocker_started_rx) = mpsc::channel();
+    let (blocker_release_tx, blocker_release_rx) = mpsc::channel();
+    let blocker = engine
+        .submit_test(Box::new(move |_| {
+            blocker_started_tx.send(()).unwrap();
+            blocker_release_rx.recv().unwrap();
+            WorkOutcome::Succeeded(TaskResult::TestOnly)
+        }))
+        .unwrap();
+    blocker_started_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    let hook_calls = Arc::new(AtomicUsize::new(0));
+    let calls = Arc::clone(&hook_calls);
+    let scan = engine
+        .start_scan_with_before_traversal_hook(root.clone(), move |_| {
+            calls.fetch_add(1, Ordering::SeqCst);
+        })
+        .unwrap();
+
+    assert_eq!(
+        engine.cancel_task(scan).unwrap(),
+        CancelOutcome::CancelledBeforeStart
+    );
+    assert_eq!(wait_terminal(&engine, scan).phase, TaskPhase::Cancelled);
+    assert_eq!(hook_calls.load(Ordering::SeqCst), 0);
+    blocker_release_tx.send(()).unwrap();
+    wait_terminal(&engine, blocker);
+    let connection = rusqlite::Connection::open(config.database_path()).unwrap();
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM scans", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(final_snapshot_count(&config), 0);
+    let replacement = engine.start_scan(root).unwrap();
+    assert_eq!(
+        wait_terminal(&engine, replacement).phase,
+        TaskPhase::Succeeded
+    );
+}
+
+#[test]
+fn overlapping_scan_scope_is_rejected_then_released() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("scan-root");
+    let child = root.join("child");
+    std::fs::create_dir_all(&child).unwrap();
+    let engine =
+        EngineHandle::open_with_limits(config(&temp), RegistryLimits::testing(2, 4, 8, 8)).unwrap();
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let first = engine
+        .start_scan_with_before_traversal_hook(root.clone(), move |_| {
+            started_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        })
+        .unwrap();
+    started_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+
+    assert_eq!(
+        engine.start_scan(root.clone()),
+        Err(StartTaskError::ScanAlreadyActive { existing: first })
+    );
+    assert_eq!(
+        engine.start_scan(child),
+        Err(StartTaskError::ScanAlreadyActive { existing: first })
+    );
+    assert_eq!(engine.cancel_task(first).unwrap(), CancelOutcome::Requested);
+    release_tx.send(()).unwrap();
+    assert_eq!(wait_terminal(&engine, first).phase, TaskPhase::Cancelled);
+    let replacement = engine.start_scan(root).unwrap();
+    assert_eq!(
+        wait_terminal(&engine, replacement).phase,
+        TaskPhase::Succeeded
+    );
+}
+
+#[test]
+fn scan_results_are_kind_checked_and_invalid_roots_fail_before_queueing() {
+    let temp = TempDir::new().unwrap();
+    let engine = EngineHandle::open(config(&temp)).unwrap();
+    let format = engine.start_format_size_batch(vec![1]).unwrap();
+    assert_eq!(
+        engine.scan_result(format).unwrap_err(),
+        TaskAccessError::WrongTaskKind
+    );
+    let relative = PathBuf::from("relative-root");
+    assert_eq!(
+        engine.start_scan(relative),
+        Err(StartTaskError::InvalidScanRoot {
+            reason: ScanRootErrorKind::InvalidPath
+        })
+    );
+    let file = temp.path().join("file");
+    std::fs::write(&file, b"x").unwrap();
+    assert_eq!(
+        engine.start_scan(file),
+        Err(StartTaskError::InvalidScanRoot {
+            reason: ScanRootErrorKind::NotDirectory
+        })
+    );
+}
+
+#[test]
+fn live_schema_upgrade_fences_scan_submission_before_queueing() {
+    let temp = TempDir::new().unwrap();
+    let config = config(&temp);
+    let root = temp.path().join("scan-root");
+    std::fs::create_dir(&root).unwrap();
+    let engine = EngineHandle::open(config.clone()).unwrap();
+    let future = crate::persistence::DATABASE_SCHEMA_VERSION + 1;
+    let connection = rusqlite::Connection::open(config.database_path()).unwrap();
+    connection
+        .execute(
+            "INSERT INTO schema_migrations
+             (version, name, checksum_sha256, applied_at_unix_ms)
+             VALUES (?1, 'future-live-scan-schema', zeroblob(32), 2)",
+            [i64::from(future)],
+        )
+        .unwrap();
+    connection
+        .pragma_update(None, "user_version", future)
+        .unwrap();
+    drop(connection);
+
+    assert_eq!(engine.start_scan(root), Err(StartTaskError::ReadOnlyStore));
+    assert!(matches!(
+        engine.database_status().unwrap().access,
+        crate::persistence::DatabaseAccess::ReadOnlyNewer { found, .. } if found == future
+    ));
+    let format = engine.start_format_size_batch(vec![1]).unwrap();
+    assert_eq!(wait_terminal(&engine, format).phase, TaskPhase::Succeeded);
+}
+
+#[cfg(unix)]
+#[test]
+fn canonical_root_alias_shares_the_active_scan_scope() {
+    use std::os::unix::fs::symlink;
+
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("scan-root");
+    let alias = temp.path().join("scan-alias");
+    std::fs::create_dir(&root).unwrap();
+    symlink(&root, &alias).unwrap();
+    let engine =
+        EngineHandle::open_with_limits(config(&temp), RegistryLimits::testing(1, 2, 4, 8)).unwrap();
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let first = engine
+        .start_scan_with_before_traversal_hook(root, move |_| {
+            started_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        })
+        .unwrap();
+    started_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+
+    assert_eq!(
+        engine.start_scan(alias),
+        Err(StartTaskError::ScanAlreadyActive { existing: first })
+    );
+    assert_eq!(engine.cancel_task(first).unwrap(), CancelOutcome::Requested);
+    release_tx.send(()).unwrap();
+    assert_eq!(wait_terminal(&engine, first).phase, TaskPhase::Cancelled);
+}
+
+#[test]
+fn panicking_scan_hook_is_durably_interrupted_and_releases_scope() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("scan-root");
+    std::fs::create_dir(&root).unwrap();
+    let engine =
+        EngineHandle::open_with_limits(config(&temp), RegistryLimits::testing(1, 2, 4, 8)).unwrap();
+    let (started_tx, started_rx) = mpsc::channel();
+    let task = engine
+        .start_scan_with_before_traversal_hook(root.clone(), move |scan_id| {
+            started_tx.send(scan_id.clone()).unwrap();
+            panic!("injected scan task panic");
+        })
+        .unwrap();
+    let scan_id = started_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+
+    let terminal = wait_terminal(&engine, task);
+    assert_eq!(terminal.phase, TaskPhase::Failed);
+    assert_eq!(terminal.failure, Some(TaskFailureKind::InternalFailure));
+    assert!(!terminal.result_available);
+    let durable = engine.inner.store.load_scan(&scan_id).unwrap().unwrap();
+    assert_eq!(durable.status(), ScanStatus::Interrupted);
+    assert!(durable.snapshot().is_none());
+    let replacement = engine.start_scan(root).unwrap();
+    assert_eq!(
+        wait_terminal(&engine, replacement).phase,
+        TaskPhase::Succeeded
+    );
+    let format = engine.start_format_size_batch(vec![1]).unwrap();
+    assert_eq!(wait_terminal(&engine, format).phase, TaskPhase::Succeeded);
+}
+
+#[test]
+fn close_cancels_and_terminalizes_a_running_scan_before_workers_exit() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("scan-root");
+    std::fs::create_dir(&root).unwrap();
+    let engine =
+        EngineHandle::open_with_limits(config(&temp), RegistryLimits::testing(1, 2, 4, 8)).unwrap();
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    engine
+        .start_scan_with_before_traversal_hook(root, move |scan_id| {
+            started_tx.send(scan_id.clone()).unwrap();
+            release_rx.recv().unwrap();
+        })
+        .unwrap();
+    let scan_id = started_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+
+    assert_eq!(engine.close(), CloseOutcome::Initiated);
+    release_tx.send(()).unwrap();
+    assert!(engine.wait_until_closed(TEST_TIMEOUT));
+    let durable = engine.inner.store.load_scan(&scan_id).unwrap().unwrap();
+    assert_eq!(durable.status(), ScanStatus::Cancelled);
+    assert!(durable.snapshot().is_none());
 }
 
 #[test]
@@ -341,7 +764,7 @@ fn running_cancellation_is_intent_until_worker_returns() {
             }
             observed_tx.send(()).unwrap();
             release_rx.recv().unwrap();
-            WorkOutcome::Cancelled
+            WorkOutcome::Cancelled(None)
         }))
         .unwrap();
     started_rx.recv_timeout(TEST_TIMEOUT).unwrap();
@@ -470,7 +893,7 @@ fn aggregate_registry_state_is_bounded_and_workers_are_reaped() {
         .submit_test(Box::new(move |_| {
             started_tx.send(()).unwrap();
             release_rx.recv().unwrap();
-            WorkOutcome::Cancelled
+            WorkOutcome::Cancelled(None)
         }))
         .unwrap();
     started_rx.recv_timeout(TEST_TIMEOUT).unwrap();
@@ -567,7 +990,7 @@ fn close_is_nonblocking_idempotent_cancels_work_and_rejects_use() {
         .submit_test(Box::new(move |_| {
             started_tx.send(()).unwrap();
             release_rx.recv().unwrap();
-            WorkOutcome::Cancelled
+            WorkOutcome::Cancelled(None)
         }))
         .unwrap();
     started_rx.recv_timeout(TEST_TIMEOUT).unwrap();
@@ -634,7 +1057,7 @@ fn only_last_handle_drop_cancels_running_and_queued_work() {
                 std::thread::yield_now();
             }
             cancelled_tx.send(()).unwrap();
-            WorkOutcome::Cancelled
+            WorkOutcome::Cancelled(None)
         }))
         .unwrap();
     started_rx.recv_timeout(TEST_TIMEOUT).unwrap();

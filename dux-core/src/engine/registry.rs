@@ -1,18 +1,30 @@
 use std::collections::{HashMap, VecDeque};
 use std::num::NonZeroU64;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::config::EngineConfig;
 use super::task::{
     CancelOutcome, CloseOutcome, EngineLifecycle, EngineOpenError, FormatSizeBatchResult,
-    FormattedSizeEntry, StartTaskError, TaskAccessError, TaskEvent, TaskEventBatch, TaskEventKind,
-    TaskFailureKind, TaskId, TaskKind, TaskPhase, TaskSnapshot,
+    FormattedSizeEntry, ScanRootErrorKind, ScanTaskCounts, ScanTaskResult, ScanTaskStatus,
+    StartTaskError, TaskAccessError, TaskEvent, TaskEventBatch, TaskEventKind, TaskFailureKind,
+    TaskId, TaskKind, TaskPhase, TaskSnapshot,
+};
+use crate::domain::{ScanCoverage, ScanId};
+use crate::persistence::snapshot::from_scan::prepare_completed_scan;
+use crate::persistence::snapshot::{
+    HostValue, SnapshotRepository, SnapshotRepositoryErrorKind, SnapshotStoreAccess,
 };
 use crate::persistence::{DatabaseStatus, StoreCoordinator};
+use crate::persistence::{
+    HistoryErrorKind, NewScanRecord, ScanCompletionRecord, ScanCounts, ScanStatus,
+    TerminalScanStatus,
+};
+use crate::scanner::{CancellationToken, ScanConfig, ScanMessage, ScanTermination, Scanner};
 
 const FORMAT_BATCH_LIMIT: usize = 256;
 
@@ -95,13 +107,15 @@ impl CancellationFlag {
 
 enum TaskResult {
     FormatSizeBatch(Arc<FormatSizeBatchResult>),
+    Scan(Arc<ScanTaskResult>),
     #[cfg(test)]
     TestOnly,
 }
 
 enum WorkOutcome {
     Succeeded(TaskResult),
-    Cancelled,
+    Cancelled(Option<TaskResult>),
+    Failed(TaskFailureKind, Option<TaskResult>),
 }
 
 struct TaskContext {
@@ -124,6 +138,44 @@ impl TaskContext {
             record.push_event(TaskEventKind::Progress { completed, total }, event_limit);
         }
     }
+
+    fn report_scan_message(&self, message: ScanMessage) {
+        let kind = match message {
+            ScanMessage::Progress(progress) => Some(TaskEventKind::ScanProgress {
+                files: progress.files_scanned,
+                directories: progress.dirs_scanned,
+                known_allocated_bytes: progress.bytes_scanned,
+                errors: progress.errors,
+            }),
+            ScanMessage::Finalizing => Some(TaskEventKind::ScanFinalizing),
+            ScanMessage::StartedDirectory(_)
+            | ScanMessage::Completed
+            | ScanMessage::Cancelled
+            | ScanMessage::Error(_) => None,
+        };
+        let Some(kind) = kind else {
+            return;
+        };
+        let mut registry = self.shared.lock_registry_recover();
+        let event_limit = self.shared.limits.events_per_task;
+        if let Some(record) = registry.records.get_mut(&self.id)
+            && !record.phase.is_terminal()
+        {
+            record.push_event(kind, event_limit);
+        }
+    }
+
+    fn install_scan_cancellation(&self, token: CancellationToken) {
+        let mut registry = self.shared.lock_registry_recover();
+        if let Some(record) = registry.records.get_mut(&self.id) {
+            if record.cancellation_requested {
+                token.cancel();
+            }
+            record.scan_cancellation = Some(token);
+        } else {
+            token.cancel();
+        }
+    }
 }
 
 type Work = Box<dyn FnOnce(TaskContext) -> WorkOutcome + Send + 'static>;
@@ -139,6 +191,8 @@ struct TaskRecord {
     phase: TaskPhase,
     cancellation_requested: bool,
     cancellation: CancellationFlag,
+    scan_cancellation: Option<CancellationToken>,
+    scan_scope: Option<PathBuf>,
     revision: u64,
     events: VecDeque<TaskEvent>,
     next_event_sequence: u64,
@@ -147,13 +201,15 @@ struct TaskRecord {
 }
 
 impl TaskRecord {
-    fn new(id: TaskId, kind: TaskKind, event_limit: usize) -> Self {
+    fn new(id: TaskId, kind: TaskKind, scan_scope: Option<PathBuf>, event_limit: usize) -> Self {
         let mut record = Self {
             id,
             kind,
             phase: TaskPhase::Queued,
             cancellation_requested: false,
             cancellation: CancellationFlag::new(),
+            scan_cancellation: None,
+            scan_scope,
             revision: 0,
             events: VecDeque::new(),
             next_event_sequence: 1,
@@ -192,6 +248,9 @@ impl TaskRecord {
         }
         self.cancellation_requested = true;
         self.cancellation.request();
+        if let Some(token) = &self.scan_cancellation {
+            token.cancel();
+        }
         self.push_event(TaskEventKind::CancellationRequested, event_limit);
         true
     }
@@ -204,6 +263,7 @@ struct Registry {
     terminal_order: VecDeque<TaskId>,
     running_tasks: usize,
     live_workers: usize,
+    active_scan_roots: HashMap<PathBuf, TaskId>,
 }
 
 impl Registry {
@@ -215,6 +275,7 @@ impl Registry {
             terminal_order: VecDeque::new(),
             running_tasks: 0,
             live_workers: 0,
+            active_scan_roots: HashMap::new(),
         }
     }
 
@@ -255,6 +316,10 @@ impl Shared {
 
         let queued: Vec<_> = registry.queue.drain(..).map(|job| job.id).collect();
         for id in queued {
+            let scope = registry
+                .records
+                .get(&id)
+                .and_then(|record| record.scan_scope.clone());
             if let Some(record) = registry.records.get_mut(&id) {
                 record.request_cancellation(self.limits.events_per_task);
                 record.phase = TaskPhase::Cancelled;
@@ -264,6 +329,11 @@ impl Shared {
                     },
                     self.limits.events_per_task,
                 );
+            }
+            if let Some(scope) = scope
+                && registry.active_scan_roots.get(&scope) == Some(&id)
+            {
+                registry.active_scan_roots.remove(&scope);
             }
             registry.retain_terminal(id, self.limits.retained_terminal_tasks);
         }
@@ -292,7 +362,7 @@ impl Shared {
 struct EngineInner {
     config: EngineConfig,
     store: Arc<StoreCoordinator>,
-    _snapshots: crate::persistence::snapshot::SnapshotRepository,
+    snapshots: Arc<SnapshotRepository>,
     shared: Arc<Shared>,
     workers: Mutex<Option<Vec<JoinHandle<()>>>>,
 }
@@ -343,18 +413,15 @@ impl EngineHandle {
             .map_err(|error| EngineOpenError::Database(error.kind))?;
         between_status_and_snapshot_open();
         let snapshot_access = match database_status.access {
-            crate::persistence::DatabaseAccess::ReadWriteCurrent => {
-                crate::persistence::snapshot::SnapshotStoreAccess::ReadWrite
-            }
+            crate::persistence::DatabaseAccess::ReadWriteCurrent => SnapshotStoreAccess::ReadWrite,
             crate::persistence::DatabaseAccess::ReadOnlyNewer { .. } => {
-                crate::persistence::snapshot::SnapshotStoreAccess::ReadOnly
+                SnapshotStoreAccess::ReadOnly
             }
         };
-        let snapshots = crate::persistence::snapshot::SnapshotRepository::open(
-            Arc::clone(&store),
-            snapshot_access,
-        )
-        .map_err(|error| EngineOpenError::Snapshot(error.open_kind()))?;
+        let snapshots = Arc::new(
+            SnapshotRepository::open(Arc::clone(&store), snapshot_access)
+                .map_err(|error| EngineOpenError::Snapshot(error.open_kind()))?,
+        );
         let shared = Arc::new(Shared::new(limits));
         let mut workers = Vec::with_capacity(limits.workers);
         for index in 0..limits.workers {
@@ -381,7 +448,7 @@ impl EngineHandle {
             inner: Arc::new(EngineInner {
                 config,
                 store,
-                _snapshots: snapshots,
+                snapshots,
                 shared,
                 workers: Mutex::new(Some(workers)),
             }),
@@ -411,12 +478,13 @@ impl EngineHandle {
         }
         self.submit(
             TaskKind::FormatSizeBatch,
+            None,
             Box::new(move |context| {
                 let total = values.len() as u64;
                 let mut entries = Vec::with_capacity(values.len());
                 for (index, bytes) in values.into_iter().enumerate() {
                     if context.is_cancellation_requested() {
-                        return WorkOutcome::Cancelled;
+                        return WorkOutcome::Cancelled(None);
                     }
                     entries.push(FormattedSizeEntry {
                         bytes,
@@ -425,7 +493,7 @@ impl EngineHandle {
                     context.report_progress((index + 1) as u64, total);
                 }
                 if context.is_cancellation_requested() {
-                    WorkOutcome::Cancelled
+                    WorkOutcome::Cancelled(None)
                 } else {
                     WorkOutcome::Succeeded(TaskResult::FormatSizeBatch(Arc::new(
                         FormatSizeBatchResult::new(entries),
@@ -433,6 +501,51 @@ impl EngineHandle {
                 }
             }),
         )
+    }
+
+    /// Start one full, no-follow, same-filesystem scan. Root validation and
+    /// overlapping-scope admission are synchronous; the durable scan ID is
+    /// generated only after a worker starts, so queued cancellation leaves no
+    /// history row.
+    pub fn start_scan(&self, root: PathBuf) -> Result<TaskId, StartTaskError> {
+        self.start_scan_with_hook(root, |_| {})
+    }
+
+    fn start_scan_with_hook(
+        &self,
+        root: PathBuf,
+        before_traversal: impl FnOnce(&ScanId) + Send + 'static,
+    ) -> Result<TaskId, StartTaskError> {
+        let canonical_root = prepare_scan_root(&root)?;
+        let status = self
+            .inner
+            .store
+            .status()
+            .map_err(|_| StartTaskError::PersistenceUnavailable)?;
+        if !matches!(
+            status.access,
+            crate::persistence::DatabaseAccess::ReadWriteCurrent
+        ) {
+            return Err(StartTaskError::ReadOnlyStore);
+        }
+        let store = Arc::clone(&self.inner.store);
+        let snapshots = Arc::clone(&self.inner.snapshots);
+        self.submit(
+            TaskKind::Scan,
+            Some(canonical_root.clone()),
+            Box::new(move |context| {
+                run_scan_task(context, canonical_root, store, snapshots, before_traversal)
+            }),
+        )
+    }
+
+    #[cfg(test)]
+    fn start_scan_with_before_traversal_hook(
+        &self,
+        root: PathBuf,
+        before_traversal: impl FnOnce(&ScanId) + Send + 'static,
+    ) -> Result<TaskId, StartTaskError> {
+        self.start_scan_with_hook(root, before_traversal)
     }
 
     pub fn task_snapshot(&self, id: TaskId) -> Result<TaskSnapshot, TaskAccessError> {
@@ -503,6 +616,25 @@ impl EngineHandle {
         }
         Ok(match &record.result {
             Some(TaskResult::FormatSizeBatch(result)) => Some(Arc::clone(result)),
+            Some(TaskResult::Scan(_)) => return Err(TaskAccessError::WrongTaskKind),
+            #[cfg(test)]
+            Some(TaskResult::TestOnly) => return Err(TaskAccessError::WrongTaskKind),
+            None => None,
+        })
+    }
+
+    pub fn scan_result(&self, id: TaskId) -> Result<Option<Arc<ScanTaskResult>>, TaskAccessError> {
+        let registry = self.lock_open_registry()?;
+        let record = registry
+            .records
+            .get(&id)
+            .ok_or(TaskAccessError::UnknownTask)?;
+        if record.kind != TaskKind::Scan {
+            return Err(TaskAccessError::WrongTaskKind);
+        }
+        Ok(match &record.result {
+            Some(TaskResult::Scan(result)) => Some(Arc::clone(result)),
+            Some(TaskResult::FormatSizeBatch(_)) => return Err(TaskAccessError::WrongTaskKind),
             #[cfg(test)]
             Some(TaskResult::TestOnly) => return Err(TaskAccessError::WrongTaskKind),
             None => None,
@@ -532,6 +664,10 @@ impl EngineHandle {
             let position = registry.queue.iter().position(|job| job.id == id);
             if let Some(position) = position {
                 registry.queue.remove(position);
+                let scope = registry
+                    .records
+                    .get(&id)
+                    .and_then(|record| record.scan_scope.clone());
                 if let Some(record) = registry.records.get_mut(&id) {
                     record.request_cancellation(event_limit);
                     record.phase = TaskPhase::Cancelled;
@@ -541,6 +677,11 @@ impl EngineHandle {
                         },
                         event_limit,
                     );
+                }
+                if let Some(scope) = scope
+                    && registry.active_scan_roots.get(&scope) == Some(&id)
+                {
+                    registry.active_scan_roots.remove(&scope);
                 }
                 registry.retain_terminal(id, self.inner.shared.limits.retained_terminal_tasks);
                 return Ok(CancelOutcome::CancelledBeforeStart);
@@ -582,7 +723,12 @@ impl EngineHandle {
         closed
     }
 
-    fn submit(&self, kind: TaskKind, work: Work) -> Result<TaskId, StartTaskError> {
+    fn submit(
+        &self,
+        kind: TaskKind,
+        scan_scope: Option<PathBuf>,
+        work: Work,
+    ) -> Result<TaskId, StartTaskError> {
         let mut registry = self
             .inner
             .shared
@@ -595,8 +741,24 @@ impl EngineHandle {
         if registry.queue.len() >= self.inner.shared.limits.queued_tasks {
             return Err(StartTaskError::QueueFull);
         }
+        if let Some(scope) = &scan_scope
+            && let Some(existing) = registry
+                .active_scan_roots
+                .iter()
+                .find_map(|(active, id)| super::config::paths_overlap(active, scope).then_some(*id))
+        {
+            return Err(StartTaskError::ScanAlreadyActive { existing });
+        }
         let id = TASK_IDS.allocate()?;
-        let record = TaskRecord::new(id, kind, self.inner.shared.limits.events_per_task);
+        let record = TaskRecord::new(
+            id,
+            kind,
+            scan_scope.clone(),
+            self.inner.shared.limits.events_per_task,
+        );
+        if let Some(scope) = scan_scope {
+            registry.active_scan_roots.insert(scope, id);
+        }
         registry.records.insert(id, record);
         registry.queue.push_back(Job { id, work });
         self.inner.shared.workers_ready.notify_one();
@@ -625,7 +787,342 @@ impl EngineHandle {
 
     #[cfg(test)]
     fn submit_test(&self, work: Work) -> Result<TaskId, StartTaskError> {
-        self.submit(TaskKind::FormatSizeBatch, work)
+        self.submit(TaskKind::FormatSizeBatch, None, work)
+    }
+}
+
+fn prepare_scan_root(root: &Path) -> Result<PathBuf, StartTaskError> {
+    if !root.is_absolute() {
+        return Err(StartTaskError::InvalidScanRoot {
+            reason: ScanRootErrorKind::InvalidPath,
+        });
+    }
+    let canonical =
+        std::fs::canonicalize(root).map_err(|error| StartTaskError::InvalidScanRoot {
+            reason: match error.kind() {
+                std::io::ErrorKind::NotFound => ScanRootErrorKind::Missing,
+                std::io::ErrorKind::PermissionDenied => ScanRootErrorKind::AccessDenied,
+                _ => ScanRootErrorKind::Unavailable,
+            },
+        })?;
+    let metadata =
+        std::fs::metadata(&canonical).map_err(|error| StartTaskError::InvalidScanRoot {
+            reason: match error.kind() {
+                std::io::ErrorKind::NotFound => ScanRootErrorKind::Missing,
+                std::io::ErrorKind::PermissionDenied => ScanRootErrorKind::AccessDenied,
+                _ => ScanRootErrorKind::Unavailable,
+            },
+        })?;
+    if !metadata.is_dir() {
+        return Err(StartTaskError::InvalidScanRoot {
+            reason: ScanRootErrorKind::NotDirectory,
+        });
+    }
+    HostValue::from_root(&canonical).map_err(|_| StartTaskError::InvalidScanRoot {
+        reason: ScanRootErrorKind::InvalidPath,
+    })?;
+    Ok(canonical)
+}
+
+fn generate_scan_id() -> Result<ScanId, TaskFailureKind> {
+    let mut random = [0_u8; 16];
+    getrandom::fill(&mut random).map_err(|_| TaskFailureKind::InternalFailure)?;
+    let mut value = String::with_capacity("scan:".len() + random.len() * 2);
+    value.push_str("scan:");
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for byte in random {
+        value.push(char::from(HEX[usize::from(byte >> 4)]));
+        value.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    ScanId::new(value).map_err(|_| TaskFailureKind::InternalFailure)
+}
+
+fn start_durable_scan(
+    store: &StoreCoordinator,
+    root: &Path,
+) -> Result<NewScanRecord, TaskFailureKind> {
+    const COLLISION_RETRIES: usize = 4;
+    for _ in 0..COLLISION_RETRIES {
+        let id = generate_scan_id()?;
+        let start = NewScanRecord::try_new(id, root.to_path_buf(), SystemTime::now())
+            .map_err(|_| TaskFailureKind::PersistenceUnavailable)?;
+        match store.record_scan_started_reconciled(&start) {
+            Ok(()) => return Ok(start),
+            Err(error) if error.kind == HistoryErrorKind::AlreadyExists => continue,
+            Err(error) if error.kind == HistoryErrorKind::OutcomeUnknown => {
+                return Err(TaskFailureKind::PersistenceOutcomeUnknown);
+            }
+            Err(_) => return Err(TaskFailureKind::PersistenceUnavailable),
+        }
+    }
+    Err(TaskFailureKind::PersistenceUnavailable)
+}
+
+fn completion_time(started_at: SystemTime) -> SystemTime {
+    let observed = SystemTime::now().max(started_at);
+    let Ok(duration) = observed.duration_since(UNIX_EPOCH) else {
+        return started_at;
+    };
+    let milliseconds = duration.as_millis();
+    let Ok(milliseconds) = u64::try_from(milliseconds) else {
+        return started_at;
+    };
+    if milliseconds > i64::MAX as u64 {
+        return started_at;
+    }
+    UNIX_EPOCH + Duration::from_millis(milliseconds)
+}
+
+fn public_counts(counts: ScanCounts) -> ScanTaskCounts {
+    ScanTaskCounts {
+        directory_count: counts.directory_count,
+        file_count: counts.file_count,
+        logical_bytes: counts.logical_bytes,
+        allocated_bytes: counts.allocated_bytes,
+    }
+}
+
+struct DurableScanGuard {
+    store: Arc<StoreCoordinator>,
+    id: ScanId,
+    started_at: SystemTime,
+    settled: bool,
+}
+
+impl DurableScanGuard {
+    fn new(store: Arc<StoreCoordinator>, start: &NewScanRecord) -> Self {
+        Self {
+            store,
+            id: start.id().clone(),
+            started_at: start.started_at(),
+            settled: false,
+        }
+    }
+
+    fn settle(
+        &mut self,
+        terminal_status: TerminalScanStatus,
+        result_status: ScanTaskStatus,
+        completed_at: SystemTime,
+        counts: ScanCounts,
+        coverage: ScanCoverage,
+    ) -> Result<Arc<ScanTaskResult>, TaskFailureKind> {
+        let completion = ScanCompletionRecord::try_new_with_coverage(
+            self.id.clone(),
+            completed_at,
+            terminal_status,
+            counts,
+            coverage.clone(),
+        )
+        .map_err(|_| TaskFailureKind::PersistenceUnavailable)?;
+        if let Err(error) = self.store.record_scan_finished_reconciled(&completion) {
+            return Err(self.map_settle_failure(error.kind));
+        }
+        self.settled = true;
+        Ok(Arc::new(ScanTaskResult::new(
+            self.id.clone(),
+            self.started_at,
+            completed_at,
+            result_status,
+            public_counts(counts),
+            coverage,
+            false,
+        )))
+    }
+
+    fn disarm(&mut self) {
+        self.settled = true;
+    }
+
+    fn map_settle_failure(&mut self, kind: HistoryErrorKind) -> TaskFailureKind {
+        if kind == HistoryErrorKind::OutcomeUnknown {
+            // The exact completion may already be durable. Never let Drop
+            // retry that ambiguity with different Interrupted facts.
+            self.settled = true;
+            TaskFailureKind::PersistenceOutcomeUnknown
+        } else {
+            TaskFailureKind::PersistenceUnavailable
+        }
+    }
+}
+
+impl Drop for DurableScanGuard {
+    fn drop(&mut self) {
+        if self.settled {
+            return;
+        }
+        let Ok(completion) = ScanCompletionRecord::try_new_with_coverage(
+            self.id.clone(),
+            completion_time(self.started_at),
+            TerminalScanStatus::Interrupted,
+            ScanCounts::default(),
+            ScanCoverage::unknown(),
+        ) else {
+            return;
+        };
+        let _ = self.store.record_scan_finished_reconciled(&completion);
+    }
+}
+
+fn failed_scan_outcome(
+    failure: TaskFailureKind,
+    result: Result<Arc<ScanTaskResult>, TaskFailureKind>,
+) -> WorkOutcome {
+    match result {
+        Ok(result) => WorkOutcome::Failed(failure, Some(TaskResult::Scan(result))),
+        Err(persistence_failure) => WorkOutcome::Failed(persistence_failure, None),
+    }
+}
+
+fn run_scan_task(
+    context: TaskContext,
+    admitted_root: PathBuf,
+    store: Arc<StoreCoordinator>,
+    snapshots: Arc<SnapshotRepository>,
+    before_traversal: impl FnOnce(&ScanId),
+) -> WorkOutcome {
+    if prepare_scan_root(&admitted_root).ok().as_deref() != Some(admitted_root.as_path()) {
+        return WorkOutcome::Failed(TaskFailureKind::ScanRootChanged, None);
+    }
+    let start = match start_durable_scan(&store, &admitted_root) {
+        Ok(start) => start,
+        Err(failure) => return WorkOutcome::Failed(failure, None),
+    };
+    let mut durable = DurableScanGuard::new(Arc::clone(&store), &start);
+    let cancellation = CancellationToken::new();
+    context.install_scan_cancellation(cancellation.clone());
+    before_traversal(start.id());
+
+    let scanner = Scanner::new(ScanConfig {
+        follow_symlinks: false,
+        max_depth: None,
+        same_filesystem: true,
+        num_threads: 0,
+    })
+    .with_cancellation(cancellation);
+    let (messages, scanner_handle) = scanner.scan(admitted_root);
+    for message in messages {
+        context.report_scan_message(message);
+    }
+    let outcome = match scanner_handle.join() {
+        Ok(outcome) => outcome,
+        Err(_) => {
+            let completed_at = completion_time(start.started_at());
+            let result = durable.settle(
+                TerminalScanStatus::Interrupted,
+                ScanTaskStatus::Interrupted,
+                completed_at,
+                ScanCounts::default(),
+                ScanCoverage::unknown(),
+            );
+            return failed_scan_outcome(TaskFailureKind::InternalFailure, result);
+        }
+    };
+    let completed_at = completion_time(start.started_at());
+    match outcome.termination() {
+        ScanTermination::Cancelled => {
+            let coverage = outcome.coverage().clone();
+            let result = durable.settle(
+                TerminalScanStatus::Cancelled,
+                ScanTaskStatus::Cancelled,
+                completed_at,
+                ScanCounts::default(),
+                coverage,
+            );
+            match result {
+                Ok(result) => WorkOutcome::Cancelled(Some(TaskResult::Scan(result))),
+                Err(failure) => WorkOutcome::Failed(failure, None),
+            }
+        }
+        ScanTermination::Failed => {
+            let coverage = outcome.coverage().clone();
+            let result = durable.settle(
+                TerminalScanStatus::Failed,
+                ScanTaskStatus::Failed,
+                completed_at,
+                ScanCounts::default(),
+                coverage,
+            );
+            failed_scan_outcome(TaskFailureKind::ScanFailed, result)
+        }
+        ScanTermination::Completed => {
+            let Some(artifact) = outcome.into_completed_artifact() else {
+                let result = durable.settle(
+                    TerminalScanStatus::Failed,
+                    ScanTaskStatus::Failed,
+                    completed_at,
+                    ScanCounts::default(),
+                    ScanCoverage::unknown(),
+                );
+                return failed_scan_outcome(TaskFailureKind::SnapshotRejected, result);
+            };
+            let prepared = match prepare_completed_scan(start.id().clone(), completed_at, &artifact)
+            {
+                Ok(prepared) => prepared,
+                Err(_) => {
+                    let result = durable.settle(
+                        TerminalScanStatus::Failed,
+                        ScanTaskStatus::Failed,
+                        completed_at,
+                        ScanCounts::default(),
+                        ScanCoverage::unknown(),
+                    );
+                    return failed_scan_outcome(TaskFailureKind::SnapshotRejected, result);
+                }
+            };
+            let (document, counts, coverage) = prepared.into_parts();
+            match snapshots.complete_scan(completed_at, counts, &coverage, &document) {
+                Ok(_) => {
+                    durable.disarm();
+                    WorkOutcome::Succeeded(TaskResult::Scan(Arc::new(ScanTaskResult::new(
+                        start.id().clone(),
+                        start.started_at(),
+                        completed_at,
+                        ScanTaskStatus::Succeeded,
+                        public_counts(counts),
+                        coverage,
+                        true,
+                    ))))
+                }
+                Err(error) => settle_after_snapshot_error(error.kind, &mut durable, completed_at),
+            }
+        }
+    }
+}
+
+fn settle_after_snapshot_error(
+    error: SnapshotRepositoryErrorKind,
+    durable: &mut DurableScanGuard,
+    completed_at: SystemTime,
+) -> WorkOutcome {
+    match durable.store.load_scan(&durable.id) {
+        Ok(Some(record)) if record.status() == ScanStatus::Running => {
+            let result = durable.settle(
+                TerminalScanStatus::Failed,
+                ScanTaskStatus::Failed,
+                completed_at,
+                ScanCounts::default(),
+                ScanCoverage::unknown(),
+            );
+            let failure = if matches!(
+                error,
+                SnapshotRepositoryErrorKind::Codec(_)
+                    | SnapshotRepositoryErrorKind::ReferenceMismatch
+            ) {
+                TaskFailureKind::SnapshotRejected
+            } else {
+                TaskFailureKind::PersistenceUnavailable
+            };
+            failed_scan_outcome(failure, result)
+        }
+        Ok(Some(_)) => {
+            durable.disarm();
+            WorkOutcome::Failed(TaskFailureKind::PersistenceOutcomeUnknown, None)
+        }
+        Ok(None) | Err(_) => {
+            durable.disarm();
+            WorkOutcome::Failed(TaskFailureKind::PersistenceOutcomeUnknown, None)
+        }
     }
 }
 
@@ -690,6 +1187,8 @@ fn finish_job(
         registry.running_tasks = registry.running_tasks.saturating_sub(1);
         return;
     };
+    let scan_scope = record.scan_scope.clone();
+    record.scan_cancellation = None;
     record.result = None;
     record.failure = None;
     // Cancellation is intent, not evidence that completed work was rolled back.
@@ -699,8 +1198,14 @@ fn finish_job(
             record.phase = TaskPhase::Succeeded;
             record.result = Some(result);
         }
-        Some(Ok(WorkOutcome::Cancelled)) => {
+        Some(Ok(WorkOutcome::Cancelled(result))) => {
             record.phase = TaskPhase::Cancelled;
+            record.result = result;
+        }
+        Some(Ok(WorkOutcome::Failed(failure, result))) => {
+            record.phase = TaskPhase::Failed;
+            record.failure = Some(failure);
+            record.result = result;
         }
         Some(Err(_)) | None => {
             record.phase = TaskPhase::Failed;
@@ -709,6 +1214,11 @@ fn finish_job(
     }
     let phase = record.phase;
     record.push_event(TaskEventKind::Terminal { phase }, event_limit);
+    if let Some(scope) = scan_scope
+        && registry.active_scan_roots.get(&scope) == Some(&id)
+    {
+        registry.active_scan_roots.remove(&scope);
+    }
     registry.running_tasks = registry.running_tasks.saturating_sub(1);
     registry.retain_terminal(id, shared.limits.retained_terminal_tasks);
     shared.lifecycle_changed.notify_all();

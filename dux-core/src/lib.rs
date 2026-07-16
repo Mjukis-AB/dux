@@ -38,8 +38,9 @@ pub use domain::{
 pub use engine::{
     CancelOutcome, CloseOutcome, EngineConfig, EngineConfigError, EngineConfigField,
     EngineConfigReason, EngineHandle, EngineLifecycle, EngineOpenError, FormatSizeBatchResult,
-    FormattedSizeEntry, StartTaskError, TaskAccessError, TaskEvent, TaskEventBatch, TaskEventKind,
-    TaskFailureKind, TaskId, TaskKind, TaskPhase, TaskSnapshot,
+    FormattedSizeEntry, ScanRootErrorKind, ScanTaskCounts, ScanTaskResult, ScanTaskStatus,
+    StartTaskError, TaskAccessError, TaskEvent, TaskEventBatch, TaskEventKind, TaskFailureKind,
+    TaskId, TaskKind, TaskPhase, TaskSnapshot,
 };
 pub use error::{DuxError, Result};
 pub use persistence::{

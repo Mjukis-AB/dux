@@ -4,8 +4,9 @@ Status: implemented format version 1, internal and crate-private.
 
 This document freezes the durable full-tree snapshot contract implemented by
 `dux-core::persistence::snapshot`. It is an implementation reference for the
-completed-only fresh-scan converter and future engine publication, Explorer,
-migration, and retention work. It does not describe the legacy CLI cache format.
+completed-only fresh-scan converter and engine publication plus future
+Explorer, migration, and retention work. It does not describe the legacy CLI
+cache format.
 
 ## 1. Authority and trust boundary
 
@@ -314,6 +315,12 @@ are deliberately not recursively scavenged in this checkpoint.
   and the fully decoded referenced document match exactly.
 - Missing or corrupt referenced files fail closed; history remains an
   observation and is not silently rewritten.
+- Engine scan admission refreshes current-schema write authority and excludes
+  overlapping canonical roots within one engine session. It creates the random
+  durable scan ID only after dequeue, exact-reconciles the start, and publishes
+  through this repository only after the scanner's completed terminal claim.
+  Queued cancellation has no durable row; cancelled, failed, and interrupted
+  work has no snapshot reference. This is not a cross-process scan lease.
 
 Future formats must retain read compatibility or explicitly invalidate old
 files. An older writer must never occupy a deterministic final name after a
@@ -323,8 +330,10 @@ newer database schema has won.
 
 This checkpoint does not implement:
 
-- wiring a real scanner task to create the durable summary and snapshot;
 - last-complete-snapshot selection per root;
+- cross-process overlapping-root scan leases or hard-process-death recovery of
+  an engine scan left `running`;
+- FFI, Swift, or CLI scan/history transport;
 - latest-two-per-root retention or active-review pins;
 - the configurable 2 GiB total-store retention policy;
 - bounded identity-safe scavenging for abandoned temps or provisioning stages;

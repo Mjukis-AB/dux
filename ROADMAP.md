@@ -1844,16 +1844,16 @@ Tasks:
   terminal outcome; event cursors and page sizes fail closed; worker panics
   become stable internal failures; and explicit nonblocking close cancels and
   removes queued work, requests running cancellation, rejects use after close,
-  and supports a bounded quiescence wait. A real, immutable, read-only formatting batch with a
-  256-item input cap exercises production submission, progress, cancellation,
-  result publication, and retention. Tests cover worker/queue bounds, FIFO,
+  and supports a bounded quiescence wait. Immutable read-only formatting and
+  durable full-scan tasks exercise production submission, typed progress,
+  cancellation, result publication, and retention. Tests cover worker/queue bounds, FIFO,
   cancellation races, close/drop/clone lifecycle, panic containment and safe
   shutdown after mutex poisoning, cursor continuity, storage-role overlap,
   non-wrapping ID exhaustion, and
-  cross-platform path construction. The registry operation is deliberately not
-  scan, domain-persistence, priority, callback, cleanup, CLI, or FFI task
-  integration; the Phase 0 UniFFI `DuxEngine` remains a smoke-only transport
-  handle until a later coarse task DTO/event slice.
+  cross-platform path construction. Scan lifecycle/persistence is now attached
+  by the sub-checkpoint below. Priority, callback, cleanup, CLI, and FFI task
+  integration remain separate; the Phase 0 UniFFI `DuxEngine` is still a
+  smoke-only transport handle until a later coarse task DTO/event slice.
 - [x] Add versioned SQLite migrations. Completed 2026-07-16: engine startup now
   provisions and opens a private SQLite store before publishing any worker,
   with one reusable coordinator per retained physical database identity and
@@ -1934,8 +1934,9 @@ Tasks:
     scans, invalid time order, and terminal rewrites. Exact-ID reads have fixed
     SQLite VM/deadline limits, decode every field into typed values, treat
     malformed lifecycle rows as corrupt observations, and survive coordinator
-    teardown/reopen. No scan task calls this layer yet, and the broad item stays
-    open: v1 candidate rows cannot preserve paths/evidence/blockers/action, and
+    teardown/reopen. The durable engine checkpoint below now calls this layer;
+    the broad item stays open because v1 candidate rows cannot preserve
+    paths/evidence/blockers/action, and
     v1 cleanup rows cannot preserve multi-path plan items or a dry-run's
     proposed Trash/permanent/eviction effect. Those facts require a subsequent
     schema migration before candidate or cleanup history can round-trip safely.
@@ -2120,9 +2121,46 @@ Tasks:
     allocation, empty trees, lossless non-UTF-8 names on non-macOS Unix,
     encode/decode, invalid capture time, followed symlinks, and non-completed
     type state.
-    Cache v7 invalidates older per-path hard-link totals. The converter is not
-    yet called by the engine, so the broad persistence checkbox and durable-scan
-    exit criterion remain open.
+    Cache v7 invalidates older per-path hard-link totals. The durable engine
+    checkpoint below now consumes this converter.
+  - Durable engine scan-task sub-checkpoint completed 2026-07-16: public
+    `start_scan` admission canonicalizes and snapshot-bounds the requested root,
+    refreshes current-schema write authority, and reserves one session-local
+    overlapping root scope under the registry mutex before enqueueing. Queued
+    cancellation releases that scope and creates no scan ID or history row.
+    Workers generate a cryptographically random scan ID only after dequeue,
+    exact-reconcile the canonical millisecond start record, install a race-safe
+    scanner cancellation token, and run an explicit no-follow, full-depth,
+    same-filesystem scan while publishing bounded typed progress/finalization
+    events. The scanner's terminal claim, not a later generic cancellation
+    check, decides success versus cancellation.
+
+    Completed traversal artifacts pass through the completed-only converter and
+    atomic snapshot repository, producing one immutable checksummed file plus an
+    exact durable succeeded summary. Cancelled and failed traversals publish no
+    snapshot and conservatively store default counts with their measured
+    coverage instead of presenting an unfinalized partial tree as exact.
+    A completed traversal can leave an unreferenced immutable orphan when file
+    publication wins but SQLite completion cannot be reconciled; it is never
+    exposed as the failed task's snapshot, and later bounded maintenance owns
+    that case.
+    Cancelled/failed tasks retain a typed scan result and stable scan ID when
+    terminal persistence succeeds. An unwind after durable start is best-effort
+    CASed to Interrupted; persistence ambiguity is surfaced distinctly and can
+    never rewrite a succeeded row. Engine close requests real scanner
+    cancellation; workers do not exit until the bounded terminal persistence
+    attempt has finished.
+
+    Integration tests cover successful publication and process-style reopen,
+    snapshot decode, running and queued cancellation, close-time cancellation,
+    real scanner failure, panic interruption and worker recovery, exact
+    post-commit start reconciliation, current-to-newer schema fencing,
+    overlapping ancestor/descendant scopes, canonical symlink aliases, result
+    kind checks, and scope release. Scope exclusion is intentionally
+    engine-session-local; cross-process scan leases, last-complete/history query
+    APIs, FFI/Swift/CLI transport, hard-process-death recovery of a running row,
+    and retention remain later work. The broad persistence checkbox stays open
+    for candidate status plus evaluator/planner lifecycle integration.
 - [x] Keep binary snapshots atomic and checksummed. Completed 2026-07-16:
   `dux-core::persistence::snapshot` now owns an independent crate-private v1
   full-tree wire rather than extending the legacy CLI cache. Its frozen
@@ -2165,7 +2203,8 @@ Tasks:
   restrictive umask, macOS ACLs, version-skew races, and Windows storage
   compilation/regressions. The normative implementation reference is
   [`docs/SNAPSHOT_FORMAT.md`](docs/SNAPSHOT_FORMAT.md). Durable engine scan-task
-  publication, last-complete selection, latest-two/2 GiB retention,
+  publication is now attached by the following checkpoint. Last-complete
+  selection, latest-two/2 GiB retention,
   active-review pins, and abandoned-stage/temp scavenging remain later tasks
   and are not claimed by this checkpoint. Typed coverage/issues and the
   completed-only fresh-scan converter were attached by following checkpoints
@@ -2241,10 +2280,11 @@ Tasks:
   Fresh CLI results retain and render the coverage qualifier; legacy cache
   trees, including cache v7 after the hard-link accounting change, deliberately
   reload as `coverage unknown` instead of being mislabeled Complete.
-  Scanner-to-engine/Swift/FFI task wiring, paged Explorer issue details,
-  permission onboarding, and legacy-cache migration remain in their later
-  roadmap items. Full logical/allocated/hard-link accounting is now attached to
-  the completed-only fresh-scan snapshot converter described above.
+  Scanner-to-engine task wiring is now complete. Swift/FFI transport, paged
+  Explorer issue details, permission onboarding, and legacy-cache migration
+  remain in their later roadmap items. Full logical/allocated/hard-link
+  accounting is attached to the completed-only fresh-scan snapshot converter
+  described above.
 - [ ] Add JSON CLI status/history scaffolding.
 - [ ] Add history retention maintenance.
 - [ ] Add engine integration tests with temporary HOME and database.

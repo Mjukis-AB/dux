@@ -5,6 +5,24 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Added durable full scans to the shared engine. Scan admission canonicalizes
+  and snapshot-bounds roots, fences newer read-only schemas, excludes
+  overlapping root scopes within one engine session, and creates no durable ID
+  for queued cancellations. Workers exact-reconcile random scan starts, bridge
+  engine cancellation directly into the scanner, emit typed bounded progress,
+  and publish completed-only immutable snapshots plus SQLite summaries.
+  Cancelled/failed traversals receive no snapshot reference and retain
+  conservative terminal summaries; a file published before an ambiguous
+  database completion may remain as an unreferenced orphan. Panics best-effort
+  settle Interrupted, close drives scanner cancellation before worker
+  quiescence, and persistence ambiguity never rewrites success. Integration
+  tests cover success/reopen, cancellation at queue/run/close, real scan
+  failure, panic recovery, schema skew, canonical aliases, overlapping scopes,
+  and ambiguous-start reconciliation. CLI/FFI/Swift transport, cross-process
+  root leases, last-complete selection, crash recovery, and retention remain.
+  The typed scan APIs are available through both `dux_core::engine` and the
+  crate root; evolving task/error/result enums are explicitly non-exhaustive
+  before the app boundary adopts them.
 - Added completed-only, snapshot-ready scan accounting. A private provenance
   witness aligned to fresh arena node IDs carries logical bytes, optional
   physical allocation, times, object identity, link count, and flags without
@@ -19,8 +37,8 @@ All notable changes to DUX will be documented in this file.
   Cache v7 invalidates earlier per-path hard-link totals. Focused tests cover
   sparse files, empty directories, hard links across walker thread counts,
   identity races, non-UTF-8 names on non-macOS Unix, exact codec round trips,
-  invalid times, and followed-link refusal. Durable engine publication remains
-  the next M2 slice.
+  invalid times, and followed-link refusal. The shared engine now consumes this
+  artifact for durable publication.
 - Added typed, non-authoritative scan coverage and issue reporting. Scanner
   workers now return the tree together with an authoritative terminal state and
   bounded canonical coverage facts; component policy exclusions, depth
@@ -37,8 +55,8 @@ All notable changes to DUX will be documented in this file.
   revalidate retained storage and schema compatibility. Fresh CLI scans retain
   and display Complete, Limited access, or Partial coverage; legacy cache trees
   are explicitly shown as coverage unknown. No cleanup authority is derived
-  from these observations, and real engine/Swift/FFI scan-task wiring remains a
-  later milestone.
+  from these observations. Engine scan tasks now persist them; Swift/FFI wiring
+  remains a later milestone.
 - Added typed raw capacity history on the existing SQLite v2 schema. Public
   opaque volume IDs and pressure labels feed a crate-private persistence layer
   that keeps required ordinary availability separate from optional
@@ -68,9 +86,9 @@ All notable changes to DUX will be documented in this file.
   database reference first. New tests cover version-skew races, collisions,
   missing/corrupt references, restrictive umasks, macOS ACLs, and Windows
   DACL/reparse/link/publication behavior. The format remains non-authoritative;
-  durable engine publication, retention, and abandoned-temp maintenance remain
-  separate roadmap work. Typed coverage and the completed-only fresh-scan
-  converter attach without changing the v1 snapshot wire.
+  retention and abandoned-temp maintenance remain separate roadmap work. Typed
+  coverage, the completed-only fresh-scan converter, and durable engine
+  publication attach without changing the v1 snapshot wire.
 - Added a crate-private cleanup-lock-coupled operation-journal state machine.
   A non-cloneable, non-shareable lease generates and owns the process identity,
   claims pristine plans as generation one, and fences every heartbeat,

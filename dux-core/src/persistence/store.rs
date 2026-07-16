@@ -48,13 +48,6 @@ pub(crate) struct StoreCoordinator {
     connection: Mutex<Connection>,
 }
 
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "typed scan persistence is integrated by the later scan task slice"
-    )
-)]
 pub(super) struct HistoryConnectionGuard<'a> {
     // Struct fields drop in declaration order: release the cross-process lease
     // before another in-process caller can acquire the connection mutex.
@@ -389,17 +382,17 @@ impl StoreCoordinator {
         Ok(page)
     }
 
-    /// Start one durable scan record. Stored paths are observations only.
-    /// A database/storage error after commit can have an ambiguous outcome;
-    /// callers reconcile by loading this exact scan ID before retrying.
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "typed scan persistence is integrated by the later scan task slice"
-        )
-    )]
+    /// Test primitive for exercising non-reconciled scan-start behavior.
+    #[cfg(test)]
     pub(crate) fn record_scan_started(&self, scan: &NewScanRecord) -> Result<(), HistoryError> {
+        self.record_scan_started_with_hook(scan, || Ok(()))
+    }
+
+    fn record_scan_started_with_hook(
+        &self,
+        scan: &NewScanRecord,
+        after_commit: impl FnOnce() -> Result<(), HistoryError>,
+    ) -> Result<(), HistoryError> {
         let prepared = PreparedNewScan::prepare(scan)?;
         let mut guard = self.lock_current_history_connection()?;
         let transaction = guard
@@ -408,10 +401,48 @@ impl StoreCoordinator {
             .map_err(map_write_sql_error)?;
         insert_scan_started(&transaction, &prepared)?;
         transaction.commit().map_err(map_write_sql_error)?;
+        after_commit()?;
         self.paths
             .repair_sqlite_sidecars()
             .and_then(|()| self.paths.validate_all_existing())
             .map_err(map_history_database_error)
+    }
+
+    /// Insert one frozen scan start and reconcile a possible post-commit
+    /// failure against that exact ID/root/time tuple. A collision with any
+    /// different row is never adopted.
+    pub(crate) fn record_scan_started_reconciled(
+        &self,
+        scan: &NewScanRecord,
+    ) -> Result<(), HistoryError> {
+        self.record_scan_started_reconciled_with_hook(scan, || Ok(()))
+    }
+
+    fn record_scan_started_reconciled_with_hook(
+        &self,
+        scan: &NewScanRecord,
+        after_commit: impl FnOnce() -> Result<(), HistoryError>,
+    ) -> Result<(), HistoryError> {
+        let failure = match self.record_scan_started_with_hook(scan, after_commit) {
+            Ok(()) => return Ok(()),
+            Err(failure) => failure,
+        };
+        match self.load_scan(scan.id()) {
+            Ok(Some(record)) if record.exactly_matches_start(scan) => Ok(()),
+            Ok(Some(_)) => Err(HistoryError::new(HistoryErrorKind::AlreadyExists)),
+            Ok(None) => Err(failure),
+            Err(_) => Err(HistoryError::new(HistoryErrorKind::OutcomeUnknown)),
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn record_scan_started_reconciled_after_commit_failure_for_test(
+        &self,
+        scan: &NewScanRecord,
+    ) -> Result<(), HistoryError> {
+        self.record_scan_started_reconciled_with_hook(scan, || {
+            Err(HistoryError::new(HistoryErrorKind::DatabaseUnavailable))
+        })
     }
 
     /// Compare-and-set one running scan to a terminal durable summary.
@@ -421,7 +452,7 @@ impl StoreCoordinator {
         not(test),
         allow(
             dead_code,
-            reason = "typed scan persistence is integrated by the later scan task slice"
+            reason = "the engine uses reconciled completion; this primitive remains for focused persistence tests"
         )
     )]
     pub(crate) fn record_scan_finished(
@@ -461,13 +492,6 @@ impl StoreCoordinator {
     /// Complete one frozen scan operation and reconcile every potentially
     /// ambiguous failure against that exact operation. Only an exact durable
     /// match is idempotent success; a different terminal row is never adopted.
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "scan tasks use the guarded completion path in a later integration slice"
-        )
-    )]
     pub(crate) fn record_scan_finished_reconciled(
         &self,
         completion: &ScanCompletionRecord,
@@ -536,13 +560,6 @@ impl StoreCoordinator {
     }
 
     /// Load at most one typed scan observation by its stable ID.
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "typed scan persistence is integrated by the later scan task slice"
-        )
-    )]
     pub(crate) fn load_scan(
         &self,
         id: &crate::domain::ScanId,
@@ -697,13 +714,6 @@ impl StoreCoordinator {
         }
     }
 
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "typed scan persistence is integrated by the later scan task slice"
-        )
-    )]
     pub(super) fn lock_current_history_connection(
         &self,
     ) -> Result<HistoryConnectionGuard<'_>, HistoryError> {
@@ -779,13 +789,6 @@ impl StoreCoordinator {
     }
 }
 
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "typed scan persistence is integrated by the later scan task slice"
-    )
-)]
 pub(super) fn map_history_database_error(error: DatabaseOpenError) -> HistoryError {
     let kind = match error.kind {
         DatabaseOpenErrorKind::Busy => HistoryErrorKind::Busy,
