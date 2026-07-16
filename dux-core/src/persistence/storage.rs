@@ -10,6 +10,8 @@ use fs4::{FileExt, TryLockError};
 use super::status::{DatabaseOpenError, DatabaseOpenErrorKind};
 
 const WRITER_LOCK_SUFFIX: &str = ".writer.lock";
+const CLEANUP_LOCK_SUFFIX: &str = ".cleanup.lock";
+const CLEANUP_LOCK_READY_SUFFIX: &str = ".cleanup.lock.ready";
 const INITIALIZATION_SENTINEL_SUFFIX: &str = ".initialized";
 const SIDECAR_SUFFIXES: [&str; 3] = ["-wal", "-shm", "-journal"];
 // These are separate, code-owned stores in the normative Application Support
@@ -18,11 +20,15 @@ const SIDECAR_SUFFIXES: [&str; 3] = ["-wal", "-shm", "-journal"];
 // make the database itself unreadable.
 const RESERVED_APP_SUPPORT_ENTRIES: [&str; 3] = ["snapshots", "ai", "logs"];
 const LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(5);
+const CONTROL_OBJECT_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 
 const SQLITE_HEADER_LENGTH: usize = 100;
 const SQLITE_MAGIC: &[u8; 16] = b"SQLite format 3\0";
 const SQLITE_APPLICATION_ID_OFFSET: usize = 68;
 const DUX_ROOT_MARKER: &[u8; 16] = b"DUXWRITERLOCK1\0\0";
+const DUX_ROOT_MARKER_LAYOUT_V2: &[u8; 16] = b"DUXSTORELAYOUT2\0";
+const DUX_CLEANUP_LOCK_MARKER: &[u8; 16] = b"DUXCLEANUPLOCK1\0";
+const DUX_CLEANUP_LOCK_READY_MARKER: &[u8; 16] = b"DUXCLEANREADY1\0\0";
 const DUX_INITIALIZATION_SENTINEL: &[u8; 16] = b"DUXINITDONE1\0\0\0\0";
 
 struct PreparedRoot {
@@ -65,6 +71,8 @@ pub(crate) struct StoreProbe {
     root_path: PathBuf,
     database_path: PathBuf,
     lock_path: PathBuf,
+    cleanup_lock_path: PathBuf,
+    cleanup_lock_ready_path: PathBuf,
     root_directory: File,
     database_file: File,
     root_identity: PlatformIdentity,
@@ -83,6 +91,12 @@ enum RootMarkerState {
     Missing,
     Valid,
     Invalid,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RootLayoutVersion {
+    LegacyV1,
+    CleanupLockV2,
 }
 
 impl StoreProbe {
@@ -287,10 +301,14 @@ impl StoreProbe {
 
         let database_path = root_path.join(&database_name);
         let lock_path = root_path.join(lock_name(&database_name));
+        let cleanup_lock_path = root_path.join(cleanup_lock_name(&database_name));
+        let cleanup_lock_ready_path = root_path.join(cleanup_lock_ready_name(&database_name));
         let probe = Self {
             root_path: root_path.to_path_buf(),
             database_path,
             lock_path,
+            cleanup_lock_path,
+            cleanup_lock_ready_path,
             root_directory,
             database_file,
             root_identity,
@@ -302,6 +320,13 @@ impl StoreProbe {
     }
 
     pub(crate) fn secure(self) -> Result<SecureStorePaths, DatabaseOpenError> {
+        self.secure_with_control_lock_timeout(CONTROL_OBJECT_LOCK_TIMEOUT)
+    }
+
+    fn secure_with_control_lock_timeout(
+        self,
+        control_lock_timeout: Duration,
+    ) -> Result<SecureStorePaths, DatabaseOpenError> {
         self.validate_probe_identity()?;
         if self.provenance == StoreProvenance::ExistingDuxDatabase {
             prove_dux_header(&self.database_file)?;
@@ -326,7 +351,7 @@ impl StoreProbe {
             .file_name()
             .ok_or_else(|| object_error(DatabaseOpenErrorKind::UnsafeStorageObject))?;
         let lock_name = suffixed_name(database_name, WRITER_LOCK_SUFFIX);
-        let Some((lock_file, lock_identity)) = platform::open_existing_file(
+        let Some((lock_file, lock_identity)) = platform::open_existing_writer_file(
             &self.root_directory,
             &self.root_path,
             &lock_name,
@@ -345,6 +370,26 @@ impl StoreProbe {
             lock_identity,
             PermissionPolicy::RequirePrivate,
         )?;
+        let provisioning_lock = acquire_advisory_lock(&lock_file, control_lock_timeout)?;
+        let root_layout = inspect_root_layout(&lock_file)?
+            .ok_or_else(|| object_error(DatabaseOpenErrorKind::UnsafeStorageObject))?;
+        platform::validate_path_identity(
+            &self.lock_path,
+            ObjectKind::RegularFile,
+            lock_identity,
+            PermissionPolicy::RequirePrivate,
+        )?;
+        let cleanup_lock = open_or_create_cleanup_lock(
+            &self.root_directory,
+            &self.root_path,
+            database_name,
+            &self.cleanup_lock_path,
+            &self.cleanup_lock_ready_path,
+            &lock_file,
+            root_layout,
+        )?;
+        FileExt::unlock(&provisioning_lock)
+            .map_err(|_| object_error(DatabaseOpenErrorKind::DatabaseUnavailable))?;
         let initialization_sentinel = open_initialization_sentinel(
             &self.root_directory,
             &self.root_path,
@@ -362,17 +407,24 @@ impl StoreProbe {
             root_path: self.root_path,
             database_path: self.database_path,
             lock_path: self.lock_path,
+            cleanup_lock_path: self.cleanup_lock_path,
+            cleanup_lock_ready_path: self.cleanup_lock_ready_path,
             root_directory: self.root_directory,
             #[cfg(windows)]
             root_rename_guard,
             database_file: self.database_file,
             lock_file,
+            cleanup_lock_file: cleanup_lock.file,
+            cleanup_lock_ready_file: cleanup_lock.ready_file,
             initialization_sentinel: Mutex::new(initialization_sentinel),
             root_identity: self.root_identity,
             database_identity: self.database_identity,
             lock_identity,
+            cleanup_lock_identity: cleanup_lock.identity,
+            cleanup_lock_ready_identity: cleanup_lock.ready_identity,
             requires_initialization: self.provenance == StoreProvenance::FreshPrivateStore,
             writer_lock_in_use: Arc::new(AtomicBool::new(false)),
+            cleanup_lock_in_use: Arc::new(AtomicBool::new(false)),
         };
         storage.validate_for_database_open()?;
         Ok(storage)
@@ -410,22 +462,36 @@ pub(crate) struct SecureStorePaths {
     root_path: PathBuf,
     database_path: PathBuf,
     lock_path: PathBuf,
+    cleanup_lock_path: PathBuf,
+    cleanup_lock_ready_path: PathBuf,
     root_directory: File,
     #[cfg(windows)]
     root_rename_guard: File,
     database_file: File,
     lock_file: File,
+    cleanup_lock_file: File,
+    cleanup_lock_ready_file: File,
     initialization_sentinel: Mutex<Option<RetainedInitializationSentinel>>,
     root_identity: PlatformIdentity,
     database_identity: PlatformIdentity,
     lock_identity: PlatformIdentity,
+    cleanup_lock_identity: PlatformIdentity,
+    cleanup_lock_ready_identity: PlatformIdentity,
     requires_initialization: bool,
     writer_lock_in_use: Arc<AtomicBool>,
+    cleanup_lock_in_use: Arc<AtomicBool>,
 }
 
 struct RetainedInitializationSentinel {
     file: File,
     identity: PlatformIdentity,
+}
+
+struct RetainedCleanupLock {
+    file: File,
+    identity: PlatformIdentity,
+    ready_file: File,
+    ready_identity: PlatformIdentity,
 }
 
 impl SecureStorePaths {
@@ -479,7 +545,7 @@ impl SecureStorePaths {
     /// and every control object still prove this is the same DUX-owned store.
     pub(crate) fn repair_sqlite_sidecars(&self) -> Result<(), DatabaseOpenError> {
         self.validate_control_objects()?;
-        prove_root_marker(&self.lock_file)?;
+        prove_current_root_marker(&self.lock_file)?;
         let database_name = self
             .database_path
             .file_name()
@@ -503,7 +569,7 @@ impl SecureStorePaths {
     /// sidecars before this check.
     pub(crate) fn recovery_artifact_exists(&self) -> Result<bool, DatabaseOpenError> {
         self.validate_control_objects()?;
-        prove_root_marker(&self.lock_file)?;
+        prove_current_root_marker(&self.lock_file)?;
         let database_name = self
             .database_path
             .file_name()
@@ -580,6 +646,10 @@ impl SecureStorePaths {
     }
 
     fn validate_control_objects(&self) -> Result<(), DatabaseOpenError> {
+        let database_name = self
+            .database_path
+            .file_name()
+            .ok_or_else(|| object_error(DatabaseOpenErrorKind::UnsafeStorageObject))?;
         #[cfg(windows)]
         platform::validate_retained_file(
             &self.root_rename_guard,
@@ -605,6 +675,7 @@ impl SecureStorePaths {
             self.database_identity,
             PermissionPolicy::RequirePrivate,
         )?;
+        prove_current_root_marker(&self.lock_file)?;
         platform::validate_retained_file(
             &self.lock_file,
             ObjectKind::RegularFile,
@@ -617,16 +688,38 @@ impl SecureStorePaths {
             self.lock_identity,
             PermissionPolicy::RequirePrivate,
         )?;
+        prove_cleanup_lock_marker(&self.cleanup_lock_file)?;
+        platform::validate_retained_file(
+            &self.cleanup_lock_file,
+            ObjectKind::RegularFile,
+            self.cleanup_lock_identity,
+            PermissionPolicy::RequirePrivate,
+        )?;
+        platform::validate_path_identity(
+            &self.cleanup_lock_path,
+            ObjectKind::RegularFile,
+            self.cleanup_lock_identity,
+            PermissionPolicy::RequirePrivate,
+        )?;
+        prove_cleanup_lock_ready_marker(&self.cleanup_lock_ready_file)?;
+        platform::validate_retained_file(
+            &self.cleanup_lock_ready_file,
+            ObjectKind::RegularFile,
+            self.cleanup_lock_ready_identity,
+            PermissionPolicy::RequirePrivate,
+        )?;
+        platform::validate_path_identity(
+            &self.cleanup_lock_ready_path,
+            ObjectKind::RegularFile,
+            self.cleanup_lock_ready_identity,
+            PermissionPolicy::RequirePrivate,
+        )?;
         if let Some(sentinel) = self
             .initialization_sentinel
             .lock()
             .map_err(|_| DatabaseOpenError::new(DatabaseOpenErrorKind::InternalState))?
             .as_ref()
         {
-            let database_name = self
-                .database_path
-                .file_name()
-                .ok_or_else(|| object_error(DatabaseOpenErrorKind::UnsafeStorageObject))?;
             prove_initialization_sentinel(&sentinel.file)?;
             platform::validate_retained_file(
                 &sentinel.file,
@@ -641,7 +734,7 @@ impl SecureStorePaths {
                 PermissionPolicy::RequirePrivate,
             )?;
         }
-        Ok(())
+        validate_store_inventory(&self.root_directory, &self.root_path, database_name)
     }
 
     pub(crate) fn validate_all_existing(&self) -> Result<(), DatabaseOpenError> {
@@ -661,51 +754,91 @@ impl SecureStorePaths {
             return Err(DatabaseOpenError::new(DatabaseOpenErrorKind::Busy));
         }
 
-        let result = self.try_acquire_writer_lock(timeout);
+        let result = acquire_advisory_lock(&self.lock_file, timeout).map(|file| WriterLockGuard {
+            file,
+            in_use: Arc::clone(&self.writer_lock_in_use),
+        });
         if result.is_err() {
             self.writer_lock_in_use.store(false, Ordering::Release);
         }
         result
     }
 
-    fn try_acquire_writer_lock(
+    /// Acquire store-wide cross-process exclusion for cleanup effects.
+    ///
+    /// This permanent OS lock has no expiry and cannot be stolen. The guard is
+    /// deliberately only an exclusion primitive: it carries no plan, journal
+    /// owner, recovery generation, target identity, or effect authority.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "cleanup execution integrates this storage-only lock in a later slice"
+        )
+    )]
+    pub(crate) fn acquire_cleanup_lock(
         &self,
         timeout: Duration,
-    ) -> Result<WriterLockGuard, DatabaseOpenError> {
-        let lock_file = self
-            .lock_file
-            .try_clone()
-            .map_err(|_| DatabaseOpenError::new(DatabaseOpenErrorKind::DatabaseUnavailable))?;
-        let deadline = Instant::now()
-            .checked_add(timeout)
-            .ok_or_else(|| DatabaseOpenError::new(DatabaseOpenErrorKind::InternalState))?;
-        loop {
-            match FileExt::try_lock(&lock_file) {
-                Ok(()) => {
-                    return Ok(WriterLockGuard {
-                        file: lock_file,
-                        in_use: Arc::clone(&self.writer_lock_in_use),
-                    });
-                }
-                Err(TryLockError::WouldBlock) => {
-                    let now = Instant::now();
-                    if now >= deadline {
-                        return Err(DatabaseOpenError::new(DatabaseOpenErrorKind::Busy));
-                    }
-                    std::thread::sleep(LOCK_RETRY_INTERVAL.min(deadline.duration_since(now)));
-                }
-                Err(TryLockError::Error(_)) => {
-                    return Err(DatabaseOpenError::new(
-                        DatabaseOpenErrorKind::DatabaseUnavailable,
-                    ));
-                }
-            }
+    ) -> Result<CleanupLockGuard, DatabaseOpenError> {
+        self.validate_control_objects()?;
+        if self
+            .cleanup_lock_in_use
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(DatabaseOpenError::new(DatabaseOpenErrorKind::Busy));
         }
+
+        let result =
+            acquire_advisory_lock(&self.cleanup_lock_file, timeout).map(|file| CleanupLockGuard {
+                file,
+                in_use: Arc::clone(&self.cleanup_lock_in_use),
+            });
+        if result.is_err() {
+            self.cleanup_lock_in_use.store(false, Ordering::Release);
+        }
+        let guard = result?;
+        if let Err(error) = self.validate_cleanup_lock_guard(&guard) {
+            drop(guard);
+            return Err(error);
+        }
+        Ok(guard)
+    }
+
+    /// Revalidate that this guard still refers to the retained cleanup lock.
+    /// Future executors must call this immediately before every OS effect;
+    /// success proves exclusion only and never target or cleanup authority.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "cleanup execution integrates held-lock revalidation in a later slice"
+        )
+    )]
+    pub(crate) fn validate_cleanup_lock_guard(
+        &self,
+        guard: &CleanupLockGuard,
+    ) -> Result<(), DatabaseOpenError> {
+        if !Arc::ptr_eq(&self.cleanup_lock_in_use, &guard.in_use) {
+            return Err(DatabaseOpenError::new(DatabaseOpenErrorKind::InternalState));
+        }
+        platform::validate_retained_file(
+            &guard.file,
+            ObjectKind::RegularFile,
+            self.cleanup_lock_identity,
+            PermissionPolicy::RequirePrivate,
+        )?;
+        self.validate_control_objects()
     }
 
     #[cfg(test)]
     fn lock_path(&self) -> &Path {
         &self.lock_path
+    }
+
+    #[cfg(test)]
+    fn cleanup_lock_path(&self) -> &Path {
+        &self.cleanup_lock_path
     }
 }
 
@@ -724,6 +857,226 @@ impl Drop for WriterLockGuard {
             self.in_use.store(false, Ordering::Release);
         }
     }
+}
+
+/// RAII guard for the permanent store-wide cleanup-effect lock.
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "cleanup execution integrates this storage-only guard in a later slice"
+    )
+)]
+pub(crate) struct CleanupLockGuard {
+    file: File,
+    in_use: Arc<AtomicBool>,
+}
+
+impl Drop for CleanupLockGuard {
+    fn drop(&mut self) {
+        // Never advertise same-process availability after an uncertain unlock.
+        // Closing the descriptor remains the final non-stealable release path.
+        if FileExt::unlock(&self.file).is_ok() {
+            self.in_use.store(false, Ordering::Release);
+        }
+    }
+}
+
+fn acquire_advisory_lock(file: &File, timeout: Duration) -> Result<File, DatabaseOpenError> {
+    let lock_file = file
+        .try_clone()
+        .map_err(|_| DatabaseOpenError::new(DatabaseOpenErrorKind::DatabaseUnavailable))?;
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .ok_or_else(|| DatabaseOpenError::new(DatabaseOpenErrorKind::InternalState))?;
+    loop {
+        match FileExt::try_lock(&lock_file) {
+            Ok(()) => return Ok(lock_file),
+            Err(TryLockError::WouldBlock) => {
+                let now = Instant::now();
+                if now >= deadline {
+                    return Err(DatabaseOpenError::new(DatabaseOpenErrorKind::Busy));
+                }
+                std::thread::sleep(LOCK_RETRY_INTERVAL.min(deadline.duration_since(now)));
+            }
+            Err(TryLockError::Error(_)) => {
+                return Err(DatabaseOpenError::new(
+                    DatabaseOpenErrorKind::DatabaseUnavailable,
+                ));
+            }
+        }
+    }
+}
+
+fn open_or_create_cleanup_lock(
+    root_directory: &File,
+    root_path: &Path,
+    database_name: &OsStr,
+    cleanup_path: &Path,
+    ready_path: &Path,
+    root_marker: &File,
+    root_layout: RootLayoutVersion,
+) -> Result<RetainedCleanupLock, DatabaseOpenError> {
+    let cleanup_name = cleanup_lock_name(database_name);
+    let ready_name = cleanup_lock_ready_name(database_name);
+    if cleanup_path != root_path.join(&cleanup_name) || ready_path != root_path.join(&ready_name) {
+        return Err(DatabaseOpenError::new(DatabaseOpenErrorKind::InternalState));
+    }
+    validate_store_inventory(root_directory, root_path, database_name)?;
+    if inspect_root_layout(root_marker)? != Some(root_layout) {
+        return Err(object_error(DatabaseOpenErrorKind::UnsafeStorageObject));
+    }
+
+    let ready = open_valid_control_marker(
+        root_directory,
+        root_path,
+        &ready_name,
+        ready_path,
+        DUX_CLEANUP_LOCK_READY_MARKER,
+    )?;
+    if let Some((ready_file, ready_identity)) = ready {
+        let Some((file, identity)) = open_valid_control_marker(
+            root_directory,
+            root_path,
+            &cleanup_name,
+            cleanup_path,
+            DUX_CLEANUP_LOCK_MARKER,
+        )?
+        else {
+            // Once the durable layout checkpoint exists, recreating a missing
+            // lock could produce a second inode while an old process still
+            // holds the original. Missing means unsafe, never "repair".
+            return Err(object_error(DatabaseOpenErrorKind::UnsafeStorageObject));
+        };
+        validate_store_inventory(root_directory, root_path, database_name)?;
+        upgrade_root_layout_marker(root_marker, root_layout)?;
+        return Ok(RetainedCleanupLock {
+            file,
+            identity,
+            ready_file,
+            ready_identity,
+        });
+    }
+
+    if root_layout == RootLayoutVersion::CleanupLockV2 {
+        // The versioned root-ownership marker is the non-recreatable layout
+        // anchor. A current layout missing its ready control is tampered or
+        // corrupt even if the cleanup leaf is also missing.
+        return Err(object_error(DatabaseOpenErrorKind::UnsafeStorageObject));
+    }
+
+    let (file, identity) = match open_valid_control_marker(
+        root_directory,
+        root_path,
+        &cleanup_name,
+        cleanup_path,
+        DUX_CLEANUP_LOCK_MARKER,
+    )? {
+        Some(existing) => existing,
+        None => create_durable_control_marker(
+            root_directory,
+            root_path,
+            &cleanup_name,
+            cleanup_path,
+            DUX_CLEANUP_LOCK_MARKER,
+        )?,
+    };
+
+    // Directory durability for the lock is established before publishing the
+    // ready marker. That ordering makes every crash state either resumable
+    // (ready absent) or fail-closed (ready present but lock absent).
+    let (ready_file, ready_identity) = create_durable_control_marker(
+        root_directory,
+        root_path,
+        &ready_name,
+        ready_path,
+        DUX_CLEANUP_LOCK_READY_MARKER,
+    )?;
+    validate_store_inventory(root_directory, root_path, database_name)?;
+    upgrade_root_layout_marker(root_marker, root_layout)?;
+    Ok(RetainedCleanupLock {
+        file,
+        identity,
+        ready_file,
+        ready_identity,
+    })
+}
+
+fn validate_store_inventory(
+    root_directory: &File,
+    root_path: &Path,
+    database_name: &OsStr,
+) -> Result<(), DatabaseOpenError> {
+    let allowed = allowed_store_entry_names(database_name, lock_name(database_name));
+    let allowed_refs: Vec<&OsStr> = allowed.iter().map(OsString::as_os_str).collect();
+    if platform::root_contains_only(root_directory, root_path, &allowed_refs)? {
+        Ok(())
+    } else {
+        Err(DatabaseOpenError::new(
+            DatabaseOpenErrorKind::UnrecognizedDatabase,
+        ))
+    }
+}
+
+fn open_valid_control_marker(
+    root_directory: &File,
+    root_path: &Path,
+    name: &OsStr,
+    path: &Path,
+    marker: &[u8; 16],
+) -> Result<Option<(File, PlatformIdentity)>, DatabaseOpenError> {
+    let Some((file, identity)) = platform::open_existing_control_file(
+        root_directory,
+        root_path,
+        name,
+        PermissionPolicy::RequirePrivate,
+    )?
+    else {
+        return Ok(None);
+    };
+    prove_exact_marker(&file, marker)?;
+    platform::validate_path_identity(
+        path,
+        ObjectKind::RegularFile,
+        identity,
+        PermissionPolicy::RequirePrivate,
+    )?;
+    Ok(Some((file, identity)))
+}
+
+fn create_durable_control_marker(
+    root_directory: &File,
+    root_path: &Path,
+    name: &OsStr,
+    path: &Path,
+    marker: &[u8; 16],
+) -> Result<(File, PlatformIdentity), DatabaseOpenError> {
+    let (created, created_identity) =
+        platform::create_private_file_exclusive(root_directory, root_path, name)?;
+    ensure_exact_marker(&created, marker)?;
+    platform::validate_path_identity(
+        path,
+        ObjectKind::RegularFile,
+        created_identity,
+        PermissionPolicy::RequirePrivate,
+    )?;
+    platform::sync_directory(root_directory)?;
+
+    let Some((reopened, reopened_identity)) = platform::open_existing_control_file(
+        root_directory,
+        root_path,
+        name,
+        PermissionPolicy::RequirePrivate,
+    )?
+    else {
+        return Err(object_error(DatabaseOpenErrorKind::UnsafeStorageObject));
+    };
+    if reopened_identity != created_identity {
+        return Err(object_error(DatabaseOpenErrorKind::UnsafeStorageObject));
+    }
+    prove_exact_marker(&reopened, marker)?;
+    drop(created);
+    Ok((reopened, reopened_identity))
 }
 
 #[derive(Clone, Copy)]
@@ -856,6 +1209,8 @@ fn allowed_store_entry_names(database_name: &OsStr, marker_name: OsString) -> Ve
     let mut allowed = vec![
         database_name.to_os_string(),
         marker_name,
+        cleanup_lock_name(database_name),
+        cleanup_lock_ready_name(database_name),
         initialization_name(database_name),
     ];
     allowed.extend(
@@ -900,6 +1255,14 @@ fn suffixed_name(name: &OsStr, suffix: &str) -> OsString {
 
 fn lock_name(database_name: &OsStr) -> OsString {
     suffixed_name(database_name, WRITER_LOCK_SUFFIX)
+}
+
+fn cleanup_lock_name(database_name: &OsStr) -> OsString {
+    suffixed_name(database_name, CLEANUP_LOCK_SUFFIX)
+}
+
+fn cleanup_lock_ready_name(database_name: &OsStr) -> OsString {
+    suffixed_name(database_name, CLEANUP_LOCK_READY_SUFFIX)
 }
 
 fn initialization_name(database_name: &OsStr) -> OsString {
@@ -958,21 +1321,46 @@ fn open_initialization_sentinel(
 }
 
 fn ensure_root_marker(file: &File) -> Result<(), DatabaseOpenError> {
-    platform::write_all_at(file, DUX_ROOT_MARKER, 0)
-        .and_then(|()| file.sync_all())
-        .map_err(|_| object_error(DatabaseOpenErrorKind::DatabaseUnavailable))?;
+    ensure_exact_marker(file, DUX_ROOT_MARKER)?;
     prove_root_marker(file)
 }
 
 fn ensure_initialization_sentinel(file: &File) -> Result<(), DatabaseOpenError> {
-    platform::write_all_at(file, DUX_INITIALIZATION_SENTINEL, 0)
-        .and_then(|()| file.sync_all())
-        .map_err(|_| object_error(DatabaseOpenErrorKind::DatabaseUnavailable))?;
+    ensure_exact_marker(file, DUX_INITIALIZATION_SENTINEL)?;
     prove_initialization_sentinel(file)
 }
 
+fn ensure_exact_marker(file: &File, marker: &[u8; 16]) -> Result<(), DatabaseOpenError> {
+    platform::write_all_at(file, marker, 0)
+        .and_then(|()| file.sync_all())
+        .map_err(|_| object_error(DatabaseOpenErrorKind::DatabaseUnavailable))
+}
+
 fn inspect_root_marker(file: &File) -> Result<RootMarkerState, DatabaseOpenError> {
-    inspect_exact_marker(file, DUX_ROOT_MARKER)
+    Ok(if inspect_root_layout(file)?.is_some() {
+        RootMarkerState::Valid
+    } else {
+        RootMarkerState::Invalid
+    })
+}
+
+fn inspect_root_layout(file: &File) -> Result<Option<RootLayoutVersion>, DatabaseOpenError> {
+    let length = file
+        .metadata()
+        .map_err(|_| object_error(DatabaseOpenErrorKind::DatabaseUnavailable))?
+        .len();
+    if length != DUX_ROOT_MARKER.len() as u64 {
+        return Ok(None);
+    }
+    let mut marker = [0_u8; 16];
+    if platform::read_exact_at(file, &mut marker, 0).is_err() {
+        return Ok(None);
+    }
+    match &marker {
+        value if value == DUX_ROOT_MARKER => Ok(Some(RootLayoutVersion::LegacyV1)),
+        value if value == DUX_ROOT_MARKER_LAYOUT_V2 => Ok(Some(RootLayoutVersion::CleanupLockV2)),
+        _ => Ok(None),
+    }
 }
 
 fn inspect_exact_marker(
@@ -998,11 +1386,43 @@ fn inspect_exact_marker(
 }
 
 fn prove_root_marker(file: &File) -> Result<(), DatabaseOpenError> {
-    prove_exact_marker(file, DUX_ROOT_MARKER)
+    if inspect_root_layout(file)?.is_some() {
+        Ok(())
+    } else {
+        Err(object_error(DatabaseOpenErrorKind::UnsafeStorageObject))
+    }
+}
+
+fn prove_current_root_marker(file: &File) -> Result<(), DatabaseOpenError> {
+    prove_exact_marker(file, DUX_ROOT_MARKER_LAYOUT_V2)
+}
+
+fn upgrade_root_layout_marker(
+    file: &File,
+    observed: RootLayoutVersion,
+) -> Result<(), DatabaseOpenError> {
+    match observed {
+        RootLayoutVersion::LegacyV1 => {
+            if inspect_root_layout(file)? != Some(RootLayoutVersion::LegacyV1) {
+                return Err(object_error(DatabaseOpenErrorKind::UnsafeStorageObject));
+            }
+            ensure_exact_marker(file, DUX_ROOT_MARKER_LAYOUT_V2)?;
+            prove_current_root_marker(file)
+        }
+        RootLayoutVersion::CleanupLockV2 => prove_current_root_marker(file),
+    }
 }
 
 fn prove_initialization_sentinel(file: &File) -> Result<(), DatabaseOpenError> {
     prove_exact_marker(file, DUX_INITIALIZATION_SENTINEL)
+}
+
+fn prove_cleanup_lock_marker(file: &File) -> Result<(), DatabaseOpenError> {
+    prove_exact_marker(file, DUX_CLEANUP_LOCK_MARKER)
+}
+
+fn prove_cleanup_lock_ready_marker(file: &File) -> Result<(), DatabaseOpenError> {
+    prove_exact_marker(file, DUX_CLEANUP_LOCK_READY_MARKER)
 }
 
 fn prove_exact_marker(file: &File, expected: &[u8; 16]) -> Result<(), DatabaseOpenError> {
@@ -1381,6 +1801,40 @@ mod platform {
             root_directory,
             name,
             OFlag::O_RDONLY | OFlag::O_NONBLOCK | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW,
+            Mode::empty(),
+        ) {
+            Ok(descriptor) => {
+                let file = File::from(descriptor);
+                let identity = validate_file(&file, ObjectKind::RegularFile, None, permissions)?;
+                Ok(Some((file, identity)))
+            }
+            Err(Errno::ENOENT) => Ok(None),
+            Err(Errno::ELOOP | Errno::EMLINK | Errno::EISDIR | Errno::ENOTDIR) => {
+                Err(object_error(DatabaseOpenErrorKind::UnsafeStorageObject))
+            }
+            Err(_) => Err(object_error(DatabaseOpenErrorKind::DatabaseUnavailable)),
+        }
+    }
+
+    pub(super) fn open_existing_control_file(
+        root_directory: &File,
+        root_path: &Path,
+        name: &std::ffi::OsStr,
+        permissions: PermissionPolicy,
+    ) -> Result<Option<(File, PlatformIdentity)>, DatabaseOpenError> {
+        open_existing_file(root_directory, root_path, name, permissions)
+    }
+
+    pub(super) fn open_existing_writer_file(
+        root_directory: &File,
+        _root_path: &Path,
+        name: &std::ffi::OsStr,
+        permissions: PermissionPolicy,
+    ) -> Result<Option<(File, PlatformIdentity)>, DatabaseOpenError> {
+        match openat(
+            root_directory,
+            name,
+            OFlag::O_RDWR | OFlag::O_NONBLOCK | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW,
             Mode::empty(),
         ) {
             Ok(descriptor) => {
@@ -1852,6 +2306,24 @@ mod platform {
         Err(DatabaseOpenError::new(DatabaseOpenErrorKind::InternalState))
     }
 
+    pub(super) fn open_existing_control_file(
+        _root_directory: &File,
+        _root_path: &Path,
+        _name: &std::ffi::OsStr,
+        _permissions: PermissionPolicy,
+    ) -> Result<Option<(File, PlatformIdentity)>, DatabaseOpenError> {
+        Err(DatabaseOpenError::new(DatabaseOpenErrorKind::InternalState))
+    }
+
+    pub(super) fn open_existing_writer_file(
+        _root_directory: &File,
+        _root_path: &Path,
+        _name: &std::ffi::OsStr,
+        _permissions: PermissionPolicy,
+    ) -> Result<Option<(File, PlatformIdentity)>, DatabaseOpenError> {
+        Err(DatabaseOpenError::new(DatabaseOpenErrorKind::InternalState))
+    }
+
     pub(super) fn resolve_existing_file_name(
         _root_directory: &File,
         _root_path: &Path,
@@ -2036,6 +2508,22 @@ mod tests {
         assert_eq!(storage.database_path(), database);
         assert!(storage.database_path().is_file());
         assert!(storage.lock_path().is_file());
+        assert_eq!(
+            fs::read(storage.lock_path()).unwrap(),
+            DUX_ROOT_MARKER_LAYOUT_V2
+        );
+        assert!(storage.cleanup_lock_path().is_file());
+        assert_eq!(
+            fs::read(storage.cleanup_lock_path()).unwrap(),
+            DUX_CLEANUP_LOCK_MARKER
+        );
+        assert_eq!(
+            fs::read(
+                database.with_file_name(cleanup_lock_ready_name(database.file_name().unwrap()))
+            )
+            .unwrap(),
+            DUX_CLEANUP_LOCK_READY_MARKER
+        );
         storage.validate_for_database_open().unwrap();
 
         #[cfg(unix)]
@@ -2066,7 +2554,135 @@ mod tests {
                     & 0o7777,
                 0o600
             );
+            assert_eq!(
+                fs::metadata(storage.cleanup_lock_path())
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o7777,
+                0o600
+            );
         }
+    }
+
+    #[test]
+    fn provisions_cleanup_lock_for_an_existing_owned_layout() {
+        let temp = TempDir::new().unwrap();
+        let database = database_path(&temp);
+        let legacy_probe = StoreProbe::prepare(&database).unwrap();
+        initialize_dux_header(&database);
+        let cleanup = database.with_file_name(cleanup_lock_name(database.file_name().unwrap()));
+        let ready = database.with_file_name(cleanup_lock_ready_name(database.file_name().unwrap()));
+        assert!(!cleanup.exists());
+        assert!(!ready.exists());
+        drop(legacy_probe);
+
+        let storage = SecureStorePaths::prepare(&database).unwrap();
+        assert_eq!(fs::read(&cleanup).unwrap(), DUX_CLEANUP_LOCK_MARKER);
+        assert_eq!(fs::read(&ready).unwrap(), DUX_CLEANUP_LOCK_READY_MARKER);
+        storage.validate_for_database_open().unwrap();
+    }
+
+    #[test]
+    fn legacy_cleanup_layout_upgrade_obeys_the_writer_lock() {
+        let temp = TempDir::new().unwrap();
+        let database = database_path(&temp);
+        let probe = StoreProbe::prepare(&database).unwrap();
+        initialize_dux_header(&database);
+        let writer_name = lock_name(database.file_name().unwrap());
+        let (writer, _) = platform::open_existing_file(
+            &probe.root_directory,
+            &probe.root_path,
+            &writer_name,
+            PermissionPolicy::RequirePrivate,
+        )
+        .unwrap()
+        .unwrap();
+        let writer_guard = acquire_advisory_lock(&writer, Duration::from_millis(20)).unwrap();
+        let cleanup = probe
+            .root_path
+            .join(cleanup_lock_name(database.file_name().unwrap()));
+        let ready = probe
+            .root_path
+            .join(cleanup_lock_ready_name(database.file_name().unwrap()));
+
+        let error = probe
+            .secure_with_control_lock_timeout(Duration::from_millis(10))
+            .err()
+            .unwrap();
+        assert_eq!(error.kind, DatabaseOpenErrorKind::Busy);
+        assert!(!cleanup.exists());
+        assert!(!ready.exists());
+
+        FileExt::unlock(&writer_guard).unwrap();
+        drop(writer_guard);
+        drop(writer);
+        let storage = SecureStorePaths::prepare(&database).unwrap();
+        assert_eq!(fs::read(cleanup).unwrap(), DUX_CLEANUP_LOCK_MARKER);
+        assert_eq!(fs::read(ready).unwrap(), DUX_CLEANUP_LOCK_READY_MARKER);
+        drop(storage);
+    }
+
+    #[test]
+    fn ready_layout_never_recreates_a_missing_cleanup_lock() {
+        let temp = TempDir::new().unwrap();
+        let database = database_path(&temp);
+        let probe = StoreProbe::prepare(&database).unwrap();
+        initialize_dux_header(&database);
+        let ready_name = cleanup_lock_ready_name(database.file_name().unwrap());
+        let (ready, ready_identity) = platform::create_private_file_exclusive(
+            &probe.root_directory,
+            &probe.root_path,
+            &ready_name,
+        )
+        .unwrap();
+        ensure_exact_marker(&ready, DUX_CLEANUP_LOCK_READY_MARKER).unwrap();
+        platform::validate_path_identity(
+            &probe.root_path.join(&ready_name),
+            ObjectKind::RegularFile,
+            ready_identity,
+            PermissionPolicy::RequirePrivate,
+        )
+        .unwrap();
+        platform::sync_directory(&probe.root_directory).unwrap();
+        drop(ready);
+        drop(probe);
+
+        let cleanup = database.with_file_name(cleanup_lock_name(database.file_name().unwrap()));
+        let error = SecureStorePaths::prepare(&database).err().unwrap();
+        assert_eq!(error.kind, DatabaseOpenErrorKind::UnsafeStorageObject);
+        assert!(!cleanup.exists());
+    }
+
+    #[test]
+    fn current_layout_never_recreates_both_missing_cleanup_controls() {
+        let temp = TempDir::new().unwrap();
+        let database = database_path(&temp);
+        let probe = StoreProbe::prepare(&database).unwrap();
+        initialize_dux_header(&database);
+        let writer_name = lock_name(database.file_name().unwrap());
+        let (writer, _) = platform::open_existing_writer_file(
+            &probe.root_directory,
+            &probe.root_path,
+            &writer_name,
+            PermissionPolicy::RequirePrivate,
+        )
+        .unwrap()
+        .unwrap();
+        ensure_exact_marker(&writer, DUX_ROOT_MARKER_LAYOUT_V2).unwrap();
+        drop(writer);
+        drop(probe);
+
+        let cleanup = database.with_file_name(cleanup_lock_name(database.file_name().unwrap()));
+        let ready = database.with_file_name(cleanup_lock_ready_name(database.file_name().unwrap()));
+        let error = SecureStorePaths::prepare(&database).err().unwrap();
+        assert_eq!(error.kind, DatabaseOpenErrorKind::UnsafeStorageObject);
+        assert!(!cleanup.exists());
+        assert!(!ready.exists());
+        assert_eq!(
+            fs::read(database.with_file_name(writer_name)).unwrap(),
+            DUX_ROOT_MARKER_LAYOUT_V2
+        );
     }
 
     #[test]
@@ -2107,6 +2723,118 @@ mod tests {
         let error = SecureStorePaths::prepare(&database).err().unwrap();
         assert_eq!(error.kind, DatabaseOpenErrorKind::UnsafeStorageObject);
         assert_eq!(fs::read(marker).unwrap(), malformed);
+    }
+
+    #[test]
+    fn malformed_cleanup_control_markers_are_rejected_without_replacement() {
+        const MALFORMED: &[u8; 16] = b"NOT-CLEANUP-LOCK";
+
+        for malformed_ready in [false, true] {
+            let temp = TempDir::new().unwrap();
+            let database = database_path(&temp);
+            let probe = StoreProbe::prepare(&database).unwrap();
+            initialize_dux_header(&database);
+            let cleanup_name = cleanup_lock_name(database.file_name().unwrap());
+            let cleanup_path = probe.root_path.join(&cleanup_name);
+            let (cleanup, cleanup_identity) = platform::create_private_file_exclusive(
+                &probe.root_directory,
+                &probe.root_path,
+                &cleanup_name,
+            )
+            .unwrap();
+            ensure_exact_marker(
+                &cleanup,
+                if malformed_ready {
+                    DUX_CLEANUP_LOCK_MARKER
+                } else {
+                    MALFORMED
+                },
+            )
+            .unwrap();
+            platform::validate_path_identity(
+                &cleanup_path,
+                ObjectKind::RegularFile,
+                cleanup_identity,
+                PermissionPolicy::RequirePrivate,
+            )
+            .unwrap();
+
+            let malformed_path = if malformed_ready {
+                let ready_name = cleanup_lock_ready_name(database.file_name().unwrap());
+                let ready_path = probe.root_path.join(&ready_name);
+                let (ready, ready_identity) = platform::create_private_file_exclusive(
+                    &probe.root_directory,
+                    &probe.root_path,
+                    &ready_name,
+                )
+                .unwrap();
+                ensure_exact_marker(&ready, MALFORMED).unwrap();
+                platform::validate_path_identity(
+                    &ready_path,
+                    ObjectKind::RegularFile,
+                    ready_identity,
+                    PermissionPolicy::RequirePrivate,
+                )
+                .unwrap();
+                ready_path
+            } else {
+                cleanup_path
+            };
+            platform::sync_directory(&probe.root_directory).unwrap();
+            drop(cleanup);
+            drop(probe);
+
+            let error = SecureStorePaths::prepare(&database).err().unwrap();
+            assert_eq!(error.kind, DatabaseOpenErrorKind::UnsafeStorageObject);
+            assert_eq!(fs::read(malformed_path).unwrap(), MALFORMED);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_lock_hard_link_is_rejected() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new().unwrap();
+        let database = database_path(&temp);
+        let probe = StoreProbe::prepare(&database).unwrap();
+        initialize_dux_header(&database);
+        let outside = temp.path().join("outside-cleanup-lock");
+        fs::write(&outside, DUX_CLEANUP_LOCK_MARKER).unwrap();
+        fs::set_permissions(&outside, fs::Permissions::from_mode(0o600)).unwrap();
+        let cleanup = probe
+            .root_path
+            .join(cleanup_lock_name(database.file_name().unwrap()));
+        fs::hard_link(&outside, &cleanup).unwrap();
+        drop(probe);
+
+        let error = SecureStorePaths::prepare(&database).err().unwrap();
+        assert_eq!(error.kind, DatabaseOpenErrorKind::UnsafeStorageObject);
+        assert_eq!(fs::read(outside).unwrap(), DUX_CLEANUP_LOCK_MARKER);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preexisting_cleanup_control_permissions_are_not_repaired() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new().unwrap();
+        let database = database_path(&temp);
+        let probe = StoreProbe::prepare(&database).unwrap();
+        initialize_dux_header(&database);
+        let cleanup = probe
+            .root_path
+            .join(cleanup_lock_name(database.file_name().unwrap()));
+        fs::write(&cleanup, DUX_CLEANUP_LOCK_MARKER).unwrap();
+        fs::set_permissions(&cleanup, fs::Permissions::from_mode(0o644)).unwrap();
+        drop(probe);
+
+        let error = SecureStorePaths::prepare(&database).err().unwrap();
+        assert_eq!(error.kind, DatabaseOpenErrorKind::UnsafePermissions);
+        assert_eq!(
+            fs::metadata(cleanup).unwrap().permissions().mode() & 0o7777,
+            0o644
+        );
     }
 
     #[cfg(unix)]
@@ -2210,6 +2938,8 @@ mod tests {
         for name in [
             "dux.sqlite3",
             "dux.sqlite3.writer.lock",
+            "dux.sqlite3.cleanup.lock",
+            "dux.sqlite3.cleanup.lock.ready",
             "dux.sqlite3-journal",
         ] {
             let temp = TempDir::new().unwrap();
@@ -2281,6 +3011,91 @@ mod tests {
         second
             .acquire_writer_lock(Duration::from_millis(20))
             .unwrap();
+    }
+
+    #[test]
+    fn cleanup_lock_is_bounded_revalidated_and_independent() {
+        let temp = TempDir::new().unwrap();
+        let database = database_path(&temp);
+        let first = SecureStorePaths::prepare(&database).unwrap();
+        let second = SecureStorePaths::prepare(&database).unwrap();
+        let guard = first
+            .acquire_cleanup_lock(Duration::from_millis(20))
+            .unwrap();
+        first.validate_cleanup_lock_guard(&guard).unwrap();
+
+        assert_eq!(
+            second
+                .acquire_cleanup_lock(Duration::from_millis(10))
+                .err()
+                .unwrap()
+                .kind,
+            DatabaseOpenErrorKind::Busy
+        );
+        assert_eq!(
+            first
+                .acquire_cleanup_lock(Duration::from_millis(1))
+                .err()
+                .unwrap()
+                .kind,
+            DatabaseOpenErrorKind::Busy
+        );
+
+        // Cleanup exclusion is intentionally distinct from SQLite writer
+        // serialization, so future journal writes can occur while it is held.
+        first
+            .acquire_writer_lock(Duration::from_millis(20))
+            .unwrap();
+        drop(guard);
+        second
+            .acquire_cleanup_lock(Duration::from_millis(20))
+            .unwrap();
+    }
+
+    #[test]
+    fn cleanup_lock_rejects_root_inventory_changes_before_and_while_held() {
+        for change_while_held in [false, true] {
+            let temp = TempDir::new().unwrap();
+            let database = database_path(&temp);
+            let storage = SecureStorePaths::prepare(&database).unwrap();
+            let guard = change_while_held.then(|| {
+                storage
+                    .acquire_cleanup_lock(Duration::from_millis(20))
+                    .unwrap()
+            });
+            fs::write(
+                database.parent().unwrap().join("foreign-after-prepare"),
+                b"untouched",
+            )
+            .unwrap();
+
+            let error = if let Some(guard) = guard.as_ref() {
+                storage.validate_cleanup_lock_guard(guard).err().unwrap()
+            } else {
+                storage
+                    .acquire_cleanup_lock(Duration::from_millis(20))
+                    .err()
+                    .unwrap()
+            };
+            assert_eq!(error.kind, DatabaseOpenErrorKind::UnrecognizedDatabase);
+        }
+    }
+
+    #[test]
+    fn cleanup_lock_rejects_writer_marker_content_changes() {
+        let temp = TempDir::new().unwrap();
+        let database = database_path(&temp);
+        let storage = SecureStorePaths::prepare(&database).unwrap();
+        let malformed = b"NOT-A-DUX-MARKER";
+        assert_eq!(malformed.len(), DUX_ROOT_MARKER.len());
+        fs::write(storage.lock_path(), malformed).unwrap();
+
+        let error = storage
+            .acquire_cleanup_lock(Duration::from_millis(20))
+            .err()
+            .unwrap();
+        assert_eq!(error.kind, DatabaseOpenErrorKind::UnsafeStorageObject);
+        assert_eq!(fs::read(storage.lock_path()).unwrap(), malformed);
     }
 
     #[cfg(unix)]
@@ -2417,6 +3232,62 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn retained_cleanup_lock_blocks_path_replacement() {
+        let temp = TempDir::new().unwrap();
+        let database = database_path(&temp);
+        let storage = SecureStorePaths::prepare(&database).unwrap();
+        let ready = database.with_file_name(cleanup_lock_ready_name(database.file_name().unwrap()));
+        for (index, control) in [storage.lock_path(), storage.cleanup_lock_path(), &ready]
+            .into_iter()
+            .enumerate()
+        {
+            let displaced = temp.path().join(format!("displaced-control-{index}"));
+            // DUX-DESTRUCTIVE: allow=test-storage-cleanup-lock-rename-guard -- attempt only to rename each TempDir-owned retained control and prove the Windows handles deny replacement
+            assert!(fs::rename(control, displaced).is_err());
+        }
+        storage.validate_for_database_open().unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn preexisting_cleanup_control_dacl_is_not_repaired() {
+        let temp = TempDir::new().unwrap();
+        let database = database_path(&temp);
+        let probe = StoreProbe::prepare(&database).unwrap();
+        initialize_dux_header(&database);
+        let cleanup_name = cleanup_lock_name(database.file_name().unwrap());
+        let cleanup_path = probe.root_path.join(&cleanup_name);
+        let (cleanup, _) = platform::create_private_file_exclusive(
+            &probe.root_directory,
+            &probe.root_path,
+            &cleanup_name,
+        )
+        .unwrap();
+        ensure_exact_marker(&cleanup, DUX_CLEANUP_LOCK_MARKER).unwrap();
+        platform::sync_directory(&probe.root_directory).unwrap();
+        drop(cleanup);
+        drop(probe);
+        platform::replace_acl_for_test(
+            &cleanup_path,
+            ObjectKind::RegularFile,
+            platform::TestAclShape::Broad,
+        )
+        .unwrap();
+
+        let error = SecureStorePaths::prepare(&database).err().unwrap();
+        assert_eq!(error.kind, DatabaseOpenErrorKind::UnsafePermissions);
+        assert_eq!(
+            platform::assert_private_for_test(&cleanup_path, ObjectKind::RegularFile)
+                .err()
+                .unwrap()
+                .kind,
+            DatabaseOpenErrorKind::UnsafePermissions
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn inherited_sqlite_sidecar_is_repaired_only_by_marker_authorized_hook() {
         let temp = TempDir::new().unwrap();
         let database = database_path(&temp);
@@ -2546,12 +3417,23 @@ mod tests {
         assert_eq!(error.kind, DatabaseOpenErrorKind::UnsafeStorageObject);
         assert_eq!(fs::read(&external_file).unwrap(), b"untouched");
 
-        for suffix in [WRITER_LOCK_SUFFIX, "-wal", "-shm", "-journal"] {
+        for suffix in [
+            WRITER_LOCK_SUFFIX,
+            CLEANUP_LOCK_SUFFIX,
+            CLEANUP_LOCK_READY_SUFFIX,
+            "-wal",
+            "-shm",
+            "-journal",
+        ] {
             let temp = TempDir::new().unwrap();
             let database = database_path(&temp);
             if suffix == WRITER_LOCK_SUFFIX {
                 fs::create_dir(database.parent().unwrap()).unwrap();
                 initialize_dux_header(&database);
+            } else if matches!(suffix, CLEANUP_LOCK_SUFFIX | CLEANUP_LOCK_READY_SUFFIX) {
+                let legacy_probe = StoreProbe::prepare(&database).unwrap();
+                initialize_dux_header(&database);
+                drop(legacy_probe);
             } else {
                 let initial = SecureStorePaths::prepare(&database).unwrap();
                 initialize_dux_header(&database);

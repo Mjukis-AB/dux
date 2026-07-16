@@ -5,6 +5,18 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Added a crate-private, permanent store-wide cleanup-effect lock distinct from
+  SQLite's writer lock. Existing owned stores provision the exact private
+  control file only while holding the writer lock. It flushes the lock and
+  ready control before durably advancing the existing ownership marker from
+  layout v1 to v2; v2 makes later absence fail closed instead of recreating a
+  second lock identity. Retained handles, exact markers, root inventory, ownership,
+  permissions, links, and path identity are revalidated around bounded lock
+  acquisition. Windows retains both cleanup controls without delete sharing so
+  `LockFileEx` cannot remain on a displaced file. Same-process, independent
+  writer-lock, cross-process, malformed-layout, link, special-file, and native
+  replacement regressions cover the boundary. The guard proves exclusion only:
+  it carries no plan, owner, recovery, journal, target, or effect authority.
 - Added crate-private planned cleanup journals on SQLite schema v2. One
   immutable cleanup plan is prepared and bounded before locking, matched
   exactly to complete persisted candidate observations, and atomically stored

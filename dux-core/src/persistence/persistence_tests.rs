@@ -281,6 +281,18 @@ fn helper_open_after_writer_lock_race() {
     });
 }
 
+fn helper_hold_cleanup_lock() {
+    let database = helper_path("DUX_PERSISTENCE_DATABASE");
+    let ready = helper_path("DUX_PERSISTENCE_READY");
+    let release = helper_path("DUX_PERSISTENCE_RELEASE");
+    let paths = SecureStorePaths::prepare(&database).unwrap();
+    let guard = paths.acquire_cleanup_lock(SUBPROCESS_TIMEOUT).unwrap();
+    paths.validate_cleanup_lock_guard(&guard).unwrap();
+    publish_handshake(&ready);
+    wait_for_handshake(&release);
+    paths.validate_cleanup_lock_guard(&guard).unwrap();
+}
+
 #[test]
 #[ignore = "launched by the process-boundary persistence regressions"]
 fn sqlite_subprocess_helper() {
@@ -294,6 +306,7 @@ fn sqlite_subprocess_helper() {
         "hot-wal" => helper_leave_wal_without_shared_memory_recovery(),
         "upgrade-under-writer-lock" => helper_upgrade_while_holding_writer_lock(),
         "open-after-writer-lock-race" => helper_open_after_writer_lock_race(),
+        "hold-cleanup-lock" => helper_hold_cleanup_lock(),
         _ => panic!("unknown persistence helper mode"),
     }
 }
@@ -1412,6 +1425,68 @@ fn cross_process_writer_waiter_rechecks_version_before_writing() {
     publish_handshake(&upgrade_release);
     upgrader.wait_for_success();
     waiter.wait_for_success();
+}
+
+#[test]
+fn cross_process_cleanup_lock_is_exclusive_and_released() {
+    let temp = TempDir::new().unwrap();
+    let path = database_path(&temp);
+    drop(StoreCoordinator::open(&path).unwrap());
+
+    let ready = temp.path().join("cleanup-holder-ready");
+    let release = temp.path().join("cleanup-holder-release");
+    let mut holder = spawn_persistence_helper(
+        "hold-cleanup-lock",
+        &[
+            ("DUX_PERSISTENCE_DATABASE", &path),
+            ("DUX_PERSISTENCE_READY", &ready),
+            ("DUX_PERSISTENCE_RELEASE", &release),
+        ],
+    );
+    wait_for_child_handshake(&mut holder, &ready);
+
+    let paths = SecureStorePaths::prepare(&path).unwrap();
+    assert_eq!(
+        paths
+            .acquire_cleanup_lock(Duration::from_millis(20))
+            .err()
+            .unwrap()
+            .kind,
+        DatabaseOpenErrorKind::Busy
+    );
+    paths
+        .acquire_writer_lock(Duration::from_millis(20))
+        .unwrap();
+
+    publish_handshake(&release);
+    holder.wait_for_success();
+    let guard = paths.acquire_cleanup_lock(SUBPROCESS_TIMEOUT).unwrap();
+    paths.validate_cleanup_lock_guard(&guard).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn cleanup_lock_is_released_after_abrupt_process_death() {
+    let temp = TempDir::new().unwrap();
+    let path = database_path(&temp);
+    drop(StoreCoordinator::open(&path).unwrap());
+
+    let ready = temp.path().join("cleanup-crash-holder-ready");
+    let never_released = temp.path().join("cleanup-crash-holder-release");
+    let mut holder = spawn_persistence_helper(
+        "hold-cleanup-lock",
+        &[
+            ("DUX_PERSISTENCE_DATABASE", &path),
+            ("DUX_PERSISTENCE_READY", &ready),
+            ("DUX_PERSISTENCE_RELEASE", &never_released),
+        ],
+    );
+    wait_for_child_handshake(&mut holder, &ready);
+    holder.terminate_without_unwinding();
+
+    let paths = SecureStorePaths::prepare(&path).unwrap();
+    let guard = paths.acquire_cleanup_lock(SUBPROCESS_TIMEOUT).unwrap();
+    paths.validate_cleanup_lock_guard(&guard).unwrap();
 }
 
 #[test]

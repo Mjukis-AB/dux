@@ -283,6 +283,40 @@ pub(super) fn open_existing_file(
     }
 }
 
+pub(super) fn open_existing_control_file(
+    _root_directory: &File,
+    root_path: &Path,
+    name: &OsStr,
+    permissions: PermissionPolicy,
+) -> Result<Option<(File, PlatformIdentity)>, DatabaseOpenError> {
+    let path = root_path.join(name);
+    match open_control_raw(&path) {
+        Ok(file) => {
+            let identity = validate_file(&file, ObjectKind::RegularFile, None, permissions)?;
+            Ok(Some((file, identity)))
+        }
+        Err(ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND) => Ok(None),
+        Err(_) => Err(object_error(DatabaseOpenErrorKind::UnsafeStorageObject)),
+    }
+}
+
+pub(super) fn open_existing_writer_file(
+    _root_directory: &File,
+    root_path: &Path,
+    name: &OsStr,
+    permissions: PermissionPolicy,
+) -> Result<Option<(File, PlatformIdentity)>, DatabaseOpenError> {
+    let path = root_path.join(name);
+    match open_control_raw(&path) {
+        Ok(file) => {
+            let identity = validate_file(&file, ObjectKind::RegularFile, None, permissions)?;
+            Ok(Some((file, identity)))
+        }
+        Err(ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND) => Ok(None),
+        Err(_) => Err(object_error(DatabaseOpenErrorKind::UnsafeStorageObject)),
+    }
+}
+
 pub(super) fn resolve_existing_file_name(
     root_directory: &File,
     root_path: &Path,
@@ -738,6 +772,33 @@ fn open_target_raw(path: &Path, kind: ObjectKind) -> Result<File, u32> {
             null(),
             OPEN_EXISTING,
             flags,
+            null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        // SAFETY: GetLastError immediately follows the failed Win32 call.
+        return Err(unsafe { GetLastError() });
+    }
+    // SAFETY: CreateFileW returned a unique owned handle and File closes it.
+    Ok(unsafe { File::from_raw_handle(handle) })
+}
+
+fn open_control_raw(path: &Path) -> Result<File, u32> {
+    let wide =
+        wide_path_raw(path).map_err(|_| windows_sys::Win32::Foundation::ERROR_INVALID_NAME)?;
+    // Retained cleanup control handles deliberately omit FILE_SHARE_DELETE.
+    // LockFileEx would otherwise remain on a displaced file while another
+    // process opened and locked a replacement at the original pathname.
+    // SAFETY: `wide` is NUL-terminated, null security attributes are correct
+    // for an existing file, and the successful handle is moved into `File`.
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            FILE_GENERIC_READ | FILE_GENERIC_WRITE | WRITE_DAC,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            null(),
+            OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT,
             null_mut(),
         )
     };

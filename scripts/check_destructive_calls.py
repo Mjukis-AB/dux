@@ -328,6 +328,11 @@ EXCEPTIONS = {
         "rust-filesystem-effect",
         "test:fresh_store_reopens_before_blocking_external_final_root_rename",
     ),
+    "test-storage-cleanup-lock-rename-guard": ExceptionSpec(
+        "dux-core/src/persistence/storage.rs",
+        "rust-filesystem-effect",
+        "test:retained_cleanup_lock_blocks_path_replacement",
+    ),
     "build-xcframework-staging-remove": ExceptionSpec(
         "dux-macos/scripts/build-rust-xcframework.sh", "shell-remove"
     ),
@@ -395,6 +400,7 @@ EXCEPTION_PRIMITIVES = {
     "storage-root-macos-publish": "renameatx_np",
     "test-storage-root-source-swap": "rename",
     "test-storage-final-root-rename-guard": "rename",
+    "test-storage-cleanup-lock-rename-guard": "rename",
     "build-xcframework-staging-remove": "rm",
     "build-xcframework-output-remove": "rm",
     "build-xcframework-publish-move": "mv",
@@ -413,6 +419,7 @@ CLIPPY_SUPPRESSION_COUNTS = {
     "dux-core/src/cache/mod.rs": 2,
     "dux-core/src/path_validation/protected.rs": 1,
     "dux-core/src/persistence/persistence_tests.rs": 3,
+    "dux-core/src/persistence/storage.rs": 1,
     "dux-core/src/persistence/storage/windows.rs": 2,
 }
 

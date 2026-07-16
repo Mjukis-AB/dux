@@ -428,6 +428,22 @@ wall-clock lease expiry. Recovery additionally requires process-instance
 liveness evidence proving the previous owner is definitely gone; PID alone,
 heartbeat age, lock age, and unknown liveness are insufficient.
 
+The implemented storage primitive retains one exact private
+`<database>.cleanup.lock` separately from the SQLite writer marker. A
+filesystem-first upgrade flushes the lock and `.cleanup.lock.ready` control
+before durably advancing the retained root-ownership marker from layout v1 to
+v2. That non-recreatable anchor permits writer-locked legacy upgrade, while v2
+with either cleanup control missing or malformed fails closed and never creates
+a replacement inode.
+Acquisition is bounded but the held OS lock has no expiry. It revalidates the
+retained file and pathname identity before returning; future executors must
+repeat that check immediately before each effect. Windows retains both cleanup
+controls without delete sharing so a locked file cannot be displaced. Unix
+continues to rely on identity revalidation and the documented same-user storage
+boundary. This guard is storage exclusion only—not a lease owner, approval,
+recovery witness, plan capability, or effect capability—and is not yet coupled
+to cleanup journals or an executor.
+
 Where the platform supports it, permanent
 removal uses descriptor-relative or handle-relative operations tied to the
 validated parent. A path-based fallback requires an explicit platform review
@@ -762,18 +778,23 @@ confidentiality.
 
 The implemented SQLite boundary provisions a previously absent DUX directory
 in an unpredictable private sibling stage. It creates and durably writes a
-fixed ownership marker plus an empty database before atomically publishing the
+fixed-length, versioned ownership marker plus an empty database before atomically publishing the
 directory without replacement. A racing winner is re-probed and never
 overwritten. An existing unmarked directory or database is not claimed,
 repaired, or populated, and a marker-owned missing database is not recreated.
-After a successful current-schema migration and WAL setup it durably creates a
-separate private initialization sentinel. This preserves the immutable
-ownership marker while distinguishing an interrupted first provision from a
-previously initialized database later truncated to zero. The SQLite layer
-accepts only its database, ownership marker, initialization sentinel, known
-SQLite sidecars, and the exact reserved `snapshots`, `ai`, and `logs` siblings
-in the final DUX directory; the later owners of those sibling stores must
-perform their own no-follow identity and permission validation.
+The ownership entry and identity are permanent. Its exact legacy-v1 content
+may advance once, in place and under its own writer lock, to layout v2 only
+after both cleanup controls are durable; every other rewrite, downgrade, or
+unknown value fails closed. This one-way layout boundary intentionally makes
+older binaries reject the upgraded store. After a successful current-schema
+migration and WAL setup DUX durably creates a separate private initialization
+sentinel, distinguishing an interrupted first provision from a previously
+initialized database later truncated to zero. The SQLite layer
+accepts only its database, ownership marker, initialization sentinel, cleanup
+lock and ready checkpoint, known SQLite sidecars, and the exact reserved
+`snapshots`, `ai`, and `logs` siblings in the final DUX directory; the later
+owners of those sibling stores must perform their own no-follow identity and
+permission validation.
 
 On Unix, stage children are created relative to a retained directory handle;
 the final no-replace rename is relative to a retained current-user parent that
@@ -846,6 +867,18 @@ allocation and rejects child pollution, gaps, limits, relative format-2 paths,
 overlap, incomplete cloud facts, mode/action mismatches, dangling dependencies,
 and time/warning/estimate drift. It cannot reconstruct `CleanupPlan`, claim an
 execution owner, transition or recover a journal, or reach an effect.
+
+The storage layer also implements the permanent store-wide cleanup exclusion
+primitive required before execution-state journaling. Its immutable lock and
+ready control are exact root entries, provisioned for legacy owned stores only
+while the writer lock is held and flushed before the root-ownership marker's
+durable layout-v2 transition. Both are retained with private no-follow identity
+evidence and never recreated after that transition.
+The cleanup and writer locks remain independent so a future holder can perform
+short fenced journal transactions in the required cleanup-before-writer order.
+Same-process and subprocess tests prove bounded contention and release; native
+Windows handles deny delete sharing to prevent path replacement. No history,
+FFI, CLI, Swift, AI, plan, or effect API can obtain this guard yet.
 
 Compatibility inspection and migration have both SQLite-VM-operation ceilings
 and deadlines sampled every 1,000 VM operations by SQLite's progress callback.
@@ -1184,12 +1217,12 @@ incident as a substitute for deterministic local evidence.
 | Legacy CLI deletion | Active arbitrary-descendant permanent path routed through a temporary core adapter; strict-target/volume/identity rechecks only; scanned-byte estimates labeled in CLI | Replace adapter with reviewed plan/approval/executor chain without weakening current checks |
 | Centralized executor | Production executor absent; temporary legacy adapter is containment only | Typed admission, cross-process lease, live revalidation, and journal required |
 | Engine/FFI task and plan API | Core handle, pre-worker SQLite compatibility handshake, and bounded per-session registry implemented for one read-only formatting batch; app architecture owns one session; UniFFI handle remains smoke-only, with no scan/task/plan DTOs or cleanup authority | FFI version rejection plus bounded scan/task/plan handles and cancellation |
-| SQLite compatibility store | Checksummed v1/v2 migrations with exact per-version fingerprints, lossless bounded path codec, bounded full/lightweight inspection, private atomic provisioning with durable initialization evidence, cross-platform process writer/version-race coverage, newer-schema read-only transition, rollback/WAL recovery, crate-private typed scan and candidate history, explicit legacy summaries, and atomic bounded planned-cleanup insert/exact-ID load are implemented; stored paths and policy remain non-authoritative observations | Scan/evaluator/planner lifecycle integration, candidate status lifecycle, cleanup execution-state CRUD with ordinal and owner-generation validation, retention, reconciliation, and bounded identity-safe abandoned-stage maintenance |
+| SQLite compatibility store | Checksummed v1/v2 migrations with exact per-version fingerprints, lossless bounded path codec, bounded full/lightweight inspection, private atomic provisioning with durable initialization evidence, cross-platform process writer/version-race coverage, durable writer-locked cleanup-lock layout upgrade, newer-schema read-only transition, rollback/WAL recovery, crate-private typed scan and candidate history, explicit legacy summaries, and atomic bounded planned-cleanup insert/exact-ID load are implemented; stored paths and policy remain non-authoritative observations | Scan/evaluator/planner lifecycle integration, candidate status lifecycle, cleanup execution-state CRUD with ordinal and owner-generation validation, retention, reconciliation, and bounded identity-safe abandoned-stage maintenance |
 | Typed scan coverage/issues | Absent; current scanner counts/skips and permits relaxed flags | Required before any scan is described as complete or becomes plan input |
 | Cache semantic/input validation | Atomic write plus CRC/version only; full-file read before bounds | Bounded reads, tree/path semantics, private permissions, retention, and migration |
 | Hard-link accounting and policy | Absent; only non-authoritative path snapshots capture link count | Deduplicated scan accounting and explicit per-mode admission rules |
 | Forbidden destructive-call lint | Implemented with compiler-resolved Rust denial, cross-language repository scan, scoped annotations, self-tests, and CI | Keep exception set exact; remove legacy baseline during executor migration |
-| Durable operation journal/history | Schema plus typed immutable `planned` insert/load implemented; no execution owner, transitions, lease coupling, or reconciliation | Cross-process cleanup lock and process-instance liveness, fenced state machine, crash reconciliation, and executor integration required before shared executor ships |
+| Durable operation journal/history | Schema plus typed immutable `planned` insert/load and a separate permanent store-wide cleanup OS lock are implemented; the lock has no history/plan/effect authority and there is no execution owner, transition, lease coupling, or reconciliation | Process-instance liveness, fenced state machine, crash reconciliation, and executor integration required before shared executor ships |
 | Private 0700/0600 stores | SQLite stage/final root, database, marker, and sidecars enforce ownership, no-follow identity, links, and Unix modes; macOS rejects final-object ACLs but accepts deny-only publication-parent ACLs; Windows uses exact protected DACLs plus handle-bound publication and a retained final-root rename guard; current binary cache remains non-private | Extend equivalent ownership and atomic-publication guarantees to snapshots, caches, logs, provider temp data, and bounded abandoned-stage maintenance |
 | Trash executor | Absent | Platform-native implementation and integration tests |
 | Cloud eviction | Absent | Supported API plus fully-uploaded/no-local-change evidence |

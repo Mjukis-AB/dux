@@ -1882,8 +1882,11 @@ Tasks:
   stores fail with distinct path-free categories.
 
   First provisioning builds an exact private sibling stage containing a
-  durably written immutable ownership marker and empty database, then publishes
-  the directory atomically without replacement. Successful current-schema
+  durably written fixed-length ownership marker and empty database, then publishes
+  the directory atomically without replacement. The marker entry and identity
+  remain permanent; its exact legacy-v1 content has one monotonic, writer-locked
+  transition to cleanup-layout v2 after both cleanup controls are durable, and
+  older binaries intentionally reject that one-way layout boundary. Successful current-schema
   setup durably adds a separate private initialization sentinel, so a later
   zero-length truncation cannot be mistaken for an interrupted first provision.
   A collision re-probes the
@@ -1992,11 +1995,30 @@ Tasks:
     rollback, legacy pollution, oversized rows/newer-schema skew, and the shared
     query budget at 256 paths plus 512 evidence facts. It cannot reconstruct a
     plan, claim an execution owner, transition or recover work, or perform an
-    effect. The next cleanup slice must first add a separate non-stealable
-    cross-process cleanup lock and process-instance liveness proof: heartbeat
-    age alone cannot safely authorize recovery while an old worker could still
-    mutate the filesystem. The broad checkbox remains open for execution-state
-    journaling and scan/evaluator/planner lifecycle integration.
+    effect. The broad checkbox remains open for execution-state journaling and
+    scan/evaluator/planner lifecycle integration.
+  - Cleanup-lock storage sub-checkpoint completed 2026-07-16: every secured
+    store now retains a distinct exact-marker `<database>.cleanup.lock` with a
+    bounded, non-expiring OS lock and independent same-process exclusion.
+    Legacy provisioning happens exclusively under the existing writer lock,
+    flushes the lock before a `.cleanup.lock.ready` control, then durably
+    advances the retained root-ownership marker from layout v1 to v2. That
+    non-recreatable v2 anchor distinguishes legacy absence from a current store
+    whose one or both cleanup controls were removed; v2 never recreates a
+    missing or malformed control. Every open and acquisition rechecks the
+    private root inventory, marker length/bytes, owner, mode or protected DACL,
+    regular-file/link shape, retained identity, and no-follow pathname.
+    Windows retains the controls without `FILE_SHARE_DELETE`, preventing a
+    `LockFileEx` holder from being displaced while a second inode is locked.
+    Fourteen focused regressions plus expanded symlink/FIFO coverage exercise
+    legacy upgrade serialization, crash-state refusal, malformed controls,
+    hard links, same- and cross-process contention/release including abrupt
+    owner death, writer-lock independence, and native Windows replacement denial
+    for all retained controls. The guard proves only
+    exclusion and has no plan, journal, owner, target, recovery, or effect
+    capability. Process-instance liveness proof and owner-generation-fenced
+    journal transitions remain the next cleanup slice; heartbeat age alone
+    still cannot authorize recovery while an old worker could mutate.
 - [ ] Keep binary snapshots atomic and checksummed.
 - [ ] Add capacity sample storage.
 - [ ] Add typed scan coverage/issues.
