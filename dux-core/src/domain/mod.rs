@@ -17,6 +17,7 @@ mod rule;
     )
 )]
 mod rule_document;
+mod scan_coverage;
 mod volume;
 
 #[cfg(test)]
@@ -35,4 +36,9 @@ pub use rule::{
     ActivityGuard, ProvenanceUrl, Rule, RuleDefinition, RuleGuards, RuleMatcher,
     RuleMatcherDefinition, RuleScope, RuleValidationError,
 };
+pub use scan_coverage::{
+    CoveragePermille, CoveragePermilleError, ScanCoverage, ScanCoverageStatus, ScanIssue,
+    ScanIssueKind,
+};
+pub(crate) use scan_coverage::{MAX_SCAN_ISSUE_OCCURRENCES, MAX_SCAN_ISSUES};
 pub use volume::DiskPressure;

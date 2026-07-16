@@ -455,10 +455,7 @@ impl StoreCoordinator {
         update_scan_finished(&transaction, &prepared)?;
         transaction.commit().map_err(map_write_sql_error)?;
         after_commit()?;
-        self.paths
-            .repair_sqlite_sidecars()
-            .and_then(|()| self.paths.validate_all_existing())
-            .map_err(map_history_database_error)
+        self.revalidate_current_history_guard(guard)
     }
 
     /// Complete one frozen scan operation and reconcile every potentially
@@ -499,6 +496,9 @@ impl StoreCoordinator {
                 Ok(()) => return Ok(()),
                 Err(failure) => failure,
             };
+        if self.revalidate_current_history_guard(guard).is_err() {
+            return Err(HistoryError::new(HistoryErrorKind::OutcomeUnknown));
+        }
         match load_scan_record(&guard.connection, completion.id()) {
             Ok(Some(record)) if record.exactly_matches_completion(completion) => Ok(()),
             Ok(Some(record)) if record.status() == super::history::ScanStatus::Running => {
@@ -519,6 +519,20 @@ impl StoreCoordinator {
         self.record_scan_finished_reconciled_with_guard_and_hook(&mut guard, completion, || {
             Err(HistoryError::new(HistoryErrorKind::DatabaseUnavailable))
         })
+    }
+
+    #[cfg(all(test, unix))]
+    pub(super) fn record_scan_finished_reconciled_with_after_commit_hook_for_test(
+        &self,
+        completion: &ScanCompletionRecord,
+        after_commit: impl FnOnce() -> Result<(), HistoryError>,
+    ) -> Result<(), HistoryError> {
+        let mut guard = self.lock_current_history_connection()?;
+        self.record_scan_finished_reconciled_with_guard_and_hook(
+            &mut guard,
+            completion,
+            after_commit,
+        )
     }
 
     /// Load at most one typed scan observation by its stable ID.

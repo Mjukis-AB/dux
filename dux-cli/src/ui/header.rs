@@ -1,3 +1,4 @@
+use dux_core::{ScanCoverage, ScanCoverageStatus};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -93,9 +94,10 @@ impl Widget for Header<'_> {
                 String::new()
             };
             format!(
-                "{} files, {}{}",
+                "{} files, {}, {}{}",
                 dux_core::format_count(tree.total_files()),
                 dux_core::format_size(tree.total_size()),
+                format_coverage(self.state.scan_coverage()),
                 cached_indicator
             )
         } else {
@@ -132,13 +134,42 @@ impl Widget for Header<'_> {
 
         // Status (right-aligned)
         let status_x = area.x + area.width.saturating_sub(char_count(&status) as u16 + 2);
-        let status_style = if is_scanning {
+        let status_style = if is_scanning
+            || matches!(
+                self.state.scan_coverage().status(),
+                ScanCoverageStatus::LimitedAccess | ScanCoverageStatus::Partial
+            ) {
             Style::default().fg(self.theme.yellow)
         } else {
             Style::default().fg(self.theme.fg_dim)
         };
         buf.set_string(status_x, area.y, &status, status_style);
     }
+}
+
+fn format_coverage(coverage: &ScanCoverage) -> String {
+    let occurrences = coverage
+        .issues()
+        .iter()
+        .map(|issue| u64::from(issue.occurrence_count()))
+        .sum::<u64>();
+    match coverage.status() {
+        ScanCoverageStatus::Unknown => "coverage unknown".to_owned(),
+        ScanCoverageStatus::Complete => "complete coverage".to_owned(),
+        ScanCoverageStatus::LimitedAccess => {
+            format!(
+                "limited access · {occurrences} issue{}",
+                plural(occurrences)
+            )
+        }
+        ScanCoverageStatus::Partial => {
+            format!("partial · {occurrences} issue{}", plural(occurrences))
+        }
+    }
+}
+
+fn plural(count: u64) -> &'static str {
+    if count == 1 { "" } else { "s" }
 }
 
 fn format_cache_age(scan_time: SystemTime, now: SystemTime) -> String {
@@ -196,6 +227,7 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(text.contains("cached 2h ago"), "{text}");
+        assert!(text.contains("coverage unknown"), "{text}");
     }
 
     #[test]
@@ -215,5 +247,49 @@ mod tests {
             .collect::<String>();
         assert!(!text.contains("cached"), "{text}");
         assert!(text.contains("0 files, 0 B"), "{text}");
+    }
+
+    #[test]
+    fn fresh_scan_header_shows_complete_or_partial_coverage() {
+        use dux_core::{ScanConfig, Scanner};
+
+        let complete_root = tempfile::TempDir::new().unwrap();
+        let scanner = Scanner::new(ScanConfig::default());
+        let (rx, handle) = scanner.scan(complete_root.path().to_path_buf());
+        for _ in rx {}
+        let (tree, coverage, _) = handle.join().unwrap().into_parts();
+        let mut complete = AppState::new(complete_root.path().to_path_buf());
+        complete.set_scanned_tree(tree, SystemTime::now(), coverage);
+
+        let partial_root = tempfile::TempDir::new().unwrap();
+        std::fs::write(partial_root.path().join("hidden"), b"payload").unwrap();
+        let scanner = Scanner::new(ScanConfig {
+            max_depth: Some(0),
+            ..ScanConfig::default()
+        });
+        let (rx, handle) = scanner.scan(partial_root.path().to_path_buf());
+        for _ in rx {}
+        let (tree, coverage, _) = handle.join().unwrap().into_parts();
+        let mut partial = AppState::new(partial_root.path().to_path_buf());
+        partial.set_scanned_tree(tree, SystemTime::now(), coverage);
+
+        let render = |state: &AppState| {
+            let area = Rect::new(0, 0, 140, 1);
+            let mut buffer = Buffer::empty(area);
+            Header::new(state, &Theme::default()).render(area, &mut buffer);
+            buffer
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>()
+        };
+        #[cfg(unix)]
+        assert!(render(&complete).contains("complete coverage"));
+        #[cfg(not(unix))]
+        assert!(render(&complete).contains("partial · 1 issue"));
+        #[cfg(unix)]
+        assert!(render(&partial).contains("partial · 1 issue"));
+        #[cfg(not(unix))]
+        assert!(render(&partial).contains("partial · 2 issues"));
     }
 }

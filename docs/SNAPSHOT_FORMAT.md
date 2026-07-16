@@ -306,7 +306,8 @@ This checkpoint does not implement:
 - latest-two-per-root retention or active-review pins;
 - the configurable 2 GiB total-store retention policy;
 - bounded identity-safe scavenging for abandoned temps or provisioning stages;
-- typed coverage/issues and complete hard-link-aware scanner integration;
+- complete hard-link-aware scanner integration (typed coverage/issues already
+  attach atomically to the SQLite summary rather than changing this v1 wire);
 - Explorer paging/indexes and measured 1M/5M-node memory budgets;
 - migration from or hardening of the legacy CLI cache.
 

@@ -10,7 +10,7 @@ use super::views::ComputedViews;
 use dux_core::cleanup::legacy_cli::{
     LegacyCliPermanentDeleteExecutor, LegacyCliPermanentDeletePlan,
 };
-use dux_core::{DiskTree, NodeId, ScanProgress};
+use dux_core::{DiskTree, NodeId, ScanCoverage, ScanProgress};
 
 const MULTI_DELETE_WORKER_LIMIT: usize = 4;
 
@@ -240,6 +240,9 @@ pub struct AppState {
     pub loaded_from_cache: bool,
     /// Original scan time for the current tree, including cache-backed trees
     scan_time: Option<SystemTime>,
+    /// Coverage that qualifies the current tree. Legacy cache files cannot
+    /// carry this value and therefore load as explicitly unknown.
+    scan_coverage: ScanCoverage,
     /// Whether the tree has been modified (e.g. by deletion) and needs cache update
     pub tree_modified: bool,
     /// Receiver for async delete results
@@ -287,6 +290,7 @@ impl AppState {
             session_stats: SessionStats::default(),
             loaded_from_cache: false,
             scan_time: None,
+            scan_coverage: ScanCoverage::unknown(),
             tree_modified: false,
             delete_receiver: None,
             delete_worker: None,
@@ -308,6 +312,7 @@ impl AppState {
         self.install_tree(tree);
         self.loaded_from_cache = false;
         self.scan_time = None;
+        self.scan_coverage = ScanCoverage::unknown();
         self.tree_modified = false;
     }
 
@@ -315,13 +320,20 @@ impl AppState {
         self.install_tree(tree);
         self.loaded_from_cache = true;
         self.scan_time = Some(scan_time);
+        self.scan_coverage = ScanCoverage::unknown();
         self.tree_modified = false;
     }
 
-    pub fn set_scanned_tree(&mut self, tree: DiskTree, scan_time: SystemTime) {
+    pub fn set_scanned_tree(
+        &mut self,
+        tree: DiskTree,
+        scan_time: SystemTime,
+        coverage: ScanCoverage,
+    ) {
         self.install_tree(tree);
         self.loaded_from_cache = false;
         self.scan_time = Some(scan_time);
+        self.scan_coverage = coverage;
         self.tree_modified = false;
     }
 
@@ -341,6 +353,10 @@ impl AppState {
 
     pub fn scan_time(&self) -> Option<SystemTime> {
         self.scan_time
+    }
+
+    pub fn scan_coverage(&self) -> &ScanCoverage {
+        &self.scan_coverage
     }
 
     pub fn prepare_rescan(&mut self) -> bool {
@@ -1457,7 +1473,11 @@ mod tests {
         assert_eq!(state.session_stats.items_deleted, 2);
 
         let replacement_time = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(60);
-        state.set_scanned_tree(DiskTree::new(state.root_path.clone()), replacement_time);
+        state.set_scanned_tree(
+            DiskTree::new(state.root_path.clone()),
+            replacement_time,
+            ScanCoverage::unknown(),
+        );
         assert_eq!(state.mode, AppMode::Browsing);
         assert!(!state.loaded_from_cache);
         assert_eq!(state.scan_time(), Some(replacement_time));

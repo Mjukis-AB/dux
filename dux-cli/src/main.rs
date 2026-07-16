@@ -14,8 +14,9 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use dux_core::{
-    CacheMetadata, CachedScanConfig, CancellationToken, DiskTree, ScanConfig, ScanMessage, Scanner,
-    cache_path_for, get_mtime, is_cache_valid, load_cache, save_cache, spot_check_mtimes,
+    CacheMetadata, CachedScanConfig, CancellationToken, DiskTree, ScanConfig, ScanMessage,
+    ScanOutcome, ScanTermination, Scanner, cache_path_for, get_mtime, is_cache_valid, load_cache,
+    save_cache, spot_check_mtimes,
 };
 use ratatui::{Terminal, backend::CrosstermBackend, style::Style, widgets::Widget};
 
@@ -133,7 +134,7 @@ fn run_app(
     }
 
     // Start scanner only if not loaded from cache
-    let cancel_token = CancellationToken::new();
+    let mut cancel_token = CancellationToken::new();
     let (progress_rx, scan_handle) = if !loaded_from_cache {
         let scanner = Scanner::new(scan_config.clone()).with_cancellation(cancel_token.clone());
         let (rx, handle) = scanner.scan(path.clone());
@@ -144,7 +145,7 @@ fn run_app(
 
     // Store the join handle in an Option so we can take it once
     let mut progress_rx = progress_rx;
-    let mut scan_handle: Option<JoinHandle<DiskTree>> = scan_handle;
+    let mut scan_handle: Option<JoinHandle<ScanOutcome>> = scan_handle;
     let mut cache_save_handle: Option<JoinHandle<dux_core::Result<()>>> = None;
 
     // For cache saving after scan
@@ -188,13 +189,12 @@ fn run_app(
             }
         }
 
-        if scan_completed {
+        if scan_completed || scan_cancelled || scan_disconnected {
             progress_rx = None;
-            let handle = scan_handle.take().ok_or_else(|| {
-                color_eyre::eyre::eyre!("scanner completed without a worker handle")
-            })?;
-            match handle.join() {
-                Ok(tree) => {
+            let join_result = scan_handle.take().map(JoinHandle::join);
+            match join_result {
+                Some(Ok(outcome)) if outcome.termination() == ScanTermination::Completed => {
+                    let (tree, coverage, _) = outcome.into_parts();
                     // Never let an older background writer rename over this newer scan.
                     join_cache_save(cache_save_handle.take())?;
                     let scan_time = SystemTime::now();
@@ -211,27 +211,26 @@ fn run_app(
                             save_cache(&cache_path, &tree_for_cache, &meta)
                         }));
                     }
-                    state.set_scanned_tree(tree, scan_time);
+                    state.set_scanned_tree(tree, scan_time, coverage);
                 }
-                Err(_) => recover_from_scan_failure(
+                Some(Ok(outcome)) if outcome.termination() == ScanTermination::Cancelled => {
+                    state.quit();
+                }
+                Some(Ok(_)) => {
+                    let message = state.error_message.clone().unwrap_or_else(|| {
+                        "Scanner failed before producing a usable tree".to_owned()
+                    });
+                    recover_from_scan_failure(&mut state, message)?;
+                }
+                Some(Err(_)) => recover_from_scan_failure(
                     &mut state,
-                    "Scanner worker panicked after reporting completion".to_string(),
+                    "Scanner worker panicked before producing a usable tree".to_string(),
                 )?,
-            }
-        } else if scan_cancelled {
-            progress_rx = None;
-            if let Some(handle) = scan_handle.take() {
-                let _ = handle.join();
-            }
-        } else if scan_disconnected {
-            progress_rx = None;
-            let join_result = scan_handle.take().map(JoinHandle::join);
-            let message = match join_result {
-                Some(Err(_)) => "Scanner worker panicked before completing".to_string(),
-                Some(Ok(_)) => "Scanner stopped before reporting completion".to_string(),
-                None => "Scanner channel disconnected without a worker handle".to_string(),
+                None => recover_from_scan_failure(
+                    &mut state,
+                    "Scanner terminated without a worker handle".to_string(),
+                )?,
             };
-            recover_from_scan_failure(&mut state, message)?;
         }
 
         // Draw UI
@@ -370,6 +369,7 @@ fn run_app(
                     // A completed older scan must finish writing before a newer scan starts.
                     join_cache_save(cache_save_handle.take())?;
                     if state.prepare_rescan() {
+                        cancel_token = CancellationToken::new();
                         let scanner = Scanner::new(scan_config.clone())
                             .with_cancellation(cancel_token.clone());
                         let (rx, handle) = scanner.scan(path.clone());

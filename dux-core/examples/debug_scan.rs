@@ -72,9 +72,13 @@ fn main() {
         }
     }
 
-    let tree = handle.join().unwrap();
+    let outcome = handle.join().unwrap();
+    let (tree, coverage, termination) = outcome.into_parts();
     println!(
-        "\nFinal: {} nodes, {} total size",
+        "\nFinal: {:?}, {:?} coverage ({} issue records), {} nodes, {} total size",
+        termination,
+        coverage.status(),
+        coverage.issues().len(),
         tree.len(),
         dux_core::format_size(tree.total_size())
     );

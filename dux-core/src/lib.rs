@@ -29,10 +29,11 @@ pub use cache::{
 pub use domain::{
     ActivityGuard, BlockReason, CLEANUP_PLAN_VALIDITY, Candidate, CandidateAction,
     CandidateCategory, CandidateId, CandidateValidationError, CleanupMode, CleanupPlan,
-    CleanupPlanId, CleanupPlanItem, CleanupPlanValidationError, DiskPressure, Evidence,
-    EvidenceKind, LocalizedTextKey, OperationStatus, PlanWarning, ProvenanceUrl, Rule,
-    RuleDefinition, RuleGuards, RuleId, RuleMatcher, RuleMatcherDefinition, RuleRef, RuleRevision,
-    RuleScope, RuleValidationError, SafetyTier, ScanId, StableIdError, VolumeId,
+    CleanupPlanId, CleanupPlanItem, CleanupPlanValidationError, CoveragePermille,
+    CoveragePermilleError, DiskPressure, Evidence, EvidenceKind, LocalizedTextKey, OperationStatus,
+    PlanWarning, ProvenanceUrl, Rule, RuleDefinition, RuleGuards, RuleId, RuleMatcher,
+    RuleMatcherDefinition, RuleRef, RuleRevision, RuleScope, RuleValidationError, SafetyTier,
+    ScanCoverage, ScanCoverageStatus, ScanId, ScanIssue, ScanIssueKind, StableIdError, VolumeId,
 };
 pub use engine::{
     CancelOutcome, CloseOutcome, EngineConfig, EngineConfigError, EngineConfigField,
@@ -50,6 +51,8 @@ pub use projection::{
     classify_artifact, project_build_artifacts_at, project_large_files,
     refresh_artifact_staleness_at,
 };
-pub use scanner::{CancellationToken, ScanConfig, ScanMessage, ScanProgress, Scanner};
+pub use scanner::{
+    CancellationToken, ScanConfig, ScanMessage, ScanOutcome, ScanProgress, ScanTermination, Scanner,
+};
 pub use size::{format_count, format_size, format_size_short, size_percentage};
 pub use tree::{DiskTree, NodeId, NodeKind, TreeNode};

@@ -64,6 +64,14 @@ mod process_liveness;
     not(test),
     allow(
         dead_code,
+        reason = "typed scan coverage integrates with the scan task in a later slice"
+    )
+)]
+mod scan_coverage_history;
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
         unused_imports,
         reason = "immutable snapshots integrate with scan tasks in this milestone"
     )

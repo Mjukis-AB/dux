@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::time::SystemTime;
 
-use crate::domain::ScanId;
+use crate::domain::{ScanCoverage, ScanId};
 
 use super::history::{
     HistoryError, HistoryErrorKind, ScanCompletionRecord, ScanCounts, ScanStatus,
@@ -317,10 +317,16 @@ impl SnapshotRepository {
         &self,
         completed_at: SystemTime,
         counts: ScanCounts,
+        coverage: &ScanCoverage,
         document: &SnapshotDocument,
     ) -> Result<SnapshotReference, SnapshotRepositoryError> {
         if self.access != SnapshotStoreAccess::ReadWrite {
             return Err(repository_error(SnapshotRepositoryErrorKind::ReadOnly));
+        }
+        if coverage.status() == crate::ScanCoverageStatus::Unknown {
+            return Err(repository_error(
+                SnapshotRepositoryErrorKind::ReferenceMismatch,
+            ));
         }
         if counts.directory_count != document.metadata.totals.directory_count
             || counts.file_count != document.metadata.totals.file_count
@@ -345,15 +351,26 @@ impl SnapshotRepository {
                 SnapshotRepositoryErrorKind::ReferenceMismatch,
             ));
         }
+        if coverage
+            .issues()
+            .iter()
+            .filter_map(|issue| issue.path())
+            .any(|path| !path.starts_with(current.root()))
+        {
+            return Err(repository_error(
+                SnapshotRepositoryErrorKind::ReferenceMismatch,
+            ));
+        }
 
         if current.status() == ScanStatus::Succeeded {
             let reference = current
                 .snapshot()
                 .ok_or_else(|| repository_error(SnapshotRepositoryErrorKind::ReferenceMismatch))?;
-            let completion = ScanCompletionRecord::try_succeeded_with_snapshot(
+            let completion = ScanCompletionRecord::try_succeeded_with_snapshot_and_coverage(
                 document.metadata.scan_id.clone(),
                 completed_at,
                 counts,
+                coverage.clone(),
                 reference.clone(),
             )
             .map_err(map_history)?;
@@ -410,10 +427,11 @@ impl SnapshotRepository {
             let reference = current
                 .snapshot()
                 .ok_or_else(|| repository_error(SnapshotRepositoryErrorKind::ReferenceMismatch))?;
-            let completion = ScanCompletionRecord::try_succeeded_with_snapshot(
+            let completion = ScanCompletionRecord::try_succeeded_with_snapshot_and_coverage(
                 document.metadata.scan_id.clone(),
                 completed_at,
                 counts,
+                coverage.clone(),
                 reference.clone(),
             )
             .map_err(map_history)?;
@@ -434,10 +452,11 @@ impl SnapshotRepository {
         }
 
         let published = self.publish_staged(&database_guard, staged, document, expected_digest)?;
-        let completion = ScanCompletionRecord::try_succeeded_with_snapshot(
+        let completion = ScanCompletionRecord::try_succeeded_with_snapshot_and_coverage(
             document.metadata.scan_id.clone(),
             completed_at,
             counts,
+            coverage.clone(),
             published.reference().clone(),
         )
         .map_err(map_history)?;
@@ -493,6 +512,7 @@ mod tests {
 
     use super::*;
     use crate::persistence::history::NewScanRecord;
+    use crate::{CoveragePermille, ScanIssue, ScanIssueKind};
 
     fn document(scan_id: &str, root: &Path) -> SnapshotDocument {
         SnapshotDocument {
@@ -559,6 +579,25 @@ mod tests {
         }
     }
 
+    fn complete_coverage() -> ScanCoverage {
+        ScanCoverage::try_from_terminal(None, Vec::new()).unwrap()
+    }
+
+    fn partial_coverage(root: &Path) -> ScanCoverage {
+        ScanCoverage::try_from_terminal(
+            Some(CoveragePermille::new(700).unwrap()),
+            vec![
+                ScanIssue::try_new(
+                    ScanIssueKind::MetadataError,
+                    Some(root.join("artifact.o")),
+                    2,
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap()
+    }
+
     fn counts_for(document: &SnapshotDocument) -> ScanCounts {
         ScanCounts {
             directory_count: document.metadata.totals.directory_count,
@@ -581,6 +620,7 @@ mod tests {
         let database = temp.path().join("store/dux.sqlite3");
         let root = temp.path().join("scan-root");
         let document = document("scan:snapshot-complete", &root);
+        let coverage = partial_coverage(&root);
         let completed_at = UNIX_EPOCH + Duration::from_millis(1_750_000_002_000);
 
         let reference = {
@@ -596,11 +636,11 @@ mod tests {
                 )
                 .unwrap();
             let reference = repository
-                .complete_scan(completed_at, counts(), &document)
+                .complete_scan(completed_at, counts(), &coverage, &document)
                 .unwrap();
             assert_eq!(
                 repository
-                    .complete_scan(completed_at, counts(), &document)
+                    .complete_scan(completed_at, counts(), &coverage, &document)
                     .unwrap(),
                 reference
             );
@@ -609,11 +649,20 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert_eq!(durable.snapshot(), Some(&reference));
+            assert_eq!(durable.coverage(), &coverage);
             reference
         };
 
-        let (_store, reopened) = open_repository(&database);
+        let (store, reopened) = open_repository(&database);
         assert_eq!(reopened.load(&reference).unwrap(), document);
+        assert_eq!(
+            store
+                .load_scan(&ScanId::new("scan:snapshot-complete").unwrap())
+                .unwrap()
+                .unwrap()
+                .coverage(),
+            &coverage
+        );
     }
 
     #[test]
@@ -648,7 +697,7 @@ mod tests {
             ScanStatus::Running
         );
         let adopted = repository
-            .complete_scan(completed_at, counts(), &document)
+            .complete_scan(completed_at, counts(), &complete_coverage(), &document)
             .unwrap();
         assert_eq!(adopted, orphan_reference);
     }
@@ -685,7 +734,12 @@ mod tests {
 
         assert_eq!(
             repository
-                .complete_scan(completed_at, counts_for(&different), &different)
+                .complete_scan(
+                    completed_at,
+                    counts_for(&different),
+                    &complete_coverage(),
+                    &different,
+                )
                 .unwrap_err()
                 .kind,
             SnapshotRepositoryErrorKind::ReferenceMismatch
@@ -723,6 +777,7 @@ mod tests {
             .complete_scan(
                 UNIX_EPOCH + Duration::from_millis(1_750_000_002_000),
                 counts(),
+                &complete_coverage(),
                 &document,
             )
             .unwrap();
@@ -751,15 +806,51 @@ mod tests {
         let database = temp.path().join("store/dux.sqlite3");
         let root = temp.path().join("scan-root");
         let document = document("scan:snapshot-rejected", &root);
-        let (_store, repository) = open_repository(&database);
+        let (store, repository) = open_repository(&database);
         let completed_at = UNIX_EPOCH + Duration::from_millis(1_750_000_002_000);
 
         assert_eq!(
             repository
-                .complete_scan(completed_at, counts(), &document)
+                .complete_scan(completed_at, counts(), &complete_coverage(), &document)
                 .unwrap_err()
                 .kind,
             SnapshotRepositoryErrorKind::History(HistoryErrorKind::NotFound)
+        );
+        store
+            .record_scan_started(
+                &NewScanRecord::try_new(
+                    document.metadata.scan_id.clone(),
+                    root,
+                    UNIX_EPOCH + Duration::from_millis(1_750_000_000_000),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            repository
+                .complete_scan(completed_at, counts(), &ScanCoverage::unknown(), &document)
+                .unwrap_err()
+                .kind,
+            SnapshotRepositoryErrorKind::ReferenceMismatch
+        );
+        let outside_coverage = ScanCoverage::try_from_terminal(
+            None,
+            vec![
+                ScanIssue::try_new(
+                    ScanIssueKind::MetadataError,
+                    Some(temp.path().join("outside")),
+                    1,
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            repository
+                .complete_scan(completed_at, counts(), &outside_coverage, &document)
+                .unwrap_err()
+                .kind,
+            SnapshotRepositoryErrorKind::ReferenceMismatch
         );
         assert_eq!(
             std::fs::read_dir(database.parent().unwrap().join("snapshots"))

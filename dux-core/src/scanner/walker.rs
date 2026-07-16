@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 use std::fs::Metadata;
+use std::io;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -12,8 +13,13 @@ use crossbeam_channel::{Receiver, Sender};
 use jwalk::WalkDir;
 
 use super::filesystem::{self, FilesystemDisposition};
+use super::issues::{
+    IssueAccumulator, coverage_from_issues, record_io_error, record_issue, record_issue_once,
+};
+use super::outcome::{ScanOutcome, ScanTermination};
 use super::probe_pool::{ProbePool, ProbePoolError, directory_probe_pool};
 use super::progress::{ScanMessage, ScanProgress};
+use crate::ScanIssueKind;
 use crate::tree::{DiskTree, NodeId, NodeKind};
 
 /// Scanner configuration
@@ -40,25 +46,48 @@ impl Default for ScanConfig {
     }
 }
 
-/// Cancellation token for stopping scans
+/// Single-scan cancellation token.
+///
+/// Clones are handles to the same scan. A token must not be reused across
+/// independent or concurrent scanners; create a fresh token for every scan.
 #[derive(Debug, Clone)]
 pub struct CancellationToken {
-    cancelled: Arc<AtomicBool>,
+    state: Arc<AtomicU8>,
 }
+
+const CANCELLATION_ACTIVE: u8 = 0;
+const CANCELLATION_REQUESTED: u8 = 1;
+const CANCELLATION_TERMINAL: u8 = 2;
 
 impl CancellationToken {
     pub fn new() -> Self {
         Self {
-            cancelled: Arc::new(AtomicBool::new(false)),
+            state: Arc::new(AtomicU8::new(CANCELLATION_ACTIVE)),
         }
     }
 
     pub fn cancel(&self) {
-        self.cancelled.store(true, Ordering::SeqCst);
+        let _ = self.state.compare_exchange(
+            CANCELLATION_ACTIVE,
+            CANCELLATION_REQUESTED,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        );
     }
 
     pub fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::SeqCst)
+        self.state.load(Ordering::SeqCst) == CANCELLATION_REQUESTED
+    }
+
+    fn claim_completed(&self) -> bool {
+        self.state
+            .compare_exchange(
+                CANCELLATION_ACTIVE,
+                CANCELLATION_TERMINAL,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            )
+            .is_ok()
     }
 }
 
@@ -166,6 +195,7 @@ fn is_virtual_or_slow_path(path: &std::path::Path, root_path: &std::path::Path) 
 
 /// How long to wait for a metadata() call before assuming the path is on a slow/hung filesystem.
 const METADATA_TIMEOUT: Duration = Duration::from_secs(5);
+const PROGRESS_CHANNEL_CAPACITY: usize = 64;
 
 #[derive(Debug)]
 struct DirectoryProbe {
@@ -189,7 +219,7 @@ fn directory_probe_with_timeout(
     classify_crossed_filesystem: bool,
     filesystem_cache: Arc<Mutex<HashMap<u64, FilesystemDisposition>>>,
     cancellation: &CancellationToken,
-) -> Result<Option<DirectoryProbe>, ProbePoolError> {
+) -> Result<io::Result<DirectoryProbe>, ProbePoolError> {
     directory_probe_with(
         directory_probe_pool(),
         DirectoryProbeRequest {
@@ -210,12 +240,12 @@ fn directory_probe_with<F>(
     timeout: Duration,
     cancellation: &CancellationToken,
     probe_filesystem: F,
-) -> Result<Option<DirectoryProbe>, ProbePoolError>
+) -> Result<io::Result<DirectoryProbe>, ProbePoolError>
 where
     F: FnOnce(&Path) -> FilesystemDisposition + Send + 'static,
 {
     pool.run(timeout, cancellation, move || {
-        let result = std::fs::metadata(&request.path).map(|metadata| {
+        std::fs::metadata(&request.path).map(|metadata| {
             let device = get_device_id(&metadata);
             let filesystem = if request.classify_crossed_filesystem && device != request.root_dev {
                 request
@@ -240,8 +270,7 @@ where
                 metadata,
                 filesystem,
             }
-        });
-        result.ok()
+        })
     })
 }
 
@@ -269,6 +298,7 @@ impl Scanner {
         }
     }
 
+    /// Attach the fresh, single-use token whose clones will control this scan.
     pub fn with_cancellation(mut self, token: CancellationToken) -> Self {
         self.cancel_token = token;
         self
@@ -279,8 +309,8 @@ impl Scanner {
     pub fn scan(
         self,
         root_path: PathBuf,
-    ) -> (Receiver<ScanMessage>, std::thread::JoinHandle<DiskTree>) {
-        let (tx, rx) = crossbeam_channel::unbounded();
+    ) -> (Receiver<ScanMessage>, std::thread::JoinHandle<ScanOutcome>) {
+        let (tx, rx) = crossbeam_channel::bounded(PROGRESS_CHANNEL_CAPACITY);
 
         let handle = std::thread::spawn(move || self.scan_sync(root_path, tx));
 
@@ -288,16 +318,53 @@ impl Scanner {
     }
 
     /// Synchronous scan (runs in thread)
-    fn scan_sync(self, root_path: PathBuf, tx: Sender<ScanMessage>) -> DiskTree {
-        let root_path = root_path.canonicalize().unwrap_or(root_path);
+    fn scan_sync(self, requested_root: PathBuf, tx: Sender<ScanMessage>) -> ScanOutcome {
+        if self.cancel_token.is_cancelled() {
+            let tree = DiskTree::new(absolute_requested_path(requested_root));
+            let mut issues = IssueAccumulator::default();
+            issues.record_once(ScanIssueKind::Cancelled, None);
+            let _ = tx.try_send(ScanMessage::Cancelled);
+            return ScanOutcome::new(tree, issues.into_coverage(), ScanTermination::Cancelled);
+        }
+
+        let root_path = match requested_root.canonicalize() {
+            Ok(path) => path,
+            Err(error) => {
+                let fallback = absolute_requested_path(requested_root);
+                let tree = DiskTree::new(fallback.clone());
+                let mut issues = IssueAccumulator::default();
+                record_root_io_error(&mut issues, fallback, &error);
+                let _ = tx.try_send(ScanMessage::Error("scan root is unavailable".to_owned()));
+                return ScanOutcome::new(tree, issues.into_coverage(), ScanTermination::Failed);
+            }
+        };
         let mut tree = DiskTree::new(root_path.clone());
 
+        let root_metadata = match std::fs::metadata(&root_path) {
+            Ok(metadata) if metadata.is_dir() => metadata,
+            Ok(_) => {
+                let mut issues = IssueAccumulator::default();
+                issues.record(ScanIssueKind::MetadataError, Some(root_path));
+                let _ = tx.try_send(ScanMessage::Error(
+                    "scan root is not a directory".to_owned(),
+                ));
+                return ScanOutcome::new(tree, issues.into_coverage(), ScanTermination::Failed);
+            }
+            Err(error) => {
+                let mut issues = IssueAccumulator::default();
+                record_root_io_error(&mut issues, root_path, &error);
+                let _ = tx.try_send(ScanMessage::Error(
+                    "scan root metadata is unavailable".to_owned(),
+                ));
+                return ScanOutcome::new(tree, issues.into_coverage(), ScanTermination::Failed);
+            }
+        };
+
         // Set root mtime for cache invalidation
-        if let Ok(root_meta) = std::fs::metadata(&root_path)
-            && let Some(mtime) = root_meta
-                .modified()
-                .ok()
-                .and_then(crate::time::cache_serializable_time)
+        if let Some(mtime) = root_metadata
+            .modified()
+            .ok()
+            .and_then(crate::time::cache_serializable_time)
             && let Some(root_node) = tree.get_mut(NodeId::ROOT)
         {
             root_node.mtime = Some(mtime);
@@ -308,12 +375,17 @@ impl Scanner {
         path_to_id.insert(root_path.clone(), NodeId::ROOT);
 
         // Get root device for same-filesystem check
-        let root_dev = std::fs::metadata(&root_path)
-            .map(|m| get_device_id(&m))
-            .unwrap_or(0);
+        let root_dev = get_device_id(&root_metadata);
 
         // Shared progress state
         let shared_progress = Arc::new(SharedProgress::new());
+        let issues = Arc::new(Mutex::new(IssueAccumulator::default()));
+        #[cfg(not(unix))]
+        record_issue(
+            &issues,
+            ScanIssueKind::FilesystemBoundaryUnknown,
+            Some(root_path.clone()),
+        );
         let progress_for_heartbeat = Arc::clone(&shared_progress);
         let tx_for_heartbeat = tx.clone();
         let cancel_for_heartbeat = self.cancel_token.clone();
@@ -325,16 +397,19 @@ impl Scanner {
             {
                 std::thread::sleep(std::time::Duration::from_millis(100));
                 let progress = progress_for_heartbeat.to_scan_progress();
-                let _ = tx_for_heartbeat.send(ScanMessage::Progress(progress));
+                let _ = tx_for_heartbeat.try_send(ScanMessage::Progress(progress));
             }
         });
 
-        let _ = tx.send(ScanMessage::StartedDirectory(root_path.clone()));
+        let _ = tx.try_send(ScanMessage::StartedDirectory(root_path.clone()));
 
         // Configure walker with process_read_dir to skip problematic directories
         let same_fs = self.config.same_filesystem;
+        let follow_symlinks = self.config.follow_symlinks;
+        let max_depth = self.config.max_depth;
         let root_for_filter = root_path.clone();
         let cancel_for_filter = self.cancel_token.clone();
+        let issues_for_filter = Arc::clone(&issues);
         let filesystem_cache = Arc::new(Mutex::new(HashMap::new()));
         let walker = WalkDir::new(&root_path)
             .skip_hidden(false)
@@ -342,24 +417,51 @@ impl Scanner {
             .sort(false) // We'll sort by size later
             .process_read_dir(move |_depth, path, _read_dir_state, children| {
                 if cancel_for_filter.is_cancelled() {
+                    record_issue_once(&issues_for_filter, ScanIssueKind::Cancelled, None);
                     children.clear();
                     return;
                 }
 
                 // Skip children in virtual/slow directories
                 if is_virtual_or_slow_path(path, &root_for_filter) {
+                    record_issue(
+                        &issues_for_filter,
+                        ScanIssueKind::PolicyExcluded,
+                        Some(path.to_path_buf()),
+                    );
                     children.clear();
                     return;
                 }
 
                 children.retain(|entry| {
                     if cancel_for_filter.is_cancelled() {
+                        record_issue_once(&issues_for_filter, ScanIssueKind::Cancelled, None);
                         return false;
                     }
 
                     if let Ok(e) = entry {
+                        let child_path = e.path();
+                        if e.file_type().is_dir()
+                            && max_depth.is_some_and(|maximum| e.depth() >= maximum)
+                        {
+                            // jwalk's max-depth guard prevents opening this
+                            // directory. Record the conservative boundary fact
+                            // here, while it is still visible to its parent.
+                            record_issue(
+                                &issues_for_filter,
+                                ScanIssueKind::DepthLimited,
+                                Some(child_path),
+                            );
+                            return true;
+                        }
+
                         // Check if child path is virtual/slow
-                        if is_virtual_or_slow_path(&e.path(), &root_for_filter) {
+                        if is_virtual_or_slow_path(&child_path, &root_for_filter) {
+                            record_issue(
+                                &issues_for_filter,
+                                ScanIssueKind::PolicyExcluded,
+                                Some(child_path),
+                            );
                             return false;
                         }
 
@@ -369,30 +471,98 @@ impl Scanner {
                         // entry for metadata first can itself block on the mount.
                         if e.file_type().is_dir() {
                             match directory_probe_with_timeout(
-                                &e.path(),
+                                &child_path,
                                 root_dev,
                                 !same_fs,
                                 Arc::clone(&filesystem_cache),
                                 &cancel_for_filter,
                             ) {
-                                Ok(Some(probe)) => {
-                                    return !should_skip_directory(
+                                Ok(Ok(probe)) => {
+                                    let directory_dev = get_device_id(&probe.metadata);
+                                    if should_skip_directory(
                                         same_fs,
                                         root_dev,
-                                        get_device_id(&probe.metadata),
+                                        directory_dev,
                                         probe.filesystem,
-                                    );
+                                    ) {
+                                        let kind = if same_fs {
+                                            ScanIssueKind::DifferentFilesystem
+                                        } else {
+                                            ScanIssueKind::NetworkOrVirtualFilesystem
+                                        };
+                                        record_issue(&issues_for_filter, kind, Some(child_path));
+                                        return false;
+                                    }
+                                    if directory_dev != root_dev
+                                        && probe.filesystem == FilesystemDisposition::Unknown
+                                    {
+                                        record_issue(
+                                            &issues_for_filter,
+                                            ScanIssueKind::FilesystemBoundaryUnknown,
+                                            Some(child_path),
+                                        );
+                                    }
+                                    return true;
                                 }
-                                Ok(None) => return false,
-                                Err(_) => return false,
+                                Ok(Err(error)) => {
+                                    record_io_error(&issues_for_filter, &child_path, &error);
+                                    return false;
+                                }
+                                Err(ProbePoolError::DeadlineExceeded) => {
+                                    record_issue(
+                                        &issues_for_filter,
+                                        ScanIssueKind::TimedOut,
+                                        Some(child_path),
+                                    );
+                                    return false;
+                                }
+                                Err(ProbePoolError::QueueSaturated) => {
+                                    record_issue(
+                                        &issues_for_filter,
+                                        ScanIssueKind::ProbePoolExhausted,
+                                        Some(child_path),
+                                    );
+                                    return false;
+                                }
+                                Err(ProbePoolError::Unavailable) => {
+                                    record_issue(
+                                        &issues_for_filter,
+                                        ScanIssueKind::MetadataError,
+                                        Some(child_path),
+                                    );
+                                    return false;
+                                }
+                                Err(ProbePoolError::Cancelled) => {
+                                    record_issue_once(
+                                        &issues_for_filter,
+                                        ScanIssueKind::Cancelled,
+                                        None,
+                                    );
+                                    return false;
+                                }
                             }
                         } else if same_fs {
                             // For files, use jwalk's cached metadata (already fetched)
                             if let Ok(meta) = e.metadata()
                                 && get_device_id(&meta) != root_dev
                             {
+                                record_issue(
+                                    &issues_for_filter,
+                                    ScanIssueKind::DifferentFilesystem,
+                                    Some(child_path),
+                                );
                                 return false;
                             }
+                        }
+
+                        if !follow_symlinks && e.path_is_symlink() {
+                            // Retain the link node itself while making the
+                            // untraversed target explicit in coverage.
+                            record_issue(
+                                &issues_for_filter,
+                                ScanIssueKind::SymlinkSkipped,
+                                Some(child_path),
+                            );
                         }
                     }
                     true
@@ -414,16 +584,33 @@ impl Scanner {
         for entry_result in walker {
             // Check for cancellation
             if self.cancel_token.is_cancelled() {
+                record_issue_once(&issues, ScanIssueKind::Cancelled, None);
                 shared_progress.done.store(true, Ordering::Relaxed);
                 let _ = heartbeat_handle.join();
-                let _ = tx.send(ScanMessage::Cancelled);
-                return tree;
+                let _ = tx.try_send(ScanMessage::Cancelled);
+                let coverage = coverage_from_issues(&issues);
+                return ScanOutcome::new(tree, coverage, ScanTermination::Cancelled);
             }
 
             let entry = match entry_result {
                 Ok(e) => e,
-                Err(_e) => {
+                Err(error) => {
                     shared_progress.errors.fetch_add(1, Ordering::Relaxed);
+                    if error.loop_ancestor().is_some() {
+                        record_issue(
+                            &issues,
+                            ScanIssueKind::SymlinkSkipped,
+                            error.path().map(Path::to_path_buf),
+                        );
+                    } else if let (Some(path), Some(io_error)) = (error.path(), error.io_error()) {
+                        record_io_error(&issues, path, io_error);
+                    } else {
+                        record_issue(
+                            &issues,
+                            ScanIssueKind::MetadataError,
+                            Some(error.path().unwrap_or(&root_path).to_path_buf()),
+                        );
+                    }
                     continue;
                 }
             };
@@ -438,14 +625,20 @@ impl Scanner {
             // Get metadata
             let metadata = match entry.metadata() {
                 Ok(m) => m,
-                Err(_) => {
+                Err(error) => {
                     shared_progress.errors.fetch_add(1, Ordering::Relaxed);
+                    if let Some(io_error) = error.io_error() {
+                        record_io_error(&issues, &path, io_error);
+                    } else {
+                        record_issue(&issues, ScanIssueKind::MetadataError, Some(path));
+                    }
                     continue;
                 }
             };
 
             // Check filesystem boundary
             if self.config.same_filesystem && get_device_id(&metadata) != root_dev {
+                record_issue(&issues, ScanIssueKind::DifferentFilesystem, Some(path));
                 continue;
             }
 
@@ -465,12 +658,18 @@ impl Scanner {
             // Get parent path and node ID
             let parent_path = match path.parent() {
                 Some(p) => p.to_path_buf(),
-                None => continue,
+                None => {
+                    record_issue(&issues, ScanIssueKind::MetadataError, Some(path));
+                    continue;
+                }
             };
 
             let parent_id = match path_to_id.get(&parent_path) {
                 Some(&id) => id,
-                None => continue, // Parent not in tree (skipped?)
+                None => {
+                    record_issue(&issues, ScanIssueKind::MetadataError, Some(path));
+                    continue;
+                }
             };
 
             // Get name
@@ -514,12 +713,21 @@ impl Scanner {
             }
         }
 
+        if self.cancel_token.is_cancelled() {
+            record_issue_once(&issues, ScanIssueKind::Cancelled, None);
+            shared_progress.done.store(true, Ordering::Relaxed);
+            let _ = heartbeat_handle.join();
+            let _ = tx.try_send(ScanMessage::Cancelled);
+            let coverage = coverage_from_issues(&issues);
+            return ScanOutcome::new(tree, coverage, ScanTermination::Cancelled);
+        }
+
         // Stop heartbeat thread
         shared_progress.done.store(true, Ordering::Relaxed);
         let _ = heartbeat_handle.join();
 
         // Send finalizing message (aggregation can take time on large trees)
-        let _ = tx.send(ScanMessage::Finalizing);
+        let _ = tx.try_send(ScanMessage::Finalizing);
 
         // Aggregate sizes from children to parents
         tree.aggregate_sizes();
@@ -527,13 +735,40 @@ impl Scanner {
         // Sort all children by size
         tree.sort_by_size();
 
+        if !self.cancel_token.claim_completed() {
+            record_issue_once(&issues, ScanIssueKind::Cancelled, None);
+            let _ = tx.try_send(ScanMessage::Cancelled);
+            let coverage = coverage_from_issues(&issues);
+            return ScanOutcome::new(tree, coverage, ScanTermination::Cancelled);
+        }
+
         // Send final progress
         let progress = shared_progress.to_scan_progress();
-        let _ = tx.send(ScanMessage::Progress(progress));
-        let _ = tx.send(ScanMessage::Completed);
+        let _ = tx.try_send(ScanMessage::Progress(progress));
+        let _ = tx.try_send(ScanMessage::Completed);
 
-        tree
+        let coverage = coverage_from_issues(&issues);
+        ScanOutcome::new(tree, coverage, ScanTermination::Completed)
     }
+}
+
+fn absolute_requested_path(requested_root: PathBuf) -> PathBuf {
+    if requested_root.is_absolute() {
+        requested_root
+    } else {
+        std::env::current_dir()
+            .map(|current| current.join(&requested_root))
+            .unwrap_or(requested_root)
+    }
+}
+
+fn record_root_io_error(issues: &mut IssueAccumulator, path: PathBuf, error: &io::Error) {
+    let kind = match error.kind() {
+        io::ErrorKind::PermissionDenied => ScanIssueKind::PermissionDenied,
+        io::ErrorKind::TimedOut => ScanIssueKind::TimedOut,
+        _ => ScanIssueKind::MetadataError,
+    };
+    issues.record(kind, Some(path));
 }
 
 /// Get actual disk usage for a file (accounts for sparse files and block size)
@@ -576,7 +811,26 @@ mod tests {
         // Drain messages
         for _ in rx {}
 
-        let tree = handle.join().unwrap();
+        let outcome = handle.join().unwrap();
+        assert_eq!(outcome.termination(), ScanTermination::Completed);
+        #[cfg(unix)]
+        assert_eq!(
+            outcome.coverage().status(),
+            crate::ScanCoverageStatus::Complete
+        );
+        #[cfg(not(unix))]
+        {
+            assert_eq!(
+                outcome.coverage().status(),
+                crate::ScanCoverageStatus::Partial
+            );
+            assert!(
+                outcome.coverage().issues().iter().any(|issue| {
+                    issue.kind() == crate::ScanIssueKind::FilesystemBoundaryUnknown
+                })
+            );
+        }
+        let (tree, _, _) = outcome.into_parts();
         assert_eq!(tree.len(), 1); // Just root
     }
 
@@ -597,7 +851,26 @@ mod tests {
 
         for _ in rx {}
 
-        let tree = handle.join().unwrap();
+        let outcome = handle.join().unwrap();
+        assert_eq!(outcome.termination(), ScanTermination::Completed);
+        #[cfg(unix)]
+        assert_eq!(
+            outcome.coverage().status(),
+            crate::ScanCoverageStatus::Complete
+        );
+        #[cfg(not(unix))]
+        {
+            assert_eq!(
+                outcome.coverage().status(),
+                crate::ScanCoverageStatus::Partial
+            );
+            assert!(
+                outcome.coverage().issues().iter().any(|issue| {
+                    issue.kind() == crate::ScanIssueKind::FilesystemBoundaryUnknown
+                })
+            );
+        }
+        let (tree, _, _) = outcome.into_parts();
         assert!(tree.len() >= 4); // root + 2 files + subdir + 1 file
         let canonical_root = temp.path().canonicalize().unwrap();
         let file = tree
@@ -755,7 +1028,7 @@ mod tests {
             |_| FilesystemDisposition::Local,
         );
 
-        assert!(matches!(result, Ok(None)));
+        assert!(matches!(result, Ok(Err(_))));
     }
 
     #[test]
@@ -763,6 +1036,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let device = get_device_id(&fs::metadata(temp.path()).unwrap());
         let pool = ProbePool::new(1, 1);
+        let (finished_tx, finished_rx) = crossbeam_channel::bounded(1);
         let request = || DirectoryProbeRequest {
             path: temp.path().to_path_buf(),
             root_dev: device.wrapping_add(1),
@@ -775,8 +1049,9 @@ mod tests {
             request(),
             Duration::from_millis(1),
             &CancellationToken::new(),
-            |_| {
+            move |_| {
                 std::thread::sleep(Duration::from_millis(20));
+                finished_tx.send(()).unwrap();
                 FilesystemDisposition::Local
             },
         );
@@ -785,6 +1060,24 @@ mod tests {
             "unexpected first probe result: {timed_out:?}"
         );
 
+        let circuit_open = directory_probe_with(
+            &pool,
+            request(),
+            Duration::from_secs(1),
+            &CancellationToken::new(),
+            |_| FilesystemDisposition::Local,
+        );
+        assert!(matches!(circuit_open, Err(ProbePoolError::QueueSaturated)));
+        finished_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        let recovery_deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while pool.unavailable_worker_count() != 0 {
+            assert!(
+                std::time::Instant::now() < recovery_deadline,
+                "probe pool did not recover"
+            );
+            std::thread::yield_now();
+        }
+
         let next = directory_probe_with(
             &pool,
             request(),
@@ -792,7 +1085,7 @@ mod tests {
             &CancellationToken::new(),
             |_| FilesystemDisposition::Local,
         );
-        assert!(matches!(next, Ok(Some(_))));
+        assert!(matches!(next, Ok(Ok(_))));
     }
 
     #[test]
@@ -807,7 +1100,7 @@ mod tests {
         let (rx, handle) = scanner.scan(temp.path().to_path_buf());
         for _ in rx {}
 
-        let tree = handle.join().unwrap();
+        let (tree, _, _) = handle.join().unwrap().into_parts();
         assert!(
             tree.find_by_path(&nested_dev.canonicalize().unwrap())
                 .is_some()
@@ -816,6 +1109,163 @@ mod tests {
             tree.find_by_path(&payload.canonicalize().unwrap())
                 .is_some()
         );
+    }
+
+    #[test]
+    fn policy_exclusion_is_reported_without_hiding_normal_components() {
+        let temp = TempDir::new().unwrap();
+        let excluded = temp.path().join(".fseventsd");
+        let normal = temp.path().join("dev");
+        fs::create_dir(&excluded).unwrap();
+        fs::create_dir(&normal).unwrap();
+        fs::write(excluded.join("events"), b"excluded").unwrap();
+        fs::write(normal.join("payload"), b"included").unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let observed_excluded = root.join(".fseventsd");
+        let observed_payload = root.join("dev/payload");
+
+        let scanner = Scanner::new(ScanConfig::default());
+        let (rx, handle) = scanner.scan(temp.path().to_path_buf());
+        for _ in rx {}
+        let outcome = handle.join().unwrap();
+
+        assert_eq!(outcome.termination(), ScanTermination::Completed);
+        assert_eq!(
+            outcome.coverage().status(),
+            crate::ScanCoverageStatus::Partial
+        );
+        assert!(outcome.coverage().issues().iter().any(|issue| {
+            issue.kind() == ScanIssueKind::PolicyExcluded
+                && issue.path() == Some(observed_excluded.as_path())
+        }));
+        assert!(outcome.tree().find_by_path(&observed_excluded).is_none());
+        assert!(outcome.tree().find_by_path(&observed_payload).is_some());
+    }
+
+    #[test]
+    fn max_depth_reports_the_unopened_boundary() {
+        let temp = TempDir::new().unwrap();
+        let boundary = temp.path().join("boundary");
+        let hidden = boundary.join("hidden");
+        fs::create_dir(&boundary).unwrap();
+        fs::write(&hidden, b"payload").unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let observed_boundary = root.join("boundary");
+        let observed_hidden = observed_boundary.join("hidden");
+
+        let scanner = Scanner::new(ScanConfig {
+            max_depth: Some(1),
+            ..ScanConfig::default()
+        });
+        let (rx, handle) = scanner.scan(temp.path().to_path_buf());
+        for _ in rx {}
+        let outcome = handle.join().unwrap();
+
+        assert_eq!(outcome.termination(), ScanTermination::Completed);
+        assert!(outcome.tree().find_by_path(&observed_boundary).is_some());
+        assert!(outcome.tree().find_by_path(&observed_hidden).is_none());
+        assert!(outcome.coverage().issues().iter().any(|issue| {
+            issue.kind() == ScanIssueKind::DepthLimited
+                && issue.path() == Some(observed_boundary.as_path())
+        }));
+    }
+
+    #[test]
+    fn zero_max_depth_reports_the_root_boundary() {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("hidden"), b"payload").unwrap();
+        let root = temp.path().canonicalize().unwrap();
+
+        let scanner = Scanner::new(ScanConfig {
+            max_depth: Some(0),
+            ..ScanConfig::default()
+        });
+        let (rx, handle) = scanner.scan(root.clone());
+        for _ in rx {}
+        let outcome = handle.join().unwrap();
+
+        assert_eq!(outcome.tree().len(), 1);
+        assert!(outcome.coverage().issues().iter().any(|issue| {
+            issue.kind() == ScanIssueKind::DepthLimited && issue.path() == Some(root.as_path())
+        }));
+    }
+
+    #[test]
+    fn missing_root_fails_with_a_root_metadata_issue() {
+        let temp = TempDir::new().unwrap();
+        let missing = temp.path().join("missing");
+        let scanner = Scanner::new(ScanConfig::default());
+        let (rx, handle) = scanner.scan(missing.clone());
+        for _ in rx {}
+        let outcome = handle.join().unwrap();
+
+        assert_eq!(outcome.termination(), ScanTermination::Failed);
+        assert_eq!(outcome.coverage().issues().len(), 1);
+        assert_eq!(
+            outcome.coverage().issues()[0].kind(),
+            ScanIssueKind::MetadataError
+        );
+        assert_eq!(
+            outcome.coverage().issues()[0].path(),
+            Some(missing.as_path())
+        );
+    }
+
+    #[test]
+    fn pre_cancelled_scan_does_not_probe_a_missing_root() {
+        let temp = TempDir::new().unwrap();
+        let missing = temp.path().join("missing");
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        let scanner = Scanner::new(ScanConfig::default()).with_cancellation(cancellation);
+        let (rx, handle) = scanner.scan(missing);
+        for _ in rx {}
+        let outcome = handle.join().unwrap();
+
+        assert_eq!(outcome.termination(), ScanTermination::Cancelled);
+        assert_eq!(outcome.coverage().issues().len(), 1);
+        assert_eq!(
+            outcome.coverage().issues()[0].kind(),
+            ScanIssueKind::Cancelled
+        );
+    }
+
+    #[test]
+    fn scan_completion_does_not_require_a_progress_consumer() {
+        let temp = TempDir::new().unwrap();
+        for index in 0..200 {
+            fs::write(temp.path().join(format!("file-{index}")), b"payload").unwrap();
+        }
+        let scanner = Scanner::new(ScanConfig::default());
+        let (_rx, handle) = scanner.scan(temp.path().to_path_buf());
+        let outcome = handle.join().unwrap();
+
+        assert_eq!(outcome.termination(), ScanTermination::Completed);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn no_follow_symlink_is_retained_and_reported() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().unwrap();
+        let target = temp.path().join("target");
+        let link = temp.path().join("link");
+        fs::write(&target, b"payload").unwrap();
+        symlink(&target, &link).unwrap();
+        let observed_link = temp.path().canonicalize().unwrap().join("link");
+
+        let scanner = Scanner::new(ScanConfig::default());
+        let (rx, handle) = scanner.scan(temp.path().to_path_buf());
+        for _ in rx {}
+        let outcome = handle.join().unwrap();
+
+        let link_id = outcome.tree().find_by_path(&observed_link).unwrap();
+        assert_eq!(outcome.tree().get(link_id).unwrap().kind, NodeKind::Symlink);
+        assert!(outcome.coverage().issues().iter().any(|issue| {
+            issue.kind() == ScanIssueKind::SymlinkSkipped
+                && issue.path() == Some(observed_link.as_path())
+        }));
     }
 
     #[cfg(unix)]
@@ -843,7 +1293,7 @@ mod tests {
         });
         let (rx, handle) = scanner.scan(temp.path().to_path_buf());
         for _ in rx {}
-        let tree = handle.join().unwrap();
+        let (tree, _, _) = handle.join().unwrap().into_parts();
 
         let canonical_root = temp.path().canonicalize().unwrap();
         let linked_dir = canonical_root.join("linked-dir");

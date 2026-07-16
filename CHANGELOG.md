@@ -5,6 +5,24 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Added typed, non-authoritative scan coverage and issue reporting. Scanner
+  workers now return the tree together with an authoritative terminal state and
+  bounded canonical coverage facts; component policy exclusions, depth
+  boundaries, permission/metadata failures, symlinks, mount boundaries,
+  cancellation, probe timeouts, and pool exhaustion can no longer silently
+  become zero-byte subtrees. Progress delivery is bounded and advisory, while a
+  terminal cancellation claim prevents a late request from racing into a false
+  completion. The probe pool distinguishes queued exhaustion from admitted
+  syscall timeouts and fast-fails while every worker is known stuck.
+  SQLite-v2 completion atomically stores the coverage status, optional
+  permille, checked occurrence total, canonical message keys, and losslessly
+  shortened issue paths with the scan summary and snapshot reference; bounded
+  readers reject hostile or contradictory parent/child facts and exact retries
+  revalidate retained storage and schema compatibility. Fresh CLI scans retain
+  and display Complete, Limited access, or Partial coverage; legacy cache trees
+  are explicitly shown as coverage unknown. No cleanup authority is derived
+  from these observations, and real engine/Swift/FFI scan-task wiring remains a
+  later milestone.
 - Added typed raw capacity history on the existing SQLite v2 schema. Public
   opaque volume IDs and pressure labels feed a crate-private persistence layer
   that keeps required ordinary availability separate from optional
@@ -34,8 +52,9 @@ All notable changes to DUX will be documented in this file.
   database reference first. New tests cover version-skew races, collisions,
   missing/corrupt references, restrictive umasks, macOS ACLs, and Windows
   DACL/reparse/link/publication behavior. The format remains non-authoritative;
-  real scan-task wiring, typed coverage, retention, and abandoned-temp
-  maintenance remain separate roadmap work.
+  real scan-task wiring, retention, and abandoned-temp maintenance remain
+  separate roadmap work. Typed coverage now attaches to the SQLite summary
+  without changing the v1 snapshot wire.
 - Added a crate-private cleanup-lock-coupled operation-journal state machine.
   A non-cloneable, non-shareable lease generates and owns the process identity,
   claims pristine plans as generation one, and fences every heartbeat,

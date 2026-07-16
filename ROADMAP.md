@@ -2136,9 +2136,10 @@ Tasks:
   restrictive umask, macOS ACLs, version-skew races, and Windows storage
   compilation/regressions. The normative implementation reference is
   [`docs/SNAPSHOT_FORMAT.md`](docs/SNAPSHOT_FORMAT.md). Scanner-task wiring,
-  last-complete selection, typed coverage/issues, latest-two/2 GiB retention,
-  active-review pins, and abandoned-stage/temp scavenging remain later tasks
-  and are not claimed by this checkpoint.
+  last-complete selection, latest-two/2 GiB retention, active-review pins, and
+  abandoned-stage/temp scavenging remain later tasks and are not claimed by
+  this checkpoint. Typed coverage/issues were attached by the following
+  checkpoint without changing the v1 snapshot wire.
 - [x] Add capacity sample storage. Completed 2026-07-16: the existing SQLite
   schema-v2 `volumes` and `disk_samples` tables now have a typed Rust boundary
   for raw, non-authoritative capacity observations. Public opaque `VolumeId`
@@ -2174,7 +2175,44 @@ Tasks:
   the pressure evaluator. It does not create daily rollups, enforce the 30-day
   raw-history policy, run retention, or persist pressure episodes. Those remain
   later roadmap work.
-- [ ] Add typed scan coverage/issues.
+- [x] Add typed scan coverage/issues. Completed 2026-07-16: bounded public
+  semantic values now distinguish Unknown, Complete, Limited access, and
+  Partial without exposing constructors that let clients manufacture a false
+  measured result. Thirteen explicitly mapped issue kinds carry canonical
+  localization keys, optional accepted-host absolute paths, checked occurrence
+  counts, and a stable ordering independent of Rust discriminants. The
+  scanner's deterministic accumulator retains at most 256 records, reserves an
+  overflow fact, and reports permission/metadata failures, policy exclusions,
+  symlink omissions, depth boundaries, mount decisions, cancellation, probe
+  timeouts, filesystem-boundary uncertainty, and queue/pool exhaustion.
+
+  `ScanOutcome`, rather than progress messages, is the terminal authority and
+  keeps the tree paired with its coverage and Completed/Cancelled/Failed state.
+  The progress channel is bounded, cancellation uses a final one-way terminal
+  claim, native max-depth traversal never opens the excluded boundary, and the
+  fixed probe pool distinguishes queue starvation from a started syscall. A
+  circuit fast-fails repeated probes while every worker is known unavailable
+  after timeout or cancellation and recovers when workers return. Focused
+  regressions cover clean, policy-skipped,
+  depth-limited, no-follow symlink, missing-root, pre-cancelled, stalled-
+  consumer, deterministic-overflow, timeout, and circuit-recovery behavior.
+
+  Schema v2 now atomically commits terminal coverage, optional permille, the
+  checked sum of issue occurrences, canonical message keys, and losslessly
+  shortened root-relative issue paths with counts and an optional immutable
+  snapshot reference. Bounded reads reconstruct and validate the complete
+  report, reject hostile types/lengths/encodings/kinds/keys, duplicate or
+  out-of-root facts, parent/child count mismatches, and terminal-status
+  contradictions. Exact retries and ambiguous commits adopt stored facts only
+  after retained-storage and current-schema revalidation. Process-style reopen,
+  rollback, collision, post-commit ambiguity, unsafe storage, and hostile-row
+  tests cover the boundary.
+
+  Fresh CLI results retain and render the coverage qualifier; legacy v6 cache
+  trees deliberately reload as `coverage unknown` instead of being mislabeled
+  Complete. Scanner-to-engine/Swift/FFI task wiring, paged Explorer issue
+  details, permission onboarding, full logical/allocated/hard-link accounting,
+  and legacy-cache migration remain in their later roadmap items.
 - [ ] Add JSON CLI status/history scaffolding.
 - [ ] Add history retention maintenance.
 - [ ] Add engine integration tests with temporary HOME and database.

@@ -1,5 +1,5 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -14,12 +14,21 @@ const CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(50);
 struct ProbeJob {
     deadline: Instant,
     abandoned: Arc<AtomicBool>,
-    expired_before_start: Arc<AtomicBool>,
+    state: Arc<AtomicU8>,
+    unavailable_workers: Arc<AtomicUsize>,
     task: Box<dyn FnOnce() + Send + 'static>,
 }
 
+const JOB_QUEUED: u8 = 0;
+const JOB_RUNNING: u8 = 1;
+const JOB_TIMED_OUT: u8 = 2;
+const JOB_FINISHED: u8 = 3;
+const JOB_EXPIRED: u8 = 4;
+const JOB_ABANDONED: u8 = 5;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ProbePoolError {
+    QueueSaturated,
     DeadlineExceeded,
     Cancelled,
     Unavailable,
@@ -33,6 +42,8 @@ pub(super) enum ProbePoolError {
 #[derive(Clone)]
 pub(super) struct ProbePool {
     requests: Sender<ProbeJob>,
+    worker_count: usize,
+    unavailable_workers: Arc<AtomicUsize>,
 }
 
 impl ProbePool {
@@ -48,7 +59,11 @@ impl ProbePool {
             spawn_worker(index, receiver.clone());
         }
 
-        Self { requests }
+        Self {
+            requests,
+            worker_count,
+            unavailable_workers: Arc::new(AtomicUsize::new(0)),
+        }
     }
 
     /// Run one job within a single deadline that includes queue admission.
@@ -62,14 +77,19 @@ impl ProbePool {
         T: Send + 'static,
         F: FnOnce() -> T + Send + 'static,
     {
+        if self.unavailable_workers.load(Ordering::Acquire) >= self.worker_count {
+            return Err(ProbePoolError::QueueSaturated);
+        }
+
         let deadline = Instant::now() + timeout;
         let abandoned = Arc::new(AtomicBool::new(false));
-        let expired_before_start = Arc::new(AtomicBool::new(false));
+        let state = Arc::new(AtomicU8::new(JOB_QUEUED));
         let (result_tx, result_rx) = crossbeam_channel::bounded(1);
         let mut pending_job = ProbeJob {
             deadline,
             abandoned: Arc::clone(&abandoned),
-            expired_before_start: Arc::clone(&expired_before_start),
+            state: Arc::clone(&state),
+            unavailable_workers: Arc::clone(&self.unavailable_workers),
             task: Box::new(move || {
                 let _ = result_tx.try_send(task());
             }),
@@ -82,7 +102,7 @@ impl ProbePool {
             }
             let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
                 abandoned.store(true, Ordering::Release);
-                return Err(ProbePoolError::DeadlineExceeded);
+                return Err(ProbePoolError::QueueSaturated);
             };
 
             match self
@@ -101,11 +121,12 @@ impl ProbePool {
         loop {
             if cancellation.is_cancelled() {
                 abandoned.store(true, Ordering::Release);
+                abandon_admitted_job(&state, &self.unavailable_workers);
                 return Err(ProbePoolError::Cancelled);
             }
             let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
                 abandoned.store(true, Ordering::Release);
-                return Err(ProbePoolError::DeadlineExceeded);
+                return Err(classify_deadline(&state, &self.unavailable_workers));
             };
 
             match result_rx.recv_timeout(remaining.min(CANCELLATION_POLL_INTERVAL)) {
@@ -115,7 +136,7 @@ impl ProbePool {
                     // asleep after the end-to-end deadline had already passed.
                     if Instant::now() >= deadline {
                         abandoned.store(true, Ordering::Release);
-                        return Err(ProbePoolError::DeadlineExceeded);
+                        return Err(classify_deadline(&state, &self.unavailable_workers));
                     }
                     return Ok(result);
                 }
@@ -123,10 +144,14 @@ impl ProbePool {
                 Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
                     abandoned.store(true, Ordering::Release);
                     if cancellation.is_cancelled() {
+                        abandon_admitted_job(&state, &self.unavailable_workers);
                         return Err(ProbePoolError::Cancelled);
                     }
-                    if expired_before_start.load(Ordering::Acquire) || Instant::now() >= deadline {
-                        return Err(ProbePoolError::DeadlineExceeded);
+                    if state.load(Ordering::Acquire) == JOB_EXPIRED {
+                        return Err(ProbePoolError::QueueSaturated);
+                    }
+                    if Instant::now() >= deadline {
+                        return Err(classify_deadline(&state, &self.unavailable_workers));
                     }
                     return Err(ProbePoolError::Unavailable);
                 }
@@ -138,6 +163,76 @@ impl ProbePool {
     fn queued_requests(&self) -> usize {
         self.requests.len()
     }
+
+    #[cfg(test)]
+    pub(super) fn unavailable_worker_count(&self) -> usize {
+        self.unavailable_workers.load(Ordering::Acquire)
+    }
+}
+
+fn abandon_admitted_job(state: &AtomicU8, unavailable_workers: &AtomicUsize) {
+    loop {
+        match state.load(Ordering::Acquire) {
+            JOB_QUEUED => {
+                if state
+                    .compare_exchange(JOB_QUEUED, JOB_EXPIRED, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+                {
+                    return;
+                }
+            }
+            JOB_RUNNING => {
+                if state
+                    .compare_exchange(
+                        JOB_RUNNING,
+                        JOB_ABANDONED,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .is_ok()
+                {
+                    unavailable_workers.fetch_add(1, Ordering::AcqRel);
+                    return;
+                }
+            }
+            JOB_TIMED_OUT | JOB_FINISHED | JOB_EXPIRED | JOB_ABANDONED => return,
+            _ => return,
+        }
+    }
+}
+
+fn classify_deadline(state: &AtomicU8, unavailable_workers: &AtomicUsize) -> ProbePoolError {
+    loop {
+        match state.load(Ordering::Acquire) {
+            JOB_QUEUED => {
+                if state
+                    .compare_exchange(JOB_QUEUED, JOB_EXPIRED, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+                {
+                    return ProbePoolError::QueueSaturated;
+                }
+            }
+            JOB_RUNNING => {
+                if state
+                    .compare_exchange(
+                        JOB_RUNNING,
+                        JOB_TIMED_OUT,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .is_ok()
+                {
+                    unavailable_workers.fetch_add(1, Ordering::AcqRel);
+                    return ProbePoolError::DeadlineExceeded;
+                }
+            }
+            JOB_EXPIRED => return ProbePoolError::QueueSaturated,
+            JOB_TIMED_OUT | JOB_FINISHED | JOB_ABANDONED => {
+                return ProbePoolError::DeadlineExceeded;
+            }
+            _ => return ProbePoolError::Unavailable,
+        }
+    }
 }
 
 fn spawn_worker(index: usize, receiver: Receiver<ProbeJob>) {
@@ -147,16 +242,40 @@ fn spawn_worker(index: usize, receiver: Receiver<ProbeJob>) {
             while let Ok(job) = receiver.recv() {
                 // Do not start work whose caller has already timed out in the queue.
                 if job.abandoned.load(Ordering::Acquire) {
+                    let _ = job.state.compare_exchange(
+                        JOB_QUEUED,
+                        JOB_EXPIRED,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    );
                     continue;
                 }
                 if Instant::now() >= job.deadline {
-                    job.expired_before_start.store(true, Ordering::Release);
+                    let _ = job.state.compare_exchange(
+                        JOB_QUEUED,
+                        JOB_EXPIRED,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    );
+                    continue;
+                }
+                if job
+                    .state
+                    .compare_exchange(JOB_QUEUED, JOB_RUNNING, Ordering::AcqRel, Ordering::Acquire)
+                    .is_err()
+                {
                     continue;
                 }
 
                 // A platform wrapper should not panic, but keep one bad job from
                 // permanently reducing the process-wide pool's capacity.
                 let _ = catch_unwind(AssertUnwindSafe(job.task));
+                if matches!(
+                    job.state.swap(JOB_FINISHED, Ordering::AcqRel),
+                    JOB_TIMED_OUT | JOB_ABANDONED
+                ) {
+                    job.unavailable_workers.fetch_sub(1, Ordering::AcqRel);
+                }
             }
         })
         .expect("failed to start filesystem probe worker");
@@ -275,12 +394,9 @@ mod tests {
 
         assert_eq!(
             pool.run(Duration::from_millis(10), &CancellationToken::new(), || 3),
-            Err(ProbePoolError::DeadlineExceeded)
+            Err(ProbePoolError::QueueSaturated)
         );
-        assert_eq!(
-            second.join().unwrap(),
-            Err(ProbePoolError::DeadlineExceeded)
-        );
+        assert_eq!(second.join().unwrap(), Err(ProbePoolError::QueueSaturated));
         let (lock, wake) = &*release;
         *lock.lock().unwrap() = true;
         wake.notify_all();
@@ -388,18 +504,97 @@ mod tests {
     }
 
     #[test]
-    fn late_reply_does_not_block_the_worker() {
-        let pool = ProbePool::new(1, 1);
+    fn timed_out_worker_opens_a_fast_fail_circuit_until_it_returns() {
+        let pool = Arc::new(ProbePool::new(1, 1));
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let (started_tx, started_rx) = crossbeam_channel::bounded(1);
+        let running_pool = Arc::clone(&pool);
+        let running_release = Arc::clone(&release);
+        let running = std::thread::spawn(move || {
+            running_pool.run(
+                Duration::from_millis(20),
+                &CancellationToken::new(),
+                move || {
+                    started_tx.send(()).unwrap();
+                    let (lock, wake) = &*running_release;
+                    let mut released = lock.lock().unwrap();
+                    while !*released {
+                        released = wake.wait(released).unwrap();
+                    }
+                    1
+                },
+            )
+        });
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
         assert_eq!(
-            pool.run(Duration::from_millis(5), &CancellationToken::new(), || {
-                std::thread::sleep(Duration::from_millis(20));
-                1
-            },),
+            running.join().unwrap(),
             Err(ProbePoolError::DeadlineExceeded)
         );
         assert_eq!(
             pool.run(Duration::from_secs(1), &CancellationToken::new(), || 2),
-            Ok(2)
+            Err(ProbePoolError::QueueSaturated)
+        );
+        let (lock, wake) = &*release;
+        *lock.lock().unwrap() = true;
+        wake.notify_all();
+        let recovery_deadline = Instant::now() + Duration::from_secs(1);
+        while pool.unavailable_worker_count() != 0 {
+            assert!(
+                Instant::now() < recovery_deadline,
+                "probe pool did not recover"
+            );
+            std::thread::yield_now();
+        }
+        assert_eq!(
+            pool.run(Duration::from_secs(1), &CancellationToken::new(), || 3),
+            Ok(3)
+        );
+    }
+
+    #[test]
+    fn cancelled_running_worker_opens_circuit_until_it_returns() {
+        let pool = Arc::new(ProbePool::new(1, 1));
+        let cancellation = CancellationToken::new();
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let (started_tx, started_rx) = crossbeam_channel::bounded(1);
+
+        let running_pool = Arc::clone(&pool);
+        let running_cancellation = cancellation.clone();
+        let running_release = Arc::clone(&release);
+        let running = std::thread::spawn(move || {
+            running_pool.run(Duration::from_secs(2), &running_cancellation, move || {
+                started_tx.send(()).unwrap();
+                let (lock, wake) = &*running_release;
+                let mut released = lock.lock().unwrap();
+                while !*released {
+                    released = wake.wait(released).unwrap();
+                }
+                1
+            })
+        });
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        cancellation.cancel();
+        assert_eq!(running.join().unwrap(), Err(ProbePoolError::Cancelled));
+        assert_eq!(pool.unavailable_worker_count(), 1);
+        assert_eq!(
+            pool.run(Duration::from_secs(1), &CancellationToken::new(), || 2),
+            Err(ProbePoolError::QueueSaturated)
+        );
+
+        let (lock, wake) = &*release;
+        *lock.lock().unwrap() = true;
+        wake.notify_all();
+        let recovery_deadline = Instant::now() + Duration::from_secs(1);
+        while pool.unavailable_worker_count() != 0 {
+            assert!(
+                Instant::now() < recovery_deadline,
+                "cancelled probe worker did not recover"
+            );
+            std::thread::yield_now();
+        }
+        assert_eq!(
+            pool.run(Duration::from_secs(1), &CancellationToken::new(), || 3),
+            Ok(3)
         );
     }
 }

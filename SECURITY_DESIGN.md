@@ -249,11 +249,15 @@ still lacks semantic tree validation and authenticity.
 The CLI MUST keep clearly labeling this action as permanent until migration.
 The macOS app MUST NOT call, wrap, or expose the legacy path.
 
-Current scans also lack typed coverage records. They skip access failures and
-some slow or unsuitable filesystems, and CLI flags can opt into symlink or
-cross-filesystem traversal. Unknown filesystem classification preserves scan
-availability rather than proving locality. Current scan totals therefore MUST
-NOT be described as complete, and relaxed scan flags MUST NOT imply cleanup
+Scanner workers now return bounded typed coverage and issue observations with
+their tree and an authoritative terminal state. Access failures, explicit
+policy exclusions, depth limits, symlink omissions, mount boundaries,
+cancellation, probe timeouts, and pool exhaustion qualify totals instead of
+silently becoming zero. Unknown filesystem-boundary classification is itself a
+partial-coverage fact; it preserves scan availability rather than proving
+locality. Fresh CLI results display that status, while the legacy cache cannot
+carry it and therefore reloads as explicitly unknown. Relaxed scan flags and a
+`Complete` observation remain non-authoritative and MUST NOT imply cleanup
 authority.
 
 The legacy binary scan cache is atomic and checksummed, but its checksum detects
@@ -1047,10 +1051,11 @@ shape. Scan coverage likewise records a constrained status separately from its
 optional quantitative estimate: unknown coverage remains `NULL`, never a
 misleading zero, while complete coverage is exactly 1000 permille.
 
-Only typed raw-sample persistence exists today. Daily-rollup creation, the
-30-day raw and one-year rollup deletion policies, pressure episodes, and all
-retention execution remain unimplemented; no current write path may claim that
-the documented retention windows are enforced.
+Typed raw-sample and bounded scan-coverage persistence exist today.
+Daily-rollup creation, the 30-day raw and one-year rollup deletion policies,
+pressure episodes, and all retention execution remain unimplemented; no
+current write path may claim that the documented retention windows are
+enforced.
 
 Clearing DUX data removes only DUX-owned stores after the same storage-root and
 symlink checks. It does not empty system Trash, provider caches, or user data.
@@ -1343,10 +1348,10 @@ incident as a substitute for deterministic local evidence.
 | Legacy CLI deletion | Active arbitrary-descendant permanent path routed through a temporary core adapter; strict-target/volume/identity rechecks only; scanned-byte estimates labeled in CLI | Replace adapter with reviewed plan/approval/executor chain without weakening current checks |
 | Centralized executor | Production executor absent; temporary legacy adapter is containment only | Typed admission, integration with the existing cross-process lease/journal, and live target revalidation required |
 | Engine/FFI task and plan API | Core handle, pre-worker SQLite compatibility handshake, and bounded per-session registry implemented for one read-only formatting batch; app architecture owns one session; UniFFI handle remains smoke-only, with no scan/task/plan DTOs or cleanup authority | FFI version rejection plus bounded scan/task/plan handles and cancellation |
-| SQLite compatibility store | Checksummed v1/v2 migrations with exact per-version fingerprints, lossless bounded path codec, bounded full/lightweight inspection, private atomic provisioning with durable initialization evidence, cross-platform process writer/version-race coverage, durable writer-locked cleanup-lock layout upgrade, private tri-state process-instance liveness evidence, newer-schema read-only transition, rollback/WAL recovery, crate-private typed scan/candidate/planned-cleanup history, and a bounded cleanup-lock-coupled owner-generation journal state machine are implemented; stored paths and policy remain non-authoritative observations | Scan/evaluator/planner lifecycle integration, candidate status lifecycle, Windows host-scope proof, retention, executor integration, and bounded identity-safe abandoned-stage maintenance |
+| SQLite compatibility store | Checksummed v1/v2 migrations with exact per-version fingerprints, lossless bounded path codec, bounded full/lightweight inspection, private atomic provisioning with durable initialization evidence, cross-platform process writer/version-race coverage, durable writer-locked cleanup-lock layout upgrade, private tri-state process-instance liveness evidence, newer-schema read-only transition, rollback/WAL recovery, crate-private typed scan coverage/issues, candidate and planned-cleanup history, and a bounded cleanup-lock-coupled owner-generation journal state machine are implemented; stored paths and policy remain non-authoritative observations | Scan/evaluator/planner lifecycle integration, candidate status lifecycle, Windows host-scope proof, retention, executor integration, and bounded identity-safe abandoned-stage maintenance |
 | Capacity sample persistence | Typed raw SQLite-v2 writes and bounded latest/cursor reads are implemented with opaque stable volume IDs, separate ordinary/important availability, hourly routine suppression, immediate stored-pressure transitions, monotonic metadata, storage/schema-gated exact retry reconciliation, volume/sample interval checks, hostile-row validation, and version-skew fencing; important-only UI observations are not persisted | Swift/engine/FFI/CLI wiring, Rust pressure evaluation/hysteresis, daily rollups, pressure episodes, and retention |
-| Binary full-tree snapshot store | Independent v1 wire has bounded pre-allocation, exact graph/path/aggregate/flag semantics, frozen golden digests, SHA-256 references, private marker-owned storage, unique temps, atomic no-replace publication, read-only final handles, database→snapshot lock ordering, version-skew fencing, and exact file-first scan-summary reconciliation; bytes remain non-authoritative | Real scan-task/Explorer integration, last-complete selection, typed coverage/issues, memory benchmarks, latest-two/2 GiB retention, active-review pins, and abandoned-stage/temp maintenance |
-| Typed scan coverage/issues | Absent; current scanner counts/skips and permits relaxed flags | Required before any scan is described as complete or becomes plan input |
+| Binary full-tree snapshot store | Independent v1 wire has bounded pre-allocation, exact graph/path/aggregate/flag semantics, frozen golden digests, SHA-256 references, private marker-owned storage, unique temps, atomic no-replace publication, read-only final handles, database→snapshot lock ordering, version-skew fencing, and exact file-first scan-summary-plus-coverage reconciliation; bytes remain non-authoritative | Real scan-task/Explorer integration, last-complete selection, memory benchmarks, latest-two/2 GiB retention, active-review pins, and abandoned-stage/temp maintenance |
+| Typed scan coverage/issues | Implemented as bounded semantic domain values, authoritative scanner terminal outcomes, atomic SQLite-v2 summary children, and truthful fresh/legacy-cache CLI labels; observations grant no plan or cleanup authority | Engine/FFI/Swift task integration, paged Explorer details, permission onboarding, and full hard-link-aware scan accounting |
 | Cache semantic/input validation | Atomic write plus CRC/version only; full-file read before bounds | Bounded reads, tree/path semantics, private permissions, retention, and migration |
 | Hard-link accounting and policy | Absent; only non-authoritative path snapshots capture link count | Deduplicated scan accounting and explicit per-mode admission rules |
 | Forbidden destructive-call lint | Implemented with compiler-resolved Rust denial, cross-language repository scan, scoped annotations, self-tests, and CI | Keep exception set exact; remove legacy baseline during executor migration |
