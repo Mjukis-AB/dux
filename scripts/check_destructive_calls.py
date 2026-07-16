@@ -348,6 +348,11 @@ EXCEPTIONS = {
         "rust-process-spawn",
         "test:cross_process_writer_contention_is_bounded",
     ),
+    "test-snapshot-inventory-fd-helper-spawn": ExceptionSpec(
+        "dux-core/src/persistence/snapshot/storage.rs",
+        "rust-process-spawn",
+        "test:inventory_closes_entry_handles_and_rejects_final_usage_change",
+    ),
     "test-snapshot-umask-helper-spawn": ExceptionSpec(
         "dux-core/src/persistence/snapshot/storage.rs",
         "rust-process-spawn",
@@ -370,6 +375,21 @@ EXCEPTIONS = {
         "dux-core/src/persistence/snapshot.rs",
         "rust-filesystem-effect",
         "test:durable_reference_fails_closed_when_snapshot_is_missing_or_corrupt",
+    ),
+    "test-snapshot-inventory-remove-pinned-final": ExceptionSpec(
+        "dux-core/src/persistence/snapshot.rs",
+        "rust-filesystem-effect",
+        "test:retention_inventory_rejects_inconsistent_active_pin_storage",
+    ),
+    "test-snapshot-inventory-oversized-temp": ExceptionSpec(
+        "dux-core/src/persistence/snapshot/storage.rs",
+        "rust-truncation-effect",
+        "test:inventory_rejects_final_larger_than_codec_limit_but_not_temp_by_policy",
+    ),
+    "test-snapshot-inventory-oversized-final": ExceptionSpec(
+        "dux-core/src/persistence/snapshot/storage.rs",
+        "rust-truncation-effect",
+        "test:inventory_rejects_final_larger_than_codec_limit_but_not_temp_by_policy",
     ),
     "test-storage-root-source-swap": ExceptionSpec(
         "dux-core/src/persistence/storage/windows.rs",
@@ -459,10 +479,14 @@ EXCEPTION_PRIMITIVES = {
     "snapshot-windows-current-temp-delete": "SetFileInformationByHandle",
     "snapshot-windows-handle-publish": "SetFileInformationByHandle",
     "test-snapshot-lock-helper-spawn": "Command::new",
+    "test-snapshot-inventory-fd-helper-spawn": "Command::new",
     "test-snapshot-umask-helper-spawn": "Command::new",
     "test-snapshot-macos-parent-acl-command": "Command::new",
     "test-snapshot-macos-final-acl-command": "Command::new",
     "test-snapshot-referenced-file-remove": "remove_file",
+    "test-snapshot-inventory-remove-pinned-final": "remove_file",
+    "test-snapshot-inventory-oversized-temp": "set_len",
+    "test-snapshot-inventory-oversized-final": "set_len",
     "test-storage-root-source-swap": "rename",
     "test-storage-final-root-rename-guard": "rename",
     "test-storage-cleanup-lock-rename-guard": "rename",
@@ -487,8 +511,8 @@ CLIPPY_SUPPRESSION_COUNTS = {
     "dux-core/src/persistence/persistence_tests.rs": 3,
     "dux-core/src/persistence/storage.rs": 1,
     "dux-core/src/persistence/storage/windows.rs": 2,
-    "dux-core/src/persistence/snapshot/storage.rs": 3,
-    "dux-core/src/persistence/snapshot.rs": 1,
+    "dux-core/src/persistence/snapshot/storage.rs": 5,
+    "dux-core/src/persistence/snapshot.rs": 2,
     "dux-cli/tests/inspection_cli.rs": 1,
 }
 

@@ -58,6 +58,7 @@ mod retention;
 mod scan_coverage_history;
 pub(crate) mod snapshot;
 mod snapshot_retention;
+mod snapshot_retention_inventory;
 mod snapshot_review_pin;
 mod status;
 mod storage;

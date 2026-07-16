@@ -27,13 +27,17 @@ use super::history::{
 };
 use super::process_liveness::{ProcessIdentityError, ProcessInstanceId, current_process_instance};
 use super::snapshot_retention::{SnapshotRetentionState, load_snapshot_retention_state};
+use super::snapshot_retention_inventory::{
+    DEFAULT_SNAPSHOT_RETENTION_CAP_BYTES, SnapshotRetentionInventory,
+    build_snapshot_retention_inventory,
+};
 #[cfg(test)]
 use super::snapshot_review_pin::{MAX_ACTIVE_PINS, MAX_EXPIRED_PRUNE};
 use super::snapshot_review_pin::{
     MAX_ACTIVE_PINS_PER_OWNER, PreparedSnapshotReviewPin, SNAPSHOT_REVIEW_PIN_ID_ATTEMPTS,
     SnapshotReviewPinId, SnapshotReviewPinState, insert_snapshot_review_pin_candidates,
-    release_snapshot_review_pin, renew_snapshot_review_pin, snapshot_review_pin_exactly_matches,
-    snapshot_review_pin_state, validate_snapshot_review_pin,
+    inspect_snapshot_review_pin_population, release_snapshot_review_pin, renew_snapshot_review_pin,
+    snapshot_review_pin_exactly_matches, snapshot_review_pin_state, validate_snapshot_review_pin,
 };
 use super::store::{HistoryConnectionGuard, StoreCoordinator};
 
@@ -48,9 +52,10 @@ pub(crate) use codec::{
     decode_snapshot, encode_snapshot, validate_snapshot_document,
 };
 pub(crate) use storage::{
-    RetainedSnapshot, SecureSnapshotStore, SnapshotFileName, SnapshotPublication,
-    SnapshotPublicationLease, SnapshotStorageError, SnapshotStorageErrorKind, SnapshotStoreAccess,
-    StagedSnapshot,
+    RetainedSnapshot, SecureSnapshotStore, SnapshotFileName, SnapshotFileUsage,
+    SnapshotInventoryEntryKind, SnapshotPublication, SnapshotPublicationLease,
+    SnapshotStorageError, SnapshotStorageErrorKind, SnapshotStoreAccess,
+    SnapshotStoreInventoryLease, StagedSnapshot,
 };
 
 const PUBLICATION_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
@@ -352,6 +357,63 @@ impl SnapshotRepository {
             access,
             review,
         })
+    }
+
+    /// Reconcile the complete bounded physical snapshot store with exact
+    /// current-schema history and review-pin facts.
+    ///
+    /// The returned value is metadata-only and cannot authorize a tombstone or
+    /// unlink. Read-only/newer-schema repositories are rejected because this
+    /// is a retention-maintenance prerequisite, not a generic history query.
+    #[allow(
+        dead_code,
+        reason = "retention maintenance consumes the sealed inventory in the next slice"
+    )]
+    pub(crate) fn inspect_retention_inventory(
+        &self,
+        observed_at: SystemTime,
+    ) -> Result<SnapshotRetentionInventory, SnapshotRepositoryError> {
+        self.inspect_retention_inventory_with_cap(observed_at, DEFAULT_SNAPSHOT_RETENTION_CAP_BYTES)
+    }
+
+    fn inspect_retention_inventory_with_cap(
+        &self,
+        observed_at: SystemTime,
+        cap_bytes: u64,
+    ) -> Result<SnapshotRetentionInventory, SnapshotRepositoryError> {
+        if self.access != SnapshotStoreAccess::ReadWrite {
+            return Err(repository_error(SnapshotRepositoryErrorKind::ReadOnly));
+        }
+        let database_guard = self
+            .database
+            .lock_current_history_connection()
+            .map_err(map_history)?;
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| repository_error(SnapshotRepositoryErrorKind::MissingStore))?;
+        // Lock order is permanently database -> snapshot. The inventory lease
+        // captures each exact final/temp identity and usage sequentially while
+        // keeping the store-wide exclusion live until SQLite reconciliation;
+        // every name is reopened and revalidated before handoff.
+        let storage = store
+            .inventory_with_writer_lease(PUBLICATION_LOCK_TIMEOUT)
+            .map_err(map_storage)?;
+        let pins = inspect_snapshot_review_pin_population(&database_guard.connection, observed_at)
+            .map_err(map_history)?;
+        let inventory = build_snapshot_retention_inventory(
+            &database_guard.connection,
+            &storage,
+            pins,
+            observed_at,
+            cap_bytes,
+        )
+        .map_err(map_history)?;
+        storage.revalidate().map_err(map_storage)?;
+        self.database
+            .revalidate_current_history_guard(&database_guard)
+            .map_err(map_history)?;
+        Ok(inventory)
     }
 
     /// Acquire an explicit cross-process lease for one snapshot-backed UI
@@ -1428,6 +1490,368 @@ mod tests {
     }
 
     #[test]
+    fn retention_inventory_reconciles_policy_storage_and_pin_observations() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let root = temp.path().join("scan-root");
+        let base = UNIX_EPOCH + Duration::from_millis(1_750_000_000_000);
+        let (store, repository) = open_repository(&database);
+
+        let mut references = Vec::new();
+        for (ordinal, scan_id) in [
+            "scan:retention-1",
+            "scan:retention-2",
+            "scan:retention-3",
+            "scan:retention-4",
+            "scan:retention-retired",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let completed_at = base + Duration::from_secs((ordinal + 1) as u64 * 10);
+            let document = document(scan_id, &root);
+            references.push(complete_snapshot(
+                &store,
+                &repository,
+                &document,
+                &root,
+                completed_at,
+            ));
+        }
+
+        store.with_connection(|connection| {
+            connection
+                .execute(
+                    "INSERT INTO snapshot_retention_tombstones (
+                         scan_id, record_format_version, scan_status,
+                         completed_at_unix_ms, snapshot_version,
+                         snapshot_relative_path, snapshot_relative_path_encoding,
+                         snapshot_checksum_sha256, committed_at_unix_ms
+                     )
+                     SELECT scan_id, 1, status, completed_at_unix_ms,
+                            snapshot_version, snapshot_relative_path,
+                            snapshot_relative_path_encoding,
+                            snapshot_checksum_sha256, completed_at_unix_ms + 1
+                     FROM scans WHERE scan_id = ?1",
+                    [references[4].scan_id().as_str()],
+                )
+                .unwrap();
+        });
+
+        let orphan_document = document("scan:retention-orphan", &root);
+        drop(
+            repository
+                .publish_orphan_for_test(&orphan_document)
+                .unwrap(),
+        );
+        let temp_document = document("scan:retention-live-temp", &root);
+        let (staged, _) = repository.stage_document(&temp_document).unwrap();
+        staged.abandon();
+
+        let observed_at = base + Duration::from_secs(60);
+        let pinned = repository
+            .acquire_review_lease(&references[0], SnapshotReviewPurpose::Explorer, observed_at)
+            .unwrap();
+        let expires_at = pinned.expires_at().unwrap();
+        let before_rows = store.with_connection(|connection| {
+            (
+                connection
+                    .query_row("SELECT count(*) FROM scans", [], |row| row.get::<_, i64>(0))
+                    .unwrap(),
+                connection
+                    .query_row("SELECT count(*) FROM snapshot_review_pins", [], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                    .unwrap(),
+                connection
+                    .query_row(
+                        "SELECT count(*) FROM snapshot_retention_tombstones",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .unwrap(),
+            )
+        });
+
+        let inventory = repository
+            .inspect_retention_inventory_with_cap(observed_at, 0)
+            .unwrap();
+        assert_eq!(inventory.entries.len(), 5);
+        assert_eq!(inventory.orphan_finals.len(), 1);
+        assert_eq!(inventory.temporary_files.len(), 1);
+        assert!(inventory.temporary_files[0].liveness_unknown);
+        assert!(inventory.accounting_unstable);
+        assert!(inventory.non_evictable_over_cap);
+        assert_eq!(inventory.totals.active_pin_rows, 1);
+        assert_eq!(inventory.totals.expired_pin_rows, 0);
+        assert_eq!(
+            inventory
+                .entries
+                .iter()
+                .find(|entry| entry.scan_id == references[3].scan_id().clone())
+                .unwrap()
+                .latest_rank,
+            Some(1)
+        );
+        assert_eq!(
+            inventory
+                .entries
+                .iter()
+                .find(|entry| entry.scan_id == references[2].scan_id().clone())
+                .unwrap()
+                .latest_rank,
+            Some(2)
+        );
+        let oldest = inventory
+            .entries
+            .iter()
+            .find(|entry| entry.scan_id == references[0].scan_id().clone())
+            .unwrap();
+        assert_eq!(oldest.latest_rank, None);
+        assert_eq!(oldest.pins.active, 1);
+        assert!(oldest.is_policy_protected());
+        assert_eq!(
+            inventory
+                .eviction_observations
+                .iter()
+                .map(|candidate| candidate.scan_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![references[1].scan_id().as_str()]
+        );
+        assert!(matches!(
+            inventory
+                .entries
+                .iter()
+                .find(|entry| entry.scan_id == references[4].scan_id().clone())
+                .unwrap()
+                .logical_state,
+            super::super::snapshot_retention_inventory::SnapshotRetentionLogicalState::Tombstoned { .. }
+        ));
+        assert!(inventory.totals.tombstoned_residual.charged_bytes > 0);
+        assert!(inventory.totals.orphan.charged_bytes > 0);
+        assert!(inventory.totals.temporary_unknown_liveness.charged_bytes > 0);
+        assert_eq!(
+            inventory.totals.store_total.charged_bytes,
+            inventory.totals.controls.charged_bytes
+                + inventory.totals.available.charged_bytes
+                + inventory.totals.tombstoned_residual.charged_bytes
+                + inventory.totals.orphan.charged_bytes
+                + inventory.totals.temporary_unknown_liveness.charged_bytes
+        );
+
+        let after_rows = store.with_connection(|connection| {
+            (
+                connection
+                    .query_row("SELECT count(*) FROM scans", [], |row| row.get::<_, i64>(0))
+                    .unwrap(),
+                connection
+                    .query_row("SELECT count(*) FROM snapshot_review_pins", [], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                    .unwrap(),
+                connection
+                    .query_row(
+                        "SELECT count(*) FROM snapshot_retention_tombstones",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .unwrap(),
+            )
+        });
+        assert_eq!(after_rows, before_rows, "inventory must not mutate history");
+
+        let at_expiry = repository
+            .inspect_retention_inventory_with_cap(expires_at, u64::MAX)
+            .unwrap();
+        assert_eq!(at_expiry.totals.active_pin_rows, 0);
+        assert_eq!(at_expiry.totals.expired_pin_rows, 1);
+        assert_eq!(
+            review_pin_count(&store),
+            1,
+            "read-only inventory must not prune expired pins"
+        );
+        assert_eq!(
+            at_expiry
+                .eviction_observations
+                .iter()
+                .map(|candidate| candidate.scan_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                references[0].scan_id().as_str(),
+                references[1].scan_id().as_str()
+            ]
+        );
+        pinned.release().unwrap();
+
+        let read_only =
+            SnapshotRepository::open(Arc::clone(&store), SnapshotStoreAccess::ReadOnly).unwrap();
+        assert_eq!(
+            read_only
+                .inspect_retention_inventory(observed_at)
+                .unwrap_err()
+                .kind,
+            SnapshotRepositoryErrorKind::ReadOnly
+        );
+        drop(read_only);
+        drop(repository);
+        drop(store);
+        let (reopened_store, reopened_repository) = open_repository(&database);
+        let reopened_inventory = reopened_repository
+            .inspect_retention_inventory(expires_at + Duration::from_millis(1))
+            .unwrap();
+        assert_eq!(reopened_inventory.entries.len(), 5);
+        assert_eq!(reopened_inventory.orphan_finals.len(), 1);
+        assert_eq!(reopened_inventory.temporary_files.len(), 1);
+        drop(reopened_repository);
+        drop(reopened_store);
+    }
+
+    #[test]
+    fn retention_inventory_rejects_duplicate_history_for_one_physical_name() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let root = temp.path().join("scan-root");
+        let completed_at = UNIX_EPOCH + Duration::from_millis(1_750_000_002_000);
+        let (store, repository) = open_repository(&database);
+        let document = document("scan:retention-duplicate-source", &root);
+        let reference = complete_snapshot(&store, &repository, &document, &root, completed_at);
+        store.with_connection(|connection| {
+            connection
+                .execute(
+                    "INSERT INTO scans (
+                         scan_id, volume_id, root_path, root_path_encoding,
+                         started_at_unix_ms, completed_at_unix_ms, status,
+                         snapshot_version, snapshot_relative_path,
+                         snapshot_relative_path_encoding, snapshot_checksum_sha256,
+                         directory_count, file_count, logical_bytes, allocated_bytes,
+                         coverage_status, coverage_permille, issue_count
+                     )
+                     SELECT 'scan:retention-duplicate-hostile', volume_id,
+                            root_path, root_path_encoding, started_at_unix_ms,
+                            completed_at_unix_ms, status, snapshot_version,
+                            snapshot_relative_path, snapshot_relative_path_encoding,
+                            snapshot_checksum_sha256, directory_count, file_count,
+                            logical_bytes, allocated_bytes, coverage_status,
+                            coverage_permille, issue_count
+                     FROM scans WHERE scan_id = ?1",
+                    [reference.scan_id().as_str()],
+                )
+                .unwrap();
+        });
+        assert_eq!(
+            repository
+                .inspect_retention_inventory(completed_at + Duration::from_secs(1))
+                .unwrap_err()
+                .kind,
+            SnapshotRepositoryErrorKind::History(HistoryErrorKind::CorruptData)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retention_inventory_rejects_lexically_aliased_stored_roots() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let root = temp.path().join("scan-root");
+        let completed_at = UNIX_EPOCH + Duration::from_millis(1_750_000_002_000);
+        let (store, repository) = open_repository(&database);
+        let document = document("scan:retention-aliased-root", &root);
+        let reference = complete_snapshot(&store, &repository, &document, &root, completed_at);
+        for hostile_root in [
+            b"/alias/./root".as_slice(),
+            b"/alias//root",
+            b"/alias/root/",
+        ] {
+            store.with_connection(|connection| {
+                connection
+                    .execute(
+                        "UPDATE scans
+                         SET root_path = ?1, root_path_encoding = 1
+                         WHERE scan_id = ?2",
+                        rusqlite::params![hostile_root, reference.scan_id().as_str()],
+                    )
+                    .unwrap();
+            });
+            assert_eq!(
+                repository
+                    .inspect_retention_inventory(completed_at + Duration::from_secs(1))
+                    .unwrap_err()
+                    .kind,
+                SnapshotRepositoryErrorKind::History(HistoryErrorKind::CorruptData)
+            );
+        }
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn retention_inventory_rejects_inconsistent_active_pin_storage() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("missing/dux.sqlite3");
+        let root = temp.path().join("missing/scan-root");
+        let completed_at = UNIX_EPOCH + Duration::from_millis(1_750_000_002_000);
+        let observed_at = completed_at + Duration::from_secs(1);
+        let (store, repository) = open_repository(&database);
+        let missing_document = document("scan:retention-active-missing", &root);
+        let reference =
+            complete_snapshot(&store, &repository, &missing_document, &root, completed_at);
+        let lease = repository
+            .acquire_review_lease(&reference, SnapshotReviewPurpose::Explorer, observed_at)
+            .unwrap();
+        // DUX-DESTRUCTIVE: allow=test-snapshot-inventory-remove-pinned-final -- remove only this TempDir-owned published fixture to prove an active pin cannot hide a missing physical final
+        std::fs::remove_file(
+            database
+                .parent()
+                .unwrap()
+                .join("snapshots")
+                .join(reference.file_name().as_str()),
+        )
+        .unwrap();
+        assert_eq!(
+            repository
+                .inspect_retention_inventory(observed_at)
+                .unwrap_err()
+                .kind,
+            SnapshotRepositoryErrorKind::History(HistoryErrorKind::CorruptData)
+        );
+        lease.release().unwrap();
+
+        let database = temp.path().join("tombstoned/dux.sqlite3");
+        let root = temp.path().join("tombstoned/scan-root");
+        let (store, repository) = open_repository(&database);
+        let document = document("scan:retention-active-tombstone", &root);
+        let reference = complete_snapshot(&store, &repository, &document, &root, completed_at);
+        let lease = repository
+            .acquire_review_lease(&reference, SnapshotReviewPurpose::Explorer, observed_at)
+            .unwrap();
+        store.with_connection(|connection| {
+            connection
+                .execute(
+                    "INSERT INTO snapshot_retention_tombstones (
+                         scan_id, record_format_version, scan_status,
+                         completed_at_unix_ms, snapshot_version,
+                         snapshot_relative_path, snapshot_relative_path_encoding,
+                         snapshot_checksum_sha256, committed_at_unix_ms
+                     )
+                     SELECT scan_id, 1, status, completed_at_unix_ms,
+                            snapshot_version, snapshot_relative_path,
+                            snapshot_relative_path_encoding,
+                            snapshot_checksum_sha256, completed_at_unix_ms + 1
+                     FROM scans WHERE scan_id = ?1",
+                    [reference.scan_id().as_str()],
+                )
+                .unwrap();
+        });
+        assert_eq!(
+            repository
+                .inspect_retention_inventory(observed_at)
+                .unwrap_err()
+                .kind,
+            SnapshotRepositoryErrorKind::History(HistoryErrorKind::CorruptData)
+        );
+        lease.release().unwrap();
+    }
+
+    #[test]
     fn review_lease_is_explicit_renewable_and_drop_expires_without_writing() {
         let temp = TempDir::new().unwrap();
         let database = temp.path().join("store/dux.sqlite3");
@@ -1904,13 +2328,20 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let database = temp.path().join("store/dux.sqlite3");
         let root = temp.path().join("scan-root");
-        let document = document("scan:snapshot-review-schema-fence", &root);
+        let review_document = document("scan:snapshot-review-schema-fence", &root);
         let completed_at = UNIX_EPOCH + Duration::from_millis(1_750_000_002_000);
         let observed_at = completed_at + Duration::from_secs(1);
         let (store, repository) = open_repository(&database);
-        let reference = complete_snapshot(&store, &repository, &document, &root, completed_at);
+        let reference =
+            complete_snapshot(&store, &repository, &review_document, &root, completed_at);
         let mut lease = repository
             .acquire_review_lease(&reference, SnapshotReviewPurpose::Explorer, observed_at)
+            .unwrap();
+        let held_publication = repository
+            .publish_orphan_for_test(&document(
+                "scan:snapshot-review-schema-fence-orphan",
+                &temp.path().join("orphan-root"),
+            ))
             .unwrap();
 
         let current = super::super::status::DATABASE_SCHEMA_VERSION;
@@ -1931,6 +2362,17 @@ mod tests {
 
         let incompatible =
             SnapshotRepositoryErrorKind::History(HistoryErrorKind::IncompatibleSchema);
+        // The current-schema database fence is acquired before snapshot-store
+        // inventory. Even though the publication holds that later lock, the
+        // newer schema wins as IncompatibleSchema rather than Busy.
+        assert_eq!(
+            repository
+                .inspect_retention_inventory(observed_at)
+                .unwrap_err()
+                .kind,
+            incompatible
+        );
+        drop(held_publication);
         assert_eq!(
             repository
                 .acquire_review_lease(&reference, SnapshotReviewPurpose::Explorer, observed_at)

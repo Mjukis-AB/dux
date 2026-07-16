@@ -5,6 +5,20 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Added schema v7's read-only snapshot-retention inventory prerequisite. The
+  checksummed migration adds a partial `scans_by_snapshot_path` index over the
+  lossless snapshot-name encoding, bytes, and scan ID only for rows that carry
+  a snapshot reference. A single database-before-snapshot locked pass now
+  sequentially opens and strictly reconciles the bounded physical store,
+  closes each observed entry handle before the next, reports exact
+  logical/allocated/conservative charged bytes, assigns latest-two ranks per
+  exact encoded root, validates active/expired review pins without pruning,
+  and separates eligible observations from tombstoned residuals, orphans,
+  controls, and unknown-liveness temps. Exact schema-object inventories,
+  canonical fingerprints, a populated v6 upgrade, hostile-row/storage, cap,
+  ordering, no-mutation, and cross-platform handle-accounting regressions cover
+  the slice. This adds no tombstone, unlink, temp-scavenging, or cleanup
+  authority.
 - Added schema-v6 cross-process snapshot review leases. Exact succeeded
   snapshot identities can now be pinned explicitly for Explorer or cleanup
   review without treating durable candidate/session state as proof that a UI

@@ -948,6 +948,24 @@ pub(super) fn run_bounded_snapshot_pin_query<T>(
     run_bounded_query_with_limits(connection, 50_000, Duration::from_secs(1), query)
 }
 
+/// A fixed but item-scaled budget for indexed reconciliation of the bounded
+/// physical snapshot-store inventory. This does not make historical scan
+/// enumeration bounded; callers must issue at most one indexed lookup for each
+/// already-bounded physical entry.
+pub(super) fn run_bounded_snapshot_retention_inventory_query<T>(
+    connection: &Connection,
+    physical_final_count: usize,
+    query: impl FnOnce() -> Result<T, HistoryError>,
+) -> Result<T, HistoryError> {
+    if physical_final_count > 2_048 {
+        return Err(HistoryError::new(HistoryErrorKind::QueryLimitExceeded));
+    }
+    let physical_final_count = u64::try_from(physical_final_count)
+        .map_err(|_| HistoryError::new(HistoryErrorKind::QueryLimitExceeded))?;
+    let maximum_callbacks = 10_000_u64.saturating_add(250 * physical_final_count);
+    run_bounded_query_with_limits(connection, maximum_callbacks, Duration::from_secs(5), query)
+}
+
 fn run_bounded_recent_query<T>(
     connection: &Connection,
     limit: usize,

@@ -21,7 +21,8 @@ use super::migrations::{
     apply_test_upgrade_chain, inspect_schema, inspect_schema_with_test_budget,
     panic_with_test_budget, schema_fingerprint, test_migrations, test_v1_schema_fingerprint,
     test_v2_schema_fingerprint, test_v3_schema_fingerprint, test_v4_schema_fingerprint,
-    test_v5_schema_fingerprint, test_v6_schema_fingerprint, validate_compiled_migrations,
+    test_v5_schema_fingerprint, test_v6_schema_fingerprint, test_v7_schema_fingerprint,
+    validate_compiled_migrations,
 };
 use super::process_liveness::current_process_instance;
 #[cfg(unix)]
@@ -444,6 +445,32 @@ fn fresh_v5_schema() -> Connection {
     connection
 }
 
+fn fresh_v6_schema() -> Connection {
+    let connection = Connection::open_in_memory().unwrap();
+    for migration in &test_migrations()[..6] {
+        connection.execute_batch(migration.sql).unwrap();
+        connection
+            .execute(
+                "INSERT INTO schema_migrations (
+                     version, name, checksum_sha256, applied_at_unix_ms
+                 ) VALUES (?1, ?2, ?3, 1)",
+                params![
+                    i64::from(migration.version),
+                    migration.name,
+                    migration.checksum_sha256.as_slice(),
+                ],
+            )
+            .unwrap();
+        connection
+            .pragma_update(None, "application_id", DUX_APPLICATION_ID)
+            .unwrap();
+        connection
+            .pragma_update(None, "user_version", migration.version)
+            .unwrap();
+    }
+    connection
+}
+
 fn fresh_current_schema() -> Connection {
     let connection = Connection::open_in_memory().unwrap();
     for migration in test_migrations() {
@@ -713,12 +740,108 @@ fn embedded_v5_schema_fingerprint_matches_complete_chain() {
 
 #[test]
 fn embedded_v6_schema_fingerprint_matches_complete_chain() {
-    let connection = fresh_current_schema();
+    let connection = fresh_v6_schema();
     assert_eq!(
         schema_fingerprint(&connection).unwrap(),
         test_v6_schema_fingerprint()
     );
+    assert_eq!(
+        inspect_schema(&connection).unwrap(),
+        SchemaState::Older { found: 6 }
+    );
+}
+
+#[test]
+fn embedded_v7_schema_fingerprint_matches_complete_chain() {
+    let connection = fresh_current_schema();
+    assert_eq!(
+        schema_fingerprint(&connection).unwrap(),
+        test_v7_schema_fingerprint()
+    );
     assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
+}
+
+#[test]
+fn populated_v6_upgrade_adds_snapshot_path_lookup_without_rewriting_scans() {
+    let mut connection = fresh_v6_schema();
+    connection
+        .pragma_update(None, "foreign_keys", true)
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO scans (
+                 scan_id, root_path, root_path_encoding, started_at_unix_ms,
+                 completed_at_unix_ms, status, snapshot_version,
+                 snapshot_relative_path, snapshot_relative_path_encoding,
+                 snapshot_checksum_sha256, coverage_status, coverage_permille
+             ) VALUES (
+                 'scan:v6-snapshot', ?1, 1, 10, 20, 'succeeded', 1,
+                 ?2, 1, ?3, 'complete', 1000
+             )",
+            params![
+                b"/v6-snapshot".as_slice(),
+                b"snapshot-v6.duxsnapshot".as_slice(),
+                [0x6a_u8; 32].as_slice(),
+            ],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO scans (
+                 scan_id, root_path, root_path_encoding, started_at_unix_ms, status
+             ) VALUES ('scan:v6-no-snapshot', ?1, 1, 30, 'failed')",
+            [b"/v6-no-snapshot".as_slice()],
+        )
+        .unwrap();
+
+    apply_pending_migrations(&mut connection, 40).unwrap();
+
+    assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
+    assert_eq!(
+        schema_fingerprint(&connection).unwrap(),
+        test_v7_schema_fingerprint()
+    );
+    let scans: Vec<(String, Option<Vec<u8>>)> = connection
+        .prepare("SELECT scan_id, snapshot_relative_path FROM scans ORDER BY scan_id")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        scans,
+        [
+            ("scan:v6-no-snapshot".to_owned(), None),
+            (
+                "scan:v6-snapshot".to_owned(),
+                Some(b"snapshot-v6.duxsnapshot".to_vec())
+            ),
+        ]
+    );
+    let index_columns: Vec<String> = connection
+        .prepare("SELECT name FROM pragma_index_info('scans_by_snapshot_path') ORDER BY seqno")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        index_columns,
+        [
+            "snapshot_relative_path_encoding",
+            "snapshot_relative_path",
+            "scan_id"
+        ]
+    );
+    let is_partial: i64 = connection
+        .query_row(
+            "SELECT partial FROM pragma_index_list('scans')
+             WHERE name = 'scans_by_snapshot_path'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(is_partial, 1);
 }
 
 #[test]
@@ -1336,7 +1459,7 @@ fn populated_v1_upgrade_preserves_legacy_candidate_and_cleanup_observations() {
     assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
     assert_eq!(
         schema_fingerprint(&connection).unwrap(),
-        test_v6_schema_fingerprint()
+        test_v7_schema_fingerprint()
     );
     let candidate: (i64, Option<String>, Option<String>) = connection
         .query_row(
@@ -1390,7 +1513,7 @@ fn populated_v1_upgrade_preserves_legacy_candidate_and_cleanup_observations() {
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
-    assert_eq!(versions, [1, 2, 3, 4, 5, 6]);
+    assert_eq!(versions, [1, 2, 3, 4, 5, 6, 7]);
 }
 
 #[test]

@@ -754,8 +754,8 @@ Do not store full millions-node trees in SQLite initially. Continue using versio
 - Daily rolled-up samples: one year.
 - Cleanup history: retained until user clears it.
 - AI insights: default 30 days, user-clearable, and regenerated on input digest change.
-- Full snapshots: latest two complete snapshots per root plus any snapshot referenced by an active cleanup review.
-- The snapshots directory has a total size cap (default 2 GiB, configurable); evict oldest first. Settings shows DUX’s own disk footprint with a clear-data action — a disk-pressure tool must not be a storage thief itself.
+- Full snapshots: latest two physically present, logically available succeeded snapshots per exact losslessly encoded root, plus any snapshot protected by an explicit active Explorer or cleanup-review lease. Scan coverage remains visible metadata; it does not silently remove a succeeded snapshot from this retention set.
+- The snapshots directory has a total size cap (default 2 GiB, configurable); charge the conservative maximum of logical length and filesystem allocation for every final, recognized temporary, and control file, while reporting both values separately. Directory metadata overhead is excluded. Evict eligible referenced snapshots oldest first; unknown-liveness temps, tombstoned residuals, and physical orphans are separate maintenance debt, never normal victims. Settings shows DUX’s own disk footprint with a clear-data action — a disk-pressure tool must not be a storage thief itself.
 - Never delete history during cleanup without a separate settings action.
 
 ### 11.3 Multi-process access
@@ -2579,11 +2579,47 @@ Tasks:
     app/FFI owner drops it; this is an explicit lifecycle gate before unlink.
 
     This checkpoint intentionally provides no production tombstone writer.
-    Latest-two-per-exact-root selection, the configurable
-    2-GiB accounting/cap, retained-handle unlink and directory flush,
-    post-commit orphan reconciliation, live temp leases, bounded marker-owned
-    temp/stage scavenging, app/FFI lease ownership and scheduling, and explicit
-    clear-data actions remain required before snapshot retention can run.
+
+  - Snapshot retention-inventory prerequisite completed 2026-07-16: schema v7
+    adds a partial exact lookup index over losslessly encoded snapshot names,
+    and the sealed repository now reconciles one bounded physical inventory
+    under the permanent database-before-snapshot lock order. One directory
+    pass sequentially opens every final and recognized temp, captures its
+    identity and usage, closes it, then sequentially reopens and revalidates
+    each name before handoff. This avoids making the 2,048-entry bound a file-
+    descriptor requirement while it enforces the
+    2,048-entry/256-KiB-name/64-temp/250-ms bounds, and measures logical plus
+    platform allocation bytes from validated handles on Unix and Windows. The
+    cap charges `max(logical, allocated)` and separately reports controls,
+    available/protected/eligible snapshots, tombstoned residuals, physical
+    orphans, and unknown-liveness temps with checked totals.
+
+    Each physical final receives at most one indexed, strictly typed history
+    match; exact raw root bytes define groups without filesystem
+    canonicalization. Physically present, logically available succeeded
+    snapshots receive deterministic latest-two ranks per exact root, and
+    unpinned older observations are ordered oldest-first. The complete bounded
+    pin population is decoded without pruning; expiry equality is inactive,
+    while active-pin/missing-file and active-pin/tombstone contradictions fail
+    closed. Duplicate references, hostile rows, oversize files, accounting
+    overflow, unsafe objects, and bounded lock/query failures likewise produce
+    no eligibility evidence. Recognized temps are point-in-time accounting
+    only because an active stage can continue growing outside the writer lock.
+    The metadata report exposes no tombstone, unlink, or cleanup authority, and
+    focused restart-style, corruption, no-mutation, cap, orphan/temp, ranking,
+    pin, expiry, storage-bound, Unix accounting, and Windows handle-accounting
+    regressions cover the slice.
+
+    Immutable history can outgrow the bounded physical directory, so this
+    physical-driven inventory intentionally cannot enumerate every missing old
+    reference. Exact loads still report a requested missing snapshot; any full
+    diagnostic history pager must remain bounded and non-authoritative.
+    Production retention still requires settings-backed cap configuration,
+    revalidation plus tombstone commit under the final lock boundary,
+    retained-handle unlink and directory flush, post-commit residual/orphan
+    reconciliation, durable live-temp leases, bounded marker-owned temp/stage
+    scavenging, app/FFI lease ownership and idle scheduling, and explicit
+    clear-data actions.
 - [x] Add engine integration tests with temporary HOME and database. Completed
   2026-07-16: an actual `dux-core` engine scans a fixture into an isolated
   platform-correct application-support/cache layout, closes to full worker

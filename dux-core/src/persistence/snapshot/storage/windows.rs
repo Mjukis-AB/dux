@@ -235,6 +235,30 @@ pub(super) fn identity(file: &File, kind: Kind) -> Result<Identity> {
     validate_structure(file, kind, None, matches!(kind, Kind::RegularFile))
 }
 
+pub(super) fn file_usage(file: &File) -> Result<(u64, u64)> {
+    let mut standard = MaybeUninit::<FILE_STANDARD_INFO>::zeroed();
+    // SAFETY: the output buffer exactly matches FileStandardInfo and the
+    // retained file handle remains live for the synchronous call.
+    let ok = unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle(),
+            FileStandardInfo,
+            standard.as_mut_ptr().cast(),
+            size_of::<FILE_STANDARD_INFO>() as u32,
+        )
+    };
+    if ok == 0 {
+        return Err(unavailable());
+    }
+    // SAFETY: the successful call initialized the complete output buffer.
+    let standard = unsafe { standard.assume_init() };
+    let logical_bytes =
+        u64::try_from(standard.EndOfFile).map_err(|_| unsafe_for(Kind::RegularFile))?;
+    let allocated_bytes =
+        u64::try_from(standard.AllocationSize).map_err(|_| unsafe_for(Kind::RegularFile))?;
+    Ok((logical_bytes, allocated_bytes))
+}
+
 pub(super) fn validate_retained(
     file: &File,
     expected: Identity,
@@ -1199,6 +1223,21 @@ mod tests {
         let owner = OwnedSid::current().unwrap();
         assert!(inspect_private_security(&directory, Kind::Directory, &owner).unwrap());
         assert!(inspect_private_security(&file, Kind::RegularFile, &owner).unwrap());
+    }
+
+    #[test]
+    fn retained_file_usage_comes_from_standard_handle_information() {
+        let temp = TempDir::new().unwrap();
+        let (directory, path) = private_directory(&temp);
+        let (file, _) = create_private_file_exclusive(&directory, &path, "usage.tmp")
+            .unwrap()
+            .expect("unique usage file");
+        (&file).write_all(b"physical usage").unwrap();
+        file.sync_all().unwrap();
+
+        let (logical_bytes, allocated_bytes) = file_usage(&file).unwrap();
+        assert_eq!(logical_bytes, 14);
+        assert!(allocated_bytes >= logical_bytes);
     }
 
     #[test]

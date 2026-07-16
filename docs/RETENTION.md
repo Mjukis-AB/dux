@@ -87,10 +87,13 @@ not turn maintenance into foreground or cleanup authority.
 
 ## Snapshot policy
 
-Full-tree snapshots retain the newest two complete snapshots for each exact
-encoded scan root plus snapshots pinned by an active review. The default total
-cap is 2 GiB. Old unpinned snapshots are eligible oldest-first; latest-two and
-active pins remain protected even if protected bytes alone exceed the cap.
+Full-tree snapshots retain the newest two physically present, logically
+available succeeded snapshots for each exact encoded scan root plus snapshots
+pinned by an active review. “Succeeded” is the terminal snapshot publication
+fact; partial/limited scan coverage remains honest metadata but does not make a
+published snapshot disappear from retention ranking. The default total cap is
+2 GiB. Old unpinned referenced snapshots are eligible oldest-first; latest-two
+and active pins remain protected even if protected bytes alone exceed the cap.
 
 Terminal scan summaries and their original snapshot references are immutable.
 Snapshot retention is therefore not allowed to clear or rewrite that historical
@@ -153,6 +156,53 @@ app/FFI owner must promptly release or drop the object after expiry or renewal
 failure: logical retention may unlink the name, but storage blocks can remain
 open until the retained handle closes.
 
+Schema v7 adds only the production lookup index needed to reconcile a bounded
+snapshot-directory inventory with immutable scan history. The partial
+`scans_by_snapshot_path` index orders by the lossless relative-name encoding,
+relative-name bytes, and scan ID, and excludes rows with no snapshot reference.
+It does not select retention victims, insert tombstones, unlink files, or grant
+cleanup authority.
+
+The sealed read-only inventory now acquires the current-schema database fence
+before one snapshot writer lease and holds both through reconciliation. A
+single bounded directory walk sequentially opens every accepted no-follow final
+or recognized temp, captures identity plus logical length and filesystem
+allocation, then closes that entry handle. After SQLite reconciliation it
+sequentially reopens and identity-validates every name; immutable final usage
+must still match exactly, while temp usage remains point-in-time. This avoids
+making the 2,048-entry bound require 2,048 descriptors. Allocation comes from
+the validated handle (`st_blocks * 512` on Unix and `FILE_STANDARD_INFO` on
+Windows). The cap charges `max(logical, allocated)` because sparse,
+compressed, cloned, and platform-specific files can make either observation
+the larger conservative value. Both observations remain visible. The two
+fixed controls count toward the store footprint; directory-entry metadata does
+not. Checked arithmetic rejects overflow.
+
+Each physical final is matched through the v7 index to zero or one strictly
+decoded history row. Zero is a physical orphan. More than one, a malformed
+row, a noncanonical encoded root, or an identity/path mismatch is corruption.
+Grouping uses the exact stored `(root encoding, root bytes)` tuple and never
+filesystem canonicalization. Available present rows receive deterministic
+latest-two ranks by completion descending, start descending, then scan ID;
+otherwise eligible observations are ordered completion/start ascending then
+scan ID. Tombstoned-present bytes and orphans are reconciliation debt, not
+normal eviction candidates.
+
+The same observation strictly decodes all at most 1,024 review pins without
+pruning. Expiry equality is inactive. An active pin protects its exact present
+snapshot; an active pin with a tombstone or missing named file is corruption,
+not evidence that can be ignored. Recognized temps are reported with unknown
+liveness and make accounting unstable: staging intentionally writes after
+releasing the writer lock, so the file can still grow. No temp is called
+abandoned or reclaimable until a durable live-temp lease/scavenging protocol
+exists.
+
+This physical-driven operation is bounded even when immutable history grows
+without limit. It therefore cannot enumerate every old missing historical
+reference. Exact snapshot loads still surface a requested missing file; a
+future diagnostic history pager must be separately bounded and must never feed
+cleanup authority without revalidation under the final locks.
+
 Future retention must validate eligibility and commit the tombstone first,
 then unlink through a retained, revalidated handle and durably flush the
 snapshot directory. A crash between the tombstone commit and unlink leaves a
@@ -164,13 +214,14 @@ Publication and retention share this lock order:
 3. snapshot writer lock.
 
 Snapshot retention is not enabled until app/FFI review-lease ownership,
-latest-two-per-exact-root selection, retained-handle deletion, live
-temporary-file leases, the typed size cap, and bounded marker-owned stage
-scavenging all exist. Tombstone insertion, the final pin/eligibility recheck,
-and retained-file acquisition must occur while holding the database and
-snapshot locks in the order above. A prior unlocked eligibility observation is
-not authority. A name prefix alone never proves that a temporary or stage
-directory belongs to DUX.
+settings-backed cap configuration, retained-handle deletion, live
+temporary-file leases, and bounded marker-owned stage scavenging all exist.
+The implemented inventory ranks latest-two and reports cap observations but is
+not authority. Tombstone insertion, the final pin/latest-two/cap eligibility
+recheck, and retained-file acquisition must occur while holding the database
+and snapshot locks in the order above. A prior inventory report is not
+authority. A name prefix alone never proves that a temporary or stage directory
+belongs to DUX.
 
 ## Failure and version behavior
 

@@ -8,6 +8,7 @@
     reason = "sealed review leases are wired to Explorer/FFI in a later milestone slice"
 )]
 
+use std::collections::BTreeMap;
 use std::path::{Component, Path};
 use std::time::SystemTime;
 
@@ -34,6 +35,25 @@ const MAX_PATH_BYTES: i64 = 65_536;
 const MAX_OWNER_BYTES: i64 = 128;
 const MAX_PURPOSE_BYTES: i64 = 32;
 pub(super) const SNAPSHOT_REVIEW_PIN_ID_ATTEMPTS: usize = 16;
+
+/// Read-only, point-in-time protection facts for one exact snapshot.
+///
+/// These counts are observations only. They deliberately carry no retained
+/// file handle and cannot authorize a retention transition.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SnapshotReviewPinSummary {
+    pub(crate) active: u32,
+    pub(crate) active_explorer: u32,
+    pub(crate) active_cleanup_review: u32,
+    pub(crate) expired: u32,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct SnapshotReviewPinPopulation {
+    pub(super) by_scan: BTreeMap<ScanId, SnapshotReviewPinSummary>,
+    pub(super) active: u32,
+    pub(super) expired: u32,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SnapshotReviewPurpose {
@@ -549,6 +569,80 @@ fn validate_and_prune_population(
         }
     }
     Ok(())
+}
+
+/// Strictly inspect the complete bounded pin population without pruning it.
+///
+/// Expiry equality is inactive. An active pin attached to a tombstoned
+/// snapshot is corruption rather than protection evidence. Expired rows are
+/// still decoded and relationship-validated so hostile SQLite values cannot
+/// disappear from both sides of a later retention decision.
+pub(super) fn inspect_snapshot_review_pin_population(
+    connection: &Connection,
+    observed_at: SystemTime,
+) -> Result<SnapshotReviewPinPopulation, HistoryError> {
+    let observed_at_unix_ms = system_time_to_unix_ms(observed_at, HistoryErrorKind::InvalidInput)?;
+    run_bounded_snapshot_pin_query(connection, || {
+        let mut statement = connection
+            .prepare(&format!(
+                "{PIN_SELECT_PREFIX}\n                 ORDER BY pin.expires_at_unix_ms ASC, pin.pin_id ASC\n                 LIMIT {}",
+                MAX_ACTIVE_PINS + 1
+            ))
+            .map_err(map_query_sql_error)?;
+        let rows = statement
+            .query_map([], raw_pin)
+            .map_err(map_query_sql_error)?;
+        let mut population = SnapshotReviewPinPopulation::default();
+        let mut count = 0_usize;
+        for row in rows {
+            let pin = decode_pin(row.map_err(map_query_sql_error)?)?;
+            count = count
+                .checked_add(1)
+                .ok_or_else(|| HistoryError::new(HistoryErrorKind::QueryLimitExceeded))?;
+            if count > MAX_ACTIVE_PINS {
+                return Err(corrupt());
+            }
+            let scan_id = ScanId::new(pin.scan_id.clone()).map_err(|_| corrupt())?;
+            let summary = population.by_scan.entry(scan_id).or_default();
+            if pin.expires_at_unix_ms <= observed_at_unix_ms {
+                summary.expired = summary
+                    .expired
+                    .checked_add(1)
+                    .ok_or_else(|| HistoryError::new(HistoryErrorKind::QueryLimitExceeded))?;
+                population.expired = population
+                    .expired
+                    .checked_add(1)
+                    .ok_or_else(|| HistoryError::new(HistoryErrorKind::QueryLimitExceeded))?;
+                continue;
+            }
+            if pin.tombstone_exact {
+                return Err(corrupt());
+            }
+            summary.active = summary
+                .active
+                .checked_add(1)
+                .ok_or_else(|| HistoryError::new(HistoryErrorKind::QueryLimitExceeded))?;
+            match pin.purpose {
+                SnapshotReviewPurpose::Explorer => {
+                    summary.active_explorer = summary
+                        .active_explorer
+                        .checked_add(1)
+                        .ok_or_else(|| HistoryError::new(HistoryErrorKind::QueryLimitExceeded))?;
+                }
+                SnapshotReviewPurpose::CleanupReview => {
+                    summary.active_cleanup_review = summary
+                        .active_cleanup_review
+                        .checked_add(1)
+                        .ok_or_else(|| HistoryError::new(HistoryErrorKind::QueryLimitExceeded))?;
+                }
+            }
+            population.active = population
+                .active
+                .checked_add(1)
+                .ok_or_else(|| HistoryError::new(HistoryErrorKind::QueryLimitExceeded))?;
+        }
+        Ok(population)
+    })
 }
 
 /*

@@ -320,6 +320,23 @@ recheck latest-two and these explicit active leases under the same lock order
 before committing a tombstone, then unlink only through a retained,
 identity-revalidated file handle and flush the directory.
 
+Schema v7 adds a partial SQLite lookup index over the lossless snapshot-name
+encoding, snapshot-name bytes, and scan ID for rows with a snapshot reference.
+It changes neither the v1 snapshot wire nor immutable scan history and grants
+no tombstone or unlink authority.
+
+The read-only retention inventory uses that index only after a single bounded
+physical directory pass sequentially opens exact no-follow file handles,
+captures identity and handle-derived usage, then closes each entry. After the
+indexed SQLite match it sequentially reopens every name and requires immutable
+final identity and usage to remain exact. This avoids an entry-count-sized file
+descriptor requirement. It reports logical length and platform allocation
+separately and conservatively charges their maximum; it does not decode full
+snapshot bodies or treat these bytes as content validity. Recognized temps have
+unknown liveness because their staging writer can remain active outside the
+snapshot writer lock. Latest-two/cap results are observations that a future
+writer must recompute under the final database and snapshot lock boundary.
+
 Initial snapshot-directory provisioning uses a private marker-complete sibling
 stage and atomic no-replace directory publication. A racing winner is reopened
 and fully validated. Losing or interrupted stages and recognized snapshot temps

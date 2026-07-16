@@ -16,6 +16,8 @@ use std::time::{Duration, Instant};
 use fs4::{FileExt, TryLockError};
 use sha2::{Digest, Sha256};
 
+use super::codec::MAX_SNAPSHOT_FILE_BYTES;
+
 const DIRECTORY_NAME: &str = "snapshots";
 const MARKER_NAME: &str = ".dux-snapshot-store";
 const WRITER_LOCK_NAME: &str = ".dux-snapshot.writer.lock";
@@ -146,6 +148,216 @@ pub(crate) struct SecureSnapshotStore {
 pub(crate) enum SnapshotStoreAccess {
     ReadOnly,
     ReadWrite,
+}
+
+/// Exact point-in-time physical usage for one retained store object.
+///
+/// `charged_bytes` is deliberately conservative: sparse/compressed files can
+/// report either logical or allocated size as the larger value on supported
+/// filesystems, so retention budgets charge the maximum of both.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SnapshotFileUsage {
+    logical_bytes: u64,
+    allocated_bytes: u64,
+    charged_bytes: u64,
+}
+
+impl SnapshotFileUsage {
+    fn from_sizes(logical_bytes: u64, allocated_bytes: u64) -> Self {
+        Self {
+            logical_bytes,
+            allocated_bytes,
+            charged_bytes: logical_bytes.max(allocated_bytes),
+        }
+    }
+
+    fn checked_add(self, other: Self) -> Result<Self> {
+        let logical_bytes = self
+            .logical_bytes
+            .checked_add(other.logical_bytes)
+            .ok_or_else(unsafe_inventory_object)?;
+        let allocated_bytes = self
+            .allocated_bytes
+            .checked_add(other.allocated_bytes)
+            .ok_or_else(unsafe_inventory_object)?;
+        let charged_bytes = self
+            .charged_bytes
+            .checked_add(other.charged_bytes)
+            .ok_or_else(unsafe_inventory_object)?;
+        Ok(Self {
+            logical_bytes,
+            allocated_bytes,
+            charged_bytes,
+        })
+    }
+
+    pub(crate) const fn logical_bytes(self) -> u64 {
+        self.logical_bytes
+    }
+
+    pub(crate) const fn allocated_bytes(self) -> u64 {
+        self.allocated_bytes
+    }
+
+    pub(crate) const fn charged_bytes(self) -> u64 {
+        self.charged_bytes
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SnapshotInventoryEntryKind {
+    Final(SnapshotFileName),
+    /// A point-in-time observation whose process liveness is unknown.
+    ///
+    /// Inventory never treats this as reclaimable and exposes no mutation
+    /// operation. A later scavenger needs its own durable liveness proof.
+    RecognizedTemp,
+}
+
+/// One no-follow, identity-checked object observed under the inventory lease.
+///
+/// The file descriptor is closed after its facts are captured. Keeping up to
+/// 2,048 descriptors would exceed the common macOS launchd soft limit. The
+/// store-wide writer lease preserves legitimate-name stability, and the entry
+/// is reopened and identity-revalidated sequentially before handoff.
+pub(crate) struct SnapshotInventoryEntry {
+    name: String,
+    kind: SnapshotInventoryEntryKind,
+    identity: Identity,
+    usage: SnapshotFileUsage,
+}
+
+impl SnapshotInventoryEntry {
+    #[cfg(test)]
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub(crate) fn kind(&self) -> &SnapshotInventoryEntryKind {
+        &self.kind
+    }
+
+    pub(crate) const fn usage(&self) -> SnapshotFileUsage {
+        self.usage
+    }
+
+    fn revalidate(&self, store: &StoreInner) -> Result<()> {
+        platform::validate_retained(
+            &store.directory,
+            store.directory_identity.0,
+            platform::Kind::Directory,
+            false,
+        )?;
+        let Some((file, identity)) =
+            platform::open_named_regular(&store.directory, &store.path, &self.name, false)?
+        else {
+            return Err(unsafe_inventory_object());
+        };
+        if Identity(identity) != self.identity {
+            return Err(unsafe_inventory_object());
+        }
+        platform::validate_retained(&file, identity, platform::Kind::RegularFile, true)?;
+        platform::validate_named(
+            &store.directory,
+            &self.name,
+            &file,
+            identity,
+            platform::Kind::RegularFile,
+        )?;
+        // Immutable finals must not change while SQLite is reconciled. A
+        // recognized stage temp may still be written by its live owner outside
+        // the writer lock, so its size remains explicitly point-in-time.
+        if matches!(self.kind, SnapshotInventoryEntryKind::Final(_))
+            && snapshot_file_usage(&file)? != self.usage
+        {
+            return Err(unsafe_inventory_object());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SnapshotControlUsage {
+    store_marker: SnapshotFileUsage,
+    writer_lock: SnapshotFileUsage,
+    total: SnapshotFileUsage,
+}
+
+impl SnapshotControlUsage {
+    pub(crate) const fn store_marker(self) -> SnapshotFileUsage {
+        self.store_marker
+    }
+
+    pub(crate) const fn writer_lock(self) -> SnapshotFileUsage {
+        self.writer_lock
+    }
+
+    pub(crate) const fn total(self) -> SnapshotFileUsage {
+        self.total
+    }
+}
+
+/// A complete bounded store observation protected by one writer lease.
+///
+/// Holding this value excludes legitimate publishers for the entire period in
+/// which higher persistence layers match database references. Entry handles
+/// are opened and closed sequentially so the 2,048-entry bound does not become
+/// a file-descriptor requirement. It deliberately offers no unlink or cleanup
+/// authority.
+pub(crate) struct SnapshotStoreInventoryLease {
+    store: Arc<StoreInner>,
+    entries: Vec<SnapshotInventoryEntry>,
+    entries_usage: SnapshotFileUsage,
+    controls: SnapshotControlUsage,
+    total_usage: SnapshotFileUsage,
+    _writer_lock: SnapshotWriterLock,
+}
+
+impl SnapshotStoreInventoryLease {
+    pub(crate) fn entries(&self) -> &[SnapshotInventoryEntry] {
+        &self.entries
+    }
+
+    pub(crate) const fn entries_usage(&self) -> SnapshotFileUsage {
+        self.entries_usage
+    }
+
+    pub(crate) const fn control_usage(&self) -> SnapshotControlUsage {
+        self.controls
+    }
+
+    pub(crate) const fn total_usage(&self) -> SnapshotFileUsage {
+        self.total_usage
+    }
+
+    /// Revalidate the exact controls and retained names after a higher layer
+    /// has reconciled this point-in-time observation with SQLite state.
+    pub(crate) fn revalidate(&self) -> Result<()> {
+        let store = SecureSnapshotStore {
+            inner: Arc::clone(&self.store),
+        };
+        store.validate_controls()?;
+        if snapshot_file_usage(&self.store.marker)? != self.controls.store_marker()
+            || snapshot_file_usage(&self.store.writer_lock)? != self.controls.writer_lock()
+        {
+            return Err(unsafe_inventory_object());
+        }
+        for entry in &self.entries {
+            entry.revalidate(&self.store)?;
+        }
+        Ok(())
+    }
+}
+
+struct SnapshotStorageInventory {
+    entries: Vec<SnapshotInventoryEntry>,
+    entries_usage: SnapshotFileUsage,
+    controls: SnapshotControlUsage,
+    total_usage: SnapshotFileUsage,
+}
+
+fn unsafe_inventory_object() -> SnapshotStorageError {
+    SnapshotStorageError::new(SnapshotStorageErrorKind::UnsafeObject)
 }
 
 impl SecureSnapshotStore {
@@ -369,13 +581,40 @@ impl SecureSnapshotStore {
         }))
     }
 
+    /// Observe every final and recognized temporary object in one bounded
+    /// directory pass while retaining the store-wide writer exclusion.
+    pub(crate) fn inventory_with_writer_lease(
+        &self,
+        timeout: Duration,
+    ) -> Result<SnapshotStoreInventoryLease> {
+        let writer_lock = self.acquire_writer_lock(timeout)?;
+        let inventory = self.inventory_locked(None)?;
+        Ok(SnapshotStoreInventoryLease {
+            store: Arc::clone(&self.inner),
+            entries: inventory.entries,
+            entries_usage: inventory.entries_usage,
+            controls: inventory.controls,
+            total_usage: inventory.total_usage,
+            _writer_lock: writer_lock,
+        })
+    }
+
     pub(crate) fn stage(
         &self,
         name: SnapshotFileName,
         timeout: Duration,
     ) -> Result<StagedSnapshot> {
         let lock = self.acquire_writer_lock(timeout)?;
-        self.validate_inventory(None)?;
+        let inventory = self.inventory_locked(None)?;
+        let existing_temps = inventory
+            .entries
+            .iter()
+            .filter(|entry| matches!(entry.kind, SnapshotInventoryEntryKind::RecognizedTemp))
+            .count();
+        if existing_temps >= MAX_RECOGNIZED_TEMPS {
+            return Err(unsafe_inventory_object());
+        }
+        drop(inventory);
         for _ in 0..RANDOM_ATTEMPTS {
             let temp_name = random_temp_name(&name)?;
             match platform::create_private_file_exclusive(
@@ -499,10 +738,24 @@ impl SecureSnapshotStore {
     }
 
     fn validate_inventory(&self, allowed_temp: Option<&str>) -> Result<()> {
+        self.inventory_locked(allowed_temp).map(drop)
+    }
+
+    fn inventory_locked(&self, allowed_temp: Option<&str>) -> Result<SnapshotStorageInventory> {
         self.validate_controls()?;
         let deadline = Instant::now()
             .checked_add(INVENTORY_DEADLINE)
             .ok_or_else(|| SnapshotStorageError::new(SnapshotStorageErrorKind::InternalState))?;
+        let marker_usage = snapshot_file_usage(&self.inner.marker)?;
+        let writer_usage = snapshot_file_usage(&self.inner.writer_lock)?;
+        let controls_total = marker_usage.checked_add(writer_usage)?;
+        let controls = SnapshotControlUsage {
+            store_marker: marker_usage,
+            writer_lock: writer_usage,
+            total: controls_total,
+        };
+        let mut entries = Vec::new();
+        let mut entries_usage = SnapshotFileUsage::default();
         let mut recognized_temps = 0_usize;
         for name in platform::inventory(
             &self.inner.directory,
@@ -510,13 +763,15 @@ impl SecureSnapshotStore {
             MAX_INVENTORY_NAME_BYTES,
             deadline,
         )? {
-            if name == MARKER_NAME
-                || name == WRITER_LOCK_NAME
-                || allowed_temp.is_some_and(|allowed| name == allowed)
-            {
+            if Instant::now() > deadline {
+                return Err(SnapshotStorageError::new(
+                    SnapshotStorageErrorKind::Unavailable,
+                ));
+            }
+            if name == MARKER_NAME || name == WRITER_LOCK_NAME {
                 continue;
             }
-            if is_recognized_temp_name(&name) {
+            let kind = if is_recognized_temp_name(&name) {
                 recognized_temps = recognized_temps.checked_add(1).ok_or_else(|| {
                     SnapshotStorageError::new(SnapshotStorageErrorKind::UnsafeObject)
                 })?;
@@ -525,31 +780,20 @@ impl SecureSnapshotStore {
                         SnapshotStorageErrorKind::UnsafeObject,
                     ));
                 }
-                let Some((file, identity)) = platform::open_named_regular(
-                    &self.inner.directory,
-                    &self.inner.path,
-                    &name,
-                    false,
-                )?
-                else {
-                    return Err(SnapshotStorageError::new(
-                        SnapshotStorageErrorKind::UnsafeObject,
-                    ));
-                };
-                platform::validate_named(
-                    &self.inner.directory,
-                    &name,
-                    &file,
-                    identity,
-                    platform::Kind::RegularFile,
-                )?;
+                SnapshotInventoryEntryKind::RecognizedTemp
+            } else {
+                SnapshotInventoryEntryKind::Final(SnapshotFileName::parse(&name)?)
+            };
+            if allowed_temp.is_some_and(|allowed| name == allowed) {
+                if !matches!(kind, SnapshotInventoryEntryKind::RecognizedTemp) {
+                    return Err(unsafe_inventory_object());
+                }
                 continue;
             }
-            let final_name = SnapshotFileName::parse(&name)?;
             let Some((file, identity)) = platform::open_named_regular(
                 &self.inner.directory,
                 &self.inner.path,
-                final_name.as_str(),
+                &name,
                 false,
             )?
             else {
@@ -559,14 +803,51 @@ impl SecureSnapshotStore {
             };
             platform::validate_named(
                 &self.inner.directory,
-                final_name.as_str(),
+                &name,
                 &file,
                 identity,
                 platform::Kind::RegularFile,
             )?;
+            let usage = snapshot_file_usage(&file)?;
+            if matches!(kind, SnapshotInventoryEntryKind::Final(_))
+                && usage.logical_bytes() > MAX_SNAPSHOT_FILE_BYTES
+            {
+                return Err(unsafe_inventory_object());
+            }
+            entries_usage = entries_usage.checked_add(usage)?;
+            entries.push(SnapshotInventoryEntry {
+                name,
+                kind,
+                identity: Identity(identity),
+                usage,
+            });
+            if Instant::now() > deadline {
+                return Err(SnapshotStorageError::new(
+                    SnapshotStorageErrorKind::Unavailable,
+                ));
+            }
         }
-        Ok(())
+        if Instant::now() > deadline {
+            return Err(SnapshotStorageError::new(
+                SnapshotStorageErrorKind::Unavailable,
+            ));
+        }
+        let total_usage = controls.total().checked_add(entries_usage)?;
+        Ok(SnapshotStorageInventory {
+            entries,
+            entries_usage,
+            controls,
+            total_usage,
+        })
     }
+}
+
+fn snapshot_file_usage(file: &File) -> Result<SnapshotFileUsage> {
+    let (logical_bytes, allocated_bytes) = platform::file_usage(file)?;
+    Ok(SnapshotFileUsage::from_sizes(
+        logical_bytes,
+        allocated_bytes,
+    ))
 }
 
 struct SnapshotWriterLock {
@@ -1254,6 +1535,17 @@ mod platform {
         })
     }
 
+    pub(super) fn file_usage(file: &File) -> Result<(u64, u64)> {
+        let status = fstat(file).map_err(|_| unavailable_for(Kind::RegularFile))?;
+        let logical_bytes =
+            u64::try_from(status.st_size).map_err(|_| unsafe_for(Kind::RegularFile))?;
+        let blocks = u64::try_from(status.st_blocks).map_err(|_| unsafe_for(Kind::RegularFile))?;
+        let allocated_bytes = blocks
+            .checked_mul(512)
+            .ok_or_else(|| unsafe_for(Kind::RegularFile))?;
+        Ok((logical_bytes, allocated_bytes))
+    }
+
     pub(super) fn validate_retained(
         file: &File,
         expected: Identity,
@@ -1614,6 +1906,7 @@ mod platform {
 mod tests {
     use std::fs;
     use std::io::{Read, Write};
+    use std::os::unix::fs::MetadataExt;
     use std::os::unix::fs::PermissionsExt;
     // DUX-DESTRUCTIVE: allow=test-snapshot-lock-command-import -- import only the fixed Rust test-harness relaunch primitive used by the bounded cross-process writer-lock regression
     use std::process::Command;
@@ -1711,6 +2004,308 @@ mod tests {
                 .mode()
                 & 0o7777,
             0o600
+        );
+    }
+
+    #[test]
+    fn inventory_accounts_finals_temps_and_controls_under_one_lease() {
+        let temp = TempDir::new().unwrap();
+        private_database_root(&temp);
+        let database = database_path(&temp);
+        let store = open_rw(&database);
+        let final_name = SnapshotFileName::from_scan_id(b"inventory-final");
+        let final_bytes = b"published inventory bytes";
+        let mut published = store
+            .stage(final_name.clone(), Duration::from_millis(100))
+            .unwrap();
+        published.write_all(final_bytes).unwrap();
+        drop(published.publish_no_replace().unwrap());
+
+        let mut staged = store
+            .stage(
+                SnapshotFileName::from_scan_id(b"inventory-temp"),
+                Duration::from_millis(100),
+            )
+            .unwrap();
+        staged.write_all(b"unknown-liveness-temp").unwrap();
+        staged.sync_all().unwrap();
+        let staged_name = staged.temp_name.clone();
+
+        let inventory = store
+            .inventory_with_writer_lease(Duration::from_millis(100))
+            .unwrap();
+        assert_eq!(inventory.entries().len(), 2);
+        let final_entry = inventory
+            .entries()
+            .iter()
+            .find(|entry| entry.name() == final_name.as_str())
+            .unwrap();
+        assert_eq!(
+            final_entry.kind(),
+            &SnapshotInventoryEntryKind::Final(final_name.clone())
+        );
+        assert_eq!(
+            final_entry.usage().logical_bytes(),
+            final_bytes.len() as u64
+        );
+        let final_metadata = fs::metadata(
+            database
+                .parent()
+                .unwrap()
+                .join(DIRECTORY_NAME)
+                .join(final_name.as_str()),
+        )
+        .unwrap();
+        assert_eq!(
+            final_entry.usage().allocated_bytes(),
+            final_metadata.blocks() * 512
+        );
+        assert_eq!(
+            final_entry.usage().charged_bytes(),
+            final_entry
+                .usage()
+                .logical_bytes()
+                .max(final_entry.usage().allocated_bytes())
+        );
+        let temp_entry = inventory
+            .entries()
+            .iter()
+            .find(|entry| entry.name() == staged_name)
+            .unwrap();
+        assert_eq!(
+            temp_entry.kind(),
+            &SnapshotInventoryEntryKind::RecognizedTemp
+        );
+
+        let controls = inventory.control_usage();
+        assert_eq!(controls.store_marker().logical_bytes(), 16);
+        assert_eq!(controls.writer_lock().logical_bytes(), 16);
+        assert_eq!(controls.total().logical_bytes(), 32);
+        assert_eq!(
+            inventory.total_usage().logical_bytes(),
+            inventory.entries_usage().logical_bytes() + 32
+        );
+        inventory.revalidate().unwrap();
+        assert_eq!(
+            store
+                .stage(
+                    SnapshotFileName::from_scan_id(b"inventory-lock-proof"),
+                    Duration::from_millis(1),
+                )
+                .err()
+                .unwrap()
+                .kind(),
+            SnapshotStorageErrorKind::Busy
+        );
+        drop(inventory);
+        staged.abort().unwrap();
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn inventory_closes_entry_handles_and_rejects_final_usage_change() {
+        const ROLE: &str = "DUX_SNAPSHOT_INVENTORY_FD_CHILD";
+        const DATABASE: &str = "DUX_SNAPSHOT_INVENTORY_FD_DATABASE";
+        if std::env::var_os(ROLE).is_some() {
+            let database = PathBuf::from(std::env::var_os(DATABASE).unwrap());
+            let limit = nix::libc::rlimit {
+                rlim_cur: 128,
+                rlim_max: 128,
+            };
+            // SAFETY: this exact-test child lowers only its own descriptor
+            // limit and exits immediately after the bounded inventory probe.
+            assert_eq!(
+                unsafe { nix::libc::setrlimit(nix::libc::RLIMIT_NOFILE, &limit) },
+                0
+            );
+            let store = open_rw(&database);
+            let inventory = store
+                .inventory_with_writer_lease(Duration::from_millis(250))
+                .unwrap();
+            assert_eq!(inventory.entries().len(), 300);
+            inventory.revalidate().unwrap();
+            return;
+        }
+
+        let temp = TempDir::new().unwrap();
+        private_database_root(&temp);
+        let database = database_path(&temp);
+        let store = open_rw(&database);
+        for ordinal in 0..300_u32 {
+            let name = SnapshotFileName::from_scan_id(format!("fd-bound-{ordinal}").as_bytes());
+            let (file, _) = platform::create_private_file_exclusive(
+                &store.inner.directory,
+                &store.inner.path,
+                name.as_str(),
+            )
+            .unwrap()
+            .unwrap();
+            drop(file);
+        }
+        drop(store);
+        let executable = std::env::current_exe().unwrap();
+        // DUX-DESTRUCTIVE: allow=test-snapshot-inventory-fd-helper-spawn -- relaunch only this exact test against its TempDir-owned store so the child can lower its own descriptor limit without racing the parent harness
+        let status = Command::new(executable)
+            .arg("--exact")
+            .arg(
+                "persistence::snapshot::storage::tests::inventory_closes_entry_handles_and_rejects_final_usage_change",
+            )
+            .arg("--nocapture")
+            .env(ROLE, "1")
+            .env(DATABASE, &database)
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let store = open_rw(&database);
+        let inventory = store
+            .inventory_with_writer_lease(Duration::from_millis(250))
+            .unwrap();
+        assert_eq!(inventory.entries().len(), 300);
+        let first = inventory
+            .entries()
+            .iter()
+            .find_map(|entry| match entry.kind() {
+                SnapshotInventoryEntryKind::Final(name) => Some(name.clone()),
+                SnapshotInventoryEntryKind::RecognizedTemp => None,
+            })
+            .unwrap();
+        let mut external_writer = fs::OpenOptions::new()
+            .append(true)
+            .open(
+                database
+                    .parent()
+                    .unwrap()
+                    .join(DIRECTORY_NAME)
+                    .join(first.as_str()),
+            )
+            .unwrap();
+        external_writer.write_all(b"changed").unwrap();
+        external_writer.sync_all().unwrap();
+        drop(external_writer);
+        assert_eq!(
+            inventory.revalidate().unwrap_err().kind(),
+            SnapshotStorageErrorKind::UnsafeObject
+        );
+    }
+
+    #[test]
+    fn stage_rejects_the_sixty_fifth_temp_without_creating_it() {
+        let temp = TempDir::new().unwrap();
+        private_database_root(&temp);
+        let store = open_rw(&database_path(&temp));
+        for ordinal in 0..MAX_RECOGNIZED_TEMPS {
+            let final_name =
+                SnapshotFileName::from_scan_id(format!("temp-population-{ordinal}").as_bytes());
+            let temp_name = random_temp_name(&final_name).unwrap();
+            let (file, _) = platform::create_private_file_exclusive(
+                &store.inner.directory,
+                &store.inner.path,
+                &temp_name,
+            )
+            .unwrap()
+            .unwrap();
+            drop(file);
+        }
+        let before = store
+            .inventory_with_writer_lease(Duration::from_millis(250))
+            .unwrap();
+        assert_eq!(
+            before
+                .entries()
+                .iter()
+                .filter(|entry| matches!(entry.kind(), SnapshotInventoryEntryKind::RecognizedTemp))
+                .count(),
+            MAX_RECOGNIZED_TEMPS
+        );
+        drop(before);
+        assert_eq!(
+            store
+                .stage(
+                    SnapshotFileName::from_scan_id(b"sixty-fifth-temp"),
+                    Duration::from_millis(250),
+                )
+                .err()
+                .unwrap()
+                .kind(),
+            SnapshotStorageErrorKind::UnsafeObject
+        );
+        let after = store
+            .inventory_with_writer_lease(Duration::from_millis(250))
+            .unwrap();
+        assert_eq!(after.entries().len(), MAX_RECOGNIZED_TEMPS);
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn inventory_rejects_final_larger_than_codec_limit_but_not_temp_by_policy() {
+        let temp = TempDir::new().unwrap();
+        private_database_root(&temp);
+        let store = open_rw(&database_path(&temp));
+        let temp_name =
+            random_temp_name(&SnapshotFileName::from_scan_id(b"oversized-temp")).unwrap();
+        let (temp_file, _) = platform::create_private_file_exclusive(
+            &store.inner.directory,
+            &store.inner.path,
+            &temp_name,
+        )
+        .unwrap()
+        .unwrap();
+        // DUX-DESTRUCTIVE: allow=test-snapshot-inventory-oversized-temp -- create a sparse oversized file only inside this TempDir-owned private snapshot fixture to prove temps are observed but not policy-classified
+        temp_file.set_len(MAX_SNAPSHOT_FILE_BYTES + 1).unwrap();
+        temp_file.sync_all().unwrap();
+        drop(temp_file);
+        let inventory = store
+            .inventory_with_writer_lease(Duration::from_millis(100))
+            .unwrap();
+        let observed_temp = inventory
+            .entries()
+            .iter()
+            .find(|entry| entry.name() == temp_name)
+            .unwrap();
+        assert_eq!(
+            observed_temp.kind(),
+            &SnapshotInventoryEntryKind::RecognizedTemp
+        );
+        assert_eq!(
+            observed_temp.usage().logical_bytes(),
+            MAX_SNAPSHOT_FILE_BYTES + 1
+        );
+        drop(inventory);
+
+        let final_name = SnapshotFileName::from_scan_id(b"oversized-final");
+        let (file, _) = platform::create_private_file_exclusive(
+            &store.inner.directory,
+            &store.inner.path,
+            final_name.as_str(),
+        )
+        .unwrap()
+        .unwrap();
+        // DUX-DESTRUCTIVE: allow=test-snapshot-inventory-oversized-final -- create a sparse oversized file only inside this TempDir-owned private snapshot fixture to prove final inventory fails closed
+        file.set_len(MAX_SNAPSHOT_FILE_BYTES + 1).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+
+        assert_eq!(
+            store
+                .inventory_with_writer_lease(Duration::from_millis(100))
+                .err()
+                .unwrap()
+                .kind(),
+            SnapshotStorageErrorKind::UnsafeObject
+        );
+    }
+
+    #[test]
+    fn inventory_usage_totals_fail_closed_on_overflow() {
+        let maximum = SnapshotFileUsage::from_sizes(u64::MAX, u64::MAX);
+        assert_eq!(
+            maximum
+                .checked_add(SnapshotFileUsage::from_sizes(1, 0))
+                .err()
+                .unwrap()
+                .kind(),
+            SnapshotStorageErrorKind::UnsafeObject
         );
     }
 
