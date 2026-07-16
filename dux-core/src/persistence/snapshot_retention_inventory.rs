@@ -30,9 +30,10 @@ use super::history::{
 use super::snapshot::SnapshotDigest;
 use super::snapshot::{
     SnapshotFileName, SnapshotFileUsage, SnapshotInventoryEntryKind, SnapshotReference,
-    SnapshotStoreInventoryLease,
+    SnapshotStoreInventoryLease, SnapshotTempKernelState,
 };
 use super::snapshot_review_pin::{SnapshotReviewPinPopulation, SnapshotReviewPinSummary};
+use super::snapshot_temp_lease::{SnapshotTempLeasePopulation, StoredSnapshotTempLease};
 
 const MAX_ID_BYTES: i64 = 128;
 const MAX_STATUS_BYTES: i64 = 16;
@@ -100,10 +101,23 @@ pub(crate) struct SnapshotOrphanFinal {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SnapshotTemporaryState {
+    Active,
+    QuiescentAtObservation,
+    Unleased,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SnapshotTemporaryObservation {
+    pub(crate) temp_name: String,
     pub(crate) usage: SnapshotFileUsage,
-    /// Always true until a durable live-temp lease exists.
-    pub(crate) liveness_unknown: bool,
+    pub(crate) state: SnapshotTemporaryState,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SnapshotTempLeaseResidual {
+    pub(crate) scan_id: ScanId,
+    pub(crate) temp_name: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -122,7 +136,9 @@ pub(crate) struct SnapshotRetentionTotals {
     pub(crate) eligible: SnapshotRetentionUsage,
     pub(crate) tombstoned_residual: SnapshotRetentionUsage,
     pub(crate) orphan: SnapshotRetentionUsage,
-    pub(crate) temporary_unknown_liveness: SnapshotRetentionUsage,
+    pub(crate) temporary_active: SnapshotRetentionUsage,
+    pub(crate) temporary_quiescent: SnapshotRetentionUsage,
+    pub(crate) temporary_unleased: SnapshotRetentionUsage,
     pub(crate) store_total: SnapshotRetentionUsage,
     pub(crate) active_pin_rows: u32,
     pub(crate) expired_pin_rows: u32,
@@ -135,6 +151,7 @@ pub(crate) struct SnapshotRetentionInventory {
     pub(crate) entries: Vec<SnapshotRetentionEntry>,
     pub(crate) orphan_finals: Vec<SnapshotOrphanFinal>,
     pub(crate) temporary_files: Vec<SnapshotTemporaryObservation>,
+    pub(crate) residual_temp_leases: Vec<SnapshotTempLeaseResidual>,
     pub(crate) eviction_observations: Vec<SnapshotEvictionObservation>,
     pub(crate) totals: SnapshotRetentionTotals,
     pub(crate) cap_excess_bytes: u64,
@@ -191,6 +208,7 @@ pub(super) fn build_snapshot_retention_inventory(
     connection: &Connection,
     storage: &SnapshotStoreInventoryLease,
     pins: SnapshotReviewPinPopulation,
+    temp_leases: SnapshotTempLeasePopulation,
     observed_at: SystemTime,
     cap_bytes: u64,
 ) -> Result<SnapshotRetentionInventory, HistoryError> {
@@ -204,6 +222,7 @@ pub(super) fn build_snapshot_retention_inventory(
             connection,
             storage,
             pins,
+            temp_leases,
             observed_at,
             cap_bytes,
         )
@@ -214,6 +233,7 @@ fn build_snapshot_retention_inventory_bounded(
     connection: &Connection,
     storage: &SnapshotStoreInventoryLease,
     mut pins: SnapshotReviewPinPopulation,
+    temp_leases: SnapshotTempLeasePopulation,
     observed_at: SystemTime,
     cap_bytes: u64,
 ) -> Result<SnapshotRetentionInventory, HistoryError> {
@@ -223,14 +243,31 @@ fn build_snapshot_retention_inventory_bounded(
     let mut entries = Vec::new();
     let mut orphan_finals = Vec::new();
     let mut temporary_files = Vec::new();
+    let mut temp_leases_by_name = temp_leases
+        .rows()
+        .iter()
+        .cloned()
+        .map(|row| (row.temp_name().to_owned(), row))
+        .collect::<BTreeMap<String, StoredSnapshotTempLease>>();
     let mut seen_scan_ids = BTreeSet::new();
 
     for physical in storage.entries() {
         match physical.kind() {
             SnapshotInventoryEntryKind::RecognizedTemp => {
+                let state = match temp_leases_by_name.remove(physical.name()) {
+                    Some(_) => match physical.temp_kernel_state() {
+                        Some(SnapshotTempKernelState::Active) => SnapshotTemporaryState::Active,
+                        Some(SnapshotTempKernelState::Quiescent) => {
+                            SnapshotTemporaryState::QuiescentAtObservation
+                        }
+                        None => return Err(corrupt()),
+                    },
+                    None => SnapshotTemporaryState::Unleased,
+                };
                 temporary_files.push(SnapshotTemporaryObservation {
+                    temp_name: physical.name().to_owned(),
                     usage: physical.usage(),
-                    liveness_unknown: true,
+                    state,
                 });
             }
             SnapshotInventoryEntryKind::Final(file_name) => {
@@ -273,6 +310,14 @@ fn build_snapshot_retention_inventory_bounded(
     }
     drop(statement);
 
+    let residual_temp_leases = temp_leases_by_name
+        .into_values()
+        .map(|row| SnapshotTempLeaseResidual {
+            scan_id: row.scan_id().clone(),
+            temp_name: row.temp_name().to_owned(),
+        })
+        .collect::<Vec<_>>();
+
     // An active, exact pin whose named final is absent cannot safely disappear
     // from retention policy. Expired rows remain coordination debt only.
     if pins.by_scan.values().any(|summary| summary.active > 0) {
@@ -311,7 +356,9 @@ fn build_snapshot_retention_inventory_bounded(
         totals.protected,
         totals.tombstoned_residual,
         totals.orphan,
-        totals.temporary_unknown_liveness,
+        totals.temporary_active,
+        totals.temporary_quiescent,
+        totals.temporary_unleased,
     ] {
         non_evictable.checked_add_usage(usage)?;
     }
@@ -321,8 +368,14 @@ fn build_snapshot_retention_inventory_bounded(
         cap_bytes,
         entries,
         orphan_finals,
-        accounting_unstable: !temporary_files.is_empty(),
+        accounting_unstable: temporary_files.iter().any(|temp| {
+            matches!(
+                temp.state,
+                SnapshotTemporaryState::Active | SnapshotTemporaryState::Unleased
+            )
+        }),
         temporary_files,
+        residual_temp_leases,
         eviction_observations,
         totals,
         cap_excess_bytes,
@@ -404,9 +457,17 @@ fn calculate_totals(
         totals.orphan.checked_add_file(orphan.usage)?;
     }
     for temp in temps {
-        totals
-            .temporary_unknown_liveness
-            .checked_add_file(temp.usage)?;
+        match temp.state {
+            SnapshotTemporaryState::Active => {
+                totals.temporary_active.checked_add_file(temp.usage)?;
+            }
+            SnapshotTemporaryState::QuiescentAtObservation => {
+                totals.temporary_quiescent.checked_add_file(temp.usage)?;
+            }
+            SnapshotTemporaryState::Unleased => {
+                totals.temporary_unleased.checked_add_file(temp.usage)?;
+            }
+        }
     }
     for summary in remaining_pins.by_scan.values() {
         totals.active_pin_rows = totals
@@ -429,7 +490,9 @@ fn calculate_totals(
         totals.available,
         totals.tombstoned_residual,
         totals.orphan,
-        totals.temporary_unknown_liveness,
+        totals.temporary_active,
+        totals.temporary_quiescent,
+        totals.temporary_unleased,
     ] {
         classified_entries.checked_add_usage(usage)?;
         totals.store_total.checked_add_usage(usage)?;

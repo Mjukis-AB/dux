@@ -36,6 +36,10 @@ use super::migrations::{
     SchemaState, apply_pending_migrations, inspect_schema, inspect_schema_for_status,
 };
 use super::retention::{RetentionBatchResult, apply_retention_batch, reconcile_retention_batch};
+use super::snapshot_temp_lease::{
+    PreparedSnapshotTempLease, SnapshotTempLeaseState, delete_snapshot_temp_lease,
+    snapshot_temp_lease_state,
+};
 use super::status::{
     DATABASE_SCHEMA_VERSION, DatabaseAccess, DatabaseOpenError, DatabaseOpenErrorKind,
     DatabaseStatus,
@@ -516,6 +520,60 @@ impl StoreCoordinator {
         self.record_scan_finished_reconciled_with_guard_and_hook(guard, completion, || Ok(()))
     }
 
+    /// Atomically consume the exact snapshot staging row and commit its
+    /// succeeded scan summary. The immutable snapshot file is already durable
+    /// and the caller retains snapshot-writer exclusion through this commit.
+    pub(super) fn record_scan_finished_with_temp_lease_reconciled_with_guard(
+        &self,
+        guard: &mut HistoryConnectionGuard<'_>,
+        completion: &ScanCompletionRecord,
+        lease: &PreparedSnapshotTempLease,
+    ) -> Result<(), HistoryError> {
+        self.record_scan_finished_with_temp_lease_with_hook(guard, completion, lease, || Ok(()))
+    }
+
+    fn record_scan_finished_with_temp_lease_with_hook(
+        &self,
+        guard: &mut HistoryConnectionGuard<'_>,
+        completion: &ScanCompletionRecord,
+        lease: &PreparedSnapshotTempLease,
+        after_commit: impl FnOnce() -> Result<(), HistoryError>,
+    ) -> Result<(), HistoryError> {
+        self.validate_history_guard(guard)?;
+        if completion.id() != lease.scan_id() {
+            return Err(HistoryError::new(HistoryErrorKind::InvalidInput));
+        }
+        let prepared = PreparedScanCompletion::prepare(completion)?;
+        let failure = {
+            let transaction = guard
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(map_write_sql_error)?;
+            let attempted = delete_snapshot_temp_lease(&transaction, lease)
+                .and_then(|()| update_scan_finished(&transaction, &prepared))
+                .and_then(|()| transaction.commit().map_err(map_write_sql_error))
+                .and_then(|()| after_commit())
+                .and_then(|()| self.revalidate_current_history_guard(guard));
+            match attempted {
+                Ok(()) => return Ok(()),
+                Err(failure) => failure,
+            }
+        };
+        self.reconcile_scan_completion_and_temp_lease(guard, completion, lease, failure)
+    }
+
+    #[cfg(test)]
+    pub(super) fn record_scan_finished_with_temp_lease_after_commit_failure_for_test(
+        &self,
+        completion: &ScanCompletionRecord,
+        lease: &PreparedSnapshotTempLease,
+    ) -> Result<(), HistoryError> {
+        let mut guard = self.lock_current_history_connection()?;
+        self.record_scan_finished_with_temp_lease_with_hook(&mut guard, completion, lease, || {
+            Err(HistoryError::new(HistoryErrorKind::DatabaseUnavailable))
+        })
+    }
+
     fn record_scan_finished_reconciled_with_guard_and_hook(
         &self,
         guard: &mut HistoryConnectionGuard<'_>,
@@ -539,6 +597,40 @@ impl StoreCoordinator {
             Ok(Some(_)) => Err(HistoryError::new(HistoryErrorKind::InvalidTransition)),
             Ok(None) => Err(HistoryError::new(HistoryErrorKind::NotFound)),
             Err(_) => Err(HistoryError::new(HistoryErrorKind::OutcomeUnknown)),
+        }
+    }
+
+    fn reconcile_scan_completion_and_temp_lease(
+        &self,
+        guard: &HistoryConnectionGuard<'_>,
+        completion: &ScanCompletionRecord,
+        lease: &PreparedSnapshotTempLease,
+        failure: HistoryError,
+    ) -> Result<(), HistoryError> {
+        if self.revalidate_current_history_guard(guard).is_err() {
+            return Err(HistoryError::new(HistoryErrorKind::OutcomeUnknown));
+        }
+        let scan = load_scan_record(&guard.connection, completion.id());
+        let lease_state = snapshot_temp_lease_state(&guard.connection, lease);
+        match (scan, lease_state) {
+            (Ok(Some(scan)), Ok(SnapshotTempLeaseState::Missing))
+                if scan.exactly_matches_completion(completion) =>
+            {
+                Ok(())
+            }
+            (Ok(Some(scan)), Ok(SnapshotTempLeaseState::Exact))
+                if scan.status() == super::history::ScanStatus::Running =>
+            {
+                Err(failure)
+            }
+            (Ok(Some(scan)), Ok(SnapshotTempLeaseState::Conflicting))
+                if scan.status() == super::history::ScanStatus::Running =>
+            {
+                Err(HistoryError::new(HistoryErrorKind::CorruptData))
+            }
+            (Ok(Some(_)), Ok(_)) => Err(HistoryError::new(HistoryErrorKind::OutcomeUnknown)),
+            (Ok(None), Ok(_)) => Err(HistoryError::new(HistoryErrorKind::NotFound)),
+            _ => Err(HistoryError::new(HistoryErrorKind::OutcomeUnknown)),
         }
     }
 
@@ -570,12 +662,9 @@ impl StoreCoordinator {
     /// Atomically mark a scan succeeded and schedule its exact evaluation.
     /// This pending-only path is reserved for a future asynchronous/recovery
     /// protocol; normal engine scans use the terminal combined path below.
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "reserved for a future asynchronous evaluation recovery protocol"
-        )
+    #[allow(
+        dead_code,
+        reason = "reserved for a future asynchronous evaluation recovery protocol"
     )]
     pub(super) fn record_scan_finished_and_schedule_evaluation_reconciled_with_guard(
         &self,
@@ -591,12 +680,63 @@ impl StoreCoordinator {
         )
     }
 
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "reserved for a future asynchronous evaluation recovery protocol"
-        )
+    #[cfg(test)]
+    pub(super) fn record_scan_finished_and_schedule_evaluation_with_temp_lease_reconciled_with_guard(
+        &self,
+        guard: &mut HistoryConnectionGuard<'_>,
+        completion: &ScanCompletionRecord,
+        request: &NewCandidateEvaluation,
+        lease: &PreparedSnapshotTempLease,
+    ) -> Result<(), HistoryError> {
+        self.validate_history_guard(guard)?;
+        if completion.id() != request.scan_id() || completion.id() != lease.scan_id() {
+            return Err(HistoryError::new(HistoryErrorKind::InvalidInput));
+        }
+        let prepared_completion = PreparedScanCompletion::prepare(completion)?;
+        let prepared_evaluation = PreparedCandidateEvaluation::prepare(request)?;
+        let failure = {
+            let transaction = guard
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(map_write_sql_error)?;
+            let attempted = delete_snapshot_temp_lease(&transaction, lease)
+                .and_then(|()| update_scan_finished(&transaction, &prepared_completion))
+                .and_then(|()| {
+                    insert_candidate_evaluation_pending(&transaction, &prepared_evaluation)
+                })
+                .and_then(|()| transaction.commit().map_err(map_write_sql_error))
+                .and_then(|()| self.revalidate_current_history_guard(guard));
+            match attempted {
+                Ok(()) => return Ok(()),
+                Err(failure) => failure,
+            }
+        };
+        if self.revalidate_current_history_guard(guard).is_err() {
+            return Err(HistoryError::new(HistoryErrorKind::OutcomeUnknown));
+        }
+        let scan = load_scan_record(&guard.connection, completion.id());
+        let evaluation = load_candidate_evaluation(&guard.connection, request.scan_id());
+        let lease_state = snapshot_temp_lease_state(&guard.connection, lease);
+        match (scan, evaluation, lease_state) {
+            (Ok(Some(scan)), Ok(Some(evaluation)), Ok(SnapshotTempLeaseState::Missing))
+                if scan.exactly_matches_completion(completion)
+                    && evaluation.exactly_matches_request(request) =>
+            {
+                Ok(())
+            }
+            (Ok(Some(scan)), Ok(None), Ok(SnapshotTempLeaseState::Exact))
+                if scan.status() == super::history::ScanStatus::Running =>
+            {
+                Err(failure)
+            }
+            (Ok(None), Ok(None), Ok(_)) => Err(HistoryError::new(HistoryErrorKind::NotFound)),
+            _ => Err(HistoryError::new(HistoryErrorKind::OutcomeUnknown)),
+        }
+    }
+
+    #[allow(
+        dead_code,
+        reason = "reserved for a future asynchronous evaluation recovery protocol"
     )]
     fn record_scan_finished_and_schedule_evaluation_with_hook(
         &self,
@@ -631,35 +771,37 @@ impl StoreCoordinator {
         self.reconcile_scan_and_evaluation(guard, completion, request, None, failure)
     }
 
-    /// Atomically commit the immutable snapshot reference and the evaluator's
-    /// complete terminal output. No crash can expose a succeeded scan without
-    /// its corresponding evaluation result.
-    pub(super) fn record_scan_finished_with_evaluation_reconciled_with_guard(
+    /// Atomically consume the exact snapshot staging row, commit the succeeded
+    /// scan, and finalize its complete deterministic candidate evaluation.
+    pub(super) fn record_scan_finished_with_evaluation_and_temp_lease_reconciled_with_guard(
         &self,
         guard: &mut HistoryConnectionGuard<'_>,
         completion: &ScanCompletionRecord,
         request: &NewCandidateEvaluation,
         evaluation: &CandidateEvaluationCompletion,
+        lease: &PreparedSnapshotTempLease,
     ) -> Result<(), HistoryError> {
-        self.record_scan_finished_with_evaluation_and_hook(
+        self.record_scan_finished_with_evaluation_and_temp_lease_with_hook(
             guard,
             completion,
             request,
             evaluation,
+            lease,
             || Ok(()),
         )
     }
 
-    fn record_scan_finished_with_evaluation_and_hook(
+    fn record_scan_finished_with_evaluation_and_temp_lease_with_hook(
         &self,
         guard: &mut HistoryConnectionGuard<'_>,
         completion: &ScanCompletionRecord,
         request: &NewCandidateEvaluation,
         evaluation: &CandidateEvaluationCompletion,
+        lease: &PreparedSnapshotTempLease,
         after_commit: impl FnOnce() -> Result<(), HistoryError>,
     ) -> Result<(), HistoryError> {
         self.validate_history_guard(guard)?;
-        if completion.id() != request.scan_id() {
+        if completion.id() != request.scan_id() || completion.id() != lease.scan_id() {
             return Err(HistoryError::new(HistoryErrorKind::InvalidInput));
         }
         evaluation.validate_for_request(request)?;
@@ -671,7 +813,8 @@ impl StoreCoordinator {
                 .connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(map_write_sql_error)?;
-            let attempted = update_scan_finished(&transaction, &prepared_completion)
+            let attempted = delete_snapshot_temp_lease(&transaction, lease)
+                .and_then(|()| update_scan_finished(&transaction, &prepared_completion))
                 .and_then(|()| {
                     insert_candidate_evaluation_pending(&transaction, &prepared_evaluation)
                 })
@@ -684,9 +827,15 @@ impl StoreCoordinator {
                 Err(failure) => failure,
             }
         };
-        self.reconcile_scan_and_evaluation(guard, completion, request, Some(evaluation), failure)
+        self.reconcile_scan_evaluation_and_temp_lease(
+            guard, completion, request, evaluation, lease, failure,
+        )
     }
 
+    #[allow(
+        dead_code,
+        reason = "reserved for a future asynchronous evaluation recovery protocol"
+    )]
     fn reconcile_scan_and_evaluation(
         &self,
         guard: &HistoryConnectionGuard<'_>,
@@ -724,6 +873,44 @@ impl StoreCoordinator {
             }
             (Ok(Some(_)), Ok(_)) => Err(HistoryError::new(HistoryErrorKind::InvalidTransition)),
             (Ok(None), Ok(None)) => Err(HistoryError::new(HistoryErrorKind::NotFound)),
+            _ => Err(HistoryError::new(HistoryErrorKind::OutcomeUnknown)),
+        }
+    }
+
+    fn reconcile_scan_evaluation_and_temp_lease(
+        &self,
+        guard: &HistoryConnectionGuard<'_>,
+        completion: &ScanCompletionRecord,
+        request: &NewCandidateEvaluation,
+        terminal: &CandidateEvaluationCompletion,
+        lease: &PreparedSnapshotTempLease,
+        failure: HistoryError,
+    ) -> Result<(), HistoryError> {
+        if self.revalidate_current_history_guard(guard).is_err() {
+            return Err(HistoryError::new(HistoryErrorKind::OutcomeUnknown));
+        }
+        let scan = load_scan_record(&guard.connection, completion.id());
+        let evaluation = load_candidate_evaluation(&guard.connection, request.scan_id());
+        let lease_state = snapshot_temp_lease_state(&guard.connection, lease);
+        match (scan, evaluation, lease_state) {
+            (Ok(Some(scan)), Ok(Some(evaluation)), Ok(SnapshotTempLeaseState::Missing))
+                if scan.exactly_matches_completion(completion)
+                    && terminal.exactly_matches_record(&evaluation, request) =>
+            {
+                Ok(())
+            }
+            (Ok(Some(scan)), Ok(None), Ok(SnapshotTempLeaseState::Exact))
+                if scan.status() == super::history::ScanStatus::Running =>
+            {
+                Err(failure)
+            }
+            (Ok(Some(scan)), Ok(None), Ok(SnapshotTempLeaseState::Conflicting))
+                if scan.status() == super::history::ScanStatus::Running =>
+            {
+                Err(HistoryError::new(HistoryErrorKind::CorruptData))
+            }
+            (Ok(None), Ok(None), Ok(_)) => Err(HistoryError::new(HistoryErrorKind::NotFound)),
+            (Ok(Some(_)), Ok(_), Ok(_)) => Err(HistoryError::new(HistoryErrorKind::OutcomeUnknown)),
             _ => Err(HistoryError::new(HistoryErrorKind::OutcomeUnknown)),
         }
     }
@@ -809,18 +996,20 @@ impl StoreCoordinator {
     }
 
     #[cfg(test)]
-    pub(super) fn record_scan_finished_with_evaluation_after_commit_failure_for_test(
+    pub(super) fn record_scan_finished_with_evaluation_and_temp_lease_after_commit_failure_for_test(
         &self,
         completion: &ScanCompletionRecord,
         request: &NewCandidateEvaluation,
         evaluation: &CandidateEvaluationCompletion,
+        lease: &PreparedSnapshotTempLease,
     ) -> Result<(), HistoryError> {
         let mut guard = self.lock_current_history_connection()?;
-        self.record_scan_finished_with_evaluation_and_hook(
+        self.record_scan_finished_with_evaluation_and_temp_lease_with_hook(
             &mut guard,
             completion,
             request,
             evaluation,
+            lease,
             || Err(HistoryError::new(HistoryErrorKind::DatabaseUnavailable)),
         )
     }

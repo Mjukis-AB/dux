@@ -273,22 +273,33 @@ Release is in reverse order. Snapshot retention must use the same order.
 
 Publication proceeds as follows:
 
-1. Under a current-schema SQLite guard, create one exclusive private temporary
-   file with a process ID and 128-bit random suffix.
-2. Release both locks and stream the fully validated document plus checksum to
-   that unique temp. No shared fixed `.tmp` name exists.
-3. Reacquire the current-schema SQLite guard. If a newer schema won, abandon
-   the recognized private temp without another store mutation.
-4. Under the snapshot writer lock, revalidate the whole store and exact temp,
-   flush the temp, and publish it with an atomic no-replace operation.
-5. Flush the snapshot directory, close the writable temp handle, reopen the
+1. Under a current-schema SQLite guard, acquire the snapshot writer lock and
+   reserve one unique recognized temp name containing the process ID and a
+   128-bit random suffix.
+2. Commit one immutable schema-v8 lease row binding that exact temp and final
+   name to the running scan, then create the exclusive private file while both
+   locks are still held. Row-before-file is deliberate: a crash may leave a
+   row without a file, never a new v8 file whose creation was not preceded by
+   its row.
+3. Acquire an exclusive kernel lock on the staged file before releasing the
+   snapshot and database locks. Retain that file lock while streaming the fully
+   validated document plus checksum. No shared fixed `.tmp` name exists.
+4. Reacquire the current-schema SQLite guard. If compatibility cannot be
+   retained, abandon the recognized private temp close-only rather than
+   mutating the store during drop or unwinding.
+5. Under the snapshot writer lock, require the exact lease row, revalidate the
+   whole store and exact retained temp, flush it, and publish with an atomic
+   no-replace operation.
+6. Flush the snapshot directory, close the writable temp handle, reopen the
    final name read-only, and require its identity to equal the published source.
-6. Decode and compare the retained winner's full document and digest. A name
+7. Decode and compare the retained winner's full document and digest. A name
    collision is idempotent only when those facts are exact.
-7. Retain the snapshot writer lock while the same SQLite guard compare-and-sets
-   the running scan to its exact terminal summary and four-field reference.
-8. Revalidate the retained file after the database commit, then release the
-   snapshot lock and SQLite guard in reverse order.
+8. Retain the snapshot writer lock while the same SQLite guard atomically
+   deletes the exact temp lease and compare-and-sets the running scan to its
+   terminal summary and four-field reference, including the optional complete
+   candidate evaluation in that transaction.
+9. Revalidate the retained file and current schema after the database commit,
+   then release the snapshot lock and SQLite guard in reverse order.
 
 The file is always durable before SQLite can reference it. Failure between file
 publication and database commit may leave an unreferenced immutable orphan;
@@ -325,6 +336,16 @@ encoding, snapshot-name bytes, and scan ID for rows with a snapshot reference.
 It changes neither the v1 snapshot wire nor immutable scan history and grants
 no tombstone or unlink authority.
 
+Schema v8 adds an immutable, bounded temporary-file lease relation without
+changing snapshot v1 bytes. A row records one running scan, exact final and
+recognized temp names, a random 128-bit lease ID, a strictly decoded process
+instance, and creation time. Stored PID/process data is identity evidence only.
+Only the kernel lock retained on the staged file establishes current writer
+liveness. The insert guard enforces the 64-row ceiling and a running parent;
+rows cannot be updated, and a scan cannot transition to `succeeded` until the
+exact row is deleted. Failed, cancelled, or interrupted scans may retain a row
+as explicit crash debt.
+
 The read-only retention inventory uses that index only after a single bounded
 physical directory pass sequentially opens exact no-follow file handles,
 captures identity and handle-derived usage, then closes each entry. After the
@@ -332,19 +353,42 @@ indexed SQLite match it sequentially reopens every name and requires immutable
 final identity and usage to remain exact. This avoids an entry-count-sized file
 descriptor requirement. It reports logical length and platform allocation
 separately and conservatively charges their maximum; it does not decode full
-snapshot bodies or treat these bytes as content validity. Recognized temps have
-unknown liveness because their staging writer can remain active outside the
-snapshot writer lock. Latest-two/cap results are observations that a future
-writer must recompute under the final database and snapshot lock boundary.
+snapshot bodies or treat these bytes as content validity. The v8 lease
+population plus a nonblocking kernel-lock probe classifies recognized temps as
+row-bound active, row-bound quiescent-at-observation, or unleased; row-only
+residuals are reported separately. Active and unleased temps keep accounting
+unstable, and every physical class remains charged and non-evictable.
+Quiescence is not unlink authority. Latest-two/cap results are observations
+that a future writer must recompute under the final database and snapshot lock
+boundary.
 The effective cap comes from the typed `snapshot_retention` database setting;
 absence means 2 GiB. Inventory reads it under the current-schema database guard
 before taking the snapshot lock. This does not change snapshot v1 bytes, and a
 cached settings value never grants retention authority.
 
+An exact same-scan retry is the sole implemented temp reconciliation. With the
+database guard held before the snapshot writer lock, it returns busy for a
+contended kernel lock. It may reopen, identity-revalidate, nonblockingly lock,
+unlink, and directory-flush only the quiescent temp named by that scan's exact
+row, then delete the row. A row-only residual can be deleted under the same
+locks because the row-before-file reservation cannot still create after those
+locks were released. It never adopts or removes an unleased temp. Normal abort
+also removes and flushes its retained current-call temp before exact row
+consumption; broad startup or retention scavenging is not implemented.
+
+The retained current-call handle remains narrow rollback authority over its
+own exact identity even if its row is concurrently deleted or replaced under
+an otherwise valid current schema. Such a mismatch forbids publication; DUX
+removes only that retained temp, preserves conflicting metadata, and reports
+corruption. Without a valid database/current-schema guard it closes the handle
+without mutating the store. This current-call rule is not inventory authority
+and cannot be used to adopt an unleased name.
+
 Initial snapshot-directory provisioning uses a private marker-complete sibling
 stage and atomic no-replace directory publication. A racing winner is reopened
-and fully validated. Losing or interrupted stages and recognized snapshot temps
-are deliberately not recursively scavenged in this checkpoint.
+and fully validated. Losing or interrupted `.dux-snapshot-stage-*` siblings,
+unrelated or terminal-scan lease residuals, and unleased recognized snapshot
+temps are deliberately not recursively scavenged in this checkpoint.
 
 ## 10. Compatibility and failure behavior
 
@@ -357,6 +401,9 @@ are deliberately not recursively scavenged in this checkpoint.
   before snapshot provisioning and every later mutation.
 - Existing successful summaries retry only when every frozen completion fact
   and the fully decoded referenced document match exactly.
+- A schema-v8 temp row is created before its file and consumed atomically with
+  successful scan completion. Kernel-lock contention is live-writer evidence;
+  PID, age, and a quiescent observation are not deletion authority.
 - A schema-v5 tombstone makes the reference logically unavailable before file
   open; malformed tombstones and missing or corrupt available files fail
   closed. History remains an observation and is not silently rewritten.
@@ -382,7 +429,8 @@ This checkpoint does not implement:
 - latest-two-per-root selection, app/FFI review-lease ownership, or a production
   tombstone writer and retained-handle unlink;
 - production total-store cap enforcement and physical-orphan reconciliation;
-- bounded identity-safe scavenging for abandoned temps or provisioning stages;
+- general terminal-row, unleased-temp, or provisioning-stage scavenging beyond
+  the exact same-scan residual retry;
 - native Windows sparse/compressed-allocation runtime verification and bounded
   accounting probes for slow filesystem drivers;
 - Explorer paging/indexes and measured 1M/5M-node memory budgets;

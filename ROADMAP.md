@@ -755,7 +755,7 @@ Do not store full millions-node trees in SQLite initially. Continue using versio
 - Cleanup history: retained until user clears it.
 - AI insights: default 30 days, user-clearable, and regenerated on input digest change.
 - Full snapshots: latest two physically present, logically available succeeded snapshots per exact losslessly encoded root, plus any snapshot protected by an explicit active Explorer or cleanup-review lease. Scan coverage remains visible metadata; it does not silently remove a succeeded snapshot from this retention set.
-- The snapshots directory has a total size cap (default 2 GiB, configurable); charge the conservative maximum of logical length and filesystem allocation for every final, recognized temporary, and control file, while reporting both values separately. Directory metadata overhead is excluded. Evict eligible referenced snapshots oldest first; unknown-liveness temps, tombstoned residuals, and physical orphans are separate maintenance debt, never normal victims. Settings shows DUX’s own disk footprint with a clear-data action — a disk-pressure tool must not be a storage thief itself.
+- The snapshots directory has a total size cap (default 2 GiB, configurable); charge the conservative maximum of logical length and filesystem allocation for every final, recognized temporary, and control file, while reporting both values separately. Directory metadata overhead is excluded. Evict eligible referenced snapshots oldest first; active, quiescent, and unleased temps, tombstoned residuals, and physical orphans are separate maintenance debt, never normal victims. Settings shows DUX’s own disk footprint with a clear-data action — a disk-pressure tool must not be a storage thief itself.
 - Never delete history during cleanup without a separate settings action.
 
 ### 11.3 Multi-process access
@@ -2640,10 +2640,63 @@ Tasks:
     inventory-integration regressions cover the slice. No FFI/Swift setting,
     tombstone writer, unlink, or cap-enforcement task exists yet.
 
+  - Durable snapshot-temp-lease prerequisite completed 2026-07-16: schema v8
+    adds a bounded immutable `snapshot_temp_leases` relation for the exact
+    running scan, deterministic final name, unique recognized temp name,
+    process-instance observation, creation time, and random 128-bit lease ID.
+    V7 upgrades fabricate no leases. Insert and update guards enforce the
+    64-row bound and immutable creation facts, while a scan cannot transition
+    to `succeeded` until its exact lease is consumed. Failed, cancelled, or
+    interrupted scans may retain a row as explicit recovery debt; PID and
+    process-instance data never establish liveness.
+
+    Staging now acquires the current-schema database guard before the snapshot
+    writer lock, reserves a unique name, commits the row, and only then creates
+    the private file. The staged handle holds a nonblocking kernel-exclusive
+    lock while encoding continues outside both store-wide locks. This
+    row-before-file order means a crash may leave a row without a file or a
+    row-bound file, but a compliant writer cannot create the file later after
+    releasing the reservation. Drop and unwinding close only.
+
+    The read-only inventory strictly reconciles the complete bounded lease
+    population with physical temps. A contended kernel lock reports `active`;
+    an acquired-and-released probe reports `quiescent_at_observation`; a
+    recognized temp with no row reports `unleased`; and a row with no file is
+    separate residual metadata. Active and unleased temps keep accounting
+    unstable, while every class remains charged and non-evictable. The state is
+    an observation, not scavenging authority.
+
+    Before creating a replacement for the same scan, the repository may
+    reconcile only that scan's exact residual while holding database then
+    snapshot exclusion. Active returns busy. A quiescent row-bound temp is
+    reopened by name, required to retain its observed identity, locked
+    nonblockingly, revalidated, unlinked, and followed by a directory flush
+    before the exact row is deleted. A row-only residual is deleted under the
+    same locks. Unleased temps are never adopted or removed by this retry.
+    Normal abort likewise performs physical removal and directory durability
+    before exact row consumption. Publication first durably publishes or
+    validates the immutable winner, then consumes the lease in the same SQLite
+    transaction that commits the exact succeeded scan and optional evaluation,
+    retaining the snapshot writer lock through commit and revalidation.
+    A retained current-call staged handle remains narrow rollback authority
+    over only its exact identity: missing/conflicting metadata forbids
+    publication, removes that current temp, preserves conflicting rows, and
+    returns corruption. Failure to establish the current-schema guard remains
+    close-only; this is not unleased-temp scavenging.
+
+    Migration/fingerprint, strict row decoding and constraints, row-before-file
+    residual, active/quiescent/unleased inventory, exact retry, atomic terminal
+    commit, and cross-process kernel-lock regressions cover the implemented
+    boundary. The kernel path is implemented for Unix and Windows, but native
+    Windows runtime verification remains outstanding. This checkpoint does not
+    provide a general temp sweeper, terminal-scan residual maintenance,
+    provisioning-stage scavenging, tombstone insertion, final-file unlink,
+    app/FFI ownership, scheduling, or cap enforcement.
+
     Production retention still requires revalidation plus tombstone commit
     under the final lock boundary,
     retained-handle unlink and directory flush, post-commit residual/orphan
-    reconciliation, durable live-temp leases, bounded marker-owned temp/stage
+    reconciliation, bounded marker-owned unleased-temp/provisioning-stage
     scavenging, app/FFI lease ownership and idle scheduling, and explicit
     clear-data actions.
 - [x] Add engine integration tests with temporary HOME and database. Completed

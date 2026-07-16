@@ -5,6 +5,25 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Added schema v8's durable snapshot temporary-file leases. Snapshot staging
+  now reserves an exact recognized name while holding the permanent
+  database-before-snapshot lock order, commits a bounded immutable lease row
+  before creating the file, and retains a nonblocking kernel file lock while
+  bytes are being encoded. Read-only inventory distinguishes row-bound active
+  and quiescent-at-observation temps from unleased legacy debt, charges every
+  class, and reports row-without-file residuals separately. An exact same-scan
+  retry may remove only a row-bound, identity-revalidated temp after acquiring
+  its kernel lock and durably flushing the directory; active temps return busy,
+  while unleased temps are never adopted or removed. Normal abort removes the
+  physical temp before consuming its exact row, and successful publication
+  atomically consumes that row with the succeeded scan/evaluation transaction
+  while retaining snapshot-writer exclusion. Drop remains close-only. Focused
+  migration, hostile-row, row-before-file, active/quiescent, same-process retry,
+  atomic completion, and cross-process kernel-lock tests cover the implemented
+  boundary. This does not enable broad temp or provisioning-stage scavenging,
+  a tombstone writer, final-file unlink, app/FFI lease ownership, scheduling,
+  or production retention enforcement; native Windows runtime verification of
+  the new liveness/removal path remains outstanding.
 - Added the typed snapshot-retention cap prerequisite. The exact
   `snapshot_retention` setting uses canonical deny-unknown value-schema-v1 JSON,
   defaults to 2 GiB without writing a row, accepts the full `u64` policy domain,

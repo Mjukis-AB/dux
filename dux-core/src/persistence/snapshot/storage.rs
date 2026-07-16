@@ -214,6 +214,17 @@ pub(crate) enum SnapshotInventoryEntryKind {
     RecognizedTemp,
 }
 
+/// Kernel-observed liveness for a recognized temporary snapshot file.
+///
+/// This observation is deliberately independent from the durable SQLite row:
+/// the row binds a name to one staging operation, while only a contended
+/// kernel lock proves that a writer still owns the file now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SnapshotTempKernelState {
+    Active,
+    Quiescent,
+}
+
 /// One no-follow, identity-checked object observed under the inventory lease.
 ///
 /// The file descriptor is closed after its facts are captured. Keeping up to
@@ -225,10 +236,10 @@ pub(crate) struct SnapshotInventoryEntry {
     kind: SnapshotInventoryEntryKind,
     identity: Identity,
     usage: SnapshotFileUsage,
+    temp_kernel_state: Option<SnapshotTempKernelState>,
 }
 
 impl SnapshotInventoryEntry {
-    #[cfg(test)]
     pub(crate) fn name(&self) -> &str {
         &self.name
     }
@@ -239,6 +250,10 @@ impl SnapshotInventoryEntry {
 
     pub(crate) const fn usage(&self) -> SnapshotFileUsage {
         self.usage
+    }
+
+    pub(crate) const fn temp_kernel_state(&self) -> Option<SnapshotTempKernelState> {
+        self.temp_kernel_state
     }
 
     fn revalidate(&self, store: &StoreInner) -> Result<()> {
@@ -264,13 +279,24 @@ impl SnapshotInventoryEntry {
             identity,
             platform::Kind::RegularFile,
         )?;
-        // Immutable finals must not change while SQLite is reconciled. A
-        // recognized stage temp may still be written by its live owner outside
-        // the writer lock, so its size remains explicitly point-in-time.
-        if matches!(self.kind, SnapshotInventoryEntryKind::Final(_))
-            && snapshot_file_usage(&file)? != self.usage
-        {
-            return Err(unsafe_inventory_object());
+        match &self.kind {
+            SnapshotInventoryEntryKind::Final(_) => {
+                if snapshot_file_usage(&file)? != self.usage {
+                    return Err(unsafe_inventory_object());
+                }
+            }
+            SnapshotInventoryEntryKind::RecognizedTemp => {
+                // A quiescent observation is stable only if a second
+                // nonblocking probe remains quiescent and its usage is exact.
+                // An initially active writer may finish or keep growing; the
+                // higher layer retains the conservative Active classification.
+                if self.temp_kernel_state == Some(SnapshotTempKernelState::Quiescent)
+                    && (probe_temp_kernel_state(&file)? != SnapshotTempKernelState::Quiescent
+                        || snapshot_file_usage(&file)? != self.usage)
+                {
+                    return Err(unsafe_inventory_object());
+                }
+            }
         }
         Ok(())
     }
@@ -302,8 +328,10 @@ impl SnapshotControlUsage {
 /// Holding this value excludes legitimate publishers for the entire period in
 /// which higher persistence layers match database references. Entry handles
 /// are opened and closed sequentially so the 2,048-entry bound does not become
-/// a file-descriptor requirement. It deliberately offers no unlink or cleanup
-/// authority.
+/// a file-descriptor requirement. Its only mutation is a narrow, identity-
+/// checked removal of one re-proven quiescent temp; higher persistence must
+/// first bind that exact name to durable same-scan retry authority. It offers
+/// no generic temp, final-snapshot, or user-data cleanup authority.
 pub(crate) struct SnapshotStoreInventoryLease {
     store: Arc<StoreInner>,
     entries: Vec<SnapshotInventoryEntry>,
@@ -346,6 +374,51 @@ impl SnapshotStoreInventoryLease {
             entry.revalidate(&self.store)?;
         }
         Ok(())
+    }
+
+    /// Reacquire and remove one exact row-bound temp after a nonblocking
+    /// quiescence proof. The caller must keep the matching SQLite row and this
+    /// writer lease live until it has durably consumed that row.
+    pub(crate) fn remove_quiescent_temp(&mut self, name: &str) -> Result<()> {
+        let observed = self
+            .entries
+            .iter()
+            .find(|entry| entry.name == name)
+            .ok_or_else(unsafe_inventory_object)?;
+        if !matches!(observed.kind, SnapshotInventoryEntryKind::RecognizedTemp)
+            || observed.temp_kernel_state != Some(SnapshotTempKernelState::Quiescent)
+        {
+            return Err(unsafe_inventory_object());
+        }
+        let Some((file, identity)) =
+            platform::open_named_temp_for_removal(&self.store.directory, &self.store.path, name)?
+        else {
+            return Err(unsafe_inventory_object());
+        };
+        if Identity(identity) != observed.identity {
+            return Err(unsafe_inventory_object());
+        }
+        match FileExt::try_lock(&file) {
+            Ok(()) => {}
+            Err(TryLockError::WouldBlock) => {
+                return Err(SnapshotStorageError::new(SnapshotStorageErrorKind::Busy));
+            }
+            Err(TryLockError::Error(_)) => {
+                return Err(SnapshotStorageError::new(
+                    SnapshotStorageErrorKind::Unavailable,
+                ));
+            }
+        }
+        platform::validate_retained(&file, identity, platform::Kind::RegularFile, true)?;
+        platform::validate_named(
+            &self.store.directory,
+            name,
+            &file,
+            identity,
+            platform::Kind::RegularFile,
+        )?;
+        platform::remove_retained_temp(&self.store.directory, name, &file, identity)?;
+        platform::sync_directory(&self.store.directory)
     }
 }
 
@@ -599,11 +672,11 @@ impl SecureSnapshotStore {
         })
     }
 
-    pub(crate) fn stage(
+    pub(crate) fn reserve_stage(
         &self,
         name: SnapshotFileName,
         timeout: Duration,
-    ) -> Result<StagedSnapshot> {
+    ) -> Result<SnapshotStageReservation> {
         let lock = self.acquire_writer_lock(timeout)?;
         let inventory = self.inventory_locked(None)?;
         let existing_temps = inventory
@@ -614,34 +687,37 @@ impl SecureSnapshotStore {
         if existing_temps >= MAX_RECOGNIZED_TEMPS {
             return Err(unsafe_inventory_object());
         }
-        drop(inventory);
         for _ in 0..RANDOM_ATTEMPTS {
             let temp_name = random_temp_name(&name)?;
-            match platform::create_private_file_exclusive(
-                &self.inner.directory,
-                &self.inner.path,
-                &temp_name,
-            )? {
-                Some((file, identity)) => {
-                    let staged = StagedSnapshot {
-                        store: Arc::clone(&self.inner),
-                        final_name: name,
-                        temp_name,
-                        file: Some(file),
-                        identity: Identity(identity),
-                        lock_timeout: timeout,
-                    };
-                    staged.revalidate()?;
-                    self.validate_inventory(Some(&staged.temp_name))?;
-                    drop(lock);
-                    return Ok(staged);
-                }
-                None => continue,
+            if inventory
+                .entries
+                .iter()
+                .any(|entry| entry.name == temp_name)
+            {
+                continue;
             }
+            return Ok(SnapshotStageReservation {
+                store: Arc::clone(&self.inner),
+                final_name: name,
+                temp_name,
+                lock_timeout: timeout,
+                created: false,
+                _writer_lock: lock,
+            });
         }
         Err(SnapshotStorageError::new(
             SnapshotStorageErrorKind::Unavailable,
         ))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn stage(
+        &self,
+        name: SnapshotFileName,
+        timeout: Duration,
+    ) -> Result<StagedSnapshot> {
+        let mut reservation = self.reserve_stage(name, timeout)?;
+        reservation.create()
     }
 
     fn acquire_writer_lock(&self, timeout: Duration) -> Result<SnapshotWriterLock> {
@@ -809,6 +885,11 @@ impl SecureSnapshotStore {
                 platform::Kind::RegularFile,
             )?;
             let usage = snapshot_file_usage(&file)?;
+            let temp_kernel_state = if matches!(kind, SnapshotInventoryEntryKind::RecognizedTemp) {
+                Some(probe_temp_kernel_state(&file)?)
+            } else {
+                None
+            };
             if matches!(kind, SnapshotInventoryEntryKind::Final(_))
                 && usage.logical_bytes() > MAX_SNAPSHOT_FILE_BYTES
             {
@@ -820,6 +901,7 @@ impl SecureSnapshotStore {
                 kind,
                 identity: Identity(identity),
                 usage,
+                temp_kernel_state,
             });
             if Instant::now() > deadline {
                 return Err(SnapshotStorageError::new(
@@ -848,6 +930,23 @@ fn snapshot_file_usage(file: &File) -> Result<SnapshotFileUsage> {
         logical_bytes,
         allocated_bytes,
     ))
+}
+
+fn probe_temp_kernel_state(file: &File) -> Result<SnapshotTempKernelState> {
+    match FileExt::try_lock(file) {
+        Ok(()) => {
+            if FileExt::unlock(file).is_err() {
+                return Err(SnapshotStorageError::new(
+                    SnapshotStorageErrorKind::Unavailable,
+                ));
+            }
+            Ok(SnapshotTempKernelState::Quiescent)
+        }
+        Err(TryLockError::WouldBlock) => Ok(SnapshotTempKernelState::Active),
+        Err(TryLockError::Error(_)) => Err(SnapshotStorageError::new(
+            SnapshotStorageErrorKind::Unavailable,
+        )),
+    }
 }
 
 struct SnapshotWriterLock {
@@ -927,6 +1026,12 @@ pub(crate) struct SnapshotPublicationLease {
     _writer_lock: SnapshotWriterLock,
 }
 
+/// Snapshot-writer exclusion retained after an exact stage unlink so SQLite
+/// can consume the matching durable row before another store mutation begins.
+pub(crate) struct SnapshotTempMutationLease {
+    _writer_lock: SnapshotWriterLock,
+}
+
 /// A retained immutable snapshot plus the store-wide writer exclusion.
 ///
 /// This type deliberately exposes no unlink operation. Its only purpose is to
@@ -968,6 +1073,70 @@ impl std::ops::Deref for SnapshotPublicationLease {
 pub(crate) enum SnapshotPublication {
     Published(SnapshotPublicationLease),
     Existing(SnapshotPublicationLease),
+}
+
+/// One generated staging name reserved while the store-wide writer lock is
+/// retained.
+///
+/// Higher layers persist the exact durable name binding before calling
+/// `create`. Keeping creation separate is what makes every physical temp
+/// either row-bound or explicit pre-v8 debt after a crash.
+#[must_use]
+pub(crate) struct SnapshotStageReservation {
+    store: Arc<StoreInner>,
+    final_name: SnapshotFileName,
+    temp_name: String,
+    lock_timeout: Duration,
+    created: bool,
+    _writer_lock: SnapshotWriterLock,
+}
+
+impl SnapshotStageReservation {
+    pub(crate) fn temp_name(&self) -> &str {
+        &self.temp_name
+    }
+
+    /// Create the exact private file and retain an exclusive kernel lock for
+    /// the complete staging lifetime. The surrounding reservation continues
+    /// to hold snapshot-writer exclusion until the caller has reconciled both
+    /// the durable row and this physical result.
+    pub(crate) fn create(&mut self) -> Result<StagedSnapshot> {
+        if self.created {
+            return Err(SnapshotStorageError::new(
+                SnapshotStorageErrorKind::InternalState,
+            ));
+        }
+        let Some((file, identity)) = platform::create_private_file_exclusive(
+            &self.store.directory,
+            &self.store.path,
+            &self.temp_name,
+        )?
+        else {
+            return Err(SnapshotStorageError::new(
+                SnapshotStorageErrorKind::Unavailable,
+            ));
+        };
+        match FileExt::try_lock(&file) {
+            Ok(()) => {}
+            Err(TryLockError::WouldBlock | TryLockError::Error(_)) => {
+                return Err(SnapshotStorageError::new(
+                    SnapshotStorageErrorKind::Unavailable,
+                ));
+            }
+        }
+        let staged = StagedSnapshot {
+            store: Arc::clone(&self.store),
+            final_name: self.final_name.clone(),
+            temp_name: self.temp_name.clone(),
+            file: Some(file),
+            identity: Identity(identity),
+            lock_timeout: self.lock_timeout,
+        };
+        staged.revalidate()?;
+        validate_inventory_inner(&self.store, Some(&self.temp_name))?;
+        self.created = true;
+        Ok(staged)
+    }
 }
 
 /// A create-new file owned by the current publication call.
@@ -1062,15 +1231,14 @@ impl StagedSnapshot {
         }
     }
 
-    pub(crate) fn abort(mut self) -> Result<()> {
+    pub(crate) fn abort(mut self) -> Result<SnapshotTempMutationLease> {
         let lock = SecureSnapshotStore {
             inner: Arc::clone(&self.store),
         }
         .acquire_writer_lock(self.lock_timeout)?;
         self.remove_current_temp()?;
         validate_inventory_inner(&self.store, None)?;
-        drop(lock);
-        Ok(())
+        Ok(SnapshotTempMutationLease { _writer_lock: lock })
     }
 
     /// Close this private temporary file without mutating the snapshot store.
@@ -1518,6 +1686,14 @@ mod platform {
                 SnapshotStorageErrorKind::Unavailable,
             )),
         }
+    }
+
+    pub(super) fn open_named_temp_for_removal(
+        directory: &File,
+        directory_path: &Path,
+        name: &str,
+    ) -> Result<Option<(File, Identity)>> {
+        open_named_regular(directory, directory_path, name, true)
     }
 
     pub(super) fn identity(file: &File, kind: Kind) -> Result<Identity> {
@@ -2076,6 +2252,10 @@ mod tests {
             temp_entry.kind(),
             &SnapshotInventoryEntryKind::RecognizedTemp
         );
+        assert_eq!(
+            temp_entry.temp_kernel_state(),
+            Some(SnapshotTempKernelState::Active)
+        );
 
         let controls = inventory.control_usage();
         assert_eq!(controls.store_marker().logical_bytes(), 16);
@@ -2099,6 +2279,46 @@ mod tests {
         );
         drop(inventory);
         staged.abort().unwrap();
+    }
+
+    #[test]
+    fn staged_temp_lock_transitions_from_active_to_quiescent_on_close_only_drop() {
+        let temp = TempDir::new().unwrap();
+        private_database_root(&temp);
+        let store = open_rw(&database_path(&temp));
+        let staged = store
+            .stage(
+                SnapshotFileName::from_scan_id(b"temp-kernel-transition"),
+                Duration::from_millis(100),
+            )
+            .unwrap();
+        let temp_name = staged.temp_name.clone();
+        let active = store
+            .inventory_with_writer_lease(Duration::from_millis(100))
+            .unwrap();
+        assert_eq!(
+            active
+                .entries()
+                .iter()
+                .find(|entry| entry.name() == temp_name)
+                .unwrap()
+                .temp_kernel_state(),
+            Some(SnapshotTempKernelState::Active)
+        );
+        drop(active);
+        staged.abandon();
+        let quiescent = store
+            .inventory_with_writer_lease(Duration::from_millis(100))
+            .unwrap();
+        assert_eq!(
+            quiescent
+                .entries()
+                .iter()
+                .find(|entry| entry.name() == temp_name)
+                .unwrap()
+                .temp_kernel_state(),
+            Some(SnapshotTempKernelState::Quiescent)
+        );
     }
 
     #[test]
@@ -2619,6 +2839,97 @@ mod tests {
         assert_eq!(
             store.open(&name).err().unwrap().kind(),
             SnapshotStorageErrorKind::UnsafeObject
+        );
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn cross_process_temp_lock_proves_active_then_quiescent() {
+        const ROLE: &str = "DUX_SNAPSHOT_TEMP_LOCK_CHILD";
+        const DATABASE: &str = "DUX_SNAPSHOT_TEMP_LOCK_DATABASE";
+        const READY: &str = "DUX_SNAPSHOT_TEMP_LOCK_READY";
+        const RELEASE: &str = "DUX_SNAPSHOT_TEMP_LOCK_RELEASE";
+
+        if std::env::var_os(ROLE).is_some() {
+            let database = PathBuf::from(std::env::var_os(DATABASE).unwrap());
+            let ready = PathBuf::from(std::env::var_os(READY).unwrap());
+            let release = PathBuf::from(std::env::var_os(RELEASE).unwrap());
+            let store = open_rw(&database);
+            let mut staged = store
+                .stage(
+                    SnapshotFileName::from_scan_id(b"cross-process-temp-lock"),
+                    Duration::from_secs(1),
+                )
+                .unwrap();
+            staged.write_all(b"locked").unwrap();
+            staged.sync_all().unwrap();
+            fs::write(ready, b"ready").unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !release.exists() {
+                assert!(Instant::now() < deadline, "parent did not release child");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            staged.abandon();
+            return;
+        }
+
+        let temp = TempDir::new().unwrap();
+        private_database_root(&temp);
+        let database = database_path(&temp);
+        let store = open_rw(&database);
+        let ready = temp.path().join("temp-lock-ready");
+        let release = temp.path().join("temp-lock-release");
+        // DUX-DESTRUCTIVE: allow=test-snapshot-temp-lock-helper-spawn -- relaunch only this exact unit test against its TempDir-owned private store to prove the kernel lease across a real process boundary
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg(
+                "persistence::snapshot::storage::tests::cross_process_temp_lock_proves_active_then_quiescent",
+            )
+            .arg("--nocapture")
+            .env(ROLE, "1")
+            .env(DATABASE, &database)
+            .env(READY, &ready)
+            .env(RELEASE, &release)
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !ready.exists() {
+            assert!(Instant::now() < deadline, "child did not lock temp");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let active = store
+            .inventory_with_writer_lease(Duration::from_millis(250))
+            .unwrap();
+        let temp_name = active
+            .entries()
+            .iter()
+            .find(|entry| matches!(entry.kind(), SnapshotInventoryEntryKind::RecognizedTemp))
+            .unwrap()
+            .name()
+            .to_owned();
+        assert_eq!(
+            active
+                .entries()
+                .iter()
+                .find(|entry| entry.name() == temp_name)
+                .unwrap()
+                .temp_kernel_state(),
+            Some(SnapshotTempKernelState::Active)
+        );
+        drop(active);
+        fs::write(&release, b"release").unwrap();
+        assert!(child.wait().unwrap().success());
+        let quiescent = store
+            .inventory_with_writer_lease(Duration::from_millis(250))
+            .unwrap();
+        assert_eq!(
+            quiescent
+                .entries()
+                .iter()
+                .find(|entry| entry.name() == temp_name)
+                .unwrap()
+                .temp_kernel_state(),
+            Some(SnapshotTempKernelState::Quiescent)
         );
     }
 

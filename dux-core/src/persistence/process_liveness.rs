@@ -97,6 +97,10 @@ impl ProcessInstanceId {
         &self.encoded
     }
 
+    pub(super) const fn pid(&self) -> u32 {
+        self.pid
+    }
+
     fn from_snapshot(
         snapshot: ProcessSnapshot,
         nonce: [u8; NONCE_BYTES],

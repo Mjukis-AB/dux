@@ -38,6 +38,12 @@ use super::snapshot_review_pin::{
     inspect_snapshot_review_pin_population, release_snapshot_review_pin, renew_snapshot_review_pin,
     snapshot_review_pin_exactly_matches, snapshot_review_pin_state, validate_snapshot_review_pin,
 };
+use super::snapshot_temp_lease::{
+    PreparedSnapshotTempLease, SnapshotTempLeaseId, SnapshotTempLeaseState,
+    delete_snapshot_temp_lease, insert_snapshot_temp_lease, inspect_snapshot_temp_leases,
+    reconcile_snapshot_temp_lease_delete, reconcile_snapshot_temp_lease_insert,
+    snapshot_temp_lease_state,
+};
 use super::store::{HistoryConnectionGuard, StoreCoordinator};
 
 mod codec;
@@ -53,8 +59,9 @@ pub(crate) use codec::{
 pub(crate) use storage::{
     RetainedSnapshot, SecureSnapshotStore, SnapshotFileName, SnapshotFileUsage,
     SnapshotInventoryEntryKind, SnapshotPublication, SnapshotPublicationLease,
-    SnapshotStorageError, SnapshotStorageErrorKind, SnapshotStoreAccess,
-    SnapshotStoreInventoryLease, StagedSnapshot,
+    SnapshotStageReservation, SnapshotStorageError, SnapshotStorageErrorKind, SnapshotStoreAccess,
+    SnapshotStoreInventoryLease, SnapshotTempKernelState, SnapshotTempMutationLease,
+    StagedSnapshot,
 };
 
 const PUBLICATION_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
@@ -124,6 +131,7 @@ impl SnapshotReference {
 pub(crate) struct PublishedSnapshot {
     reference: SnapshotReference,
     publication: SnapshotPublicationLease,
+    temp_lease: PreparedSnapshotTempLease,
 }
 
 impl PublishedSnapshot {
@@ -397,10 +405,13 @@ impl SnapshotRepository {
             .map_err(map_storage)?;
         let pins = inspect_snapshot_review_pin_population(&database_guard.connection, observed_at)
             .map_err(map_history)?;
+        let temp_leases =
+            inspect_snapshot_temp_leases(&database_guard.connection).map_err(map_history)?;
         let inventory = build_snapshot_retention_inventory(
             &database_guard.connection,
             &storage,
             pins,
+            temp_leases,
             observed_at,
             cap_bytes,
         )
@@ -600,7 +611,21 @@ impl SnapshotRepository {
     fn stage_document(
         &self,
         document: &SnapshotDocument,
-    ) -> Result<(StagedSnapshot, SnapshotDigest), SnapshotRepositoryError> {
+    ) -> Result<(StagedSnapshot, SnapshotDigest, PreparedSnapshotTempLease), SnapshotRepositoryError>
+    {
+        self.stage_document_with_create(document, |reservation| {
+            reservation.create().map_err(map_storage)
+        })
+    }
+
+    fn stage_document_with_create(
+        &self,
+        document: &SnapshotDocument,
+        create: impl FnOnce(
+            &mut SnapshotStageReservation,
+        ) -> Result<StagedSnapshot, SnapshotRepositoryError>,
+    ) -> Result<(StagedSnapshot, SnapshotDigest, PreparedSnapshotTempLease), SnapshotRepositoryError>
+    {
         if self.access != SnapshotStoreAccess::ReadWrite {
             return Err(repository_error(SnapshotRepositoryErrorKind::ReadOnly));
         }
@@ -608,33 +633,220 @@ impl SnapshotRepository {
             .store
             .as_ref()
             .ok_or_else(|| repository_error(SnapshotRepositoryErrorKind::MissingStore))?;
+        // Generate every fallible process-local identity before entering the
+        // permanent database-to-snapshot critical section.
+        let lease_id = SnapshotTempLeaseId::random().map_err(map_history)?;
+        let owner = current_process_instance().map_err(map_process_identity)?;
+        let created_at = SystemTime::now();
         let file_name =
             SnapshotFileName::from_scan_id(document.metadata.scan_id.as_str().as_bytes());
-        let mut staged = {
-            let _database_guard = self
-                .database
-                .lock_current_history_connection()
-                .map_err(map_history)?;
-            store
-                .stage(file_name, PUBLICATION_LOCK_TIMEOUT)
-                .map_err(map_storage)?
-        };
+        let mut database_guard = self
+            .database
+            .lock_current_history_connection()
+            .map_err(map_history)?;
+        self.reconcile_existing_temp_lease_with_guard(
+            &mut database_guard,
+            store,
+            &document.metadata.scan_id,
+        )?;
+        let mut reservation = store
+            .reserve_stage(file_name.clone(), PUBLICATION_LOCK_TIMEOUT)
+            .map_err(map_storage)?;
+        let temp_lease = PreparedSnapshotTempLease::prepare(
+            lease_id,
+            document.metadata.scan_id.clone(),
+            file_name,
+            reservation.temp_name().to_owned(),
+            owner,
+            created_at,
+        )
+        .map_err(map_history)?;
+        self.insert_temp_lease_with_guard(&mut database_guard, &temp_lease)?;
+        let mut staged = create(&mut reservation)?;
+        drop(reservation);
+        drop(database_guard);
         let expected_digest = match encode_snapshot(document, &mut staged) {
             Ok(digest) => digest,
             Err(error) => {
-                let database_guard = match self.database.lock_current_history_connection() {
+                let mut database_guard = match self.database.lock_current_history_connection() {
                     Ok(guard) => guard,
                     Err(history) => {
                         staged.abandon();
                         return Err(map_history(history));
                     }
                 };
-                staged.abort().map_err(map_storage)?;
+                self.abort_staged_with_guard(&mut database_guard, staged, &temp_lease)?;
                 drop(database_guard);
                 return Err(map_codec(error));
             }
         };
-        Ok((staged, expected_digest))
+        Ok((staged, expected_digest, temp_lease))
+    }
+
+    fn reconcile_existing_temp_lease_with_guard(
+        &self,
+        database_guard: &mut HistoryConnectionGuard<'_>,
+        store: &SecureSnapshotStore,
+        scan_id: &ScanId,
+    ) -> Result<(), SnapshotRepositoryError> {
+        self.database
+            .validate_history_guard(database_guard)
+            .map_err(map_history)?;
+        let population =
+            inspect_snapshot_temp_leases(&database_guard.connection).map_err(map_history)?;
+        let Some(existing) = population
+            .rows()
+            .iter()
+            .find(|row| row.scan_id() == scan_id)
+        else {
+            return Ok(());
+        };
+        let expected = existing.as_prepared();
+        let mut storage = store
+            .inventory_with_writer_lease(PUBLICATION_LOCK_TIMEOUT)
+            .map_err(map_storage)?;
+        if let Some(entry) = storage
+            .entries()
+            .iter()
+            .find(|entry| entry.name() == existing.temp_name())
+        {
+            if !matches!(entry.kind(), SnapshotInventoryEntryKind::RecognizedTemp) {
+                return Err(repository_error(SnapshotRepositoryErrorKind::History(
+                    HistoryErrorKind::CorruptData,
+                )));
+            }
+            match entry.temp_kernel_state() {
+                Some(SnapshotTempKernelState::Active) => {
+                    return Err(repository_error(SnapshotRepositoryErrorKind::Storage(
+                        SnapshotStorageErrorKind::Busy,
+                    )));
+                }
+                Some(SnapshotTempKernelState::Quiescent) => {
+                    storage
+                        .remove_quiescent_temp(existing.temp_name())
+                        .map_err(map_storage)?;
+                }
+                None => {
+                    return Err(repository_error(SnapshotRepositoryErrorKind::History(
+                        HistoryErrorKind::CorruptData,
+                    )));
+                }
+            }
+        }
+        self.delete_temp_lease_with_guard(database_guard, &expected)?;
+        drop(storage);
+        Ok(())
+    }
+
+    fn insert_temp_lease_with_guard(
+        &self,
+        database_guard: &mut HistoryConnectionGuard<'_>,
+        lease: &PreparedSnapshotTempLease,
+    ) -> Result<(), SnapshotRepositoryError> {
+        self.insert_temp_lease_with_guard_and_hook(database_guard, lease, || Ok(()))
+    }
+
+    fn insert_temp_lease_with_guard_and_hook(
+        &self,
+        database_guard: &mut HistoryConnectionGuard<'_>,
+        lease: &PreparedSnapshotTempLease,
+        after_commit: impl FnOnce() -> Result<(), HistoryError>,
+    ) -> Result<(), SnapshotRepositoryError> {
+        self.database
+            .validate_history_guard(database_guard)
+            .map_err(map_history)?;
+        let transaction = database_guard
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(super::history::map_write_sql_error)
+            .map_err(map_history)?;
+        insert_snapshot_temp_lease(&transaction, lease).map_err(map_history)?;
+        let write = transaction
+            .commit()
+            .map_err(super::history::map_write_sql_error)
+            .and_then(|()| after_commit())
+            .and_then(|()| {
+                self.database
+                    .revalidate_current_history_guard(database_guard)
+            });
+        if let Err(failure) = write {
+            self.revalidate_temp_lease_reconciliation(database_guard)?;
+            reconcile_snapshot_temp_lease_insert(&database_guard.connection, lease, failure)
+                .map_err(map_history)?;
+        }
+        Ok(())
+    }
+
+    fn delete_temp_lease_with_guard(
+        &self,
+        database_guard: &mut HistoryConnectionGuard<'_>,
+        lease: &PreparedSnapshotTempLease,
+    ) -> Result<(), SnapshotRepositoryError> {
+        self.delete_temp_lease_with_guard_and_hook(database_guard, lease, || Ok(()))
+    }
+
+    fn delete_temp_lease_with_guard_and_hook(
+        &self,
+        database_guard: &mut HistoryConnectionGuard<'_>,
+        lease: &PreparedSnapshotTempLease,
+        after_commit: impl FnOnce() -> Result<(), HistoryError>,
+    ) -> Result<(), SnapshotRepositoryError> {
+        self.database
+            .validate_history_guard(database_guard)
+            .map_err(map_history)?;
+        let transaction = database_guard
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(super::history::map_write_sql_error)
+            .map_err(map_history)?;
+        delete_snapshot_temp_lease(&transaction, lease).map_err(map_history)?;
+        let write = transaction
+            .commit()
+            .map_err(super::history::map_write_sql_error)
+            .and_then(|()| after_commit())
+            .and_then(|()| {
+                self.database
+                    .revalidate_current_history_guard(database_guard)
+            });
+        if let Err(failure) = write {
+            self.revalidate_temp_lease_reconciliation(database_guard)?;
+            reconcile_snapshot_temp_lease_delete(&database_guard.connection, lease, failure)
+                .map_err(map_history)?;
+        }
+        Ok(())
+    }
+
+    fn revalidate_temp_lease_reconciliation(
+        &self,
+        database_guard: &HistoryConnectionGuard<'_>,
+    ) -> Result<(), SnapshotRepositoryError> {
+        self.database
+            .revalidate_current_history_guard(database_guard)
+            .map_err(|_| outcome_unknown())
+    }
+
+    fn abort_staged_with_guard(
+        &self,
+        database_guard: &mut HistoryConnectionGuard<'_>,
+        staged: StagedSnapshot,
+        lease: &PreparedSnapshotTempLease,
+    ) -> Result<(), SnapshotRepositoryError> {
+        self.database
+            .validate_history_guard(database_guard)
+            .map_err(map_history)?;
+        if snapshot_temp_lease_state(&database_guard.connection, lease).map_err(map_history)?
+            != SnapshotTempLeaseState::Exact
+        {
+            let mutation = staged.abort().map_err(map_storage)?;
+            drop(mutation);
+            return Err(repository_error(SnapshotRepositoryErrorKind::History(
+                HistoryErrorKind::CorruptData,
+            )));
+        }
+        let mutation: SnapshotTempMutationLease = staged.abort().map_err(map_storage)?;
+        self.delete_temp_lease_with_guard(database_guard, lease)?;
+        drop(mutation);
+        Ok(())
     }
 
     fn publish_staged(
@@ -643,10 +855,21 @@ impl SnapshotRepository {
         staged: StagedSnapshot,
         document: &SnapshotDocument,
         expected_digest: SnapshotDigest,
+        temp_lease: PreparedSnapshotTempLease,
     ) -> Result<PublishedSnapshot, SnapshotRepositoryError> {
         self.database
             .validate_history_guard(database_guard)
             .map_err(map_history)?;
+        if snapshot_temp_lease_state(&database_guard.connection, &temp_lease)
+            .map_err(map_history)?
+            != SnapshotTempLeaseState::Exact
+        {
+            let mutation = staged.abort().map_err(map_storage)?;
+            drop(mutation);
+            return Err(repository_error(SnapshotRepositoryErrorKind::History(
+                HistoryErrorKind::CorruptData,
+            )));
+        }
         let file_name =
             SnapshotFileName::from_scan_id(document.metadata.scan_id.as_str().as_bytes());
         let publication = match staged.publish_no_replace().map_err(map_storage)? {
@@ -664,6 +887,7 @@ impl SnapshotRepository {
         Ok(PublishedSnapshot {
             reference,
             publication,
+            temp_lease,
         })
     }
 
@@ -672,7 +896,7 @@ impl SnapshotRepository {
         &self,
         document: &SnapshotDocument,
     ) -> Result<PublishedSnapshot, SnapshotRepositoryError> {
-        let (staged, expected_digest) = self.stage_document(document)?;
+        let (staged, expected_digest, temp_lease) = self.stage_document(document)?;
         let database_guard = match self.database.lock_current_history_connection() {
             Ok(guard) => guard,
             Err(error) => {
@@ -680,7 +904,13 @@ impl SnapshotRepository {
                 return Err(map_history(error));
             }
         };
-        self.publish_staged(&database_guard, staged, document, expected_digest)
+        self.publish_staged(
+            &database_guard,
+            staged,
+            document,
+            expected_digest,
+            temp_lease,
+        )
     }
 
     pub(crate) fn load(
@@ -881,7 +1111,7 @@ impl SnapshotRepository {
             )));
         }
 
-        let (staged, expected_digest) = self.stage_document(document)?;
+        let (staged, expected_digest, temp_lease) = self.stage_document(document)?;
         let mut database_guard = match self.database.lock_current_history_connection() {
             Ok(guard) => guard,
             Err(error) => {
@@ -895,27 +1125,27 @@ impl SnapshotRepository {
         {
             Ok(loaded) => loaded,
             Err(error) => {
-                staged.abort().map_err(map_storage)?;
+                self.abort_staged_with_guard(&mut database_guard, staged, &temp_lease)?;
                 return Err(map_history(error));
             }
         };
         let current = match loaded {
             Some(current) => current,
             None => {
-                staged.abort().map_err(map_storage)?;
+                self.abort_staged_with_guard(&mut database_guard, staged, &temp_lease)?;
                 return Err(repository_error(SnapshotRepositoryErrorKind::History(
                     HistoryErrorKind::NotFound,
                 )));
             }
         };
         if !document.metadata.root.matches_path(current.root()) {
-            staged.abort().map_err(map_storage)?;
+            self.abort_staged_with_guard(&mut database_guard, staged, &temp_lease)?;
             return Err(repository_error(
                 SnapshotRepositoryErrorKind::ReferenceMismatch,
             ));
         }
         if current.status() == ScanStatus::Succeeded {
-            staged.abort().map_err(map_storage)?;
+            self.abort_staged_with_guard(&mut database_guard, staged, &temp_lease)?;
             let reference = current
                 .snapshot()
                 .ok_or_else(|| repository_error(SnapshotRepositoryErrorKind::ReferenceMismatch))?;
@@ -954,13 +1184,19 @@ impl SnapshotRepository {
             return Ok(reference.clone());
         }
         if current.status() != ScanStatus::Running || current.snapshot().is_some() {
-            staged.abort().map_err(map_storage)?;
+            self.abort_staged_with_guard(&mut database_guard, staged, &temp_lease)?;
             return Err(repository_error(SnapshotRepositoryErrorKind::History(
                 HistoryErrorKind::InvalidTransition,
             )));
         }
 
-        let published = self.publish_staged(&database_guard, staged, document, expected_digest)?;
+        let published = self.publish_staged(
+            &database_guard,
+            staged,
+            document,
+            expected_digest,
+            temp_lease,
+        )?;
         let completion = ScanCompletionRecord::try_succeeded_with_snapshot_and_coverage(
             document.metadata.scan_id.clone(),
             completed_at,
@@ -977,16 +1213,21 @@ impl SnapshotRepository {
             )
             .map_err(map_history)?;
             self.database
-                .record_scan_finished_with_evaluation_reconciled_with_guard(
+                .record_scan_finished_with_evaluation_and_temp_lease_reconciled_with_guard(
                     &mut database_guard,
                     &completion,
                     &request,
                     terminal,
+                    &published.temp_lease,
                 )
                 .map_err(map_history)?;
         } else {
             self.database
-                .record_scan_finished_reconciled_with_guard(&mut database_guard, &completion)
+                .record_scan_finished_with_temp_lease_reconciled_with_guard(
+                    &mut database_guard,
+                    &completion,
+                    &published.temp_lease,
+                )
                 .map_err(map_history)?;
         }
         published.revalidate()?;
@@ -1278,8 +1519,9 @@ fn decode_reference(
 #[cfg(test)]
 mod tests {
     use std::ffi::OsStr;
-    use std::path::Path;
-    use std::time::{Duration, UNIX_EPOCH};
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::time::{Duration, Instant, UNIX_EPOCH};
 
     use tempfile::TempDir;
 
@@ -1485,6 +1727,632 @@ mod tests {
         })
     }
 
+    fn temp_lease_count(store: &StoreCoordinator) -> i64 {
+        store.with_connection(|connection| {
+            connection
+                .query_row("SELECT count(*) FROM snapshot_temp_leases", [], |row| {
+                    row.get(0)
+                })
+                .unwrap()
+        })
+    }
+
+    fn install_future_schema(database: &Path) {
+        let future = super::super::status::DATABASE_SCHEMA_VERSION + 1;
+        let external = rusqlite::Connection::open(database).unwrap();
+        external
+            .execute(
+                "INSERT INTO schema_migrations (
+                     version, name, checksum_sha256, applied_at_unix_ms
+                 ) VALUES (?1, 'test-future-temp-lease-schema', zeroblob(32), 1)",
+                [future],
+            )
+            .unwrap();
+        external
+            .pragma_update(None, "user_version", future)
+            .unwrap();
+    }
+
+    fn restore_current_schema(database: &Path) {
+        let current = super::super::status::DATABASE_SCHEMA_VERSION;
+        let future = current + 1;
+        let external = rusqlite::Connection::open(database).unwrap();
+        external
+            .execute("DELETE FROM schema_migrations WHERE version = ?1", [future])
+            .unwrap();
+        external
+            .pragma_update(None, "user_version", current)
+            .unwrap();
+    }
+
+    fn reserve_prepared_temp_lease(
+        repository: &SnapshotRepository,
+        database_guard: &HistoryConnectionGuard<'_>,
+        scan_id: &ScanId,
+        created_at: SystemTime,
+    ) -> (SnapshotStageReservation, PreparedSnapshotTempLease) {
+        repository
+            .database
+            .validate_history_guard(database_guard)
+            .unwrap();
+        let file_name = SnapshotFileName::from_scan_id(scan_id.as_str().as_bytes());
+        let reservation = repository
+            .store
+            .as_ref()
+            .unwrap()
+            .reserve_stage(file_name.clone(), PUBLICATION_LOCK_TIMEOUT)
+            .unwrap();
+        let lease = PreparedSnapshotTempLease::prepare(
+            SnapshotTempLeaseId::random().unwrap(),
+            scan_id.clone(),
+            file_name,
+            reservation.temp_name().to_owned(),
+            current_process_instance().unwrap(),
+            created_at,
+        )
+        .unwrap();
+        (reservation, lease)
+    }
+
+    #[test]
+    fn temp_lease_insert_does_not_adopt_exact_row_after_newer_schema_wins() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let root = temp.path().join("scan-root");
+        let document = document("scan:temp-insert-schema-race", &root);
+        let created_at = UNIX_EPOCH + Duration::from_millis(1_750_000_002_000);
+        let (store, repository) = open_repository(&database);
+        store
+            .record_scan_started(
+                &NewScanRecord::try_new(
+                    document.metadata.scan_id.clone(),
+                    root,
+                    created_at - Duration::from_secs(1),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let mut guard = store.lock_current_history_connection().unwrap();
+        let (reservation, lease) = reserve_prepared_temp_lease(
+            &repository,
+            &guard,
+            &document.metadata.scan_id,
+            created_at,
+        );
+
+        let error = repository
+            .insert_temp_lease_with_guard_and_hook(&mut guard, &lease, || {
+                install_future_schema(&database);
+                Ok(())
+            })
+            .unwrap_err();
+        assert_eq!(
+            error.kind,
+            SnapshotRepositoryErrorKind::History(HistoryErrorKind::OutcomeUnknown)
+        );
+        drop(reservation);
+        drop(guard);
+        let external = rusqlite::Connection::open(&database).unwrap();
+        assert_eq!(
+            snapshot_temp_lease_state(&external, &lease).unwrap(),
+            SnapshotTempLeaseState::Exact
+        );
+        drop(external);
+        restore_current_schema(&database);
+    }
+
+    #[test]
+    fn temp_lease_delete_does_not_adopt_absence_after_newer_schema_wins() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let root = temp.path().join("scan-root");
+        let document = document("scan:temp-delete-schema-race", &root);
+        let created_at = UNIX_EPOCH + Duration::from_millis(1_750_000_002_000);
+        let (store, repository) = open_repository(&database);
+        store
+            .record_scan_started(
+                &NewScanRecord::try_new(
+                    document.metadata.scan_id.clone(),
+                    root,
+                    created_at - Duration::from_secs(1),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let mut guard = store.lock_current_history_connection().unwrap();
+        let (reservation, lease) = reserve_prepared_temp_lease(
+            &repository,
+            &guard,
+            &document.metadata.scan_id,
+            created_at,
+        );
+        repository
+            .insert_temp_lease_with_guard(&mut guard, &lease)
+            .unwrap();
+
+        let error = repository
+            .delete_temp_lease_with_guard_and_hook(&mut guard, &lease, || {
+                install_future_schema(&database);
+                Ok(())
+            })
+            .unwrap_err();
+        assert_eq!(
+            error.kind,
+            SnapshotRepositoryErrorKind::History(HistoryErrorKind::OutcomeUnknown)
+        );
+        drop(reservation);
+        drop(guard);
+        let external = rusqlite::Connection::open(&database).unwrap();
+        assert_eq!(
+            snapshot_temp_lease_state(&external, &lease).unwrap(),
+            SnapshotTempLeaseState::Missing
+        );
+        drop(external);
+        restore_current_schema(&database);
+    }
+
+    #[test]
+    fn durable_insert_failures_leave_exact_retryable_row_and_file_states() {
+        for (suffix, create_file) in [("row-only", false), ("row-and-file", true)] {
+            let temp = TempDir::new().unwrap();
+            let database = temp.path().join("store/dux.sqlite3");
+            let root = temp.path().join("scan-root");
+            let document = document(&format!("scan:temp-create-failure:{suffix}"), &root);
+            let completed_at = UNIX_EPOCH + Duration::from_millis(1_750_000_002_000);
+            let (store, repository) = open_repository(&database);
+            store
+                .record_scan_started(
+                    &NewScanRecord::try_new(
+                        document.metadata.scan_id.clone(),
+                        root,
+                        completed_at - Duration::from_secs(1),
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+
+            let error = repository
+                .stage_document_with_create(&document, |reservation| {
+                    if create_file {
+                        let mut staged = reservation.create().map_err(map_storage)?;
+                        std::io::Write::write_all(&mut staged, b"durable-stage-debt").map_err(
+                            |_| {
+                                repository_error(SnapshotRepositoryErrorKind::Storage(
+                                    SnapshotStorageErrorKind::Unavailable,
+                                ))
+                            },
+                        )?;
+                        staged.sync_all().map_err(map_storage)?;
+                        staged.abandon();
+                    }
+                    Err(repository_error(SnapshotRepositoryErrorKind::Storage(
+                        SnapshotStorageErrorKind::Unavailable,
+                    )))
+                })
+                .err()
+                .unwrap();
+            assert_eq!(
+                error.kind,
+                SnapshotRepositoryErrorKind::Storage(SnapshotStorageErrorKind::Unavailable)
+            );
+            assert_eq!(temp_lease_count(&store), 1);
+            let debt = repository
+                .inspect_retention_inventory(completed_at)
+                .unwrap();
+            if create_file {
+                assert_eq!(debt.temporary_files.len(), 1);
+                assert_eq!(
+                    debt.temporary_files[0].state,
+                    super::super::snapshot_retention_inventory::SnapshotTemporaryState::QuiescentAtObservation
+                );
+                assert!(debt.residual_temp_leases.is_empty());
+                assert!(debt.totals.temporary_quiescent.charged_bytes > 0);
+            } else {
+                assert!(debt.temporary_files.is_empty());
+                assert_eq!(debt.residual_temp_leases.len(), 1);
+                assert_eq!(
+                    debt.residual_temp_leases[0].scan_id,
+                    document.metadata.scan_id
+                );
+            }
+
+            repository
+                .complete_scan(completed_at, counts(), &complete_coverage(), &document)
+                .unwrap();
+            assert_eq!(temp_lease_count(&store), 0);
+            let clean = repository
+                .inspect_retention_inventory(completed_at)
+                .unwrap();
+            assert!(clean.temporary_files.is_empty());
+            assert!(clean.residual_temp_leases.is_empty());
+        }
+    }
+
+    #[test]
+    fn missing_live_stage_row_rolls_back_only_the_retained_current_temp() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let root = temp.path().join("scan-root");
+        let document = document("scan:temp-live-row-missing", &root);
+        let observed_at = UNIX_EPOCH + Duration::from_millis(1_750_000_002_000);
+        let (store, repository) = open_repository(&database);
+        store
+            .record_scan_started(
+                &NewScanRecord::try_new(
+                    document.metadata.scan_id.clone(),
+                    root,
+                    observed_at - Duration::from_secs(1),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let (staged, _, lease) = repository.stage_document(&document).unwrap();
+        let mut guard = store.lock_current_history_connection().unwrap();
+        let transaction = guard
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        delete_snapshot_temp_lease(&transaction, &lease).unwrap();
+        transaction.commit().unwrap();
+
+        let error = repository
+            .abort_staged_with_guard(&mut guard, staged, &lease)
+            .unwrap_err();
+        assert_eq!(
+            error.kind,
+            SnapshotRepositoryErrorKind::History(HistoryErrorKind::CorruptData)
+        );
+        assert_eq!(
+            snapshot_temp_lease_state(&guard.connection, &lease).unwrap(),
+            SnapshotTempLeaseState::Missing
+        );
+        drop(guard);
+        let inventory = repository.inspect_retention_inventory(observed_at).unwrap();
+        assert!(inventory.temporary_files.is_empty());
+        assert!(inventory.residual_temp_leases.is_empty());
+    }
+
+    #[test]
+    fn conflicting_live_stage_row_is_untouched_while_current_temp_is_rolled_back() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let root = temp.path().join("scan-root");
+        let document = document("scan:temp-live-row-conflict", &root);
+        let observed_at = UNIX_EPOCH + Duration::from_millis(1_750_000_002_000);
+        let (store, repository) = open_repository(&database);
+        store
+            .record_scan_started(
+                &NewScanRecord::try_new(
+                    document.metadata.scan_id.clone(),
+                    root,
+                    observed_at - Duration::from_secs(1),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let (staged, _, lease) = repository.stage_document(&document).unwrap();
+        let mut guard = store.lock_current_history_connection().unwrap();
+        let (reservation, conflicting) = reserve_prepared_temp_lease(
+            &repository,
+            &guard,
+            &document.metadata.scan_id,
+            observed_at + Duration::from_millis(1),
+        );
+        let transaction = guard
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        delete_snapshot_temp_lease(&transaction, &lease).unwrap();
+        insert_snapshot_temp_lease(&transaction, &conflicting).unwrap();
+        transaction.commit().unwrap();
+        drop(reservation);
+        assert_eq!(
+            snapshot_temp_lease_state(&guard.connection, &lease).unwrap(),
+            SnapshotTempLeaseState::Conflicting
+        );
+
+        let error = repository
+            .abort_staged_with_guard(&mut guard, staged, &lease)
+            .unwrap_err();
+        assert_eq!(
+            error.kind,
+            SnapshotRepositoryErrorKind::History(HistoryErrorKind::CorruptData)
+        );
+        assert_eq!(
+            snapshot_temp_lease_state(&guard.connection, &conflicting).unwrap(),
+            SnapshotTempLeaseState::Exact
+        );
+        drop(guard);
+        let inventory = repository.inspect_retention_inventory(observed_at).unwrap();
+        assert!(inventory.temporary_files.is_empty());
+        assert_eq!(inventory.residual_temp_leases.len(), 1);
+        assert_eq!(
+            inventory.residual_temp_leases[0].scan_id,
+            document.metadata.scan_id
+        );
+    }
+
+    #[test]
+    fn codec_rejection_aborts_exact_temp_and_durable_lease() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let root = temp.path().join("scan-root");
+        let mut invalid = document("scan:temp-codec-abort", &root);
+        invalid.nodes[1].id = 0;
+        let completed_at = UNIX_EPOCH + Duration::from_millis(1_750_000_002_000);
+        let (store, repository) = open_repository(&database);
+        store
+            .record_scan_started(
+                &NewScanRecord::try_new(
+                    invalid.metadata.scan_id.clone(),
+                    root,
+                    completed_at - Duration::from_secs(1),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+
+        let error = repository
+            .complete_scan(completed_at, counts(), &complete_coverage(), &invalid)
+            .unwrap_err();
+        assert!(matches!(error.kind, SnapshotRepositoryErrorKind::Codec(_)));
+        assert_eq!(temp_lease_count(&store), 0);
+        assert_eq!(
+            store
+                .load_scan(&invalid.metadata.scan_id)
+                .unwrap()
+                .unwrap()
+                .status(),
+            ScanStatus::Running
+        );
+        let inventory = repository
+            .inspect_retention_inventory(completed_at)
+            .unwrap();
+        assert!(inventory.temporary_files.is_empty());
+        assert!(inventory.residual_temp_leases.is_empty());
+        assert!(inventory.orphan_finals.is_empty());
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn cross_process_crash_preserves_row_and_transitions_temp_to_quiescent() {
+        const ROLE: &str = "DUX_SNAPSHOT_DURABLE_TEMP_CHILD";
+        const DATABASE: &str = "DUX_SNAPSHOT_DURABLE_TEMP_DATABASE";
+        const ROOT: &str = "DUX_SNAPSHOT_DURABLE_TEMP_ROOT";
+        const READY: &str = "DUX_SNAPSHOT_DURABLE_TEMP_READY";
+        const SCAN_ID: &str = "scan:durable-temp-process-crash";
+
+        if std::env::var_os(ROLE).is_some() {
+            let database = PathBuf::from(std::env::var_os(DATABASE).unwrap());
+            let root = PathBuf::from(std::env::var_os(ROOT).unwrap());
+            let ready = PathBuf::from(std::env::var_os(READY).unwrap());
+            let document = document(SCAN_ID, &root);
+            let (_store, repository) = open_repository(&database);
+            let (mut staged, _, _) = repository.stage_document(&document).unwrap();
+            staged.sync_all().unwrap();
+            fs::write(ready, b"ready").unwrap();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            panic!("parent did not terminate durable-temp helper");
+        }
+
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let root = temp.path().join("scan-root");
+        let ready = temp.path().join("durable-temp-ready");
+        let document = document(SCAN_ID, &root);
+        let completed_at = UNIX_EPOCH + Duration::from_millis(1_750_000_002_000);
+        let (store, repository) = open_repository(&database);
+        store
+            .record_scan_started(
+                &NewScanRecord::try_new(
+                    document.metadata.scan_id.clone(),
+                    root.clone(),
+                    completed_at - Duration::from_secs(1),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+
+        // DUX-DESTRUCTIVE: allow=test-snapshot-durable-temp-helper-spawn -- relaunch only this exact unit test against its TempDir-owned database to prove durable row and kernel-lock behavior across abrupt process death
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg(
+                "persistence::snapshot::tests::cross_process_crash_preserves_row_and_transitions_temp_to_quiescent",
+            )
+            .arg("--nocapture")
+            .env(ROLE, "1")
+            .env(DATABASE, &database)
+            .env(ROOT, &root)
+            .env(READY, &ready)
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !ready.exists() {
+            assert!(Instant::now() < deadline, "child did not publish readiness");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        let active = repository
+            .inspect_retention_inventory(completed_at)
+            .unwrap();
+        assert_eq!(temp_lease_count(&store), 1);
+        assert_eq!(active.temporary_files.len(), 1);
+        assert_eq!(
+            active.temporary_files[0].state,
+            super::super::snapshot_retention_inventory::SnapshotTemporaryState::Active
+        );
+        drop(active);
+
+        child.kill().unwrap();
+        assert!(!child.wait().unwrap().success());
+        let quiescent = repository
+            .inspect_retention_inventory(completed_at)
+            .unwrap();
+        assert_eq!(temp_lease_count(&store), 1);
+        assert_eq!(quiescent.temporary_files.len(), 1);
+        assert_eq!(
+            quiescent.temporary_files[0].state,
+            super::super::snapshot_retention_inventory::SnapshotTemporaryState::QuiescentAtObservation
+        );
+
+        repository
+            .complete_scan(completed_at, counts(), &complete_coverage(), &document)
+            .unwrap();
+        assert_eq!(temp_lease_count(&store), 0);
+        let clean = repository
+            .inspect_retention_inventory(completed_at)
+            .unwrap();
+        assert!(clean.temporary_files.is_empty());
+        assert!(clean.residual_temp_leases.is_empty());
+    }
+
+    #[test]
+    fn active_stage_blocks_retry_then_quiescent_debt_is_reconciled_exactly() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let root = temp.path().join("scan-root");
+        let document = document("scan:temp-lease-retry", &root);
+        let completed_at = UNIX_EPOCH + Duration::from_millis(1_750_000_002_000);
+        let (store, repository) = open_repository(&database);
+        store
+            .record_scan_started(
+                &NewScanRecord::try_new(
+                    document.metadata.scan_id.clone(),
+                    root,
+                    completed_at - Duration::from_secs(1),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+
+        let (staged, _, _) = repository.stage_document(&document).unwrap();
+        assert_eq!(temp_lease_count(&store), 1);
+        let active = repository
+            .inspect_retention_inventory(completed_at)
+            .unwrap();
+        assert_eq!(active.temporary_files.len(), 1);
+        assert_eq!(
+            active.temporary_files[0].state,
+            super::super::snapshot_retention_inventory::SnapshotTemporaryState::Active
+        );
+        assert!(active.accounting_unstable);
+        assert_eq!(
+            repository
+                .complete_scan(completed_at, counts(), &complete_coverage(), &document)
+                .unwrap_err()
+                .kind,
+            SnapshotRepositoryErrorKind::Storage(SnapshotStorageErrorKind::Busy)
+        );
+        staged.abandon();
+
+        let quiescent = repository
+            .inspect_retention_inventory(completed_at)
+            .unwrap();
+        assert_eq!(
+            quiescent.temporary_files[0].state,
+            super::super::snapshot_retention_inventory::SnapshotTemporaryState::QuiescentAtObservation
+        );
+        assert!(!quiescent.accounting_unstable);
+
+        repository
+            .complete_scan(completed_at, counts(), &complete_coverage(), &document)
+            .unwrap();
+        assert_eq!(temp_lease_count(&store), 0);
+        let clean = repository
+            .inspect_retention_inventory(completed_at)
+            .unwrap();
+        assert!(clean.temporary_files.is_empty());
+        assert!(clean.residual_temp_leases.is_empty());
+    }
+
+    #[test]
+    fn row_before_file_crash_debt_is_visible_and_retryable() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let root = temp.path().join("scan-root");
+        let document = document("scan:temp-row-only-retry", &root);
+        let completed_at = UNIX_EPOCH + Duration::from_millis(1_750_000_002_000);
+        let (store, repository) = open_repository(&database);
+        store
+            .record_scan_started(
+                &NewScanRecord::try_new(
+                    document.metadata.scan_id.clone(),
+                    root,
+                    completed_at - Duration::from_secs(1),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let mut guard = store.lock_current_history_connection().unwrap();
+        let reservation = repository
+            .store
+            .as_ref()
+            .unwrap()
+            .reserve_stage(
+                SnapshotFileName::from_scan_id(document.metadata.scan_id.as_str().as_bytes()),
+                PUBLICATION_LOCK_TIMEOUT,
+            )
+            .unwrap();
+        let lease = PreparedSnapshotTempLease::prepare(
+            SnapshotTempLeaseId::random().unwrap(),
+            document.metadata.scan_id.clone(),
+            SnapshotFileName::from_scan_id(document.metadata.scan_id.as_str().as_bytes()),
+            reservation.temp_name().to_owned(),
+            current_process_instance().unwrap(),
+            completed_at,
+        )
+        .unwrap();
+        repository
+            .insert_temp_lease_with_guard(&mut guard, &lease)
+            .unwrap();
+        drop(reservation);
+        drop(guard);
+
+        let debt = repository
+            .inspect_retention_inventory(completed_at)
+            .unwrap();
+        assert!(debt.temporary_files.is_empty());
+        assert_eq!(debt.residual_temp_leases.len(), 1);
+        assert_eq!(
+            debt.residual_temp_leases[0].scan_id,
+            document.metadata.scan_id
+        );
+        repository
+            .complete_scan(completed_at, counts(), &complete_coverage(), &document)
+            .unwrap();
+        assert_eq!(temp_lease_count(&store), 0);
+    }
+
+    #[test]
+    fn unleased_legacy_temp_remains_unknown_and_is_never_reconciled() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let (_store, repository) = open_repository(&database);
+        let staged = repository
+            .store
+            .as_ref()
+            .unwrap()
+            .stage(
+                SnapshotFileName::from_scan_id(b"legacy-unleased-temp"),
+                Duration::from_millis(100),
+            )
+            .unwrap();
+        staged.abandon();
+        let inventory = repository
+            .inspect_retention_inventory(UNIX_EPOCH + Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(inventory.temporary_files.len(), 1);
+        assert_eq!(
+            inventory.temporary_files[0].state,
+            super::super::snapshot_retention_inventory::SnapshotTemporaryState::Unleased
+        );
+        assert!(inventory.accounting_unstable);
+        assert!(inventory.residual_temp_leases.is_empty());
+    }
+
     #[test]
     fn retention_inventory_reconciles_policy_storage_and_pin_observations() {
         let temp = TempDir::new().unwrap();
@@ -1535,13 +2403,33 @@ mod tests {
         });
 
         let orphan_document = document("scan:retention-orphan", &root);
+        store
+            .record_scan_started(
+                &NewScanRecord::try_new(
+                    orphan_document.metadata.scan_id.clone(),
+                    root.clone(),
+                    base + Duration::from_secs(51),
+                )
+                .unwrap(),
+            )
+            .unwrap();
         drop(
             repository
                 .publish_orphan_for_test(&orphan_document)
                 .unwrap(),
         );
         let temp_document = document("scan:retention-live-temp", &root);
-        let (staged, _) = repository.stage_document(&temp_document).unwrap();
+        store
+            .record_scan_started(
+                &NewScanRecord::try_new(
+                    temp_document.metadata.scan_id.clone(),
+                    root.clone(),
+                    base + Duration::from_secs(52),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let (staged, _, _) = repository.stage_document(&temp_document).unwrap();
         staged.abandon();
 
         let observed_at = base + Duration::from_secs(60);
@@ -1577,8 +2465,12 @@ mod tests {
         assert_eq!(inventory.entries.len(), 5);
         assert_eq!(inventory.orphan_finals.len(), 1);
         assert_eq!(inventory.temporary_files.len(), 1);
-        assert!(inventory.temporary_files[0].liveness_unknown);
-        assert!(inventory.accounting_unstable);
+        assert_eq!(
+            inventory.temporary_files[0].state,
+            super::super::snapshot_retention_inventory::SnapshotTemporaryState::QuiescentAtObservation
+        );
+        assert_eq!(inventory.residual_temp_leases.len(), 1);
+        assert!(!inventory.accounting_unstable);
         assert!(inventory.non_evictable_over_cap);
         assert_eq!(inventory.totals.active_pin_rows, 1);
         assert_eq!(inventory.totals.expired_pin_rows, 0);
@@ -1627,14 +2519,16 @@ mod tests {
         ));
         assert!(inventory.totals.tombstoned_residual.charged_bytes > 0);
         assert!(inventory.totals.orphan.charged_bytes > 0);
-        assert!(inventory.totals.temporary_unknown_liveness.charged_bytes > 0);
+        assert!(inventory.totals.temporary_quiescent.charged_bytes > 0);
         assert_eq!(
             inventory.totals.store_total.charged_bytes,
             inventory.totals.controls.charged_bytes
                 + inventory.totals.available.charged_bytes
                 + inventory.totals.tombstoned_residual.charged_bytes
                 + inventory.totals.orphan.charged_bytes
-                + inventory.totals.temporary_unknown_liveness.charged_bytes
+                + inventory.totals.temporary_active.charged_bytes
+                + inventory.totals.temporary_quiescent.charged_bytes
+                + inventory.totals.temporary_unleased.charged_bytes
         );
 
         let after_rows = store.with_connection(|connection| {
@@ -1703,6 +2597,7 @@ mod tests {
         assert_eq!(reopened_inventory.entries.len(), 5);
         assert_eq!(reopened_inventory.orphan_finals.len(), 1);
         assert_eq!(reopened_inventory.temporary_files.len(), 1);
+        assert_eq!(reopened_inventory.residual_temp_leases.len(), 1);
         drop(reopened_repository);
         drop(reopened_store);
     }
@@ -1714,9 +2609,18 @@ mod tests {
         let root = temp.path().join("scan-root");
         let observed_at = UNIX_EPOCH + Duration::from_millis(1_750_000_002_000);
         let (store, repository) = open_repository(&database);
-        let held_publication = repository
-            .publish_orphan_for_test(&document("scan:retention-setting-lock", &root))
+        let lock_document = document("scan:retention-setting-lock", &root);
+        store
+            .record_scan_started(
+                &NewScanRecord::try_new(
+                    lock_document.metadata.scan_id.clone(),
+                    root.clone(),
+                    observed_at - Duration::from_secs(1),
+                )
+                .unwrap(),
+            )
             .unwrap();
+        let held_publication = repository.publish_orphan_for_test(&lock_document).unwrap();
 
         store.with_connection(|connection| {
             connection
@@ -2390,11 +3294,20 @@ mod tests {
         let mut lease = repository
             .acquire_review_lease(&reference, SnapshotReviewPurpose::Explorer, observed_at)
             .unwrap();
+        let orphan_root = temp.path().join("orphan-root");
+        let orphan_document = document("scan:snapshot-review-schema-fence-orphan", &orphan_root);
+        store
+            .record_scan_started(
+                &NewScanRecord::try_new(
+                    orphan_document.metadata.scan_id.clone(),
+                    orphan_root,
+                    observed_at,
+                )
+                .unwrap(),
+            )
+            .unwrap();
         let held_publication = repository
-            .publish_orphan_for_test(&document(
-                "scan:snapshot-review-schema-fence-orphan",
-                &temp.path().join("orphan-root"),
-            ))
+            .publish_orphan_for_test(&orphan_document)
             .unwrap();
 
         let current = super::super::status::DATABASE_SCHEMA_VERSION;
@@ -2472,6 +3385,16 @@ mod tests {
 
         let orphan_root = temp.path().join("orphan-root");
         let orphan_document = document("scan:snapshot-review-lock-orphan", &orphan_root);
+        store
+            .record_scan_started(
+                &NewScanRecord::try_new(
+                    orphan_document.metadata.scan_id.clone(),
+                    orphan_root,
+                    observed_at,
+                )
+                .unwrap(),
+            )
+            .unwrap();
         let publication = repository
             .publish_orphan_for_test(&orphan_document)
             .unwrap();
@@ -2725,6 +3648,7 @@ mod tests {
         orphan.revalidate().unwrap();
         let orphan_reference = orphan.reference().clone();
         drop(orphan);
+        assert_eq!(temp_lease_count(&store), 1);
         assert_eq!(
             store
                 .load_scan(&document.metadata.scan_id)
@@ -2737,6 +3661,7 @@ mod tests {
             .complete_scan(completed_at, counts(), &complete_coverage(), &document)
             .unwrap();
         assert_eq!(adopted, orphan_reference);
+        assert_eq!(temp_lease_count(&store), 0);
     }
 
     #[test]
@@ -3485,6 +4410,28 @@ mod tests {
                 .status(),
             ScanStatus::Running
         );
+        store.with_connection(|connection| {
+            let population = inspect_snapshot_temp_leases(connection).unwrap();
+            let lease = population
+                .rows()
+                .iter()
+                .find(|lease| lease.scan_id() == &target.metadata.scan_id)
+                .unwrap();
+            assert_eq!(
+                lease.parent_status(),
+                super::super::snapshot_temp_lease::SnapshotTempLeaseParentStatus::Running
+            );
+        });
+        let retention = repository
+            .inspect_retention_inventory(completed_at)
+            .unwrap();
+        assert!(retention.temporary_files.is_empty());
+        assert!(
+            retention
+                .residual_temp_leases
+                .iter()
+                .any(|lease| lease.scan_id == target.metadata.scan_id)
+        );
         assert!(
             store
                 .load_candidate_evaluation(&target.metadata.scan_id)
@@ -3497,6 +4444,51 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn exact_post_commit_failure_reconciles_non_evaluation_completion_and_lease() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let root = temp.path().join("scan-root");
+        let document = document("scan:snapshot-completion-ambiguous", &root);
+        let completed_at = UNIX_EPOCH + Duration::from_millis(1_750_000_002_000);
+        let (store, repository) = open_repository(&database);
+        store
+            .record_scan_started(
+                &NewScanRecord::try_new(
+                    document.metadata.scan_id.clone(),
+                    root,
+                    UNIX_EPOCH + Duration::from_millis(1_750_000_000_000),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let published = repository.publish_orphan_for_test(&document).unwrap();
+        let completion = ScanCompletionRecord::try_succeeded_with_snapshot_and_coverage(
+            document.metadata.scan_id.clone(),
+            completed_at,
+            counts(),
+            complete_coverage(),
+            published.reference().clone(),
+        )
+        .unwrap();
+
+        store
+            .record_scan_finished_with_temp_lease_after_commit_failure_for_test(
+                &completion,
+                &published.temp_lease,
+            )
+            .unwrap();
+        assert_eq!(temp_lease_count(&store), 0);
+        assert!(
+            store
+                .load_scan(&document.metadata.scan_id)
+                .unwrap()
+                .unwrap()
+                .exactly_matches_completion(&completion)
+        );
+        published.revalidate().unwrap();
     }
 
     #[test]
@@ -3538,10 +4530,11 @@ mod tests {
         )
         .unwrap();
         store
-            .record_scan_finished_with_evaluation_after_commit_failure_for_test(
+            .record_scan_finished_with_evaluation_and_temp_lease_after_commit_failure_for_test(
                 &completion,
                 &request,
                 &terminal,
+                &published.temp_lease,
             )
             .unwrap();
         assert_eq!(
@@ -3592,10 +4585,11 @@ mod tests {
         {
             let mut guard = store.lock_current_history_connection().unwrap();
             store
-                .record_scan_finished_and_schedule_evaluation_reconciled_with_guard(
+                .record_scan_finished_and_schedule_evaluation_with_temp_lease_reconciled_with_guard(
                     &mut guard,
                     &completion,
                     &request,
+                    &published.temp_lease,
                 )
                 .unwrap();
         }

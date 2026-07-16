@@ -127,9 +127,10 @@ opened; an exact tombstone means that it is logically unavailable even if its
 bytes remain. Tombstones cannot be updated or deleted, and malformed or
 mismatched rows are corruption rather than evidence of availability. DUX keeps
 all trigger programs disabled with depth zero while inspecting an untrusted
-database and enables depth one for exactly three migration-owned mutable guards
-only after the complete supported schema fingerprint has passed: these
-tombstone update/delete guards plus the schema-v6 review-pin update guard.
+database and enables depth one for exactly six migration-owned guards only
+after the complete supported schema fingerprint has passed: the tombstone
+update/delete guards, the schema-v6 review-pin update guard, and schema-v8's
+temp-lease insert/update plus succeeded-scan-with-lease guards.
 Unknown newer schemas remain trigger-disabled and read-only.
 
 Every repository load now validates the current-schema database guard and
@@ -212,11 +213,65 @@ normal eviction candidates.
 The same observation strictly decodes all at most 1,024 review pins without
 pruning. Expiry equality is inactive. An active pin protects its exact present
 snapshot; an active pin with a tombstone or missing named file is corruption,
-not evidence that can be ignored. Recognized temps are reported with unknown
-liveness and make accounting unstable: staging intentionally writes after
-releasing the writer lock, so the file can still grow. No temp is called
-abandoned or reclaimable until a durable live-temp lease/scavenging protocol
-exists.
+not evidence that can be ignored.
+
+Schema v8 adds the durable coordination half of the temporary-file protocol.
+The table holds at most 64 rows; each immutable row binds one running scan to
+its deterministic final name, unique recognized temp name, random 128-bit lease
+ID, strictly decoded process-instance observation, and creation time. The PID
+embedded in the temp name and the stored process instance are identity checks,
+never liveness or expiry authority. V7 migration creates no rows. A scan cannot
+become `succeeded` while its row remains, but failed, cancelled, and interrupted
+parents may retain an immutable row as explicit recovery debt.
+
+Creation keeps the global database-before-snapshot lock order. Under a
+current-schema database guard and snapshot writer lock, DUX reserves the exact
+name and commits the row before creating the exclusive private file. Creation
+finishes before either lock is released. The staged file then retains an
+exclusive kernel lock while encoding continues outside the store-wide locks.
+This makes row-without-file a valid crash residual and prevents a compliant
+writer from creating that file later after a maintenance observer has acquired
+both locks. Drop and unwinding close the handle only; neither enters SQLite nor
+removes a name.
+
+Inventory now classifies recognized temps by the complete bounded row set and
+a nonblocking kernel-lock probe. A row-bound file whose lock is contended is
+`active`; one whose lock was acquired at observation is
+`quiescent_at_observation`; a physical recognized temp with no row is
+`unleased`; and a row with no physical file is reported separately as a
+residual lease. Active and unleased files make accounting unstable. Quiescence
+is only a point-in-time observation, not cleanup authority. All three physical
+classes are charged and excluded from normal snapshot victims.
+
+The only implemented physical temp reconciliation is an exact same-scan retry.
+While retaining the current-schema database guard and then snapshot writer
+lock, it rejects an active file as busy. For a quiescent row-bound file it
+reopens the exact name, requires the observed identity, acquires the kernel lock
+nonblockingly, revalidates the retained file and name, unlinks it, and flushes
+the directory before deleting the exact row. A row-without-file residual may
+have its exact row deleted because row-before-file creation cannot still be
+pending after both locks are acquired. An unleased temp is never adopted or
+removed by this path. Normal abort is also physical-first: it removes and
+flushes the retained current-call temp before consuming the row. Successful
+publication instead makes the immutable final durable first, then atomically
+deletes the exact temp lease with the succeeded scan summary and optional
+evaluation while the snapshot writer lock remains held. A failed transaction
+retains both the running scan and lease input; exact post-commit reconciliation
+never treats a conflicting row as success.
+
+A staged handle still retained by its creating call is a narrower rollback
+capability than inventory. If its row is missing or conflicting under an exact
+current-schema guard, publication is forbidden, but DUX removes only that
+handle's identity-matched, kernel-locked temp, leaves any conflicting row
+unchanged, and returns corruption. This does not adopt or sweep an observed
+unleased temp. If the database/current-schema guard cannot be established, the
+handle is closed without mutation instead.
+
+This protocol is not a general scavenger. It does not sweep unrelated or
+terminal-scan leases, remove unleased pre-v8 temps, or touch
+`.dux-snapshot-stage-*` provisioning siblings. Native Windows runtime coverage
+of the new kernel-liveness and retained-temp removal path is still required;
+the implementation does not claim that verification from Unix tests.
 
 This physical-driven operation is bounded even when immutable history grows
 without limit. It therefore cannot enumerate every old missing historical
@@ -235,8 +290,9 @@ Publication and retention share this lock order:
 3. snapshot writer lock.
 
 Snapshot retention is not enabled until app/FFI review-lease ownership,
-retained-handle deletion, live temporary-file leases, and bounded marker-owned
-stage scavenging all exist.
+retained-handle final deletion, the final locked eligibility/tombstone writer,
+post-tombstone residual handling, and bounded marker-owned unleased-temp and
+provisioning-stage scavenging all exist.
 The implemented inventory ranks latest-two and reports cap observations but is
 not authority. Tombstone insertion, the final pin/latest-two/cap eligibility
 recheck, and retained-file acquisition must occur while holding the database

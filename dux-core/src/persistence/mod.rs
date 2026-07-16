@@ -61,6 +61,7 @@ pub(crate) mod snapshot;
 mod snapshot_retention;
 mod snapshot_retention_inventory;
 mod snapshot_review_pin;
+mod snapshot_temp_lease;
 mod status;
 mod storage;
 mod store;

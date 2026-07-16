@@ -231,6 +231,25 @@ pub(super) fn open_named_regular(
     Ok(Some((file, identity)))
 }
 
+pub(super) fn open_named_temp_for_removal(
+    directory: &File,
+    _directory_path: &Path,
+    name: &str,
+) -> Result<Option<(File, Identity)>> {
+    let Some(file) = open_relative(
+        directory,
+        name,
+        Kind::RegularFile,
+        private_file_access(true) | DELETE,
+        SHARE_WITHOUT_DELETE,
+    )?
+    else {
+        return Ok(None);
+    };
+    let identity = validate_private(&file, Kind::RegularFile, None, true)?;
+    Ok(Some((file, identity)))
+}
+
 pub(super) fn identity(file: &File, kind: Kind) -> Result<Identity> {
     validate_structure(file, kind, None, matches!(kind, Kind::RegularFile))
 }

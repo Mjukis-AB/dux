@@ -348,6 +348,16 @@ EXCEPTIONS = {
         "rust-process-spawn",
         "test:cross_process_writer_contention_is_bounded",
     ),
+    "test-snapshot-temp-lock-helper-spawn": ExceptionSpec(
+        "dux-core/src/persistence/snapshot/storage.rs",
+        "rust-process-spawn",
+        "test:cross_process_temp_lock_proves_active_then_quiescent",
+    ),
+    "test-snapshot-durable-temp-helper-spawn": ExceptionSpec(
+        "dux-core/src/persistence/snapshot.rs",
+        "rust-process-spawn",
+        "test:cross_process_crash_preserves_row_and_transitions_temp_to_quiescent",
+    ),
     "test-snapshot-inventory-fd-helper-spawn": ExceptionSpec(
         "dux-core/src/persistence/snapshot/storage.rs",
         "rust-process-spawn",
@@ -479,6 +489,8 @@ EXCEPTION_PRIMITIVES = {
     "snapshot-windows-current-temp-delete": "SetFileInformationByHandle",
     "snapshot-windows-handle-publish": "SetFileInformationByHandle",
     "test-snapshot-lock-helper-spawn": "Command::new",
+    "test-snapshot-temp-lock-helper-spawn": "Command::new",
+    "test-snapshot-durable-temp-helper-spawn": "Command::new",
     "test-snapshot-inventory-fd-helper-spawn": "Command::new",
     "test-snapshot-umask-helper-spawn": "Command::new",
     "test-snapshot-macos-parent-acl-command": "Command::new",
@@ -511,8 +523,8 @@ CLIPPY_SUPPRESSION_COUNTS = {
     "dux-core/src/persistence/persistence_tests.rs": 3,
     "dux-core/src/persistence/storage.rs": 1,
     "dux-core/src/persistence/storage/windows.rs": 2,
-    "dux-core/src/persistence/snapshot/storage.rs": 5,
-    "dux-core/src/persistence/snapshot.rs": 2,
+    "dux-core/src/persistence/snapshot/storage.rs": 6,
+    "dux-core/src/persistence/snapshot.rs": 3,
     "dux-cli/tests/inspection_cli.rs": 1,
 }
 
