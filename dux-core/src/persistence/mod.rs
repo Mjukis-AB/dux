@@ -52,10 +52,20 @@ mod migrations;
     )
 )]
 mod process_liveness;
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        unused_imports,
+        reason = "immutable snapshots integrate with scan tasks in this milestone"
+    )
+)]
+pub(crate) mod snapshot;
 mod status;
 mod storage;
 mod store;
 
+pub use snapshot::SnapshotOpenErrorKind;
 pub use status::{DATABASE_SCHEMA_VERSION, DatabaseAccess, DatabaseOpenErrorKind, DatabaseStatus};
 pub(crate) use store::StoreCoordinator;
 

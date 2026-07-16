@@ -22,6 +22,7 @@ pub enum EngineConfigReason {
     MissingFileName,
     UnsupportedPlatformSyntax,
     OverlappingStorage,
+    UnexpectedLayout,
 }
 
 /// Invalid explicit engine storage configuration.
@@ -52,6 +53,19 @@ impl EngineConfig {
         validate_path(&database_path, EngineConfigField::Database, true)?;
         validate_path(&snapshots_directory, EngineConfigField::Snapshots, false)?;
         validate_path(&cache_directory, EngineConfigField::Cache, false)?;
+        let expected_snapshots = database_path
+            .parent()
+            .ok_or(EngineConfigError {
+                field: EngineConfigField::Database,
+                reason: EngineConfigReason::FilesystemRoot,
+            })?
+            .join("snapshots");
+        if !paths_equal(&snapshots_directory, &expected_snapshots) {
+            return Err(EngineConfigError {
+                field: EngineConfigField::Snapshots,
+                reason: EngineConfigReason::UnexpectedLayout,
+            });
+        }
         if paths_overlap(&database_path, &snapshots_directory) {
             return Err(EngineConfigError {
                 field: EngineConfigField::Snapshots,
@@ -92,9 +106,19 @@ fn paths_overlap(left: &Path, right: &Path) -> bool {
     left == right || left.starts_with(right) || right.starts_with(left)
 }
 
+#[cfg(not(windows))]
+fn paths_equal(left: &Path, right: &Path) -> bool {
+    left == right
+}
+
 #[cfg(windows)]
 fn paths_overlap(left: &Path, right: &Path) -> bool {
     windows_path_is_prefix(left, right) || windows_path_is_prefix(right, left)
+}
+
+#[cfg(windows)]
+fn paths_equal(left: &Path, right: &Path) -> bool {
+    windows_path_is_prefix(left, right) && windows_path_is_prefix(right, left)
 }
 
 fn validate_path(
@@ -277,12 +301,26 @@ mod tests {
 
         let duplicate = EngineConfig::new(
             temp.path().join("dux.sqlite3"),
-            temp.path().join("owned"),
-            temp.path().join("owned"),
+            temp.path().join("snapshots"),
+            temp.path().join("snapshots"),
         )
         .unwrap_err();
         assert_eq!(duplicate.field, EngineConfigField::Cache);
         assert_eq!(duplicate.reason, EngineConfigReason::OverlappingStorage);
+    }
+
+    #[test]
+    fn snapshots_must_use_the_reserved_database_sibling() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("data/dux.sqlite3");
+        let error = EngineConfig::new(
+            database,
+            temp.path().join("elsewhere/snapshots"),
+            temp.path().join("cache"),
+        )
+        .unwrap_err();
+        assert_eq!(error.field, EngineConfigField::Snapshots);
+        assert_eq!(error.reason, EngineConfigReason::UnexpectedLayout);
     }
 
     #[test]
@@ -329,49 +367,56 @@ mod tests {
                 database.clone(),
                 cache.clone(),
                 EngineConfigField::Snapshots,
+                EngineConfigReason::UnexpectedLayout,
             ),
             (
                 snapshots.join("dux.sqlite3"),
                 snapshots.clone(),
                 cache.clone(),
                 EngineConfigField::Snapshots,
+                EngineConfigReason::UnexpectedLayout,
             ),
             (
                 database.clone(),
                 database.join("snapshots"),
                 cache.clone(),
                 EngineConfigField::Snapshots,
+                EngineConfigReason::UnexpectedLayout,
             ),
             (
                 cache.join("dux.sqlite3"),
-                snapshots.clone(),
-                cache.clone(),
-                EngineConfigField::Cache,
-            ),
-            (
-                database.clone(),
                 cache.join("snapshots"),
                 cache.clone(),
                 EngineConfigField::Cache,
+                EngineConfigReason::OverlappingStorage,
+            ),
+            (
+                database.clone(),
+                snapshots.clone(),
+                database.parent().unwrap().to_path_buf(),
+                EngineConfigField::Cache,
+                EngineConfigReason::OverlappingStorage,
             ),
             (
                 database.clone(),
                 snapshots.clone(),
                 snapshots.join("cache"),
                 EngineConfigField::Cache,
+                EngineConfigReason::OverlappingStorage,
             ),
             (
                 database,
                 snapshots.clone(),
                 snapshots,
                 EngineConfigField::Cache,
+                EngineConfigReason::OverlappingStorage,
             ),
         ];
 
-        for (database, snapshots, cache, field) in cases {
+        for (database, snapshots, cache, field, reason) in cases {
             let error = EngineConfig::new(database, snapshots, cache).unwrap_err();
             assert_eq!(error.field, field);
-            assert_eq!(error.reason, EngineConfigReason::OverlappingStorage);
+            assert_eq!(error.reason, reason);
         }
     }
 
@@ -408,6 +453,6 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.field, EngineConfigField::Snapshots);
-        assert_eq!(error.reason, EngineConfigReason::OverlappingStorage);
+        assert_eq!(error.reason, EngineConfigReason::UnexpectedLayout);
     }
 }

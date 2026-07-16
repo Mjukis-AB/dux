@@ -1,0 +1,315 @@
+# DUX binary snapshot format and storage contract
+
+Status: implemented format version 1, internal and crate-private.
+
+This document freezes the durable full-tree snapshot contract implemented by
+`dux-core::persistence::snapshot`. It is an implementation reference for future
+scan, Explorer, migration, and retention work. It does not describe the legacy
+CLI cache format.
+
+## 1. Authority and trust boundary
+
+A snapshot is sensitive, non-authoritative scan history. It may support UI
+rendering, comparison, discovery, or a targeted rescan. It never proves that a
+path still exists, identifies a current filesystem object, authorizes a cleanup
+plan, or authorizes an effect.
+
+SHA-256 detects accidental corruption and makes the SQLite reference exact. It
+does not authenticate a same-user writer, encrypt path data, or make persisted
+metadata safe to execute. Any future planner must obtain fresh lossless scan
+provenance and live path/volume/rule witnesses independently.
+
+All stored bytes are untrusted on read. The decoder checks bounds before
+copying variable-length values, grows the node vector only as node records are
+actually read, verifies the checksum, rejects trailing input, and then validates
+the complete graph and aggregate semantics.
+
+## 2. File naming and database reference
+
+One completed scan has one deterministic file name:
+
+```text
+snapshot-<lowercase SHA-256 of the UTF-8 ScanId bytes>.duxsnapshot
+```
+
+The name is exactly 85 ASCII bytes and one path component. SQLite stores the
+following tuple atomically on the `scans` row:
+
+- positive snapshot format version;
+- losslessly encoded relative file name;
+- relative-name encoding tag;
+- 32-byte snapshot digest.
+
+The tuple must be entirely null or entirely present. It is valid only on a
+`succeeded` scan. The decoded name must exactly equal the deterministic name for
+that row's scan ID. A tuple is a reference, not evidence that its file is valid;
+loads still open the file no-follow, verify storage identity and permissions,
+decode the whole file, and compare its version, digest, and embedded scan ID.
+
+## 3. Integer and checksum conventions
+
+- Every integer is unsigned little-endian unless a field says otherwise.
+- Fixed headers contain no native Rust enum discriminants or `usize` values.
+- The file is `header || payload || digest`.
+- The trailing digest is SHA-256 over the exact header and payload bytes. The
+  digest does not cover itself.
+- A reader must reach EOF immediately after the 32-byte digest.
+- Reserved bytes must be zero.
+- A format change that alters any encoded byte, field meaning, invariant, or
+  accepted representation requires a new format version and explicit
+  migration/invalidation behavior.
+
+Golden encoded lengths and whole-file SHA-256 values are fixed in codec tests
+for Unix and Windows so encoder and decoder drift cannot silently agree.
+
+## 4. File header
+
+The fixed header is 96 bytes.
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 0 | 8 | Magic `DUXSNAP\0` |
+| 8 | 4 | Format version, currently `1` |
+| 12 | 4 | Header size, exactly `96` |
+| 16 | 8 | Payload byte length |
+| 24 | 8 | Node count |
+| 32 | 8 | Directory count |
+| 40 | 8 | Regular-file count |
+| 48 | 8 | Root logical-byte aggregate |
+| 56 | 8 | Root allocated-byte aggregate or zero when absent |
+| 64 | 8 | Capture time: seconds since Unix epoch |
+| 72 | 4 | Capture time: nanoseconds, less than 1,000,000,000 |
+| 76 | 1 | Aggregate presence flags; bit 0 means allocated bytes present |
+| 77 | 1 | Root host encoding |
+| 78 | 2 | Reserved zero |
+| 80 | 4 | UTF-8 scan-ID byte length |
+| 84 | 4 | Root host-value byte length |
+| 88 | 8 | Reserved zero |
+
+The payload starts with the scan-ID bytes and root bytes, followed by exactly
+`node_count` node records and their optional names. The declared payload must be
+exactly consumed.
+
+Host encodings are:
+
+- `1`: lossless Unix `OsStr` bytes;
+- `2`: lossless little-endian Windows UTF-16 code units.
+
+Files are host-specific. The current host must be able to reconstruct and
+validate the root as an absolute path containing no `.` or `..` component. A
+node name uses the same host encoding as the root and must reconstruct as one
+non-empty normal component.
+
+## 5. Node record
+
+Nodes use depth-first pre-order. Every fixed node record is 112 bytes and is
+immediately followed by its name bytes, except that the root has no name.
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 0 | 8 | Snapshot-local node ID |
+| 8 | 8 | Parent node ID, or `u64::MAX` for the root |
+| 16 | 4 | Depth |
+| 20 | 1 | Node kind |
+| 21 | 1 | Optional-field presence bits |
+| 22 | 1 | Name host encoding, or zero for the root |
+| 23 | 1 | Reserved zero |
+| 24 | 8 | Logical bytes |
+| 32 | 8 | Allocated bytes, or zero when absent |
+| 40 | 8 | Descendant regular-file count, including self for a file |
+| 48 | 8 | Immediate child count |
+| 56 | 8 | Modification time seconds, or zero when absent |
+| 64 | 4 | Modification time nanoseconds, or zero when absent |
+| 68 | 4 | Name byte length, zero only for the root |
+| 72 | 8 | Access time seconds, or zero when absent |
+| 80 | 4 | Access time nanoseconds, or zero when absent |
+| 84 | 4 | Scan-observation flags |
+| 88 | 8 | Unix device number, or zero when absent |
+| 96 | 8 | Unix inode number, or zero when absent |
+| 104 | 8 | Reserved zero |
+
+Optional-field presence bits are:
+
+- bit 0: allocated bytes;
+- bit 1: modification time;
+- bit 2: access time;
+- bit 3: Unix device/inode observation.
+
+An absent optional field requires all of its storage fields to be zero. Access
+time remains explicitly unreliable snapshot evidence.
+
+Node kinds are:
+
+- `1`: directory;
+- `2`: regular file;
+- `3`: symbolic link observation;
+- `4`: other entry;
+- `5`: error observation.
+
+Scan-observation flags are a known-bit set:
+
+- bit 0: inaccessible;
+- bit 1: timed out;
+- bit 2: hard-link duplicate;
+- bit 3: mount boundary.
+
+Unknown field-presence or scan-observation bits reject the file. A hard-link
+duplicate flag is valid only on a regular-file node. A mount-boundary flag is
+valid only on a directory node. Unix identity is optional historical evidence,
+valid only in a Unix-encoded snapshot, and must not be reused as current object
+identity. Windows snapshots currently represent hard-link accounting through
+the finalized values and scan flag rather than a Unix identity tuple.
+
+## 6. Canonical graph and aggregate invariants
+
+The decoder accepts only one canonical tree representation:
+
+1. The document contains at least one node.
+2. Node IDs equal their zero-based record indexes.
+3. Node zero is an unnamed depth-zero directory with no parent.
+4. Every later node has exactly the active depth-first parent and a depth one
+   greater than that parent.
+5. Every directory's declared immediate-child count is consumed exactly.
+6. Files, symlinks, other entries, and error entries have no children.
+7. A regular file has `file_count == 1`; symlink/other/error nodes have
+   `file_count == 0`.
+8. Two children of one parent cannot have the same exact encoded name.
+9. Directory logical bytes and file counts equal the checked sum of their
+   immediate child aggregates.
+10. Allocated bytes are canonical: all children known means `Some(exact sum)`;
+    any unknown child means `None`; an empty directory is `Some(0)`.
+11. The root aggregates equal the file-header totals.
+12. Header directory and regular-file counts equal the actual node kinds.
+13. All additions are checked for overflow.
+
+This validation prevents a checksum-valid but ambiguous tree from creating
+duplicate Explorer paths or inconsistent estimates. It still does not make the
+tree current or actionable.
+
+## 7. Hard bounds
+
+Version 1 rejects values outside these code-owned limits:
+
+| Value | Limit |
+|---|---:|
+| Complete file, including digest | 2 GiB |
+| Nodes | 5,000,000 |
+| Depth | 4,096 |
+| Scan ID | 128 UTF-8 bytes |
+| Root host value | 65,536 bytes |
+| One name component | 1,024 bytes |
+| Reconstructed encoded path | 65,536 bytes |
+
+Lengths are checked with overflow-safe arithmetic. A tiny truncated file that
+claims the maximum node count fails on its first missing record and does not
+reserve memory proportional to the unproven count. A legitimate maximum file
+can still require substantial decoded memory; the roadmap's 1M/5M-node memory
+benchmarks and later indexed/paged display work remain required.
+
+## 8. Private snapshot store
+
+The store is exactly `<SQLite database parent>/snapshots`. Engine configuration
+rejects any other snapshot location. The SQLite owner remains alive while the
+snapshot owner is used, retaining the database root's replacement guards.
+
+The snapshot directory has independent permanent controls:
+
+```text
+.dux-snapshot-store
+.dux-snapshot.writer.lock
+```
+
+Both have exact fixed markers. The directory inventory admits only those
+controls, canonical final names, and a bounded set of recognized unique
+temporary names. Unknown entries, symlinks/reparse points, special files,
+multi-link files, ownership mismatches, unsafe permissions/DACLs, retained
+identity changes, or over-budget inventory fail closed.
+
+Unix directories/files are exact mode 0700/0600 even under a restrictive umask.
+macOS permits deny-only ACLs on the publication parent but rejects extended
+ACLs on final DUX objects. Windows uses protected current-user-only DACLs,
+handle-relative creation/publication, retained volume/file IDs, and no-delete-
+sharing directory guards. Published files are closed and reopened read-only by
+exact destination identity before higher layers receive them.
+
+Read-only access never provisions or repairs a missing store. Therefore an
+older engine that observes a valid newer SQLite schema performs zero snapshot
+store writes.
+
+## 9. Atomic publication and SQLite ordering
+
+The global mutation lock order is:
+
+```text
+SQLite connection mutex
+→ SQLite cross-process writer/compatibility lease
+→ snapshot writer lock
+```
+
+Release is in reverse order. Snapshot retention must use the same order.
+
+Publication proceeds as follows:
+
+1. Under a current-schema SQLite guard, create one exclusive private temporary
+   file with a process ID and 128-bit random suffix.
+2. Release both locks and stream the fully validated document plus checksum to
+   that unique temp. No shared fixed `.tmp` name exists.
+3. Reacquire the current-schema SQLite guard. If a newer schema won, abandon
+   the recognized private temp without another store mutation.
+4. Under the snapshot writer lock, revalidate the whole store and exact temp,
+   flush the temp, and publish it with an atomic no-replace operation.
+5. Flush the snapshot directory, close the writable temp handle, reopen the
+   final name read-only, and require its identity to equal the published source.
+6. Decode and compare the retained winner's full document and digest. A name
+   collision is idempotent only when those facts are exact.
+7. Retain the snapshot writer lock while the same SQLite guard compare-and-sets
+   the running scan to its exact terminal summary and four-field reference.
+8. Revalidate the retained file after the database commit, then release the
+   snapshot lock and SQLite guard in reverse order.
+
+The file is always durable before SQLite can reference it. Failure between file
+publication and database commit may leave an unreferenced immutable orphan;
+retention may later remove only a proven unreferenced orphan. SQLite must never
+reference an unpublished file. A potentially ambiguous post-commit storage
+failure is reconciled by exact scan ID, status, canonical completion time,
+counts, version, name, and digest rather than by retrying with changed facts.
+
+Initial snapshot-directory provisioning uses a private marker-complete sibling
+stage and atomic no-replace directory publication. A racing winner is reopened
+and fully validated. Losing or interrupted stages and recognized snapshot temps
+are deliberately not recursively scavenged in this checkpoint.
+
+## 10. Compatibility and failure behavior
+
+- Unknown snapshot versions return a distinct incompatible-version result.
+- Invalid magic, length, checksum, semantic data, limits, and I/O remain
+  separate path-free internal categories.
+- Engine startup opens/migrates SQLite first, then validates or provisions the
+  snapshot owner before publishing workers.
+- A current-to-newer schema race is rechecked under the SQLite writer lease
+  before snapshot provisioning and every later mutation.
+- Existing successful summaries retry only when every frozen completion fact
+  and the fully decoded referenced document match exactly.
+- Missing or corrupt referenced files fail closed; history remains an
+  observation and is not silently rewritten.
+
+Future formats must retain read compatibility or explicitly invalidate old
+files. An older writer must never occupy a deterministic final name after a
+newer database schema has won.
+
+## 11. Deliberately separate future work
+
+This checkpoint does not implement:
+
+- wiring a real scanner task to create the durable summary and snapshot;
+- last-complete-snapshot selection per root;
+- latest-two-per-root retention or active-review pins;
+- the configurable 2 GiB total-store retention policy;
+- bounded identity-safe scavenging for abandoned temps or provisioning stages;
+- typed coverage/issues and complete hard-link-aware scanner integration;
+- Explorer paging/indexes and measured 1M/5M-node memory budgets;
+- migration from or hardening of the legacy CLI cache.
+
+Those items remain separate roadmap work. None may weaken the immutable
+publication, current-schema fence, non-authoritative data boundary, or lock
+ordering defined here.

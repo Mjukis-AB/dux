@@ -11,6 +11,7 @@ use rusqlite::{Connection, OptionalExtension, Row, Transaction, params};
 use crate::domain::ScanId;
 
 use super::codec::{EncodedBytes, StoredEncoding, decode_host_path, encode_host_path};
+use super::snapshot::SnapshotReference;
 
 const QUERY_PROGRESS_INTERVAL: i32 = 100;
 const QUERY_MAX_CALLBACKS: u64 = 1_000;
@@ -105,7 +106,10 @@ impl NewScanRecord {
             return Err(HistoryError::new(HistoryErrorKind::InvalidInput));
         }
         encode_host_path(&root).map_err(|_| HistoryError::new(HistoryErrorKind::InvalidInput))?;
-        system_time_to_unix_ms(started_at, HistoryErrorKind::InvalidInput)?;
+        let started_at = unix_ms_to_system_time(system_time_to_unix_ms(
+            started_at,
+            HistoryErrorKind::InvalidInput,
+        )?)?;
         Ok(Self {
             id,
             root,
@@ -132,6 +136,7 @@ pub(crate) struct ScanCompletionRecord {
     completed_at: SystemTime,
     status: TerminalScanStatus,
     counts: ScanCounts,
+    snapshot: Option<SnapshotReference>,
 }
 
 impl ScanCompletionRecord {
@@ -141,14 +146,45 @@ impl ScanCompletionRecord {
         status: TerminalScanStatus,
         counts: ScanCounts,
     ) -> Result<Self, HistoryError> {
-        system_time_to_unix_ms(completed_at, HistoryErrorKind::InvalidInput)?;
+        let completed_at = unix_ms_to_system_time(system_time_to_unix_ms(
+            completed_at,
+            HistoryErrorKind::InvalidInput,
+        )?)?;
         validate_counts(counts, HistoryErrorKind::InvalidInput)?;
         Ok(Self {
             id,
             completed_at,
             status,
             counts,
+            snapshot: None,
         })
+    }
+
+    pub(crate) fn try_succeeded_with_snapshot(
+        id: ScanId,
+        completed_at: SystemTime,
+        counts: ScanCounts,
+        snapshot: SnapshotReference,
+    ) -> Result<Self, HistoryError> {
+        if snapshot.scan_id() != &id {
+            return Err(HistoryError::new(HistoryErrorKind::InvalidInput));
+        }
+        let completed_at = unix_ms_to_system_time(system_time_to_unix_ms(
+            completed_at,
+            HistoryErrorKind::InvalidInput,
+        )?)?;
+        validate_counts(counts, HistoryErrorKind::InvalidInput)?;
+        Ok(Self {
+            id,
+            completed_at,
+            status: TerminalScanStatus::Succeeded,
+            counts,
+            snapshot: Some(snapshot),
+        })
+    }
+
+    pub(crate) fn id(&self) -> &ScanId {
+        &self.id
     }
 
     pub(crate) fn completed_at(&self) -> SystemTime {
@@ -168,6 +204,7 @@ pub(crate) struct ScanRecord {
     completed_at: Option<SystemTime>,
     status: ScanStatus,
     counts: ScanCounts,
+    snapshot: Option<SnapshotReference>,
 }
 
 impl ScanRecord {
@@ -194,6 +231,18 @@ impl ScanRecord {
     pub(crate) fn counts(&self) -> ScanCounts {
         self.counts
     }
+
+    pub(crate) fn snapshot(&self) -> Option<&SnapshotReference> {
+        self.snapshot.as_ref()
+    }
+
+    pub(crate) fn exactly_matches_completion(&self, completion: &ScanCompletionRecord) -> bool {
+        self.id == completion.id
+            && self.completed_at == Some(completion.completed_at)
+            && self.status == ScanStatus::from(completion.status)
+            && self.counts == completion.counts
+            && self.snapshot == completion.snapshot
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -209,6 +258,7 @@ pub(crate) enum HistoryErrorKind {
     CorruptData,
     DatabaseUnavailable,
     InternalState,
+    OutcomeUnknown,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -248,11 +298,36 @@ pub(super) struct PreparedScanCompletion {
     completed_at_unix_ms: i64,
     status: ScanStatus,
     counts: ScanCounts,
+    snapshot: Option<PreparedSnapshotReference>,
+}
+
+struct PreparedSnapshotReference {
+    version: i64,
+    relative_path: EncodedBytes,
+    digest: [u8; 32],
 }
 
 impl PreparedScanCompletion {
     pub(super) fn prepare(completion: &ScanCompletionRecord) -> Result<Self, HistoryError> {
         validate_counts(completion.counts, HistoryErrorKind::InvalidInput)?;
+        if completion.snapshot.is_some() && completion.status != TerminalScanStatus::Succeeded {
+            return Err(HistoryError::new(HistoryErrorKind::InvalidInput));
+        }
+        let snapshot = completion
+            .snapshot
+            .as_ref()
+            .map(|reference| {
+                if reference.scan_id() != &completion.id {
+                    return Err(HistoryError::new(HistoryErrorKind::InvalidInput));
+                }
+                Ok(PreparedSnapshotReference {
+                    version: i64::from(reference.version()),
+                    relative_path: encode_host_path(Path::new(reference.file_name().as_str()))
+                        .map_err(|_| HistoryError::new(HistoryErrorKind::InvalidInput))?,
+                    digest: reference.digest().bytes(),
+                })
+            })
+            .transpose()?;
         Ok(Self {
             id: completion.id.as_str().to_owned(),
             completed_at_unix_ms: system_time_to_unix_ms(
@@ -261,6 +336,7 @@ impl PreparedScanCompletion {
             )?,
             status: completion.status.into(),
             counts: completion.counts,
+            snapshot,
         })
     }
 }
@@ -298,7 +374,10 @@ pub(super) fn update_scan_finished(
         .execute(
             "UPDATE scans
              SET completed_at_unix_ms = ?2, status = ?3, directory_count = ?4,
-                 file_count = ?5, logical_bytes = ?6, allocated_bytes = ?7
+                 file_count = ?5, logical_bytes = ?6, allocated_bytes = ?7,
+                 snapshot_version = ?8, snapshot_relative_path = ?9,
+                 snapshot_relative_path_encoding = ?10,
+                 snapshot_checksum_sha256 = ?11
              WHERE scan_id = ?1 AND status = 'running'
                AND completed_at_unix_ms IS NULL AND started_at_unix_ms <= ?2",
             params![
@@ -319,6 +398,22 @@ pub(super) fn update_scan_finished(
                     .allocated_bytes
                     .map(|value| to_i64(value, HistoryErrorKind::InvalidInput))
                     .transpose()?,
+                completion
+                    .snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.version),
+                completion
+                    .snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.relative_path.bytes.as_slice()),
+                completion
+                    .snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.relative_path.encoding as i64),
+                completion
+                    .snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.digest.as_slice()),
             ],
         )
         .map_err(map_write_sql_error)?;
@@ -354,7 +449,13 @@ pub(super) fn load_scan_record(
                         typeof(root_path), length(root_path), root_path,
                         root_path_encoding, started_at_unix_ms, completed_at_unix_ms,
                         typeof(status), length(CAST(status AS BLOB)), status,
-                        directory_count, file_count, logical_bytes, allocated_bytes
+                        directory_count, file_count, logical_bytes, allocated_bytes,
+                        typeof(snapshot_version), snapshot_version,
+                        typeof(snapshot_relative_path), length(snapshot_relative_path),
+                        snapshot_relative_path,
+                        typeof(snapshot_relative_path_encoding), snapshot_relative_path_encoding,
+                        typeof(snapshot_checksum_sha256), length(snapshot_checksum_sha256),
+                        snapshot_checksum_sha256
                  FROM scans WHERE scan_id = ?1",
                 [id.as_str()],
                 raw_scan_row,
@@ -376,12 +477,43 @@ struct RawScanRow {
     file_count: i64,
     logical_bytes: i64,
     allocated_bytes: Option<i64>,
+    snapshot: Option<RawSnapshotReference>,
+}
+
+struct RawSnapshotReference {
+    version: i64,
+    relative_path: Vec<u8>,
+    relative_path_encoding: i64,
+    digest: Vec<u8>,
 }
 
 fn raw_scan_row(row: &Row<'_>) -> rusqlite::Result<RawScanRow> {
     validate_stored_value(row, 0, 1, "text", 1, MAX_STORED_ID_BYTES)?;
     validate_stored_value(row, 3, 4, "blob", 1, MAX_STORED_PATH_BYTES)?;
     validate_stored_value(row, 9, 10, "text", 1, MAX_STORED_STATUS_BYTES)?;
+    let snapshot_types = [
+        row.get::<_, String>(16)?,
+        row.get::<_, String>(18)?,
+        row.get::<_, String>(21)?,
+        row.get::<_, String>(23)?,
+    ];
+    let snapshot = if snapshot_types.iter().all(|value| value == "null") {
+        None
+    } else if snapshot_types == ["integer", "blob", "integer", "blob"] {
+        let relative_path_length: i64 = row.get(19)?;
+        let digest_length: i64 = row.get(24)?;
+        if !(1..=MAX_STORED_PATH_BYTES).contains(&relative_path_length) || digest_length != 32 {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        Some(RawSnapshotReference {
+            version: row.get(17)?,
+            relative_path: row.get(20)?,
+            relative_path_encoding: row.get(22)?,
+            digest: row.get(25)?,
+        })
+    } else {
+        return Err(rusqlite::Error::InvalidQuery);
+    };
     Ok(RawScanRow {
         id: row.get(2)?,
         root: row.get(5)?,
@@ -393,6 +525,7 @@ fn raw_scan_row(row: &Row<'_>) -> rusqlite::Result<RawScanRow> {
         file_count: row.get(13)?,
         logical_bytes: row.get(14)?,
         allocated_bytes: row.get(15)?,
+        snapshot,
     })
 }
 
@@ -439,6 +572,13 @@ fn decode_scan_row(raw: RawScanRow) -> Result<ScanRecord, HistoryError> {
         logical_bytes: from_i64(raw.logical_bytes)?,
         allocated_bytes: raw.allocated_bytes.map(from_i64).transpose()?,
     };
+    let snapshot = raw
+        .snapshot
+        .map(|snapshot| decode_snapshot_reference(&id, snapshot))
+        .transpose()?;
+    if snapshot.is_some() && status != ScanStatus::Succeeded {
+        return Err(HistoryError::new(HistoryErrorKind::CorruptData));
+    }
     Ok(ScanRecord {
         id,
         root,
@@ -446,7 +586,39 @@ fn decode_scan_row(raw: RawScanRow) -> Result<ScanRecord, HistoryError> {
         completed_at,
         status,
         counts,
+        snapshot,
     })
+}
+
+fn decode_snapshot_reference(
+    scan_id: &ScanId,
+    raw: RawSnapshotReference,
+) -> Result<SnapshotReference, HistoryError> {
+    let version = u32::try_from(raw.version)
+        .ok()
+        .filter(|version| *version > 0)
+        .ok_or_else(|| HistoryError::new(HistoryErrorKind::CorruptData))?;
+    let relative_path = decode_host_path(&EncodedBytes {
+        bytes: raw.relative_path,
+        encoding: stored_host_encoding(raw.relative_path_encoding)?,
+    })
+    .map_err(|_| HistoryError::new(HistoryErrorKind::CorruptData))?;
+    let mut components = relative_path.components();
+    let Some(std::path::Component::Normal(file_name)) = components.next() else {
+        return Err(HistoryError::new(HistoryErrorKind::CorruptData));
+    };
+    if components.next().is_some() {
+        return Err(HistoryError::new(HistoryErrorKind::CorruptData));
+    }
+    let file_name = file_name
+        .to_str()
+        .ok_or_else(|| HistoryError::new(HistoryErrorKind::CorruptData))?;
+    let digest: [u8; 32] = raw
+        .digest
+        .try_into()
+        .map_err(|_| HistoryError::new(HistoryErrorKind::CorruptData))?;
+    SnapshotReference::from_stored(scan_id, version, file_name, digest)
+        .map_err(|_| HistoryError::new(HistoryErrorKind::CorruptData))
 }
 
 fn validate_counts(counts: ScanCounts, kind: HistoryErrorKind) -> Result<(), HistoryError> {
@@ -574,6 +746,7 @@ mod tests {
     use super::*;
     use crate::DATABASE_SCHEMA_VERSION;
     use crate::persistence::StoreCoordinator;
+    use crate::persistence::snapshot::{SnapshotFileName, SnapshotReference};
     use tempfile::TempDir;
 
     fn started(id: &str, root: PathBuf, offset_ms: u64) -> NewScanRecord {
@@ -598,6 +771,11 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    fn snapshot_reference(id: &ScanId) -> SnapshotReference {
+        let name = SnapshotFileName::from_scan_id(id.as_str().as_bytes());
+        SnapshotReference::from_stored(id, 1, name.as_str(), [0x5a; 32]).unwrap()
     }
 
     #[test]
@@ -649,6 +827,148 @@ mod tests {
                 .unwrap_err()
                 .kind,
             HistoryErrorKind::NotFound
+        );
+    }
+
+    #[test]
+    fn snapshot_tuple_is_atomic_typed_and_exactly_reconciled() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let start = started("scan:with-snapshot", temp.path().join("root"), 0);
+        let reference = snapshot_reference(start.id());
+        let finish = ScanCompletionRecord::try_succeeded_with_snapshot(
+            start.id().clone(),
+            UNIX_EPOCH + Duration::from_nanos(1_750_000_002_000_999_999),
+            ScanCounts {
+                directory_count: 1,
+                file_count: 2,
+                logical_bytes: 3,
+                allocated_bytes: Some(4),
+            },
+            reference.clone(),
+        )
+        .unwrap();
+
+        {
+            let store = StoreCoordinator::open(&database).unwrap();
+            store.record_scan_started(&start).unwrap();
+            store.record_scan_finished_reconciled(&finish).unwrap();
+            store.record_scan_finished_reconciled(&finish).unwrap();
+        }
+
+        let reopened = StoreCoordinator::open(&database).unwrap();
+        let stored = reopened.load_scan(start.id()).unwrap().unwrap();
+        assert_eq!(stored.snapshot(), Some(&reference));
+        assert!(stored.exactly_matches_completion(&finish));
+        assert_eq!(
+            finish.completed_at(),
+            UNIX_EPOCH + Duration::from_millis(1_750_000_002_000)
+        );
+    }
+
+    #[test]
+    fn committed_scan_completion_reconciles_an_injected_post_commit_failure() {
+        let temp = TempDir::new().unwrap();
+        let store = StoreCoordinator::open(&temp.path().join("store/dux.sqlite3")).unwrap();
+        let start = started("scan:ambiguous-commit", temp.path().join("root"), 0);
+        let finish = ScanCompletionRecord::try_succeeded_with_snapshot(
+            start.id().clone(),
+            UNIX_EPOCH + Duration::from_nanos(1_750_000_002_000_999_999),
+            ScanCounts {
+                directory_count: 1,
+                file_count: 1,
+                logical_bytes: 2,
+                allocated_bytes: Some(3),
+            },
+            snapshot_reference(start.id()),
+        )
+        .unwrap();
+        store.record_scan_started(&start).unwrap();
+
+        store
+            .record_scan_finished_reconciled_after_commit_failure_for_test(&finish)
+            .unwrap();
+
+        assert!(
+            store
+                .load_scan(start.id())
+                .unwrap()
+                .unwrap()
+                .exactly_matches_completion(&finish)
+        );
+    }
+
+    #[test]
+    fn scan_start_time_is_canonical_before_persistence_and_ordering() {
+        let temp = TempDir::new().unwrap();
+        let input = UNIX_EPOCH + Duration::from_nanos(1_750_000_000_000_999_999);
+        let start = NewScanRecord::try_new(
+            ScanId::new("scan:canonical-start").unwrap(),
+            temp.path().join("root"),
+            input,
+        )
+        .unwrap();
+        assert_eq!(
+            start.started_at(),
+            UNIX_EPOCH + Duration::from_millis(1_750_000_000_000)
+        );
+
+        let store = StoreCoordinator::open(&temp.path().join("store/dux.sqlite3")).unwrap();
+        store.record_scan_started(&start).unwrap();
+        assert_eq!(
+            store.load_scan(start.id()).unwrap().unwrap().started_at(),
+            start.started_at()
+        );
+    }
+
+    #[test]
+    fn malformed_or_non_success_snapshot_tuples_fail_as_corrupt() {
+        let temp = TempDir::new().unwrap();
+        let store = StoreCoordinator::open(&temp.path().join("store/dux.sqlite3")).unwrap();
+
+        let partial = started("scan:snapshot-partial", temp.path().join("partial"), 0);
+        store.record_scan_started(&partial).unwrap();
+        store.with_connection(|connection| {
+            connection
+                .pragma_update(None, "ignore_check_constraints", true)
+                .unwrap();
+            connection
+                .execute(
+                    "UPDATE scans SET snapshot_version = 1 WHERE scan_id = ?1",
+                    [partial.id().as_str()],
+                )
+                .unwrap();
+            connection
+                .pragma_update(None, "ignore_check_constraints", false)
+                .unwrap();
+        });
+        assert_eq!(
+            store.load_scan(partial.id()).unwrap_err().kind,
+            HistoryErrorKind::CorruptData
+        );
+
+        let failed = started("scan:snapshot-failed", temp.path().join("failed"), 1);
+        store.record_scan_started(&failed).unwrap();
+        let reference = snapshot_reference(failed.id());
+        let finish = ScanCompletionRecord::try_succeeded_with_snapshot(
+            failed.id().clone(),
+            UNIX_EPOCH + Duration::from_millis(1_750_000_002_001),
+            ScanCounts::default(),
+            reference,
+        )
+        .unwrap();
+        store.record_scan_finished(&finish).unwrap();
+        store.with_connection(|connection| {
+            connection
+                .execute(
+                    "UPDATE scans SET status = 'failed' WHERE scan_id = ?1",
+                    [failed.id().as_str()],
+                )
+                .unwrap();
+        });
+        assert_eq!(
+            store.load_scan(failed.id()).unwrap_err().kind,
+            HistoryErrorKind::CorruptData
         );
     }
 

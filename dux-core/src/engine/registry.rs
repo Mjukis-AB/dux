@@ -292,6 +292,7 @@ impl Shared {
 struct EngineInner {
     config: EngineConfig,
     store: Arc<StoreCoordinator>,
+    _snapshots: crate::persistence::snapshot::SnapshotRepository,
     shared: Arc<Shared>,
     workers: Mutex<Option<Vec<JoinHandle<()>>>>,
 }
@@ -317,10 +318,43 @@ impl EngineHandle {
         config: EngineConfig,
         limits: RegistryLimits,
     ) -> Result<Self, EngineOpenError> {
+        Self::open_with_limits_and_snapshot_hook(config, limits, || {})
+    }
+
+    #[cfg(test)]
+    fn open_with_snapshot_hook(
+        config: EngineConfig,
+        hook: impl FnOnce(),
+    ) -> Result<Self, EngineOpenError> {
+        Self::open_with_limits_and_snapshot_hook(config, RegistryLimits::PRODUCTION, hook)
+    }
+
+    fn open_with_limits_and_snapshot_hook(
+        config: EngineConfig,
+        limits: RegistryLimits,
+        between_status_and_snapshot_open: impl FnOnce(),
+    ) -> Result<Self, EngineOpenError> {
         // Durable storage is validated and migrated before any worker becomes
         // observable, so a failed open cannot leave a live partial engine.
         let store = StoreCoordinator::open(config.database_path())
             .map_err(|error| EngineOpenError::Database(error.kind))?;
+        let database_status = store
+            .status()
+            .map_err(|error| EngineOpenError::Database(error.kind))?;
+        between_status_and_snapshot_open();
+        let snapshot_access = match database_status.access {
+            crate::persistence::DatabaseAccess::ReadWriteCurrent => {
+                crate::persistence::snapshot::SnapshotStoreAccess::ReadWrite
+            }
+            crate::persistence::DatabaseAccess::ReadOnlyNewer { .. } => {
+                crate::persistence::snapshot::SnapshotStoreAccess::ReadOnly
+            }
+        };
+        let snapshots = crate::persistence::snapshot::SnapshotRepository::open(
+            Arc::clone(&store),
+            snapshot_access,
+        )
+        .map_err(|error| EngineOpenError::Snapshot(error.open_kind()))?;
         let shared = Arc::new(Shared::new(limits));
         let mut workers = Vec::with_capacity(limits.workers);
         for index in 0..limits.workers {
@@ -347,6 +381,7 @@ impl EngineHandle {
             inner: Arc::new(EngineInner {
                 config,
                 store,
+                _snapshots: snapshots,
                 shared,
                 workers: Mutex::new(Some(workers)),
             }),

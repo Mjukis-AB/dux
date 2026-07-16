@@ -133,6 +133,8 @@ pub enum CloseOutcome {
 pub enum EngineOpenError {
     #[error("engine database is unavailable: {0:?}")]
     Database(crate::persistence::DatabaseOpenErrorKind),
+    #[error("engine snapshot storage is unavailable: {0:?}")]
+    Snapshot(crate::persistence::SnapshotOpenErrorKind),
     #[error("engine worker resources are unavailable")]
     WorkerUnavailable,
 }

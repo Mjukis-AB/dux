@@ -63,7 +63,7 @@ fn database_failure_prevents_engine_publication_without_echoing_paths() {
     std::fs::write(&blocked_root, b"not a directory").unwrap();
     let config = EngineConfig::new(
         blocked_root.join("dux.sqlite3"),
-        temp.path().join("snapshots"),
+        blocked_root.join("snapshots"),
         temp.path().join("cache"),
     )
     .unwrap();
@@ -74,6 +74,93 @@ fn database_failure_prevents_engine_publication_without_echoing_paths() {
         EngineOpenError::Database(crate::persistence::DatabaseOpenErrorKind::UnsafeStorageRoot)
     );
     assert!(!error.to_string().contains("blocked-root"));
+}
+
+#[test]
+fn snapshot_failure_prevents_engine_publication_without_echoing_paths() {
+    let temp = TempDir::new().unwrap();
+    let config = config(&temp);
+    let store = crate::persistence::StoreCoordinator::open(config.database_path()).unwrap();
+    drop(store);
+    std::fs::create_dir(config.snapshots_directory()).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            config.snapshots_directory(),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+    }
+
+    let error = EngineHandle::open(config).err().unwrap();
+    assert!(matches!(
+        error,
+        EngineOpenError::Snapshot(
+            crate::persistence::SnapshotOpenErrorKind::UnrecognizedStore
+                | crate::persistence::SnapshotOpenErrorKind::UnsafeRoot
+        )
+    ));
+    assert!(!error.to_string().contains("snapshots"));
+}
+
+#[test]
+fn newer_database_never_provisions_missing_snapshot_storage() {
+    let temp = TempDir::new().unwrap();
+    let config = config(&temp);
+    drop(crate::persistence::StoreCoordinator::open(config.database_path()).unwrap());
+    let connection = rusqlite::Connection::open(config.database_path()).unwrap();
+    let future = crate::persistence::DATABASE_SCHEMA_VERSION + 1;
+    connection
+        .execute(
+            "INSERT INTO schema_migrations
+             (version, name, checksum_sha256, applied_at_unix_ms)
+             VALUES (?1, 'future-engine-schema', zeroblob(32), 2)",
+            [i64::from(future)],
+        )
+        .unwrap();
+    connection
+        .pragma_update(None, "user_version", future)
+        .unwrap();
+    drop(connection);
+    assert!(!config.snapshots_directory().exists());
+
+    let engine = EngineHandle::open(config.clone()).unwrap();
+    assert!(matches!(
+        engine.database_status().unwrap().access,
+        crate::persistence::DatabaseAccess::ReadOnlyNewer { found, .. } if found == future
+    ));
+    assert!(!config.snapshots_directory().exists());
+    engine.close();
+    assert!(engine.wait_until_closed(TEST_TIMEOUT));
+}
+
+#[test]
+fn schema_upgrade_after_status_sample_fences_snapshot_provisioning() {
+    let temp = TempDir::new().unwrap();
+    let config = config(&temp);
+    let database = config.database_path().to_path_buf();
+    let future = crate::persistence::DATABASE_SCHEMA_VERSION + 1;
+
+    let error = EngineHandle::open_with_snapshot_hook(config.clone(), move || {
+        let connection = rusqlite::Connection::open(database).unwrap();
+        connection
+            .execute(
+                "INSERT INTO schema_migrations
+                 (version, name, checksum_sha256, applied_at_unix_ms)
+                 VALUES (?1, 'future-snapshot-race', zeroblob(32), 2)",
+                [i64::from(future)],
+            )
+            .unwrap();
+        connection
+            .pragma_update(None, "user_version", future)
+            .unwrap();
+    })
+    .err()
+    .unwrap();
+
+    assert!(matches!(error, EngineOpenError::Snapshot(_)));
+    assert!(!config.snapshots_directory().exists());
 }
 
 #[test]

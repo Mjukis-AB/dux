@@ -318,6 +318,49 @@ EXCEPTIONS = {
     "storage-root-macos-publish": ExceptionSpec(
         "dux-core/src/persistence/storage.rs", "rust-platform-delete"
     ),
+    "snapshot-linux-no-replace-publish": ExceptionSpec(
+        "dux-core/src/persistence/snapshot/storage.rs", "rust-platform-delete"
+    ),
+    "snapshot-macos-no-replace-publish": ExceptionSpec(
+        "dux-core/src/persistence/snapshot/storage.rs", "rust-platform-delete"
+    ),
+    "snapshot-current-temp-unlink": ExceptionSpec(
+        "dux-core/src/persistence/snapshot/storage.rs", "rust-platform-delete"
+    ),
+    "snapshot-windows-current-temp-delete": ExceptionSpec(
+        "dux-core/src/persistence/snapshot/storage/windows.rs", "rust-platform-delete"
+    ),
+    "snapshot-windows-handle-publish": ExceptionSpec(
+        "dux-core/src/persistence/snapshot/storage/windows.rs", "rust-platform-delete"
+    ),
+    "test-snapshot-lock-helper-spawn": ExceptionSpec(
+        "dux-core/src/persistence/snapshot/storage.rs",
+        "rust-process-spawn",
+        "test:cross_process_writer_contention_is_bounded",
+    ),
+    "test-snapshot-umask-helper-spawn": ExceptionSpec(
+        "dux-core/src/persistence/snapshot/storage.rs",
+        "rust-process-spawn",
+        "test:restrictive_umask_still_provisions_exact_private_modes",
+    ),
+    "test-snapshot-macos-parent-acl-command": ExceptionSpec(
+        "dux-core/src/persistence/snapshot/storage.rs",
+        "rust-process-spawn",
+        "test:macos_accepts_deny_only_parent_acl_and_rejects_final_object_acl",
+    ),
+    "test-snapshot-macos-final-acl-command": ExceptionSpec(
+        "dux-core/src/persistence/snapshot/storage.rs",
+        "rust-process-spawn",
+        "test:macos_accepts_deny_only_parent_acl_and_rejects_final_object_acl",
+    ),
+    "test-snapshot-lock-command-import": ExceptionSpec(
+        "dux-core/src/persistence/snapshot/storage.rs", "rust-process-spawn"
+    ),
+    "test-snapshot-referenced-file-remove": ExceptionSpec(
+        "dux-core/src/persistence/snapshot.rs",
+        "rust-filesystem-effect",
+        "test:durable_reference_fails_closed_when_snapshot_is_missing_or_corrupt",
+    ),
     "test-storage-root-source-swap": ExceptionSpec(
         "dux-core/src/persistence/storage/windows.rs",
         "rust-filesystem-effect",
@@ -398,6 +441,16 @@ EXCEPTION_PRIMITIVES = {
     "storage-root-handle-publish": "SetFileInformationByHandle",
     "storage-root-linux-publish": "SYS_renameat2",
     "storage-root-macos-publish": "renameatx_np",
+    "snapshot-linux-no-replace-publish": "SYS_renameat2",
+    "snapshot-macos-no-replace-publish": "renameatx_np",
+    "snapshot-current-temp-unlink": "unlinkat",
+    "snapshot-windows-current-temp-delete": "SetFileInformationByHandle",
+    "snapshot-windows-handle-publish": "SetFileInformationByHandle",
+    "test-snapshot-lock-helper-spawn": "Command::new",
+    "test-snapshot-umask-helper-spawn": "Command::new",
+    "test-snapshot-macos-parent-acl-command": "Command::new",
+    "test-snapshot-macos-final-acl-command": "Command::new",
+    "test-snapshot-referenced-file-remove": "remove_file",
     "test-storage-root-source-swap": "rename",
     "test-storage-final-root-rename-guard": "rename",
     "test-storage-cleanup-lock-rename-guard": "rename",
@@ -421,6 +474,8 @@ CLIPPY_SUPPRESSION_COUNTS = {
     "dux-core/src/persistence/persistence_tests.rs": 3,
     "dux-core/src/persistence/storage.rs": 1,
     "dux-core/src/persistence/storage/windows.rs": 2,
+    "dux-core/src/persistence/snapshot/storage.rs": 3,
+    "dux-core/src/persistence/snapshot.rs": 1,
 }
 
 CLIPPY_PRODUCT_SUPPRESSION_SYMBOLS = {

@@ -5,6 +5,22 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Added a crate-private immutable application snapshot subsystem separate from
+  the legacy CLI cache. Its frozen v1 depth-first wire preserves lossless host
+  names, exact graph and aggregate semantics, optional times and Unix identity,
+  typed scan flags, and a trailing SHA-256 checksum behind hard file/node/depth/
+  path bounds; golden digests and checksum-valid hostile fixtures prevent
+  silent format drift and ambiguous trees. An independently marker-owned
+  private store uses unique temps, atomic no-replace publication, exact
+  0700/0600 or protected-DACL validation, retained identities, and read-only
+  final handles. Snapshot mutations hold the current-schema SQLite fence before
+  the snapshot writer lock, retain publication exclusion through the exact
+  terminal-scan CAS, and reconcile ambiguous commits without ever publishing a
+  database reference first. New tests cover version-skew races, collisions,
+  missing/corrupt references, restrictive umasks, macOS ACLs, and Windows
+  DACL/reparse/link/publication behavior. The format remains non-authoritative;
+  real scan-task wiring, typed coverage, retention, and abandoned-temp
+  maintenance remain separate roadmap work.
 - Added a crate-private cleanup-lock-coupled operation-journal state machine.
   A non-cloneable, non-shareable lease generates and owns the process identity,
   claims pristine plans as generation one, and fences every heartbeat,
@@ -80,9 +96,9 @@ All notable changes to DUX will be documented in this file.
   preserve stable IDs, lossless accepted host-codec absolute roots, checked times and byte counts,
   reject duplicate or terminal rewrites, recheck schema compatibility while
   holding the coordinator and cross-process writer lease, and bound SQLite
-  read work. Completed summaries survive coordinator teardown and reopen; this
-  does not yet expose scan APIs to the engine, persist snapshots, or make
-  historical paths actionable.
+  read work. Completed summaries survive coordinator teardown and reopen. Scan
+  APIs remain absent from the engine; the separate snapshot subsystem above can
+  now attach an exact immutable file, but historical paths stay non-actionable.
 - Added a versioned private SQLite foundation owned by the shared engine. A
   checksummed v1 `STRICT` schema covers all planned aggregate/history tables
   with bounded fields, constrained semantic text, and a tested lossless

@@ -2094,7 +2094,51 @@ Tasks:
     FFI, CLI, Swift, AI, and every effect primitive. The broad persistence item
     stays open for candidate status and scan/evaluator/planner lifecycle
     integration.
-- [ ] Keep binary snapshots atomic and checksummed.
+- [x] Keep binary snapshots atomic and checksummed. Completed 2026-07-16:
+  `dux-core::persistence::snapshot` now owns an independent crate-private v1
+  full-tree wire rather than extending the legacy CLI cache. Its frozen
+  96-byte header, 112-byte depth-first node records, and trailing SHA-256
+  preserve lossless host roots/components, stable node IDs, logical and
+  allocated aggregates, file/directory counts, optional modification/access
+  times, typed inaccessible/timeout/hard-link/mount flags, optional Unix
+  device/inode observations, and exact node kinds. Fixed bounds cap files at
+  2 GiB, nodes at five million, depth at 4,096, components at 1 KiB, and
+  reconstructed encoded paths at 64 KiB. Decoding copies bounded host values,
+  grows node storage only after records exist, rejects unknown/reserved bits,
+  duplicate sibling paths, graph/child/depth drift, noncanonical optional
+  fields, arithmetic overflow, inconsistent aggregates, checksum errors,
+  incompatible versions, truncation, and trailing data. Platform-specific
+  whole-wire golden digests prevent encoder/decoder drift without a version
+  bump. These bytes remain sensitive non-authoritative observations.
+
+  The exact `<database parent>/snapshots` owner independently provisions a
+  marker-complete private directory, validates a bounded exact inventory, and
+  uses exclusive PID-plus-random temps, durable atomic no-replace publication,
+  collision winner validation, and read-only reopened final handles. Unix
+  creation repairs exact 0700/0600 modes even beneath a restrictive umask;
+  macOS accepts deny-only publication-parent ACLs but rejects final-object
+  ACLs; Windows uses protected owner-only DACLs, retained IDs, handle-relative
+  operations, reparse/multi-link rejection, no-replace tests, and read-only
+  winner reopening. Read-only newer-schema startup never provisions storage.
+
+  SQLite stores the positive version, canonical relative file name, encoding,
+  and 32-byte digest as an all-or-none tuple only on successful scans. The
+  mutation order is SQLite connection → SQLite writer/compatibility lease →
+  snapshot writer. A current-to-newer race is rechecked before provisioning,
+  staging, and publication; publication retains snapshot exclusion through the
+  exact scan-summary CAS and post-commit revalidation. The file is durable
+  before SQLite can reference it; an ambiguous commit is reconciled by every
+  frozen completion fact, and exact retries or existing-file collisions decode
+  and compare the entire document plus digest. Focused tests cover corrupt,
+  truncated, hostile-length and checksum-valid hostile inputs, missing/corrupt
+  durable references, same-ID/different-document collisions, process-style
+  reopen, file-first orphan adoption, post-commit ambiguity, lock contention,
+  restrictive umask, macOS ACLs, version-skew races, and Windows storage
+  compilation/regressions. The normative implementation reference is
+  [`docs/SNAPSHOT_FORMAT.md`](docs/SNAPSHOT_FORMAT.md). Scanner-task wiring,
+  last-complete selection, typed coverage/issues, latest-two/2 GiB retention,
+  active-review pins, and abandoned-stage/temp scavenging remain later tasks
+  and are not claimed by this checkpoint.
 - [ ] Add capacity sample storage.
 - [ ] Add typed scan coverage/issues.
 - [ ] Add JSON CLI status/history scaffolding.

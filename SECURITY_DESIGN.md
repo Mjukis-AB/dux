@@ -256,12 +256,14 @@ availability rather than proving locality. Current scan totals therefore MUST
 NOT be described as complete, and relaxed scan flags MUST NOT imply cleanup
 authority.
 
-Current binary scan caches are atomic and checksummed, but checksums detect
-corruption rather than malicious tampering and the current cache writer does
-not enforce the future 0700-directory/0600-file permissions. Cached paths are
-therefore sensitive, non-authoritative data. The SQLite store now has private
-permissions and migration tests; binary snapshot/cache storage does not, so
-public app cleanup remains blocked.
+The legacy binary scan cache is atomic and checksummed, but its checksum detects
+corruption rather than malicious tampering and its writer does not enforce the
+future 0700-directory/0600-file permissions. Cached paths are therefore
+sensitive, non-authoritative data. The separate application snapshot store now
+has bounded semantic decoding, SHA-256 references, private permissions,
+current-schema-fenced atomic publication, and platform storage tests. No real
+scan task writes that store yet, and neither snapshot implementation can grant
+cleanup authority, so public app cleanup remains blocked.
 
 The current loader reads the complete cache before structural validation, has
 no retention cap, and accepts same-user replacement as ordinary input. A forged
@@ -794,10 +796,11 @@ it requires a key-custody, backup, migration, and recovery design. DUX MUST NOT
 describe 0600 files as encrypted.
 
 SQLite uses restrictive permissions before opening, transactional migrations,
-and one coordinated writer model. Binary snapshots use unique private temporary
-files, checksum/version validation, durable flush where required, and atomic
-replacement. CRC checks detect accidental corruption, not authenticity or
-confidentiality.
+and one coordinated writer model. Application snapshots use unique private
+temporary files, SHA-256/version validation, durable flush where required, and
+atomic no-replace publication; published handles are reopened read-only by
+exact identity. The legacy cache still uses CRC. Both checks detect accidental
+corruption, not authenticity or confidentiality.
 
 The implemented SQLite boundary provisions a previously absent DUX directory
 in an unpredictable private sibling stage. It creates and durably writes a
@@ -838,6 +841,22 @@ a final-root handle that denies delete sharing prevents a parent
 `DELETE_CHILD` grant from swapping the directory while SQLite uses its path.
 SQLite-created Windows sidecars inherit private access and are immediately
 repaired to the exact protected file DACL before further use.
+
+The implemented application snapshot owner independently validates the exact
+reserved `snapshots` sibling. Its fixed-marker 0700/0600 or protected-DACL
+store uses bounded inventory, exclusive random temporary files, durable
+no-replace publication, single-link/no-follow identity checks, and read-only
+reopened final handles. The frozen v1 depth-first wire validates exact sibling
+names, graph structure, aggregates, scan flags, optional times and Unix
+identity observations, and a trailing SHA-256 digest before returning any
+document. Snapshot bytes remain non-authoritative. Mutation order is SQLite
+connection mutex, SQLite writer/compatibility lease, then snapshot writer lock;
+publication retains the last lock through the exact SQLite terminal-scan CAS
+and post-commit file revalidation. A newer schema therefore fences an older
+snapshot writer before provisioning and every later mutation. File-first
+failure may leave an unreferenced immutable orphan, never a database reference
+to an unpublished file. The exact wire and failure contract are documented in
+[`docs/SNAPSHOT_FORMAT.md`](docs/SNAPSHOT_FORMAT.md).
 
 Migration SQL is embedded, sequential, SHA-256 checked, denied embedded
 transaction/savepoint control, applied in one runner-owned `BEGIN IMMEDIATE`
@@ -968,12 +987,22 @@ Future retention maintenance must scavenge only bounded, identity-validated,
 code-owned stages; current code deliberately does not recursively delete an
 unproven path during error recovery.
 
+Snapshot provisioning can likewise leave a private
+`.dux-snapshot-stage-*` sibling in empty, marker-only, or marker-complete form.
+An interrupted writer can leave an exact recognized `.snapshot-*.tmp` inside
+the published snapshot root. Startup validates but does not scavenge at most 64
+such temps; a 65th makes the inventory unavailable, and an individual temp may
+be large. These are explicit availability/footprint debts for later bounded,
+identity-safe retention maintenance, never permission to recursively delete an
+unproven path.
+
 Symlinked storage roots, ownership mismatch, unsupported schema versions, and
 unsafe permissions block writes. Older clients fail read-only rather than
 downgrade or corrupt shared state. The internal SQLite coordinator provides a
-stable cross-process lease whenever an `EngineHandle` opens the store. App/FFI
-and CLI adoption plus coordinated binary-snapshot publication remain future
-integration work.
+stable cross-process lease whenever an `EngineHandle` opens the store. The
+application snapshot owner now takes that compatibility lease before its own
+writer lock and retains snapshot exclusion through the exact scan-summary CAS.
+App/FFI and CLI scan adoption remain future integration work.
 
 ### 12.3 Retention and deletion
 
@@ -1284,12 +1313,13 @@ incident as a substitute for deterministic local evidence.
 | Centralized executor | Production executor absent; temporary legacy adapter is containment only | Typed admission, integration with the existing cross-process lease/journal, and live target revalidation required |
 | Engine/FFI task and plan API | Core handle, pre-worker SQLite compatibility handshake, and bounded per-session registry implemented for one read-only formatting batch; app architecture owns one session; UniFFI handle remains smoke-only, with no scan/task/plan DTOs or cleanup authority | FFI version rejection plus bounded scan/task/plan handles and cancellation |
 | SQLite compatibility store | Checksummed v1/v2 migrations with exact per-version fingerprints, lossless bounded path codec, bounded full/lightweight inspection, private atomic provisioning with durable initialization evidence, cross-platform process writer/version-race coverage, durable writer-locked cleanup-lock layout upgrade, private tri-state process-instance liveness evidence, newer-schema read-only transition, rollback/WAL recovery, crate-private typed scan/candidate/planned-cleanup history, and a bounded cleanup-lock-coupled owner-generation journal state machine are implemented; stored paths and policy remain non-authoritative observations | Scan/evaluator/planner lifecycle integration, candidate status lifecycle, Windows host-scope proof, retention, executor integration, and bounded identity-safe abandoned-stage maintenance |
+| Binary full-tree snapshot store | Independent v1 wire has bounded pre-allocation, exact graph/path/aggregate/flag semantics, frozen golden digests, SHA-256 references, private marker-owned storage, unique temps, atomic no-replace publication, read-only final handles, database→snapshot lock ordering, version-skew fencing, and exact file-first scan-summary reconciliation; bytes remain non-authoritative | Real scan-task/Explorer integration, last-complete selection, typed coverage/issues, memory benchmarks, latest-two/2 GiB retention, active-review pins, and abandoned-stage/temp maintenance |
 | Typed scan coverage/issues | Absent; current scanner counts/skips and permits relaxed flags | Required before any scan is described as complete or becomes plan input |
 | Cache semantic/input validation | Atomic write plus CRC/version only; full-file read before bounds | Bounded reads, tree/path semantics, private permissions, retention, and migration |
 | Hard-link accounting and policy | Absent; only non-authoritative path snapshots capture link count | Deduplicated scan accounting and explicit per-mode admission rules |
 | Forbidden destructive-call lint | Implemented with compiler-resolved Rust denial, cross-language repository scan, scoped annotations, self-tests, and CI | Keep exception set exact; remove legacy baseline during executor migration |
 | Durable operation journal/history | Schema, typed immutable `planned` insert/load, permanent cleanup OS lock, tri-state process evidence, and a private cleanup-lock-coupled owner/generation state machine are implemented. It covers validation, durable effect intent, outcomes, cancellation, terminal derivation, same-scope death recovery, and explicit unknown reconciliation without performing an effect | Windows host-scope proof, cross-reboot policy, engine lifecycle and centralized-executor integration required before shared executor ships |
-| Private 0700/0600 stores | SQLite stage/final root, database, marker, and sidecars enforce ownership, no-follow identity, links, and Unix modes; macOS rejects final-object ACLs but accepts deny-only publication-parent ACLs; Windows uses exact protected DACLs plus handle-bound publication and a retained final-root rename guard; current binary cache remains non-private | Extend equivalent ownership and atomic-publication guarantees to snapshots, caches, logs, provider temp data, and bounded abandoned-stage maintenance |
+| Private 0700/0600 stores | SQLite and application snapshot roots/controls/data enforce ownership, no-follow identity, links, and exact Unix modes; macOS rejects final-object ACLs but accepts deny-only publication-parent ACLs; Windows uses exact protected DACLs, handle-bound publication, retained identity, and rename guards; the legacy binary cache remains non-private | Extend equivalent guarantees to the legacy cache, logs, provider temp data, and bounded abandoned-stage/temp maintenance |
 | Trash executor | Absent | Platform-native implementation and integration tests |
 | Cloud eviction | Absent | Supported API plus fully-uploaded/no-local-change evidence |
 | Scheduled cleanup | Absent | Manual-history maturity and all automation gates in §10 |

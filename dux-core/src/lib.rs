@@ -43,6 +43,7 @@ pub use engine::{
 pub use error::{DuxError, Result};
 pub use persistence::{
     DATABASE_SCHEMA_VERSION, DatabaseAccess, DatabaseOpenErrorKind, DatabaseStatus,
+    SnapshotOpenErrorKind,
 };
 pub use projection::{
     ArtifactClassification, ArtifactKind, BuildArtifactEntry, LargeFileEntry, StaleThreshold,

@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -54,6 +54,7 @@ pub(super) struct HistoryConnectionGuard<'a> {
     // before another in-process caller can acquire the connection mutex.
     _writer_lock: WriterLockGuard,
     pub(super) connection: MutexGuard<'a, Connection>,
+    store_identity: StoreIdentity,
 }
 
 impl StoreCoordinator {
@@ -241,6 +242,17 @@ impl StoreCoordinator {
         Ok(self.cached_status())
     }
 
+    /// Return the exact retained database path used to derive owned sibling
+    /// stores. Callers must never accept an independent path alongside this
+    /// coordinator, because that could fence one database while mutating
+    /// another root.
+    pub(super) fn validated_database_path(&self) -> Result<PathBuf, HistoryError> {
+        self.paths
+            .validate_all_existing()
+            .and_then(|()| self.paths.sqlite_path())
+            .map_err(map_history_database_error)
+    }
+
     /// Start one durable scan record. Stored paths are observations only.
     /// A database/storage error after commit can have an ambiguous outcome;
     /// callers reconcile by loading this exact scan ID before retrying.
@@ -280,18 +292,97 @@ impl StoreCoordinator {
         &self,
         completion: &ScanCompletionRecord,
     ) -> Result<(), HistoryError> {
-        let prepared = PreparedScanCompletion::prepare(completion)?;
         let mut guard = self.lock_current_history_connection()?;
+        self.record_scan_finished_with_guard(&mut guard, completion)
+    }
+
+    fn record_scan_finished_with_guard(
+        &self,
+        guard: &mut HistoryConnectionGuard<'_>,
+        completion: &ScanCompletionRecord,
+    ) -> Result<(), HistoryError> {
+        self.record_scan_finished_with_guard_and_hook(guard, completion, || Ok(()))
+    }
+
+    fn record_scan_finished_with_guard_and_hook(
+        &self,
+        guard: &mut HistoryConnectionGuard<'_>,
+        completion: &ScanCompletionRecord,
+        after_commit: impl FnOnce() -> Result<(), HistoryError>,
+    ) -> Result<(), HistoryError> {
+        self.validate_history_guard(guard)?;
+        let prepared = PreparedScanCompletion::prepare(completion)?;
         let transaction = guard
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(map_write_sql_error)?;
         update_scan_finished(&transaction, &prepared)?;
         transaction.commit().map_err(map_write_sql_error)?;
+        after_commit()?;
         self.paths
             .repair_sqlite_sidecars()
             .and_then(|()| self.paths.validate_all_existing())
             .map_err(map_history_database_error)
+    }
+
+    /// Complete one frozen scan operation and reconcile every potentially
+    /// ambiguous failure against that exact operation. Only an exact durable
+    /// match is idempotent success; a different terminal row is never adopted.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "scan tasks use the guarded completion path in a later integration slice"
+        )
+    )]
+    pub(crate) fn record_scan_finished_reconciled(
+        &self,
+        completion: &ScanCompletionRecord,
+    ) -> Result<(), HistoryError> {
+        let mut guard = self.lock_current_history_connection()?;
+        self.record_scan_finished_reconciled_with_guard(&mut guard, completion)
+    }
+
+    pub(super) fn record_scan_finished_reconciled_with_guard(
+        &self,
+        guard: &mut HistoryConnectionGuard<'_>,
+        completion: &ScanCompletionRecord,
+    ) -> Result<(), HistoryError> {
+        self.record_scan_finished_reconciled_with_guard_and_hook(guard, completion, || Ok(()))
+    }
+
+    fn record_scan_finished_reconciled_with_guard_and_hook(
+        &self,
+        guard: &mut HistoryConnectionGuard<'_>,
+        completion: &ScanCompletionRecord,
+        after_commit: impl FnOnce() -> Result<(), HistoryError>,
+    ) -> Result<(), HistoryError> {
+        self.validate_history_guard(guard)?;
+        let failure =
+            match self.record_scan_finished_with_guard_and_hook(guard, completion, after_commit) {
+                Ok(()) => return Ok(()),
+                Err(failure) => failure,
+            };
+        match load_scan_record(&guard.connection, completion.id()) {
+            Ok(Some(record)) if record.exactly_matches_completion(completion) => Ok(()),
+            Ok(Some(record)) if record.status() == super::history::ScanStatus::Running => {
+                Err(failure)
+            }
+            Ok(Some(_)) => Err(HistoryError::new(HistoryErrorKind::InvalidTransition)),
+            Ok(None) => Err(HistoryError::new(HistoryErrorKind::NotFound)),
+            Err(_) => Err(HistoryError::new(HistoryErrorKind::OutcomeUnknown)),
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn record_scan_finished_reconciled_after_commit_failure_for_test(
+        &self,
+        completion: &ScanCompletionRecord,
+    ) -> Result<(), HistoryError> {
+        let mut guard = self.lock_current_history_connection()?;
+        self.record_scan_finished_reconciled_with_guard_and_hook(&mut guard, completion, || {
+            Err(HistoryError::new(HistoryErrorKind::DatabaseUnavailable))
+        })
     }
 
     /// Load at most one typed scan observation by its stable ID.
@@ -307,6 +398,15 @@ impl StoreCoordinator {
         id: &crate::domain::ScanId,
     ) -> Result<Option<ScanRecord>, HistoryError> {
         let guard = self.lock_current_history_connection()?;
+        load_scan_record(&guard.connection, id)
+    }
+
+    pub(super) fn load_scan_with_guard(
+        &self,
+        guard: &HistoryConnectionGuard<'_>,
+        id: &crate::domain::ScanId,
+    ) -> Result<Option<ScanRecord>, HistoryError> {
+        self.validate_history_guard(guard)?;
         load_scan_record(&guard.connection, id)
     }
 
@@ -463,6 +563,7 @@ impl StoreCoordinator {
                 Ok(HistoryConnectionGuard {
                     _writer_lock: writer_lock,
                     connection,
+                    store_identity: self.paths.identity(),
                 })
             }
             SchemaState::Newer { .. } => {
@@ -473,6 +574,16 @@ impl StoreCoordinator {
                 Err(HistoryError::new(HistoryErrorKind::CorruptData))
             }
         }
+    }
+
+    pub(super) fn validate_history_guard(
+        &self,
+        guard: &HistoryConnectionGuard<'_>,
+    ) -> Result<(), HistoryError> {
+        if guard.store_identity != self.paths.identity() {
+            return Err(HistoryError::new(HistoryErrorKind::InternalState));
+        }
+        Ok(())
     }
 
     fn cached_status(&self) -> DatabaseStatus {
