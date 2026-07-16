@@ -13,6 +13,14 @@ use super::candidate_history::{
     DurableCandidatePathItem, DurableCandidatePathPage, DurableObservedPath, DurablePathEncoding,
     MAX_CANDIDATE_DETAIL_PAGE_LIMIT,
 };
+use super::cleanup_history::{
+    CleanupHistoryCursor, CleanupHistoryError, DurableCleanupErrorCategory,
+    DurableCleanupHistoryPage, DurableCleanupItemStatus, DurableCleanupItemSummary,
+    DurableCleanupMode, DurableCleanupRecordFormat, DurableCleanupSessionId,
+    DurableCleanupSessionObservation, DurableCleanupSessionStatus, DurableCleanupSessionSummary,
+    DurableCleanupStatusCounts, DurableCleanupTrigger, DurableCleanupWarning,
+    MAX_RECENT_CLEANUP_HISTORY_LIMIT,
+};
 use super::config::EngineConfig;
 use super::settings::{
     SnapshotRetentionCap, SnapshotRetentionCapError, SnapshotRetentionCapSource,
@@ -42,10 +50,16 @@ use crate::persistence::snapshot::{
 use crate::persistence::{
     CandidateEvaluationCompletion, CandidateEvaluationFailureKind, CandidateEvaluationIdentity,
     CandidateEvaluationObservation, CandidateEvaluationRecord, CandidateEvaluationStatus,
-    CandidateHistoryStatus, CandidateReviewAction, CompleteCandidateRecord, HistoryErrorKind,
-    HostPathObservationEncoding, MAX_RECENT_SCAN_HISTORY_LIMIT, NewCandidateRecord, NewScanRecord,
-    ScanCompletionRecord, ScanCounts, ScanStatus, TerminalScanStatus, observe_host_path,
+    CandidateHistoryStatus, CandidateReviewAction, CleanupSessionId, CompleteCandidateRecord,
+    HistoryErrorKind, HostPathObservationEncoding, MAX_RECENT_SCAN_HISTORY_LIMIT,
+    NewCandidateRecord, NewScanRecord, ScanCompletionRecord, ScanCounts, ScanStatus,
+    StoredCleanupErrorCategory, StoredCleanupHistoryCursor, StoredCleanupHistoryObservation,
+    StoredCleanupItemStatus, StoredCleanupItemSummary, StoredCleanupMode,
+    StoredCleanupRecordFormat, StoredCleanupSessionStatus, StoredCleanupSessionSummary,
+    StoredCleanupStatusCounts, StoredCleanupTrigger, TerminalScanStatus, observe_host_path,
 };
+#[cfg(test)]
+use crate::persistence::{CleanupTrigger, NewCleanupSessionRecord, StoredCandidateRecord};
 use crate::persistence::{DatabaseStatus, StoreCoordinator};
 use crate::persistence::{
     SnapshotRetentionCapSetting, SnapshotRetentionCapSettingSource,
@@ -664,6 +678,62 @@ impl EngineHandle {
             scans,
             has_more: page.has_more(),
         })
+    }
+
+    /// Return one keyset-bounded page of path-free cleanup-session summaries.
+    /// Historical policy and outcomes are presentation observations only and
+    /// cannot be reused as current validation, approval, or effect authority.
+    pub fn recent_cleanup_history(
+        &self,
+        cursor: Option<&CleanupHistoryCursor>,
+        limit: u16,
+    ) -> Result<DurableCleanupHistoryPage, CleanupHistoryError> {
+        if !(1..=MAX_RECENT_CLEANUP_HISTORY_LIMIT).contains(&limit) {
+            return Err(CleanupHistoryError::InvalidLimit {
+                maximum: MAX_RECENT_CLEANUP_HISTORY_LIMIT,
+            });
+        }
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(CleanupHistoryError::Closed);
+        }
+        let stored_cursor = cursor.map(stored_cleanup_history_cursor).transpose()?;
+        let page = self
+            .inner
+            .store
+            .recent_cleanup_history(stored_cursor.as_ref(), usize::from(limit))
+            .map_err(|error| map_cleanup_history_error(error.kind))?;
+        let records = page
+            .records
+            .into_iter()
+            .map(public_cleanup_session_summary)
+            .collect::<Result<Vec<_>, _>>()?;
+        let next_cursor = page
+            .next_cursor
+            .map(public_cleanup_history_cursor)
+            .transpose()?;
+        DurableCleanupHistoryPage::new(records, next_cursor)
+            .ok_or(CleanupHistoryError::InternalState)
+    }
+
+    /// Return one fully validated, path-free cleanup journal observation. The
+    /// complete stored graph is checked internally, but paths, evidence,
+    /// candidate identities, execution fences, and claims stay sealed.
+    pub fn cleanup_session_history(
+        &self,
+        session_id: &DurableCleanupSessionId,
+    ) -> Result<DurableCleanupSessionObservation, CleanupHistoryError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(CleanupHistoryError::Closed);
+        }
+        let stored_id = CleanupSessionId::new(session_id.as_str().to_owned())
+            .map_err(|_| CleanupHistoryError::InternalState)?;
+        let observation = self
+            .inner
+            .store
+            .cleanup_history_session(&stored_id)
+            .map_err(|error| map_cleanup_history_error(error.kind))?
+            .ok_or(CleanupHistoryError::SessionNotFound)?;
+        public_cleanup_history_observation(observation)
     }
 
     /// Load one exact, bounded candidate-discovery observation from durable
@@ -1721,6 +1791,265 @@ const fn map_scan_history_error(kind: HistoryErrorKind) -> ScanHistoryError {
         | HistoryErrorKind::InvalidTransition
         | HistoryErrorKind::DatabaseUnavailable
         | HistoryErrorKind::OutcomeUnknown => ScanHistoryError::Unavailable,
+    }
+}
+
+fn stored_cleanup_history_cursor(
+    cursor: &CleanupHistoryCursor,
+) -> Result<StoredCleanupHistoryCursor, CleanupHistoryError> {
+    let milliseconds = cursor
+        .started_at()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| CleanupHistoryError::InternalState)?
+        .as_millis();
+    let started_at_unix_ms =
+        i64::try_from(milliseconds).map_err(|_| CleanupHistoryError::InternalState)?;
+    let session_id = CleanupSessionId::new(cursor.session_id().as_str().to_owned())
+        .map_err(|_| CleanupHistoryError::InternalState)?;
+    StoredCleanupHistoryCursor::try_new(started_at_unix_ms, session_id)
+        .map_err(|_| CleanupHistoryError::InternalState)
+}
+
+fn public_cleanup_history_cursor(
+    cursor: StoredCleanupHistoryCursor,
+) -> Result<CleanupHistoryCursor, CleanupHistoryError> {
+    let milliseconds =
+        u64::try_from(cursor.started_at_unix_ms).map_err(|_| CleanupHistoryError::CorruptData)?;
+    let started_at = UNIX_EPOCH
+        .checked_add(Duration::from_millis(milliseconds))
+        .ok_or(CleanupHistoryError::CorruptData)?;
+    let session_id = DurableCleanupSessionId::new(cursor.session_id.as_str().to_owned())
+        .ok_or(CleanupHistoryError::CorruptData)?;
+    Ok(CleanupHistoryCursor::new(started_at, session_id))
+}
+
+fn public_cleanup_session_summary(
+    summary: StoredCleanupSessionSummary,
+) -> Result<DurableCleanupSessionSummary, CleanupHistoryError> {
+    let id = DurableCleanupSessionId::new(summary.session_id.as_str().to_owned())
+        .ok_or(CleanupHistoryError::CorruptData)?;
+    let format = match summary.format {
+        StoredCleanupRecordFormat::LegacyIncomplete => DurableCleanupRecordFormat::LegacyIncomplete,
+        StoredCleanupRecordFormat::CompleteV2 => DurableCleanupRecordFormat::Complete,
+    };
+    DurableCleanupSessionSummary::new(
+        id,
+        summary.plan_id.as_str().to_owned(),
+        format,
+        summary.source_scan_id,
+        summary.started_at,
+        summary.completed_at,
+        summary.plan_created_at,
+        summary.plan_expires_at,
+        public_cleanup_mode(summary.mode),
+        public_cleanup_trigger(summary.trigger),
+        public_cleanup_session_status(summary.status),
+        summary.estimated_bytes,
+        summary.verified_capacity_delta_bytes,
+        summary.cancellation_requested,
+        summary.item_total,
+        summary.path_total,
+        summary.evidence_total,
+        public_cleanup_status_counts(summary.item_status_counts)?,
+        public_cleanup_status_counts(summary.path_status_counts)?,
+    )
+    .ok_or(CleanupHistoryError::CorruptData)
+}
+
+fn public_cleanup_history_observation(
+    observation: StoredCleanupHistoryObservation,
+) -> Result<DurableCleanupSessionObservation, CleanupHistoryError> {
+    let format = observation.summary.format;
+    let summary = public_cleanup_session_summary(observation.summary)?;
+    let items = observation
+        .items
+        .into_iter()
+        .map(|item| public_cleanup_item_summary(item, format))
+        .collect::<Result<Vec<_>, _>>()?;
+    let warnings = observation
+        .warnings
+        .into_iter()
+        .map(public_cleanup_warning)
+        .collect();
+    DurableCleanupSessionObservation::new(summary, items, warnings)
+        .ok_or(CleanupHistoryError::CorruptData)
+}
+
+fn public_cleanup_item_summary(
+    item: StoredCleanupItemSummary,
+    format: StoredCleanupRecordFormat,
+) -> Result<DurableCleanupItemSummary, CleanupHistoryError> {
+    let has_complete_policy = item.category.is_some()
+        && item.safety.is_some()
+        && item.action.is_some()
+        && item.rule_schedule_eligible.is_some();
+    if (format == StoredCleanupRecordFormat::CompleteV2) != has_complete_policy
+        || (format == StoredCleanupRecordFormat::LegacyIncomplete
+            && (item.newest_mtime.is_some()
+                || item.evidence_count != 0
+                || item.error_category.is_some()))
+    {
+        return Err(CleanupHistoryError::CorruptData);
+    }
+    let error_category = item
+        .error_category
+        .map(public_cleanup_error_category)
+        .transpose()?;
+    DurableCleanupItemSummary::new(
+        u16::try_from(item.ordinal).map_err(|_| CleanupHistoryError::CorruptData)?,
+        item.rule,
+        item.category,
+        item.safety,
+        item.action,
+        item.rule_schedule_eligible,
+        item.newest_mtime,
+        item.estimated_bytes,
+        public_cleanup_item_status(item.status),
+        item.error_recorded,
+        error_category,
+        item.path_count,
+        item.evidence_count,
+    )
+    .ok_or(CleanupHistoryError::CorruptData)
+}
+
+fn public_cleanup_error_category(
+    category: StoredCleanupErrorCategory,
+) -> Result<DurableCleanupErrorCategory, CleanupHistoryError> {
+    DurableCleanupErrorCategory::new(category.as_str().to_owned())
+        .ok_or(CleanupHistoryError::CorruptData)
+}
+
+fn public_cleanup_status_counts(
+    counts: StoredCleanupStatusCounts,
+) -> Result<DurableCleanupStatusCounts, CleanupHistoryError> {
+    let groups = [
+        (DurableCleanupItemStatus::Planned, counts.planned),
+        (DurableCleanupItemStatus::Validating, counts.validating),
+        (DurableCleanupItemStatus::DryRun, counts.dry_run),
+        (
+            DurableCleanupItemStatus::EffectStarted,
+            counts.effect_started,
+        ),
+        (DurableCleanupItemStatus::Trashed, counts.trashed),
+        (DurableCleanupItemStatus::Removed, counts.removed),
+        (DurableCleanupItemStatus::Evicted, counts.evicted),
+        (DurableCleanupItemStatus::Skipped, counts.skipped),
+        (DurableCleanupItemStatus::Rejected, counts.rejected),
+        (DurableCleanupItemStatus::Failed, counts.failed),
+        (
+            DurableCleanupItemStatus::ChangedSincePlan,
+            counts.changed_since_plan,
+        ),
+        (DurableCleanupItemStatus::Interrupted, counts.interrupted),
+        (DurableCleanupItemStatus::Unavailable, counts.unavailable),
+        (
+            DurableCleanupItemStatus::OutcomeUnknown,
+            counts.outcome_unknown,
+        ),
+    ];
+    let statuses = groups
+        .into_iter()
+        .flat_map(|(status, count)| std::iter::repeat_n(status, usize::from(count)));
+    let public = DurableCleanupStatusCounts::from_statuses(statuses)
+        .ok_or(CleanupHistoryError::CorruptData)?;
+    if public.total() != counts.total {
+        return Err(CleanupHistoryError::CorruptData);
+    }
+    Ok(public)
+}
+
+const fn public_cleanup_mode(mode: StoredCleanupMode) -> DurableCleanupMode {
+    match mode {
+        StoredCleanupMode::DryRun => DurableCleanupMode::DryRun,
+        StoredCleanupMode::Trash => DurableCleanupMode::Trash,
+        StoredCleanupMode::PermanentSafe => DurableCleanupMode::PermanentSafe,
+        StoredCleanupMode::EvictLocalCopy => DurableCleanupMode::EvictLocalCopy,
+    }
+}
+
+const fn public_cleanup_trigger(trigger: StoredCleanupTrigger) -> DurableCleanupTrigger {
+    match trigger {
+        StoredCleanupTrigger::Manual => DurableCleanupTrigger::Manual,
+        StoredCleanupTrigger::LowDisk => DurableCleanupTrigger::LowDisk,
+        StoredCleanupTrigger::Scheduled => DurableCleanupTrigger::Scheduled,
+        StoredCleanupTrigger::Cli => DurableCleanupTrigger::Cli,
+    }
+}
+
+const fn public_cleanup_session_status(
+    status: StoredCleanupSessionStatus,
+) -> DurableCleanupSessionStatus {
+    match status {
+        StoredCleanupSessionStatus::Planned => DurableCleanupSessionStatus::Planned,
+        StoredCleanupSessionStatus::Running => DurableCleanupSessionStatus::Running,
+        StoredCleanupSessionStatus::Recovering => DurableCleanupSessionStatus::Recovering,
+        StoredCleanupSessionStatus::Completed => DurableCleanupSessionStatus::Completed,
+        StoredCleanupSessionStatus::PartiallyCompleted => {
+            DurableCleanupSessionStatus::PartiallyCompleted
+        }
+        StoredCleanupSessionStatus::Failed => DurableCleanupSessionStatus::Failed,
+        StoredCleanupSessionStatus::Cancelled => DurableCleanupSessionStatus::Cancelled,
+        StoredCleanupSessionStatus::Interrupted => DurableCleanupSessionStatus::Interrupted,
+        StoredCleanupSessionStatus::Rejected => DurableCleanupSessionStatus::Rejected,
+        StoredCleanupSessionStatus::DryRun => DurableCleanupSessionStatus::DryRun,
+    }
+}
+
+const fn public_cleanup_item_status(status: StoredCleanupItemStatus) -> DurableCleanupItemStatus {
+    match status {
+        StoredCleanupItemStatus::Planned => DurableCleanupItemStatus::Planned,
+        StoredCleanupItemStatus::Validating => DurableCleanupItemStatus::Validating,
+        StoredCleanupItemStatus::DryRun => DurableCleanupItemStatus::DryRun,
+        StoredCleanupItemStatus::EffectStarted => DurableCleanupItemStatus::EffectStarted,
+        StoredCleanupItemStatus::Trashed => DurableCleanupItemStatus::Trashed,
+        StoredCleanupItemStatus::Removed => DurableCleanupItemStatus::Removed,
+        StoredCleanupItemStatus::Evicted => DurableCleanupItemStatus::Evicted,
+        StoredCleanupItemStatus::Skipped => DurableCleanupItemStatus::Skipped,
+        StoredCleanupItemStatus::Rejected => DurableCleanupItemStatus::Rejected,
+        StoredCleanupItemStatus::Failed => DurableCleanupItemStatus::Failed,
+        StoredCleanupItemStatus::ChangedSincePlan => DurableCleanupItemStatus::ChangedSincePlan,
+        StoredCleanupItemStatus::Interrupted => DurableCleanupItemStatus::Interrupted,
+        StoredCleanupItemStatus::Unavailable => DurableCleanupItemStatus::Unavailable,
+        StoredCleanupItemStatus::OutcomeUnknown => DurableCleanupItemStatus::OutcomeUnknown,
+    }
+}
+
+const fn public_cleanup_warning(warning: crate::domain::PlanWarning) -> DurableCleanupWarning {
+    match warning {
+        crate::domain::PlanWarning::EstimatedBytesUnverified => {
+            DurableCleanupWarning::EstimatedBytesUnverified
+        }
+        crate::domain::PlanWarning::DryRunDoesNotMutate => {
+            DurableCleanupWarning::DryRunDoesNotMutate
+        }
+        crate::domain::PlanWarning::TrashDoesNotFreeSpaceImmediately => {
+            DurableCleanupWarning::TrashDoesNotFreeSpaceImmediately
+        }
+        crate::domain::PlanWarning::PermanentRemovalCannotBeUndone => {
+            DurableCleanupWarning::PermanentRemovalCannotBeUndone
+        }
+        crate::domain::PlanWarning::CloudEvictionRequiresNetworkToRedownload => {
+            DurableCleanupWarning::CloudEvictionRequiresNetworkToRedownload
+        }
+    }
+}
+
+const fn map_cleanup_history_error(kind: HistoryErrorKind) -> CleanupHistoryError {
+    match kind {
+        HistoryErrorKind::IncompatibleSchema => CleanupHistoryError::IncompatibleSchema,
+        HistoryErrorKind::QueryLimitExceeded => CleanupHistoryError::QueryLimitExceeded,
+        HistoryErrorKind::Busy => CleanupHistoryError::Busy,
+        HistoryErrorKind::UnsafeStorage => CleanupHistoryError::UnsafeStorage,
+        HistoryErrorKind::CorruptData => CleanupHistoryError::CorruptData,
+        HistoryErrorKind::InternalState | HistoryErrorKind::InvalidInput => {
+            CleanupHistoryError::InternalState
+        }
+        HistoryErrorKind::DatabaseUnavailable
+        | HistoryErrorKind::AlreadyExists
+        | HistoryErrorKind::NotFound
+        | HistoryErrorKind::InvalidTransition
+        | HistoryErrorKind::OutcomeUnknown => CleanupHistoryError::Unavailable,
     }
 }
 

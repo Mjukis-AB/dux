@@ -36,6 +36,8 @@ const MAX_TOTAL_PATHS: usize = 256;
 const MAX_TOTAL_EVIDENCE: usize = 512;
 const MAX_WARNINGS: usize = 5;
 const MAX_ID_BYTES: i64 = 128;
+const MAX_LEGACY_ERROR_CHARACTERS: i64 = 128;
+const MAX_LEGACY_ERROR_BYTES: i64 = MAX_LEGACY_ERROR_CHARACTERS * 4;
 const MAX_POLICY_BYTES: i64 = 64;
 const MAX_PATH_BYTES: i64 = 65_536;
 const MAX_TEXT_BYTES: i64 = 4_096;
@@ -523,7 +525,7 @@ pub(super) fn load_cleanup_session_record(
     run_bounded_query(connection, || load_within_budget(connection, id))
 }
 
-fn load_within_budget(
+pub(super) fn load_within_budget(
     connection: &Connection,
     id: &CleanupSessionId,
 ) -> Result<Option<StoredCleanupSessionRecord>, HistoryError> {
@@ -853,7 +855,8 @@ fn load_legacy_items(
                     typeof(rule_id), length(CAST(rule_id AS BLOB)), rule_id, rule_revision,
                     estimated_bytes,
                     typeof(final_status), length(CAST(final_status AS BLOB)), final_status,
-                    typeof(error_category), length(CAST(error_category AS BLOB)), error_category,
+                    typeof(error_category), length(CAST(error_category AS BLOB)),
+                    length(error_category), error_category,
                     record_format_version,
                     typeof(legacy_target_path), length(legacy_target_path), legacy_target_path,
                     legacy_target_path_encoding,
@@ -879,17 +882,26 @@ fn load_legacy_items(
         validate_required_value(row, 1, 2, "text", MAX_ID_BYTES).map_err(map_query_sql_error)?;
         validate_required_value(row, 6, 7, "text", MAX_POLICY_BYTES)
             .map_err(map_query_sql_error)?;
-        validate_optional_value(row, 9, 10, "text", MAX_ID_BYTES).map_err(map_query_sql_error)?;
-        validate_required_value(row, 13, 14, "blob", MAX_PATH_BYTES)
+        validate_optional_value(row, 9, 10, "text", MAX_LEGACY_ERROR_BYTES)
             .map_err(map_query_sql_error)?;
-        let version: i64 = row.get(12).map_err(map_query_sql_error)?;
-        let candidate_id: Option<String> = row.get(17).map_err(map_query_sql_error)?;
-        let category: Option<String> = row.get(18).map_err(map_query_sql_error)?;
-        let safety: Option<String> = row.get(19).map_err(map_query_sql_error)?;
-        let action: Option<String> = row.get(20).map_err(map_query_sql_error)?;
-        let schedule: Option<i64> = row.get(21).map_err(map_query_sql_error)?;
-        let newest_seconds: Option<i64> = row.get(22).map_err(map_query_sql_error)?;
-        let newest_nanos: Option<i64> = row.get(23).map_err(map_query_sql_error)?;
+        validate_required_value(row, 14, 15, "blob", MAX_PATH_BYTES)
+            .map_err(map_query_sql_error)?;
+        let error_characters: Option<i64> = row.get(11).map_err(map_query_sql_error)?;
+        let error_category: Option<String> = row.get(12).map_err(map_query_sql_error)?;
+        if error_category.is_none() != error_characters.is_none()
+            || error_characters
+                .is_some_and(|value| !(1..=MAX_LEGACY_ERROR_CHARACTERS).contains(&value))
+        {
+            return Err(corrupt());
+        }
+        let version: i64 = row.get(13).map_err(map_query_sql_error)?;
+        let candidate_id: Option<String> = row.get(18).map_err(map_query_sql_error)?;
+        let category: Option<String> = row.get(19).map_err(map_query_sql_error)?;
+        let safety: Option<String> = row.get(20).map_err(map_query_sql_error)?;
+        let action: Option<String> = row.get(21).map_err(map_query_sql_error)?;
+        let schedule: Option<i64> = row.get(22).map_err(map_query_sql_error)?;
+        let newest_seconds: Option<i64> = row.get(23).map_err(map_query_sql_error)?;
+        let newest_nanos: Option<i64> = row.get(24).map_err(map_query_sql_error)?;
         if version != 1
             || candidate_id.is_some()
             || category.is_some()
@@ -904,8 +916,8 @@ fn load_legacy_items(
         let rule_id: String = row.get(3).map_err(map_query_sql_error)?;
         let revision: i64 = row.get(4).map_err(map_query_sql_error)?;
         let path = decode_legacy_path(
-            row.get(15).map_err(map_query_sql_error)?,
             row.get(16).map_err(map_query_sql_error)?,
+            row.get(17).map_err(map_query_sql_error)?,
         )?;
         items.push(LegacyCleanupItemSummary {
             ordinal: items.len(),
@@ -915,7 +927,7 @@ fn load_legacy_items(
             status: item_status_from_stored(
                 &row.get::<_, String>(8).map_err(map_query_sql_error)?,
             )?,
-            error_category: row.get(11).map_err(map_query_sql_error)?,
+            error_category,
         });
     }
     Ok(items)

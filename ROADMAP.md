@@ -2414,9 +2414,54 @@ Tasks:
     terminal-owner refusal, concurrent select/dismiss convergence, and exact
     post-commit adoption. Maximum-legal cleanup-history and active-journal
     contracts also prove that the exact preflight does not consume their
-    enclosing aggregate query budget. The broad persistence checkbox remains
-    open for cleanup-history query surfaces, planner/executor engine lifecycle,
-    FFI/Swift/UI/CLI transport, and retention integration.
+    enclosing aggregate query budget. At that checkpoint the broad persistence
+    checkbox remained open for the following cleanup-history bridge,
+    planner/executor engine lifecycle, FFI/Swift/UI/CLI transport, and retention.
+  - Bounded cleanup-history read-bridge sub-checkpoint completed 2026-07-17:
+    `EngineHandle::recent_cleanup_history` now returns a path-free 1..=64
+    keyset page ordered by `started_at DESC, session_id ASC`; an opaque cursor
+    and limit-plus-one sentinel preserve equal-time ordering without an
+    unbounded offset. Summaries distinguish migrated format-1
+    `LegacyIncomplete` from complete format-2 storage and expose only
+    plan/source identity, lifecycle
+    times, mode, trigger, status, cancellation observation, estimated bytes,
+    separately verified capacity delta, bounded graph totals, and exhaustive
+    item/path status counts. Exact lookup accepts only an opaque session token
+    obtained from the feed and returns bounded path-free item policy/status
+    summaries and warnings.
+
+    Every selected recent row first passes parent and format-shape checks,
+    checked estimate summation, graph-count and encoded-byte preflight,
+    per-item nonempty/contiguous path and evidence relationships, warning
+    continuity/uniqueness, source-scan existence, and active claim coupling.
+    A journal-owned scalar validator then reuses the execution state machine's
+    lifecycle, generation/time, path-shape, item derivation, mode/action success,
+    active/recovering, and terminal-status rules without reading target paths,
+    evidence payloads, or candidate payloads. Exact format-2 lookup additionally
+    runs the complete bounded journal decoder before scrubbing its projection;
+    exact legacy lookup preserves its incomplete summary without fabricating
+    source, lifetime, policy, evidence, warning, or trusted error-category facts.
+
+    Returned DTOs contain no target path, evidence payload, candidate ID,
+    owner/generation/heartbeat, plan claim, prior review state, or execution
+    fence. Neither historical policy nor an outcome can become current
+    validation, planner input, approval, recovery permission, or an effect.
+    Reads retain the normal compatibility/writer guard for a coherent view but
+    intentionally acquire no cleanup OS lock. Separate fixed SQLite VM/deadline
+    envelopes guard recent and exact calls, and a conservative 64 MiB per-graph
+    read-materialization charge rejects oversized storage before payload decode.
+    That read cap is intentionally not claimed as write-admission symmetry: a
+    schema-valid historical graph can later return `QueryLimitExceeded`.
+
+    Focused regressions cover empty/closed/missing and limit behavior,
+    process-style reopen, same-time cursor order, 128-character multibyte legacy
+    error scrubbing, all status/error mappings, a legal 64-record page plus
+    sentinel, no-mutation/path-disclosure assertions, orphaned and gapped child
+    graphs, scalar lifecycle drift, and oversized payload rejection before
+    decode. The broad persistence checkbox stays open for planner/executor
+    engine lifecycle, FFI/Swift/UI/CLI transport, local path drill-down,
+    cleanup-history retention/clear-data integration, and production execution
+    history. History remains observation, never a planner witness.
 - [x] Keep binary snapshots atomic and checksummed. Completed 2026-07-16:
   `dux-core::persistence::snapshot` now owns an independent crate-private v1
   full-tree wire rather than extending the legacy CLI cache. Its frozen

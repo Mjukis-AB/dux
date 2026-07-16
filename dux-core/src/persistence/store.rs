@@ -29,6 +29,11 @@ use super::cleanup_history::{
     CleanupSessionId, NewCleanupSessionRecord, PreparedCleanupSession, StoredCleanupSessionRecord,
     insert_cleanup_session, load_cleanup_session_record,
 };
+use super::cleanup_history_query::{
+    StoredCleanupHistoryCursor, StoredCleanupHistoryObservation, StoredCleanupHistoryPage,
+    cleanup_history_session as query_cleanup_history_session,
+    recent_cleanup_history as query_recent_cleanup_history,
+};
 use super::history::{
     HistoryError, HistoryErrorKind, NewScanRecord, PreparedNewScan, PreparedScanCompletion,
     RecentScanRecords, ScanCompletionRecord, ScanRecord, insert_scan_started,
@@ -1433,6 +1438,28 @@ impl StoreCoordinator {
     ) -> Result<Option<StoredCleanupSessionRecord>, HistoryError> {
         let guard = self.lock_current_history_connection()?;
         load_cleanup_session_record(&guard.connection, id)
+    }
+
+    /// Return a bounded, path-free page ordered newest first. The ordinary
+    /// writer/compatibility guard is held across every scalar child query; no
+    /// cleanup OS lock is acquired because this is observation only.
+    pub(crate) fn recent_cleanup_history(
+        &self,
+        cursor: Option<&StoredCleanupHistoryCursor>,
+        limit: usize,
+    ) -> Result<StoredCleanupHistoryPage, HistoryError> {
+        let guard = self.lock_current_history_connection()?;
+        query_recent_cleanup_history(&guard.connection, cursor, limit)
+    }
+
+    /// Load one fully validated journal graph and project it to scrubbed,
+    /// path-free history. This observation carries no execution authority.
+    pub(crate) fn cleanup_history_session(
+        &self,
+        id: &CleanupSessionId,
+    ) -> Result<Option<StoredCleanupHistoryObservation>, HistoryError> {
+        let guard = self.lock_current_history_connection()?;
+        query_cleanup_history_session(&guard.connection, id)
     }
 
     /// Acquire the store-wide cleanup exclusion before any journal connection

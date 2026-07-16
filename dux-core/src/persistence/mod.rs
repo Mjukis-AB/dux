@@ -28,6 +28,7 @@ mod capacity_history;
     )
 )]
 mod cleanup_history;
+mod cleanup_history_query;
 #[cfg_attr(
     not(test),
     allow(
@@ -70,8 +71,19 @@ pub(crate) use candidate_evaluation_history::{
     CandidateEvaluationCompletion, CandidateEvaluationFailureKind, CandidateEvaluationIdentity,
     CandidateEvaluationObservation, CandidateEvaluationRecord, CandidateEvaluationStatus,
 };
+#[cfg(test)]
+pub(crate) use candidate_history::StoredCandidateRecord;
 pub(crate) use candidate_history::{
     CandidateHistoryStatus, CompleteCandidateRecord, NewCandidateRecord,
+};
+pub(crate) use cleanup_history::CleanupSessionId;
+#[cfg(test)]
+pub(crate) use cleanup_history::{CleanupTrigger, NewCleanupSessionRecord};
+pub(crate) use cleanup_history_query::{
+    StoredCleanupErrorCategory, StoredCleanupHistoryCursor, StoredCleanupHistoryObservation,
+    StoredCleanupItemStatus, StoredCleanupItemSummary, StoredCleanupMode,
+    StoredCleanupRecordFormat, StoredCleanupSessionStatus, StoredCleanupSessionSummary,
+    StoredCleanupStatusCounts, StoredCleanupTrigger,
 };
 pub(crate) use codec::{HostPathObservationEncoding, observe_host_path};
 pub(crate) use history::{

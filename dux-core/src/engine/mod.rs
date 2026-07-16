@@ -6,6 +6,7 @@
 //! boundaries.
 
 mod candidate_history;
+mod cleanup_history;
 mod config;
 mod registry;
 mod settings;
@@ -16,6 +17,14 @@ pub use candidate_history::{
     DurableCandidateEvidence, DurableCandidateEvidenceItem, DurableCandidateEvidencePage,
     DurableCandidatePathItem, DurableCandidatePathPage, DurableObservedPath, DurablePathEncoding,
     MAX_CANDIDATE_DETAIL_PAGE_LIMIT,
+};
+pub use cleanup_history::{
+    CleanupHistoryCursor, CleanupHistoryError, DurableCleanupErrorCategory,
+    DurableCleanupHistoryPage, DurableCleanupItemStatus, DurableCleanupItemSummary,
+    DurableCleanupMode, DurableCleanupRecordFormat, DurableCleanupSessionId,
+    DurableCleanupSessionObservation, DurableCleanupSessionStatus, DurableCleanupSessionSummary,
+    DurableCleanupStatusCounts, DurableCleanupTrigger, DurableCleanupWarning,
+    MAX_RECENT_CLEANUP_HISTORY_LIMIT,
 };
 pub use config::{EngineConfig, EngineConfigError, EngineConfigField, EngineConfigReason};
 pub use registry::EngineHandle;

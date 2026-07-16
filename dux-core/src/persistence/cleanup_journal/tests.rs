@@ -153,6 +153,12 @@ impl Fixture {
         })
     }
 
+    fn validate_scalar_state(&self) -> Result<(), HistoryError> {
+        self.store.with_connection(|connection| {
+            validate_cleanup_journal_scalar_state_within_budget(connection, &self.session_id)
+        })
+    }
+
     fn make_legacy_uncoupled(&self, candidate_status: &str) {
         self.store.with_connection(|connection| {
             let transaction = connection.unchecked_transaction().unwrap();
@@ -324,6 +330,83 @@ fn append_value(output: &mut Vec<u8>, value: Value) {
             output.extend_from_slice(&value);
         }
     }
+}
+
+#[test]
+fn scalar_state_validator_accepts_planned_active_and_terminal_journals() {
+    let fixture = Fixture::new(
+        CleanupMode::DryRun,
+        CandidateAction::RemoveKnownRegenerableContents,
+        1,
+    );
+    fixture.validate_scalar_state().unwrap();
+
+    let mut claim = fixture.claim();
+    fixture.validate_scalar_state().unwrap();
+    claim.begin_validation(0, 0).unwrap();
+    fixture.validate_scalar_state().unwrap();
+    claim
+        .finish_validation(
+            0,
+            0,
+            ValidationOutcome::DryRun,
+            None,
+            fixture.started_at + Duration::from_secs(2),
+        )
+        .unwrap();
+    fixture.validate_scalar_state().unwrap();
+    claim
+        .terminalize(fixture.started_at + Duration::from_secs(3), None)
+        .unwrap();
+    fixture.validate_scalar_state().unwrap();
+}
+
+#[test]
+fn scalar_state_validator_rejects_ordinal_and_derived_item_corruption() {
+    let fixture = Fixture::new(
+        CleanupMode::PermanentSafe,
+        CandidateAction::RemoveKnownRegenerableContents,
+        1,
+    );
+    fixture.execute(
+        "UPDATE cleanup_item_paths SET path_ordinal = 1 WHERE session_id = ?1",
+        [fixture.session_id.as_str()],
+    );
+    assert_eq!(
+        fixture.validate_scalar_state().unwrap_err().kind,
+        HistoryErrorKind::CorruptData
+    );
+
+    fixture.execute(
+        "UPDATE cleanup_item_paths SET path_ordinal = 0 WHERE session_id = ?1",
+        [fixture.session_id.as_str()],
+    );
+    fixture.execute(
+        "UPDATE cleanup_items SET final_status = 'failed' WHERE session_id = ?1",
+        [fixture.session_id.as_str()],
+    );
+    assert_eq!(
+        fixture.validate_scalar_state().unwrap_err().kind,
+        HistoryErrorKind::CorruptData
+    );
+}
+
+#[test]
+fn scalar_state_validator_rejects_malformed_execution_owner() {
+    let fixture = Fixture::new(
+        CleanupMode::PermanentSafe,
+        CandidateAction::RemoveKnownRegenerableContents,
+        1,
+    );
+    drop(fixture.claim());
+    fixture.execute(
+        "UPDATE cleanup_sessions SET execution_owner_id = 'not-an-owner' WHERE session_id = ?1",
+        [fixture.session_id.as_str()],
+    );
+    assert_eq!(
+        fixture.validate_scalar_state().unwrap_err().kind,
+        HistoryErrorKind::CorruptData
+    );
 }
 
 #[test]

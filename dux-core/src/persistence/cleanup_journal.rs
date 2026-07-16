@@ -1408,7 +1408,7 @@ fn recompute_item(
     )
 }
 
-fn derive_item_status(paths: &[JournalPath]) -> PathStatus {
+fn derive_item_status<P: DynamicPathState>(paths: &[P]) -> PathStatus {
     const PRECEDENCE: &[PathStatus] = &[
         PathStatus::EffectStarted,
         PathStatus::Validating,
@@ -1428,7 +1428,7 @@ fn derive_item_status(paths: &[JournalPath]) -> PathStatus {
     PRECEDENCE
         .iter()
         .copied()
-        .find(|status| paths.iter().any(|path| path.status == *status))
+        .find(|status| paths.iter().any(|path| path.status() == *status))
         .unwrap_or(PathStatus::Failed)
 }
 
@@ -1502,7 +1502,7 @@ fn load_cleanup_journal(
     })
 }
 
-fn load_cleanup_journal_within_budget(
+pub(super) fn load_cleanup_journal_within_budget(
     connection: &Connection,
     session_id: &CleanupSessionId,
 ) -> Result<Option<CleanupJournal>, HistoryError> {
@@ -1653,6 +1653,294 @@ fn load_cleanup_journal_within_budget(
     }))
 }
 
+/// Validate only the bounded scalar state of a schema-v2 cleanup journal.
+///
+/// This is the path-free companion to [`load_cleanup_journal_within_budget`]
+/// for recent-history projections. It deliberately does not select target
+/// paths, evidence path/text fields, candidate identities, or other frozen
+/// candidate payload. The caller must already own the surrounding query
+/// budget; installing another progress handler here would replace that guard.
+pub(super) fn validate_cleanup_journal_scalar_state_within_budget(
+    connection: &Connection,
+    session_id: &CleanupSessionId,
+) -> Result<(), HistoryError> {
+    let raw = connection
+        .query_row(
+            "SELECT record_format_version, started_at_unix_ms,
+                    completed_at_unix_ms,
+                    CASE WHEN typeof(mode) = 'text'
+                              AND length(CAST(mode AS BLOB)) BETWEEN 1 AND 64
+                         THEN mode END,
+                    verified_capacity_delta_bytes,
+                    CASE WHEN typeof(status) = 'text'
+                              AND length(CAST(status AS BLOB)) BETWEEN 1 AND 64
+                         THEN status END,
+                    CASE WHEN typeof(execution_owner_id) = 'text'
+                              AND length(CAST(execution_owner_id AS BLOB)) BETWEEN 1 AND 128
+                         THEN execution_owner_id END,
+                    execution_generation, last_heartbeat_at_unix_ms,
+                    cancellation_requested,
+                    CASE WHEN
+                        typeof(record_format_version) = 'integer' AND
+                        typeof(started_at_unix_ms) = 'integer' AND
+                        typeof(completed_at_unix_ms) IN ('integer', 'null') AND
+                        typeof(mode) = 'text' AND length(CAST(mode AS BLOB)) BETWEEN 1 AND 64 AND
+                        typeof(verified_capacity_delta_bytes) IN ('integer', 'null') AND
+                        typeof(status) = 'text' AND length(CAST(status AS BLOB)) BETWEEN 1 AND 64 AND
+                        typeof(execution_owner_id) IN ('text', 'null') AND
+                        (execution_owner_id IS NULL OR
+                            length(CAST(execution_owner_id AS BLOB)) BETWEEN 1 AND 128) AND
+                        typeof(execution_generation) IN ('integer', 'null') AND
+                        typeof(last_heartbeat_at_unix_ms) IN ('integer', 'null') AND
+                        typeof(cancellation_requested) = 'integer'
+                    THEN 0 ELSE 1 END
+             FROM cleanup_sessions WHERE session_id = ?1",
+            [session_id.as_str()],
+            |row| {
+                Ok(ScalarRawSession {
+                    version: row.get(0)?,
+                    started_ms: row.get(1)?,
+                    completed_ms: row.get(2)?,
+                    mode: row.get(3)?,
+                    capacity_delta: row.get(4)?,
+                    status: row.get(5)?,
+                    owner: row.get(6)?,
+                    generation: row.get(7)?,
+                    heartbeat_ms: row.get(8)?,
+                    cancellation_requested: row.get(9)?,
+                    invalid_storage: row.get(10)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(map_query_sql_error)?
+        .ok_or_else(corrupt)?;
+    if raw.version != 2 || raw.invalid_storage != 0 {
+        return Err(corrupt());
+    }
+    let started_at = unix_ms_to_system_time(raw.started_ms)?;
+    let mode = mode_from_stored(raw.mode.as_deref().ok_or_else(corrupt)?)?;
+    let cancellation_requested = decode_bool(raw.cancellation_requested)?;
+    let lifecycle = decode_lifecycle_fields(
+        session_id,
+        raw.lifecycle_fields()?,
+        cancellation_requested,
+        started_at,
+    )?;
+    let mut items = load_scalar_journal_items(connection, session_id)?;
+    load_scalar_journal_paths(connection, session_id, &mut items)?;
+    validate_dynamic_state(&lifecycle, mode, started_at, &items)
+}
+
+struct ScalarRawSession {
+    version: i64,
+    started_ms: i64,
+    completed_ms: Option<i64>,
+    mode: Option<String>,
+    capacity_delta: Option<i64>,
+    status: Option<String>,
+    owner: Option<String>,
+    generation: Option<i64>,
+    heartbeat_ms: Option<i64>,
+    cancellation_requested: i64,
+    invalid_storage: i64,
+}
+
+impl ScalarRawSession {
+    fn lifecycle_fields(&self) -> Result<RawLifecycleFields<'_>, HistoryError> {
+        Ok(RawLifecycleFields {
+            status: self.status.as_deref().ok_or_else(corrupt)?,
+            owner: self.owner.as_deref(),
+            generation: self.generation,
+            heartbeat_ms: self.heartbeat_ms,
+            completed_ms: self.completed_ms,
+            capacity_delta: self.capacity_delta,
+        })
+    }
+}
+
+#[derive(Debug)]
+struct ScalarJournalItem {
+    ordinal: usize,
+    action: CandidateAction,
+    status: PathStatus,
+    error_category: Option<String>,
+    paths: Vec<ScalarJournalPath>,
+}
+
+#[derive(Debug)]
+struct ScalarJournalPath {
+    attempt_generation: Option<u64>,
+    status: PathStatus,
+    error_category: Option<String>,
+    effect_started_at: Option<SystemTime>,
+    completed_at: Option<SystemTime>,
+}
+
+fn load_scalar_journal_items(
+    connection: &Connection,
+    session_id: &CleanupSessionId,
+) -> Result<Vec<ScalarJournalItem>, HistoryError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT item_ordinal,
+                    CASE WHEN typeof(proposed_action) = 'text'
+                              AND length(CAST(proposed_action AS BLOB)) BETWEEN 1 AND 64
+                         THEN proposed_action END,
+                    CASE WHEN typeof(final_status) = 'text'
+                              AND length(CAST(final_status AS BLOB)) BETWEEN 1 AND 64
+                         THEN final_status END,
+                    CASE WHEN typeof(error_category) = 'text'
+                              AND length(CAST(error_category AS BLOB)) BETWEEN 1 AND 128
+                         THEN error_category END,
+                    error_category IS NULL,
+                    CASE WHEN
+                        typeof(item_ordinal) = 'integer' AND
+                        typeof(record_format_version) = 'integer' AND
+                        record_format_version = 2 AND
+                        typeof(proposed_action) = 'text' AND
+                        length(CAST(proposed_action AS BLOB)) BETWEEN 1 AND 64 AND
+                        typeof(final_status) = 'text' AND
+                        length(CAST(final_status AS BLOB)) BETWEEN 1 AND 64 AND
+                        typeof(error_category) IN ('text', 'null') AND
+                        (error_category IS NULL OR
+                            length(CAST(error_category AS BLOB)) BETWEEN 1 AND 128)
+                    THEN 0 ELSE 1 END
+             FROM cleanup_items WHERE session_id = ?1
+             ORDER BY item_ordinal LIMIT 65",
+        )
+        .map_err(map_query_sql_error)?;
+    let mut rows = statement
+        .query([session_id.as_str()])
+        .map_err(map_query_sql_error)?;
+    let mut items = Vec::new();
+    while let Some(row) = rows.next().map_err(map_query_sql_error)? {
+        if items.len() >= MAX_ITEMS {
+            return Err(corrupt());
+        }
+        let ordinal = row.get::<_, i64>(0).map_err(map_query_sql_error)?;
+        let action = row
+            .get::<_, Option<String>>(1)
+            .map_err(map_query_sql_error)?
+            .ok_or_else(corrupt)?;
+        let status = row
+            .get::<_, Option<String>>(2)
+            .map_err(map_query_sql_error)?
+            .ok_or_else(corrupt)?;
+        let error = row
+            .get::<_, Option<String>>(3)
+            .map_err(map_query_sql_error)?;
+        let error_is_null = decode_bool(row.get(4).map_err(map_query_sql_error)?)?;
+        let invalid_storage: i64 = row.get(5).map_err(map_query_sql_error)?;
+        if ordinal != items.len() as i64 || invalid_storage != 0 || error_is_null != error.is_none()
+        {
+            return Err(corrupt());
+        }
+        validate_stored_error(error.as_deref())?;
+        items.push(ScalarJournalItem {
+            ordinal: items.len(),
+            action: action_from_stored(&action)?,
+            status: PathStatus::from_stored(&status)?,
+            error_category: error,
+            paths: Vec::new(),
+        });
+    }
+    if items.is_empty() {
+        return Err(corrupt());
+    }
+    Ok(items)
+}
+
+fn load_scalar_journal_paths(
+    connection: &Connection,
+    session_id: &CleanupSessionId,
+    items: &mut [ScalarJournalItem],
+) -> Result<(), HistoryError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT item_ordinal, path_ordinal, attempt_generation,
+                    CASE WHEN typeof(status) = 'text'
+                              AND length(CAST(status AS BLOB)) BETWEEN 1 AND 64
+                         THEN status END,
+                    CASE WHEN typeof(error_category) = 'text'
+                              AND length(CAST(error_category AS BLOB)) BETWEEN 1 AND 128
+                         THEN error_category END,
+                    error_category IS NULL, effect_started_at_unix_ms,
+                    completed_at_unix_ms,
+                    CASE WHEN
+                        typeof(item_ordinal) = 'integer' AND
+                        typeof(path_ordinal) = 'integer' AND
+                        typeof(attempt_generation) IN ('integer', 'null') AND
+                        typeof(status) = 'text' AND
+                        length(CAST(status AS BLOB)) BETWEEN 1 AND 64 AND
+                        typeof(error_category) IN ('text', 'null') AND
+                        (error_category IS NULL OR
+                            length(CAST(error_category AS BLOB)) BETWEEN 1 AND 128) AND
+                        typeof(effect_started_at_unix_ms) IN ('integer', 'null') AND
+                        typeof(completed_at_unix_ms) IN ('integer', 'null')
+                    THEN 0 ELSE 1 END
+             FROM cleanup_item_paths WHERE session_id = ?1
+             ORDER BY item_ordinal, path_ordinal LIMIT 257",
+        )
+        .map_err(map_query_sql_error)?;
+    let mut rows = statement
+        .query([session_id.as_str()])
+        .map_err(map_query_sql_error)?;
+    let mut total = 0_usize;
+    while let Some(row) = rows.next().map_err(map_query_sql_error)? {
+        if total >= MAX_TOTAL_PATHS {
+            return Err(corrupt());
+        }
+        let item_ordinal = row.get::<_, i64>(0).map_err(map_query_sql_error)?;
+        let item_index = usize::try_from(item_ordinal).map_err(|_| corrupt())?;
+        let item = items.get_mut(item_index).ok_or_else(corrupt)?;
+        if item.ordinal != item_index {
+            return Err(corrupt());
+        }
+        let path_ordinal = row.get::<_, i64>(1).map_err(map_query_sql_error)?;
+        let status = row
+            .get::<_, Option<String>>(3)
+            .map_err(map_query_sql_error)?
+            .ok_or_else(corrupt)?;
+        let error = row
+            .get::<_, Option<String>>(4)
+            .map_err(map_query_sql_error)?;
+        let error_is_null = decode_bool(row.get(5).map_err(map_query_sql_error)?)?;
+        let invalid_storage: i64 = row.get(8).map_err(map_query_sql_error)?;
+        if path_ordinal != item.paths.len() as i64
+            || invalid_storage != 0
+            || error_is_null != error.is_none()
+        {
+            return Err(corrupt());
+        }
+        validate_stored_error(error.as_deref())?;
+        item.paths.push(ScalarJournalPath {
+            attempt_generation: row
+                .get::<_, Option<i64>>(2)
+                .map_err(map_query_sql_error)?
+                .map(decode_generation)
+                .transpose()?,
+            status: PathStatus::from_stored(&status)?,
+            error_category: error,
+            effect_started_at: row
+                .get::<_, Option<i64>>(6)
+                .map_err(map_query_sql_error)?
+                .map(unix_ms_to_system_time)
+                .transpose()?,
+            completed_at: row
+                .get::<_, Option<i64>>(7)
+                .map_err(map_query_sql_error)?
+                .map(unix_ms_to_system_time)
+                .transpose()?,
+        });
+        total += 1;
+    }
+    if items.iter().any(|item| item.paths.is_empty()) {
+        return Err(corrupt());
+    }
+    Ok(())
+}
+
 struct RawSession {
     version: i64,
     plan_id: String,
@@ -1680,7 +1968,38 @@ fn decode_lifecycle(
     cancellation_requested: bool,
     started_at: SystemTime,
 ) -> Result<JournalLifecycle, HistoryError> {
-    let execution = match (&raw.owner, raw.generation, raw.heartbeat_ms) {
+    decode_lifecycle_fields(
+        session_id,
+        RawLifecycleFields {
+            status: &raw.status,
+            owner: raw.owner.as_deref(),
+            generation: raw.generation,
+            heartbeat_ms: raw.heartbeat_ms,
+            completed_ms: raw.completed_ms,
+            capacity_delta: raw.capacity_delta,
+        },
+        cancellation_requested,
+        started_at,
+    )
+}
+
+#[derive(Clone, Copy)]
+struct RawLifecycleFields<'a> {
+    status: &'a str,
+    owner: Option<&'a str>,
+    generation: Option<i64>,
+    heartbeat_ms: Option<i64>,
+    completed_ms: Option<i64>,
+    capacity_delta: Option<i64>,
+}
+
+fn decode_lifecycle_fields(
+    session_id: &CleanupSessionId,
+    raw: RawLifecycleFields<'_>,
+    cancellation_requested: bool,
+    started_at: SystemTime,
+) -> Result<JournalLifecycle, HistoryError> {
+    let execution = match (raw.owner, raw.generation, raw.heartbeat_ms) {
         (None, None, None) => None,
         (Some(owner), Some(generation), Some(heartbeat)) => {
             let heartbeat = unix_ms_to_system_time(heartbeat)?;
@@ -1705,13 +2024,13 @@ fn decode_lifecycle(
         }
         return Ok(JournalLifecycle::Planned);
     }
-    if matches!(raw.status.as_str(), "running" | "recovering") {
+    if matches!(raw.status, "running" | "recovering") {
         if raw.completed_ms.is_some() || raw.capacity_delta.is_some() {
             return Err(corrupt());
         }
         let (owner, generation, heartbeat_at) = execution.ok_or_else(corrupt)?;
         return Ok(JournalLifecycle::Active {
-            phase: active_phase(&raw.status)?,
+            phase: active_phase(raw.status)?,
             fence: ExecutionFence {
                 session_id: session_id.clone(),
                 owner,
@@ -1721,7 +2040,7 @@ fn decode_lifecycle(
             cancellation_requested,
         });
     }
-    let status = terminal_session_status_from_stored(&raw.status)?;
+    let status = terminal_session_status_from_stored(raw.status)?;
     // All schema-v2 terminal rows are produced from a claimed generation and
     // retain that provenance even though no further mutation is permitted.
     let (owner, generation, heartbeat_at) = execution.ok_or_else(corrupt)?;
@@ -2056,11 +2375,121 @@ fn ensure_no_orphans(
     if orphan != 0 { Err(corrupt()) } else { Ok(()) }
 }
 
+trait DynamicPathState {
+    fn attempt_generation(&self) -> Option<u64>;
+    fn status(&self) -> PathStatus;
+    fn error_category(&self) -> Option<&str>;
+    fn effect_started_at(&self) -> Option<SystemTime>;
+    fn completed_at(&self) -> Option<SystemTime>;
+}
+
+impl DynamicPathState for JournalPath {
+    fn attempt_generation(&self) -> Option<u64> {
+        self.attempt_generation
+    }
+
+    fn status(&self) -> PathStatus {
+        self.status
+    }
+
+    fn error_category(&self) -> Option<&str> {
+        self.error_category.as_deref()
+    }
+
+    fn effect_started_at(&self) -> Option<SystemTime> {
+        self.effect_started_at
+    }
+
+    fn completed_at(&self) -> Option<SystemTime> {
+        self.completed_at
+    }
+}
+
+impl DynamicPathState for ScalarJournalPath {
+    fn attempt_generation(&self) -> Option<u64> {
+        self.attempt_generation
+    }
+
+    fn status(&self) -> PathStatus {
+        self.status
+    }
+
+    fn error_category(&self) -> Option<&str> {
+        self.error_category.as_deref()
+    }
+
+    fn effect_started_at(&self) -> Option<SystemTime> {
+        self.effect_started_at
+    }
+
+    fn completed_at(&self) -> Option<SystemTime> {
+        self.completed_at
+    }
+}
+
+trait DynamicItemState {
+    type Path: DynamicPathState;
+
+    fn action(&self) -> CandidateAction;
+    fn status(&self) -> PathStatus;
+    fn error_category(&self) -> Option<&str>;
+    fn paths(&self) -> &[Self::Path];
+}
+
+impl DynamicItemState for JournalItem {
+    type Path = JournalPath;
+
+    fn action(&self) -> CandidateAction {
+        self.frozen.proposed_action
+    }
+
+    fn status(&self) -> PathStatus {
+        self.status
+    }
+
+    fn error_category(&self) -> Option<&str> {
+        self.error_category.as_deref()
+    }
+
+    fn paths(&self) -> &[Self::Path] {
+        &self.paths
+    }
+}
+
+impl DynamicItemState for ScalarJournalItem {
+    type Path = ScalarJournalPath;
+
+    fn action(&self) -> CandidateAction {
+        self.action
+    }
+
+    fn status(&self) -> PathStatus {
+        self.status
+    }
+
+    fn error_category(&self) -> Option<&str> {
+        self.error_category.as_deref()
+    }
+
+    fn paths(&self) -> &[Self::Path] {
+        &self.paths
+    }
+}
+
 fn validate_dynamic_graph(
     lifecycle: &JournalLifecycle,
     mode: CleanupMode,
     started_at: SystemTime,
     items: &[JournalItem],
+) -> Result<(), HistoryError> {
+    validate_dynamic_state(lifecycle, mode, started_at, items)
+}
+
+fn validate_dynamic_state<I: DynamicItemState>(
+    lifecycle: &JournalLifecycle,
+    mode: CleanupMode,
+    started_at: SystemTime,
+    items: &[I],
 ) -> Result<(), HistoryError> {
     let (current_generation, heartbeat_at) = match lifecycle {
         JournalLifecycle::Planned => (None, None),
@@ -2076,35 +2505,33 @@ fn validate_dynamic_graph(
         } => (Some(fence.generation), Some(*heartbeat_at)),
     };
     for item in items {
-        if item.status != derive_item_status(&item.paths)
-            || item.error_category.as_deref()
+        if item.status() != derive_item_status(item.paths())
+            || item.error_category()
                 != item
-                    .paths
+                    .paths()
                     .iter()
-                    .find(|path| path.status == item.status)
-                    .and_then(|path| path.error_category.as_deref())
+                    .find(|path| path.status() == item.status())
+                    .and_then(DynamicPathState::error_category)
         {
             return Err(corrupt());
         }
-        for path in &item.paths {
+        for path in item.paths() {
             validate_path_shape(path, current_generation, started_at)?;
             if path
-                .effect_started_at
+                .effect_started_at()
                 .zip(heartbeat_at)
                 .is_some_and(|(effect, heartbeat)| effect > heartbeat)
             {
                 return Err(corrupt());
             }
-            if path.status.is_success()
-                && !success_matches(mode, item.frozen.proposed_action, path.status)
-            {
+            if path.status().is_success() && !success_matches(mode, item.action(), path.status()) {
                 return Err(corrupt());
             }
         }
     }
     let statuses = items
         .iter()
-        .flat_map(|item| item.paths.iter().map(|path| path.status))
+        .flat_map(|item| item.paths().iter().map(DynamicPathState::status))
         .collect::<Vec<_>>();
     match lifecycle {
         JournalLifecycle::Planned => {
@@ -2113,11 +2540,11 @@ fn validate_dynamic_graph(
             }
         }
         JournalLifecycle::Active { phase, fence, .. } => {
-            if items.iter().flat_map(|item| &item.paths).any(|path| {
+            if items.iter().flat_map(DynamicItemState::paths).any(|path| {
                 matches!(
-                    path.status,
+                    path.status(),
                     PathStatus::Validating | PathStatus::EffectStarted
-                ) && path.attempt_generation != Some(fence.generation)
+                ) && path.attempt_generation() != Some(fence.generation)
             }) || (*phase == ActivePhase::Running
                 && statuses.contains(&PathStatus::OutcomeUnknown))
                 || (*phase == ActivePhase::Recovering
@@ -2143,8 +2570,8 @@ fn validate_dynamic_graph(
             }
             if items
                 .iter()
-                .flat_map(|item| &item.paths)
-                .filter_map(|path| path.completed_at)
+                .flat_map(DynamicItemState::paths)
+                .filter_map(DynamicPathState::completed_at)
                 .any(|path_completed| path_completed > *completed_at)
             {
                 return Err(corrupt());
@@ -2157,53 +2584,53 @@ fn validate_dynamic_graph(
     Ok(())
 }
 
-fn validate_path_shape(
-    path: &JournalPath,
+fn validate_path_shape<P: DynamicPathState>(
+    path: &P,
     current_generation: Option<u64>,
     started_at: SystemTime,
 ) -> Result<(), HistoryError> {
     if path
-        .attempt_generation
+        .attempt_generation()
         .is_some_and(|generation| current_generation.is_none_or(|current| generation > current))
-        || (path.status == PathStatus::Planned && path.attempt_generation.is_some())
-        || (path.status != PathStatus::Planned && path.attempt_generation.is_none())
-        || (path.status == PathStatus::Planned
-            && (path.error_category.is_some()
-                || path.effect_started_at.is_some()
-                || path.completed_at.is_some()))
-        || (path.status == PathStatus::Validating
-            && (path.error_category.is_some()
-                || path.effect_started_at.is_some()
-                || path.completed_at.is_some()))
+        || (path.status() == PathStatus::Planned && path.attempt_generation().is_some())
+        || (path.status() != PathStatus::Planned && path.attempt_generation().is_none())
+        || (path.status() == PathStatus::Planned
+            && (path.error_category().is_some()
+                || path.effect_started_at().is_some()
+                || path.completed_at().is_some()))
+        || (path.status() == PathStatus::Validating
+            && (path.error_category().is_some()
+                || path.effect_started_at().is_some()
+                || path.completed_at().is_some()))
         || (matches!(
-            path.status,
+            path.status(),
             PathStatus::EffectStarted
                 | PathStatus::Trashed
                 | PathStatus::Removed
                 | PathStatus::Evicted
                 | PathStatus::OutcomeUnknown
-        ) && path.effect_started_at.is_none())
-        || (path.status == PathStatus::EffectStarted && path.completed_at.is_some())
-        || (path.status == PathStatus::EffectStarted && path.error_category.is_some())
+        ) && path.effect_started_at().is_none())
+        || (path.status() == PathStatus::EffectStarted && path.completed_at().is_some())
+        || (path.status() == PathStatus::EffectStarted && path.error_category().is_some())
         || (matches!(
-            path.status,
+            path.status(),
             PathStatus::DryRun
                 | PathStatus::Skipped
                 | PathStatus::Rejected
                 | PathStatus::ChangedSincePlan
                 | PathStatus::Interrupted
                 | PathStatus::Unavailable
-        ) && path.effect_started_at.is_some())
-        || (path.status.is_terminal() && path.completed_at.is_none())
-        || (path.status.is_success() && path.error_category.is_some())
+        ) && path.effect_started_at().is_some())
+        || (path.status().is_terminal() && path.completed_at().is_none())
+        || (path.status().is_success() && path.error_category().is_some())
         || path
-            .effect_started_at
-            .zip(path.completed_at)
+            .effect_started_at()
+            .zip(path.completed_at())
             .is_some_and(|(start, end)| end < start)
         || path
-            .effect_started_at
+            .effect_started_at()
             .is_some_and(|value| value < started_at)
-        || path.completed_at.is_some_and(|value| value < started_at)
+        || path.completed_at().is_some_and(|value| value < started_at)
     {
         return Err(corrupt());
     }

@@ -171,6 +171,134 @@ fn make_marker_candidate_cleanup_reviewable(engine: &EngineHandle, scan_id: &Sca
     });
 }
 
+fn record_planned_cleanup_history(
+    engine: &EngineHandle,
+    scan_id: &ScanId,
+    candidate_id: &crate::CandidateId,
+    session: &str,
+) {
+    use crate::domain::{
+        Candidate, CandidateInput, CleanupMode, CleanupPlan, CleanupPlanId, LocalizedTextKey,
+        ProvenanceUrl, Rule, RuleDefinition, RuleGuards, RuleMatcher, RuleMatcherDefinition,
+        RuleScope,
+    };
+
+    make_marker_candidate_cleanup_reviewable(engine, scan_id);
+    let StoredCandidateRecord::Complete(stored) = engine
+        .inner
+        .store
+        .load_candidate(candidate_id)
+        .unwrap()
+        .unwrap()
+    else {
+        panic!("expected complete candidate");
+    };
+    let matcher = RuleMatcher::try_new(RuleMatcherDefinition {
+        path_component: Some("target".to_owned()),
+        required_ancestor_markers_any: Vec::new(),
+        required_markers_all: Vec::new(),
+        forbidden_markers_any: Vec::new(),
+        exact_bundle_identifiers: Vec::new(),
+        excluded_descendants: Vec::new(),
+        protected_descendants: Vec::new(),
+    })
+    .unwrap();
+    let rule = Rule::try_new(RuleDefinition {
+        reference: stored.rule().clone(),
+        title_key: LocalizedTextKey::new("fixture.cleanup_history.title").unwrap(),
+        category: stored.category(),
+        scope: RuleScope::ConfiguredProjectRoots,
+        matcher,
+        guards: RuleGuards::try_new(None, 0, Vec::new(), false).unwrap(),
+        safety: stored.safety(),
+        action: stored.action(),
+        schedule_eligible: stored.rule_schedule_eligible(),
+        explanation_key: LocalizedTextKey::new("fixture.cleanup_history.explanation").unwrap(),
+        provenance: vec![ProvenanceUrl::new("https://example.com/cleanup-history").unwrap()],
+    })
+    .unwrap();
+    let candidate = Candidate::try_from_rule(
+        &rule,
+        CandidateInput::new(
+            stored.id().clone(),
+            stored.paths().to_vec(),
+            stored.estimated_bytes(),
+            stored.newest_mtime(),
+            stored.evidence().to_vec(),
+            stored.blockers().to_vec(),
+            stored.source_scan_id().clone(),
+        ),
+    )
+    .unwrap();
+    let started_at = std::time::UNIX_EPOCH + Duration::from_millis(1_800_000_001_000);
+    let plan = CleanupPlan::try_from_candidates_for_persistence_test(
+        CleanupPlanId::new(format!("plan:{session}")).unwrap(),
+        started_at - Duration::from_secs(1),
+        CleanupMode::PermanentSafe,
+        &[candidate],
+    )
+    .unwrap();
+    engine
+        .inner
+        .store
+        .record_cleanup_session_planned(
+            &NewCleanupSessionRecord::try_from_plan(
+                CleanupSessionId::new(session).unwrap(),
+                &plan,
+                started_at,
+                CleanupTrigger::Manual,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+}
+
+fn insert_legacy_cleanup_history(
+    engine: &EngineHandle,
+    session: &str,
+    started_at_unix_ms: i64,
+    status: &str,
+    item_status: &str,
+    error_category: Option<&str>,
+) {
+    engine.inner.store.with_connection(|connection| {
+        connection
+            .execute(
+                "INSERT INTO cleanup_sessions (
+                     session_id, plan_id, started_at_unix_ms,
+                     completed_at_unix_ms, mode, estimated_bytes,
+                     verified_capacity_delta_bytes, trigger_source, status,
+                     record_format_version, candidate_status_coupling_version
+                 ) VALUES (?1, ?2, ?3, ?4, 'permanent_safe', 10, 7,
+                           'manual', ?5, 1, 1)",
+                rusqlite::params![
+                    session,
+                    format!("plan:{session}"),
+                    started_at_unix_ms,
+                    (status != "planned").then_some(started_at_unix_ms + 1),
+                    status,
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO cleanup_items (
+                     session_id, item_ordinal, rule_id, rule_revision,
+                     estimated_bytes, final_status, error_category,
+                     record_format_version, legacy_target_path,
+                     legacy_target_path_encoding
+                 ) VALUES (?1, 0, 'fixture.legacy', 1, 10, ?2, ?3, 1, ?4, 1)",
+                rusqlite::params![
+                    session,
+                    item_status,
+                    error_category,
+                    b"relative/legacy-target".as_slice(),
+                ],
+            )
+            .unwrap();
+    });
+}
+
 fn seed_ai_insight(engine: &EngineHandle, id: &str, created_ms: i64, expires_ms: i64) {
     let mut digest = [0_u8; 32];
     for (destination, source) in digest.iter_mut().zip(id.as_bytes()) {
@@ -417,6 +545,16 @@ fn newer_database_never_provisions_missing_snapshot_storage() {
             CandidateReviewCommand::Dismiss,
         ),
         Err(CandidateReviewError::IncompatibleSchema)
+    );
+    assert_eq!(
+        engine.recent_cleanup_history(None, 1),
+        Err(CleanupHistoryError::IncompatibleSchema)
+    );
+    assert_eq!(
+        engine.cleanup_session_history(
+            &DurableCleanupSessionId::new("session:future-schema").unwrap()
+        ),
+        Err(CleanupHistoryError::IncompatibleSchema)
     );
     assert_eq!(
         engine.snapshot_retention_cap(),
@@ -1915,6 +2053,486 @@ fn cleanup_eligible_candidate_supports_select_clear_and_selected_dismissal() {
             .unwrap()
             .status(),
         DurableCandidateStatus::Discovered
+    );
+}
+
+#[test]
+fn cleanup_history_is_empty_bounded_and_closed_with_typed_errors() {
+    let (_temp, engine) = engine_with_limits(RegistryLimits::testing(1, 4, 8, 16));
+    let page = engine.recent_cleanup_history(None, 1).unwrap();
+    assert!(page.records().is_empty());
+    assert!(page.next_cursor().is_none());
+    assert_eq!(
+        engine.recent_cleanup_history(None, 0),
+        Err(CleanupHistoryError::InvalidLimit {
+            maximum: MAX_RECENT_CLEANUP_HISTORY_LIMIT
+        })
+    );
+    assert_eq!(
+        engine.recent_cleanup_history(None, MAX_RECENT_CLEANUP_HISTORY_LIMIT + 1),
+        Err(CleanupHistoryError::InvalidLimit {
+            maximum: MAX_RECENT_CLEANUP_HISTORY_LIMIT
+        })
+    );
+    let missing = DurableCleanupSessionId::new("session:missing").unwrap();
+    assert_eq!(
+        engine.cleanup_session_history(&missing),
+        Err(CleanupHistoryError::SessionNotFound)
+    );
+    engine.close();
+    assert_eq!(
+        engine.recent_cleanup_history(None, 1),
+        Err(CleanupHistoryError::Closed)
+    );
+    assert_eq!(
+        engine.cleanup_session_history(&missing),
+        Err(CleanupHistoryError::Closed)
+    );
+}
+
+#[test]
+fn planned_cleanup_history_is_path_free_exact_and_survives_reopen() {
+    let (_temp, config, engine, scan_id, candidate_id, target) = completed_marker_candidate();
+    record_planned_cleanup_history(&engine, &scan_id, &candidate_id, "session:engine-history");
+    let before = engine.inner.store.with_connection(|connection| {
+        (
+            connection
+                .query_row("SELECT count(*) FROM cleanup_sessions", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            connection
+                .query_row("SELECT count(*) FROM candidate_plan_claims", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            connection
+                .query_row(
+                    "SELECT status FROM candidates WHERE candidate_id = ?1",
+                    [candidate_id.as_str()],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+        )
+    });
+
+    let page = engine.recent_cleanup_history(None, 64).unwrap();
+    assert_eq!(page.records().len(), 1);
+    let summary = &page.records()[0];
+    assert_eq!(summary.id().as_str(), "session:engine-history");
+    assert_eq!(summary.format(), DurableCleanupRecordFormat::Complete);
+    assert_eq!(summary.source_scan_id(), Some(&scan_id));
+    assert_eq!(summary.status(), DurableCleanupSessionStatus::Planned);
+    assert_eq!(summary.mode(), DurableCleanupMode::PermanentSafe);
+    assert_eq!(summary.trigger(), DurableCleanupTrigger::Manual);
+    assert_eq!(summary.cancellation_requested(), Some(false));
+    assert_eq!(summary.item_total(), 1);
+    assert_eq!(summary.path_total(), 1);
+    assert!(summary.evidence_total() >= 1);
+    assert_eq!(summary.item_status_counts().planned(), 1);
+    assert_eq!(summary.path_status_counts().planned(), 1);
+    assert!(page.next_cursor().is_none());
+
+    let session_id = summary.id().clone();
+    let exact = engine.cleanup_session_history(&session_id).unwrap();
+    assert_eq!(exact.summary(), summary);
+    assert_eq!(exact.items().len(), 1);
+    let item = &exact.items()[0];
+    assert_eq!(item.ordinal(), 0);
+    assert_eq!(item.status(), DurableCleanupItemStatus::Planned);
+    assert_eq!(
+        item.category(),
+        Some(crate::CandidateCategory::DeveloperArtifact)
+    );
+    assert_eq!(item.safety(), Some(crate::SafetyTier::SafeRegenerable));
+    assert_eq!(
+        item.action(),
+        Some(crate::CandidateAction::RemoveKnownRegenerableContents)
+    );
+    assert_eq!(item.rule_schedule_eligible(), Some(true));
+    assert_eq!(item.path_count(), 1);
+    assert!(item.evidence_count() >= 1);
+    assert!(!item.error_recorded());
+    assert!(item.error_category().is_none());
+    assert!(
+        exact
+            .warnings()
+            .contains(&DurableCleanupWarning::PermanentRemovalCannotBeUndone)
+    );
+    let after = engine.inner.store.with_connection(|connection| {
+        (
+            connection
+                .query_row("SELECT count(*) FROM cleanup_sessions", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            connection
+                .query_row("SELECT count(*) FROM candidate_plan_claims", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            connection
+                .query_row(
+                    "SELECT status FROM candidates WHERE candidate_id = ?1",
+                    [candidate_id.as_str()],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+        )
+    });
+    assert_eq!(
+        before, after,
+        "history reads must not mutate journal authority"
+    );
+    assert!(
+        !format!("{exact:?}").contains(&target.to_string_lossy().to_string()),
+        "path-free cleanup history must not disclose the stored target"
+    );
+
+    engine.close();
+    let reopened = EngineHandle::open(config).unwrap();
+    assert_eq!(
+        reopened
+            .cleanup_session_history(&session_id)
+            .unwrap()
+            .summary(),
+        summary
+    );
+}
+
+#[test]
+fn cleanup_history_keyset_order_and_legacy_incompleteness_are_explicit() {
+    let (_temp, engine) = engine_with_limits(RegistryLimits::testing(1, 4, 8, 16));
+    insert_legacy_cleanup_history(
+        &engine,
+        "session:a",
+        1_700_000_002_000,
+        "completed",
+        "removed",
+        None,
+    );
+    let legacy_error = "é".repeat(128);
+    insert_legacy_cleanup_history(
+        &engine,
+        "session:b",
+        1_700_000_002_000,
+        "failed",
+        "failed",
+        Some(&legacy_error),
+    );
+    insert_legacy_cleanup_history(
+        &engine,
+        "session:c",
+        1_700_000_001_000,
+        "dry_run",
+        "dry_run",
+        None,
+    );
+
+    let first = engine.recent_cleanup_history(None, 1).unwrap();
+    assert_eq!(first.records()[0].id().as_str(), "session:a");
+    let second = engine
+        .recent_cleanup_history(first.next_cursor(), 1)
+        .unwrap();
+    assert_eq!(second.records()[0].id().as_str(), "session:b");
+    let third = engine
+        .recent_cleanup_history(second.next_cursor(), 1)
+        .unwrap();
+    assert_eq!(third.records()[0].id().as_str(), "session:c");
+    assert!(third.next_cursor().is_none());
+
+    let exact = engine
+        .cleanup_session_history(second.records()[0].id())
+        .unwrap();
+    assert_eq!(
+        exact.summary().format(),
+        DurableCleanupRecordFormat::LegacyIncomplete
+    );
+    assert!(exact.summary().source_scan_id().is_none());
+    assert!(exact.summary().plan_created_at().is_none());
+    assert!(exact.summary().plan_expires_at().is_none());
+    assert_eq!(exact.summary().verified_capacity_delta_bytes(), Some(7));
+    assert_eq!(exact.items().len(), 1);
+    assert_eq!(exact.items()[0].path_count(), 1);
+    assert!(exact.items()[0].category().is_none());
+    assert!(exact.items()[0].safety().is_none());
+    assert!(exact.items()[0].action().is_none());
+    assert!(exact.items()[0].error_recorded());
+    assert!(exact.items()[0].error_category().is_none());
+}
+
+#[test]
+fn cleanup_history_status_and_error_mappings_are_exhaustive() {
+    let session_statuses = [
+        StoredCleanupSessionStatus::Planned,
+        StoredCleanupSessionStatus::Running,
+        StoredCleanupSessionStatus::Recovering,
+        StoredCleanupSessionStatus::Completed,
+        StoredCleanupSessionStatus::PartiallyCompleted,
+        StoredCleanupSessionStatus::Failed,
+        StoredCleanupSessionStatus::Cancelled,
+        StoredCleanupSessionStatus::Interrupted,
+        StoredCleanupSessionStatus::Rejected,
+        StoredCleanupSessionStatus::DryRun,
+    ];
+    assert_eq!(
+        session_statuses.map(public_cleanup_session_status),
+        [
+            DurableCleanupSessionStatus::Planned,
+            DurableCleanupSessionStatus::Running,
+            DurableCleanupSessionStatus::Recovering,
+            DurableCleanupSessionStatus::Completed,
+            DurableCleanupSessionStatus::PartiallyCompleted,
+            DurableCleanupSessionStatus::Failed,
+            DurableCleanupSessionStatus::Cancelled,
+            DurableCleanupSessionStatus::Interrupted,
+            DurableCleanupSessionStatus::Rejected,
+            DurableCleanupSessionStatus::DryRun,
+        ]
+    );
+    let item_statuses = [
+        StoredCleanupItemStatus::Planned,
+        StoredCleanupItemStatus::Validating,
+        StoredCleanupItemStatus::DryRun,
+        StoredCleanupItemStatus::EffectStarted,
+        StoredCleanupItemStatus::Trashed,
+        StoredCleanupItemStatus::Removed,
+        StoredCleanupItemStatus::Evicted,
+        StoredCleanupItemStatus::Skipped,
+        StoredCleanupItemStatus::Rejected,
+        StoredCleanupItemStatus::Failed,
+        StoredCleanupItemStatus::ChangedSincePlan,
+        StoredCleanupItemStatus::Interrupted,
+        StoredCleanupItemStatus::Unavailable,
+        StoredCleanupItemStatus::OutcomeUnknown,
+    ];
+    assert_eq!(
+        item_statuses.map(public_cleanup_item_status),
+        [
+            DurableCleanupItemStatus::Planned,
+            DurableCleanupItemStatus::Validating,
+            DurableCleanupItemStatus::DryRun,
+            DurableCleanupItemStatus::EffectStarted,
+            DurableCleanupItemStatus::Trashed,
+            DurableCleanupItemStatus::Removed,
+            DurableCleanupItemStatus::Evicted,
+            DurableCleanupItemStatus::Skipped,
+            DurableCleanupItemStatus::Rejected,
+            DurableCleanupItemStatus::Failed,
+            DurableCleanupItemStatus::ChangedSincePlan,
+            DurableCleanupItemStatus::Interrupted,
+            DurableCleanupItemStatus::Unavailable,
+            DurableCleanupItemStatus::OutcomeUnknown,
+        ]
+    );
+    for (kind, expected) in [
+        (
+            HistoryErrorKind::IncompatibleSchema,
+            CleanupHistoryError::IncompatibleSchema,
+        ),
+        (
+            HistoryErrorKind::QueryLimitExceeded,
+            CleanupHistoryError::QueryLimitExceeded,
+        ),
+        (HistoryErrorKind::Busy, CleanupHistoryError::Busy),
+        (
+            HistoryErrorKind::UnsafeStorage,
+            CleanupHistoryError::UnsafeStorage,
+        ),
+        (
+            HistoryErrorKind::CorruptData,
+            CleanupHistoryError::CorruptData,
+        ),
+        (
+            HistoryErrorKind::InternalState,
+            CleanupHistoryError::InternalState,
+        ),
+        (
+            HistoryErrorKind::InvalidInput,
+            CleanupHistoryError::InternalState,
+        ),
+        (
+            HistoryErrorKind::DatabaseUnavailable,
+            CleanupHistoryError::Unavailable,
+        ),
+        (
+            HistoryErrorKind::AlreadyExists,
+            CleanupHistoryError::Unavailable,
+        ),
+        (HistoryErrorKind::NotFound, CleanupHistoryError::Unavailable),
+        (
+            HistoryErrorKind::InvalidTransition,
+            CleanupHistoryError::Unavailable,
+        ),
+        (
+            HistoryErrorKind::OutcomeUnknown,
+            CleanupHistoryError::Unavailable,
+        ),
+    ] {
+        assert_eq!(map_cleanup_history_error(kind), expected);
+    }
+}
+
+#[test]
+fn cleanup_history_rejects_over_budget_graph_before_payload_decode() {
+    let (_temp, _config, engine, scan_id, candidate_id, _target) = completed_marker_candidate();
+    record_planned_cleanup_history(
+        &engine,
+        &scan_id,
+        &candidate_id,
+        "session:over-budget-history",
+    );
+    engine.inner.store.with_connection(|connection| {
+        let first: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM cleanup_item_evidence
+                 WHERE session_id = 'session:over-budget-history' AND item_ordinal = 0",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        connection
+            .execute(
+                "WITH RECURSIVE seq(value) AS (
+                     SELECT 0 UNION ALL SELECT value + 1 FROM seq WHERE value < 349
+                 )
+                 INSERT INTO cleanup_item_evidence (
+                     session_id, item_ordinal, evidence_ordinal, evidence_kind,
+                     path_value, path_value_encoding
+                 )
+                 SELECT 'session:over-budget-history', 0, ?1 + value,
+                        'required_marker', zeroblob(65536), 2
+                 FROM seq",
+                [first],
+            )
+            .unwrap();
+    });
+    let id = DurableCleanupSessionId::new("session:over-budget-history").unwrap();
+    assert_eq!(
+        engine.cleanup_session_history(&id),
+        Err(CleanupHistoryError::QueryLimitExceeded)
+    );
+    assert_eq!(
+        engine.recent_cleanup_history(None, 1),
+        Err(CleanupHistoryError::QueryLimitExceeded)
+    );
+}
+
+#[test]
+fn cleanup_history_legal_maximum_page_uses_one_more_sentinel() {
+    let (_temp, engine) = engine_with_limits(RegistryLimits::testing(1, 4, 8, 16));
+    for index in 0..=usize::from(MAX_RECENT_CLEANUP_HISTORY_LIMIT) {
+        insert_legacy_cleanup_history(
+            &engine,
+            &format!("session:page-{index:03}"),
+            1_700_100_000_000 - i64::try_from(index).unwrap(),
+            "completed",
+            "removed",
+            None,
+        );
+    }
+    let first = engine
+        .recent_cleanup_history(None, MAX_RECENT_CLEANUP_HISTORY_LIMIT)
+        .unwrap();
+    assert_eq!(
+        first.records().len(),
+        usize::from(MAX_RECENT_CLEANUP_HISTORY_LIMIT)
+    );
+    assert!(first.next_cursor().is_some());
+    let second = engine
+        .recent_cleanup_history(first.next_cursor(), MAX_RECENT_CLEANUP_HISTORY_LIMIT)
+        .unwrap();
+    assert_eq!(second.records().len(), 1);
+    assert_eq!(second.records()[0].id().as_str(), "session:page-064");
+    assert!(second.next_cursor().is_none());
+}
+
+#[test]
+fn cleanup_history_rejects_gapped_graph_without_partial_results() {
+    let (_temp, _config, engine, scan_id, candidate_id, _target) = completed_marker_candidate();
+    record_planned_cleanup_history(&engine, &scan_id, &candidate_id, "session:corrupt-history");
+    engine.inner.store.with_connection(|connection| {
+        connection
+            .pragma_update(None, "foreign_keys", "OFF")
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE cleanup_items SET item_ordinal = 1
+                 WHERE session_id = 'session:corrupt-history'",
+                [],
+            )
+            .unwrap();
+        connection
+            .pragma_update(None, "foreign_keys", "ON")
+            .unwrap();
+    });
+    let id = DurableCleanupSessionId::new("session:corrupt-history").unwrap();
+    assert_eq!(
+        engine.cleanup_session_history(&id),
+        Err(CleanupHistoryError::CorruptData)
+    );
+    assert_eq!(
+        engine.recent_cleanup_history(None, 64),
+        Err(CleanupHistoryError::CorruptData)
+    );
+}
+
+#[test]
+fn cleanup_history_rejects_orphaned_children_before_payload_decode() {
+    let (_temp, _config, engine, scan_id, candidate_id, _target) = completed_marker_candidate();
+    record_planned_cleanup_history(&engine, &scan_id, &candidate_id, "session:orphan-history");
+    engine.inner.store.with_connection(|connection| {
+        connection
+            .pragma_update(None, "foreign_keys", "OFF")
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE cleanup_item_paths SET item_ordinal = 63
+                 WHERE session_id = 'session:orphan-history'",
+                [],
+            )
+            .unwrap();
+        connection
+            .pragma_update(None, "foreign_keys", "ON")
+            .unwrap();
+    });
+    let id = DurableCleanupSessionId::new("session:orphan-history").unwrap();
+    assert_eq!(
+        engine.cleanup_session_history(&id),
+        Err(CleanupHistoryError::CorruptData)
+    );
+    assert_eq!(
+        engine.recent_cleanup_history(None, 64),
+        Err(CleanupHistoryError::CorruptData)
+    );
+}
+
+#[test]
+fn cleanup_history_recent_feed_runs_complete_lifecycle_validation() {
+    let (_temp, _config, engine, scan_id, candidate_id, _target) = completed_marker_candidate();
+    record_planned_cleanup_history(
+        &engine,
+        &scan_id,
+        &candidate_id,
+        "session:lifecycle-history",
+    );
+    engine.inner.store.with_connection(|connection| {
+        connection
+            .execute(
+                "UPDATE cleanup_items SET final_status = 'failed'
+                 WHERE session_id = 'session:lifecycle-history'",
+                [],
+            )
+            .unwrap();
+    });
+    let id = DurableCleanupSessionId::new("session:lifecycle-history").unwrap();
+    assert_eq!(
+        engine.cleanup_session_history(&id),
+        Err(CleanupHistoryError::CorruptData)
+    );
+    assert_eq!(
+        engine.recent_cleanup_history(None, 64),
+        Err(CleanupHistoryError::CorruptData)
     );
 }
 

@@ -5,6 +5,23 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Added a bounded, path-free core cleanup-history read bridge. Recent pages use
+  a 1..=64 opaque keyset cursor, preserve equal-time ordering, and expose
+  lifecycle, estimates versus verified capacity deltas, graph totals, and
+  exhaustive item/path status counts. Scalar graph and journal-state validation
+  checks size, relationships, claims, generations, times, derived outcomes, and
+  mode-compatible success without reading stored target/evidence payloads;
+  exact format-2 lookup additionally validates the complete journal before
+  returning scrubbed item policy/status summaries and warnings. Migrated rows remain
+  explicitly `LegacyIncomplete`, including arbitrary legacy error text that is
+  reduced to an error-presence bit. Fixed VM/deadline and conservative 64 MiB
+  per-graph read limits fail closed without claiming matching write admission.
+  Public values omit paths, evidence payloads, candidate IDs, ownership fences,
+  claims, and prior review state, and cannot construct a plan, approve recovery,
+  or reach an effect. Empty/limit/closed/missing, reopen, cursor, status/error,
+  maximum-page, secret-path, structural/lifecycle corruption, and over-budget
+  regressions cover the core-only boundary; FFI/Swift/UI/CLI transport remains
+  later.
 - Added a bounded core candidate-review boundary. Exact path and evidence
   pagers require both scan and candidate IDs, enforce 1..=64 pages and strict
   immutable cursors, and return lossless accepted-host bytes plus display text

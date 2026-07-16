@@ -1013,6 +1013,26 @@ fn run_bounded_query_with_limits<T>(
     Ok(value)
 }
 
+/// Dedicated fixed budget for the path-free cleanup-history pager. The pager
+/// validates bounded scalar structure and lifecycle state without reading path
+/// or evidence payload values.
+pub(super) fn run_bounded_cleanup_history_page_query<T>(
+    connection: &Connection,
+    query: impl FnOnce() -> Result<T, HistoryError>,
+) -> Result<T, HistoryError> {
+    run_bounded_query_with_limits(connection, 250_000, Duration::from_secs(3), query)
+}
+
+/// Dedicated fixed budget for one complete cleanup-history observation. This
+/// is intentionally separate from the journal's mutation-time reads so callers
+/// never nest SQLite progress handlers.
+pub(super) fn run_bounded_cleanup_history_observation_query<T>(
+    connection: &Connection,
+    query: impl FnOnce() -> Result<T, HistoryError>,
+) -> Result<T, HistoryError> {
+    run_bounded_query_with_limits(connection, 300_000, Duration::from_secs(3), query)
+}
+
 struct QueryProgressGuard<'connection> {
     connection: &'connection Connection,
     installed: bool,
