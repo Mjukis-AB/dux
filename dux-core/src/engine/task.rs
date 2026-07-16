@@ -2,7 +2,10 @@ use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use crate::domain::{CoveragePermille, ScanCoverage, ScanCoverageStatus, ScanId};
+use crate::domain::{
+    BlockReason, CandidateAction, CandidateCategory, CandidateId, CoveragePermille, EvidenceKind,
+    RuleRef, SafetyTier, ScanCoverage, ScanCoverageStatus, ScanId,
+};
 
 /// Opaque, non-durable identifier scoped to one running DUX process.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -301,6 +304,227 @@ pub enum ScanHistoryError {
     #[error("durable scan history is unavailable")]
     Unavailable,
     #[error("engine history state is unavailable")]
+    InternalState,
+}
+
+/// Durable review projection for one scan-bound candidate observation.
+/// These values describe history only; none is a current validation, plan, or
+/// cleanup capability.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DurableCandidateStatus {
+    Discovered,
+    Selected,
+    Dismissed,
+    Stale,
+    Planned,
+    Completed,
+    Failed,
+    Unavailable,
+}
+
+/// Durable evaluator state for one exact scan. `NotRun` distinguishes scans
+/// that legitimately predate discovery or did not complete successfully from
+/// a reserved pending evaluation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DurableCandidateEvaluationStatus {
+    NotRun,
+    Pending,
+    Succeeded {
+        candidate_count: u32,
+    },
+    Failed {
+        kind: CandidateEvaluationTaskFailureKind,
+    },
+}
+
+/// Path-free summary of a fully validated stored candidate. Exact paths and
+/// evidence payloads remain behind a future paged inspection boundary; counts
+/// and typed reason kinds are sufficient for overview and filtering without
+/// making history executable.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DurableCandidateSummary {
+    id: CandidateId,
+    rule: RuleRef,
+    category: CandidateCategory,
+    estimated_bytes: u64,
+    newest_mtime: Option<SystemTime>,
+    safety: SafetyTier,
+    action: CandidateAction,
+    rule_schedule_eligible: bool,
+    path_count: u16,
+    evidence_kinds: Arc<[EvidenceKind]>,
+    blockers: Arc<[BlockReason]>,
+    created_at: SystemTime,
+    status: DurableCandidateStatus,
+}
+
+impl DurableCandidateSummary {
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn new(
+        id: CandidateId,
+        rule: RuleRef,
+        category: CandidateCategory,
+        estimated_bytes: u64,
+        newest_mtime: Option<SystemTime>,
+        safety: SafetyTier,
+        action: CandidateAction,
+        rule_schedule_eligible: bool,
+        path_count: u16,
+        evidence_kinds: Vec<EvidenceKind>,
+        blockers: Vec<BlockReason>,
+        created_at: SystemTime,
+        status: DurableCandidateStatus,
+    ) -> Self {
+        Self {
+            id,
+            rule,
+            category,
+            estimated_bytes,
+            newest_mtime,
+            safety,
+            action,
+            rule_schedule_eligible,
+            path_count,
+            evidence_kinds: evidence_kinds.into(),
+            blockers: blockers.into(),
+            created_at,
+            status,
+        }
+    }
+
+    pub fn id(&self) -> &CandidateId {
+        &self.id
+    }
+
+    pub fn rule(&self) -> &RuleRef {
+        &self.rule
+    }
+
+    pub fn category(&self) -> CandidateCategory {
+        self.category
+    }
+
+    pub fn estimated_bytes(&self) -> u64 {
+        self.estimated_bytes
+    }
+
+    pub fn newest_mtime(&self) -> Option<SystemTime> {
+        self.newest_mtime
+    }
+
+    pub fn safety(&self) -> SafetyTier {
+        self.safety
+    }
+
+    pub fn action(&self) -> CandidateAction {
+        self.action
+    }
+
+    pub fn rule_schedule_eligible(&self) -> bool {
+        self.rule_schedule_eligible
+    }
+
+    pub fn path_count(&self) -> u16 {
+        self.path_count
+    }
+
+    pub fn evidence_kinds(&self) -> &[EvidenceKind] {
+        &self.evidence_kinds
+    }
+
+    pub fn blockers(&self) -> &[BlockReason] {
+        &self.blockers
+    }
+
+    pub fn created_at(&self) -> SystemTime {
+        self.created_at
+    }
+
+    pub fn status(&self) -> DurableCandidateStatus {
+        self.status
+    }
+}
+
+/// Exact-scan durable discovery observation. The candidate list is present
+/// only for a fully validated successful evaluation and is stable across task
+/// eviction and process restart.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DurableCandidateEvaluation {
+    scan_id: ScanId,
+    source_scan_status: DurableScanStatus,
+    scheduled_at: Option<SystemTime>,
+    completed_at: Option<SystemTime>,
+    status: DurableCandidateEvaluationStatus,
+    candidates: Arc<[DurableCandidateSummary]>,
+}
+
+impl DurableCandidateEvaluation {
+    pub(super) fn new(
+        scan_id: ScanId,
+        source_scan_status: DurableScanStatus,
+        scheduled_at: Option<SystemTime>,
+        completed_at: Option<SystemTime>,
+        status: DurableCandidateEvaluationStatus,
+        candidates: Vec<DurableCandidateSummary>,
+    ) -> Self {
+        Self {
+            scan_id,
+            source_scan_status,
+            scheduled_at,
+            completed_at,
+            status,
+            candidates: candidates.into(),
+        }
+    }
+
+    pub fn scan_id(&self) -> &ScanId {
+        &self.scan_id
+    }
+
+    pub fn source_scan_status(&self) -> DurableScanStatus {
+        self.source_scan_status
+    }
+
+    pub fn scheduled_at(&self) -> Option<SystemTime> {
+        self.scheduled_at
+    }
+
+    pub fn completed_at(&self) -> Option<SystemTime> {
+        self.completed_at
+    }
+
+    pub fn status(&self) -> DurableCandidateEvaluationStatus {
+        self.status
+    }
+
+    pub fn candidates(&self) -> &[DurableCandidateSummary] {
+        &self.candidates
+    }
+}
+
+/// Stable, path-free failure taxonomy for exact-scan candidate history.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum CandidateHistoryError {
+    #[error("engine session is closed")]
+    Closed,
+    #[error("the requested durable scan does not exist")]
+    ScanNotFound,
+    #[error("the durable store schema is newer than this engine")]
+    IncompatibleSchema,
+    #[error("the durable store is busy")]
+    Busy,
+    #[error("the durable store is unsafe")]
+    UnsafeStorage,
+    #[error("the candidate history query exceeded its fixed resource budget")]
+    QueryLimitExceeded,
+    #[error("durable candidate history is corrupt")]
+    CorruptData,
+    #[error("durable candidate history is unavailable")]
+    Unavailable,
+    #[error("engine candidate-history state is unavailable")]
     InternalState,
 }
 

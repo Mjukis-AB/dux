@@ -66,12 +66,13 @@ mod status;
 mod storage;
 mod store;
 
-#[cfg(test)]
-pub(crate) use candidate_evaluation_history::CandidateEvaluationStatus;
 pub(crate) use candidate_evaluation_history::{
     CandidateEvaluationCompletion, CandidateEvaluationFailureKind, CandidateEvaluationIdentity,
+    CandidateEvaluationObservation, CandidateEvaluationRecord, CandidateEvaluationStatus,
 };
-pub(crate) use candidate_history::NewCandidateRecord;
+pub(crate) use candidate_history::{
+    CandidateHistoryStatus, CompleteCandidateRecord, NewCandidateRecord,
+};
 pub(crate) use history::{
     HistoryErrorKind, MAX_RECENT_SCAN_HISTORY_LIMIT, NewScanRecord, ScanCompletionRecord,
     ScanCounts, ScanStatus, TerminalScanStatus,

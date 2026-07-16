@@ -5,6 +5,23 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Added an exact-scan durable candidate-discovery read bridge. The core engine
+  distinguishes a missing scan, a real scan with no evaluation, Pending,
+  Succeeded, and typed Failed evaluation history. Before any payload-bearing
+  child query, the store charges row counts and encoded bytes against a
+  conservative 32 MiB materialization budget also enforced during evaluation
+  write preparation; the existing VM/time budget remains independent. The
+  production evaluator maps a valid over-budget graph to typed discovery
+  `LimitExceeded`, preserving the successful scan and snapshot instead of
+  misreporting a persistence failure. The complete stored graph is then
+  validated before a path-free summary exposes
+  policy, estimates, counts, typed evidence kinds/blockers, and historical
+  status. Exact paths and evidence payloads remain private. Reopen, lifecycle,
+  version-skew, failure, exhaustive mapping, corruption, exact-budget, and
+  over-budget preflight regressions cover the boundary. The DTO is observation
+  only: it cannot reconstruct a candidate or cleanup plan, mutate review or
+  planning state, or reach an effect. Paged details and FFI/Swift/UI/CLI
+  transport remain later.
 - Added the core production snapshot-cap mutation boundary. One bounded batch
   holds the current-schema database lease before the snapshot writer lease,
   rebuilds the complete cap/latest-two/active-pin inventory, refuses new
@@ -156,7 +173,8 @@ All notable changes to DUX will be documented in this file.
   commits scan success, terminal evaluation state, and the complete candidate
   batch or typed failure, with exact ambiguity reconciliation, hostile-row
   validation, all-or-nothing inserts, and bounded set-based loading proven at
-  the exact 4,096-candidate cap across process-style reopen. Late
+  the exact 4,096-candidate cardinality cap across process-style reopen when
+  the aggregate child graph fits the decoded-materialization budget. Late
   cancellation observed before discovery's final checkpoint cancels discovery
   without falsifying an already-completed scan; later requests remain recorded
   as intent without rewriting the terminal batch;

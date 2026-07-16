@@ -8,8 +8,9 @@ use rusqlite::limits::Limit;
 use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 
 use super::candidate_evaluation_history::{
-    CandidateEvaluationCompletion, CandidateEvaluationRecord, NewCandidateEvaluation,
-    PreparedCandidateEvaluation, insert_candidate_evaluation_pending, load_candidate_evaluation,
+    CandidateEvaluationCompletion, CandidateEvaluationObservation, CandidateEvaluationRecord,
+    NewCandidateEvaluation, PreparedCandidateEvaluation, insert_candidate_evaluation_pending,
+    load_candidate_evaluation, load_candidate_evaluation_for_scan,
     load_candidate_evaluation_within_budget,
 };
 use super::candidate_history::{
@@ -984,6 +985,16 @@ impl StoreCoordinator {
     ) -> Result<Option<CandidateEvaluationRecord>, HistoryError> {
         let guard = self.lock_current_history_connection()?;
         load_candidate_evaluation(&guard.connection, scan_id)
+    }
+
+    /// Load the complete candidate-evaluation observation for one exact scan.
+    /// The result is immutable history and never planner or executor authority.
+    pub(crate) fn load_candidate_evaluation_for_scan(
+        &self,
+        scan_id: &crate::domain::ScanId,
+    ) -> Result<CandidateEvaluationObservation, HistoryError> {
+        let guard = self.lock_current_history_connection()?;
+        load_candidate_evaluation_for_scan(&guard.connection, scan_id)
     }
 
     pub(super) fn load_candidate_evaluation_with_guard(

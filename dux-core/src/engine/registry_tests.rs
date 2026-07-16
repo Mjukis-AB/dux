@@ -51,6 +51,73 @@ fn started_maintenance(outcome: HistoryMaintenanceStartOutcome) -> TaskId {
     }
 }
 
+fn over_budget_candidate_records(
+    scan_id: &ScanId,
+    completed_at: SystemTime,
+) -> Vec<NewCandidateRecord> {
+    use crate::domain::{
+        Candidate, CandidateInput, LocalizedTextKey, ProvenanceUrl, Rule, RuleDefinition,
+        RuleGuards, RuleMatcher, RuleMatcherDefinition, RuleScope,
+    };
+
+    let matcher = RuleMatcher::try_new(RuleMatcherDefinition {
+        path_component: Some("fixture".to_owned()),
+        required_ancestor_markers_any: Vec::new(),
+        required_markers_all: Vec::new(),
+        forbidden_markers_any: Vec::new(),
+        exact_bundle_identifiers: Vec::new(),
+        excluded_descendants: Vec::new(),
+        protected_descendants: Vec::new(),
+    })
+    .unwrap();
+    let rule = Rule::try_new(RuleDefinition {
+        reference: crate::RuleRef::new(
+            crate::RuleId::new("fixture.over-budget").unwrap(),
+            crate::RuleRevision::new(1).unwrap(),
+        ),
+        title_key: LocalizedTextKey::new("fixture.over_budget.title").unwrap(),
+        category: crate::CandidateCategory::DeveloperArtifact,
+        scope: RuleScope::ConfiguredProjectRoots,
+        matcher,
+        guards: RuleGuards::try_new(None, 0, Vec::new(), false).unwrap(),
+        safety: crate::SafetyTier::Informational,
+        action: crate::CandidateAction::RevealOnly,
+        schedule_eligible: false,
+        explanation_key: LocalizedTextKey::new("fixture.over_budget.explanation").unwrap(),
+        provenance: vec![ProvenanceUrl::new("https://example.com/over-budget").unwrap()],
+    })
+    .unwrap();
+    let long_path = |fill: char, index: usize| {
+        #[cfg(windows)]
+        let value = format!("C:\\{}{:07}", fill.to_string().repeat(32_758), index);
+        #[cfg(not(windows))]
+        let value = format!("/{}{:07}", fill.to_string().repeat(32_760), index);
+        PathBuf::from(value)
+    };
+    let paths = (0..256)
+        .map(|index| long_path('p', index))
+        .collect::<Vec<_>>();
+    let evidence = (0..100)
+        .map(|index| crate::Evidence::RequiredMarker {
+            path: long_path('e', index),
+        })
+        .collect::<Vec<_>>();
+    let candidate = Candidate::try_from_rule(
+        &rule,
+        CandidateInput::new(
+            crate::CandidateId::new("candidate:over-budget").unwrap(),
+            paths,
+            1,
+            None,
+            evidence,
+            Vec::new(),
+            scan_id.clone(),
+        ),
+    )
+    .unwrap();
+    vec![NewCandidateRecord::try_from_candidate(&candidate, completed_at).unwrap()]
+}
+
 fn seed_ai_insight(engine: &EngineHandle, id: &str, created_ms: i64, expires_ms: i64) {
     let mut digest = [0_u8; 32];
     for (destination, source) in digest.iter_mut().zip(id.as_bytes()) {
@@ -281,6 +348,10 @@ fn newer_database_never_provisions_missing_snapshot_storage() {
         Err(ScanHistoryError::IncompatibleSchema)
     );
     assert_eq!(
+        engine.candidate_history_for_scan(&ScanId::new("scan:future-schema").unwrap()),
+        Err(CandidateHistoryError::IncompatibleSchema)
+    );
+    assert_eq!(
         engine.snapshot_retention_cap(),
         Err(SnapshotRetentionCapError::IncompatibleSchema)
     );
@@ -295,6 +366,24 @@ fn newer_database_never_provisions_missing_snapshot_storage() {
     assert!(!config.snapshots_directory().exists());
     engine.close();
     assert!(engine.wait_until_closed(TEST_TIMEOUT));
+}
+
+#[test]
+fn candidate_history_distinguishes_missing_scan_and_closed_engine() {
+    let (_temp, engine) = engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let missing = ScanId::new("scan:missing-candidate-history").unwrap();
+
+    assert_eq!(
+        engine.candidate_history_for_scan(&missing),
+        Err(CandidateHistoryError::ScanNotFound)
+    );
+
+    engine.close();
+    assert!(engine.wait_until_closed(TEST_TIMEOUT));
+    assert_eq!(
+        engine.candidate_history_for_scan(&missing),
+        Err(CandidateHistoryError::Closed)
+    );
 }
 
 #[test]
@@ -1056,6 +1145,93 @@ fn history_maintenance_failure_mapping_is_exhaustive_and_stable() {
 }
 
 #[test]
+fn candidate_history_status_and_error_mappings_are_exhaustive_and_stable() {
+    for (input, expected) in [
+        (
+            CandidateHistoryStatus::Discovered,
+            DurableCandidateStatus::Discovered,
+        ),
+        (
+            CandidateHistoryStatus::Selected,
+            DurableCandidateStatus::Selected,
+        ),
+        (
+            CandidateHistoryStatus::Dismissed,
+            DurableCandidateStatus::Dismissed,
+        ),
+        (CandidateHistoryStatus::Stale, DurableCandidateStatus::Stale),
+        (
+            CandidateHistoryStatus::Planned,
+            DurableCandidateStatus::Planned,
+        ),
+        (
+            CandidateHistoryStatus::Completed,
+            DurableCandidateStatus::Completed,
+        ),
+        (
+            CandidateHistoryStatus::Failed,
+            DurableCandidateStatus::Failed,
+        ),
+        (
+            CandidateHistoryStatus::Unavailable,
+            DurableCandidateStatus::Unavailable,
+        ),
+    ] {
+        assert_eq!(public_candidate_status(input), expected);
+    }
+
+    for (input, expected) in [
+        (
+            HistoryErrorKind::IncompatibleSchema,
+            CandidateHistoryError::IncompatibleSchema,
+        ),
+        (
+            HistoryErrorKind::QueryLimitExceeded,
+            CandidateHistoryError::QueryLimitExceeded,
+        ),
+        (HistoryErrorKind::Busy, CandidateHistoryError::Busy),
+        (
+            HistoryErrorKind::UnsafeStorage,
+            CandidateHistoryError::UnsafeStorage,
+        ),
+        (
+            HistoryErrorKind::CorruptData,
+            CandidateHistoryError::CorruptData,
+        ),
+        (
+            HistoryErrorKind::InternalState,
+            CandidateHistoryError::InternalState,
+        ),
+        (
+            HistoryErrorKind::InvalidInput,
+            CandidateHistoryError::Unavailable,
+        ),
+        (
+            HistoryErrorKind::AlreadyExists,
+            CandidateHistoryError::Unavailable,
+        ),
+        (
+            HistoryErrorKind::NotFound,
+            CandidateHistoryError::Unavailable,
+        ),
+        (
+            HistoryErrorKind::InvalidTransition,
+            CandidateHistoryError::Unavailable,
+        ),
+        (
+            HistoryErrorKind::DatabaseUnavailable,
+            CandidateHistoryError::Unavailable,
+        ),
+        (
+            HistoryErrorKind::OutcomeUnknown,
+            CandidateHistoryError::Unavailable,
+        ),
+    ] {
+        assert_eq!(map_candidate_history_error(input), expected);
+    }
+}
+
+#[test]
 fn invalid_maintenance_clock_fails_and_panic_releases_exclusive_admission() {
     let (_temp, engine) = engine_with_limits(RegistryLimits::testing(1, 2, 4, 8));
     let invalid = started_maintenance(
@@ -1127,6 +1303,19 @@ fn completed_scan_publishes_durable_snapshot_and_survives_reopen() {
         crate::ScanCoverageStatus::Unknown
     );
     let scan_id = result.scan_id().clone();
+    let candidate_history = engine.candidate_history_for_scan(&scan_id).unwrap();
+    assert_eq!(candidate_history.scan_id(), &scan_id);
+    assert_eq!(
+        candidate_history.source_scan_status(),
+        DurableScanStatus::Succeeded
+    );
+    assert!(candidate_history.scheduled_at().is_some());
+    assert!(candidate_history.completed_at().is_some());
+    assert_eq!(
+        candidate_history.status(),
+        DurableCandidateEvaluationStatus::Succeeded { candidate_count: 0 }
+    );
+    assert!(candidate_history.candidates().is_empty());
     let durable = engine.inner.store.load_scan(&scan_id).unwrap().unwrap();
     assert_eq!(durable.status(), ScanStatus::Succeeded);
     assert_eq!(durable.started_at(), result.started_at());
@@ -1194,6 +1383,10 @@ fn completed_scan_publishes_durable_snapshot_and_survives_reopen() {
     let reference = durable.snapshot().unwrap();
     assert_eq!(reopened.inner.snapshots.load(reference).unwrap(), document);
     assert_eq!(
+        reopened.candidate_history_for_scan(&scan_id).unwrap(),
+        candidate_history
+    );
+    assert_eq!(
         reopened
             .inner
             .store
@@ -1228,6 +1421,45 @@ fn completed_scan_persists_marker_verified_discovery_batch_across_reopen() {
         CandidateEvaluationTaskStatus::Succeeded { candidate_count: 1 }
     );
     let scan_id = result.scan_id().clone();
+    let candidate_history = engine.candidate_history_for_scan(&scan_id).unwrap();
+    assert_eq!(
+        candidate_history.status(),
+        DurableCandidateEvaluationStatus::Succeeded { candidate_count: 1 }
+    );
+    assert_eq!(
+        candidate_history.source_scan_status(),
+        DurableScanStatus::Succeeded
+    );
+    let public_candidate = &candidate_history.candidates()[0];
+    assert_eq!(
+        public_candidate.rule().id().as_str(),
+        "developer.rust.target"
+    );
+    assert_eq!(
+        public_candidate.category(),
+        crate::CandidateCategory::DeveloperArtifact
+    );
+    assert!(public_candidate.estimated_bytes() > 0);
+    assert_eq!(public_candidate.path_count(), 1);
+    assert_eq!(public_candidate.safety(), crate::SafetyTier::Informational);
+    assert_eq!(
+        public_candidate.action(),
+        crate::CandidateAction::RevealOnly
+    );
+    assert!(!public_candidate.rule_schedule_eligible());
+    assert_eq!(
+        public_candidate.blockers(),
+        [crate::BlockReason::ProtectedPath]
+    );
+    assert!(
+        public_candidate
+            .evidence_kinds()
+            .contains(&crate::EvidenceKind::RequiredMarker)
+    );
+    assert_eq!(
+        public_candidate.status(),
+        DurableCandidateStatus::Discovered
+    );
     let evaluation = engine
         .inner
         .store
@@ -1257,6 +1489,10 @@ fn completed_scan_persists_marker_verified_discovery_batch_across_reopen() {
     assert!(engine.wait_until_closed(TEST_TIMEOUT));
     drop(engine);
     let reopened = EngineHandle::open(config).unwrap();
+    assert_eq!(
+        reopened.candidate_history_for_scan(&scan_id).unwrap(),
+        candidate_history
+    );
     let reopened_evaluation = reopened
         .inner
         .store
@@ -1264,6 +1500,189 @@ fn completed_scan_persists_marker_verified_discovery_batch_across_reopen() {
         .unwrap()
         .unwrap();
     assert_eq!(reopened_evaluation, evaluation);
+}
+
+#[test]
+fn candidate_history_rejects_corrupt_child_rows_without_partial_results() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("scan-root");
+    let project = root.join("project");
+    let target = project.join("target");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::write(project.join("Cargo.toml"), b"[package]\nname='fixture'\n").unwrap();
+    std::fs::write(target.join("object"), vec![7_u8; 8 * 1024]).unwrap();
+    let engine =
+        EngineHandle::open_with_limits(config(&temp), RegistryLimits::testing(1, 4, 8, 16))
+            .unwrap();
+
+    let task = engine.start_scan(root).unwrap();
+    assert_eq!(wait_terminal(&engine, task).phase, TaskPhase::Succeeded);
+    let result = engine.scan_result(task).unwrap().unwrap();
+    let scan_id = result.scan_id().clone();
+    assert_eq!(
+        result.candidate_evaluation(),
+        CandidateEvaluationTaskStatus::Succeeded { candidate_count: 1 }
+    );
+    engine.inner.store.with_connection(|connection| {
+        assert_eq!(
+            connection
+                .execute(
+                    "UPDATE candidate_paths SET path_ordinal = 1
+                     WHERE candidate_id = (
+                         SELECT candidate_id FROM candidates WHERE scan_id = ?1
+                     )",
+                    [scan_id.as_str()],
+                )
+                .unwrap(),
+            1
+        );
+    });
+
+    assert_eq!(
+        engine.candidate_history_for_scan(&scan_id),
+        Err(CandidateHistoryError::CorruptData)
+    );
+}
+
+#[test]
+fn candidate_history_rejects_over_budget_graph_before_payload_decode() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("scan-root");
+    let project = root.join("project");
+    let target = project.join("target");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::write(project.join("Cargo.toml"), b"[package]\nname='fixture'\n").unwrap();
+    std::fs::write(target.join("object"), vec![7_u8; 8 * 1024]).unwrap();
+    let engine =
+        EngineHandle::open_with_limits(config(&temp), RegistryLimits::testing(1, 4, 8, 16))
+            .unwrap();
+
+    let task = engine.start_scan(root).unwrap();
+    assert_eq!(wait_terminal(&engine, task).phase, TaskPhase::Succeeded);
+    let result = engine.scan_result(task).unwrap().unwrap();
+    let scan_id = result.scan_id().clone();
+    assert_eq!(
+        result.candidate_evaluation(),
+        CandidateEvaluationTaskStatus::Succeeded { candidate_count: 1 }
+    );
+    engine.inner.store.with_connection(|connection| {
+        connection
+            .execute(
+                "WITH RECURSIVE ordinal(value) AS (
+                     VALUES(1)
+                     UNION ALL
+                     SELECT value + 1 FROM ordinal WHERE value < 255
+                 )
+                 INSERT INTO candidate_paths (
+                     candidate_id, path_ordinal, observed_path, observed_path_encoding
+                 )
+                 SELECT candidate.candidate_id, ordinal.value,
+                        CAST('/' || printf('%.*c', 32760, 'a') ||
+                             printf('%07d', ordinal.value) AS BLOB),
+                        1
+                 FROM candidates AS candidate, ordinal
+                 WHERE candidate.scan_id = ?1",
+                [scan_id.as_str()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "WITH RECURSIVE ordinal(value) AS (
+                     VALUES(0)
+                     UNION ALL
+                     SELECT value + 1 FROM ordinal WHERE value < 99
+                 ), selected(candidate_id, first_ordinal) AS (
+                     SELECT candidate.candidate_id,
+                            count(evidence.evidence_ordinal)
+                     FROM candidates AS candidate
+                     JOIN candidate_evidence AS evidence USING (candidate_id)
+                     WHERE candidate.scan_id = ?1
+                 )
+                 INSERT INTO candidate_evidence (
+                     candidate_id, evidence_ordinal, evidence_kind,
+                     path_value, path_value_encoding
+                 )
+                 SELECT selected.candidate_id,
+                        selected.first_ordinal + ordinal.value,
+                        'required_marker',
+                        CAST('/' || printf('%.*c', 32760, 'e') ||
+                             printf('%07d', ordinal.value) AS BLOB),
+                        1
+                 FROM selected, ordinal",
+                [scan_id.as_str()],
+            )
+            .unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT count(*), max(length(path.observed_path))
+                     FROM candidates AS candidate
+                     JOIN candidate_paths AS path USING (candidate_id)
+                     WHERE candidate.scan_id = ?1",
+                    [scan_id.as_str()],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+                )
+                .unwrap(),
+            (256, 32_768)
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT count(*)
+                     FROM candidates AS candidate
+                     JOIN candidate_evidence AS evidence USING (candidate_id)
+                     WHERE candidate.scan_id = ?1 AND length(evidence.path_value) = 32768",
+                    [scan_id.as_str()],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            100
+        );
+    });
+
+    assert_eq!(
+        engine.candidate_history_for_scan(&scan_id),
+        Err(CandidateHistoryError::QueryLimitExceeded)
+    );
+}
+
+#[test]
+fn candidate_history_preflight_rejects_oversized_payloads() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("scan-root");
+    let project = root.join("project");
+    let target = project.join("target");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::write(project.join("Cargo.toml"), b"[package]\nname='fixture'\n").unwrap();
+    std::fs::write(target.join("object"), vec![7_u8; 8 * 1024]).unwrap();
+    let engine =
+        EngineHandle::open_with_limits(config(&temp), RegistryLimits::testing(1, 4, 8, 16))
+            .unwrap();
+
+    let task = engine.start_scan(root).unwrap();
+    assert_eq!(wait_terminal(&engine, task).phase, TaskPhase::Succeeded);
+    let scan_id = engine.scan_result(task).unwrap().unwrap().scan_id().clone();
+    engine.inner.store.with_connection(|connection| {
+        connection
+            .pragma_update(None, "ignore_check_constraints", true)
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE candidate_paths SET observed_path = zeroblob(16777216)
+                 WHERE candidate_id = (
+                     SELECT candidate_id FROM candidates WHERE scan_id = ?1
+                 )",
+                [scan_id.as_str()],
+            )
+            .unwrap();
+        connection
+            .pragma_update(None, "ignore_check_constraints", false)
+            .unwrap();
+    });
+    assert_eq!(
+        engine.candidate_history_for_scan(&scan_id),
+        Err(CandidateHistoryError::CorruptData)
+    );
 }
 
 #[test]
@@ -1276,6 +1695,27 @@ fn candidate_limit_failure_maps_to_the_public_discovery_status() {
     let identity = CandidateEvaluationIdentity::try_new(1, 1, [1; 32], 1, [2; 32]).unwrap();
     let (_, _, status) =
         failed_candidate_evaluation(identity, SystemTime::UNIX_EPOCH, kind).unwrap();
+    assert_eq!(
+        status,
+        CandidateEvaluationTaskStatus::Failed {
+            kind: CandidateEvaluationTaskFailureKind::LimitExceeded
+        }
+    );
+}
+
+#[test]
+fn materialization_limit_becomes_typed_discovery_failure_before_publication() {
+    let evaluated_at = SystemTime::UNIX_EPOCH + Duration::from_secs(10);
+    let scan_id = ScanId::new("scan:over-budget-evaluation").unwrap();
+    let candidates = over_budget_candidate_records(&scan_id, evaluated_at);
+    assert!(
+        !CandidateEvaluationCompletion::batch_fits_materialization_budget(&candidates).unwrap()
+    );
+    let identity = CandidateEvaluationIdentity::try_new(1, 1, [1; 32], 1, [2; 32]).unwrap();
+
+    let (_, _completion, status) =
+        complete_candidate_evaluation(identity, evaluated_at, candidates).unwrap();
+
     assert_eq!(
         status,
         CandidateEvaluationTaskStatus::Failed {
@@ -1339,6 +1779,14 @@ fn cancellation_after_completed_traversal_cancels_discovery_not_scan() {
         }
     );
     assert!(evaluation.candidates().is_empty());
+    let durable_candidates = engine.candidate_history_for_scan(result.scan_id()).unwrap();
+    assert_eq!(
+        durable_candidates.status(),
+        DurableCandidateEvaluationStatus::Failed {
+            kind: CandidateEvaluationTaskFailureKind::Cancelled
+        }
+    );
+    assert!(durable_candidates.candidates().is_empty());
     assert_eq!(final_snapshot_count(&config), 1);
 }
 
@@ -1439,6 +1887,19 @@ fn running_scan_cancellation_is_durable_and_publishes_no_snapshot() {
             .is_none()
     );
     assert_eq!(final_snapshot_count(&config), 0);
+    let candidates = engine.candidate_history_for_scan(&scan_id).unwrap();
+    assert_eq!(candidates.scan_id(), &scan_id);
+    assert_eq!(
+        candidates.source_scan_status(),
+        DurableScanStatus::Cancelled
+    );
+    assert_eq!(
+        candidates.status(),
+        DurableCandidateEvaluationStatus::NotRun
+    );
+    assert_eq!(candidates.scheduled_at(), None);
+    assert_eq!(candidates.completed_at(), None);
+    assert!(candidates.candidates().is_empty());
 }
 
 #[test]

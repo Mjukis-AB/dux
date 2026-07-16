@@ -13,7 +13,9 @@ use super::settings::{
     SnapshotRetentionCapUpdate,
 };
 use super::task::{
-    CancelOutcome, CandidateEvaluationTaskFailureKind, CandidateEvaluationTaskStatus, CloseOutcome,
+    CancelOutcome, CandidateEvaluationTaskFailureKind, CandidateEvaluationTaskStatus,
+    CandidateHistoryError, CloseOutcome, DurableCandidateEvaluation,
+    DurableCandidateEvaluationStatus, DurableCandidateStatus, DurableCandidateSummary,
     DurableScanCounts, DurableScanCoverage, DurableScanStatus, DurableScanSummary, EngineLifecycle,
     EngineOpenError, FormatSizeBatchResult, FormattedSizeEntry, HistoryMaintenanceFailureKind,
     HistoryMaintenanceResult, HistoryMaintenanceStartOutcome, RecentScanHistory, ScanHistoryError,
@@ -33,8 +35,10 @@ use crate::persistence::snapshot::{
 };
 use crate::persistence::{
     CandidateEvaluationCompletion, CandidateEvaluationFailureKind, CandidateEvaluationIdentity,
-    HistoryErrorKind, MAX_RECENT_SCAN_HISTORY_LIMIT, NewCandidateRecord, NewScanRecord,
-    ScanCompletionRecord, ScanCounts, ScanStatus, TerminalScanStatus,
+    CandidateEvaluationObservation, CandidateEvaluationRecord, CandidateEvaluationStatus,
+    CandidateHistoryStatus, CompleteCandidateRecord, HistoryErrorKind,
+    MAX_RECENT_SCAN_HISTORY_LIMIT, NewCandidateRecord, NewScanRecord, ScanCompletionRecord,
+    ScanCounts, ScanStatus, TerminalScanStatus,
 };
 use crate::persistence::{DatabaseStatus, StoreCoordinator};
 use crate::persistence::{
@@ -654,6 +658,24 @@ impl EngineHandle {
             scans,
             has_more: page.has_more(),
         })
+    }
+
+    /// Load one exact, bounded candidate-discovery observation from durable
+    /// history. Returned summaries deliberately omit paths and evidence
+    /// payloads and cannot be converted into a cleanup plan or effect.
+    pub fn candidate_history_for_scan(
+        &self,
+        scan_id: &ScanId,
+    ) -> Result<DurableCandidateEvaluation, CandidateHistoryError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(CandidateHistoryError::Closed);
+        }
+        let observation = self
+            .inner
+            .store
+            .load_candidate_evaluation_for_scan(scan_id)
+            .map_err(|error| map_candidate_history_error(error.kind))?;
+        public_candidate_history(scan_id, observation)
     }
 
     pub fn lifecycle(&self) -> EngineLifecycle {
@@ -1456,6 +1478,30 @@ fn prepare_candidate_evaluation(
             );
         }
     };
+    complete_candidate_evaluation(identity, evaluated_at, candidates)
+}
+
+fn complete_candidate_evaluation(
+    identity: CandidateEvaluationIdentity,
+    evaluated_at: SystemTime,
+    candidates: Vec<NewCandidateRecord>,
+) -> Result<
+    (
+        CandidateEvaluationIdentity,
+        CandidateEvaluationCompletion,
+        CandidateEvaluationTaskStatus,
+    ),
+    TaskFailureKind,
+> {
+    if !CandidateEvaluationCompletion::batch_fits_materialization_budget(&candidates)
+        .map_err(|_| TaskFailureKind::InternalFailure)?
+    {
+        return failed_candidate_evaluation(
+            identity,
+            evaluated_at,
+            CandidateEvaluationFailureKind::LimitExceeded,
+        );
+    }
     let candidate_count =
         u32::try_from(candidates.len()).map_err(|_| TaskFailureKind::InternalFailure)?;
     let completion = CandidateEvaluationCompletion::succeeded(evaluated_at, candidates)
@@ -1523,6 +1569,162 @@ const fn map_scan_history_error(kind: HistoryErrorKind) -> ScanHistoryError {
         | HistoryErrorKind::InvalidTransition
         | HistoryErrorKind::DatabaseUnavailable
         | HistoryErrorKind::OutcomeUnknown => ScanHistoryError::Unavailable,
+    }
+}
+
+fn public_candidate_history(
+    requested_scan_id: &ScanId,
+    observation: CandidateEvaluationObservation,
+) -> Result<DurableCandidateEvaluation, CandidateHistoryError> {
+    match observation {
+        CandidateEvaluationObservation::MissingScan => Err(CandidateHistoryError::ScanNotFound),
+        CandidateEvaluationObservation::NotRun { scan_status } => {
+            Ok(DurableCandidateEvaluation::new(
+                requested_scan_id.clone(),
+                public_durable_scan_status(scan_status),
+                None,
+                None,
+                DurableCandidateEvaluationStatus::NotRun,
+                Vec::new(),
+            ))
+        }
+        CandidateEvaluationObservation::Pending(record) => public_candidate_record(
+            requested_scan_id,
+            record,
+            CandidateEvaluationStatus::Pending,
+        ),
+        CandidateEvaluationObservation::Succeeded(record) => {
+            let status = record.status();
+            if !matches!(status, CandidateEvaluationStatus::Succeeded { .. }) {
+                return Err(CandidateHistoryError::CorruptData);
+            }
+            public_candidate_record(requested_scan_id, record, status)
+        }
+        CandidateEvaluationObservation::Failed(record) => {
+            let status = record.status();
+            if !matches!(status, CandidateEvaluationStatus::Failed { .. }) {
+                return Err(CandidateHistoryError::CorruptData);
+            }
+            public_candidate_record(requested_scan_id, record, status)
+        }
+    }
+}
+
+fn public_candidate_record(
+    requested_scan_id: &ScanId,
+    record: CandidateEvaluationRecord,
+    expected_status: CandidateEvaluationStatus,
+) -> Result<DurableCandidateEvaluation, CandidateHistoryError> {
+    if record.scan_id() != requested_scan_id || record.status() != expected_status {
+        return Err(CandidateHistoryError::CorruptData);
+    }
+    let status = match record.status() {
+        CandidateEvaluationStatus::Pending => {
+            if record.completed_at().is_some() || !record.candidates().is_empty() {
+                return Err(CandidateHistoryError::CorruptData);
+            }
+            DurableCandidateEvaluationStatus::Pending
+        }
+        CandidateEvaluationStatus::Succeeded { candidate_count } => {
+            if record.completed_at().is_none()
+                || usize::try_from(candidate_count).ok() != Some(record.candidates().len())
+            {
+                return Err(CandidateHistoryError::CorruptData);
+            }
+            DurableCandidateEvaluationStatus::Succeeded { candidate_count }
+        }
+        CandidateEvaluationStatus::Failed { kind } => {
+            if record.completed_at().is_none() || !record.candidates().is_empty() {
+                return Err(CandidateHistoryError::CorruptData);
+            }
+            DurableCandidateEvaluationStatus::Failed {
+                kind: public_candidate_evaluation_failure(kind),
+            }
+        }
+    };
+    let candidates = record
+        .candidates()
+        .iter()
+        .map(|candidate| public_candidate_summary(requested_scan_id, candidate))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(DurableCandidateEvaluation::new(
+        requested_scan_id.clone(),
+        DurableScanStatus::Succeeded,
+        Some(record.scheduled_at()),
+        record.completed_at(),
+        status,
+        candidates,
+    ))
+}
+
+fn public_candidate_summary(
+    requested_scan_id: &ScanId,
+    candidate: &CompleteCandidateRecord,
+) -> Result<DurableCandidateSummary, CandidateHistoryError> {
+    if candidate.source_scan_id() != requested_scan_id {
+        return Err(CandidateHistoryError::CorruptData);
+    }
+    let path_count =
+        u16::try_from(candidate.paths().len()).map_err(|_| CandidateHistoryError::InternalState)?;
+    Ok(DurableCandidateSummary::new(
+        candidate.id().clone(),
+        candidate.rule().clone(),
+        candidate.category(),
+        candidate.estimated_bytes(),
+        candidate.newest_mtime(),
+        candidate.safety(),
+        candidate.action(),
+        candidate.rule_schedule_eligible(),
+        path_count,
+        candidate
+            .evidence()
+            .iter()
+            .map(crate::domain::Evidence::kind)
+            .collect(),
+        candidate.blockers().to_vec(),
+        candidate.created_at(),
+        public_candidate_status(candidate.status()),
+    ))
+}
+
+const fn public_candidate_status(status: CandidateHistoryStatus) -> DurableCandidateStatus {
+    match status {
+        CandidateHistoryStatus::Discovered => DurableCandidateStatus::Discovered,
+        CandidateHistoryStatus::Selected => DurableCandidateStatus::Selected,
+        CandidateHistoryStatus::Dismissed => DurableCandidateStatus::Dismissed,
+        CandidateHistoryStatus::Stale => DurableCandidateStatus::Stale,
+        CandidateHistoryStatus::Planned => DurableCandidateStatus::Planned,
+        CandidateHistoryStatus::Completed => DurableCandidateStatus::Completed,
+        CandidateHistoryStatus::Failed => DurableCandidateStatus::Failed,
+        CandidateHistoryStatus::Unavailable => DurableCandidateStatus::Unavailable,
+    }
+}
+
+const fn public_durable_scan_status(status: ScanStatus) -> DurableScanStatus {
+    match status {
+        ScanStatus::Queued => DurableScanStatus::Queued,
+        ScanStatus::Running => DurableScanStatus::Running,
+        ScanStatus::Succeeded => DurableScanStatus::Succeeded,
+        ScanStatus::Failed => DurableScanStatus::Failed,
+        ScanStatus::Cancelled => DurableScanStatus::Cancelled,
+        ScanStatus::Interrupted => DurableScanStatus::Interrupted,
+    }
+}
+
+const fn map_candidate_history_error(kind: HistoryErrorKind) -> CandidateHistoryError {
+    match kind {
+        HistoryErrorKind::IncompatibleSchema => CandidateHistoryError::IncompatibleSchema,
+        HistoryErrorKind::QueryLimitExceeded => CandidateHistoryError::QueryLimitExceeded,
+        HistoryErrorKind::Busy => CandidateHistoryError::Busy,
+        HistoryErrorKind::UnsafeStorage => CandidateHistoryError::UnsafeStorage,
+        HistoryErrorKind::CorruptData => CandidateHistoryError::CorruptData,
+        HistoryErrorKind::InternalState => CandidateHistoryError::InternalState,
+        HistoryErrorKind::InvalidInput
+        | HistoryErrorKind::AlreadyExists
+        | HistoryErrorKind::NotFound
+        | HistoryErrorKind::InvalidTransition
+        | HistoryErrorKind::DatabaseUnavailable
+        | HistoryErrorKind::OutcomeUnknown => CandidateHistoryError::Unavailable,
     }
 }
 

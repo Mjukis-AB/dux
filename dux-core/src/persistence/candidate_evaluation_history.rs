@@ -15,8 +15,10 @@ use rusqlite::{Connection, OptionalExtension, Row, Transaction, params};
 use crate::domain::{MAX_EVALUATED_CANDIDATES, ScanId};
 
 use super::candidate_history::{
-    CompleteCandidateRecord, NewCandidateRecord, PreparedCandidate, complete_candidate_matches_new,
-    insert_candidate, load_complete_candidate_batch_within_budget,
+    CompleteCandidateRecord, NewCandidateRecord, PreparedCandidate,
+    candidate_record_batch_fits_materialization_budget, complete_candidate_matches_new,
+    ensure_prepared_candidate_batch_budget, insert_candidate,
+    load_complete_candidate_batch_within_budget,
 };
 use super::history::{
     HistoryError, HistoryErrorKind, ScanStatus, load_scan_record_within_budget,
@@ -28,7 +30,7 @@ const MAX_STORED_ID_BYTES: i64 = 128;
 const MAX_FAILURE_KIND_BYTES: i64 = 64;
 const EVALUATION_QUERY_PROGRESS_INTERVAL: i32 = 100;
 const EVALUATION_QUERY_BASE_CALLBACKS: u64 = 1_000;
-const EVALUATION_QUERY_CALLBACKS_PER_CANDIDATE: u64 = 4;
+const EVALUATION_QUERY_CALLBACKS_PER_CANDIDATE: u64 = 12;
 const EVALUATION_QUERY_MAX_ELAPSED: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -160,11 +162,19 @@ enum CandidateEvaluationOutcome {
 }
 
 impl CandidateEvaluationCompletion {
+    pub(crate) fn batch_fits_materialization_budget(
+        candidates: &[NewCandidateRecord],
+    ) -> Result<bool, HistoryError> {
+        candidate_record_batch_fits_materialization_budget(candidates)
+    }
+
     pub(crate) fn succeeded(
         completed_at: SystemTime,
         candidates: Vec<NewCandidateRecord>,
     ) -> Result<Self, HistoryError> {
-        if candidates.len() > MAX_EVALUATED_CANDIDATES {
+        if candidates.len() > MAX_EVALUATED_CANDIDATES
+            || !Self::batch_fits_materialization_budget(&candidates)?
+        {
             return Err(invalid());
         }
         let completed_at_unix_ms =
@@ -188,12 +198,14 @@ impl CandidateEvaluationCompletion {
     }
 
     pub(super) fn prepare_candidates(&self) -> Result<Vec<PreparedCandidate>, HistoryError> {
-        match &self.outcome {
+        let candidates = match &self.outcome {
             CandidateEvaluationOutcome::Succeeded { candidates } => {
                 candidates.iter().map(PreparedCandidate::prepare).collect()
             }
             CandidateEvaluationOutcome::Failed { .. } => Ok(Vec::new()),
-        }
+        }?;
+        ensure_prepared_candidate_batch_budget(&candidates)?;
+        Ok(candidates)
     }
 
     pub(super) fn validate_for_request(
@@ -279,6 +291,18 @@ pub(crate) struct CandidateEvaluationRecord {
 }
 
 impl CandidateEvaluationRecord {
+    pub(crate) fn scan_id(&self) -> &ScanId {
+        &self.request.scan_id
+    }
+
+    pub(crate) const fn scheduled_at(&self) -> SystemTime {
+        self.request.scheduled_at
+    }
+
+    pub(crate) const fn completed_at(&self) -> Option<SystemTime> {
+        self.completed_at
+    }
+
     #[cfg_attr(
         not(test),
         allow(
@@ -290,7 +314,6 @@ impl CandidateEvaluationRecord {
         self.status
     }
 
-    #[cfg(test)]
     pub(crate) fn candidates(&self) -> &[CompleteCandidateRecord] {
         &self.candidates
     }
@@ -334,6 +357,20 @@ impl CandidateEvaluationRecord {
             && self.status == CandidateEvaluationStatus::Failed { kind }
             && self.candidates.is_empty()
     }
+}
+
+/// Exact, bounded candidate-evaluation history for one requested scan.
+///
+/// These variants contain immutable historical observations only. They cannot
+/// reconstruct a domain candidate, create a cleanup plan, or grant execution
+/// authority.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum CandidateEvaluationObservation {
+    MissingScan,
+    NotRun { scan_status: ScanStatus },
+    Pending(CandidateEvaluationRecord),
+    Succeeded(CandidateEvaluationRecord),
+    Failed(CandidateEvaluationRecord),
 }
 
 pub(super) struct PreparedCandidateEvaluation {
@@ -483,11 +520,39 @@ pub(super) fn load_candidate_evaluation(
     })
 }
 
+pub(super) fn load_candidate_evaluation_for_scan(
+    connection: &Connection,
+    scan_id: &ScanId,
+) -> Result<CandidateEvaluationObservation, HistoryError> {
+    run_bounded_evaluation_query(connection, || {
+        let Some(scan) = load_scan_record_within_budget(connection, scan_id)? else {
+            return Ok(CandidateEvaluationObservation::MissingScan);
+        };
+        let Some(record) = load_candidate_evaluation_within_budget(connection, scan_id)? else {
+            return Ok(CandidateEvaluationObservation::NotRun {
+                scan_status: scan.status(),
+            });
+        };
+        Ok(observation_from_record(record))
+    })
+}
+
+fn observation_from_record(record: CandidateEvaluationRecord) -> CandidateEvaluationObservation {
+    match record.status() {
+        CandidateEvaluationStatus::Pending => CandidateEvaluationObservation::Pending(record),
+        CandidateEvaluationStatus::Succeeded { .. } => {
+            CandidateEvaluationObservation::Succeeded(record)
+        }
+        CandidateEvaluationStatus::Failed { .. } => CandidateEvaluationObservation::Failed(record),
+    }
+}
+
 /// Candidate evaluations are capped at 4,096 complete parent graphs. The
 /// ordinary exact-record budget is intentionally small and cannot decode that
 /// valid maximum even with set-based reads, so this boundary has its own fixed
-/// budget: 100,000 base VM steps plus 400 per possible candidate. SQL-side
-/// `LIMIT max + 1` sentinels remain the primary materialization bound.
+/// budget: 100,000 base VM steps plus 1,200 per possible candidate. The larger
+/// linear term includes scalar-only type/length/materialization preflights;
+/// SQL-side `LIMIT max + 1` sentinels remain the primary cardinality bound.
 fn run_bounded_evaluation_query<T>(
     connection: &Connection,
     query: impl FnOnce() -> Result<T, HistoryError>,
@@ -824,4 +889,92 @@ const fn invalid() -> HistoryError {
 
 const fn corrupt() -> HistoryError {
     HistoryError::new(HistoryErrorKind::CorruptData)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::UNIX_EPOCH;
+
+    use rusqlite::Connection;
+
+    use super::*;
+    use crate::persistence::history::{NewScanRecord, PreparedNewScan, insert_scan_started};
+    use crate::persistence::migrations::apply_pending_migrations;
+
+    fn record(status: CandidateEvaluationStatus) -> CandidateEvaluationRecord {
+        let scheduled_at = UNIX_EPOCH + Duration::from_secs(10);
+        let completed_at = match status {
+            CandidateEvaluationStatus::Pending => None,
+            CandidateEvaluationStatus::Succeeded { .. }
+            | CandidateEvaluationStatus::Failed { .. } => {
+                Some(UNIX_EPOCH + Duration::from_secs(11))
+            }
+        };
+        CandidateEvaluationRecord {
+            request: NewCandidateEvaluation {
+                scan_id: ScanId::new("scan:observation").unwrap(),
+                identity: CandidateEvaluationIdentity::try_new(1, 1, [1; 32], 1, [2; 32]).unwrap(),
+                snapshot_version: 1,
+                snapshot_sha256: [3; 32],
+                scheduled_at,
+            },
+            completed_at,
+            status,
+            candidates: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn exact_scan_query_distinguishes_missing_and_not_run() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        apply_pending_migrations(&mut connection, 1).unwrap();
+
+        let missing = ScanId::new("scan:missing").unwrap();
+        assert_eq!(
+            load_candidate_evaluation_for_scan(&connection, &missing).unwrap(),
+            CandidateEvaluationObservation::MissingScan
+        );
+
+        let running = ScanId::new("scan:not-run").unwrap();
+        let scan = NewScanRecord::try_new(
+            running.clone(),
+            std::env::temp_dir().join("dux-candidate-observation"),
+            UNIX_EPOCH + Duration::from_secs(1),
+        )
+        .unwrap();
+        let prepared = PreparedNewScan::prepare(&scan).unwrap();
+        let transaction = connection.transaction().unwrap();
+        insert_scan_started(&transaction, &prepared).unwrap();
+        transaction.commit().unwrap();
+
+        assert_eq!(
+            load_candidate_evaluation_for_scan(&connection, &running).unwrap(),
+            CandidateEvaluationObservation::NotRun {
+                scan_status: ScanStatus::Running
+            }
+        );
+    }
+
+    #[test]
+    fn recorded_observation_has_one_explicit_variant_per_lifecycle_state() {
+        let pending = record(CandidateEvaluationStatus::Pending);
+        assert!(matches!(
+            observation_from_record(pending),
+            CandidateEvaluationObservation::Pending(_)
+        ));
+
+        let succeeded = record(CandidateEvaluationStatus::Succeeded { candidate_count: 0 });
+        assert!(matches!(
+            observation_from_record(succeeded),
+            CandidateEvaluationObservation::Succeeded(_)
+        ));
+
+        let failed = record(CandidateEvaluationStatus::Failed {
+            kind: CandidateEvaluationFailureKind::EvaluationFailed,
+        });
+        assert!(matches!(
+            observation_from_record(failed),
+            CandidateEvaluationObservation::Failed(_)
+        ));
+    }
 }

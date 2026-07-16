@@ -2320,8 +2320,9 @@ Tasks:
     locking and rolls back every candidate on any later failure. Bounded reads
     use set-based parent/child/claim queries instead of N+1 loading, validate
     storage classes, format, terminal time order, snapshot binding, candidate
-    count, and every complete child record, and reopen the exact 4,096-candidate
-    maximum within a dedicated fixed VM/time budget. Standalone legacy
+    count, and every complete child record. The dedicated fixed VM/time budget
+    admits the 4,096-candidate cardinality maximum when its aggregate graph
+    also fits the later 32 MiB decoded-materialization limit. Standalone legacy
     candidate insertion is refused for any scan that owns an evaluation row,
     preventing post-terminal batch drift. Cancellation observed after the
     scanner's Completed claim but before discovery's final cancellation
@@ -2339,6 +2340,41 @@ Tasks:
     non-success traversal exclusion. The broad persistence checkbox remains
     open for planner/executor engine lifecycle integration, bounded history
     query surfaces, and retention maintenance.
+  - Durable candidate-discovery read-bridge sub-checkpoint completed
+    2026-07-16: `EngineHandle::candidate_history_for_scan` now loads one exact
+    scan-bound discovery observation from the private store after an open-
+    session preflight. The query distinguishes a missing scan from a real scan
+    whose evaluator did not run and preserves Pending, Succeeded, or typed
+    Failed evaluator state. Before any payload-bearing child query, it counts
+    rows and encoded bytes against the same conservative 32 MiB aggregate
+    materialization budget applied during evaluation write preparation. That
+    preflight, the dedicated VM/time budget, and full graph decoding reject
+    oversized batches, incompatible schema, hostile storage classes,
+    malformed children, count/status/time drift, and cross-scan candidates
+    before publishing any value. A valid evaluator result that exceeds the
+    aggregate budget becomes a durable typed discovery `LimitExceeded` failure;
+    it does not turn the successfully completed scan into a persistence
+    failure.
+
+    The public durable DTO survives task-record eviction and process-style
+    reopen. Successful evaluations expose only candidate ID, rule, category,
+    estimated bytes, newest mtime, safety/action policy, schedule eligibility,
+    path count, evidence kinds, blockers, creation time, and historical status.
+    Exact paths and evidence payloads remain sealed for a future paged detail
+    boundary. A stored review, planned, or terminal status is an observation
+    only: this bridge cannot reconstruct a domain `Candidate` or `CleanupPlan`,
+    mutate review state, validate current evidence, approve cleanup, or reach
+    an effect.
+
+    Focused regressions cover missing/closed sessions, zero- and one-candidate
+    success across reopen, evaluator cancellation, non-successful scans with
+    NotRun, exhaustive candidate-status and failure mapping, newer-schema
+    fencing, corrupt child rejection, exact aggregate-budget boundaries, and a
+    schema-shaped over-budget graph rejected before payload decoding. The broad
+    persistence checkbox remains open for paged candidate path/evidence and
+    review-mutation surfaces, cleanup-history queries, planner/executor engine
+    lifecycle, and FFI/Swift/UI/CLI transport. History must never become a
+    planner witness.
 - [x] Keep binary snapshots atomic and checksummed. Completed 2026-07-16:
   `dux-core::persistence::snapshot` now owns an independent crate-private v1
   full-tree wire rather than extending the legacy CLI cache. Its frozen

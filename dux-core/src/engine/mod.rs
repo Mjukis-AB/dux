@@ -17,7 +17,9 @@ pub use settings::{
     SnapshotRetentionCapUpdate,
 };
 pub use task::{
-    CancelOutcome, CandidateEvaluationTaskFailureKind, CandidateEvaluationTaskStatus, CloseOutcome,
+    CancelOutcome, CandidateEvaluationTaskFailureKind, CandidateEvaluationTaskStatus,
+    CandidateHistoryError, CloseOutcome, DurableCandidateEvaluation,
+    DurableCandidateEvaluationStatus, DurableCandidateStatus, DurableCandidateSummary,
     DurableScanCounts, DurableScanCoverage, DurableScanStatus, DurableScanSummary, EngineLifecycle,
     EngineOpenError, FormatSizeBatchResult, FormattedSizeEntry, HistoryMaintenanceFailureKind,
     HistoryMaintenanceResult, HistoryMaintenanceStartOutcome, RecentScanHistory, ScanHistoryError,
