@@ -7,6 +7,10 @@ use rusqlite::config::DbConfig;
 use rusqlite::limits::Limit;
 use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 
+use super::candidate_history::{
+    NewCandidateRecord, PreparedCandidate, StoredCandidateRecord, insert_candidate,
+    load_candidate_record,
+};
 use super::history::{
     HistoryError, HistoryErrorKind, NewScanRecord, PreparedNewScan, PreparedScanCompletion,
     ScanCompletionRecord, ScanRecord, insert_scan_started, load_scan_record, map_write_sql_error,
@@ -300,6 +304,50 @@ impl StoreCoordinator {
     ) -> Result<Option<ScanRecord>, HistoryError> {
         let guard = self.lock_current_history_connection()?;
         load_scan_record(&guard.connection, id)
+    }
+
+    /// Insert one complete deterministic candidate observation atomically.
+    /// A database/storage error after commit can have an ambiguous outcome;
+    /// callers reconcile by loading this exact candidate ID before retrying.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "typed candidate persistence is integrated by the later evaluator task slice"
+        )
+    )]
+    pub(crate) fn record_candidate_discovered(
+        &self,
+        candidate: &NewCandidateRecord,
+    ) -> Result<(), HistoryError> {
+        let prepared = PreparedCandidate::prepare(candidate)?;
+        let mut guard = self.lock_current_history_connection()?;
+        let transaction = guard
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(map_write_sql_error)?;
+        insert_candidate(&transaction, &prepared)?;
+        transaction.commit().map_err(map_write_sql_error)?;
+        self.paths
+            .repair_sqlite_sidecars()
+            .and_then(|()| self.paths.validate_all_existing())
+            .map_err(map_history_database_error)
+    }
+
+    /// Load one candidate history observation without granting plan authority.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "typed candidate persistence is integrated by the later evaluator task slice"
+        )
+    )]
+    pub(crate) fn load_candidate(
+        &self,
+        id: &crate::domain::CandidateId,
+    ) -> Result<Option<StoredCandidateRecord>, HistoryError> {
+        let guard = self.lock_current_history_connection()?;
+        load_candidate_record(&guard.connection, id)
     }
 
     #[cfg_attr(

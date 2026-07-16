@@ -812,6 +812,17 @@ observations: they are not canonical path witnesses, current evidence,
 approval, or executor capabilities, and they do not add an AI/history-to-plan
 authority edge.
 
+The implemented typed candidate-history API prepares all bounded data before
+locking, atomically inserts a format-2 parent and contiguous ordered children,
+and requires the referenced scan to exist. Its exact-ID reader shares the
+bounded SQLite progress budget across parent and child queries, checks storage
+types and byte lengths before materialization, and returns either a dedicated
+complete observation or an explicit legacy summary. It rejects legacy child
+pollution, missing/gapped/over-limit children, dangling scans, malformed
+evidence, incompatible policy, and incomplete cloud-upload facts. It cannot
+construct a domain `Candidate`, change status, create a plan, or execute an
+effect.
+
 Compatibility inspection and migration have both SQLite-VM-operation ceilings
 and deadlines sampled every 1,000 VM operations by SQLite's progress callback.
 Schema/ledger storage types and byte lengths are checked before Rust
@@ -1147,7 +1158,7 @@ incident as a substitute for deterministic local evidence.
 | Legacy CLI deletion | Active arbitrary-descendant permanent path routed through a temporary core adapter; strict-target/volume/identity rechecks only; scanned-byte estimates labeled in CLI | Replace adapter with reviewed plan/approval/executor chain without weakening current checks |
 | Centralized executor | Production executor absent; temporary legacy adapter is containment only | Typed admission, cross-process lease, live revalidation, and journal required |
 | Engine/FFI task and plan API | Core handle, pre-worker SQLite compatibility handshake, and bounded per-session registry implemented for one read-only formatting batch; app architecture owns one session; UniFFI handle remains smoke-only, with no scan/task/plan DTOs or cleanup authority | FFI version rejection plus bounded scan/task/plan handles and cancellation |
-| SQLite compatibility store | Checksummed v1/v2 migrations with exact per-version fingerprints, lossless bounded path codec, bounded full/lightweight inspection, private atomic provisioning with durable initialization evidence, cross-platform process writer/version-race coverage, newer-schema read-only transition, rollback/WAL recovery, crate-private typed scan start/terminal-CAS/exact-ID history, explicit legacy summaries, and normalized candidate/cleanup history capable of preserving frozen facts, proposed effects, and crash-recovery states are implemented; stored paths and policy remain non-authoritative observations | Scan task integration, typed candidate/cleanup CRUD with ordinal and owner-generation validation, retention, reconciliation, and bounded identity-safe abandoned-stage maintenance |
+| SQLite compatibility store | Checksummed v1/v2 migrations with exact per-version fingerprints, lossless bounded path codec, bounded full/lightweight inspection, private atomic provisioning with durable initialization evidence, cross-platform process writer/version-race coverage, newer-schema read-only transition, rollback/WAL recovery, crate-private typed scan start/terminal-CAS/exact-ID history, explicit legacy summaries, a bounded typed candidate insert/load boundary, and normalized cleanup history capable of preserving frozen facts, proposed effects, and crash-recovery states are implemented; stored paths and policy remain non-authoritative observations | Scan task integration, candidate status lifecycle, typed cleanup CRUD with ordinal and owner-generation validation, retention, reconciliation, and bounded identity-safe abandoned-stage maintenance |
 | Typed scan coverage/issues | Absent; current scanner counts/skips and permits relaxed flags | Required before any scan is described as complete or becomes plan input |
 | Cache semantic/input validation | Atomic write plus CRC/version only; full-file read before bounds | Bounded reads, tree/path semantics, private permissions, retention, and migration |
 | Hard-link accounting and policy | Absent; only non-authoritative path snapshots capture link count | Deduplicated scan accounting and explicit per-mode admission rules |

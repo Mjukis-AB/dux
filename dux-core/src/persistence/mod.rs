@@ -7,6 +7,14 @@
     not(test),
     allow(
         dead_code,
+        reason = "typed candidate persistence is integrated by the later evaluator task slice"
+    )
+)]
+mod candidate_history;
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
         reason = "the frozen v1 byte codec is consumed by the next typed persistence slice"
     )
 )]

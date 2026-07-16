@@ -18,6 +18,8 @@ mod rule;
 )]
 mod rule_document;
 
+#[cfg(test)]
+pub(crate) use candidate::CandidateInput;
 pub use candidate::{BlockReason, Candidate, CandidateValidationError, Evidence, EvidenceKind};
 pub use cleanup_plan::{
     CLEANUP_PLAN_VALIDITY, CleanupMode, CleanupPlan, CleanupPlanItem, CleanupPlanValidationError,

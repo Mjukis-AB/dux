@@ -498,7 +498,7 @@ fn unix_ms_to_system_time(value: i64) -> Result<SystemTime, HistoryError> {
         .ok_or_else(|| HistoryError::new(HistoryErrorKind::CorruptData))
 }
 
-fn run_bounded_query<T>(
+pub(super) fn run_bounded_query<T>(
     connection: &Connection,
     query: impl FnOnce() -> Result<T, HistoryError>,
 ) -> Result<T, HistoryError> {
@@ -559,7 +559,7 @@ pub(super) fn map_write_sql_error(error: rusqlite::Error) -> HistoryError {
     HistoryError::new(kind)
 }
 
-fn map_query_sql_error(error: rusqlite::Error) -> HistoryError {
+pub(super) fn map_query_sql_error(error: rusqlite::Error) -> HistoryError {
     use rusqlite::ErrorCode;
     let kind = match error.sqlite_error_code() {
         Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked) => HistoryErrorKind::Busy,

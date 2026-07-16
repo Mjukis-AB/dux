@@ -5,6 +5,14 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Added crate-private typed candidate history on SQLite schema v2. Complete
+  deterministic findings are inserted atomically with ordered bounded paths,
+  evidence, and blockers, then loaded only as non-executable observation
+  records; migrated v1 rows return explicit incomplete summaries. Exact-ID
+  reads bound SQLite work and validate storage types/lengths, ordinals, enum
+  shapes, source-scan presence, policy pairs, and cloud-upload evidence before
+  returning data. No status mutation, plan construction, FFI surface, or
+  cleanup authority is introduced.
 - Added checksummed SQLite schema v2 for complete, non-authoritative candidate
   and cleanup history. The atomic v1→v2 migration preserves legacy summaries
   under an explicit legacy format without inventing absent facts; new records

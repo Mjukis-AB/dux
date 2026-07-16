@@ -1956,6 +1956,26 @@ Tasks:
     executor authority. The broad item stays open until typed candidate and
     cleanup APIs reject missing/noncontiguous child records and integrate with
     scan/cleanup lifecycles.
+  - Candidate-history API sub-checkpoint completed 2026-07-16: a crate-private
+    insert freezes one validated domain candidate as format 2 with status
+    `discovered`, after preparing and bounding every path, byte count,
+    nanosecond timestamp, evidence payload, and blocker before locking. The
+    atomic parent/ordered-child transaction requires an existing source scan,
+    holds the coordinator mutex and cross-process lease through exact schema
+    inspection, commit, and post-commit storage validation, and documents
+    exact-ID reconciliation for ambiguous post-commit failures. The bounded
+    exact-ID reader returns a dedicated non-executable complete observation or
+    an explicit legacy summary; it never reconstructs a domain `Candidate`.
+    It checks SQLite types and byte lengths before allocation, contiguous
+    ordinals, child limits, source-scan presence, absolute accepted-host paths,
+    every enum/evidence shape, policy compatibility, scheduling rules, and
+    exact per-path cloud-upload facts. Nine focused tests cover process-style
+    reopen, all evidence and blocker variants, exhaustive mappings, legacy
+    pollution, missing scans, duplicate rollback, invalid inputs, malformed
+    ordinals and evidence, newer-schema skew, maximum 256-path/512-evidence/
+    64-blocker budgets, and oversized values before materialization. Status
+    transitions, cleanup journaling, and lifecycle integration remain open, so
+    the broad checkbox stays unchecked.
 - [ ] Keep binary snapshots atomic and checksummed.
 - [ ] Add capacity sample storage.
 - [ ] Add typed scan coverage/issues.
