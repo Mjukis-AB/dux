@@ -24,7 +24,9 @@ pub struct ScanProgress {
     pub files_scanned: u64,
     /// Number of directories scanned
     pub dirs_scanned: u64,
-    /// Total bytes scanned so far
+    /// Known allocated bytes observed so far. Intermediate values are
+    /// per-path advisory observations; the final value reflects hard-link
+    /// deduplication and omits entries whose allocation is unknown.
     pub bytes_scanned: u64,
     /// Number of errors encountered
     pub errors: u64,

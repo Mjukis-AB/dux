@@ -12,11 +12,14 @@ use std::os::unix::fs::MetadataExt;
 use crossbeam_channel::{Receiver, Sender};
 use jwalk::WalkDir;
 
+use super::facts::{ScanFactsBuilder, ScanNodeFlags};
 use super::filesystem::{self, FilesystemDisposition};
 use super::issues::{
     IssueAccumulator, coverage_from_issues, record_io_error, record_issue, record_issue_once,
 };
-use super::outcome::{ScanOutcome, ScanTermination};
+use super::outcome::ScanOutcome;
+#[cfg(test)]
+use super::outcome::ScanTermination;
 use super::probe_pool::{ProbePool, ProbePoolError, directory_probe_pool};
 use super::progress::{ScanMessage, ScanProgress};
 use crate::ScanIssueKind;
@@ -324,7 +327,7 @@ impl Scanner {
             let mut issues = IssueAccumulator::default();
             issues.record_once(ScanIssueKind::Cancelled, None);
             let _ = tx.try_send(ScanMessage::Cancelled);
-            return ScanOutcome::new(tree, issues.into_coverage(), ScanTermination::Cancelled);
+            return ScanOutcome::cancelled(tree, issues.into_coverage());
         }
 
         let root_path = match requested_root.canonicalize() {
@@ -335,7 +338,7 @@ impl Scanner {
                 let mut issues = IssueAccumulator::default();
                 record_root_io_error(&mut issues, fallback, &error);
                 let _ = tx.try_send(ScanMessage::Error("scan root is unavailable".to_owned()));
-                return ScanOutcome::new(tree, issues.into_coverage(), ScanTermination::Failed);
+                return ScanOutcome::failed(tree, issues.into_coverage());
             }
         };
         let mut tree = DiskTree::new(root_path.clone());
@@ -348,7 +351,7 @@ impl Scanner {
                 let _ = tx.try_send(ScanMessage::Error(
                     "scan root is not a directory".to_owned(),
                 ));
-                return ScanOutcome::new(tree, issues.into_coverage(), ScanTermination::Failed);
+                return ScanOutcome::failed(tree, issues.into_coverage());
             }
             Err(error) => {
                 let mut issues = IssueAccumulator::default();
@@ -356,15 +359,30 @@ impl Scanner {
                 let _ = tx.try_send(ScanMessage::Error(
                     "scan root metadata is unavailable".to_owned(),
                 ));
-                return ScanOutcome::new(tree, issues.into_coverage(), ScanTermination::Failed);
+                return ScanOutcome::failed(tree, issues.into_coverage());
             }
         };
 
+        let mut facts = ScanFactsBuilder::new();
+        let (root_facts, root_accounting_issue) = match super::accounting::capture_node_facts(
+            &root_path,
+            &root_metadata,
+            true,
+            Some(true),
+        ) {
+            Ok(capture) => capture,
+            Err(error) => (
+                super::accounting::logical_only_facts(&root_metadata),
+                Some(error.issue_kind()),
+            ),
+        };
+        let root_mtime = root_facts.modified_at;
+        facts
+            .record(NodeId::ROOT, root_facts)
+            .expect("the root is the first scan-fact slot");
+
         // Set root mtime for cache invalidation
-        if let Some(mtime) = root_metadata
-            .modified()
-            .ok()
-            .and_then(crate::time::cache_serializable_time)
+        if let Some(mtime) = root_mtime
             && let Some(root_node) = tree.get_mut(NodeId::ROOT)
         {
             root_node.mtime = Some(mtime);
@@ -380,6 +398,9 @@ impl Scanner {
         // Shared progress state
         let shared_progress = Arc::new(SharedProgress::new());
         let issues = Arc::new(Mutex::new(IssueAccumulator::default()));
+        if let Some(kind) = root_accounting_issue {
+            record_issue(&issues, kind, Some(root_path.clone()));
+        }
         #[cfg(not(unix))]
         record_issue(
             &issues,
@@ -589,7 +610,7 @@ impl Scanner {
                 let _ = heartbeat_handle.join();
                 let _ = tx.try_send(ScanMessage::Cancelled);
                 let coverage = coverage_from_issues(&issues);
-                return ScanOutcome::new(tree, coverage, ScanTermination::Cancelled);
+                return ScanOutcome::cancelled(tree, coverage);
             }
 
             let entry = match entry_result {
@@ -680,13 +701,51 @@ impl Scanner {
 
             // Add node
             let node_id = tree.add_node(name, kind, path.clone(), parent_id);
+            let (mut node_facts, accounting_issue) = match super::accounting::capture_node_facts(
+                &path,
+                &metadata,
+                self.config.follow_symlinks && path_is_symlink,
+                match kind {
+                    NodeKind::Directory => Some(true),
+                    NodeKind::File => Some(false),
+                    _ => None,
+                },
+            ) {
+                Ok(capture) => capture,
+                Err(error) => (
+                    super::accounting::logical_only_facts(&metadata),
+                    Some(error.issue_kind()),
+                ),
+            };
+            if let Some(kind) = accounting_issue {
+                record_issue(&issues, kind, Some(path.clone()));
+            }
+            if kind == NodeKind::Directory
+                && let (Some(parent_identity), Some(identity)) = (
+                    facts.node(parent_id).and_then(|facts| facts.identity),
+                    node_facts.identity,
+                )
+                && parent_identity.volume_key() != identity.volume_key()
+            {
+                node_facts.flags.insert(ScanNodeFlags::MOUNT_BOUNDARY);
+            }
+            let node_mtime = node_facts.modified_at;
+            let progress_bytes = node_facts.allocated_bytes.unwrap_or(0);
+            if facts.record(node_id, node_facts).is_err() {
+                record_issue(
+                    &issues,
+                    ScanIssueKind::MetadataError,
+                    Some(root_path.clone()),
+                );
+                shared_progress.done.store(true, Ordering::Relaxed);
+                let _ = heartbeat_handle.join();
+                let coverage = coverage_from_issues(&issues);
+                return ScanOutcome::failed(tree, coverage);
+            }
             if let Some(node) = tree.get_mut(node_id) {
                 node.path_is_symlink = path_is_symlink;
                 if matches!(kind, NodeKind::Directory | NodeKind::File) {
-                    node.mtime = metadata
-                        .modified()
-                        .ok()
-                        .and_then(crate::time::cache_serializable_time);
+                    node.mtime = node_mtime;
                 }
             }
 
@@ -701,11 +760,10 @@ impl Scanner {
             }
 
             // Set size for files
-            let size = get_disk_usage(&metadata);
-            tree.set_size(node_id, size);
+            tree.set_size(node_id, progress_bytes);
             shared_progress
                 .bytes_scanned
-                .fetch_add(size, Ordering::Relaxed);
+                .fetch_add(progress_bytes, Ordering::Relaxed);
 
             // Update current path
             if let Ok(mut guard) = shared_progress.current_path.lock() {
@@ -719,7 +777,7 @@ impl Scanner {
             let _ = heartbeat_handle.join();
             let _ = tx.try_send(ScanMessage::Cancelled);
             let coverage = coverage_from_issues(&issues);
-            return ScanOutcome::new(tree, coverage, ScanTermination::Cancelled);
+            return ScanOutcome::cancelled(tree, coverage);
         }
 
         // Stop heartbeat thread
@@ -729,17 +787,38 @@ impl Scanner {
         // Send finalizing message (aggregation can take time on large trees)
         let _ = tx.try_send(ScanMessage::Finalizing);
 
-        // Aggregate sizes from children to parents
-        tree.aggregate_sizes();
-
+        let finalized = match facts.finalize(&mut tree, |path| {
+            record_issue(
+                &issues,
+                ScanIssueKind::FileChangedDuringScan,
+                Some(path.to_path_buf()),
+            );
+        }) {
+            Ok(finalized) => finalized,
+            Err(_) => {
+                record_issue(
+                    &issues,
+                    ScanIssueKind::MetadataError,
+                    Some(root_path.clone()),
+                );
+                let _ = tx.try_send(ScanMessage::Error(
+                    "scan accounting could not be finalized".to_owned(),
+                ));
+                let coverage = coverage_from_issues(&issues);
+                return ScanOutcome::failed(tree, coverage);
+            }
+        };
         // Sort all children by size
         tree.sort_by_size();
+        shared_progress
+            .bytes_scanned
+            .store(tree.root().size, Ordering::Relaxed);
 
         if !self.cancel_token.claim_completed() {
             record_issue_once(&issues, ScanIssueKind::Cancelled, None);
             let _ = tx.try_send(ScanMessage::Cancelled);
             let coverage = coverage_from_issues(&issues);
-            return ScanOutcome::new(tree, coverage, ScanTermination::Cancelled);
+            return ScanOutcome::cancelled(tree, coverage);
         }
 
         // Send final progress
@@ -748,7 +827,7 @@ impl Scanner {
         let _ = tx.try_send(ScanMessage::Completed);
 
         let coverage = coverage_from_issues(&issues);
-        ScanOutcome::new(tree, coverage, ScanTermination::Completed)
+        ScanOutcome::completed(tree, coverage, finalized.facts)
     }
 }
 
@@ -769,19 +848,6 @@ fn record_root_io_error(issues: &mut IssueAccumulator, path: PathBuf, error: &io
         _ => ScanIssueKind::MetadataError,
     };
     issues.record(kind, Some(path));
-}
-
-/// Get actual disk usage for a file (accounts for sparse files and block size)
-#[cfg(unix)]
-fn get_disk_usage(metadata: &Metadata) -> u64 {
-    // st_blocks is in 512-byte units
-    metadata.blocks() * 512
-}
-
-/// Get actual disk usage for a file (Windows fallback - uses file size)
-#[cfg(not(unix))]
-fn get_disk_usage(metadata: &Metadata) -> u64 {
-    metadata.len()
 }
 
 /// Get device ID for same-filesystem checks
@@ -988,25 +1054,42 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let device = get_device_id(&fs::metadata(temp.path()).unwrap());
         let cache = Arc::new(Mutex::new(HashMap::new()));
-        let pool = ProbePool::new(1, 1);
-
-        let result = directory_probe_with(
-            &pool,
-            DirectoryProbeRequest {
-                path: temp.path().to_path_buf(),
-                root_dev: device.wrapping_add(1),
-                classify_crossed_filesystem: true,
-                filesystem_cache: cache,
-            },
-            Duration::from_millis(1),
-            &CancellationToken::new(),
-            |_| {
-                std::thread::sleep(Duration::from_millis(25));
-                FilesystemDisposition::Local
-            },
-        );
+        let pool = Arc::new(ProbePool::new(1, 1));
+        let (started_tx, started_rx) = crossbeam_channel::bounded(1);
+        let (release_tx, release_rx) = crossbeam_channel::bounded(1);
+        let running_pool = Arc::clone(&pool);
+        let path = temp.path().to_path_buf();
+        let running = std::thread::spawn(move || {
+            directory_probe_with(
+                &running_pool,
+                DirectoryProbeRequest {
+                    path,
+                    root_dev: device.wrapping_add(1),
+                    classify_crossed_filesystem: true,
+                    filesystem_cache: cache,
+                },
+                Duration::from_millis(100),
+                &CancellationToken::new(),
+                move |_| {
+                    started_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    FilesystemDisposition::Local
+                },
+            )
+        });
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        let result = running.join().unwrap();
 
         assert!(matches!(result, Err(ProbePoolError::DeadlineExceeded)));
+        release_tx.send(()).unwrap();
+        let recovery_deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while pool.unavailable_worker_count() != 0 {
+            assert!(
+                std::time::Instant::now() < recovery_deadline,
+                "directory probe worker did not recover"
+            );
+            std::thread::yield_now();
+        }
     }
 
     #[test]

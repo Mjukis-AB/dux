@@ -512,6 +512,12 @@ pub(crate) fn encode_snapshot(
     Ok(SnapshotDigest(digest))
 }
 
+pub(crate) fn validate_snapshot_document(
+    document: &SnapshotDocument,
+) -> Result<(), SnapshotCodecError> {
+    validate_document(document, SnapshotCodecErrorKind::InvalidInput).map(|_| ())
+}
+
 pub(crate) fn decode_snapshot(
     reader: &mut impl Read,
 ) -> Result<(SnapshotDocument, SnapshotDigest), SnapshotCodecError> {

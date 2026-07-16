@@ -5,6 +5,22 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Added completed-only, snapshot-ready scan accounting. A private provenance
+  witness aligned to fresh arena node IDs carries logical bytes, optional
+  physical allocation, times, object identity, link count, and flags without
+  expanding the public/cache tree wire. Logical size counts every pathname;
+  multiply linked file allocation is assigned once to the losslessly smallest
+  path, while conflicting observations become allocation-unknown coverage
+  facts. Unknown allocation is never replaced by logical size, and known CLI
+  bytes remain visible when a sibling is unknown. The converter validates and
+  remaps the live graph into canonical depth-first snapshot nodes, retains
+  lossless host components, rejects followed symlinks unsupported by snapshot
+  v1, and cannot be constructed from a cached, failed, or cancelled scan.
+  Cache v7 invalidates earlier per-path hard-link totals. Focused tests cover
+  sparse files, empty directories, hard links across walker thread counts,
+  identity races, non-UTF-8 names on non-macOS Unix, exact codec round trips,
+  invalid times, and followed-link refusal. Durable engine publication remains
+  the next M2 slice.
 - Added typed, non-authoritative scan coverage and issue reporting. Scanner
   workers now return the tree together with an authoritative terminal state and
   bounded canonical coverage facts; component policy exclusions, depth
@@ -52,9 +68,9 @@ All notable changes to DUX will be documented in this file.
   database reference first. New tests cover version-skew races, collisions,
   missing/corrupt references, restrictive umasks, macOS ACLs, and Windows
   DACL/reparse/link/publication behavior. The format remains non-authoritative;
-  real scan-task wiring, retention, and abandoned-temp maintenance remain
-  separate roadmap work. Typed coverage now attaches to the SQLite summary
-  without changing the v1 snapshot wire.
+  durable engine publication, retention, and abandoned-temp maintenance remain
+  separate roadmap work. Typed coverage and the completed-only fresh-scan
+  converter attach without changing the v1 snapshot wire.
 - Added a crate-private cleanup-lock-coupled operation-journal state machine.
   A non-cloneable, non-shareable lease generates and owns the process identity,
   claims pristine plans as generation one, and fences every heartbeat,

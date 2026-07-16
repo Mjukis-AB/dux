@@ -266,8 +266,11 @@ future 0700-directory/0600-file permissions. Cached paths are therefore
 sensitive, non-authoritative data. The separate application snapshot store now
 has bounded semantic decoding, SHA-256 references, private permissions,
 current-schema-fenced atomic publication, and platform storage tests. No real
-scan task writes that store yet, and neither snapshot implementation can grant
-cleanup authority, so public app cleanup remains blocked.
+scan task writes that store yet. A private completed-only converter now carries
+lossless fresh facts into a validated snapshot document and deduplicates
+hard-linked allocation, but cannot publish or authorize anything. Neither
+snapshot implementation can grant cleanup authority, so public app cleanup
+remains blocked.
 
 The current loader reads the complete cache before structural validation, has
 no retention cap, and accepts same-user replacement as ordinary input. A forged
@@ -558,8 +561,10 @@ planning must come from trusted OS account/platform discovery.
 
 ### 7.4 Hard links and recursive targets
 
-Future scan accounting MUST deduplicate hard-linked allocation within its
-declared scope, and planning MUST record link counts and overlap decisions. A
+Fresh scan accounting deduplicates hard-linked allocation within its declared
+scope, preserves conflicting or unidentified multiply linked allocation as
+unknown, and still remains non-authoritative. Planning MUST independently
+record and revalidate link counts and overlap decisions. A
 permanent regular-file candidate with a link count greater than one is rejected unless a future rule
 type explicitly proves ownership of every link and explains that removing one
 name may not reclaim allocation; no such rule exists initially. Ad hoc Trash
@@ -1350,10 +1355,10 @@ incident as a substitute for deterministic local evidence.
 | Engine/FFI task and plan API | Core handle, pre-worker SQLite compatibility handshake, and bounded per-session registry implemented for one read-only formatting batch; app architecture owns one session; UniFFI handle remains smoke-only, with no scan/task/plan DTOs or cleanup authority | FFI version rejection plus bounded scan/task/plan handles and cancellation |
 | SQLite compatibility store | Checksummed v1/v2 migrations with exact per-version fingerprints, lossless bounded path codec, bounded full/lightweight inspection, private atomic provisioning with durable initialization evidence, cross-platform process writer/version-race coverage, durable writer-locked cleanup-lock layout upgrade, private tri-state process-instance liveness evidence, newer-schema read-only transition, rollback/WAL recovery, crate-private typed scan coverage/issues, candidate and planned-cleanup history, and a bounded cleanup-lock-coupled owner-generation journal state machine are implemented; stored paths and policy remain non-authoritative observations | Scan/evaluator/planner lifecycle integration, candidate status lifecycle, Windows host-scope proof, retention, executor integration, and bounded identity-safe abandoned-stage maintenance |
 | Capacity sample persistence | Typed raw SQLite-v2 writes and bounded latest/cursor reads are implemented with opaque stable volume IDs, separate ordinary/important availability, hourly routine suppression, immediate stored-pressure transitions, monotonic metadata, storage/schema-gated exact retry reconciliation, volume/sample interval checks, hostile-row validation, and version-skew fencing; important-only UI observations are not persisted | Swift/engine/FFI/CLI wiring, Rust pressure evaluation/hysteresis, daily rollups, pressure episodes, and retention |
-| Binary full-tree snapshot store | Independent v1 wire has bounded pre-allocation, exact graph/path/aggregate/flag semantics, frozen golden digests, SHA-256 references, private marker-owned storage, unique temps, atomic no-replace publication, read-only final handles, database→snapshot lock ordering, version-skew fencing, and exact file-first scan-summary-plus-coverage reconciliation; bytes remain non-authoritative | Real scan-task/Explorer integration, last-complete selection, memory benchmarks, latest-two/2 GiB retention, active-review pins, and abandoned-stage/temp maintenance |
-| Typed scan coverage/issues | Implemented as bounded semantic domain values, authoritative scanner terminal outcomes, atomic SQLite-v2 summary children, and truthful fresh/legacy-cache CLI labels; observations grant no plan or cleanup authority | Engine/FFI/Swift task integration, paged Explorer details, permission onboarding, and full hard-link-aware scan accounting |
+| Binary full-tree snapshot store | Independent v1 wire has bounded pre-allocation, exact graph/path/aggregate/flag semantics, frozen golden digests, SHA-256 references, private marker-owned storage, unique temps, atomic no-replace publication, read-only final handles, database→snapshot lock ordering, version-skew fencing, and exact file-first scan-summary-plus-coverage reconciliation. A completed-only fresh-scan converter supplies lossless canonical DFS nodes and fail-closed hard-link accounting; bytes remain non-authoritative | Durable engine scan-task/Explorer integration, last-complete selection, memory benchmarks, latest-two/2 GiB retention, active-review pins, abandoned-stage/temp maintenance, and native Windows sparse/compressed-allocation verification |
+| Typed scan coverage/issues | Implemented as bounded semantic domain values, authoritative scanner terminal outcomes, atomic SQLite-v2 summary children, truthful fresh/legacy-cache CLI labels, and changed-hard-link observations; observations grant no plan or cleanup authority | Engine/FFI/Swift task integration, paged Explorer details, and permission onboarding |
 | Cache semantic/input validation | Atomic write plus CRC/version only; full-file read before bounds | Bounded reads, tree/path semantics, private permissions, retention, and migration |
-| Hard-link accounting and policy | Absent; only non-authoritative path snapshots capture link count | Deduplicated scan accounting and explicit per-mode admission rules |
+| Hard-link accounting and policy | Fresh completed scans deterministically count allocation once per stable identity and fail conflicts/unknown identity closed; no cleanup policy or authority derives from it | Native Windows sparse/compressed verification plus explicit planner/executor per-mode admission and live revalidation rules |
 | Forbidden destructive-call lint | Implemented with compiler-resolved Rust denial, cross-language repository scan, scoped annotations, self-tests, and CI | Keep exception set exact; remove legacy baseline during executor migration |
 | Durable operation journal/history | Schema, typed immutable `planned` insert/load, permanent cleanup OS lock, tri-state process evidence, and a private cleanup-lock-coupled owner/generation state machine are implemented. It covers validation, durable effect intent, outcomes, cancellation, terminal derivation, same-scope death recovery, and explicit unknown reconciliation without performing an effect | Windows host-scope proof, cross-reboot policy, engine lifecycle and centralized-executor integration required before shared executor ships |
 | Private 0700/0600 stores | SQLite and application snapshot roots/controls/data enforce ownership, no-follow identity, links, and exact Unix modes; macOS rejects final-object ACLs but accepts deny-only publication-parent ACLs; Windows uses exact protected DACLs, handle-bound publication, retained identity, and rename guards; the legacy binary cache remains non-private | Extend equivalent guarantees to the legacy cache, logs, provider temp data, and bounded abandoned-stage/temp maintenance |

@@ -2,7 +2,7 @@
 
 Status: Draft implementation specification
 
-Last updated: 2026-07-15
+Last updated: 2026-07-16
 
 Primary platform: macOS 14 or later
 
@@ -344,7 +344,7 @@ Add only metadata required for correctness or product features:
 
 - logical byte length;
 - allocated byte count;
-- modification time for files and directories (captured from the size metadata snapshot since cache v6; the optional field already occupied the current in-memory node layout, while populated file values increase serialized cache size);
+- modification time for files and directories (captured from the size metadata snapshot since cache v6; cache v7 additionally invalidates pre-deduplication hard-link totals without changing the serialized shape; the optional field already occupied the current in-memory node layout, while populated file values increase serialized cache size);
 - optional access time, clearly marked as unreliable;
 - device and inode identity on Unix for hard-link deduplication;
 - file type;
@@ -2094,6 +2094,35 @@ Tasks:
     FFI, CLI, Swift, AI, and every effect primitive. The broad persistence item
     stays open for candidate status and scan/evaluator/planner lifecycle
     integration.
+  - Fresh-scan snapshot-preparation sub-checkpoint completed 2026-07-16: a
+    private node-ID-aligned provenance witness now exists only on a genuinely
+    completed traversal and carries logical bytes, optional physical allocation,
+    modification/access times, object identity, link count, and scan flags from
+    one fresh traversal, with a platform handle capture where required. Public
+    or cache-rebuilt `DiskTree` values cannot mint it, and cancelled or failed
+    outcomes cannot become durable snapshots.
+    Logical bytes count every pathname while multiply linked regular-file
+    allocation is counted once per stable identity; the exact lossless
+    lexicographically smallest path is the deterministic representative.
+    Conflicting size, allocation, link-count, or modification observations fail
+    allocation closed and become bounded changed-during-scan coverage facts.
+    Unknown allocation stays `None` in the application snapshot while the
+    legacy CLI retains the checked sum of bytes that are actually known instead
+    of substituting logical bytes or collapsing the whole subtree to zero.
+
+    The completed-only converter validates the live arena graph, rebuilds
+    lossless host components from exact paths rather than display names,
+    assigns canonical depth-first snapshot IDs, enforces every v1 bound and
+    aggregate invariant, and rejects followed file or directory symlinks until
+    the wire can represent that provenance. Empty directories remain exact
+    `Some(0)` allocations. Tests cover sparse files, deterministic hard links
+    across walker thread counts, conflicting identity observations, unknown
+    allocation, empty trees, lossless non-UTF-8 names on non-macOS Unix,
+    encode/decode, invalid capture time, followed symlinks, and non-completed
+    type state.
+    Cache v7 invalidates older per-path hard-link totals. The converter is not
+    yet called by the engine, so the broad persistence checkbox and durable-scan
+    exit criterion remain open.
 - [x] Keep binary snapshots atomic and checksummed. Completed 2026-07-16:
   `dux-core::persistence::snapshot` now owns an independent crate-private v1
   full-tree wire rather than extending the legacy CLI cache. Its frozen
@@ -2135,11 +2164,12 @@ Tasks:
   reopen, file-first orphan adoption, post-commit ambiguity, lock contention,
   restrictive umask, macOS ACLs, version-skew races, and Windows storage
   compilation/regressions. The normative implementation reference is
-  [`docs/SNAPSHOT_FORMAT.md`](docs/SNAPSHOT_FORMAT.md). Scanner-task wiring,
-  last-complete selection, latest-two/2 GiB retention, active-review pins, and
-  abandoned-stage/temp scavenging remain later tasks and are not claimed by
-  this checkpoint. Typed coverage/issues were attached by the following
-  checkpoint without changing the v1 snapshot wire.
+  [`docs/SNAPSHOT_FORMAT.md`](docs/SNAPSHOT_FORMAT.md). Durable engine scan-task
+  publication, last-complete selection, latest-two/2 GiB retention,
+  active-review pins, and abandoned-stage/temp scavenging remain later tasks
+  and are not claimed by this checkpoint. Typed coverage/issues and the
+  completed-only fresh-scan converter were attached by following checkpoints
+  without changing the v1 snapshot wire.
 - [x] Add capacity sample storage. Completed 2026-07-16: the existing SQLite
   schema-v2 `volumes` and `disk_samples` tables now have a typed Rust boundary
   for raw, non-authoritative capacity observations. Public opaque `VolumeId`
@@ -2208,11 +2238,13 @@ Tasks:
   rollback, collision, post-commit ambiguity, unsafe storage, and hostile-row
   tests cover the boundary.
 
-  Fresh CLI results retain and render the coverage qualifier; legacy v6 cache
-  trees deliberately reload as `coverage unknown` instead of being mislabeled
-  Complete. Scanner-to-engine/Swift/FFI task wiring, paged Explorer issue
-  details, permission onboarding, full logical/allocated/hard-link accounting,
-  and legacy-cache migration remain in their later roadmap items.
+  Fresh CLI results retain and render the coverage qualifier; legacy cache
+  trees, including cache v7 after the hard-link accounting change, deliberately
+  reload as `coverage unknown` instead of being mislabeled Complete.
+  Scanner-to-engine/Swift/FFI task wiring, paged Explorer issue details,
+  permission onboarding, and legacy-cache migration remain in their later
+  roadmap items. Full logical/allocated/hard-link accounting is now attached to
+  the completed-only fresh-scan snapshot converter described above.
 - [ ] Add JSON CLI status/history scaffolding.
 - [ ] Add history retention maintenance.
 - [ ] Add engine integration tests with temporary HOME and database.

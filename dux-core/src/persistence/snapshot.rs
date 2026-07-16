@@ -17,12 +17,21 @@ use super::history::{
 use super::store::{HistoryConnectionGuard, StoreCoordinator};
 
 mod codec;
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "fresh-scan conversion is consumed by the next M2 durable engine task slice"
+    )
+)]
+pub(crate) mod from_scan;
 mod storage;
 
 pub(crate) use codec::{
-    HostValue, SNAPSHOT_FORMAT_VERSION, SnapshotCodecError, SnapshotCodecErrorKind, SnapshotDigest,
-    SnapshotDocument, SnapshotMetadata, SnapshotNode, SnapshotNodeKind, SnapshotScanFlags,
-    SnapshotTimestamp, SnapshotTotals, SnapshotUnixIdentity, decode_snapshot, encode_snapshot,
+    HostValue, MAX_SNAPSHOT_DEPTH, MAX_SNAPSHOT_NODES, SNAPSHOT_FORMAT_VERSION, SnapshotCodecError,
+    SnapshotCodecErrorKind, SnapshotDigest, SnapshotDocument, SnapshotMetadata, SnapshotNode,
+    SnapshotNodeKind, SnapshotScanFlags, SnapshotTimestamp, SnapshotTotals, SnapshotUnixIdentity,
+    decode_snapshot, encode_snapshot, validate_snapshot_document,
 };
 pub(crate) use storage::{
     RetainedSnapshot, SecureSnapshotStore, SnapshotFileName, SnapshotPublication,
@@ -323,6 +332,7 @@ impl SnapshotRepository {
         if self.access != SnapshotStoreAccess::ReadWrite {
             return Err(repository_error(SnapshotRepositoryErrorKind::ReadOnly));
         }
+        counts.validate_for_storage().map_err(map_history)?;
         if coverage.status() == crate::ScanCoverageStatus::Unknown {
             return Err(repository_error(
                 SnapshotRepositoryErrorKind::ReferenceMismatch,
@@ -859,6 +869,59 @@ mod tests {
                 .filter(|entry| entry.file_name().to_string_lossy().starts_with("snapshot-"))
                 .count(),
             0
+        );
+    }
+
+    #[test]
+    fn out_of_sqlite_range_counts_are_rejected_before_snapshot_publication() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let root = temp.path().join("scan-root");
+        let mut document = document("scan:snapshot-count-overflow", &root);
+        let overflow = (i64::MAX as u64) + 1;
+        document.metadata.totals.logical_bytes = overflow;
+        document.nodes[0].logical_bytes = overflow;
+        document.nodes[1].logical_bytes = overflow;
+        let counts = counts_for(&document);
+        let (store, repository) = open_repository(&database);
+        store
+            .record_scan_started(
+                &NewScanRecord::try_new(
+                    document.metadata.scan_id.clone(),
+                    root,
+                    UNIX_EPOCH + Duration::from_millis(1_750_000_000_000),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+
+        assert_eq!(
+            repository
+                .complete_scan(
+                    UNIX_EPOCH + Duration::from_millis(1_750_000_002_000),
+                    counts,
+                    &complete_coverage(),
+                    &document,
+                )
+                .unwrap_err()
+                .kind,
+            SnapshotRepositoryErrorKind::History(HistoryErrorKind::InvalidInput)
+        );
+        assert_eq!(
+            std::fs::read_dir(database.parent().unwrap().join("snapshots"))
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().starts_with("snapshot-"))
+                .count(),
+            0
+        );
+        assert_eq!(
+            store
+                .load_scan(&document.metadata.scan_id)
+                .unwrap()
+                .unwrap()
+                .status(),
+            ScanStatus::Running
         );
     }
 }

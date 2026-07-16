@@ -154,20 +154,27 @@ impl DiskTree {
 
     /// Sort all children by size descending
     pub fn sort_by_size(&mut self) {
-        // First collect all the size information
-        let sizes: Vec<u64> = self
-            .nodes
-            .iter()
-            .map(|n| n.as_ref().map(|n| n.size).unwrap_or(0))
-            .collect();
-
-        // Then sort each node's children
-        for node in self.nodes.iter_mut().flatten() {
-            node.children.sort_by(|a, b| {
-                let size_a = sizes.get(a.index()).copied().unwrap_or(0);
-                let size_b = sizes.get(b.index()).copied().unwrap_or(0);
-                size_b.cmp(&size_a)
+        // Clone only one directory's child IDs at a time. Cloning every full
+        // path here can multiply memory use during million-node finalization.
+        for index in 0..self.nodes.len() {
+            let Some(mut children) = self.nodes[index].as_ref().map(|node| node.children.clone())
+            else {
+                continue;
+            };
+            children.sort_by(|left, right| {
+                let left = self.get(*left);
+                let right = self.get(*right);
+                right
+                    .map(|node| node.size)
+                    .cmp(&left.map(|node| node.size))
+                    .then_with(|| {
+                        left.map(|node| node.path.as_path())
+                            .cmp(&right.map(|node| node.path.as_path()))
+                    })
             });
+            if let Some(node) = self.nodes[index].as_mut() {
+                node.children = children;
+            }
         }
     }
 

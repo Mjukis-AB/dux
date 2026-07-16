@@ -92,6 +92,14 @@ pub(crate) struct ScanCounts {
     pub(crate) allocated_bytes: Option<u64>,
 }
 
+impl ScanCounts {
+    /// Validate the frozen counts against SQLite's signed integer domain before
+    /// any snapshot bytes are staged or published.
+    pub(crate) fn validate_for_storage(self) -> Result<(), HistoryError> {
+        validate_counts(self, HistoryErrorKind::InvalidInput)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct NewScanRecord {
     id: ScanId,
@@ -154,7 +162,7 @@ impl ScanCompletionRecord {
             completed_at,
             HistoryErrorKind::InvalidInput,
         )?)?;
-        validate_counts(counts, HistoryErrorKind::InvalidInput)?;
+        counts.validate_for_storage()?;
         Ok(Self {
             id,
             completed_at,
@@ -190,7 +198,7 @@ impl ScanCompletionRecord {
             completed_at,
             HistoryErrorKind::InvalidInput,
         )?)?;
-        validate_counts(counts, HistoryErrorKind::InvalidInput)?;
+        counts.validate_for_storage()?;
         Ok(Self {
             id,
             completed_at,

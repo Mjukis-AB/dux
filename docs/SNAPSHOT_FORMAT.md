@@ -3,9 +3,9 @@
 Status: implemented format version 1, internal and crate-private.
 
 This document freezes the durable full-tree snapshot contract implemented by
-`dux-core::persistence::snapshot`. It is an implementation reference for future
-scan, Explorer, migration, and retention work. It does not describe the legacy
-CLI cache format.
+`dux-core::persistence::snapshot`. It is an implementation reference for the
+completed-only fresh-scan converter and future engine publication, Explorer,
+migration, and retention work. It does not describe the legacy CLI cache format.
 
 ## 1. Authority and trust boundary
 
@@ -186,6 +186,23 @@ This validation prevents a checksum-valid but ambiguous tree from creating
 duplicate Explorer paths or inconsistent estimates. It still does not make the
 tree current or actionable.
 
+The private scanner adapter accepts only a type-state witness produced by a
+fresh completed traversal; cached/client trees and failed or cancelled outcomes
+cannot create one. Logical bytes count every observed pathname. Allocation for
+regular files sharing one stable identity is assigned once to the exact
+lossless lexicographically smallest path and all other observed links carry the
+hard-link-duplicate flag with `Some(0)`. Conflicting logical size, allocation,
+link count, or modification time makes the whole observed identity group's
+allocation unknown. An absent identity cannot support deduplication, so a
+multiply linked observation without identity is also allocation-unknown.
+
+Unknown allocation is never replaced with logical size. A directory's exact
+allocation is `None` when any child is unknown, while the legacy CLI tree keeps
+the checked sum of known child allocation for useful display. Followed file and
+directory symlinks are rejected by the v1 converter because the wire cannot yet
+preserve their target provenance. Exact host path components, not lossy display
+names, supply node names and deterministic depth-first IDs.
+
 ## 7. Hard bounds
 
 Version 1 rejects values outside these code-owned limits:
@@ -205,6 +222,11 @@ claims the maximum node count fails on its first missing record and does not
 reserve memory proportional to the unproven count. A legitimate maximum file
 can still require substantial decoded memory; the roadmap's 1M/5M-node memory
 benchmarks and later indexed/paged display work remain required.
+
+The wire can encode unsigned 64-bit aggregates, but a completed scan prepared
+for durable publication additionally requires every summary count to fit
+SQLite's signed 64-bit integer domain. The converter and repository both enforce
+that boundary before any snapshot bytes are staged or published.
 
 ## 8. Private snapshot store
 
@@ -306,8 +328,8 @@ This checkpoint does not implement:
 - latest-two-per-root retention or active-review pins;
 - the configurable 2 GiB total-store retention policy;
 - bounded identity-safe scavenging for abandoned temps or provisioning stages;
-- complete hard-link-aware scanner integration (typed coverage/issues already
-  attach atomically to the SQLite summary rather than changing this v1 wire);
+- native Windows sparse/compressed-allocation runtime verification and bounded
+  accounting probes for slow filesystem drivers;
 - Explorer paging/indexes and measured 1M/5M-node memory budgets;
 - migration from or hardening of the legacy CLI cache.
 
