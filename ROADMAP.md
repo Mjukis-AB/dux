@@ -2614,8 +2614,34 @@ Tasks:
     physical-driven inventory intentionally cannot enumerate every missing old
     reference. Exact loads still report a requested missing snapshot; any full
     diagnostic history pager must remain bounded and non-authoritative.
-    Production retention still requires settings-backed cap configuration,
-    revalidation plus tombstone commit under the final lock boundary,
+
+  - Settings-backed snapshot-cap prerequisite completed 2026-07-16: the
+    existing schema-v1 `settings` table now reserves only the exact
+    `snapshot_retention` key for a deny-unknown value-schema-v1 object whose
+    canonical JSON is `{"cap_bytes":<u64>}`. Absence means the versioned 2 GiB
+    default without creating a row; explicit set and reset never touch unknown
+    keys. Explicitly setting 2 GiB stores that override; reset removes it, so a
+    future default change cannot erase user intent. Every load checks SQLite
+    storage classes and small byte bounds before
+    allocation, rejects malformed or noncanonical current values as corrupt,
+    and reports a newer per-setting schema as incompatible instead of silently
+    using the default or overwriting it. All `u64` caps, including zero, are
+    policy-valid; latest-two and active pins remain protected independently.
+
+    Typed, path-free core engine get/set/reset APIs expose default-versus-stored
+    provenance and update time, reject closed or newer-schema sessions, and
+    exact-reconcile post-commit failures. Multiple engine sessions observe the
+    same durable value across process-style reopen. The sealed retention
+    inventory reads the effective cap after acquiring its current-schema
+    database guard and before the snapshot lock, then holds that guard through
+    reconciliation. It never trusts a cached settings DTO. Focused default/no-
+    write, unknown-key, canonical-boundary, exact-retry/reset, reopen,
+    malformed/newer-value-schema, clock, engine-lifecycle, multi-session, and
+    inventory-integration regressions cover the slice. No FFI/Swift setting,
+    tombstone writer, unlink, or cap-enforcement task exists yet.
+
+    Production retention still requires revalidation plus tombstone commit
+    under the final lock boundary,
     retained-handle unlink and directory flush, post-commit residual/orphan
     reconciliation, durable live-temp leases, bounded marker-owned temp/stage
     scavenging, app/FFI lease ownership and idle scheduling, and explicit

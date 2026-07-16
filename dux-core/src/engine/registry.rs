@@ -8,6 +8,10 @@ use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::config::EngineConfig;
+use super::settings::{
+    SnapshotRetentionCap, SnapshotRetentionCapError, SnapshotRetentionCapSource,
+    SnapshotRetentionCapUpdate,
+};
 use super::task::{
     CancelOutcome, CandidateEvaluationTaskFailureKind, CandidateEvaluationTaskStatus, CloseOutcome,
     DurableScanCounts, DurableScanCoverage, DurableScanStatus, DurableScanSummary, EngineLifecycle,
@@ -33,6 +37,10 @@ use crate::persistence::{
     ScanCompletionRecord, ScanCounts, ScanStatus, TerminalScanStatus,
 };
 use crate::persistence::{DatabaseStatus, StoreCoordinator};
+use crate::persistence::{
+    SnapshotRetentionCapSetting, SnapshotRetentionCapSettingSource,
+    SnapshotRetentionCapSettingUpdate,
+};
 use crate::scanner::{CancellationToken, ScanConfig, ScanMessage, ScanTermination, Scanner};
 
 const FORMAT_BATCH_LIMIT: usize = 256;
@@ -535,6 +543,53 @@ impl EngineHandle {
         &self,
     ) -> Result<DatabaseStatus, crate::persistence::DatabaseOpenErrorKind> {
         self.inner.store.status().map_err(|error| error.kind)
+    }
+
+    /// Load the effective, versioned snapshot-store size cap.
+    ///
+    /// The result is policy metadata only. It cannot select or remove a
+    /// snapshot, and a future retention writer must reread it under its final
+    /// database-to-snapshot lock boundary.
+    pub fn snapshot_retention_cap(
+        &self,
+    ) -> Result<SnapshotRetentionCap, SnapshotRetentionCapError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(SnapshotRetentionCapError::Closed);
+        }
+        self.inner
+            .store
+            .load_snapshot_retention_cap()
+            .map(public_snapshot_retention_cap)
+            .map_err(|error| map_snapshot_retention_cap_error(error.kind))
+    }
+
+    /// Store one explicit snapshot cap in the shared DUX settings database.
+    pub fn set_snapshot_retention_cap(
+        &self,
+        cap_bytes: u64,
+    ) -> Result<SnapshotRetentionCapUpdate, SnapshotRetentionCapError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(SnapshotRetentionCapError::Closed);
+        }
+        self.inner
+            .store
+            .set_snapshot_retention_cap(cap_bytes)
+            .map(public_snapshot_retention_cap_update)
+            .map_err(|error| map_snapshot_retention_cap_error(error.kind))
+    }
+
+    /// Remove the explicit override and restore the versioned core default.
+    pub fn reset_snapshot_retention_cap(
+        &self,
+    ) -> Result<SnapshotRetentionCapUpdate, SnapshotRetentionCapError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(SnapshotRetentionCapError::Closed);
+        }
+        self.inner
+            .store
+            .reset_snapshot_retention_cap()
+            .map(public_snapshot_retention_cap_update)
+            .map_err(|error| map_snapshot_retention_cap_error(error.kind))
     }
 
     /// Load a bounded, path-free page of durable scan observations. This reads
@@ -1468,6 +1523,43 @@ const fn map_scan_history_error(kind: HistoryErrorKind) -> ScanHistoryError {
         | HistoryErrorKind::InvalidTransition
         | HistoryErrorKind::DatabaseUnavailable
         | HistoryErrorKind::OutcomeUnknown => ScanHistoryError::Unavailable,
+    }
+}
+
+fn public_snapshot_retention_cap(setting: SnapshotRetentionCapSetting) -> SnapshotRetentionCap {
+    SnapshotRetentionCap {
+        cap_bytes: setting.cap_bytes,
+        source: match setting.source {
+            SnapshotRetentionCapSettingSource::Default => SnapshotRetentionCapSource::Default,
+            SnapshotRetentionCapSettingSource::Stored => SnapshotRetentionCapSource::Stored,
+        },
+        updated_at: setting.updated_at,
+    }
+}
+
+fn public_snapshot_retention_cap_update(
+    update: SnapshotRetentionCapSettingUpdate,
+) -> SnapshotRetentionCapUpdate {
+    SnapshotRetentionCapUpdate {
+        settings: public_snapshot_retention_cap(update.settings),
+        changed: update.changed,
+    }
+}
+
+const fn map_snapshot_retention_cap_error(kind: HistoryErrorKind) -> SnapshotRetentionCapError {
+    match kind {
+        HistoryErrorKind::InvalidInput => SnapshotRetentionCapError::InvalidClock,
+        HistoryErrorKind::IncompatibleSchema => SnapshotRetentionCapError::IncompatibleSchema,
+        HistoryErrorKind::QueryLimitExceeded => SnapshotRetentionCapError::QueryLimitExceeded,
+        HistoryErrorKind::Busy => SnapshotRetentionCapError::Busy,
+        HistoryErrorKind::UnsafeStorage => SnapshotRetentionCapError::UnsafeStorage,
+        HistoryErrorKind::CorruptData => SnapshotRetentionCapError::CorruptData,
+        HistoryErrorKind::DatabaseUnavailable => SnapshotRetentionCapError::Unavailable,
+        HistoryErrorKind::OutcomeUnknown => SnapshotRetentionCapError::OutcomeUnknown,
+        HistoryErrorKind::AlreadyExists
+        | HistoryErrorKind::NotFound
+        | HistoryErrorKind::InvalidTransition
+        | HistoryErrorKind::InternalState => SnapshotRetentionCapError::InternalState,
     }
 }
 

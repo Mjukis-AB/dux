@@ -28,8 +28,7 @@ use super::history::{
 use super::process_liveness::{ProcessIdentityError, ProcessInstanceId, current_process_instance};
 use super::snapshot_retention::{SnapshotRetentionState, load_snapshot_retention_state};
 use super::snapshot_retention_inventory::{
-    DEFAULT_SNAPSHOT_RETENTION_CAP_BYTES, SnapshotRetentionInventory,
-    build_snapshot_retention_inventory,
+    SnapshotRetentionInventory, build_snapshot_retention_inventory,
 };
 #[cfg(test)]
 use super::snapshot_review_pin::{MAX_ACTIVE_PINS, MAX_EXPIRED_PRUNE};
@@ -373,14 +372,6 @@ impl SnapshotRepository {
         &self,
         observed_at: SystemTime,
     ) -> Result<SnapshotRetentionInventory, SnapshotRepositoryError> {
-        self.inspect_retention_inventory_with_cap(observed_at, DEFAULT_SNAPSHOT_RETENTION_CAP_BYTES)
-    }
-
-    fn inspect_retention_inventory_with_cap(
-        &self,
-        observed_at: SystemTime,
-        cap_bytes: u64,
-    ) -> Result<SnapshotRetentionInventory, SnapshotRepositoryError> {
         if self.access != SnapshotStoreAccess::ReadWrite {
             return Err(repository_error(SnapshotRepositoryErrorKind::ReadOnly));
         }
@@ -388,6 +379,11 @@ impl SnapshotRepository {
             .database
             .lock_current_history_connection()
             .map_err(map_history)?;
+        let cap_bytes = self
+            .database
+            .load_snapshot_retention_cap_with_guard(&database_guard)
+            .map_err(map_history)?
+            .cap_bytes;
         let store = self
             .store
             .as_ref()
@@ -1573,9 +1569,11 @@ mod tests {
             )
         });
 
-        let inventory = repository
-            .inspect_retention_inventory_with_cap(observed_at, 0)
+        store
+            .set_snapshot_retention_cap_at_for_test(0, observed_at)
             .unwrap();
+        let inventory = repository.inspect_retention_inventory(observed_at).unwrap();
+        assert_eq!(inventory.cap_bytes, 0);
         assert_eq!(inventory.entries.len(), 5);
         assert_eq!(inventory.orphan_finals.len(), 1);
         assert_eq!(inventory.temporary_files.len(), 1);
@@ -1660,9 +1658,11 @@ mod tests {
         });
         assert_eq!(after_rows, before_rows, "inventory must not mutate history");
 
-        let at_expiry = repository
-            .inspect_retention_inventory_with_cap(expires_at, u64::MAX)
+        store
+            .set_snapshot_retention_cap_at_for_test(u64::MAX, expires_at)
             .unwrap();
+        let at_expiry = repository.inspect_retention_inventory(expires_at).unwrap();
+        assert_eq!(at_expiry.cap_bytes, u64::MAX);
         assert_eq!(at_expiry.totals.active_pin_rows, 0);
         assert_eq!(at_expiry.totals.expired_pin_rows, 1);
         assert_eq!(
@@ -1699,11 +1699,64 @@ mod tests {
         let reopened_inventory = reopened_repository
             .inspect_retention_inventory(expires_at + Duration::from_millis(1))
             .unwrap();
+        assert_eq!(reopened_inventory.cap_bytes, u64::MAX);
         assert_eq!(reopened_inventory.entries.len(), 5);
         assert_eq!(reopened_inventory.orphan_finals.len(), 1);
         assert_eq!(reopened_inventory.temporary_files.len(), 1);
         drop(reopened_repository);
         drop(reopened_store);
+    }
+
+    #[test]
+    fn retention_inventory_fails_on_invalid_cap_before_snapshot_lock() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let root = temp.path().join("scan-root");
+        let observed_at = UNIX_EPOCH + Duration::from_millis(1_750_000_002_000);
+        let (store, repository) = open_repository(&database);
+        let held_publication = repository
+            .publish_orphan_for_test(&document("scan:retention-setting-lock", &root))
+            .unwrap();
+
+        store.with_connection(|connection| {
+            connection
+                .execute(
+                    "INSERT INTO settings (
+                         setting_key, value_json, value_schema_version,
+                         updated_at_unix_ms
+                     ) VALUES (
+                         'snapshot_retention', '{\"cap_bytes\":1,\"extra\":2}', 1, 1
+                     )",
+                    [],
+                )
+                .unwrap();
+        });
+        assert_eq!(
+            repository
+                .inspect_retention_inventory(observed_at)
+                .unwrap_err()
+                .kind,
+            SnapshotRepositoryErrorKind::History(HistoryErrorKind::CorruptData)
+        );
+
+        store.with_connection(|connection| {
+            connection
+                .execute(
+                    "UPDATE settings
+                     SET value_json = '{\"cap_bytes\":1}', value_schema_version = 2
+                     WHERE setting_key = 'snapshot_retention'",
+                    [],
+                )
+                .unwrap();
+        });
+        assert_eq!(
+            repository
+                .inspect_retention_inventory(observed_at)
+                .unwrap_err()
+                .kind,
+            SnapshotRepositoryErrorKind::History(HistoryErrorKind::IncompatibleSchema)
+        );
+        drop(held_publication);
     }
 
     #[test]

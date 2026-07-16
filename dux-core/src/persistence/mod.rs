@@ -56,6 +56,7 @@ mod migrations;
 mod process_liveness;
 mod retention;
 mod scan_coverage_history;
+mod settings;
 pub(crate) mod snapshot;
 mod snapshot_retention;
 mod snapshot_retention_inventory;
@@ -73,6 +74,10 @@ pub(crate) use candidate_history::NewCandidateRecord;
 pub(crate) use history::{
     HistoryErrorKind, MAX_RECENT_SCAN_HISTORY_LIMIT, NewScanRecord, ScanCompletionRecord,
     ScanCounts, ScanStatus, TerminalScanStatus,
+};
+pub(crate) use settings::{
+    SnapshotRetentionCapSetting, SnapshotRetentionCapSettingSource,
+    SnapshotRetentionCapSettingUpdate,
 };
 pub use snapshot::SnapshotOpenErrorKind;
 pub(crate) use snapshot_review_pin::SnapshotReviewPurpose;

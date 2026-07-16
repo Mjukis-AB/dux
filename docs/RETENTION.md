@@ -95,6 +95,27 @@ published snapshot disappear from retention ranking. The default total cap is
 2 GiB. Old unpinned referenced snapshots are eligible oldest-first; latest-two
 and active pins remain protected even if protected bytes alone exceed the cap.
 
+The effective cap is now a typed core setting stored only under the exact
+`snapshot_retention` key. Value schema 1 is the canonical, deny-unknown JSON
+object `{"cap_bytes":<u64>}`. A missing row means the versioned 2 GiB default
+and causes no implicit write. Every `u64` value, including zero, is valid policy
+input; it never weakens latest-two or active-pin protection. A malformed or
+noncanonical current value is corruption, while a newer per-setting schema is
+incompatible and is never overwritten. Unknown setting keys are untouched.
+Explicitly setting 2 GiB stores that override and preserves user intent if a
+later version changes its default; reset removes the row and restores default
+provenance.
+
+The shared engine exposes typed, path-free get, set, and reset operations.
+Set/reset are explicit configuration writes and exact-reconcile ambiguous
+commits; automatic history retention remains forbidden from mutating settings.
+The retention inventory reads the effective setting while holding its
+current-schema database guard and before acquiring the snapshot lock. A future
+writer must repeat that read under its final database-to-snapshot boundary;
+neither an engine settings DTO nor an earlier inventory is authority. FFI and
+Swift settings presentation remain unimplemented and must call these
+synchronous core operations off the main actor.
+
 Terminal scan summaries and their original snapshot references are immutable.
 Snapshot retention is therefore not allowed to clear or rewrite that historical
 tuple. Schema v5 implements the prerequisite as an append-only
@@ -214,8 +235,8 @@ Publication and retention share this lock order:
 3. snapshot writer lock.
 
 Snapshot retention is not enabled until app/FFI review-lease ownership,
-settings-backed cap configuration, retained-handle deletion, live
-temporary-file leases, and bounded marker-owned stage scavenging all exist.
+retained-handle deletion, live temporary-file leases, and bounded marker-owned
+stage scavenging all exist.
 The implemented inventory ranks latest-two and reports cap observations but is
 not authority. Tombstone insertion, the final pin/latest-two/cap eligibility
 recheck, and retained-file acquisition must occur while holding the database

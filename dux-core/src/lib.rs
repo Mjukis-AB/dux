@@ -41,8 +41,9 @@ pub use engine::{
     EngineConfigError, EngineConfigField, EngineConfigReason, EngineHandle, EngineLifecycle,
     EngineOpenError, FormatSizeBatchResult, FormattedSizeEntry, RecentScanHistory,
     ScanHistoryError, ScanRootErrorKind, ScanTaskCounts, ScanTaskResult, ScanTaskStatus,
-    StartTaskError, TaskAccessError, TaskEvent, TaskEventBatch, TaskEventKind, TaskFailureKind,
-    TaskId, TaskKind, TaskPhase, TaskSnapshot,
+    SnapshotRetentionCap, SnapshotRetentionCapError, SnapshotRetentionCapSource,
+    SnapshotRetentionCapUpdate, StartTaskError, TaskAccessError, TaskEvent, TaskEventBatch,
+    TaskEventKind, TaskFailureKind, TaskId, TaskKind, TaskPhase, TaskSnapshot,
 };
 pub use error::{DuxError, Result};
 pub use persistence::{

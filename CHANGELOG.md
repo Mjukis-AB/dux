@@ -5,6 +5,17 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Added the typed snapshot-retention cap prerequisite. The exact
+  `snapshot_retention` setting uses canonical deny-unknown value-schema-v1 JSON,
+  defaults to 2 GiB without writing a row, accepts the full `u64` policy domain,
+  preserves unknown keys, rejects malformed current values, and fences newer
+  per-setting schemas without overwrite. Path-free core engine get/set/reset
+  APIs expose stored/default provenance and exact-reconcile ambiguous commits.
+  Retention inventory now rereads the effective cap under its current-schema
+  database guard before taking the snapshot lock. Focused default, boundary,
+  retry/reset, reopen, corruption/version, engine lifecycle/multi-session, and
+  inventory tests cover the slice. This adds no FFI/Swift setting, tombstone,
+  unlink, or cap-enforcement authority.
 - Added schema v7's read-only snapshot-retention inventory prerequisite. The
   checksummed migration adds a partial `scans_by_snapshot_path` index over the
   lossless snapshot-name encoding, bytes, and scan ID only for rows that carry

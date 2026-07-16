@@ -100,6 +100,72 @@ fn handle_is_send_sync_and_config_is_explicit() {
 }
 
 #[test]
+fn snapshot_retention_cap_is_shared_versioned_and_closed_with_typed_errors() {
+    let temp = TempDir::new().unwrap();
+    let config = config(&temp);
+    let first = EngineHandle::open(config.clone()).unwrap();
+    let second = EngineHandle::open(config).unwrap();
+
+    assert_eq!(
+        first.snapshot_retention_cap().unwrap(),
+        SnapshotRetentionCap {
+            cap_bytes: 2 * 1024 * 1024 * 1024,
+            source: SnapshotRetentionCapSource::Default,
+            updated_at: None,
+        }
+    );
+    let explicit_default = first
+        .set_snapshot_retention_cap(2 * 1024 * 1024 * 1024)
+        .unwrap();
+    assert!(explicit_default.changed);
+    assert_eq!(
+        explicit_default.settings.source,
+        SnapshotRetentionCapSource::Stored
+    );
+    assert_eq!(
+        second.snapshot_retention_cap().unwrap(),
+        explicit_default.settings
+    );
+    let zero = first.set_snapshot_retention_cap(0).unwrap();
+    assert!(zero.changed);
+    assert_eq!(zero.settings.cap_bytes, 0);
+    assert_eq!(zero.settings.source, SnapshotRetentionCapSource::Stored);
+    assert!(zero.settings.updated_at.is_some());
+    assert_eq!(second.snapshot_retention_cap().unwrap(), zero.settings);
+
+    let exact = second.set_snapshot_retention_cap(0).unwrap();
+    assert!(!exact.changed);
+    assert_eq!(exact.settings, zero.settings);
+    let maximum = second.set_snapshot_retention_cap(u64::MAX).unwrap();
+    assert!(maximum.changed);
+    assert_eq!(first.snapshot_retention_cap().unwrap(), maximum.settings);
+
+    let reset = first.reset_snapshot_retention_cap().unwrap();
+    assert!(reset.changed);
+    assert_eq!(reset.settings.source, SnapshotRetentionCapSource::Default);
+    assert_eq!(reset.settings.cap_bytes, 2 * 1024 * 1024 * 1024);
+    assert_eq!(reset.settings.updated_at, None);
+    assert_eq!(second.snapshot_retention_cap().unwrap(), reset.settings);
+
+    first.close();
+    assert!(first.wait_until_closed(TEST_TIMEOUT));
+    assert_eq!(
+        first.snapshot_retention_cap(),
+        Err(SnapshotRetentionCapError::Closed)
+    );
+    assert_eq!(
+        first.set_snapshot_retention_cap(1),
+        Err(SnapshotRetentionCapError::Closed)
+    );
+    assert_eq!(
+        first.reset_snapshot_retention_cap(),
+        Err(SnapshotRetentionCapError::Closed)
+    );
+    second.close();
+    assert!(second.wait_until_closed(TEST_TIMEOUT));
+}
+
+#[test]
 fn ambiguous_terminal_persistence_disarms_changed_fact_fallback() {
     let (_temp, engine) = engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
     let start = NewScanRecord::try_new(
@@ -213,6 +279,18 @@ fn newer_database_never_provisions_missing_snapshot_storage() {
     assert_eq!(
         engine.recent_scan_history(1),
         Err(ScanHistoryError::IncompatibleSchema)
+    );
+    assert_eq!(
+        engine.snapshot_retention_cap(),
+        Err(SnapshotRetentionCapError::IncompatibleSchema)
+    );
+    assert_eq!(
+        engine.set_snapshot_retention_cap(1),
+        Err(SnapshotRetentionCapError::IncompatibleSchema)
+    );
+    assert_eq!(
+        engine.reset_snapshot_retention_cap(),
+        Err(SnapshotRetentionCapError::IncompatibleSchema)
     );
     assert!(!config.snapshots_directory().exists());
     engine.close();

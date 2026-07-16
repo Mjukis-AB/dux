@@ -34,7 +34,6 @@ use super::snapshot::{
 };
 use super::snapshot_review_pin::{SnapshotReviewPinPopulation, SnapshotReviewPinSummary};
 
-pub(super) const DEFAULT_SNAPSHOT_RETENTION_CAP_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_ID_BYTES: i64 = 128;
 const MAX_STATUS_BYTES: i64 = 16;
 const MAX_PATH_BYTES: i64 = 65_536;

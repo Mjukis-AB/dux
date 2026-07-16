@@ -336,6 +336,10 @@ snapshot bodies or treat these bytes as content validity. Recognized temps have
 unknown liveness because their staging writer can remain active outside the
 snapshot writer lock. Latest-two/cap results are observations that a future
 writer must recompute under the final database and snapshot lock boundary.
+The effective cap comes from the typed `snapshot_retention` database setting;
+absence means 2 GiB. Inventory reads it under the current-schema database guard
+before taking the snapshot lock. This does not change snapshot v1 bytes, and a
+cached settings value never grants retention authority.
 
 Initial snapshot-directory provisioning uses a private marker-complete sibling
 stage and atomic no-replace directory publication. A racing winner is reopened
@@ -377,8 +381,7 @@ This checkpoint does not implement:
 - FFI, Swift, or CLI scan/history transport;
 - latest-two-per-root selection, app/FFI review-lease ownership, or a production
   tombstone writer and retained-handle unlink;
-- the configurable 2 GiB total-store retention policy and physical-orphan
-  reconciliation;
+- production total-store cap enforcement and physical-orphan reconciliation;
 - bounded identity-safe scavenging for abandoned temps or provisioning stages;
 - native Windows sparse/compressed-allocation runtime verification and bounded
   accounting probes for slow filesystem drivers;
