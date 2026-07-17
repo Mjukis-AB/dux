@@ -29,6 +29,8 @@ enum DiskPressurePolicyAccessibility {
 }
 
 struct DuxSettingsView: View {
+    @Environment(\.scenePhase) private var scenePhase
+
     let model: AppModel
 
     var body: some View {
@@ -55,6 +57,10 @@ struct DuxSettingsView: View {
                 .foregroundStyle(.secondary)
                 Text("Closing Explorer keeps DUX available from the menu bar.")
                     .foregroundStyle(.secondary)
+
+                Divider()
+
+                loginItemSettings(model: model)
             }
 
             Section("Disk pressure") {
@@ -83,7 +89,7 @@ struct DuxSettingsView: View {
 
                 Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 10) {
                     GridRow {
-                        Text("")
+                        Text(verbatim: "")
                         Text("GiB")
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -197,11 +203,88 @@ struct DuxSettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 620, height: 610)
+        .frame(width: 620, height: 730)
         .task {
+            await model.refreshLoginItemState()
             await model.loadDiskPressurePolicy()
             await model.loadInitialState()
         }
+        .onChange(of: scenePhase) { _, phase in
+            guard phase == .active else {
+                return
+            }
+            Task { await model.refreshLoginItemState() }
+        }
+    }
+
+    @ViewBuilder
+    private func loginItemSettings(model: AppModel) -> some View {
+        let presentation = LoginItemPresentation.make(state: model.loginItemState)
+        Toggle(
+            "Launch at login",
+            isOn: Binding(
+                get: { presentation.toggleOn },
+                set: { requested in
+                    Task { await model.setLaunchAtLogin(requested) }
+                }
+            )
+        )
+        .disabled(!presentation.toggleEnabled)
+        .accessibilityIdentifier(LoginItemAccessibility.toggle)
+        .accessibilityHint(
+            "Uses the current macOS Login Items setting; separate approval may be required"
+        )
+
+        LabeledContent("Login item status") {
+            HStack(spacing: 8) {
+                if let progressLabel = presentation.progressLabel {
+                    ProgressView()
+                        .controlSize(.small)
+                        .accessibilityIdentifier(LoginItemAccessibility.progress)
+                        .accessibilityLabel(Text(verbatim: progressLabel))
+                }
+                if model.loginItemState.status == .requiresApproval {
+                    Image(systemName: "exclamationmark.triangle")
+                }
+                Text(verbatim: presentation.statusTitle)
+            }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier(LoginItemAccessibility.status)
+
+        Text(verbatim: presentation.statusDetail)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+
+        if presentation.showsApprovalAction {
+            Button("Open Login Items Settings…") {
+                AppActivation.openLoginItemsSettings()
+            }
+            .accessibilityIdentifier(LoginItemAccessibility.openSystemSettings)
+            .accessibilityHint("Opens macOS System Settings so you can approve DUX")
+        }
+
+        if presentation.showsRefreshAction {
+            Button("Check again") {
+                Task { await model.refreshLoginItemState() }
+            }
+            .accessibilityIdentifier(LoginItemAccessibility.refresh)
+            .accessibilityHint("Reads the Login Items status from macOS again")
+        }
+
+        if let message = presentation.errorMessage {
+            Label {
+                Text(verbatim: message)
+            } icon: {
+                Image(systemName: "exclamationmark.triangle")
+            }
+            .foregroundStyle(.red)
+            .accessibilityIdentifier(LoginItemAccessibility.error)
+        }
+
+        Text("Uses macOS Login Items. DUX installs no daemon or privileged helper.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
     }
 
     private func policyRow(

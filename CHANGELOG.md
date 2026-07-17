@@ -5,6 +5,22 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Added an opt-in Launch at Login setting backed only by
+  `SMAppService.mainApp`. Settings reflects macOS's authoritative registered,
+  enabled, approval-required, unavailable, and unknown states; refreshes after
+  returning from System Settings; and never stores a competing UserDefaults
+  preference. Registration changes are single-flight and always re-read system
+  status before claiming success, including already-settled error races. The
+  existing `LSUIElement` menu-bar startup remains unchanged, and no helper,
+  daemon, entitlement, privilege, scan, or cleanup authority is added. All
+  registration-mutation tests use an injected service and never mutate the
+  developer's Login Items, while one production integration test reads the
+  current status without enabling it. The focused 17-test suite and complete
+  140-test linked Swift suite pass, as do the full Rust format/lint/test gates,
+  the 20-test destructive-boundary checker and 170-source scan. Debug and
+  Release bindings are byte-identical, and unsigned universal arm64/x86_64
+  Debug and Release apps target macOS 14. Signed enable/disable and sign-in-cycle
+  testing remains gated on the production bundle identity.
 - Added the first native Explorer window: a single reusable, menu-bar-first
   `NavigationSplitView` whose Overview reports startup-disk capacity and the
   current in-session Home scan from the existing shared `AppModel`. Capacity

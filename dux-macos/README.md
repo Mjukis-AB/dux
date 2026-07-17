@@ -131,6 +131,20 @@ menu action opens Explorer or Settings. The generated Info.plist sets
 `LSUIElement=true`, so closing Explorer leaves DUX running without a default
 Dock icon. User-facing shell keys live in `Dux/Resources/Localizable.xcstrings`.
 
+Settings owns one opt-in Launch at Login control through an injected actor that
+privately wraps `SMAppService.mainApp`. macOS status is the only source of truth:
+there is no mirrored UserDefaults flag. Registration and unregistration are
+single-flight, always followed by a fresh status read, and approval-required is
+shown as registered but currently blocked with a direct System Settings action.
+The setting refreshes when Settings appears and when it returns active. It adds
+no helper, launch daemon, entitlement, privilege, TCC access, or engine/FFI
+capability; a login launch follows the existing `LSUIElement` menu-bar startup
+and does not open Explorer or begin a Home scan. Mutation tests inject a fake
+service and never touch the host's Login Items; one integration test calls only
+the production status reader. Do not perform real registration testing with the
+temporary `se.mjukis.dux.spike` identity; the signed stable install and sign-in
+cycle remain gated on the production identity in Milestone 9.
+
 Explorer currently contains one honest Overview destination in a
 `NavigationSplitView`, plus a direct Settings shortcut. It reads only the same
 cached startup-volume state and current in-session Home-scan aggregate already

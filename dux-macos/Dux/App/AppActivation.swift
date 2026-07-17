@@ -1,4 +1,5 @@
 import AppKit
+import ServiceManagement
 import SwiftUI
 
 enum DuxSceneID {
@@ -25,6 +26,16 @@ enum AppActivation {
     static func openSettings(using openSettings: OpenSettingsAction) {
         openSettings()
         NSApplication.shared.activate()
+    }
+
+    static func openLoginItemsSettings() {
+        openLoginItemsSettings {
+            SMAppService.openSystemSettingsLoginItems()
+        }
+    }
+
+    static func openLoginItemsSettings(open: () -> Void) {
+        open()
     }
 
     static func quit() {

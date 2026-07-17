@@ -2,7 +2,7 @@
 
 Status: normative design and implementation gate
 
-Last reviewed: 2026-07-16
+Last reviewed: 2026-07-17
 
 Applies to: `dux-core`, `dux-cli`, `dux-ffi`, and the direct-download macOS app
 
@@ -1691,8 +1691,15 @@ for administrator credentials, disable platform protections, or install a privil
 gain coverage.
 
 The public app MUST use Hardened Runtime, library validation, the smallest
-reviewed entitlement set, and signed bundled code. `SMAppService.mainApp` MUST
-remain opt-in launch at login, not a privilege boundary. The separately launched CLI has its own
+reviewed entitlement set, and signed bundled code. `SMAppService.mainApp`
+remains opt-in launch at login, not a privilege boundary. The native setting
+uses macOS status as its sole source of truth, performs no registration at
+startup, serializes user-requested changes, and re-reads status before claiming
+an outcome. Approval-required is not described as enabled. The service adds no
+helper, daemon, entitlement, filesystem access, engine call, or cleanup
+authority, and automated tests never mutate the host's Login Items. Real
+enable/disable and sign-in-cycle validation waits for a signed stable app with
+the frozen production identifier. The separately launched CLI has its own
 process and TCC context; the app MUST NOT imply that GUI access transfers to it
 or use the CLI as an access bypass.
 

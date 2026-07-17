@@ -17,6 +17,7 @@ final class AppModel: DuxCapacitySampling {
     private(set) var diskPressurePolicyState = DiskPressurePolicyState.idle
     var diskPressurePolicyDraft = DiskPressurePolicyDraft.defaults
     private(set) var scanState = AppScanState.idle
+    private(set) var loginItemState = LoginItemState.idle
 
     private let engineService: any EngineServing
     private let volumeMonitor: any VolumeMonitoring
@@ -24,6 +25,7 @@ final class AppModel: DuxCapacitySampling {
     private let menuBarLabelPreferenceStore: any MenuBarLabelPreferenceStoring
     private let homeScanService: any HomeScanServing
     private let homeScanClock: any HomeScanPollingClock
+    private let loginItemService: any LoginItemServing
 
     @ObservationIgnored
     private var engineLoadTask: Task<Void, Never>?
@@ -51,6 +53,10 @@ final class AppModel: DuxCapacitySampling {
     private var latestHomeScanProgress: ScanProgressFacts?
     @ObservationIgnored
     private var homeScanIsInvalidated = false
+    @ObservationIgnored
+    private var loginItemTask: Task<Void, Never>?
+    @ObservationIgnored
+    private var loginItemGeneration: UInt64 = 0
 
     init(
         engineService: any EngineServing = EngineService(),
@@ -60,7 +66,8 @@ final class AppModel: DuxCapacitySampling {
         menuBarLabelPreferenceStore: any MenuBarLabelPreferenceStoring =
             UserDefaultsMenuBarLabelPreferenceStore(),
         homeScanService: (any HomeScanServing)? = nil,
-        homeScanClock: any HomeScanPollingClock = ContinuousHomeScanPollingClock()
+        homeScanClock: any HomeScanPollingClock = ContinuousHomeScanPollingClock(),
+        loginItemService: any LoginItemServing = LoginItemService()
     ) {
         self.engineService = engineService
         self.volumeMonitor = volumeMonitor
@@ -71,6 +78,7 @@ final class AppModel: DuxCapacitySampling {
             override: homeScanService
         )
         self.homeScanClock = homeScanClock
+        self.loginItemService = loginItemService
         menuBarLabelMode = menuBarLabelPreferenceStore.load()
     }
 
@@ -230,6 +238,99 @@ final class AppModel: DuxCapacitySampling {
         pressurePolicyTask?.cancel()
         pressurePolicyTask = nil
         diskPressurePolicyState = diskPressurePolicy == nil ? .idle : .ready
+    }
+
+    func refreshLoginItemState() async {
+        if let loginItemTask {
+            await loginItemTask.value
+            return
+        }
+
+        loginItemGeneration &+= 1
+        let generation = loginItemGeneration
+        loginItemState = LoginItemState(
+            status: loginItemState.status,
+            activity: .loading,
+            failure: nil
+        )
+        let service = loginItemService
+        let task = Task { @MainActor [weak self] in
+            let status = await service.status()
+            guard !Task.isCancelled, let self,
+                  generation == self.loginItemGeneration else {
+                return
+            }
+            self.loginItemState = LoginItemState(
+                status: status,
+                activity: nil,
+                failure: nil
+            )
+            self.loginItemTask = nil
+        }
+        loginItemTask = task
+        await task.value
+    }
+
+    func setLaunchAtLogin(_ registrationRequested: Bool) async {
+        if let loginItemTask {
+            await loginItemTask.value
+            return
+        }
+        guard let status = loginItemState.status,
+              status != .notFound,
+              status != .unknown,
+              status.registrationRequested != registrationRequested else {
+            return
+        }
+
+        loginItemGeneration &+= 1
+        let generation = loginItemGeneration
+        loginItemState = LoginItemState(
+            status: status,
+            activity: registrationRequested ? .registering : .unregistering,
+            failure: nil
+        )
+        let service = loginItemService
+        let task = Task { @MainActor [weak self] in
+            let operationFailure: LoginItemFailureReason?
+            do {
+                if registrationRequested {
+                    try await service.register()
+                } else {
+                    try await service.unregister()
+                }
+                operationFailure = nil
+            } catch {
+                operationFailure = Self.loginItemFailureReason(for: error)
+            }
+
+            let confirmedStatus = await service.status()
+            let reachedRequestedState = registrationRequested
+                ? confirmedStatus.registrationRequested
+                : confirmedStatus == .notRegistered
+            let failure: LoginItemFailure?
+            if reachedRequestedState {
+                failure = nil
+            } else {
+                let reason = operationFailure ?? .outcomeUnknown
+                failure = registrationRequested
+                    ? .registration(reason)
+                    : .unregistration(reason)
+            }
+
+            guard !Task.isCancelled, let self,
+                  generation == self.loginItemGeneration else {
+                return
+            }
+            self.loginItemState = LoginItemState(
+                status: confirmedStatus,
+                activity: nil,
+                failure: failure
+            )
+            self.loginItemTask = nil
+        }
+        loginItemTask = task
+        await task.value
     }
 
     func startHomeScan() async {
@@ -443,6 +544,20 @@ final class AppModel: DuxCapacitySampling {
             return .draft(error)
         }
         return .unexpected
+    }
+
+    private static func loginItemFailureReason(
+        for error: Error
+    ) -> LoginItemFailureReason {
+        guard let error = error as? LoginItemServiceError else {
+            return .unexpected
+        }
+        return switch error {
+        case .invalidSignature: .invalidSignature
+        case .denied: .denied
+        case .serviceUnavailable: .serviceUnavailable
+        case .unexpected: .unexpected
+        }
     }
 
     private func isCurrentHomeScan(_ generation: UInt64) -> Bool {

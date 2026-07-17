@@ -3513,7 +3513,34 @@ Tasks:
   format/lint/test gates, the 20-test destructive-boundary checker and
   167-source scan, byte-identical Debug/Release bindings, and unsigned universal
   arm64/x86_64 Debug and Release builds at the macOS 14 deployment target pass.
-- [ ] Implement launch-at-login setting.
+- [x] Implement launch-at-login setting. Completed 2026-07-17: Settings now
+  exposes one opt-in `SMAppService.mainApp` control whose source of truth is the
+  current macOS Login Items status, never UserDefaults. The shared `AppModel`
+  retains the last confirmed state while loading or changing, serializes
+  operations, re-reads status after every register/unregister attempt, and
+  normalizes already-settled races without claiming an unconfirmed outcome.
+  Enabled, not registered, approval required, service not found, and unknown
+  future statuses have distinct accessible text. Approval-required remains
+  visibly registered but blocked and links to the exact System Settings pane;
+  unavailable/unknown states remain disabled and retryable. Settings refreshes
+  on appearance and after returning active, but the app never registers during
+  startup or first run.
+
+  The production actor privately owns `SMAppService.mainApp`; render state and
+  errors are app-owned, bounded, and path-free. Launching remains an
+  `LSUIElement` menu-bar startup and adds no helper, daemon, plist, entitlement,
+  privilege, TCC access, engine/FFI call, scan, AI, or cleanup capability. The
+  17-test focused suite covers all known Apple statuses, typed errors, honest
+  presentation, postcondition mismatch, approval/duplicate error races,
+  external changes, single-flight operations, caller cancellation,
+  accessibility identifiers, the System Settings action seam, and a production
+  read-only status query without ever registering the temporary bundle
+  identifier. The complete 140-test linked Swift suite, full Rust
+  format/lint/test gates, 20 destructive-boundary checker tests and 170-source
+  boundary scan pass. Debug and Release bindings are byte-identical, and
+  unsigned universal arm64/x86_64 Debug and Release apps target macOS 14.
+  Signed install and sign-in-cycle validation remains explicitly gated by
+  Milestone 9's production identity.
 - [ ] Implement notification permission UI but do not notify repeatedly.
 - [ ] Implement permission/coverage onboarding.
 - [ ] Add signed/notarized local release script.
@@ -3688,7 +3715,9 @@ Tasks:
   Windows persistence-maintenance support.
 - [ ] Preserve standalone Homebrew/crates.io release.
 - [ ] Freeze the production bundle identifier, Apple Developer team, signing
-  identity, and designated requirement before TCC and launch-at-login testing.
+  identity, and designated requirement before TCC and launch-at-login testing;
+  then validate enable, approval-required recovery, disable, relocation policy,
+  and a real sign-out/sign-in cycle from a signed stable installation.
 - [ ] Add the primary notarized/stapled DMG with an Applications link; optionally
   publish a notarized ZIP as a secondary artifact.
 - [ ] Add Developer ID signing, notarization, and stapling CI.
