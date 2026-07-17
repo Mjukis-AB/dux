@@ -3095,12 +3095,24 @@ mod tests {
                         .unwrap();
                     connection
                         .execute(
+                            "DELETE FROM scan_process_claims WHERE scan_id = ?1",
+                            [document.metadata.scan_id.as_str()],
+                        )
+                        .unwrap();
+                    connection
+                        .execute(
                             "DELETE FROM scans WHERE scan_id = ?1",
                             [document.metadata.scan_id.as_str()],
                         )
                         .unwrap();
                 }
                 "queued" => {
+                    connection
+                        .execute(
+                            "DELETE FROM scan_process_claims WHERE scan_id = ?1",
+                            [document.metadata.scan_id.as_str()],
+                        )
+                        .unwrap();
                     connection
                         .execute(
                             "UPDATE scans SET status = 'queued' WHERE scan_id = ?1",
@@ -3112,6 +3124,12 @@ mod tests {
                     connection
                         .execute(
                             "DELETE FROM snapshot_temp_leases WHERE scan_id = ?1",
+                            [document.metadata.scan_id.as_str()],
+                        )
+                        .unwrap();
+                    connection
+                        .execute(
+                            "DELETE FROM scan_process_claims WHERE scan_id = ?1",
                             [document.metadata.scan_id.as_str()],
                         )
                         .unwrap();
@@ -3545,6 +3563,48 @@ mod tests {
             );
             assert_eq!(retention_tombstone_count(&store), 0);
         }
+    }
+
+    #[test]
+    fn scan_process_recovery_preserves_temp_debt_for_terminal_reconciliation() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let root = temp.path().join("scan-root");
+        let base = UNIX_EPOCH + Duration::from_millis(1_750_000_031_000);
+        let document = document("scan:recovered-temp-debt", &root);
+        let (store, repository) = open_repository(&database);
+        record_running_scan(&store, &document, &root, base);
+        repository
+            .leave_snapshot_temp_residual_for_test(&document, false)
+            .unwrap();
+        assert_eq!(temp_lease_count(&store), 1);
+
+        let recovered = store
+            .run_scan_recovery_batch_with_hooks_for_test(
+                base + Duration::from_secs(1),
+                |_| crate::persistence::process_liveness::ProcessLiveness::DefinitelyGone,
+                || Ok(()),
+                || Ok(()),
+            )
+            .unwrap();
+        assert_eq!(
+            recovered.outcome,
+            crate::persistence::ScanRecoveryBatchOutcome::Interrupted
+        );
+        assert_eq!(temp_lease_count(&store), 1);
+        assert_eq!(
+            store
+                .load_scan(&document.metadata.scan_id)
+                .unwrap()
+                .unwrap()
+                .status(),
+            ScanStatus::Interrupted
+        );
+
+        repository
+            .reconcile_terminal_snapshot_temp_residual(base + Duration::from_secs(2))
+            .unwrap();
+        assert_eq!(temp_lease_count(&store), 0);
     }
 
     #[test]

@@ -577,14 +577,15 @@ newer database schema has won.
 This checkpoint does not implement:
 
 - last-complete-snapshot selection per root;
-- cross-process overlapping-root scan leases or hard-process-death recovery of
-  an engine scan left `running`;
+- cross-process overlapping-root scan leases or cross-reboot/legacy-v8 recovery
+  of an engine scan left `running` (schema v9 same-scope claimed recovery is
+  implemented without snapshot authority);
 - FFI, Swift, or CLI scan/history transport;
-- app/FFI review-lease ownership and native periodic idle scheduling (the core
-  engine can request exactly one sealed batch, but this does not change the
-  snapshot wire or enable product scheduling);
-- hard-process-death recovery of `running` temp-lease parents; legacy external
-  provisioning stages remain manual debt;
+- paged FFI/Swift snapshot browsing (review-lease ownership and native periodic
+  scheduling are implemented without changing the snapshot wire);
+- cross-reboot or unclaimed legacy recovery of `running` temp-lease parents;
+  schema v9 same-scope recovery preserves the exact lease for terminal-temp
+  reconciliation, and legacy external provisioning stages remain manual debt;
 - explicit user clear-data actions;
 - native Windows temp/final/provisioning-stage removal and
   sparse/compressed-allocation runtime verification plus bounded accounting

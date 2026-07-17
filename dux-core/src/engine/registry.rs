@@ -36,18 +36,20 @@ use super::task::{
     DurableScanCounts, DurableScanCoverage, DurableScanStatus, DurableScanSummary, EngineLifecycle,
     EngineOpenError, FormatSizeBatchResult, FormattedSizeEntry, HistoryMaintenanceFailureKind,
     HistoryMaintenanceResult, HistoryMaintenanceStartOutcome, RecentScanHistory, ScanHistoryError,
-    ScanRootErrorKind, ScanTaskCounts, ScanTaskResult, ScanTaskStatus,
-    SnapshotOrphanMaintenanceFailureKind, SnapshotOrphanMaintenanceOutcome,
-    SnapshotOrphanMaintenanceResult, SnapshotOrphanMaintenanceStartOutcome,
-    SnapshotProvisioningStageMaintenanceFailureKind, SnapshotProvisioningStageMaintenanceOutcome,
-    SnapshotProvisioningStageMaintenanceResult, SnapshotProvisioningStageMaintenanceStartOutcome,
-    SnapshotRetentionFailureKind, SnapshotRetentionOutcome, SnapshotRetentionResult,
-    SnapshotRetentionStartOutcome, SnapshotTerminalTempMaintenanceFailureKind,
-    SnapshotTerminalTempMaintenanceOutcome, SnapshotTerminalTempMaintenanceResult,
-    SnapshotTerminalTempMaintenanceStartOutcome, SnapshotUnleasedTempMaintenanceFailureKind,
-    SnapshotUnleasedTempMaintenanceOutcome, SnapshotUnleasedTempMaintenanceResult,
-    SnapshotUnleasedTempMaintenanceStartOutcome, StartTaskError, TaskAccessError, TaskEvent,
-    TaskEventBatch, TaskEventKind, TaskFailureKind, TaskId, TaskKind, TaskPhase, TaskSnapshot,
+    ScanRecoveryMaintenanceFailureKind, ScanRecoveryMaintenanceOutcome,
+    ScanRecoveryMaintenanceResult, ScanRecoveryMaintenanceStartOutcome, ScanRootErrorKind,
+    ScanTaskCounts, ScanTaskResult, ScanTaskStatus, SnapshotOrphanMaintenanceFailureKind,
+    SnapshotOrphanMaintenanceOutcome, SnapshotOrphanMaintenanceResult,
+    SnapshotOrphanMaintenanceStartOutcome, SnapshotProvisioningStageMaintenanceFailureKind,
+    SnapshotProvisioningStageMaintenanceOutcome, SnapshotProvisioningStageMaintenanceResult,
+    SnapshotProvisioningStageMaintenanceStartOutcome, SnapshotRetentionFailureKind,
+    SnapshotRetentionOutcome, SnapshotRetentionResult, SnapshotRetentionStartOutcome,
+    SnapshotTerminalTempMaintenanceFailureKind, SnapshotTerminalTempMaintenanceOutcome,
+    SnapshotTerminalTempMaintenanceResult, SnapshotTerminalTempMaintenanceStartOutcome,
+    SnapshotUnleasedTempMaintenanceFailureKind, SnapshotUnleasedTempMaintenanceOutcome,
+    SnapshotUnleasedTempMaintenanceResult, SnapshotUnleasedTempMaintenanceStartOutcome,
+    StartTaskError, TaskAccessError, TaskEvent, TaskEventBatch, TaskEventKind, TaskFailureKind,
+    TaskId, TaskKind, TaskPhase, TaskSnapshot,
 };
 use crate::domain::{
     CANDIDATE_CATALOG_SCHEMA_VERSION, CANDIDATE_CATALOG_SHA256, CANDIDATE_CONTEXT_FORMAT_VERSION,
@@ -167,6 +169,7 @@ enum TaskResult {
     FormatSizeBatch(Arc<FormatSizeBatchResult>),
     Scan(Arc<ScanTaskResult>),
     HistoryMaintenance(Arc<HistoryMaintenanceResult>),
+    ScanRecoveryMaintenance(Arc<ScanRecoveryMaintenanceResult>),
     SnapshotRetention(Arc<SnapshotRetentionResult>),
     SnapshotOrphanMaintenance(Arc<SnapshotOrphanMaintenanceResult>),
     SnapshotProvisioningStageMaintenance(Arc<SnapshotProvisioningStageMaintenanceResult>),
@@ -241,6 +244,38 @@ impl TaskContext {
         let mut registry = self.shared.lock_registry_recover();
         let event_limit = self.shared.limits.events_per_task;
         if let Some(record) = registry.records.get_mut(&self.id)
+            && !record.phase.is_terminal()
+        {
+            record.push_event(kind, event_limit);
+        }
+    }
+
+    /// Atomically order cancellation against durable running-scan recovery.
+    /// If this wins, later cancellation remains intent and cannot rewrite the
+    /// exact persistence batch outcome.
+    fn try_begin_scan_recovery_maintenance_batch(&self) -> bool {
+        let mut registry = self.shared.lock_registry_recover();
+        let event_limit = self.shared.limits.events_per_task;
+        if let Some(record) = registry.records.get_mut(&self.id)
+            && record.kind == TaskKind::ScanRecoveryMaintenance
+            && record.phase == TaskPhase::Running
+            && !record.cancellation_requested
+        {
+            record.push_event(
+                TaskEventKind::ScanRecoveryMaintenanceBatchApplying,
+                event_limit,
+            );
+            true
+        } else {
+            false
+        }
+    }
+
+    fn report_scan_recovery_maintenance_finished(&self, kind: TaskEventKind) {
+        let mut registry = self.shared.lock_registry_recover();
+        let event_limit = self.shared.limits.events_per_task;
+        if let Some(record) = registry.records.get_mut(&self.id)
+            && record.kind == TaskKind::ScanRecoveryMaintenance
             && !record.phase.is_terminal()
         {
             record.push_event(kind, event_limit);
@@ -528,6 +563,7 @@ struct Registry {
     running_tasks: usize,
     live_workers: usize,
     active_scan_roots: HashMap<PathBuf, TaskId>,
+    active_scan_recovery_maintenance: Option<TaskId>,
     active_history_maintenance: Option<TaskId>,
     active_snapshot_retention: Option<TaskId>,
     active_snapshot_orphan_maintenance: Option<TaskId>,
@@ -546,6 +582,7 @@ impl Registry {
             running_tasks: 0,
             live_workers: 0,
             active_scan_roots: HashMap::new(),
+            active_scan_recovery_maintenance: None,
             active_history_maintenance: None,
             active_snapshot_retention: None,
             active_snapshot_orphan_maintenance: None,
@@ -569,6 +606,11 @@ impl Registry {
             && self.active_scan_roots.get(scope) == Some(&id)
         {
             self.active_scan_roots.remove(scope);
+        }
+        if kind == TaskKind::ScanRecoveryMaintenance
+            && self.active_scan_recovery_maintenance == Some(id)
+        {
+            self.active_scan_recovery_maintenance = None;
         }
         if kind == TaskKind::HistoryMaintenance && self.active_history_maintenance == Some(id) {
             self.active_history_maintenance = None;
@@ -1203,6 +1245,174 @@ impl EngineHandle {
                 }
             }),
         )
+    }
+
+    /// Recover at most one exact running scan whose durable process-instance
+    /// owner is proven gone. This sealed idle-only task accepts no scan or
+    /// owner input, and exposes only bounded path-free aggregate observations.
+    pub fn start_scan_recovery_maintenance(
+        &self,
+    ) -> Result<ScanRecoveryMaintenanceStartOutcome, StartTaskError> {
+        self.start_scan_recovery_maintenance_with_hooks(
+            SystemTime::now,
+            || {},
+            || {},
+            || {},
+            |store, observed_at| {
+                store
+                    .run_scan_recovery_batch(observed_at)
+                    .map_err(|error| error.kind)
+            },
+        )
+    }
+
+    #[cfg(test)]
+    fn start_scan_recovery_maintenance_at(
+        &self,
+        observed_at: SystemTime,
+    ) -> Result<ScanRecoveryMaintenanceStartOutcome, StartTaskError> {
+        self.start_scan_recovery_maintenance_with_hooks(
+            move || observed_at,
+            || {},
+            || {},
+            || {},
+            |store, observed_at| {
+                store
+                    .run_scan_recovery_batch(observed_at)
+                    .map_err(|error| error.kind)
+            },
+        )
+    }
+
+    #[cfg(test)]
+    fn start_scan_recovery_maintenance_with_test_hooks(
+        &self,
+        observed_at: SystemTime,
+        before_batch: impl FnOnce() + Send + 'static,
+        after_applying: impl FnOnce() + Send + 'static,
+        after_batch: impl FnOnce() + Send + 'static,
+    ) -> Result<ScanRecoveryMaintenanceStartOutcome, StartTaskError> {
+        self.start_scan_recovery_maintenance_with_hooks(
+            move || observed_at,
+            before_batch,
+            after_applying,
+            after_batch,
+            |store, observed_at| {
+                store
+                    .run_scan_recovery_batch(observed_at)
+                    .map_err(|error| error.kind)
+            },
+        )
+    }
+
+    #[cfg(test)]
+    fn start_scan_recovery_maintenance_with_test_batch(
+        &self,
+        observed_at: SystemTime,
+        batch: crate::persistence::ScanRecoveryBatchResult,
+    ) -> Result<ScanRecoveryMaintenanceStartOutcome, StartTaskError> {
+        self.start_scan_recovery_maintenance_with_hooks(
+            move || observed_at,
+            || {},
+            || {},
+            || {},
+            move |_, _| Ok(batch),
+        )
+    }
+
+    fn start_scan_recovery_maintenance_with_hooks(
+        &self,
+        clock: impl FnOnce() -> SystemTime + Send + 'static,
+        before_batch: impl FnOnce() + Send + 'static,
+        after_applying: impl FnOnce() + Send + 'static,
+        after_batch: impl FnOnce() + Send + 'static,
+        run_batch: impl FnOnce(
+            &StoreCoordinator,
+            SystemTime,
+        )
+            -> Result<crate::persistence::ScanRecoveryBatchResult, HistoryErrorKind>
+        + Send
+        + 'static,
+    ) -> Result<ScanRecoveryMaintenanceStartOutcome, StartTaskError> {
+        if let Some(outcome) = self.scan_recovery_maintenance_preflight()? {
+            return Ok(outcome);
+        }
+        let status = self
+            .inner
+            .store
+            .status()
+            .map_err(|_| StartTaskError::PersistenceUnavailable)?;
+        if !matches!(
+            status.access,
+            crate::persistence::DatabaseAccess::ReadWriteCurrent
+        ) {
+            return Err(StartTaskError::ReadOnlyStore);
+        }
+        let store = Arc::clone(&self.inner.store);
+        self.submit_scan_recovery_maintenance(Box::new(move |context| {
+            if context.is_cancellation_requested() {
+                return WorkOutcome::Cancelled(None);
+            }
+            let observed_at = clock();
+            before_batch();
+            if !context.try_begin_scan_recovery_maintenance_batch() {
+                return WorkOutcome::Cancelled(None);
+            }
+            // Applying is the point of no return. A later cancellation remains
+            // visible intent but cannot suppress an exact durable outcome.
+            after_applying();
+            match run_batch(&store, observed_at) {
+                Ok(batch) => {
+                    let result = Arc::new(ScanRecoveryMaintenanceResult::new(
+                        batch.observed_at,
+                        public_scan_recovery_maintenance_outcome(&batch.outcome),
+                        batch.claimed_count_before,
+                        batch.claimed_count_after,
+                        batch.alive_count,
+                        batch.unknown_count,
+                        batch.recoverable_count,
+                        batch.has_more,
+                    ));
+                    after_batch();
+                    context.report_scan_recovery_maintenance_finished(
+                        TaskEventKind::ScanRecoveryMaintenanceBatchFinished {
+                            outcome: result.outcome(),
+                            claimed_count_before: result.claimed_count_before(),
+                            claimed_count_after: result.claimed_count_after(),
+                            alive_count: result.alive_count(),
+                            unknown_count: result.unknown_count(),
+                            recoverable_count: result.recoverable_count(),
+                            has_more: result.has_more(),
+                        },
+                    );
+                    WorkOutcome::Succeeded(TaskResult::ScanRecoveryMaintenance(result))
+                }
+                Err(kind) => WorkOutcome::Failed(map_scan_recovery_maintenance_failure(kind), None),
+            }
+        }))
+    }
+
+    fn scan_recovery_maintenance_preflight(
+        &self,
+    ) -> Result<Option<ScanRecoveryMaintenanceStartOutcome>, StartTaskError> {
+        let registry = self
+            .inner
+            .shared
+            .registry
+            .lock()
+            .map_err(|_| StartTaskError::InternalState)?;
+        if registry.lifecycle != EngineLifecycle::Open {
+            return Err(StartTaskError::Closed);
+        }
+        if let Some(existing) = registry.active_scan_recovery_maintenance {
+            return Ok(Some(ScanRecoveryMaintenanceStartOutcome::AlreadyActive(
+                existing,
+            )));
+        }
+        if registry.running_tasks != 0 || !registry.queue.is_empty() {
+            return Ok(Some(ScanRecoveryMaintenanceStartOutcome::DeferredBusy));
+        }
+        Ok(None)
     }
 
     /// Start one bounded DUX-owned history-maintenance batch. This can roll up
@@ -2144,6 +2354,7 @@ impl EngineHandle {
             Some(TaskResult::FormatSizeBatch(result)) => Some(Arc::clone(result)),
             Some(
                 TaskResult::Scan(_)
+                | TaskResult::ScanRecoveryMaintenance(_)
                 | TaskResult::HistoryMaintenance(_)
                 | TaskResult::SnapshotRetention(_)
                 | TaskResult::SnapshotOrphanMaintenance(_)
@@ -2172,6 +2383,7 @@ impl EngineHandle {
             Some(TaskResult::Scan(result)) => Some(Arc::clone(result)),
             Some(
                 TaskResult::FormatSizeBatch(_)
+                | TaskResult::ScanRecoveryMaintenance(_)
                 | TaskResult::HistoryMaintenance(_)
                 | TaskResult::SnapshotRetention(_)
                 | TaskResult::SnapshotOrphanMaintenance(_)
@@ -2181,6 +2393,36 @@ impl EngineHandle {
             ) => {
                 return Err(TaskAccessError::WrongTaskKind);
             }
+            #[cfg(test)]
+            Some(TaskResult::TestOnly) => return Err(TaskAccessError::WrongTaskKind),
+            None => None,
+        })
+    }
+
+    pub fn scan_recovery_maintenance_result(
+        &self,
+        id: TaskId,
+    ) -> Result<Option<Arc<ScanRecoveryMaintenanceResult>>, TaskAccessError> {
+        let registry = self.lock_open_registry()?;
+        let record = registry
+            .records
+            .get(&id)
+            .ok_or(TaskAccessError::UnknownTask)?;
+        if record.kind != TaskKind::ScanRecoveryMaintenance {
+            return Err(TaskAccessError::WrongTaskKind);
+        }
+        Ok(match &record.result {
+            Some(TaskResult::ScanRecoveryMaintenance(result)) => Some(Arc::clone(result)),
+            Some(
+                TaskResult::FormatSizeBatch(_)
+                | TaskResult::Scan(_)
+                | TaskResult::HistoryMaintenance(_)
+                | TaskResult::SnapshotRetention(_)
+                | TaskResult::SnapshotOrphanMaintenance(_)
+                | TaskResult::SnapshotProvisioningStageMaintenance(_)
+                | TaskResult::SnapshotTerminalTempMaintenance(_)
+                | TaskResult::SnapshotUnleasedTempMaintenance(_),
+            ) => return Err(TaskAccessError::WrongTaskKind),
             #[cfg(test)]
             Some(TaskResult::TestOnly) => return Err(TaskAccessError::WrongTaskKind),
             None => None,
@@ -2204,6 +2446,7 @@ impl EngineHandle {
             Some(
                 TaskResult::FormatSizeBatch(_)
                 | TaskResult::Scan(_)
+                | TaskResult::ScanRecoveryMaintenance(_)
                 | TaskResult::SnapshotRetention(_)
                 | TaskResult::SnapshotOrphanMaintenance(_)
                 | TaskResult::SnapshotProvisioningStageMaintenance(_)
@@ -2235,6 +2478,7 @@ impl EngineHandle {
             Some(
                 TaskResult::FormatSizeBatch(_)
                 | TaskResult::Scan(_)
+                | TaskResult::ScanRecoveryMaintenance(_)
                 | TaskResult::HistoryMaintenance(_)
                 | TaskResult::SnapshotOrphanMaintenance(_)
                 | TaskResult::SnapshotProvisioningStageMaintenance(_)
@@ -2264,6 +2508,7 @@ impl EngineHandle {
             Some(
                 TaskResult::FormatSizeBatch(_)
                 | TaskResult::Scan(_)
+                | TaskResult::ScanRecoveryMaintenance(_)
                 | TaskResult::HistoryMaintenance(_)
                 | TaskResult::SnapshotRetention(_)
                 | TaskResult::SnapshotProvisioningStageMaintenance(_)
@@ -2295,6 +2540,7 @@ impl EngineHandle {
             Some(
                 TaskResult::FormatSizeBatch(_)
                 | TaskResult::Scan(_)
+                | TaskResult::ScanRecoveryMaintenance(_)
                 | TaskResult::HistoryMaintenance(_)
                 | TaskResult::SnapshotRetention(_)
                 | TaskResult::SnapshotOrphanMaintenance(_)
@@ -2324,6 +2570,7 @@ impl EngineHandle {
             Some(
                 TaskResult::FormatSizeBatch(_)
                 | TaskResult::Scan(_)
+                | TaskResult::ScanRecoveryMaintenance(_)
                 | TaskResult::HistoryMaintenance(_)
                 | TaskResult::SnapshotRetention(_)
                 | TaskResult::SnapshotOrphanMaintenance(_)
@@ -2353,6 +2600,7 @@ impl EngineHandle {
             Some(
                 TaskResult::FormatSizeBatch(_)
                 | TaskResult::Scan(_)
+                | TaskResult::ScanRecoveryMaintenance(_)
                 | TaskResult::HistoryMaintenance(_)
                 | TaskResult::SnapshotRetention(_)
                 | TaskResult::SnapshotOrphanMaintenance(_)
@@ -2485,6 +2733,42 @@ impl EngineHandle {
         registry.queue.push_back(Job { id, work });
         self.inner.shared.workers_ready.notify_one();
         Ok(id)
+    }
+
+    fn submit_scan_recovery_maintenance(
+        &self,
+        work: Work,
+    ) -> Result<ScanRecoveryMaintenanceStartOutcome, StartTaskError> {
+        let mut registry = self
+            .inner
+            .shared
+            .registry
+            .lock()
+            .map_err(|_| StartTaskError::InternalState)?;
+        if registry.lifecycle != EngineLifecycle::Open {
+            return Err(StartTaskError::Closed);
+        }
+        if let Some(existing) = registry.active_scan_recovery_maintenance {
+            return Ok(ScanRecoveryMaintenanceStartOutcome::AlreadyActive(existing));
+        }
+        // Recovery shares the lowest-priority idle boundary with every other
+        // maintenance class. Recheck after the compatibility probe to close
+        // admission races with foreground and maintenance work.
+        if registry.running_tasks != 0 || !registry.queue.is_empty() {
+            return Ok(ScanRecoveryMaintenanceStartOutcome::DeferredBusy);
+        }
+        let id = TASK_IDS.allocate()?;
+        let record = TaskRecord::new(
+            id,
+            TaskKind::ScanRecoveryMaintenance,
+            None,
+            self.inner.shared.limits.events_per_task,
+        );
+        registry.active_scan_recovery_maintenance = Some(id);
+        registry.records.insert(id, record);
+        registry.queue.push_back(Job { id, work });
+        self.inner.shared.workers_ready.notify_one();
+        Ok(ScanRecoveryMaintenanceStartOutcome::Started(id))
     }
 
     fn submit_history_maintenance(
@@ -3704,6 +3988,45 @@ const fn map_history_maintenance_failure(kind: HistoryErrorKind) -> TaskFailureK
         | HistoryErrorKind::InternalState => HistoryMaintenanceFailureKind::InternalState,
     };
     TaskFailureKind::HistoryMaintenance(kind)
+}
+
+const fn map_scan_recovery_maintenance_failure(kind: HistoryErrorKind) -> TaskFailureKind {
+    let kind = match kind {
+        HistoryErrorKind::InvalidInput => ScanRecoveryMaintenanceFailureKind::InvalidClock,
+        HistoryErrorKind::IncompatibleSchema => {
+            ScanRecoveryMaintenanceFailureKind::IncompatibleSchema
+        }
+        HistoryErrorKind::QueryLimitExceeded => ScanRecoveryMaintenanceFailureKind::BudgetExceeded,
+        HistoryErrorKind::Busy => ScanRecoveryMaintenanceFailureKind::Busy,
+        HistoryErrorKind::UnsafeStorage => ScanRecoveryMaintenanceFailureKind::UnsafeStorage,
+        HistoryErrorKind::CorruptData => ScanRecoveryMaintenanceFailureKind::CorruptData,
+        HistoryErrorKind::DatabaseUnavailable => ScanRecoveryMaintenanceFailureKind::Unavailable,
+        HistoryErrorKind::OutcomeUnknown => ScanRecoveryMaintenanceFailureKind::OutcomeUnknown,
+        HistoryErrorKind::AlreadyExists
+        | HistoryErrorKind::NotFound
+        | HistoryErrorKind::InvalidTransition
+        | HistoryErrorKind::InternalState => ScanRecoveryMaintenanceFailureKind::InternalState,
+    };
+    TaskFailureKind::ScanRecoveryMaintenance(kind)
+}
+
+const fn public_scan_recovery_maintenance_outcome(
+    outcome: &crate::persistence::ScanRecoveryBatchOutcome,
+) -> ScanRecoveryMaintenanceOutcome {
+    match outcome {
+        crate::persistence::ScanRecoveryBatchOutcome::NoClaim => {
+            ScanRecoveryMaintenanceOutcome::NoClaim
+        }
+        crate::persistence::ScanRecoveryBatchOutcome::DeferredUnproven => {
+            ScanRecoveryMaintenanceOutcome::DeferredUnproven
+        }
+        crate::persistence::ScanRecoveryBatchOutcome::Interrupted => {
+            ScanRecoveryMaintenanceOutcome::Interrupted
+        }
+        crate::persistence::ScanRecoveryBatchOutcome::ChangedConcurrently => {
+            ScanRecoveryMaintenanceOutcome::ChangedConcurrently
+        }
+    }
 }
 
 const fn public_snapshot_retention_outcome(

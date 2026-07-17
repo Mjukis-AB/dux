@@ -1718,6 +1718,12 @@ mod tests {
         store.with_connection(|connection| {
             connection
                 .execute(
+                    "DELETE FROM scan_process_claims WHERE scan_id = ?1",
+                    [start.id().as_str()],
+                )
+                .unwrap();
+            connection
+                .execute(
                     "UPDATE scans SET status = 'succeeded' WHERE scan_id = ?1",
                     [start.id().as_str()],
                 )

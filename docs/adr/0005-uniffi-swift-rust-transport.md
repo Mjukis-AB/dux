@@ -56,13 +56,18 @@ Those capabilities retain their own gates below and in ADR 0004.
 
 ## Current realization
 
-FFI contract v3 now replaces that historical first handle with the real shared
+FFI contract v4 now replaces that historical first handle with the real shared
 engine session. The app supplies input-only private data/cache roots; storage
-paths never return across the boundary. Six maintenance kinds use opaque task
+paths never return across the boundary. Seven maintenance kinds use opaque task
 objects with nonblocking versioned path-free poll/cancel records, and exact
 Explorer reviews use opaque scan-bound lease objects. No task accepts a path,
 cap, inventory, victim, candidate, or cleanup instruction. Review sessions
 expose only scan ID, expiry, renewal, and idempotent release.
+
+The seventh task is scan recovery. It exposes only bounded page counts and
+typed outcomes; process-instance identities and recovery-scope keys remain
+private to Rust. As with every maintenance task, the transport cannot select a
+scan, owner, or victim and cannot acquire cleanup authority.
 
 The Swift adapter lazily constructs and synchronizes the engine on its utility
 queue. FFI close invalidates renewal, attempts exact release for every

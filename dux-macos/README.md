@@ -110,12 +110,15 @@ still-live registered review pins and rejects later renewal.
 
 Private-store maintenance is deliberately separate from user cleanup and from
 Milestone 8 automations. After a 60-second startup grace, the scheduler runs at
-most one sealed Rust batch at a time across history, snapshot retention,
-physical orphans, provisioning stages, terminal temps, and unleased temps. It
-uses one-minute inter-batch spacing, a six-hour normal cycle, distinct bounded
+most one sealed Rust batch at a time across scan recovery, terminal temps,
+unleased temps, provisioning stages, physical orphans, snapshot retention, and
+history. Recovery is ordered before terminal-temp reconciliation so a proven
+dead scan can become `interrupted` without touching its temp lease; the next
+sealed owner may then reconcile that residual. The scheduler uses one-minute
+inter-batch spacing, a six-hour normal cycle, distinct bounded
 backoffs, Low Power Mode/thermal gates, and wake handling that cannot erase
 startup grace or a failure/resource backoff. No Swift or FFI input selects a
-path, inventory item, or victim.
+path, process owner, inventory item, or victim.
 
 The application shell is menu bar-first. `MenuBarExtra` must remain the first
 scene so the macOS 14 automatic scene-launch behavior does not open Explorer at

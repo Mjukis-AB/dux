@@ -42,7 +42,17 @@ use super::history::{
 use super::migrations::{
     SchemaState, apply_pending_migrations, inspect_schema, inspect_schema_for_status,
 };
+use super::process_liveness::{
+    ProcessIdentityError, ProcessInstanceId, ProcessLiveness, current_process_instance,
+    probe_process_instance,
+};
 use super::retention::{RetentionBatchResult, apply_retention_batch, reconcile_retention_batch};
+use super::scan_process_claim::{
+    ScanRecoveryBatchOutcome, ScanRecoveryBatchResult, canonical_recovery_time, classify_claims,
+    consume_owned_scan_process_claim, count_remaining_scan_process_claims,
+    exact_recovered_scan_matches, exact_scan_process_claim_matches, insert_scan_process_claim,
+    interrupt_scan_process_claim, load_scan_process_claim_page, scan_process_claim_is_missing,
+};
 use super::snapshot_temp_lease::{
     PreparedSnapshotTempLease, SnapshotTempLeaseState, delete_snapshot_temp_lease,
     snapshot_temp_lease_state,
@@ -74,6 +84,8 @@ pub(crate) struct StoreCoordinator {
     status: Mutex<DatabaseStatus>,
     paths: SecureStorePaths,
     connection: Mutex<Connection>,
+    scan_process_owner: OnceLock<ProcessInstanceId>,
+    scan_recovery_cursor: Mutex<Option<(i64, String)>>,
 }
 
 pub(super) struct HistoryConnectionGuard<'a> {
@@ -172,6 +184,8 @@ impl StoreCoordinator {
                 }),
                 paths,
                 connection: Mutex::new(connection),
+                scan_process_owner: OnceLock::new(),
+                scan_recovery_cursor: Mutex::new(None),
             });
         }
 
@@ -196,7 +210,21 @@ impl StoreCoordinator {
             }),
             paths,
             connection: Mutex::new(connection),
+            scan_process_owner: OnceLock::new(),
+            scan_recovery_cursor: Mutex::new(None),
         })
+    }
+
+    fn scan_process_owner(&self) -> Result<ProcessInstanceId, HistoryError> {
+        if let Some(owner) = self.scan_process_owner.get() {
+            return Ok(owner.clone());
+        }
+        let candidate = current_process_instance().map_err(map_scan_process_identity_error)?;
+        let _ = self.scan_process_owner.set(candidate);
+        self.scan_process_owner
+            .get()
+            .cloned()
+            .ok_or_else(|| HistoryError::new(HistoryErrorKind::InternalState))
     }
 
     fn refresh_compatibility(&self) -> Result<(), DatabaseOpenError> {
@@ -423,12 +451,14 @@ impl StoreCoordinator {
         after_commit: impl FnOnce() -> Result<(), HistoryError>,
     ) -> Result<(), HistoryError> {
         let prepared = PreparedNewScan::prepare(scan)?;
+        let owner = self.scan_process_owner()?;
         let mut guard = self.lock_current_history_connection()?;
         let transaction = guard
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(map_write_sql_error)?;
         insert_scan_started(&transaction, &prepared)?;
+        insert_scan_process_claim(&transaction, scan.id(), scan.started_at(), &owner)?;
         transaction.commit().map_err(map_write_sql_error)?;
         after_commit()?;
         self.paths
@@ -456,8 +486,23 @@ impl StoreCoordinator {
             Ok(()) => return Ok(()),
             Err(failure) => failure,
         };
+        let owner = self.scan_process_owner()?;
         match self.load_scan(scan.id()) {
-            Ok(Some(record)) if record.exactly_matches_start(scan) => Ok(()),
+            Ok(Some(record)) if record.exactly_matches_start(scan) => {
+                let guard = self
+                    .lock_current_history_connection()
+                    .map_err(|_| HistoryError::new(HistoryErrorKind::OutcomeUnknown))?;
+                match exact_scan_process_claim_matches(
+                    &guard.connection,
+                    scan.id(),
+                    scan.started_at(),
+                    &owner,
+                ) {
+                    Ok(true) => Ok(()),
+                    Ok(false) => Err(HistoryError::new(HistoryErrorKind::AlreadyExists)),
+                    Err(_) => Err(HistoryError::new(HistoryErrorKind::OutcomeUnknown)),
+                }
+            }
             Ok(Some(_)) => Err(HistoryError::new(HistoryErrorKind::AlreadyExists)),
             Ok(None) => Err(failure),
             Err(_) => Err(HistoryError::new(HistoryErrorKind::OutcomeUnknown)),
@@ -508,10 +553,12 @@ impl StoreCoordinator {
     ) -> Result<(), HistoryError> {
         self.validate_history_guard(guard)?;
         let prepared = PreparedScanCompletion::prepare(completion)?;
+        let owner = self.scan_process_owner()?;
         let transaction = guard
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(map_write_sql_error)?;
+        consume_owned_scan_process_claim(&transaction, completion.id(), &owner)?;
         update_scan_finished(&transaction, &prepared)?;
         transaction.commit().map_err(map_write_sql_error)?;
         after_commit()?;
@@ -561,12 +608,16 @@ impl StoreCoordinator {
             return Err(HistoryError::new(HistoryErrorKind::InvalidInput));
         }
         let prepared = PreparedScanCompletion::prepare(completion)?;
+        let owner = self.scan_process_owner()?;
         let failure = {
             let transaction = guard
                 .connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(map_write_sql_error)?;
             let attempted = delete_snapshot_temp_lease(&transaction, lease)
+                .and_then(|()| {
+                    consume_owned_scan_process_claim(&transaction, completion.id(), &owner)
+                })
                 .and_then(|()| update_scan_finished(&transaction, &prepared))
                 .and_then(|()| transaction.commit().map_err(map_write_sql_error))
                 .and_then(|()| after_commit())
@@ -606,14 +657,18 @@ impl StoreCoordinator {
         if self.revalidate_current_history_guard(guard).is_err() {
             return Err(HistoryError::new(HistoryErrorKind::OutcomeUnknown));
         }
-        match load_scan_record(&guard.connection, completion.id()) {
-            Ok(Some(record)) if record.exactly_matches_completion(completion) => Ok(()),
-            Ok(Some(record)) if record.status() == super::history::ScanStatus::Running => {
+        let claim_missing = scan_process_claim_is_missing(&guard.connection, completion.id());
+        match (
+            load_scan_record(&guard.connection, completion.id()),
+            claim_missing,
+        ) {
+            (Ok(Some(record)), Ok(true)) if record.exactly_matches_completion(completion) => Ok(()),
+            (Ok(Some(record)), Ok(_)) if record.status() == super::history::ScanStatus::Running => {
                 Err(failure)
             }
-            Ok(Some(_)) => Err(HistoryError::new(HistoryErrorKind::InvalidTransition)),
-            Ok(None) => Err(HistoryError::new(HistoryErrorKind::NotFound)),
-            Err(_) => Err(HistoryError::new(HistoryErrorKind::OutcomeUnknown)),
+            (Ok(Some(_)), Ok(_)) => Err(HistoryError::new(HistoryErrorKind::InvalidTransition)),
+            (Ok(None), Ok(_)) => Err(HistoryError::new(HistoryErrorKind::NotFound)),
+            _ => Err(HistoryError::new(HistoryErrorKind::OutcomeUnknown)),
         }
     }
 
@@ -629,24 +684,25 @@ impl StoreCoordinator {
         }
         let scan = load_scan_record(&guard.connection, completion.id());
         let lease_state = snapshot_temp_lease_state(&guard.connection, lease);
-        match (scan, lease_state) {
-            (Ok(Some(scan)), Ok(SnapshotTempLeaseState::Missing))
+        let claim_missing = scan_process_claim_is_missing(&guard.connection, completion.id());
+        match (scan, lease_state, claim_missing) {
+            (Ok(Some(scan)), Ok(SnapshotTempLeaseState::Missing), Ok(true))
                 if scan.exactly_matches_completion(completion) =>
             {
                 Ok(())
             }
-            (Ok(Some(scan)), Ok(SnapshotTempLeaseState::Exact))
+            (Ok(Some(scan)), Ok(SnapshotTempLeaseState::Exact), Ok(_))
                 if scan.status() == super::history::ScanStatus::Running =>
             {
                 Err(failure)
             }
-            (Ok(Some(scan)), Ok(SnapshotTempLeaseState::Conflicting))
+            (Ok(Some(scan)), Ok(SnapshotTempLeaseState::Conflicting), Ok(_))
                 if scan.status() == super::history::ScanStatus::Running =>
             {
                 Err(HistoryError::new(HistoryErrorKind::CorruptData))
             }
-            (Ok(Some(_)), Ok(_)) => Err(HistoryError::new(HistoryErrorKind::OutcomeUnknown)),
-            (Ok(None), Ok(_)) => Err(HistoryError::new(HistoryErrorKind::NotFound)),
+            (Ok(Some(_)), Ok(_), Ok(_)) => Err(HistoryError::new(HistoryErrorKind::OutcomeUnknown)),
+            (Ok(None), Ok(_), Ok(_)) => Err(HistoryError::new(HistoryErrorKind::NotFound)),
             _ => Err(HistoryError::new(HistoryErrorKind::OutcomeUnknown)),
         }
     }
@@ -711,12 +767,16 @@ impl StoreCoordinator {
         }
         let prepared_completion = PreparedScanCompletion::prepare(completion)?;
         let prepared_evaluation = PreparedCandidateEvaluation::prepare(request)?;
+        let owner = self.scan_process_owner()?;
         let failure = {
             let transaction = guard
                 .connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(map_write_sql_error)?;
             let attempted = delete_snapshot_temp_lease(&transaction, lease)
+                .and_then(|()| {
+                    consume_owned_scan_process_claim(&transaction, completion.id(), &owner)
+                })
                 .and_then(|()| update_scan_finished(&transaction, &prepared_completion))
                 .and_then(|()| {
                     insert_candidate_evaluation_pending(&transaction, &prepared_evaluation)
@@ -734,19 +794,26 @@ impl StoreCoordinator {
         let scan = load_scan_record(&guard.connection, completion.id());
         let evaluation = load_candidate_evaluation(&guard.connection, request.scan_id());
         let lease_state = snapshot_temp_lease_state(&guard.connection, lease);
-        match (scan, evaluation, lease_state) {
-            (Ok(Some(scan)), Ok(Some(evaluation)), Ok(SnapshotTempLeaseState::Missing))
-                if scan.exactly_matches_completion(completion)
-                    && evaluation.exactly_matches_request(request) =>
+        let claim_missing = scan_process_claim_is_missing(&guard.connection, completion.id());
+        match (scan, evaluation, lease_state, claim_missing) {
+            (
+                Ok(Some(scan)),
+                Ok(Some(evaluation)),
+                Ok(SnapshotTempLeaseState::Missing),
+                Ok(true),
+            ) if scan.exactly_matches_completion(completion)
+                && evaluation.exactly_matches_request(request) =>
             {
                 Ok(())
             }
-            (Ok(Some(scan)), Ok(None), Ok(SnapshotTempLeaseState::Exact))
+            (Ok(Some(scan)), Ok(None), Ok(SnapshotTempLeaseState::Exact), Ok(_))
                 if scan.status() == super::history::ScanStatus::Running =>
             {
                 Err(failure)
             }
-            (Ok(None), Ok(None), Ok(_)) => Err(HistoryError::new(HistoryErrorKind::NotFound)),
+            (Ok(None), Ok(None), Ok(_), Ok(_)) => {
+                Err(HistoryError::new(HistoryErrorKind::NotFound))
+            }
             _ => Err(HistoryError::new(HistoryErrorKind::OutcomeUnknown)),
         }
     }
@@ -768,12 +835,14 @@ impl StoreCoordinator {
         }
         let prepared_completion = PreparedScanCompletion::prepare(completion)?;
         let prepared_evaluation = PreparedCandidateEvaluation::prepare(request)?;
+        let owner = self.scan_process_owner()?;
         let failure = {
             let transaction = guard
                 .connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(map_write_sql_error)?;
-            let attempted = update_scan_finished(&transaction, &prepared_completion)
+            let attempted = consume_owned_scan_process_claim(&transaction, completion.id(), &owner)
+                .and_then(|()| update_scan_finished(&transaction, &prepared_completion))
                 .and_then(|()| {
                     insert_candidate_evaluation_pending(&transaction, &prepared_evaluation)
                 })
@@ -825,12 +894,16 @@ impl StoreCoordinator {
         let prepared_completion = PreparedScanCompletion::prepare(completion)?;
         let prepared_evaluation = PreparedCandidateEvaluation::prepare(request)?;
         let candidates = evaluation.prepare_candidates()?;
+        let owner = self.scan_process_owner()?;
         let failure = {
             let transaction = guard
                 .connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(map_write_sql_error)?;
             let attempted = delete_snapshot_temp_lease(&transaction, lease)
+                .and_then(|()| {
+                    consume_owned_scan_process_claim(&transaction, completion.id(), &owner)
+                })
                 .and_then(|()| update_scan_finished(&transaction, &prepared_completion))
                 .and_then(|()| {
                     insert_candidate_evaluation_pending(&transaction, &prepared_evaluation)
@@ -866,15 +939,16 @@ impl StoreCoordinator {
         }
         let scan = load_scan_record(&guard.connection, completion.id());
         let evaluation = load_candidate_evaluation(&guard.connection, request.scan_id());
-        match (scan, evaluation) {
-            (Ok(Some(scan)), Ok(Some(evaluation)))
+        let claim_missing = scan_process_claim_is_missing(&guard.connection, completion.id());
+        match (scan, evaluation, claim_missing) {
+            (Ok(Some(scan)), Ok(Some(evaluation)), Ok(true))
                 if scan.exactly_matches_completion(completion)
                     && evaluation.exactly_matches_request(request)
                     && terminal.is_none() =>
             {
                 Ok(())
             }
-            (Ok(Some(scan)), Ok(Some(evaluation)))
+            (Ok(Some(scan)), Ok(Some(evaluation)), Ok(true))
                 if scan.exactly_matches_completion(completion)
                     && terminal.is_some_and(|terminal| {
                         terminal.exactly_matches_record(&evaluation, request)
@@ -882,14 +956,18 @@ impl StoreCoordinator {
             {
                 Ok(())
             }
-            (Ok(Some(scan)), Ok(None)) if scan.status() == super::history::ScanStatus::Running => {
+            (Ok(Some(scan)), Ok(None), Ok(_))
+                if scan.status() == super::history::ScanStatus::Running =>
+            {
                 Err(failure)
             }
-            (Ok(Some(scan)), Ok(None)) if scan.exactly_matches_completion(completion) => {
+            (Ok(Some(scan)), Ok(None), Ok(_)) if scan.exactly_matches_completion(completion) => {
                 Err(HistoryError::new(HistoryErrorKind::OutcomeUnknown))
             }
-            (Ok(Some(_)), Ok(_)) => Err(HistoryError::new(HistoryErrorKind::InvalidTransition)),
-            (Ok(None), Ok(None)) => Err(HistoryError::new(HistoryErrorKind::NotFound)),
+            (Ok(Some(_)), Ok(_), Ok(_)) => {
+                Err(HistoryError::new(HistoryErrorKind::InvalidTransition))
+            }
+            (Ok(None), Ok(None), Ok(_)) => Err(HistoryError::new(HistoryErrorKind::NotFound)),
             _ => Err(HistoryError::new(HistoryErrorKind::OutcomeUnknown)),
         }
     }
@@ -909,25 +987,34 @@ impl StoreCoordinator {
         let scan = load_scan_record(&guard.connection, completion.id());
         let evaluation = load_candidate_evaluation(&guard.connection, request.scan_id());
         let lease_state = snapshot_temp_lease_state(&guard.connection, lease);
-        match (scan, evaluation, lease_state) {
-            (Ok(Some(scan)), Ok(Some(evaluation)), Ok(SnapshotTempLeaseState::Missing))
-                if scan.exactly_matches_completion(completion)
-                    && terminal.exactly_matches_record(&evaluation, request) =>
+        let claim_missing = scan_process_claim_is_missing(&guard.connection, completion.id());
+        match (scan, evaluation, lease_state, claim_missing) {
+            (
+                Ok(Some(scan)),
+                Ok(Some(evaluation)),
+                Ok(SnapshotTempLeaseState::Missing),
+                Ok(true),
+            ) if scan.exactly_matches_completion(completion)
+                && terminal.exactly_matches_record(&evaluation, request) =>
             {
                 Ok(())
             }
-            (Ok(Some(scan)), Ok(None), Ok(SnapshotTempLeaseState::Exact))
+            (Ok(Some(scan)), Ok(None), Ok(SnapshotTempLeaseState::Exact), Ok(_))
                 if scan.status() == super::history::ScanStatus::Running =>
             {
                 Err(failure)
             }
-            (Ok(Some(scan)), Ok(None), Ok(SnapshotTempLeaseState::Conflicting))
+            (Ok(Some(scan)), Ok(None), Ok(SnapshotTempLeaseState::Conflicting), Ok(_))
                 if scan.status() == super::history::ScanStatus::Running =>
             {
                 Err(HistoryError::new(HistoryErrorKind::CorruptData))
             }
-            (Ok(None), Ok(None), Ok(_)) => Err(HistoryError::new(HistoryErrorKind::NotFound)),
-            (Ok(Some(_)), Ok(_), Ok(_)) => Err(HistoryError::new(HistoryErrorKind::OutcomeUnknown)),
+            (Ok(None), Ok(None), Ok(_), Ok(_)) => {
+                Err(HistoryError::new(HistoryErrorKind::NotFound))
+            }
+            (Ok(Some(_)), Ok(_), Ok(_), Ok(_)) => {
+                Err(HistoryError::new(HistoryErrorKind::OutcomeUnknown))
+            }
             _ => Err(HistoryError::new(HistoryErrorKind::OutcomeUnknown)),
         }
     }
@@ -1076,6 +1163,159 @@ impl StoreCoordinator {
     ) -> Result<RecentScanRecords, HistoryError> {
         let guard = self.lock_current_history_connection()?;
         load_recent_scan_records(&guard.connection, limit)
+    }
+
+    /// Recover at most one durably claimed running scan whose exact process
+    /// instance is definitely gone. OS probes run with SQLite locks dropped.
+    pub(crate) fn run_scan_recovery_batch(
+        &self,
+        observed_at: SystemTime,
+    ) -> Result<ScanRecoveryBatchResult, HistoryError> {
+        self.run_scan_recovery_batch_with_hooks(
+            observed_at,
+            probe_process_instance,
+            || Ok(()),
+            || Ok(()),
+        )
+    }
+
+    fn run_scan_recovery_batch_with_hooks(
+        &self,
+        observed_at: SystemTime,
+        probe: impl FnMut(&ProcessInstanceId) -> ProcessLiveness,
+        before_write: impl FnOnce() -> Result<(), HistoryError>,
+        after_commit: impl FnOnce() -> Result<(), HistoryError>,
+    ) -> Result<ScanRecoveryBatchResult, HistoryError> {
+        let (observed_at, completed_at_unix_ms) = canonical_recovery_time(observed_at)?;
+        let owner = self.scan_process_owner()?;
+        let recovery_scope = owner.recovery_scope_key();
+        let cursor = self
+            .scan_recovery_cursor
+            .lock()
+            .map_err(|_| HistoryError::new(HistoryErrorKind::InternalState))?
+            .clone();
+        let page = {
+            let guard = self.lock_current_history_connection()?;
+            let mut page = load_scan_process_claim_page(
+                &guard.connection,
+                recovery_scope.as_deref(),
+                cursor.as_ref().map(|cursor| (cursor.0, cursor.1.as_str())),
+            )?;
+            if page.claims.is_empty() && cursor.is_some() {
+                page = load_scan_process_claim_page(
+                    &guard.connection,
+                    recovery_scope.as_deref(),
+                    None,
+                )?;
+            }
+            page
+        };
+        let page_has_more = page.has_more;
+        let claims = page.claims;
+        *self
+            .scan_recovery_cursor
+            .lock()
+            .map_err(|_| HistoryError::new(HistoryErrorKind::InternalState))? = if page_has_more {
+            claims
+                .last()
+                .map(|claim| (claim.cursor().0, claim.cursor().1.to_owned()))
+        } else {
+            None
+        };
+        let claimed_count_before = u32::try_from(claims.len())
+            .map_err(|_| HistoryError::new(HistoryErrorKind::CorruptData))?;
+        if claims.is_empty() {
+            return Ok(ScanRecoveryBatchResult {
+                observed_at,
+                outcome: ScanRecoveryBatchOutcome::NoClaim,
+                claimed_count_before: 0,
+                claimed_count_after: 0,
+                alive_count: 0,
+                unknown_count: 0,
+                recoverable_count: 0,
+                has_more: false,
+            });
+        }
+
+        let (liveness, alive_count, unknown_count, recoverable_count) =
+            classify_claims(&claims, probe);
+        let Some(target_index) = liveness
+            .iter()
+            .position(|state| *state == ProcessLiveness::DefinitelyGone)
+        else {
+            return Ok(ScanRecoveryBatchResult {
+                observed_at,
+                outcome: ScanRecoveryBatchOutcome::DeferredUnproven,
+                claimed_count_before,
+                claimed_count_after: claimed_count_before,
+                alive_count,
+                unknown_count,
+                recoverable_count: 0,
+                has_more: page_has_more,
+            });
+        };
+        let target = &claims[target_index];
+        before_write()?;
+
+        let mut guard = self.lock_current_history_connection()?;
+        let transaction = guard
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(map_write_sql_error)?;
+        if !interrupt_scan_process_claim(&transaction, target, completed_at_unix_ms)? {
+            drop(transaction);
+            let claimed_count_after =
+                count_remaining_scan_process_claims(&guard.connection, &claims)?;
+            return Ok(ScanRecoveryBatchResult {
+                observed_at,
+                outcome: ScanRecoveryBatchOutcome::ChangedConcurrently,
+                claimed_count_before,
+                claimed_count_after,
+                alive_count,
+                unknown_count,
+                recoverable_count,
+                has_more: true,
+            });
+        }
+        let attempt = transaction
+            .commit()
+            .map_err(map_write_sql_error)
+            .and_then(|()| after_commit())
+            .and_then(|()| self.revalidate_current_history_guard(&guard));
+        if let Err(failure) = attempt {
+            if self.revalidate_current_history_guard(&guard).is_err() {
+                return Err(HistoryError::new(HistoryErrorKind::OutcomeUnknown));
+            }
+            match exact_recovered_scan_matches(&guard.connection, target, completed_at_unix_ms) {
+                Ok(true) => {}
+                Ok(false) => return Err(failure),
+                Err(_) => return Err(HistoryError::new(HistoryErrorKind::OutcomeUnknown)),
+            }
+        }
+        let claimed_count_after =
+            count_remaining_scan_process_claims(&guard.connection, &claims)
+                .map_err(|_| HistoryError::new(HistoryErrorKind::OutcomeUnknown))?;
+        Ok(ScanRecoveryBatchResult {
+            observed_at,
+            outcome: ScanRecoveryBatchOutcome::Interrupted,
+            claimed_count_before,
+            claimed_count_after,
+            alive_count,
+            unknown_count,
+            recoverable_count,
+            has_more: recoverable_count > 1 || page_has_more,
+        })
+    }
+
+    #[cfg(test)]
+    pub(super) fn run_scan_recovery_batch_with_hooks_for_test(
+        &self,
+        observed_at: SystemTime,
+        probe: impl FnMut(&ProcessInstanceId) -> ProcessLiveness,
+        before_write: impl FnOnce() -> Result<(), HistoryError>,
+        after_commit: impl FnOnce() -> Result<(), HistoryError>,
+    ) -> Result<ScanRecoveryBatchResult, HistoryError> {
+        self.run_scan_recovery_batch_with_hooks(observed_at, probe, before_write, after_commit)
     }
 
     /// Apply one bounded batch of automatic retention to DUX-owned capacity
@@ -1730,6 +1970,16 @@ fn configure_full_synchronous(connection: &Connection) -> Result<(), DatabaseOpe
         ));
     }
     Ok(())
+}
+
+fn map_scan_process_identity_error(error: ProcessIdentityError) -> HistoryError {
+    let kind = match error {
+        ProcessIdentityError::InvalidEncoding => HistoryErrorKind::InternalState,
+        ProcessIdentityError::ObservationUnavailable | ProcessIdentityError::RandomUnavailable => {
+            HistoryErrorKind::DatabaseUnavailable
+        }
+    };
+    HistoryError::new(kind)
 }
 
 fn unix_time_ms() -> Result<i64, DatabaseOpenError> {

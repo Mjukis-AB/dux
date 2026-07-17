@@ -3790,6 +3790,12 @@ mod tests {
         store.with_connection(|connection| {
             connection
                 .execute(
+                    "DELETE FROM scan_process_claims WHERE scan_id = ?1",
+                    [queued_scan.as_str()],
+                )
+                .unwrap();
+            connection
+                .execute(
                     "UPDATE scans SET status = 'queued' WHERE scan_id = ?1",
                     [queued_scan.as_str()],
                 )

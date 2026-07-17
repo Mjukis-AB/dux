@@ -7,7 +7,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use dux_core::engine::{
     CancelOutcome as CoreCancelOutcome, EngineConfig, EngineHandle, EngineOpenError,
-    HistoryMaintenanceStartOutcome, SnapshotOrphanMaintenanceOutcome as CoreOrphanOutcome,
+    HistoryMaintenanceStartOutcome, ScanRecoveryMaintenanceOutcome as CoreScanRecoveryOutcome,
+    ScanRecoveryMaintenanceStartOutcome, SnapshotOrphanMaintenanceOutcome as CoreOrphanOutcome,
     SnapshotOrphanMaintenanceStartOutcome,
     SnapshotProvisioningStageMaintenanceOutcome as CoreStageOutcome,
     SnapshotProvisioningStageMaintenanceStartOutcome,
@@ -23,7 +24,7 @@ use dux_core::engine::{
 };
 use dux_core::{DatabaseOpenErrorKind, ScanId, SnapshotOpenErrorKind};
 
-const FFI_CONTRACT_VERSION: u32 = 3;
+const FFI_CONTRACT_VERSION: u32 = 4;
 const FFI_RECORD_VERSION: u32 = 1;
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 static LIVE_ENGINE_INSTANCE_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -87,6 +88,7 @@ pub enum EngineError {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum MaintenanceKind {
+    ScanRecovery,
     History,
     SnapshotRetention,
     SnapshotOrphan,
@@ -134,6 +136,10 @@ pub enum MaintenanceFailure {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum MaintenanceOutcome {
+    ScanRecoveryNone,
+    ScanRecoveryDeferredUnproven,
+    ScanRecoveryInterrupted,
+    ScanRecoveryChangedConcurrently,
     HistoryApplied,
     RetentionUnderCap,
     RetentionDeferredUnstable,
@@ -159,6 +165,9 @@ pub enum MaintenanceOutcome {
 /// Their meanings are fixed by `kind` and `outcome`; no field carries cleanup
 /// authority. History uses the four `*_count_after` fields for created daily
 /// rollups, pruned raw samples, pruned daily rollups, and pruned AI insights.
+/// Scan recovery uses primary before/after for the inspected claimed-running
+/// page, then secondary/tertiary/quaternary before for alive, unknown, and
+/// definitely gone owners; process identities never cross this boundary.
 /// Snapshot residual kinds use count pairs for their documented inventories;
 /// byte fields always contain bytes and never row counts.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
@@ -517,6 +526,12 @@ fn start_maintenance(
         };
     }
     Ok(match kind {
+        MaintenanceKind::ScanRecovery => map_start!(
+            engine.start_scan_recovery_maintenance(),
+            ScanRecoveryMaintenanceStartOutcome::Started,
+            ScanRecoveryMaintenanceStartOutcome::AlreadyActive,
+            ScanRecoveryMaintenanceStartOutcome::DeferredBusy
+        ),
         MaintenanceKind::History => map_start!(
             engine.start_history_maintenance(),
             HistoryMaintenanceStartOutcome::Started,
@@ -608,6 +623,32 @@ fn maintenance_result(
     kind: MaintenanceKind,
 ) -> Result<Option<MaintenanceResult>, EngineError> {
     let result = match kind {
+        MaintenanceKind::ScanRecovery => engine
+            .scan_recovery_maintenance_result(id)
+            .map_err(map_task_access_error)?
+            .map(|r| {
+                let outcome = match r.outcome() {
+                    CoreScanRecoveryOutcome::NoClaim => MaintenanceOutcome::ScanRecoveryNone,
+                    CoreScanRecoveryOutcome::DeferredUnproven => {
+                        MaintenanceOutcome::ScanRecoveryDeferredUnproven
+                    }
+                    CoreScanRecoveryOutcome::Interrupted => {
+                        MaintenanceOutcome::ScanRecoveryInterrupted
+                    }
+                    CoreScanRecoveryOutcome::ChangedConcurrently => {
+                        MaintenanceOutcome::ScanRecoveryChangedConcurrently
+                    }
+                    _ => return Err(EngineError::InternalState),
+                };
+                let mut out = empty_result(kind, r.observed_at(), outcome, r.has_more())?;
+                out.primary_count_before = u64::from(r.claimed_count_before());
+                out.primary_count_after = u64::from(r.claimed_count_after());
+                out.secondary_count_before = u64::from(r.alive_count());
+                out.tertiary_count_before = u64::from(r.unknown_count());
+                out.quaternary_count_before = u64::from(r.recoverable_count());
+                Ok(out)
+            })
+            .transpose()?,
         MaintenanceKind::History => engine
             .history_maintenance_result(id)
             .map_err(map_task_access_error)?
@@ -777,7 +818,8 @@ fn map_phase(phase: CoreTaskPhase) -> TaskPhase {
 
 fn map_failure(failure: TaskFailureKind) -> MaintenanceFailure {
     use dux_core::engine::{
-        HistoryMaintenanceFailureKind as H, SnapshotOrphanMaintenanceFailureKind as O,
+        HistoryMaintenanceFailureKind as H, ScanRecoveryMaintenanceFailureKind as S,
+        SnapshotOrphanMaintenanceFailureKind as O,
         SnapshotProvisioningStageMaintenanceFailureKind as P, SnapshotRetentionFailureKind as R,
         SnapshotTerminalTempMaintenanceFailureKind as T,
         SnapshotUnleasedTempMaintenanceFailureKind as U,
@@ -799,6 +841,7 @@ fn map_failure(failure: TaskFailureKind) -> MaintenanceFailure {
         };
     }
     match failure {
+        TaskFailureKind::ScanRecoveryMaintenance(value) => map_typed!(value, S),
         TaskFailureKind::HistoryMaintenance(value) => map_typed!(value, H),
         TaskFailureKind::SnapshotProvisioningStageMaintenance(value) => map_typed!(value, P),
         TaskFailureKind::SnapshotTerminalTempMaintenance(value) => map_typed!(value, T),
@@ -913,10 +956,10 @@ mod tests {
     }
 
     #[test]
-    fn reports_contract_three_and_preserves_smoke_formatting() {
+    fn reports_contract_four_and_preserves_smoke_formatting() {
         let _guard = ENGINE_TEST_LOCK.lock().unwrap();
         let (_temp, engine) = engine();
-        assert_eq!(library_version().ffi_contract_version, 3);
+        assert_eq!(library_version().ffi_contract_version, 4);
         assert_eq!(engine.library_version().unwrap(), library_version());
         assert_eq!(engine.format_size(1536).unwrap().display, "1.5 KB");
         assert!(engine.close());
@@ -928,6 +971,7 @@ mod tests {
         let _guard = ENGINE_TEST_LOCK.lock().unwrap();
         let (_temp, engine) = engine();
         for kind in [
+            MaintenanceKind::ScanRecovery,
             MaintenanceKind::History,
             MaintenanceKind::SnapshotRetention,
             MaintenanceKind::SnapshotOrphan,
@@ -947,6 +991,16 @@ mod tests {
                     TaskPhase::Succeeded | TaskPhase::Failed | TaskPhase::Cancelled
                 ) {
                     assert!(poll.phase != TaskPhase::Succeeded || poll.result.is_some());
+                    if kind == MaintenanceKind::ScanRecovery && poll.phase == TaskPhase::Succeeded {
+                        let result = poll.result.as_ref().unwrap();
+                        assert_eq!(result.outcome, MaintenanceOutcome::ScanRecoveryNone);
+                        assert_eq!(result.primary_count_before, 0);
+                        assert_eq!(result.primary_count_after, 0);
+                        assert_eq!(result.secondary_count_before, 0);
+                        assert_eq!(result.tertiary_count_before, 0);
+                        assert_eq!(result.quaternary_count_before, 0);
+                        assert_eq!(result.removed_bytes, 0);
+                    }
                     break;
                 }
                 assert!(Instant::now() < deadline);

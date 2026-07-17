@@ -28,6 +28,7 @@ impl TaskId {
 pub enum TaskKind {
     FormatSizeBatch,
     Scan,
+    ScanRecoveryMaintenance,
     HistoryMaintenance,
     SnapshotRetention,
     SnapshotOrphanMaintenance,
@@ -62,12 +63,28 @@ pub enum TaskFailureKind {
     SnapshotRejected,
     PersistenceUnavailable,
     PersistenceOutcomeUnknown,
+    ScanRecoveryMaintenance(ScanRecoveryMaintenanceFailureKind),
     HistoryMaintenance(HistoryMaintenanceFailureKind),
     SnapshotRetention(SnapshotRetentionFailureKind),
     SnapshotOrphanMaintenance(SnapshotOrphanMaintenanceFailureKind),
     SnapshotProvisioningStageMaintenance(SnapshotProvisioningStageMaintenanceFailureKind),
     SnapshotTerminalTempMaintenance(SnapshotTerminalTempMaintenanceFailureKind),
     SnapshotUnleasedTempMaintenance(SnapshotUnleasedTempMaintenanceFailureKind),
+}
+
+/// Path-free failure categories for durable running-scan recovery.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ScanRecoveryMaintenanceFailureKind {
+    InvalidClock,
+    IncompatibleSchema,
+    Busy,
+    UnsafeStorage,
+    BudgetExceeded,
+    CorruptData,
+    Unavailable,
+    OutcomeUnknown,
+    InternalState,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -192,6 +209,16 @@ pub enum TaskEventKind {
     CandidateEvaluationStarted,
     CandidateEvaluationFinished {
         status: CandidateEvaluationTaskStatus,
+    },
+    ScanRecoveryMaintenanceBatchApplying,
+    ScanRecoveryMaintenanceBatchFinished {
+        outcome: ScanRecoveryMaintenanceOutcome,
+        claimed_count_before: u32,
+        claimed_count_after: u32,
+        alive_count: u32,
+        unknown_count: u32,
+        recoverable_count: u32,
+        has_more: bool,
     },
     HistoryMaintenanceBatchApplying,
     HistoryMaintenanceBatchFinished {
@@ -339,6 +366,89 @@ impl HistoryMaintenanceResult {
 
     pub const fn ai_insights_pruned(&self) -> u32 {
         self.ai_insights_pruned
+    }
+
+    pub const fn has_more(&self) -> bool {
+        self.has_more
+    }
+}
+
+/// Path-free outcome of one bounded running-scan recovery decision. Exact
+/// scan and process-instance identities stay private inside persistence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ScanRecoveryMaintenanceOutcome {
+    NoClaim,
+    DeferredUnproven,
+    Interrupted,
+    ChangedConcurrently,
+}
+
+/// Immutable path-free outcome from one inspected page of an idle-only
+/// running-scan recovery batch.
+/// `has_more` asks the caller to submit a later task; core never self-enqueues.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScanRecoveryMaintenanceResult {
+    observed_at: SystemTime,
+    outcome: ScanRecoveryMaintenanceOutcome,
+    claimed_count_before: u32,
+    claimed_count_after: u32,
+    alive_count: u32,
+    unknown_count: u32,
+    recoverable_count: u32,
+    has_more: bool,
+}
+
+impl ScanRecoveryMaintenanceResult {
+    #[allow(clippy::too_many_arguments)]
+    pub(super) const fn new(
+        observed_at: SystemTime,
+        outcome: ScanRecoveryMaintenanceOutcome,
+        claimed_count_before: u32,
+        claimed_count_after: u32,
+        alive_count: u32,
+        unknown_count: u32,
+        recoverable_count: u32,
+        has_more: bool,
+    ) -> Self {
+        Self {
+            observed_at,
+            outcome,
+            claimed_count_before,
+            claimed_count_after,
+            alive_count,
+            unknown_count,
+            recoverable_count,
+            has_more,
+        }
+    }
+
+    pub const fn observed_at(&self) -> SystemTime {
+        self.observed_at
+    }
+
+    pub const fn outcome(&self) -> ScanRecoveryMaintenanceOutcome {
+        self.outcome
+    }
+
+    pub const fn claimed_count_before(&self) -> u32 {
+        self.claimed_count_before
+    }
+
+    pub const fn claimed_count_after(&self) -> u32 {
+        self.claimed_count_after
+    }
+
+    pub const fn alive_count(&self) -> u32 {
+        self.alive_count
+    }
+
+    pub const fn unknown_count(&self) -> u32 {
+        self.unknown_count
+    }
+
+    pub const fn recoverable_count(&self) -> u32 {
+        self.recoverable_count
     }
 
     pub const fn has_more(&self) -> bool {
@@ -1228,6 +1338,13 @@ pub enum CancelOutcome {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HistoryMaintenanceStartOutcome {
+    Started(TaskId),
+    AlreadyActive(TaskId),
+    DeferredBusy,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScanRecoveryMaintenanceStartOutcome {
     Started(TaskId),
     AlreadyActive(TaskId),
     DeferredBusy,

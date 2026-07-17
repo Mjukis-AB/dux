@@ -1218,6 +1218,9 @@ public func FfiConverterTypeMaintenancePoll_lower(_ value: MaintenancePoll) -> R
  * Their meanings are fixed by `kind` and `outcome`; no field carries cleanup
  * authority. History uses the four `*_count_after` fields for created daily
  * rollups, pruned raw samples, pruned daily rollups, and pruned AI insights.
+ * Scan recovery uses primary before/after for the inspected claimed-running
+ * page, then secondary/tertiary/quaternary before for alive, unknown, and
+ * definitely gone owners; process identities never cross this boundary.
  * Snapshot residual kinds use count pairs for their documented inventories;
  * byte fields always contain bytes and never row counts.
  */
@@ -1829,6 +1832,7 @@ public func FfiConverterTypeMaintenanceFailure_lower(_ value: MaintenanceFailure
 
 public enum MaintenanceKind: Equatable, Hashable {
 
+    case scanRecovery
     case history
     case snapshotRetention
     case snapshotOrphan
@@ -1856,17 +1860,19 @@ public struct FfiConverterTypeMaintenanceKind: FfiConverterRustBuffer {
         let variant: Int32 = try readInt(&buf)
         switch variant {
 
-        case 1: return .history
+        case 1: return .scanRecovery
 
-        case 2: return .snapshotRetention
+        case 2: return .history
 
-        case 3: return .snapshotOrphan
+        case 3: return .snapshotRetention
 
-        case 4: return .snapshotProvisioningStage
+        case 4: return .snapshotOrphan
 
-        case 5: return .snapshotTerminalTemp
+        case 5: return .snapshotProvisioningStage
 
-        case 6: return .snapshotUnleasedTemp
+        case 6: return .snapshotTerminalTemp
+
+        case 7: return .snapshotUnleasedTemp
 
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -1876,28 +1882,32 @@ public struct FfiConverterTypeMaintenanceKind: FfiConverterRustBuffer {
         switch value {
 
 
-        case .history:
+        case .scanRecovery:
             writeInt(&buf, Int32(1))
 
 
-        case .snapshotRetention:
+        case .history:
             writeInt(&buf, Int32(2))
 
 
-        case .snapshotOrphan:
+        case .snapshotRetention:
             writeInt(&buf, Int32(3))
 
 
-        case .snapshotProvisioningStage:
+        case .snapshotOrphan:
             writeInt(&buf, Int32(4))
 
 
-        case .snapshotTerminalTemp:
+        case .snapshotProvisioningStage:
             writeInt(&buf, Int32(5))
 
 
-        case .snapshotUnleasedTemp:
+        case .snapshotTerminalTemp:
             writeInt(&buf, Int32(6))
+
+
+        case .snapshotUnleasedTemp:
+            writeInt(&buf, Int32(7))
 
         }
     }
@@ -1924,6 +1934,10 @@ public func FfiConverterTypeMaintenanceKind_lower(_ value: MaintenanceKind) -> R
 
 public enum MaintenanceOutcome: Equatable, Hashable {
 
+    case scanRecoveryNone
+    case scanRecoveryDeferredUnproven
+    case scanRecoveryInterrupted
+    case scanRecoveryChangedConcurrently
     case historyApplied
     case retentionUnderCap
     case retentionDeferredUnstable
@@ -1964,43 +1978,51 @@ public struct FfiConverterTypeMaintenanceOutcome: FfiConverterRustBuffer {
         let variant: Int32 = try readInt(&buf)
         switch variant {
 
-        case 1: return .historyApplied
+        case 1: return .scanRecoveryNone
 
-        case 2: return .retentionUnderCap
+        case 2: return .scanRecoveryDeferredUnproven
 
-        case 3: return .retentionDeferredUnstable
+        case 3: return .scanRecoveryInterrupted
 
-        case 4: return .retentionDeferredNoEligibleSnapshot
+        case 4: return .scanRecoveryChangedConcurrently
 
-        case 5: return .retentionRemovedTombstonedResidual
+        case 5: return .historyApplied
 
-        case 6: return .retentionTombstonedAndRemoved
+        case 6: return .retentionUnderCap
 
-        case 7: return .orphanNone
+        case 7: return .retentionDeferredUnstable
 
-        case 8: return .orphanRemoved
+        case 8: return .retentionDeferredNoEligibleSnapshot
 
-        case 9: return .stageNone
+        case 9: return .retentionRemovedTombstonedResidual
 
-        case 10: return .stageDeferredUnproven
+        case 10: return .retentionTombstonedAndRemoved
 
-        case 11: return .stageRemovedMarkerOnly
+        case 11: return .orphanNone
 
-        case 12: return .stageRemovedMarkerComplete
+        case 12: return .orphanRemoved
 
-        case 13: return .terminalTempNone
+        case 13: return .stageNone
 
-        case 14: return .terminalTempDeferredActive
+        case 14: return .stageDeferredUnproven
 
-        case 15: return .terminalTempReconciledRowOnly
+        case 15: return .stageRemovedMarkerOnly
 
-        case 16: return .terminalTempRemoved
+        case 16: return .stageRemovedMarkerComplete
 
-        case 17: return .unleasedTempNone
+        case 17: return .terminalTempNone
 
-        case 18: return .unleasedTempDeferredActive
+        case 18: return .terminalTempDeferredActive
 
-        case 19: return .unleasedTempRemoved
+        case 19: return .terminalTempReconciledRowOnly
+
+        case 20: return .terminalTempRemoved
+
+        case 21: return .unleasedTempNone
+
+        case 22: return .unleasedTempDeferredActive
+
+        case 23: return .unleasedTempRemoved
 
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -2010,80 +2032,96 @@ public struct FfiConverterTypeMaintenanceOutcome: FfiConverterRustBuffer {
         switch value {
 
 
-        case .historyApplied:
+        case .scanRecoveryNone:
             writeInt(&buf, Int32(1))
 
 
-        case .retentionUnderCap:
+        case .scanRecoveryDeferredUnproven:
             writeInt(&buf, Int32(2))
 
 
-        case .retentionDeferredUnstable:
+        case .scanRecoveryInterrupted:
             writeInt(&buf, Int32(3))
 
 
-        case .retentionDeferredNoEligibleSnapshot:
+        case .scanRecoveryChangedConcurrently:
             writeInt(&buf, Int32(4))
 
 
-        case .retentionRemovedTombstonedResidual:
+        case .historyApplied:
             writeInt(&buf, Int32(5))
 
 
-        case .retentionTombstonedAndRemoved:
+        case .retentionUnderCap:
             writeInt(&buf, Int32(6))
 
 
-        case .orphanNone:
+        case .retentionDeferredUnstable:
             writeInt(&buf, Int32(7))
 
 
-        case .orphanRemoved:
+        case .retentionDeferredNoEligibleSnapshot:
             writeInt(&buf, Int32(8))
 
 
-        case .stageNone:
+        case .retentionRemovedTombstonedResidual:
             writeInt(&buf, Int32(9))
 
 
-        case .stageDeferredUnproven:
+        case .retentionTombstonedAndRemoved:
             writeInt(&buf, Int32(10))
 
 
-        case .stageRemovedMarkerOnly:
+        case .orphanNone:
             writeInt(&buf, Int32(11))
 
 
-        case .stageRemovedMarkerComplete:
+        case .orphanRemoved:
             writeInt(&buf, Int32(12))
 
 
-        case .terminalTempNone:
+        case .stageNone:
             writeInt(&buf, Int32(13))
 
 
-        case .terminalTempDeferredActive:
+        case .stageDeferredUnproven:
             writeInt(&buf, Int32(14))
 
 
-        case .terminalTempReconciledRowOnly:
+        case .stageRemovedMarkerOnly:
             writeInt(&buf, Int32(15))
 
 
-        case .terminalTempRemoved:
+        case .stageRemovedMarkerComplete:
             writeInt(&buf, Int32(16))
 
 
-        case .unleasedTempNone:
+        case .terminalTempNone:
             writeInt(&buf, Int32(17))
 
 
-        case .unleasedTempDeferredActive:
+        case .terminalTempDeferredActive:
             writeInt(&buf, Int32(18))
 
 
-        case .unleasedTempRemoved:
+        case .terminalTempReconciledRowOnly:
             writeInt(&buf, Int32(19))
+
+
+        case .terminalTempRemoved:
+            writeInt(&buf, Int32(20))
+
+
+        case .unleasedTempNone:
+            writeInt(&buf, Int32(21))
+
+
+        case .unleasedTempDeferredActive:
+            writeInt(&buf, Int32(22))
+
+
+        case .unleasedTempRemoved:
+            writeInt(&buf, Int32(23))
 
         }
     }

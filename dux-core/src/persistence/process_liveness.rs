@@ -97,6 +97,14 @@ impl ProcessInstanceId {
         &self.encoded
     }
 
+    /// Stable discovery partition for one reliable boot/namespace scope.
+    /// This narrows bounded recovery queries but is never liveness authority.
+    pub(crate) fn recovery_scope_key(&self) -> Option<String> {
+        self.scope
+            .as_ref()
+            .map(|scope| format!("{}:{}", self.platform.tag(), hex_lower(scope)))
+    }
+
     pub(super) const fn pid(&self) -> u32 {
         self.pid
     }

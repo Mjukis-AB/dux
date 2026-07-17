@@ -3176,10 +3176,63 @@ Tasks:
     expiry/release, close-acquire linearization, FFI use after close, all six
     maintenance kinds, concurrent close, and exact pin drainage.
 
-    Production retention still requires hard-process-death recovery for
-    `running` rows, explicit clear-data actions, and native Windows
-    mutation-path runtime verification.
+    This FFI-v3 checkpoint was superseded by the schema-v9/FFI-v4 running-scan
+    recovery checkpoint below. Production retention still requires explicit
+    clear-data actions, cross-reboot and legacy-v8 running-row policy, and
+    native Windows mutation-path runtime verification.
     Legacy external snapshot-stage siblings remain unattributable manual debt.
+
+  - Same-scope hard-process-death running-scan recovery completed 2026-07-17:
+    schema v9 adds a strict immutable `scan_process_claims` relation. Every new
+    typed scan start commits its pristine `running` row and one exact
+    process-instance claim atomically; every normal terminal path consumes only
+    the same coordinator owner's validated format/scope/start tuple. Existing
+    v8 running rows migrate without fabricated ownership and remain explicit
+    legacy debt. Claims are capped at 64 per exact owner, with separate owner
+    and reliable-scope indexes, so old boot/foreign owners neither make start
+    admission unbounded nor create a global lockout.
+
+    Recovery reads and completely validates one 64-row keyset page for the
+    current reliable macOS/Linux boot/namespace scope, drops every SQLite and
+    writer guard, and performs OS liveness probes. Only `DefinitelyGone` is a
+    permit. The current-schema writer boundary is reacquired and one exact
+    pristine claim/scan tuple is compare-and-set to `interrupted`; normal
+    completion or another recoverer winning the race is reported without
+    overwrite. `Alive` and `Unknown` are durable byte-for-byte no-ops. A
+    malformed owner/scope/parent fails closed, newer-schema races prevent the
+    write, commit ambiguity reconciles only the exact terminal facts, and page
+    sentinels expose honest `has_more`. Reboot/foreign scope remains `Unknown`;
+    Windows still cannot prove death without reliable host/boot scope.
+
+    This transition changes history only and takes no cleanup lock. It never
+    opens, selects, or removes a path, snapshot, temp, candidate, plan, or user
+    data. Any exact snapshot-temp lease remains after the parent becomes
+    `interrupted`, and the independently sealed terminal-temp batch owns later
+    physical-first reconciliation. The engine exposes one idle-only sealed
+    `ScanRecoveryMaintenance` batch with Applying cancellation linearization,
+    path-free counts/outcomes, deduplication, cross-maintenance exclusion, and
+    no self-enqueue behavior.
+
+    FFI contract v4 adds that task without exposing process identities, paths,
+    scan IDs, or authority-bearing inputs. Swift expands the native rotation to
+    seven kinds and deliberately requests scan recovery before terminal-temp
+    reconciliation while retaining the existing startup grace, energy gates,
+    cadence, backoffs, and shutdown ordering. Migration/checksum/fingerprint,
+    exact owner completion, hostile scope, index-plan/keyset page fairness,
+    live/unknown no-op, scope-replacement, normal-completion and two-recoverer
+    races, schema race, post-commit
+    reconciliation, real graceful/SIGKILL child death, and temp-debt convergence
+    regressions cover the boundary. Verification passed the 690-test core
+    library (plus one ignored platform fixture), full locked workspace, FFI,
+    linked 35-test Swift suite, formatting, workspace/fuzz/MSRV lint and check,
+    destructive-call policy, and script-policy suites. Fresh generated bindings
+    were byte-identical across Debug and Release; unsigned universal arm64 and
+    x86_64 Debug/Release apps built and both deployment-target checks reported
+    macOS 14.0. Windows and Linux Rust cross-checks were attempted but this
+    macOS host lacks the C cross-compilers required by bundled SQLite
+    (`stdlib.h` for MSVC and `x86_64-linux-gnu-gcc` respectively); host tests and
+    the existing target-specific compile fixtures cover the changed liveness
+    branches without claiming those environment-blocked checks passed.
 - [x] Add engine integration tests with temporary HOME and database. Completed
   2026-07-16: an actual `dux-core` engine scans a fixture into an isolated
   platform-correct application-support/cache layout, closes to full worker

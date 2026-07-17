@@ -5,9 +5,24 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
-- Added the real macOS engine/maintenance runtime through FFI contract v3.
+- Added conservative hard-process-death recovery for schema-v9 claimed running
+  scans. Start and normal completion atomically create/consume one exact private
+  process-instance claim; a bounded indexed same-scope keyset pass drops every
+  SQLite lock before OS probes and exact-CASes at most one pristine row to
+  `interrupted` only for `DefinitelyGone`. Live, unknown, malformed,
+  cross-reboot, legacy-v8, and newer-schema cases never recover. Snapshot-temp
+  leases are preserved for the independently sealed terminal-temp reconciler.
+  The idle-only core task exposes path-free counts/outcomes and no caller scan or
+  owner input. FFI contract v4 and the macOS scheduler add it as the first of
+  seven fair maintenance kinds. Real graceful/SIGKILL child-process, indexed
+  keyset-plan, paging, admission-cap, exact-scope race,
+  commit-reconciliation, schema-fencing, hostile-row,
+  cancellation/close, redaction, and temp-debt convergence regressions cover the
+  boundary.
+- Added the real macOS engine/maintenance runtime, introduced through FFI
+  contract v3 and now carried by contract v4.
   `DuxEngine` now opens the shared Rust engine from input-only private data and
-  cache roots, exposes all six sealed maintenance kinds as opaque cancellable
+  cache roots, exposes all seven sealed maintenance kinds as opaque cancellable
   tasks with versioned path-free results, and exposes Explorer-only snapshot
   review sessions without paths, filenames, digests, handles, inventories, or
   cleanup authority. History row counts are distinct from every byte field.
@@ -18,7 +33,7 @@ All notable changes to DUX will be documented in this file.
   its actor-owned review controller uses five-minute/wake renewal plus
   generation-safe explicit release, and app shutdown is ordered maintenance →
   reviews → engine with duplicate termination requests coalesced. A native
-  energy-aware scheduler runs one fair six-kind cycle after a 60-second grace,
+  energy-aware scheduler runs one fair seven-kind cycle after a 60-second grace,
   spaces normal batches by one minute, waits six hours between cycles, and
   preserves distinct `has_more`, deferral, busy, failure, and energy backoffs
   across activation/wake signals. Scheduler shutdown awaits any suspended
@@ -130,8 +145,8 @@ All notable changes to DUX will be documented in this file.
   an incompatible old writer's open inode, but its later current-schema/name
   publication proof fails. Avoiding that same-user availability race requires
   not running old and current binaries concurrently on the owner-private store.
-  App/FFI scheduling and review leases, running-row recovery, clear-data, and
-  native Windows runtime verification remain future. Exact-marker-owned
+  Explicit clear-data and native Windows runtime verification remain future.
+  Exact-marker-owned
   root-local provisioning-stage maintenance is the separate slice above;
   legacy external snapshot stages remain unattributable manual debt.
 - Added bounded terminal snapshot-temp reconciliation. A separate sealed

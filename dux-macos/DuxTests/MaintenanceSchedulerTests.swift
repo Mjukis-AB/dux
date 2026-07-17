@@ -20,9 +20,9 @@ final class MaintenanceSchedulerTests: XCTestCase {
             return count == 1 && inFlight == nil
         }
         let firstStarts = await service.startedKinds()
-        XCTAssertEqual(firstStarts, [.snapshotTerminalTemp])
+        XCTAssertEqual(firstStarts, [.scanRecovery])
 
-        for expectedCount in 2 ... 6 {
+        for expectedCount in 2 ... 7 {
             await clock.advance(by: 2)
             try await eventually {
                 let count = await service.startedKinds().count
@@ -33,7 +33,7 @@ final class MaintenanceSchedulerTests: XCTestCase {
         let allStarts = await service.startedKinds()
         XCTAssertEqual(allStarts, DuxMaintenanceKind.allCases)
         let afterCycle = await scheduler.snapshot()
-        XCTAssertEqual(afterCycle.nextDeadline?.milliseconds, 120)
+        XCTAssertEqual(afterCycle.nextDeadline?.milliseconds, 122)
         await scheduler.stop()
     }
 
@@ -86,7 +86,7 @@ final class MaintenanceSchedulerTests: XCTestCase {
             return count == 2 && inFlight == nil
         }
         let starts = await service.startedKinds()
-        XCTAssertEqual(starts, [.snapshotTerminalTemp, .snapshotUnleasedTemp])
+        XCTAssertEqual(starts, [.scanRecovery, .snapshotTerminalTemp])
         await scheduler.stop()
     }
 
@@ -112,7 +112,7 @@ final class MaintenanceSchedulerTests: XCTestCase {
         let starts = await service.startedKinds()
         XCTAssertEqual(
             starts,
-            Array(repeating: DuxMaintenanceKind.snapshotTerminalTemp, count: 3)
+            Array(repeating: DuxMaintenanceKind.scanRecovery, count: 3)
         )
         await scheduler.stop()
     }
@@ -135,7 +135,7 @@ final class MaintenanceSchedulerTests: XCTestCase {
         await clock.advance(by: 1)
         try await waitForCompletedAttempt(scheduler, service: service, count: 2)
         let starts = await service.startedKinds()
-        XCTAssertEqual(starts, [.snapshotTerminalTemp, .snapshotTerminalTemp])
+        XCTAssertEqual(starts, [.scanRecovery, .scanRecovery])
         await scheduler.stop()
     }
 
@@ -150,7 +150,7 @@ final class MaintenanceSchedulerTests: XCTestCase {
         await scheduler.start()
         await clock.advance(by: 10)
         try await eventually {
-            await scheduler.snapshot().inFlightKind == .snapshotTerminalTemp
+            await scheduler.snapshot().inFlightKind == .scanRecovery
         }
         try await eventually { await service.firstTaskPollCount() == 1 }
         await scheduler.signal(.wake)
@@ -179,7 +179,7 @@ final class MaintenanceSchedulerTests: XCTestCase {
         await clock.advance(by: 2)
         try await waitForCompletedAttempt(scheduler, service: service, count: 2)
         let starts = await service.startedKinds()
-        XCTAssertEqual(starts, [.snapshotTerminalTemp, .snapshotUnleasedTemp])
+        XCTAssertEqual(starts, [.scanRecovery, .snapshotTerminalTemp])
         await scheduler.stop()
     }
 
@@ -210,10 +210,10 @@ final class MaintenanceSchedulerTests: XCTestCase {
         XCTAssertEqual(
             starts,
             [
+                .scanRecovery,
+                .scanRecovery,
                 .snapshotTerminalTemp,
                 .snapshotTerminalTemp,
-                .snapshotUnleasedTemp,
-                .snapshotUnleasedTemp,
             ]
         )
         await scheduler.stop()
@@ -229,7 +229,7 @@ final class MaintenanceSchedulerTests: XCTestCase {
         await scheduler.start()
         await clock.advance(by: 10)
         try await eventually {
-            await scheduler.snapshot().inFlightKind == .snapshotTerminalTemp
+            await scheduler.snapshot().inFlightKind == .scanRecovery
         }
         await scheduler.signal(.wake)
         await scheduler.signal(.applicationBecameActive)
@@ -243,15 +243,15 @@ final class MaintenanceSchedulerTests: XCTestCase {
         await clock.advance(by: 1)
         try await eventually { await scheduler.snapshot().inFlightKind == nil }
         let startsBeforeDelay = await service.startedKinds()
-        XCTAssertEqual(startsBeforeDelay, [.snapshotTerminalTemp])
+        XCTAssertEqual(startsBeforeDelay, [.scanRecovery])
         await clock.advance(by: 1)
         let startsStillBeforeDelay = await service.startedKinds()
-        XCTAssertEqual(startsStillBeforeDelay, [.snapshotTerminalTemp])
+        XCTAssertEqual(startsStillBeforeDelay, [.scanRecovery])
         await clock.advance(by: 1)
         try await eventually { await service.startedKinds().count == 2 }
         let starts = await service.startedKinds()
         let cancellationsAfterFinish = await task.cancellationCount()
-        XCTAssertEqual(starts, [.snapshotTerminalTemp, .snapshotUnleasedTemp])
+        XCTAssertEqual(starts, [.scanRecovery, .snapshotTerminalTemp])
         XCTAssertEqual(cancellationsAfterFinish, 0)
         await scheduler.stop()
     }
@@ -274,7 +274,7 @@ final class MaintenanceSchedulerTests: XCTestCase {
         await scheduler.signal(.energyPolicyChanged)
         try await waitForCompletedAttempt(scheduler, service: service, count: 1)
         let starts = await service.startedKinds()
-        XCTAssertEqual(starts, [.snapshotTerminalTemp])
+        XCTAssertEqual(starts, [.scanRecovery])
         await scheduler.stop()
     }
 
@@ -291,10 +291,10 @@ final class MaintenanceSchedulerTests: XCTestCase {
         await scheduler.start()
         await clock.advance(by: 10)
         try await eventually {
-            await scheduler.snapshot().nextKind == .snapshotUnleasedTemp
+            await scheduler.snapshot().nextKind == .snapshotTerminalTemp
         }
         let starts = await service.startedKinds()
-        XCTAssertEqual(starts, [.snapshotTerminalTemp])
+        XCTAssertEqual(starts, [.scanRecovery])
         await scheduler.stop()
     }
 
@@ -308,7 +308,7 @@ final class MaintenanceSchedulerTests: XCTestCase {
         await scheduler.start()
         await clock.advance(by: 10)
         try await eventually {
-            await scheduler.snapshot().inFlightKind == .snapshotTerminalTemp
+            await scheduler.snapshot().inFlightKind == .scanRecovery
         }
         await scheduler.stop()
         let cancellations = await task.cancellationCount()
@@ -318,7 +318,7 @@ final class MaintenanceSchedulerTests: XCTestCase {
         await Task.yield()
         let starts = await service.startedKinds()
         let isStarted = await scheduler.snapshot().isStarted
-        XCTAssertEqual(starts, [.snapshotTerminalTemp])
+        XCTAssertEqual(starts, [.scanRecovery])
         XCTAssertFalse(isStarted)
     }
 
@@ -372,7 +372,7 @@ final class MaintenanceSchedulerTests: XCTestCase {
 
         let starts = await service.startedKinds()
         let snapshot = await scheduler.snapshot()
-        XCTAssertEqual(starts, [.snapshotTerminalTemp])
+        XCTAssertEqual(starts, [.scanRecovery])
         XCTAssertFalse(snapshot.isStarted)
         XCTAssertNil(snapshot.inFlightKind)
         XCTAssertNil(snapshot.nextDeadline)

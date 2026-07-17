@@ -57,6 +57,7 @@ mod migrations;
 mod process_liveness;
 mod retention;
 mod scan_coverage_history;
+mod scan_process_claim;
 mod settings;
 pub(crate) mod snapshot;
 mod snapshot_retention;
@@ -92,6 +93,7 @@ pub(crate) use history::{
     HistoryErrorKind, MAX_RECENT_SCAN_HISTORY_LIMIT, NewScanRecord, ScanCompletionRecord,
     ScanCounts, ScanStatus, TerminalScanStatus,
 };
+pub(crate) use scan_process_claim::{ScanRecoveryBatchOutcome, ScanRecoveryBatchResult};
 pub(crate) use settings::{
     SnapshotRetentionCapSetting, SnapshotRetentionCapSettingSource,
     SnapshotRetentionCapSettingUpdate,

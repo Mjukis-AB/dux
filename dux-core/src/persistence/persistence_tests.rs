@@ -3,7 +3,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use rusqlite::{Connection, OpenFlags, params};
 use tempfile::TempDir;
@@ -22,7 +22,7 @@ use super::migrations::{
     panic_with_test_budget, schema_fingerprint, test_migrations, test_v1_schema_fingerprint,
     test_v2_schema_fingerprint, test_v3_schema_fingerprint, test_v4_schema_fingerprint,
     test_v5_schema_fingerprint, test_v6_schema_fingerprint, test_v7_schema_fingerprint,
-    test_v8_schema_fingerprint, validate_compiled_migrations,
+    test_v8_schema_fingerprint, test_v9_schema_fingerprint, validate_compiled_migrations,
 };
 use super::process_liveness::current_process_instance;
 #[cfg(unix)]
@@ -316,6 +316,27 @@ fn helper_hold_process_instance() {
     wait_for_handshake(&release);
 }
 
+fn helper_hold_claimed_scan() {
+    let database = helper_path("DUX_PERSISTENCE_DATABASE");
+    let root = helper_path("DUX_PERSISTENCE_SCAN_ROOT");
+    let ready = helper_path("DUX_PERSISTENCE_READY");
+    let release = helper_path("DUX_PERSISTENCE_RELEASE");
+    let store = StoreCoordinator::open(&database).unwrap();
+    store
+        .record_scan_started_reconciled(
+            &NewScanRecord::try_new(
+                crate::ScanId::new("scan:subprocess-claimed").unwrap(),
+                root,
+                UNIX_EPOCH + Duration::from_millis(10),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    publish_handshake(&ready);
+    wait_for_handshake(&release);
+    drop(store);
+}
+
 #[test]
 #[ignore = "launched by the process-boundary persistence regressions"]
 fn sqlite_subprocess_helper() {
@@ -331,6 +352,7 @@ fn sqlite_subprocess_helper() {
         "open-after-writer-lock-race" => helper_open_after_writer_lock_race(),
         "hold-cleanup-lock" => helper_hold_cleanup_lock(),
         "hold-process-instance" => helper_hold_process_instance(),
+        "hold-claimed-scan" => helper_hold_claimed_scan(),
         _ => panic!("unknown persistence helper mode"),
     }
 }
@@ -474,6 +496,32 @@ fn fresh_v6_schema() -> Connection {
 fn fresh_v7_schema() -> Connection {
     let connection = Connection::open_in_memory().unwrap();
     for migration in &test_migrations()[..7] {
+        connection.execute_batch(migration.sql).unwrap();
+        connection
+            .execute(
+                "INSERT INTO schema_migrations (
+                     version, name, checksum_sha256, applied_at_unix_ms
+                 ) VALUES (?1, ?2, ?3, 1)",
+                params![
+                    i64::from(migration.version),
+                    migration.name,
+                    migration.checksum_sha256.as_slice(),
+                ],
+            )
+            .unwrap();
+        connection
+            .pragma_update(None, "application_id", DUX_APPLICATION_ID)
+            .unwrap();
+        connection
+            .pragma_update(None, "user_version", migration.version)
+            .unwrap();
+    }
+    connection
+}
+
+fn fresh_v8_schema() -> Connection {
+    let connection = Connection::open_in_memory().unwrap();
+    for migration in &test_migrations()[..8] {
         connection.execute_batch(migration.sql).unwrap();
         connection
             .execute(
@@ -792,10 +840,23 @@ fn embedded_v7_schema_fingerprint_matches_complete_chain() {
 
 #[test]
 fn embedded_v8_schema_fingerprint_matches_complete_chain() {
-    let connection = fresh_current_schema();
+    let connection = fresh_v8_schema();
     assert_eq!(
         schema_fingerprint(&connection).unwrap(),
         test_v8_schema_fingerprint()
+    );
+    assert_eq!(
+        inspect_schema(&connection).unwrap(),
+        SchemaState::Older { found: 8 }
+    );
+}
+
+#[test]
+fn embedded_v9_schema_fingerprint_matches_complete_chain() {
+    let connection = fresh_current_schema();
+    assert_eq!(
+        schema_fingerprint(&connection).unwrap(),
+        test_v9_schema_fingerprint()
     );
     assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
 }
@@ -821,7 +882,7 @@ fn populated_v7_upgrade_adds_empty_snapshot_temp_lease_relation() {
     assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
     assert_eq!(
         schema_fingerprint(&connection).unwrap(),
-        test_v8_schema_fingerprint()
+        test_v9_schema_fingerprint()
     );
     let lease_count: i64 = connection
         .query_row("SELECT count(*) FROM snapshot_temp_leases", [], |row| {
@@ -837,6 +898,46 @@ fn populated_v7_upgrade_adds_empty_snapshot_temp_lease_relation() {
         )
         .unwrap();
     assert_eq!(scan, ("scan:v7-running".to_owned(), "running".to_owned()));
+}
+
+#[test]
+fn populated_v8_upgrade_preserves_running_rows_without_fabricating_claims() {
+    let mut connection = fresh_v8_schema();
+    connection
+        .pragma_update(None, "foreign_keys", true)
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO scans (
+                 scan_id, root_path, root_path_encoding, started_at_unix_ms,
+                 status, coverage_status
+             ) VALUES ('scan:v8-unclaimed', ?1, 1, 10, 'running', 'unknown')",
+            [b"/v8-unclaimed".as_slice()],
+        )
+        .unwrap();
+
+    apply_pending_migrations(&mut connection, 40).unwrap();
+
+    assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
+    assert_eq!(
+        schema_fingerprint(&connection).unwrap(),
+        test_v9_schema_fingerprint()
+    );
+    let scan: (String, Option<i64>, i64, i64) = connection
+        .query_row(
+            "SELECT status, completed_at_unix_ms, directory_count, issue_count
+             FROM scans WHERE scan_id = 'scan:v8-unclaimed'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(scan, ("running".to_owned(), None, 0, 0));
+    let claim_count: i64 = connection
+        .query_row("SELECT count(*) FROM scan_process_claims", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(claim_count, 0);
 }
 
 #[test]
@@ -877,7 +978,7 @@ fn populated_v6_upgrade_adds_snapshot_path_lookup_without_rewriting_scans() {
     assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
     assert_eq!(
         schema_fingerprint(&connection).unwrap(),
-        test_v8_schema_fingerprint()
+        test_v9_schema_fingerprint()
     );
     let scans: Vec<(String, Option<Vec<u8>>)> = connection
         .prepare("SELECT scan_id, snapshot_relative_path FROM scans ORDER BY scan_id")
@@ -1537,7 +1638,7 @@ fn populated_v1_upgrade_preserves_legacy_candidate_and_cleanup_observations() {
     assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
     assert_eq!(
         schema_fingerprint(&connection).unwrap(),
-        test_v8_schema_fingerprint()
+        test_v9_schema_fingerprint()
     );
     let candidate: (i64, Option<String>, Option<String>) = connection
         .query_row(
@@ -1591,7 +1692,7 @@ fn populated_v1_upgrade_preserves_legacy_candidate_and_cleanup_observations() {
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
-    assert_eq!(versions, [1, 2, 3, 4, 5, 6, 7, 8]);
+    assert_eq!(versions, [1, 2, 3, 4, 5, 6, 7, 8, 9]);
 }
 
 #[test]
@@ -2997,6 +3098,56 @@ fn process_instance_liveness_tracks_graceful_and_abrupt_death() {
         assert_eq!(
             probe_process_instance(&identity),
             ProcessLiveness::DefinitelyGone
+        );
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn claimed_scan_recovery_requires_real_same_scope_process_death() {
+    for abrupt in [false, true] {
+        let temp = TempDir::new().unwrap();
+        let path = database_path(&temp);
+        let root = temp.path().join("scan-root");
+        std::fs::create_dir(&root).unwrap();
+        drop(StoreCoordinator::open(&path).unwrap());
+        let ready = temp.path().join("claimed-ready");
+        let release = temp.path().join("claimed-release");
+        let mut child = spawn_persistence_helper(
+            "hold-claimed-scan",
+            &[
+                ("DUX_PERSISTENCE_DATABASE", &path),
+                ("DUX_PERSISTENCE_SCAN_ROOT", &root),
+                ("DUX_PERSISTENCE_READY", &ready),
+                ("DUX_PERSISTENCE_RELEASE", &release),
+            ],
+        );
+        wait_for_child_handshake(&mut child, &ready);
+        let store = StoreCoordinator::open(&path).unwrap();
+        let live = store
+            .run_scan_recovery_batch(UNIX_EPOCH + Duration::from_millis(20))
+            .unwrap();
+        assert_eq!(live.outcome, ScanRecoveryBatchOutcome::DeferredUnproven);
+        assert_eq!(live.alive_count, 1);
+
+        if abrupt {
+            child.terminate_without_unwinding();
+        } else {
+            publish_handshake(&release);
+            child.wait_for_success();
+        }
+        let recovered = store
+            .run_scan_recovery_batch(UNIX_EPOCH + Duration::from_millis(30))
+            .unwrap();
+        assert_eq!(recovered.outcome, ScanRecoveryBatchOutcome::Interrupted);
+        assert_eq!(recovered.claimed_count_after, 0);
+        assert_eq!(
+            store
+                .load_scan(&crate::ScanId::new("scan:subprocess-claimed").unwrap())
+                .unwrap()
+                .unwrap()
+                .status(),
+            ScanStatus::Interrupted
         );
     }
 }

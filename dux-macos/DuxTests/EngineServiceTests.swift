@@ -36,7 +36,7 @@ final class EngineServiceTests: XCTestCase {
         let result = try await EngineService(engine: fixture.engine).loadSmokeResult(bytes: 1_536)
 
         XCTAssertEqual(result.libraryVersion, "0.5.0")
-        XCTAssertEqual(result.ffiContractVersion, 3)
+        XCTAssertEqual(result.ffiContractVersion, 4)
         XCTAssertEqual(result.bytes, 1_536)
         XCTAssertEqual(result.displaySize, "1.5 KB")
         XCTAssertTrue(result.executedOffMainThread)
@@ -67,7 +67,7 @@ final class EngineServiceTests: XCTestCase {
             weakEngine = engine
 
             XCTAssertEqual(liveEngineInstanceCount(), baseline + 1)
-            XCTAssertEqual(try engine.libraryVersion().ffiContractVersion, 3)
+            XCTAssertEqual(try engine.libraryVersion().ffiContractVersion, 4)
             XCTAssertTrue(engine.close())
             XCTAssertTrue(engine.close())
             XCTAssertThrowsError(try engine.formatSize(bytes: 1_536)) { error in
@@ -139,7 +139,7 @@ private actor CountingEngineService: EngineServing {
         await Task.yield()
         return EngineSmokeResult(
             libraryVersion: "test",
-            ffiContractVersion: 3,
+            ffiContractVersion: 4,
             bytes: bytes,
             displaySize: "test",
             executedOffMainThread: true

@@ -81,14 +81,41 @@ phase. A successful task publishes one finished event and immutable typed
 result. Expected failures are stable, path-free categories; a panic becomes an
 internal task failure and always releases exclusive admission.
 
-FFI contract v3 and the native app now own this idle boundary. UniFFI exposes
+FFI contract v4 and the native app now own this idle boundary. UniFFI exposes
 only opaque maintenance tasks and path-free typed aggregates. The in-process
 scheduler starts after a 60-second grace, rechecks Low Power Mode and thermal
-state, executes at most one batch at a time, completes one fair six-kind cycle
-with one-minute spacing, then waits six hours. `DeferredBusy`, `has_more`,
+state, executes at most one batch at a time, completes one fair seven-kind cycle
+with scan recovery ordered before terminal-temp reconciliation and one-minute
+spacing, then waits six hours. `DeferredBusy`, `has_more`,
 deterministic deferrals, retryable failures, and energy denial have separate
 bounded delays. Wake/lifecycle signals coalesce but never erase startup grace
 or a resource/failure backoff. This scheduling grants no new cleanup authority.
+
+## Running-scan recovery orchestration
+
+Schema v9 records an immutable private process-instance claim in the same
+transaction that creates each new `running` scan. Claims are capped at 64 per
+exact process owner; owner and reliable-scope indexes keep admission and
+discovery bounded without allowing foreign or earlier-boot debt to block a new
+owner. Existing v8 running rows remain unclaimed and are never guessed into an
+owner.
+
+One idle-only `ScanRecoveryMaintenance` batch reads and fully validates a
+64-row keyset page for the current reliable boot/namespace scope, releases the
+SQLite guard, and probes every exact owner. Only `DefinitelyGone` may be chosen.
+The writer guard is then reacquired and one pristine claim/scan tuple is
+exact-CASed to `interrupted`; a concurrently completed or recovered row is
+reported without overwrite. `Alive`, `Unknown`, malformed data, newer-schema
+races, and pre-start clocks never produce a recovery write. Page cursors are
+process-local discovery hints, not durable authority, and `has_more` reports a
+sentinel page or additional proven-dead work.
+
+Recovery changes history only. It never opens or removes a snapshot, temp file,
+candidate, cleanup plan, or user path. An exact snapshot-temp lease remains
+attached after the parent becomes `interrupted`, so the independently sealed
+terminal-temp batch owns the later physical-first reconciliation. macOS and
+Linux can prove only same-scope death. Reboot/foreign scope stays `Unknown`, and
+Windows remains unable to prove death until it gains reliable host/boot scope.
 
 ## Snapshot-cap engine orchestration
 
@@ -386,8 +413,10 @@ charged bytes, and `has_more`. Scan IDs, lease IDs, owners, names, roots, and
 paths stay private. Native scheduling must apply backoff to active-only debt.
 
 This authority never adopts an unleased temp, touches a provisioning stage, or
-recovers a `running` scan left behind by hard process death. Those require
-separate ownership and liveness boundaries.
+itself recovers a `running` scan. The preceding scan-recovery boundary must
+first prove exact same-scope process death and terminalize the parent without
+touching the lease; terminal-temp maintenance then retains sole residual-removal
+authority.
 
 ### Unleased snapshot-temp reconciliation contract
 
@@ -567,7 +596,8 @@ Publication and retention share this lock order:
 
 Core cap enforcement, retained-handle final deletion, exact tombstoned residual
 handling, typed one-batch engine invocation, app/FFI review-lease ownership,
-and native periodic idle scheduling with bounded backoff are implemented.
+same-scope hard-process-death scan recovery, and native periodic idle scheduling
+with bounded backoff are implemented.
 Physical-orphan reconciliation is the separate implemented capability below,
 and terminal row-bound temp reconciliation is the separate implemented
 capability above. Unleased physical-temp and exact-marker-owned root-local

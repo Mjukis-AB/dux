@@ -218,6 +218,13 @@ fn started_maintenance(outcome: HistoryMaintenanceStartOutcome) -> TaskId {
     }
 }
 
+fn started_scan_recovery_maintenance(outcome: ScanRecoveryMaintenanceStartOutcome) -> TaskId {
+    match outcome {
+        ScanRecoveryMaintenanceStartOutcome::Started(id) => id,
+        other => panic!("expected started scan recovery maintenance, got {other:?}"),
+    }
+}
+
 fn started_snapshot_retention(outcome: SnapshotRetentionStartOutcome) -> TaskId {
     match outcome {
         SnapshotRetentionStartOutcome::Started(id) => id,
@@ -1061,21 +1068,30 @@ fn recent_scan_history_orders_ties_reports_more_and_exposes_only_succeeded_count
 fn recent_scan_history_exact_limit_uses_one_bounded_page_and_more_sentinel() {
     let (_temp, engine) = engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
     let root = engine.config().cache_directory().join("history-limit-root");
-    let base = SystemTime::UNIX_EPOCH + Duration::from_millis(1_750_000_000_000);
-    for index in 0..=crate::persistence::MAX_RECENT_SCAN_HISTORY_LIMIT {
-        engine
-            .inner
-            .store
-            .record_scan_started(
-                &NewScanRecord::try_new(
-                    ScanId::new(format!("scan:history-limit:{index:03}")).unwrap(),
-                    root.join(format!("root-{index:03}")),
-                    base + Duration::from_millis(index as u64),
+    engine.inner.store.with_connection(|connection| {
+        for index in 0..=crate::persistence::MAX_RECENT_SCAN_HISTORY_LIMIT {
+            let path = root.join(format!("root-{index:03}"));
+            let observed = crate::persistence::observe_host_path(&path).unwrap();
+            let encoding = match observed.encoding() {
+                crate::persistence::HostPathObservationEncoding::Utf8 => 1_i64,
+                crate::persistence::HostPathObservationEncoding::Utf16LittleEndian => 2_i64,
+            };
+            connection
+                .execute(
+                    "INSERT INTO scans (
+                         scan_id, root_path, root_path_encoding, started_at_unix_ms,
+                         status, coverage_status
+                     ) VALUES (?1, ?2, ?3, ?4, 'running', 'unknown')",
+                    rusqlite::params![
+                        format!("scan:history-limit:{index:03}"),
+                        observed.bytes(),
+                        encoding,
+                        1_750_000_000_000_i64 + index as i64,
+                    ],
                 )
-                .unwrap(),
-            )
-            .unwrap();
-    }
+                .unwrap();
+        }
+    });
 
     let page = engine
         .recent_scan_history(crate::persistence::MAX_RECENT_SCAN_HISTORY_LIMIT)
@@ -1269,6 +1285,327 @@ fn real_format_batch_runs_through_registry_and_publishes_immutable_result() {
             .iter()
             .any(|event| matches!(event.kind, TaskEventKind::Terminal { .. }))
     );
+}
+
+#[test]
+fn scan_recovery_maintenance_runs_one_typed_path_free_noop_batch() {
+    let (temp, engine) = engine_with_limits(RegistryLimits::testing(1, 2, 4, 8));
+    let observed = SystemTime::UNIX_EPOCH + Duration::from_millis(9_000);
+    let id = started_scan_recovery_maintenance(
+        engine.start_scan_recovery_maintenance_at(observed).unwrap(),
+    );
+    let terminal = wait_terminal(&engine, id);
+    assert_eq!(terminal.kind, TaskKind::ScanRecoveryMaintenance);
+    assert_eq!(terminal.phase, TaskPhase::Succeeded);
+    assert!(terminal.result_available);
+
+    let result = engine
+        .scan_recovery_maintenance_result(id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.observed_at(), observed);
+    assert_eq!(result.outcome(), ScanRecoveryMaintenanceOutcome::NoClaim);
+    assert_eq!(result.claimed_count_before(), 0);
+    assert_eq!(result.claimed_count_after(), 0);
+    assert_eq!(result.alive_count(), 0);
+    assert_eq!(result.unknown_count(), 0);
+    assert_eq!(result.recoverable_count(), 0);
+    assert!(!result.has_more());
+    assert_eq!(
+        engine.history_maintenance_result(id).unwrap_err(),
+        TaskAccessError::WrongTaskKind
+    );
+    assert_eq!(
+        engine.scan_result(id).unwrap_err(),
+        TaskAccessError::WrongTaskKind
+    );
+
+    let events = engine.task_events(id, 0, 8).unwrap().events;
+    let applying = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event.kind,
+                TaskEventKind::ScanRecoveryMaintenanceBatchApplying
+            )
+        })
+        .unwrap();
+    let finished = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event.kind,
+                TaskEventKind::ScanRecoveryMaintenanceBatchFinished {
+                    outcome: ScanRecoveryMaintenanceOutcome::NoClaim,
+                    claimed_count_before: 0,
+                    claimed_count_after: 0,
+                    alive_count: 0,
+                    unknown_count: 0,
+                    recoverable_count: 0,
+                    has_more: false,
+                }
+            )
+        })
+        .unwrap();
+    let terminal_event = events
+        .iter()
+        .position(|event| matches!(event.kind, TaskEventKind::Terminal { .. }))
+        .unwrap();
+    assert!(applying < finished && finished < terminal_event);
+
+    let debug = format!("{result:?}{events:?}");
+    assert!(!debug.contains(temp.path().to_string_lossy().as_ref()));
+    assert!(!debug.contains("scan:"));
+    assert!(!debug.contains("owner_process_instance"));
+}
+
+#[test]
+fn scan_recovery_maintenance_preserves_changed_race_counts_and_has_more() {
+    let (_temp, engine) = engine_with_limits(RegistryLimits::testing(1, 2, 4, 8));
+    let observed = SystemTime::UNIX_EPOCH + Duration::from_millis(9_001);
+    let id = started_scan_recovery_maintenance(
+        engine
+            .start_scan_recovery_maintenance_with_test_batch(
+                observed,
+                crate::persistence::ScanRecoveryBatchResult {
+                    observed_at: observed,
+                    outcome: crate::persistence::ScanRecoveryBatchOutcome::ChangedConcurrently,
+                    claimed_count_before: 5,
+                    claimed_count_after: 4,
+                    alive_count: 1,
+                    unknown_count: 1,
+                    recoverable_count: 3,
+                    has_more: true,
+                },
+            )
+            .unwrap(),
+    );
+    assert_eq!(wait_terminal(&engine, id).phase, TaskPhase::Succeeded);
+    let result = engine
+        .scan_recovery_maintenance_result(id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        result.outcome(),
+        ScanRecoveryMaintenanceOutcome::ChangedConcurrently
+    );
+    assert_eq!(result.claimed_count_before(), 5);
+    assert_eq!(result.claimed_count_after(), 4);
+    assert_eq!(result.alive_count(), 1);
+    assert_eq!(result.unknown_count(), 1);
+    assert_eq!(result.recoverable_count(), 3);
+    assert!(result.has_more());
+}
+
+#[test]
+fn scan_recovery_maintenance_is_idle_deduplicated_and_cross_exclusive() {
+    let (_temp, engine) = engine_with_limits(RegistryLimits::testing(1, 2, 4, 8));
+    let (foreground_started_tx, foreground_started_rx) = mpsc::channel();
+    let (foreground_release_tx, foreground_release_rx) = mpsc::channel();
+    let foreground = engine
+        .submit_test(Box::new(move |_| {
+            foreground_started_tx.send(()).unwrap();
+            foreground_release_rx.recv().unwrap();
+            WorkOutcome::Succeeded(TaskResult::TestOnly)
+        }))
+        .unwrap();
+    foreground_started_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    assert_eq!(
+        engine.start_scan_recovery_maintenance().unwrap(),
+        ScanRecoveryMaintenanceStartOutcome::DeferredBusy
+    );
+    foreground_release_tx.send(()).unwrap();
+    wait_terminal(&engine, foreground);
+
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let first = started_scan_recovery_maintenance(
+        engine
+            .start_scan_recovery_maintenance_with_test_hooks(
+                SystemTime::UNIX_EPOCH + Duration::from_millis(9_002),
+                move || {
+                    started_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                },
+                || {},
+                || {},
+            )
+            .unwrap(),
+    );
+    started_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    assert_eq!(
+        engine.start_scan_recovery_maintenance().unwrap(),
+        ScanRecoveryMaintenanceStartOutcome::AlreadyActive(first)
+    );
+    assert_eq!(
+        engine.start_history_maintenance().unwrap(),
+        HistoryMaintenanceStartOutcome::DeferredBusy
+    );
+    assert_eq!(
+        engine.start_snapshot_terminal_temp_maintenance().unwrap(),
+        SnapshotTerminalTempMaintenanceStartOutcome::DeferredBusy
+    );
+    release_tx.send(()).unwrap();
+    assert_eq!(wait_terminal(&engine, first).phase, TaskPhase::Succeeded);
+    assert!(
+        engine
+            .inner
+            .shared
+            .lock_registry_recover()
+            .active_scan_recovery_maintenance
+            .is_none()
+    );
+}
+
+#[test]
+fn scan_recovery_cancellation_and_close_are_linearized_at_applying() {
+    let (_temp, engine) = engine_with_limits(RegistryLimits::testing(1, 2, 8, 8));
+    let observed = SystemTime::UNIX_EPOCH + Duration::from_millis(9_003);
+
+    let (before_tx, before_rx) = mpsc::channel();
+    let (before_release_tx, before_release_rx) = mpsc::channel();
+    let cancelled = started_scan_recovery_maintenance(
+        engine
+            .start_scan_recovery_maintenance_with_test_hooks(
+                observed,
+                move || {
+                    before_tx.send(()).unwrap();
+                    before_release_rx.recv().unwrap();
+                },
+                || {},
+                || {},
+            )
+            .unwrap(),
+    );
+    before_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    assert_eq!(
+        engine.cancel_task(cancelled).unwrap(),
+        CancelOutcome::Requested
+    );
+    before_release_tx.send(()).unwrap();
+    assert_eq!(
+        wait_terminal(&engine, cancelled).phase,
+        TaskPhase::Cancelled
+    );
+    assert!(
+        engine
+            .task_events(cancelled, 0, 8)
+            .unwrap()
+            .events
+            .iter()
+            .all(|event| !matches!(
+                event.kind,
+                TaskEventKind::ScanRecoveryMaintenanceBatchApplying
+            ))
+    );
+
+    let (applying_tx, applying_rx) = mpsc::channel();
+    let (applying_release_tx, applying_release_rx) = mpsc::channel();
+    let applied = started_scan_recovery_maintenance(
+        engine
+            .start_scan_recovery_maintenance_with_test_hooks(
+                observed + Duration::from_millis(1),
+                || {},
+                move || {
+                    applying_tx.send(()).unwrap();
+                    applying_release_rx.recv().unwrap();
+                },
+                || {},
+            )
+            .unwrap(),
+    );
+    applying_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    assert_eq!(engine.close(), CloseOutcome::Initiated);
+    applying_release_tx.send(()).unwrap();
+    assert!(engine.wait_until_closed(TEST_TIMEOUT));
+    let registry = engine.inner.shared.lock_registry_recover();
+    let record = registry.records.get(&applied).unwrap();
+    assert_eq!(record.phase, TaskPhase::Succeeded);
+    assert!(record.cancellation_requested);
+    assert!(matches!(
+        record.result,
+        Some(TaskResult::ScanRecoveryMaintenance(_))
+    ));
+}
+
+#[test]
+fn scan_recovery_mappings_are_exhaustive_and_stable() {
+    for (input, expected) in [
+        (
+            crate::persistence::ScanRecoveryBatchOutcome::NoClaim,
+            ScanRecoveryMaintenanceOutcome::NoClaim,
+        ),
+        (
+            crate::persistence::ScanRecoveryBatchOutcome::DeferredUnproven,
+            ScanRecoveryMaintenanceOutcome::DeferredUnproven,
+        ),
+        (
+            crate::persistence::ScanRecoveryBatchOutcome::Interrupted,
+            ScanRecoveryMaintenanceOutcome::Interrupted,
+        ),
+        (
+            crate::persistence::ScanRecoveryBatchOutcome::ChangedConcurrently,
+            ScanRecoveryMaintenanceOutcome::ChangedConcurrently,
+        ),
+    ] {
+        assert_eq!(public_scan_recovery_maintenance_outcome(&input), expected);
+    }
+
+    for (input, expected) in [
+        (
+            HistoryErrorKind::InvalidInput,
+            ScanRecoveryMaintenanceFailureKind::InvalidClock,
+        ),
+        (
+            HistoryErrorKind::IncompatibleSchema,
+            ScanRecoveryMaintenanceFailureKind::IncompatibleSchema,
+        ),
+        (
+            HistoryErrorKind::QueryLimitExceeded,
+            ScanRecoveryMaintenanceFailureKind::BudgetExceeded,
+        ),
+        (
+            HistoryErrorKind::Busy,
+            ScanRecoveryMaintenanceFailureKind::Busy,
+        ),
+        (
+            HistoryErrorKind::UnsafeStorage,
+            ScanRecoveryMaintenanceFailureKind::UnsafeStorage,
+        ),
+        (
+            HistoryErrorKind::CorruptData,
+            ScanRecoveryMaintenanceFailureKind::CorruptData,
+        ),
+        (
+            HistoryErrorKind::DatabaseUnavailable,
+            ScanRecoveryMaintenanceFailureKind::Unavailable,
+        ),
+        (
+            HistoryErrorKind::OutcomeUnknown,
+            ScanRecoveryMaintenanceFailureKind::OutcomeUnknown,
+        ),
+        (
+            HistoryErrorKind::AlreadyExists,
+            ScanRecoveryMaintenanceFailureKind::InternalState,
+        ),
+        (
+            HistoryErrorKind::NotFound,
+            ScanRecoveryMaintenanceFailureKind::InternalState,
+        ),
+        (
+            HistoryErrorKind::InvalidTransition,
+            ScanRecoveryMaintenanceFailureKind::InternalState,
+        ),
+        (
+            HistoryErrorKind::InternalState,
+            ScanRecoveryMaintenanceFailureKind::InternalState,
+        ),
+    ] {
+        assert_eq!(
+            map_scan_recovery_maintenance_failure(input),
+            TaskFailureKind::ScanRecoveryMaintenance(expected)
+        );
+    }
 }
 
 #[test]

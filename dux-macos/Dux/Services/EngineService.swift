@@ -16,7 +16,7 @@ protocol DuxSnapshotReviewLease: AnyObject, Sendable {
 }
 
 struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewServing, Sendable {
-    fileprivate static let expectedFFIContractVersion: UInt32 = 3
+    fileprivate static let expectedFFIContractVersion: UInt32 = 4
 
     private let state: EngineServiceState
 
@@ -127,6 +127,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
 
     private static func ffiKind(_ kind: DuxMaintenanceKind) -> MaintenanceKind {
         switch kind {
+        case .scanRecovery: .scanRecovery
         case .history: .history
         case .snapshotRetention: .snapshotRetention
         case .snapshotOrphan: .snapshotOrphan
@@ -294,6 +295,8 @@ private final class FFIDuxMaintenanceTask: DuxMaintenanceTask, @unchecked Sendab
 
     private static func deferral(_ outcome: MaintenanceOutcome) -> DuxMaintenanceDeferral? {
         switch outcome {
+        case .scanRecoveryDeferredUnproven:
+            .unproven
         case .terminalTempDeferredActive, .unleasedTempDeferredActive:
             .active
         case .retentionDeferredUnstable:
