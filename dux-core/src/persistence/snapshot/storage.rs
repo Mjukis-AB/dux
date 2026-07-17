@@ -50,6 +50,16 @@ pub(crate) struct SnapshotStorageError {
     kind: SnapshotStorageErrorKind,
 }
 
+/// Exact effect boundary for one observed-final removal. `BeforeEffect`
+/// guarantees that no unlink/disposition succeeded. `OutcomeUnknown` means
+/// the namespace mutation succeeded but its directory durability could not be
+/// established.
+#[derive(Debug)]
+pub(crate) enum SnapshotFinalRemovalError {
+    BeforeEffect(SnapshotStorageError),
+    OutcomeUnknown,
+}
+
 impl SnapshotStorageError {
     const fn new(kind: SnapshotStorageErrorKind) -> Self {
         Self { kind }
@@ -183,6 +193,26 @@ impl SnapshotFileUsage {
         let charged_bytes = self
             .charged_bytes
             .checked_add(other.charged_bytes)
+            .ok_or_else(unsafe_inventory_object)?;
+        Ok(Self {
+            logical_bytes,
+            allocated_bytes,
+            charged_bytes,
+        })
+    }
+
+    fn checked_sub(self, other: Self) -> Result<Self> {
+        let logical_bytes = self
+            .logical_bytes
+            .checked_sub(other.logical_bytes)
+            .ok_or_else(unsafe_inventory_object)?;
+        let allocated_bytes = self
+            .allocated_bytes
+            .checked_sub(other.allocated_bytes)
+            .ok_or_else(unsafe_inventory_object)?;
+        let charged_bytes = self
+            .charged_bytes
+            .checked_sub(other.charged_bytes)
             .ok_or_else(unsafe_inventory_object)?;
         Ok(Self {
             logical_bytes,
@@ -330,9 +360,9 @@ impl SnapshotControlUsage {
 /// are opened and closed sequentially so the 2,048-entry bound does not become
 /// a file-descriptor requirement. Its mutations are limited to one re-proven
 /// quiescent temp or one exact observed final; higher persistence must first
-/// bind either name to durable same-scan or tombstone authority. The storage
-/// type itself offers no generic temp, snapshot-policy, or user-data cleanup
-/// authority.
+/// bind either name to durable same-scan, tombstone, or exact unreferenced
+/// orphan authority. The storage type itself offers no generic temp,
+/// snapshot-policy, or user-data cleanup authority.
 pub(crate) struct SnapshotStoreInventoryLease {
     store: Arc<StoreInner>,
     entries: Vec<SnapshotInventoryEntry>,
@@ -470,7 +500,8 @@ impl SnapshotStoreInventoryLease {
 
     /// Remove one exact final that was observed by this inventory lease.
     ///
-    /// Higher persistence layers must establish tombstone and retention-policy
+    /// Higher persistence layers must establish either exact tombstone and
+    /// retention-policy authority or a separately proven unreferenced-orphan
     /// authority before calling this storage-only capability. The typed final
     /// handle must match this lease's retained observation and remain live for
     /// the complete call. The entry is reopened no-follow with deletion access
@@ -480,8 +511,32 @@ impl SnapshotStoreInventoryLease {
         &mut self,
         retained: &RetainedSnapshot,
     ) -> Result<SnapshotFileUsage> {
+        self.remove_observed_final_reconciled(retained)
+            .map_err(|error| match error {
+                SnapshotFinalRemovalError::BeforeEffect(error) => error,
+                SnapshotFinalRemovalError::OutcomeUnknown => {
+                    SnapshotStorageError::new(SnapshotStorageErrorKind::Unavailable)
+                }
+            })
+    }
+
+    /// Remove one fully proven final while preserving the physical effect
+    /// boundary for callers that do not have a durable logical tombstone.
+    pub(crate) fn remove_observed_final_reconciled(
+        &mut self,
+        retained: &RetainedSnapshot,
+    ) -> std::result::Result<SnapshotFileUsage, SnapshotFinalRemovalError> {
+        self.remove_observed_final_with_sync(retained, platform::sync_directory)
+    }
+
+    fn remove_observed_final_with_sync(
+        &mut self,
+        retained: &RetainedSnapshot,
+        sync_directory: impl FnOnce(&File) -> Result<()>,
+    ) -> std::result::Result<SnapshotFileUsage, SnapshotFinalRemovalError> {
+        let before_effect = SnapshotFinalRemovalError::BeforeEffect;
         if !Arc::ptr_eq(&self.store, &retained.store) {
-            return Err(unsafe_inventory_object());
+            return Err(before_effect(unsafe_inventory_object()));
         }
         let name = &retained.name;
         let position = self
@@ -493,48 +548,67 @@ impl SnapshotStoreInventoryLease {
                     SnapshotInventoryEntryKind::Final(observed) if observed == name
                 )
             })
-            .ok_or_else(unsafe_inventory_object)?;
+            .ok_or_else(|| before_effect(unsafe_inventory_object()))?;
         let observed = &self.entries[position];
         if retained.identity != observed.identity
-            || snapshot_file_usage(&retained.file)? != observed.usage
+            || snapshot_file_usage(&retained.file).map_err(before_effect)? != observed.usage
         {
-            return Err(unsafe_inventory_object());
+            return Err(before_effect(unsafe_inventory_object()));
         }
-        retained.revalidate()?;
+        retained.revalidate().map_err(before_effect)?;
         let Some((file, identity)) = platform::open_named_final_for_removal(
             &self.store.directory,
             &self.store.path,
             name.as_str(),
-        )?
+        )
+        .map_err(before_effect)?
         else {
-            return Err(unsafe_inventory_object());
+            return Err(before_effect(unsafe_inventory_object()));
         };
-        if Identity(identity) != observed.identity || snapshot_file_usage(&file)? != observed.usage
+        if Identity(identity) != observed.identity
+            || snapshot_file_usage(&file).map_err(before_effect)? != observed.usage
         {
-            return Err(unsafe_inventory_object());
+            return Err(before_effect(unsafe_inventory_object()));
         }
-        platform::validate_retained(&file, identity, platform::Kind::RegularFile, true)?;
+        platform::validate_retained(&file, identity, platform::Kind::RegularFile, true)
+            .map_err(before_effect)?;
         platform::validate_named(
             &self.store.directory,
             name.as_str(),
             &file,
             identity,
             platform::Kind::RegularFile,
-        )?;
-        if snapshot_file_usage(&file)? != observed.usage {
-            return Err(unsafe_inventory_object());
+        )
+        .map_err(before_effect)?;
+        if snapshot_file_usage(&file).map_err(before_effect)? != observed.usage {
+            return Err(before_effect(unsafe_inventory_object()));
         }
-        platform::remove_retained_final(&self.store.directory, name.as_str(), &file, identity)?;
-        platform::sync_directory(&self.store.directory)?;
 
-        let removed = self.entries.remove(position).usage;
-        self.entries_usage = self
-            .entries
-            .iter()
-            .try_fold(SnapshotFileUsage::default(), |total, entry| {
-                total.checked_add(entry.usage)
-            })?;
-        self.total_usage = self.entries_usage.checked_add(self.controls.total())?;
+        // Freeze every accounting postcondition before the physical effect so
+        // no arithmetic failure can be mislabeled as an unlink failure.
+        let removed = observed.usage;
+        let entries_usage = self
+            .entries_usage
+            .checked_sub(removed)
+            .map_err(before_effect)?;
+        let total_usage = self
+            .total_usage
+            .checked_sub(removed)
+            .map_err(before_effect)?;
+
+        // The platform function consumes and closes the delete-capable handle
+        // before returning. On Windows the POSIX disposition is applied when
+        // that handle closes, so directory sync must never run while it is
+        // still live. From this return onward, only directory durability
+        // remains uncertain.
+        platform::remove_retained_final(&self.store.directory, name.as_str(), file, identity)
+            .map_err(before_effect)?;
+        sync_directory(&self.store.directory)
+            .map_err(|_| SnapshotFinalRemovalError::OutcomeUnknown)?;
+
+        self.entries.remove(position);
+        self.entries_usage = entries_usage;
+        self.total_usage = total_usage;
         Ok(removed)
     }
 }
@@ -754,9 +828,8 @@ impl SecureSnapshotStore {
         else {
             return Err(unsafe_inventory_object());
         };
-        platform::remove_retained_final(&self.inner.directory, name.as_str(), &current, identity)?;
+        platform::remove_retained_final(&self.inner.directory, name.as_str(), current, identity)?;
         platform::sync_directory(&self.inner.directory)?;
-        drop(current);
         let Some((mut replacement, _)) = platform::create_private_file_exclusive(
             &self.inner.directory,
             &self.inner.path,
@@ -2118,14 +2191,16 @@ mod platform {
     pub(super) fn remove_retained_final(
         directory: &File,
         name: &str,
-        file: &File,
+        file: File,
         expected: Identity,
     ) -> Result<()> {
         use nix::unistd::{UnlinkatFlags, unlinkat};
-        validate_named(directory, name, file, expected, Kind::RegularFile)?;
-        // DUX-DESTRUCTIVE: allow=snapshot-observed-final-unlink -- remove only an exact typed final observed under the retained inventory writer lease after identity and usage revalidation
+        validate_named(directory, name, &file, expected, Kind::RegularFile)?;
+        // DUX-DESTRUCTIVE: allow=snapshot-observed-final-unlink -- remove only an exact typed final observed under the retained inventory writer lease after higher-layer tombstone or orphan authority plus identity and usage revalidation
         unlinkat(directory, name, UnlinkatFlags::NoRemoveDir)
-            .map_err(|_| SnapshotStorageError::new(SnapshotStorageErrorKind::Unavailable))
+            .map_err(|_| SnapshotStorageError::new(SnapshotStorageErrorKind::Unavailable))?;
+        drop(file);
+        Ok(())
     }
 
     #[cfg(target_os = "macos")]
@@ -2498,12 +2573,11 @@ mod tests {
         platform::remove_retained_final(
             &store.inner.directory,
             replaced_name.as_str(),
-            &original,
+            original,
             original_identity,
         )
         .unwrap();
         platform::sync_directory(&store.inner.directory).unwrap();
-        drop(original);
         let (mut replacement, _) = platform::create_private_file_exclusive(
             &store.inner.directory,
             &store.inner.path,
@@ -2556,7 +2630,9 @@ mod tests {
 
         let retained = inventory.retain_observed_final(&removed_name).unwrap();
         assert_eq!(
-            inventory.remove_observed_final(&retained).unwrap(),
+            inventory
+                .remove_observed_final_reconciled(&retained)
+                .unwrap(),
             expected_usage
         );
         drop(retained);
@@ -2584,6 +2660,59 @@ mod tests {
             SnapshotStorageErrorKind::UnsafeObject
         );
         assert!(snapshot_root.join(retained_name.as_str()).exists());
+    }
+
+    #[test]
+    fn reconciled_final_removal_reports_post_unlink_sync_failure_as_outcome_unknown() {
+        let temp = TempDir::new().unwrap();
+        private_database_root(&temp);
+        let database = database_path(&temp);
+        let store = open_rw(&database);
+        let removed_name = SnapshotFileName::from_scan_id(b"reconciled-sync-unknown");
+        let mut staged = store
+            .stage(removed_name.clone(), Duration::from_millis(100))
+            .unwrap();
+        staged.write_all(b"snapshot bytes").unwrap();
+        drop(staged.publish_no_replace().unwrap());
+
+        let snapshot_root = database.parent().unwrap().join(DIRECTORY_NAME);
+        let mut inventory = store
+            .inventory_with_writer_lease(Duration::from_millis(100))
+            .unwrap();
+        let before_entries_usage = inventory.entries_usage();
+        let before_total_usage = inventory.total_usage();
+        let retained = inventory.retain_observed_final(&removed_name).unwrap();
+
+        let error = inventory
+            .remove_observed_final_with_sync(&retained, |_| {
+                Err(SnapshotStorageError::new(
+                    SnapshotStorageErrorKind::Unavailable,
+                ))
+            })
+            .unwrap_err();
+        assert!(matches!(error, SnapshotFinalRemovalError::OutcomeUnknown));
+        assert_eq!(inventory.entries_usage(), before_entries_usage);
+        assert_eq!(inventory.total_usage(), before_total_usage);
+        assert!(
+            inventory
+                .entries()
+                .iter()
+                .any(|entry| entry.name() == removed_name.as_str())
+        );
+
+        drop(retained);
+        assert!(!snapshot_root.join(removed_name.as_str()).exists());
+        drop(inventory);
+
+        let fresh = store
+            .inventory_with_writer_lease(Duration::from_millis(100))
+            .unwrap();
+        assert!(
+            fresh
+                .entries()
+                .iter()
+                .all(|entry| entry.name() != removed_name.as_str())
+        );
     }
 
     #[test]
@@ -2615,13 +2744,17 @@ mod tests {
         changed.write_all(b"changed").unwrap();
         changed.sync_all().unwrap();
         drop(changed);
-        assert_eq!(
-            inventory
-                .remove_observed_final(&changed_retained)
-                .unwrap_err()
-                .kind(),
-            SnapshotStorageErrorKind::UnsafeObject
-        );
+        match inventory
+            .remove_observed_final_reconciled(&changed_retained)
+            .unwrap_err()
+        {
+            SnapshotFinalRemovalError::BeforeEffect(error) => {
+                assert_eq!(error.kind(), SnapshotStorageErrorKind::UnsafeObject);
+            }
+            SnapshotFinalRemovalError::OutcomeUnknown => {
+                panic!("usage change must fail before physical removal")
+            }
+        }
         assert!(snapshot_root.join(changed_name.as_str()).exists());
 
         let (original, original_identity) = platform::open_named_final_for_removal(
@@ -2634,12 +2767,11 @@ mod tests {
         platform::remove_retained_final(
             &store.inner.directory,
             replacement_name.as_str(),
-            &original,
+            original,
             original_identity,
         )
         .unwrap();
         platform::sync_directory(&store.inner.directory).unwrap();
-        drop(original);
         let (mut replacement, _) = platform::create_private_file_exclusive(
             &store.inner.directory,
             &store.inner.path,

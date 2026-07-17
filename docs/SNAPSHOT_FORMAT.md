@@ -388,6 +388,27 @@ A later batch repeats identity, usage, and full-content validation, so changed
 or same-name replacement bytes are not removed. Scan and tombstone history are
 never deleted.
 
+Physical-orphan reconciliation is a separate sealed one-final batch, not a cap
+fallback. Under the current-schema database guard and then the snapshot writer
+lease, it builds a complete bounded typed-final/catalog match and selects only
+the deterministic first final with zero exact snapshot references. It retains
+the observed identity and logical/allocation usage, fully decodes and
+checksum-validates the body, requires the decoded scan ID to derive the exact
+filename, and requires an existing parent with the same lossless root and no
+snapshot reference. Only `running`, `failed`, `cancelled`, or `interrupted`
+parents are admissible; missing, queued, succeeded, referenced, malformed, or
+root-conflicting parents leave the final untouched.
+
+The reconciler keeps the validated read handle live, performs a second
+delete-capable name/identity/usage validation, applies checked accounting before
+mutation, removes at most that final, and syncs the snapshot directory. It
+creates no tombstone, changes no scan or temp row, and does not use temp state,
+cap policy, latest-two ranking, or review pins as authority. Known pre-unlink
+failures are retryable storage failures; uncertainty after unlink is
+`OutcomeUnknown`. The typed idle-only engine task accepts no path or candidate,
+publishes path-free aggregate observations, invokes one batch, and never
+self-enqueues.
+
 An exact same-scan retry is the sole implemented temp reconciliation. With the
 database guard held before the snapshot writer lock, it returns busy for a
 contended kernel lock. It may reopen, identity-revalidate, nonblockingly lock,
@@ -451,7 +472,6 @@ This checkpoint does not implement:
 - app/FFI review-lease ownership and native periodic idle scheduling (the core
   engine can request exactly one sealed batch, but this does not change the
   snapshot wire or enable product scheduling);
-- physical-orphan reconciliation;
 - general terminal-row, unleased-temp, or provisioning-stage scavenging beyond
   the exact same-scan residual retry;
 - native Windows sparse/compressed-allocation runtime verification and bounded

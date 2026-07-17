@@ -373,18 +373,81 @@ Core cap enforcement, retained-handle final deletion, exact tombstoned residual
 handling, and typed one-batch engine invocation are implemented. Automatic
 production scheduling is not enabled until app/FFI owns the review-lease
 lifecycle and a native periodic idle scheduler requests bounded batches with
-appropriate backoff. Physical-orphan reconciliation, general
-terminal/unleased-temp and provisioning-stage scavenging, and explicit
-clear-data actions remain separate maintenance capabilities. A prior inventory
-report is never authority; the writer recomputes every proof under the lock
-order above. A name prefix alone never proves that a temporary or stage
-directory belongs to DUX.
+appropriate backoff. Physical-orphan reconciliation is the separate implemented
+capability below. General terminal/unleased-temp and provisioning-stage
+scavenging and explicit clear-data actions remain future maintenance
+capabilities. A prior inventory report is never authority; each writer
+recomputes every proof under the lock order above. A name prefix alone never
+proves that a temporary or stage directory belongs to DUX.
+
+### Physical-orphan reconciliation contract
+
+A physical orphan is an accepted typed final name with no matching snapshot
+reference in the current database. That zero-match classification is only a
+bounded observation. Orphan maintenance is separate from cap enforcement:
+orphans are never normal cap victims, latest-two or pin policy does not grant
+their removal, and a malformed cap, pin, or temp row must not become deletion
+authority.
+
+One sealed orphan batch may select only the deterministic first typed orphan
+from a complete bounded physical-final/catalog reconciliation. It holds the
+current-schema database guard before the snapshot writer lease continuously
+through proof and mutation. It then retains the exact observed identity and
+usage, fully decodes the snapshot wire and checksum, and requires the decoded
+scan ID to derive the exact observed filename. The exact scan parent must
+exist, its lossless root must match the decoded root, and it must have no
+snapshot reference. `running`, `failed`, `cancelled`, and `interrupted` parents
+are admissible; `queued`, `succeeded`, missing, referenced, malformed, or
+root-conflicting parents are corruption and leave the final untouched.
+
+Allowing a `running` parent does not preempt a live publication. Publication
+retains the same snapshot writer lease through its database compare-and-set,
+so orphan maintenance cannot own that lease while a compliant publisher is
+between final publication and reference commit. A later retry must reacquire
+the locks and can recreate or exactly validate its final. Active, quiescent,
+and unleased temporary files therefore neither authorize nor defer removal of
+a separately proven orphan final. The batch never consumes a temp lease,
+settles a scan, writes a tombstone, or changes any history row.
+
+After a checked pre-mutation accounting update, the batch keeps the
+digest-validated read handle live, reopens the exact observed identity with
+deletion access, repeats name/identity/usage validation, removes at most that
+one final, and durably syncs the snapshot directory. A failure known to precede
+unlink remains a retryable storage failure. Once unlink has succeeded, any
+remaining directory-durability uncertainty is reported as `OutcomeUnknown`,
+never as success or a definite no-effect failure. A later bounded inventory
+converges from the physical namespace; no tombstone may be fabricated for an
+unreferenced final.
+
+The engine entry point is likewise separate and idle-only. It accepts no path,
+scan ID, filename, root, cap, inventory, or candidate. Public events and results
+discard the private scan ID/name and expose only canonical time, bounded orphan
+counts/charged bytes, removed bytes, and whether another explicit idle request
+may be useful. Core never loops or self-enqueues. App/FFI scheduling remains a
+later product decision.
+
+The sealed repository entry point is
+`SnapshotRepository::reconcile_physical_orphan`. The corresponding engine API
+is `EngineHandle::start_snapshot_orphan_maintenance`; its
+`SnapshotOrphanMaintenanceBatchApplying` event is the cancellation point of no
+return, and `SnapshotOrphanMaintenanceBatchFinished` publishes either
+`NoOrphan` or `Removed { bytes }`. The immutable result also reports the
+canonical observation time, before/after orphan counts and charged bytes, and
+`has_more`. Admission is session-local and duplicate-safe and succeeds only
+when no foreground or maintenance work is queued or running at the observed
+idle boundary. Later storage mutations remain serialized by repository locks;
+the task does not block subsequently submitted foreground work. One task
+performs exactly one repository call.
 
 ## Failure and version behavior
 
 Maintenance requires the current writable schema and the same private storage
-validation as every history write. A newer schema is never mutated. Target rows
-are fully type/range/enum validated before mutation. A transaction error rolls
-back the complete batch. If storage validation fails after commit, DUX compares
-the frozen postconditions while retaining the writer lease; an exact match is
-adopted, otherwise the result is outcome-unknown and a later retry remains safe.
+validation as every history write. A newer schema is never mutated. For
+database-mutating history-retention and snapshot-cap batches, target rows are
+fully type/range/enum validated before mutation, a transaction error rolls back
+the complete transaction, and a commit-adjacent failure is adopted only after
+the frozen durable postconditions match exactly under the retained writer
+lease. Otherwise the result is outcome-unknown and a later retry remains safe.
+Physical-orphan reconciliation performs no SQLite transaction and changes no
+row; its sole mutation is one proven final unlink, with guaranteed pre-effect
+failures kept distinct from post-unlink `OutcomeUnknown`.

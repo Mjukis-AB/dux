@@ -1,3 +1,4 @@
+use std::ffi::OsStr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
@@ -56,6 +57,86 @@ fn started_snapshot_retention(outcome: SnapshotRetentionStartOutcome) -> TaskId 
         SnapshotRetentionStartOutcome::Started(id) => id,
         other => panic!("expected started snapshot retention, got {other:?}"),
     }
+}
+
+fn started_snapshot_orphan_maintenance(outcome: SnapshotOrphanMaintenanceStartOutcome) -> TaskId {
+    match outcome {
+        SnapshotOrphanMaintenanceStartOutcome::Started(id) => id,
+        other => panic!("expected started snapshot orphan maintenance, got {other:?}"),
+    }
+}
+
+fn publish_running_orphan(
+    engine: &EngineHandle,
+    root: &std::path::Path,
+    scan_id: &str,
+    started_at: SystemTime,
+) {
+    use crate::persistence::snapshot::{
+        SnapshotDocument, SnapshotMetadata, SnapshotNode, SnapshotNodeKind, SnapshotScanFlags,
+        SnapshotTimestamp, SnapshotTotals, SnapshotUnixIdentity,
+    };
+
+    let scan_id = ScanId::new(scan_id).unwrap();
+    let document = SnapshotDocument {
+        metadata: SnapshotMetadata {
+            scan_id: scan_id.clone(),
+            root: HostValue::from_root(root).unwrap(),
+            captured_at: SnapshotTimestamp::new(1_750_000_000, 123).unwrap(),
+            totals: SnapshotTotals {
+                directory_count: 1,
+                file_count: 1,
+                logical_bytes: 10,
+                allocated_bytes: Some(16),
+            },
+        },
+        nodes: vec![
+            SnapshotNode {
+                id: 0,
+                parent: None,
+                depth: 0,
+                kind: SnapshotNodeKind::Directory,
+                name: None,
+                logical_bytes: 10,
+                allocated_bytes: Some(16),
+                file_count: 1,
+                child_count: 1,
+                modified_at: None,
+                accessed_at: None,
+                scan_flags: SnapshotScanFlags::NONE,
+                unix_identity: cfg!(unix).then(|| SnapshotUnixIdentity::new(7, 10)),
+            },
+            SnapshotNode {
+                id: 1,
+                parent: Some(0),
+                depth: 1,
+                kind: SnapshotNodeKind::File,
+                name: Some(HostValue::from_component(OsStr::new("orphan.bin")).unwrap()),
+                logical_bytes: 10,
+                allocated_bytes: Some(16),
+                file_count: 1,
+                child_count: 0,
+                modified_at: None,
+                accessed_at: None,
+                scan_flags: SnapshotScanFlags::NONE,
+                unix_identity: cfg!(unix).then(|| SnapshotUnixIdentity::new(7, 11)),
+            },
+        ],
+    };
+    engine
+        .inner
+        .store
+        .record_scan_started(
+            &NewScanRecord::try_new(scan_id, root.to_path_buf(), started_at).unwrap(),
+        )
+        .unwrap();
+    drop(
+        engine
+            .inner
+            .snapshots
+            .publish_orphan_for_test(&document)
+            .unwrap(),
+    );
 }
 
 fn publish_snapshots(engine: &EngineHandle, root: &std::path::Path, count: usize) {
@@ -2178,6 +2259,747 @@ fn invalid_snapshot_retention_clock_and_panic_release_exclusive_admission() {
     assert_eq!(
         wait_terminal(&engine, replacement).phase,
         TaskPhase::Succeeded
+    );
+}
+
+#[test]
+fn snapshot_orphan_maintenance_runs_one_typed_path_free_no_orphan_batch() {
+    let (_temp, engine) = engine_with_limits(RegistryLimits::testing(1, 2, 4, 8));
+    let observed = SystemTime::UNIX_EPOCH + Duration::from_millis(10_000);
+
+    let id = started_snapshot_orphan_maintenance(
+        engine
+            .start_snapshot_orphan_maintenance_at(observed)
+            .unwrap(),
+    );
+    let terminal = wait_terminal(&engine, id);
+    assert_eq!(terminal.kind, TaskKind::SnapshotOrphanMaintenance);
+    assert_eq!(terminal.phase, TaskPhase::Succeeded);
+    assert!(terminal.result_available);
+    let result = engine
+        .snapshot_orphan_maintenance_result(id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.observed_at(), observed);
+    assert_eq!(result.outcome(), SnapshotOrphanMaintenanceOutcome::NoOrphan);
+    assert_eq!(result.orphan_count_before(), 0);
+    assert_eq!(result.orphan_count_after(), 0);
+    assert_eq!(result.orphan_charged_bytes_before(), 0);
+    assert_eq!(result.orphan_charged_bytes_after(), 0);
+    assert!(!result.has_more());
+    assert_eq!(
+        engine.snapshot_retention_result(id).unwrap_err(),
+        TaskAccessError::WrongTaskKind
+    );
+    assert_eq!(
+        engine.history_maintenance_result(id).unwrap_err(),
+        TaskAccessError::WrongTaskKind
+    );
+    assert_eq!(
+        engine.scan_result(id).unwrap_err(),
+        TaskAccessError::WrongTaskKind
+    );
+
+    let events = engine.task_events(id, 0, 8).unwrap().events;
+    let applying = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event.kind,
+                TaskEventKind::SnapshotOrphanMaintenanceBatchApplying
+            )
+        })
+        .unwrap();
+    let finished = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event.kind,
+                TaskEventKind::SnapshotOrphanMaintenanceBatchFinished {
+                    outcome: SnapshotOrphanMaintenanceOutcome::NoOrphan,
+                    orphan_count_before: 0,
+                    orphan_count_after: 0,
+                    orphan_charged_bytes_before: 0,
+                    orphan_charged_bytes_after: 0,
+                    has_more: false,
+                }
+            )
+        })
+        .unwrap();
+    let terminal_event = events
+        .iter()
+        .position(|event| matches!(event.kind, TaskEventKind::Terminal { .. }))
+        .unwrap();
+    assert!(applying < finished && finished < terminal_event);
+
+    assert_eq!(engine.close(), CloseOutcome::Initiated);
+    assert!(engine.wait_until_closed(TEST_TIMEOUT));
+    assert_eq!(
+        engine.start_snapshot_orphan_maintenance(),
+        Err(StartTaskError::Closed)
+    );
+}
+
+#[test]
+fn snapshot_orphan_maintenance_removes_one_final_and_requires_resubmission() {
+    let temp = TempDir::new().unwrap();
+    let config = config(&temp);
+    let root = temp.path().join("scan-root");
+    std::fs::create_dir(&root).unwrap();
+    let engine =
+        EngineHandle::open_with_limits(config.clone(), RegistryLimits::testing(1, 4, 16, 8))
+            .unwrap();
+    let observed = SystemTime::UNIX_EPOCH + Duration::from_millis(20_000);
+    publish_running_orphan(
+        &engine,
+        &root,
+        "scan:engine-orphan-first-private",
+        observed - Duration::from_millis(2),
+    );
+    publish_running_orphan(
+        &engine,
+        &root,
+        "scan:engine-orphan-second-private",
+        observed - Duration::from_millis(1),
+    );
+    assert_eq!(final_snapshot_count(&config), 2);
+
+    let first = started_snapshot_orphan_maintenance(
+        engine
+            .start_snapshot_orphan_maintenance_at(observed)
+            .unwrap(),
+    );
+    assert_eq!(wait_terminal(&engine, first).phase, TaskPhase::Succeeded);
+    let first_result = engine
+        .snapshot_orphan_maintenance_result(first)
+        .unwrap()
+        .unwrap();
+    let first_bytes = match first_result.outcome() {
+        SnapshotOrphanMaintenanceOutcome::Removed { bytes } => bytes,
+        other => panic!("expected removal, got {other:?}"),
+    };
+    assert!(first_bytes > 0);
+    assert_eq!(first_result.orphan_count_before(), 2);
+    assert_eq!(first_result.orphan_count_after(), 1);
+    assert_eq!(
+        first_result.orphan_charged_bytes_before() - first_bytes,
+        first_result.orphan_charged_bytes_after()
+    );
+    assert!(first_result.has_more());
+    assert_eq!(final_snapshot_count(&config), 1);
+    let debug = format!("{first_result:?}");
+    assert!(!debug.contains("engine-orphan"));
+    assert!(!debug.contains(root.to_string_lossy().as_ref()));
+
+    let second = started_snapshot_orphan_maintenance(
+        engine
+            .start_snapshot_orphan_maintenance_at(observed + Duration::from_millis(1))
+            .unwrap(),
+    );
+    assert_eq!(wait_terminal(&engine, second).phase, TaskPhase::Succeeded);
+    let second_result = engine
+        .snapshot_orphan_maintenance_result(second)
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        second_result.outcome(),
+        SnapshotOrphanMaintenanceOutcome::Removed { bytes } if bytes > 0
+    ));
+    assert_eq!(second_result.orphan_count_before(), 1);
+    assert_eq!(second_result.orphan_count_after(), 0);
+    assert!(!second_result.has_more());
+    assert_eq!(final_snapshot_count(&config), 0);
+
+    let empty = started_snapshot_orphan_maintenance(
+        engine
+            .start_snapshot_orphan_maintenance_at(observed + Duration::from_millis(2))
+            .unwrap(),
+    );
+    assert_eq!(wait_terminal(&engine, empty).phase, TaskPhase::Succeeded);
+    assert_eq!(
+        engine
+            .snapshot_orphan_maintenance_result(empty)
+            .unwrap()
+            .unwrap()
+            .outcome(),
+        SnapshotOrphanMaintenanceOutcome::NoOrphan
+    );
+}
+
+#[test]
+fn snapshot_orphan_maintenance_is_idle_deduplicated_and_cross_exclusive() {
+    let (_temp, engine) = engine_with_limits(RegistryLimits::testing(1, 3, 8, 8));
+    let (foreground_started_tx, foreground_started_rx) = mpsc::channel();
+    let (foreground_release_tx, foreground_release_rx) = mpsc::channel();
+    let foreground = engine
+        .submit_test(Box::new(move |_| {
+            foreground_started_tx.send(()).unwrap();
+            foreground_release_rx.recv().unwrap();
+            WorkOutcome::Succeeded(TaskResult::TestOnly)
+        }))
+        .unwrap();
+    foreground_started_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    let record_count = engine.inner.shared.lock_registry_recover().records.len();
+    assert_eq!(
+        engine.start_snapshot_orphan_maintenance().unwrap(),
+        SnapshotOrphanMaintenanceStartOutcome::DeferredBusy
+    );
+    assert_eq!(
+        engine.inner.shared.lock_registry_recover().records.len(),
+        record_count
+    );
+    foreground_release_tx.send(()).unwrap();
+    wait_terminal(&engine, foreground);
+
+    let (history_started_tx, history_started_rx) = mpsc::channel();
+    let (history_release_tx, history_release_rx) = mpsc::channel();
+    let history = started_maintenance(
+        engine
+            .start_history_maintenance_with_test_hooks(
+                SystemTime::UNIX_EPOCH + Duration::from_millis(9_999),
+                move || {
+                    history_started_tx.send(()).unwrap();
+                    history_release_rx.recv().unwrap();
+                },
+                || {},
+            )
+            .unwrap(),
+    );
+    history_started_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    assert_eq!(
+        engine.start_snapshot_orphan_maintenance().unwrap(),
+        SnapshotOrphanMaintenanceStartOutcome::DeferredBusy
+    );
+    history_release_tx.send(()).unwrap();
+    wait_terminal(&engine, history);
+
+    let (orphan_started_tx, orphan_started_rx) = mpsc::channel();
+    let (orphan_release_tx, orphan_release_rx) = mpsc::channel();
+    let orphan = started_snapshot_orphan_maintenance(
+        engine
+            .start_snapshot_orphan_maintenance_with_test_hooks(
+                SystemTime::UNIX_EPOCH + Duration::from_millis(10_000),
+                move || {
+                    orphan_started_tx.send(()).unwrap();
+                    orphan_release_rx.recv().unwrap();
+                },
+                || {},
+                || {},
+            )
+            .unwrap(),
+    );
+    orphan_started_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    assert_eq!(
+        engine.start_snapshot_orphan_maintenance().unwrap(),
+        SnapshotOrphanMaintenanceStartOutcome::AlreadyActive(orphan)
+    );
+    assert_eq!(
+        engine.start_history_maintenance().unwrap(),
+        HistoryMaintenanceStartOutcome::DeferredBusy
+    );
+    assert_eq!(
+        engine.start_snapshot_retention().unwrap(),
+        SnapshotRetentionStartOutcome::DeferredBusy
+    );
+    orphan_release_tx.send(()).unwrap();
+    assert_eq!(wait_terminal(&engine, orphan).phase, TaskPhase::Succeeded);
+
+    let (retention_started_tx, retention_started_rx) = mpsc::channel();
+    let (retention_release_tx, retention_release_rx) = mpsc::channel();
+    let retention = started_snapshot_retention(
+        engine
+            .start_snapshot_retention_with_test_hooks(
+                SystemTime::UNIX_EPOCH + Duration::from_millis(10_001),
+                move || {
+                    retention_started_tx.send(()).unwrap();
+                    retention_release_rx.recv().unwrap();
+                },
+                || {},
+                || {},
+            )
+            .unwrap(),
+    );
+    retention_started_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    assert_eq!(
+        engine.start_snapshot_orphan_maintenance().unwrap(),
+        SnapshotOrphanMaintenanceStartOutcome::DeferredBusy
+    );
+    retention_release_tx.send(()).unwrap();
+    wait_terminal(&engine, retention);
+}
+
+#[test]
+fn snapshot_orphan_maintenance_cancellation_is_linearized_at_applying() {
+    let temp = TempDir::new().unwrap();
+    let config = config(&temp);
+    let root = temp.path().join("scan-root");
+    std::fs::create_dir(&root).unwrap();
+    let engine =
+        EngineHandle::open_with_limits(config.clone(), RegistryLimits::testing(1, 2, 8, 8))
+            .unwrap();
+    let observed = SystemTime::UNIX_EPOCH + Duration::from_millis(20_000);
+    publish_running_orphan(
+        &engine,
+        &root,
+        "scan:cancel-orphan-private",
+        observed - Duration::from_millis(1),
+    );
+
+    let (before_tx, before_rx) = mpsc::channel();
+    let (before_release_tx, before_release_rx) = mpsc::channel();
+    let cancelled = started_snapshot_orphan_maintenance(
+        engine
+            .start_snapshot_orphan_maintenance_with_test_hooks(
+                observed,
+                move || {
+                    before_tx.send(()).unwrap();
+                    before_release_rx.recv().unwrap();
+                },
+                || {},
+                || {},
+            )
+            .unwrap(),
+    );
+    before_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    assert_eq!(
+        engine.cancel_task(cancelled).unwrap(),
+        CancelOutcome::Requested
+    );
+    before_release_tx.send(()).unwrap();
+    assert_eq!(
+        wait_terminal(&engine, cancelled).phase,
+        TaskPhase::Cancelled
+    );
+    assert_eq!(final_snapshot_count(&config), 1);
+    assert!(
+        engine
+            .task_events(cancelled, 0, 8)
+            .unwrap()
+            .events
+            .iter()
+            .all(|event| !matches!(
+                event.kind,
+                TaskEventKind::SnapshotOrphanMaintenanceBatchApplying
+            ))
+    );
+
+    let (applying_tx, applying_rx) = mpsc::channel();
+    let (applying_release_tx, applying_release_rx) = mpsc::channel();
+    let applied = started_snapshot_orphan_maintenance(
+        engine
+            .start_snapshot_orphan_maintenance_with_test_hooks(
+                observed + Duration::from_millis(1),
+                || {},
+                move || {
+                    applying_tx.send(()).unwrap();
+                    applying_release_rx.recv().unwrap();
+                },
+                || {},
+            )
+            .unwrap(),
+    );
+    applying_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    assert_eq!(
+        engine.cancel_task(applied).unwrap(),
+        CancelOutcome::Requested
+    );
+    applying_release_tx.send(()).unwrap();
+    let terminal = wait_terminal(&engine, applied);
+    assert_eq!(terminal.phase, TaskPhase::Succeeded);
+    assert!(terminal.cancellation_requested);
+    assert!(matches!(
+        engine
+            .snapshot_orphan_maintenance_result(applied)
+            .unwrap()
+            .unwrap()
+            .outcome(),
+        SnapshotOrphanMaintenanceOutcome::Removed { .. }
+    ));
+    assert_eq!(final_snapshot_count(&config), 0);
+}
+
+#[test]
+fn close_before_snapshot_orphan_applying_mutates_nothing_and_quiesces() {
+    let temp = TempDir::new().unwrap();
+    let config = config(&temp);
+    let root = temp.path().join("scan-root");
+    std::fs::create_dir(&root).unwrap();
+    let engine =
+        EngineHandle::open_with_limits(config.clone(), RegistryLimits::testing(1, 2, 8, 8))
+            .unwrap();
+    let observed = SystemTime::UNIX_EPOCH + Duration::from_millis(20_000);
+    publish_running_orphan(
+        &engine,
+        &root,
+        "scan:close-orphan-private",
+        observed - Duration::from_millis(1),
+    );
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let task = started_snapshot_orphan_maintenance(
+        engine
+            .start_snapshot_orphan_maintenance_with_test_hooks(
+                observed,
+                move || {
+                    started_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                },
+                || {},
+                || {},
+            )
+            .unwrap(),
+    );
+    started_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    assert_eq!(engine.close(), CloseOutcome::Initiated);
+    release_tx.send(()).unwrap();
+    assert!(engine.wait_until_closed(TEST_TIMEOUT));
+    let registry = engine.inner.shared.lock_registry_recover();
+    let record = registry.records.get(&task).unwrap();
+    assert_eq!(record.phase, TaskPhase::Cancelled);
+    assert!(record.cancellation_requested);
+    assert!(record.events.iter().all(|event| !matches!(
+        event.kind,
+        TaskEventKind::SnapshotOrphanMaintenanceBatchApplying
+    )));
+    drop(registry);
+    assert_eq!(final_snapshot_count(&config), 1);
+}
+
+#[test]
+fn snapshot_orphan_maintenance_serializes_across_engine_sessions() {
+    let temp = TempDir::new().unwrap();
+    let config = config(&temp);
+    let root = temp.path().join("scan-root");
+    std::fs::create_dir(&root).unwrap();
+    let first_engine =
+        EngineHandle::open_with_limits(config.clone(), RegistryLimits::testing(1, 2, 8, 8))
+            .unwrap();
+    let observed = SystemTime::UNIX_EPOCH + Duration::from_millis(20_000);
+    publish_running_orphan(
+        &first_engine,
+        &root,
+        "scan:cross-session-orphan-private",
+        observed - Duration::from_millis(1),
+    );
+    let second_engine =
+        EngineHandle::open_with_limits(config.clone(), RegistryLimits::testing(1, 2, 8, 8))
+            .unwrap();
+    let (applying_tx, applying_rx) = mpsc::channel();
+    let (first_release_tx, first_release_rx) = mpsc::channel();
+    let (second_release_tx, second_release_rx) = mpsc::channel();
+    let first_ready = applying_tx.clone();
+    let first = started_snapshot_orphan_maintenance(
+        first_engine
+            .start_snapshot_orphan_maintenance_with_test_hooks(
+                observed,
+                || {},
+                move || {
+                    first_ready.send(()).unwrap();
+                    first_release_rx.recv().unwrap();
+                },
+                || {},
+            )
+            .unwrap(),
+    );
+    let second = started_snapshot_orphan_maintenance(
+        second_engine
+            .start_snapshot_orphan_maintenance_with_test_hooks(
+                observed,
+                || {},
+                move || {
+                    applying_tx.send(()).unwrap();
+                    second_release_rx.recv().unwrap();
+                },
+                || {},
+            )
+            .unwrap(),
+    );
+    applying_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    applying_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    first_release_tx.send(()).unwrap();
+    second_release_tx.send(()).unwrap();
+    assert_eq!(
+        wait_terminal(&first_engine, first).phase,
+        TaskPhase::Succeeded
+    );
+    assert_eq!(
+        wait_terminal(&second_engine, second).phase,
+        TaskPhase::Succeeded
+    );
+    let outcomes = [
+        first_engine
+            .snapshot_orphan_maintenance_result(first)
+            .unwrap()
+            .unwrap()
+            .outcome(),
+        second_engine
+            .snapshot_orphan_maintenance_result(second)
+            .unwrap()
+            .unwrap()
+            .outcome(),
+    ];
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, SnapshotOrphanMaintenanceOutcome::Removed { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, SnapshotOrphanMaintenanceOutcome::NoOrphan))
+            .count(),
+        1
+    );
+    assert_eq!(final_snapshot_count(&config), 0);
+}
+
+#[test]
+fn invalid_orphan_clock_schema_race_and_panic_release_exclusive_admission() {
+    let temp = TempDir::new().unwrap();
+    let config = config(&temp);
+    let engine =
+        EngineHandle::open_with_limits(config.clone(), RegistryLimits::testing(1, 2, 8, 8))
+            .unwrap();
+    let invalid = started_snapshot_orphan_maintenance(
+        engine
+            .start_snapshot_orphan_maintenance_at(SystemTime::UNIX_EPOCH - Duration::from_millis(1))
+            .unwrap(),
+    );
+    assert_eq!(
+        wait_terminal(&engine, invalid).failure,
+        Some(TaskFailureKind::SnapshotOrphanMaintenance(
+            SnapshotOrphanMaintenanceFailureKind::InvalidClock
+        ))
+    );
+
+    let panicking = started_snapshot_orphan_maintenance(
+        engine
+            .start_snapshot_orphan_maintenance_with_test_hooks(
+                SystemTime::UNIX_EPOCH + Duration::from_millis(10_000),
+                || panic!("snapshot orphan hook panic"),
+                || {},
+                || {},
+            )
+            .unwrap(),
+    );
+    assert_eq!(wait_terminal(&engine, panicking).phase, TaskPhase::Failed);
+    let replacement = started_snapshot_orphan_maintenance(
+        engine
+            .start_snapshot_orphan_maintenance_at(
+                SystemTime::UNIX_EPOCH + Duration::from_millis(10_000),
+            )
+            .unwrap(),
+    );
+    assert_eq!(
+        wait_terminal(&engine, replacement).phase,
+        TaskPhase::Succeeded
+    );
+
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let racing = started_snapshot_orphan_maintenance(
+        engine
+            .start_snapshot_orphan_maintenance_with_test_hooks(
+                SystemTime::UNIX_EPOCH + Duration::from_millis(20_000),
+                move || {
+                    started_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                },
+                || {},
+                || {},
+            )
+            .unwrap(),
+    );
+    started_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    let future = crate::persistence::DATABASE_SCHEMA_VERSION + 1;
+    engine.inner.store.with_connection(|connection| {
+        connection
+            .execute(
+                "INSERT INTO schema_migrations
+                 (version, name, checksum_sha256, applied_at_unix_ms)
+                 VALUES (?1, 'future-orphan-maintenance-race', zeroblob(32), 2)",
+                [i64::from(future)],
+            )
+            .unwrap();
+        connection
+            .pragma_update(None, "user_version", future)
+            .unwrap();
+    });
+    release_tx.send(()).unwrap();
+    assert_eq!(
+        wait_terminal(&engine, racing).failure,
+        Some(TaskFailureKind::SnapshotOrphanMaintenance(
+            SnapshotOrphanMaintenanceFailureKind::IncompatibleSchema
+        ))
+    );
+}
+
+#[test]
+fn snapshot_orphan_failure_and_outcome_mapping_are_path_free_and_exhaustive() {
+    let assert_mapping = |input, expected| {
+        assert_eq!(
+            map_snapshot_orphan_maintenance_failure(input),
+            TaskFailureKind::SnapshotOrphanMaintenance(expected)
+        );
+    };
+    for input in [
+        SnapshotRepositoryErrorKind::ReadOnly,
+        SnapshotRepositoryErrorKind::MissingStore,
+        SnapshotRepositoryErrorKind::ReviewLeaseExpired,
+    ] {
+        assert_mapping(input, SnapshotOrphanMaintenanceFailureKind::InternalState);
+    }
+    for input in [
+        SnapshotRepositoryErrorKind::MissingSnapshot,
+        SnapshotRepositoryErrorKind::SnapshotUnavailable,
+        SnapshotRepositoryErrorKind::ReferenceMismatch,
+    ] {
+        assert_mapping(input, SnapshotOrphanMaintenanceFailureKind::CorruptData);
+    }
+    assert_mapping(
+        SnapshotRepositoryErrorKind::IncompatibleVersion,
+        SnapshotOrphanMaintenanceFailureKind::IncompatibleSnapshot,
+    );
+    for (input, expected) in [
+        (
+            SnapshotCodecErrorKind::InvalidInput,
+            SnapshotOrphanMaintenanceFailureKind::InternalState,
+        ),
+        (
+            SnapshotCodecErrorKind::Io,
+            SnapshotOrphanMaintenanceFailureKind::Unavailable,
+        ),
+        (
+            SnapshotCodecErrorKind::LimitExceeded,
+            SnapshotOrphanMaintenanceFailureKind::BudgetExceeded,
+        ),
+        (
+            SnapshotCodecErrorKind::IncompatibleVersion,
+            SnapshotOrphanMaintenanceFailureKind::IncompatibleSnapshot,
+        ),
+        (
+            SnapshotCodecErrorKind::InvalidMagic,
+            SnapshotOrphanMaintenanceFailureKind::CorruptData,
+        ),
+        (
+            SnapshotCodecErrorKind::InvalidLength,
+            SnapshotOrphanMaintenanceFailureKind::CorruptData,
+        ),
+        (
+            SnapshotCodecErrorKind::ChecksumMismatch,
+            SnapshotOrphanMaintenanceFailureKind::CorruptData,
+        ),
+        (
+            SnapshotCodecErrorKind::CorruptData,
+            SnapshotOrphanMaintenanceFailureKind::CorruptData,
+        ),
+    ] {
+        assert_mapping(SnapshotRepositoryErrorKind::Codec(input), expected);
+    }
+    for (input, expected) in [
+        (
+            SnapshotStorageErrorKind::InvalidConfiguration,
+            SnapshotOrphanMaintenanceFailureKind::InternalState,
+        ),
+        (
+            SnapshotStorageErrorKind::UnsafeRoot,
+            SnapshotOrphanMaintenanceFailureKind::UnsafeStorage,
+        ),
+        (
+            SnapshotStorageErrorKind::UnsafeObject,
+            SnapshotOrphanMaintenanceFailureKind::UnsafeStorage,
+        ),
+        (
+            SnapshotStorageErrorKind::UnrecognizedStore,
+            SnapshotOrphanMaintenanceFailureKind::UnsafeStorage,
+        ),
+        (
+            SnapshotStorageErrorKind::Unavailable,
+            SnapshotOrphanMaintenanceFailureKind::Unavailable,
+        ),
+        (
+            SnapshotStorageErrorKind::Busy,
+            SnapshotOrphanMaintenanceFailureKind::Busy,
+        ),
+        (
+            SnapshotStorageErrorKind::InternalState,
+            SnapshotOrphanMaintenanceFailureKind::InternalState,
+        ),
+    ] {
+        assert_mapping(SnapshotRepositoryErrorKind::Storage(input), expected);
+    }
+    for (input, expected) in [
+        (
+            HistoryErrorKind::InvalidInput,
+            SnapshotOrphanMaintenanceFailureKind::InvalidClock,
+        ),
+        (
+            HistoryErrorKind::IncompatibleSchema,
+            SnapshotOrphanMaintenanceFailureKind::IncompatibleSchema,
+        ),
+        (
+            HistoryErrorKind::QueryLimitExceeded,
+            SnapshotOrphanMaintenanceFailureKind::BudgetExceeded,
+        ),
+        (
+            HistoryErrorKind::Busy,
+            SnapshotOrphanMaintenanceFailureKind::Busy,
+        ),
+        (
+            HistoryErrorKind::UnsafeStorage,
+            SnapshotOrphanMaintenanceFailureKind::UnsafeStorage,
+        ),
+        (
+            HistoryErrorKind::CorruptData,
+            SnapshotOrphanMaintenanceFailureKind::CorruptData,
+        ),
+        (
+            HistoryErrorKind::DatabaseUnavailable,
+            SnapshotOrphanMaintenanceFailureKind::Unavailable,
+        ),
+        (
+            HistoryErrorKind::OutcomeUnknown,
+            SnapshotOrphanMaintenanceFailureKind::OutcomeUnknown,
+        ),
+        (
+            HistoryErrorKind::AlreadyExists,
+            SnapshotOrphanMaintenanceFailureKind::InternalState,
+        ),
+        (
+            HistoryErrorKind::NotFound,
+            SnapshotOrphanMaintenanceFailureKind::InternalState,
+        ),
+        (
+            HistoryErrorKind::InvalidTransition,
+            SnapshotOrphanMaintenanceFailureKind::InternalState,
+        ),
+        (
+            HistoryErrorKind::InternalState,
+            SnapshotOrphanMaintenanceFailureKind::InternalState,
+        ),
+    ] {
+        assert_mapping(SnapshotRepositoryErrorKind::History(input), expected);
+    }
+
+    let private_id = ScanId::new("scan:must-not-cross-orphan-boundary").unwrap();
+    let removed = public_snapshot_orphan_maintenance_outcome(
+        &SnapshotOrphanReconciliationBatchOutcome::Removed {
+            scan_id: private_id.clone(),
+            bytes: 42,
+        },
+    );
+    assert_eq!(
+        removed,
+        SnapshotOrphanMaintenanceOutcome::Removed { bytes: 42 }
+    );
+    assert!(!format!("{removed:?}").contains(private_id.as_str()));
+    assert_eq!(
+        public_snapshot_orphan_maintenance_outcome(
+            &SnapshotOrphanReconciliationBatchOutcome::NoOrphan
+        ),
+        SnapshotOrphanMaintenanceOutcome::NoOrphan
     );
 }
 

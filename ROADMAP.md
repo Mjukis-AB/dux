@@ -2888,11 +2888,57 @@ Tasks:
     failure mapping, exclusive-marker release, and independently opened engine
     sessions sharing one store.
 
+  - Physical-orphan reconciliation sub-checkpoint completed 2026-07-17: a
+    separate sealed repository batch now removes at most one immutable DUX
+    snapshot final whose absence from the exact snapshot-path catalog is
+    re-proven under a current-schema database guard followed by the snapshot
+    writer lease. The classifier is bounded independently of cap, pin,
+    tombstone, and temp policy, fully validates every referenced physical-final
+    catalog row, and selects only the deterministic first typed zero-reference
+    name. A prior inventory or caller-supplied path never grants authority.
+
+    Before mutation, the repository retains the observed identity and exact
+    logical/allocation usage, fully decodes the bounded checksum-valid body,
+    requires the decoded scan ID to derive the exact filename, and loads the
+    exact parent. Its lossless root must match, its snapshot reference must be
+    absent, and its status must be `running`, `failed`, `cancelled`, or
+    `interrupted`; missing, queued, succeeded, referenced, duplicate,
+    malformed, or root-conflicting evidence fails closed. A live publication
+    cannot be in its file-first/database-commit interval while reconciliation
+    owns the same writer lease. Active or unleased temps do not authorize or
+    defer this distinct final, and no scan, temp-lease, tombstone, pin, or other
+    history row is changed.
+
+    The digest-validated read handle stays live while a separate delete-capable
+    handle repeats name, identity, and usage checks. Count and charged-byte
+    postconditions are checked before unlink; success requires snapshot-
+    directory durability. The storage boundary now distinguishes a guaranteed
+    pre-effect failure from post-unlink durability uncertainty, which maps to
+    `OutcomeUnknown`. No tombstone is fabricated for an unreferenced final, and
+    a later bounded inventory converges from physical state.
+
+    `EngineHandle::start_snapshot_orphan_maintenance` exposes this as a
+    separate typed, path-free, idle-only `SnapshotOrphanMaintenance` task. It
+    accepts no filename, scan ID, root, path, cap, inventory, or victim; invokes
+    exactly one repository batch; redacts the private scan identity; reports
+    canonical time, bounded orphan counts and charged bytes, removed bytes, and
+    `has_more`; linearizes cancellation/close with an Applying point of no
+    return; and never self-enqueues. Focused tests cover deterministic
+    one-at-a-time and below-cap removal, active-temp independence, every allowed
+    terminal parent, invalid parent/body/name/root/reference evidence,
+    duplicate/malformed catalog rows, exact accounting, pre/post-effect
+    failures, event/result redaction, idle/deduplicated cross-maintenance
+    admission, cancellation/close, schema/clock/panic failures, and two engine
+    sessions racing the same orphan. Unix executes the unlink path. The Windows
+    implementation consumes and closes the POSIX-disposition handle before
+    directory sync; local MSVC cross-checking is blocked before Rust compilation
+    by the bundled SQLite C build's missing Windows sysroot, so native Windows
+    compile/runtime verification remains open.
+
     Production retention still requires app/FFI review-lease ownership and
-    native periodic idle scheduling, physical-orphan reconciliation, bounded
-    marker-owned terminal/unleased-temp and provisioning-stage scavenging,
-    explicit clear-data actions, and native Windows mutation-path runtime
-    verification.
+    native periodic idle scheduling, bounded marker-owned
+    terminal/unleased-temp and provisioning-stage scavenging, explicit clear-
+    data actions, and native Windows mutation-path runtime verification.
 - [x] Add engine integration tests with temporary HOME and database. Completed
   2026-07-16: an actual `dux-core` engine scans a fixture into an isolated
   platform-correct application-support/cache layout, closes to full worker

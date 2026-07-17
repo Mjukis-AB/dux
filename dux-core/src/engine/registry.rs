@@ -34,6 +34,8 @@ use super::task::{
     EngineOpenError, FormatSizeBatchResult, FormattedSizeEntry, HistoryMaintenanceFailureKind,
     HistoryMaintenanceResult, HistoryMaintenanceStartOutcome, RecentScanHistory, ScanHistoryError,
     ScanRootErrorKind, ScanTaskCounts, ScanTaskResult, ScanTaskStatus,
+    SnapshotOrphanMaintenanceFailureKind, SnapshotOrphanMaintenanceOutcome,
+    SnapshotOrphanMaintenanceResult, SnapshotOrphanMaintenanceStartOutcome,
     SnapshotRetentionFailureKind, SnapshotRetentionOutcome, SnapshotRetentionResult,
     SnapshotRetentionStartOutcome, StartTaskError, TaskAccessError, TaskEvent, TaskEventBatch,
     TaskEventKind, TaskFailureKind, TaskId, TaskKind, TaskPhase, TaskSnapshot,
@@ -46,8 +48,9 @@ use crate::domain::{
 };
 use crate::persistence::snapshot::from_scan::prepare_completed_scan;
 use crate::persistence::snapshot::{
-    HostValue, SnapshotCodecErrorKind, SnapshotRepository, SnapshotRepositoryErrorKind,
-    SnapshotRetentionBatchOutcome, SnapshotStorageErrorKind, SnapshotStoreAccess,
+    HostValue, SnapshotCodecErrorKind, SnapshotOrphanReconciliationBatchOutcome,
+    SnapshotRepository, SnapshotRepositoryErrorKind, SnapshotRetentionBatchOutcome,
+    SnapshotStorageErrorKind, SnapshotStoreAccess,
 };
 use crate::persistence::{
     CandidateEvaluationCompletion, CandidateEvaluationFailureKind, CandidateEvaluationIdentity,
@@ -153,6 +156,7 @@ enum TaskResult {
     Scan(Arc<ScanTaskResult>),
     HistoryMaintenance(Arc<HistoryMaintenanceResult>),
     SnapshotRetention(Arc<SnapshotRetentionResult>),
+    SnapshotOrphanMaintenance(Arc<SnapshotOrphanMaintenanceResult>),
     #[cfg(test)]
     TestOnly,
 }
@@ -286,6 +290,37 @@ impl TaskContext {
         }
     }
 
+    /// Order cancellation against the first repository operation that may
+    /// physically remove a decoded DUX-owned orphan final.
+    fn try_begin_snapshot_orphan_maintenance_batch(&self) -> bool {
+        let mut registry = self.shared.lock_registry_recover();
+        let event_limit = self.shared.limits.events_per_task;
+        if let Some(record) = registry.records.get_mut(&self.id)
+            && record.kind == TaskKind::SnapshotOrphanMaintenance
+            && record.phase == TaskPhase::Running
+            && !record.cancellation_requested
+        {
+            record.push_event(
+                TaskEventKind::SnapshotOrphanMaintenanceBatchApplying,
+                event_limit,
+            );
+            true
+        } else {
+            false
+        }
+    }
+
+    fn report_snapshot_orphan_maintenance_finished(&self, kind: TaskEventKind) {
+        let mut registry = self.shared.lock_registry_recover();
+        let event_limit = self.shared.limits.events_per_task;
+        if let Some(record) = registry.records.get_mut(&self.id)
+            && record.kind == TaskKind::SnapshotOrphanMaintenance
+            && !record.phase.is_terminal()
+        {
+            record.push_event(kind, event_limit);
+        }
+    }
+
     fn install_scan_cancellation(&self, token: CancellationToken) {
         let mut registry = self.shared.lock_registry_recover();
         if let Some(record) = registry.records.get_mut(&self.id) {
@@ -387,6 +422,7 @@ struct Registry {
     active_scan_roots: HashMap<PathBuf, TaskId>,
     active_history_maintenance: Option<TaskId>,
     active_snapshot_retention: Option<TaskId>,
+    active_snapshot_orphan_maintenance: Option<TaskId>,
 }
 
 impl Registry {
@@ -401,6 +437,7 @@ impl Registry {
             active_scan_roots: HashMap::new(),
             active_history_maintenance: None,
             active_snapshot_retention: None,
+            active_snapshot_orphan_maintenance: None,
         }
     }
 
@@ -424,6 +461,11 @@ impl Registry {
         }
         if kind == TaskKind::SnapshotRetention && self.active_snapshot_retention == Some(id) {
             self.active_snapshot_retention = None;
+        }
+        if kind == TaskKind::SnapshotOrphanMaintenance
+            && self.active_snapshot_orphan_maintenance == Some(id)
+        {
+            self.active_snapshot_orphan_maintenance = None;
         }
     }
 }
@@ -1209,6 +1251,128 @@ impl EngineHandle {
         Ok(None)
     }
 
+    /// Reconcile at most one decoded DUX-owned snapshot final whose durable
+    /// scan parent has no snapshot reference. Exact orphan identity stays
+    /// inside persistence; `has_more` is only a later idle-rescheduling hint.
+    pub fn start_snapshot_orphan_maintenance(
+        &self,
+    ) -> Result<SnapshotOrphanMaintenanceStartOutcome, StartTaskError> {
+        self.start_snapshot_orphan_maintenance_with_hooks(SystemTime::now, || {}, || {}, || {})
+    }
+
+    #[cfg(test)]
+    fn start_snapshot_orphan_maintenance_at(
+        &self,
+        observed_at: SystemTime,
+    ) -> Result<SnapshotOrphanMaintenanceStartOutcome, StartTaskError> {
+        self.start_snapshot_orphan_maintenance_with_hooks(move || observed_at, || {}, || {}, || {})
+    }
+
+    #[cfg(test)]
+    fn start_snapshot_orphan_maintenance_with_test_hooks(
+        &self,
+        observed_at: SystemTime,
+        before_batch: impl FnOnce() + Send + 'static,
+        after_applying: impl FnOnce() + Send + 'static,
+        after_batch: impl FnOnce() + Send + 'static,
+    ) -> Result<SnapshotOrphanMaintenanceStartOutcome, StartTaskError> {
+        self.start_snapshot_orphan_maintenance_with_hooks(
+            move || observed_at,
+            before_batch,
+            after_applying,
+            after_batch,
+        )
+    }
+
+    fn start_snapshot_orphan_maintenance_with_hooks(
+        &self,
+        clock: impl FnOnce() -> SystemTime + Send + 'static,
+        before_batch: impl FnOnce() + Send + 'static,
+        after_applying: impl FnOnce() + Send + 'static,
+        after_batch: impl FnOnce() + Send + 'static,
+    ) -> Result<SnapshotOrphanMaintenanceStartOutcome, StartTaskError> {
+        if let Some(outcome) = self.snapshot_orphan_maintenance_preflight()? {
+            return Ok(outcome);
+        }
+        let status = self
+            .inner
+            .store
+            .status()
+            .map_err(|_| StartTaskError::PersistenceUnavailable)?;
+        if !matches!(
+            status.access,
+            crate::persistence::DatabaseAccess::ReadWriteCurrent
+        ) {
+            return Err(StartTaskError::ReadOnlyStore);
+        }
+        let snapshots = Arc::clone(&self.inner.snapshots);
+        self.submit_snapshot_orphan_maintenance(Box::new(move |context| {
+            if context.is_cancellation_requested() {
+                return WorkOutcome::Cancelled(None);
+            }
+            let observed_at = clock();
+            before_batch();
+            if !context.try_begin_snapshot_orphan_maintenance_batch() {
+                return WorkOutcome::Cancelled(None);
+            }
+            // Applying is the point of no return. Later cancellation remains
+            // visible intent but cannot suppress an exact repository result.
+            after_applying();
+            match snapshots.reconcile_physical_orphan(observed_at) {
+                Ok(result) => {
+                    let outcome = public_snapshot_orphan_maintenance_outcome(&result.outcome);
+                    let result = Arc::new(SnapshotOrphanMaintenanceResult::new(
+                        result.observed_at,
+                        outcome,
+                        result.orphan_count_before,
+                        result.orphan_count_after,
+                        result.orphan_charged_bytes_before,
+                        result.orphan_charged_bytes_after,
+                        result.has_more,
+                    ));
+                    after_batch();
+                    context.report_snapshot_orphan_maintenance_finished(
+                        TaskEventKind::SnapshotOrphanMaintenanceBatchFinished {
+                            outcome: result.outcome(),
+                            orphan_count_before: result.orphan_count_before(),
+                            orphan_count_after: result.orphan_count_after(),
+                            orphan_charged_bytes_before: result.orphan_charged_bytes_before(),
+                            orphan_charged_bytes_after: result.orphan_charged_bytes_after(),
+                            has_more: result.has_more(),
+                        },
+                    );
+                    WorkOutcome::Succeeded(TaskResult::SnapshotOrphanMaintenance(result))
+                }
+                Err(error) => {
+                    WorkOutcome::Failed(map_snapshot_orphan_maintenance_failure(error.kind), None)
+                }
+            }
+        }))
+    }
+
+    fn snapshot_orphan_maintenance_preflight(
+        &self,
+    ) -> Result<Option<SnapshotOrphanMaintenanceStartOutcome>, StartTaskError> {
+        let registry = self
+            .inner
+            .shared
+            .registry
+            .lock()
+            .map_err(|_| StartTaskError::InternalState)?;
+        if registry.lifecycle != EngineLifecycle::Open {
+            return Err(StartTaskError::Closed);
+        }
+        if let Some(existing) = registry.active_snapshot_orphan_maintenance {
+            return Ok(Some(SnapshotOrphanMaintenanceStartOutcome::AlreadyActive(
+                existing,
+            )));
+        }
+        if registry.running_tasks != 0 || !registry.queue.is_empty() {
+            return Ok(Some(SnapshotOrphanMaintenanceStartOutcome::DeferredBusy));
+        }
+        Ok(None)
+    }
+
     /// Start one full, no-follow, same-filesystem scan. Root validation and
     /// overlapping-scope admission are synchronous; the durable scan ID is
     /// generated only after a worker starts, so queued cancellation leaves no
@@ -1362,7 +1526,8 @@ impl EngineHandle {
             Some(
                 TaskResult::Scan(_)
                 | TaskResult::HistoryMaintenance(_)
-                | TaskResult::SnapshotRetention(_),
+                | TaskResult::SnapshotRetention(_)
+                | TaskResult::SnapshotOrphanMaintenance(_),
             ) => {
                 return Err(TaskAccessError::WrongTaskKind);
             }
@@ -1386,7 +1551,8 @@ impl EngineHandle {
             Some(
                 TaskResult::FormatSizeBatch(_)
                 | TaskResult::HistoryMaintenance(_)
-                | TaskResult::SnapshotRetention(_),
+                | TaskResult::SnapshotRetention(_)
+                | TaskResult::SnapshotOrphanMaintenance(_),
             ) => {
                 return Err(TaskAccessError::WrongTaskKind);
             }
@@ -1413,7 +1579,8 @@ impl EngineHandle {
             Some(
                 TaskResult::FormatSizeBatch(_)
                 | TaskResult::Scan(_)
-                | TaskResult::SnapshotRetention(_),
+                | TaskResult::SnapshotRetention(_)
+                | TaskResult::SnapshotOrphanMaintenance(_),
             ) => {
                 return Err(TaskAccessError::WrongTaskKind);
             }
@@ -1440,7 +1607,34 @@ impl EngineHandle {
             Some(
                 TaskResult::FormatSizeBatch(_)
                 | TaskResult::Scan(_)
-                | TaskResult::HistoryMaintenance(_),
+                | TaskResult::HistoryMaintenance(_)
+                | TaskResult::SnapshotOrphanMaintenance(_),
+            ) => return Err(TaskAccessError::WrongTaskKind),
+            #[cfg(test)]
+            Some(TaskResult::TestOnly) => return Err(TaskAccessError::WrongTaskKind),
+            None => None,
+        })
+    }
+
+    pub fn snapshot_orphan_maintenance_result(
+        &self,
+        id: TaskId,
+    ) -> Result<Option<Arc<SnapshotOrphanMaintenanceResult>>, TaskAccessError> {
+        let registry = self.lock_open_registry()?;
+        let record = registry
+            .records
+            .get(&id)
+            .ok_or(TaskAccessError::UnknownTask)?;
+        if record.kind != TaskKind::SnapshotOrphanMaintenance {
+            return Err(TaskAccessError::WrongTaskKind);
+        }
+        Ok(match &record.result {
+            Some(TaskResult::SnapshotOrphanMaintenance(result)) => Some(Arc::clone(result)),
+            Some(
+                TaskResult::FormatSizeBatch(_)
+                | TaskResult::Scan(_)
+                | TaskResult::HistoryMaintenance(_)
+                | TaskResult::SnapshotRetention(_),
             ) => return Err(TaskAccessError::WrongTaskKind),
             #[cfg(test)]
             Some(TaskResult::TestOnly) => return Err(TaskAccessError::WrongTaskKind),
@@ -1640,6 +1834,44 @@ impl EngineHandle {
         registry.queue.push_back(Job { id, work });
         self.inner.shared.workers_ready.notify_one();
         Ok(SnapshotRetentionStartOutcome::Started(id))
+    }
+
+    fn submit_snapshot_orphan_maintenance(
+        &self,
+        work: Work,
+    ) -> Result<SnapshotOrphanMaintenanceStartOutcome, StartTaskError> {
+        let mut registry = self
+            .inner
+            .shared
+            .registry
+            .lock()
+            .map_err(|_| StartTaskError::InternalState)?;
+        if registry.lifecycle != EngineLifecycle::Open {
+            return Err(StartTaskError::Closed);
+        }
+        if let Some(existing) = registry.active_snapshot_orphan_maintenance {
+            return Ok(SnapshotOrphanMaintenanceStartOutcome::AlreadyActive(
+                existing,
+            ));
+        }
+        // Physical-orphan reconciliation shares the same idle-only boundary
+        // as both retention classes. Repeating this after the store status
+        // probe closes the admission race with foreground and maintenance work.
+        if registry.running_tasks != 0 || !registry.queue.is_empty() {
+            return Ok(SnapshotOrphanMaintenanceStartOutcome::DeferredBusy);
+        }
+        let id = TASK_IDS.allocate()?;
+        let record = TaskRecord::new(
+            id,
+            TaskKind::SnapshotOrphanMaintenance,
+            None,
+            self.inner.shared.limits.events_per_task,
+        );
+        registry.active_snapshot_orphan_maintenance = Some(id);
+        registry.records.insert(id, record);
+        registry.queue.push_back(Job { id, work });
+        self.inner.shared.workers_ready.notify_one();
+        Ok(SnapshotOrphanMaintenanceStartOutcome::Started(id))
     }
 
     fn lock_open_registry(&self) -> Result<std::sync::MutexGuard<'_, Registry>, TaskAccessError> {
@@ -2657,6 +2889,19 @@ const fn public_snapshot_retention_outcome(
     }
 }
 
+const fn public_snapshot_orphan_maintenance_outcome(
+    outcome: &SnapshotOrphanReconciliationBatchOutcome,
+) -> SnapshotOrphanMaintenanceOutcome {
+    match outcome {
+        SnapshotOrphanReconciliationBatchOutcome::NoOrphan => {
+            SnapshotOrphanMaintenanceOutcome::NoOrphan
+        }
+        SnapshotOrphanReconciliationBatchOutcome::Removed { bytes, .. } => {
+            SnapshotOrphanMaintenanceOutcome::Removed { bytes: *bytes }
+        }
+    }
+}
+
 const fn map_snapshot_retention_failure(kind: SnapshotRepositoryErrorKind) -> TaskFailureKind {
     let kind = match kind {
         SnapshotRepositoryErrorKind::ReadOnly
@@ -2715,6 +2960,84 @@ const fn map_snapshot_retention_failure(kind: SnapshotRepositoryErrorKind) -> Ta
         },
     };
     TaskFailureKind::SnapshotRetention(kind)
+}
+
+const fn map_snapshot_orphan_maintenance_failure(
+    kind: SnapshotRepositoryErrorKind,
+) -> TaskFailureKind {
+    let kind = match kind {
+        SnapshotRepositoryErrorKind::ReadOnly
+        | SnapshotRepositoryErrorKind::MissingStore
+        | SnapshotRepositoryErrorKind::ReviewLeaseExpired => {
+            SnapshotOrphanMaintenanceFailureKind::InternalState
+        }
+        SnapshotRepositoryErrorKind::MissingSnapshot
+        | SnapshotRepositoryErrorKind::SnapshotUnavailable
+        | SnapshotRepositoryErrorKind::ReferenceMismatch => {
+            SnapshotOrphanMaintenanceFailureKind::CorruptData
+        }
+        SnapshotRepositoryErrorKind::IncompatibleVersion => {
+            SnapshotOrphanMaintenanceFailureKind::IncompatibleSnapshot
+        }
+        SnapshotRepositoryErrorKind::Codec(kind) => match kind {
+            SnapshotCodecErrorKind::InvalidInput => {
+                SnapshotOrphanMaintenanceFailureKind::InternalState
+            }
+            SnapshotCodecErrorKind::Io => SnapshotOrphanMaintenanceFailureKind::Unavailable,
+            SnapshotCodecErrorKind::LimitExceeded => {
+                SnapshotOrphanMaintenanceFailureKind::BudgetExceeded
+            }
+            SnapshotCodecErrorKind::IncompatibleVersion => {
+                SnapshotOrphanMaintenanceFailureKind::IncompatibleSnapshot
+            }
+            SnapshotCodecErrorKind::InvalidMagic
+            | SnapshotCodecErrorKind::InvalidLength
+            | SnapshotCodecErrorKind::ChecksumMismatch
+            | SnapshotCodecErrorKind::CorruptData => {
+                SnapshotOrphanMaintenanceFailureKind::CorruptData
+            }
+        },
+        SnapshotRepositoryErrorKind::Storage(kind) => match kind {
+            SnapshotStorageErrorKind::InvalidConfiguration
+            | SnapshotStorageErrorKind::InternalState => {
+                SnapshotOrphanMaintenanceFailureKind::InternalState
+            }
+            SnapshotStorageErrorKind::UnsafeRoot
+            | SnapshotStorageErrorKind::UnsafeObject
+            | SnapshotStorageErrorKind::UnrecognizedStore => {
+                SnapshotOrphanMaintenanceFailureKind::UnsafeStorage
+            }
+            SnapshotStorageErrorKind::Unavailable => {
+                SnapshotOrphanMaintenanceFailureKind::Unavailable
+            }
+            SnapshotStorageErrorKind::Busy => SnapshotOrphanMaintenanceFailureKind::Busy,
+        },
+        SnapshotRepositoryErrorKind::History(kind) => match kind {
+            HistoryErrorKind::InvalidInput => SnapshotOrphanMaintenanceFailureKind::InvalidClock,
+            HistoryErrorKind::IncompatibleSchema => {
+                SnapshotOrphanMaintenanceFailureKind::IncompatibleSchema
+            }
+            HistoryErrorKind::QueryLimitExceeded => {
+                SnapshotOrphanMaintenanceFailureKind::BudgetExceeded
+            }
+            HistoryErrorKind::Busy => SnapshotOrphanMaintenanceFailureKind::Busy,
+            HistoryErrorKind::UnsafeStorage => SnapshotOrphanMaintenanceFailureKind::UnsafeStorage,
+            HistoryErrorKind::CorruptData => SnapshotOrphanMaintenanceFailureKind::CorruptData,
+            HistoryErrorKind::DatabaseUnavailable => {
+                SnapshotOrphanMaintenanceFailureKind::Unavailable
+            }
+            HistoryErrorKind::OutcomeUnknown => {
+                SnapshotOrphanMaintenanceFailureKind::OutcomeUnknown
+            }
+            HistoryErrorKind::AlreadyExists
+            | HistoryErrorKind::NotFound
+            | HistoryErrorKind::InvalidTransition
+            | HistoryErrorKind::InternalState => {
+                SnapshotOrphanMaintenanceFailureKind::InternalState
+            }
+        },
+    };
+    TaskFailureKind::SnapshotOrphanMaintenance(kind)
 }
 
 const fn public_candidate_evaluation_failure(

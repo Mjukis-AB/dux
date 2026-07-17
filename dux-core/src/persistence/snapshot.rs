@@ -32,7 +32,8 @@ use super::snapshot_retention::{
     reconcile_snapshot_retention_tombstone_insert,
 };
 use super::snapshot_retention_inventory::{
-    SnapshotRetentionInventory, build_snapshot_retention_inventory,
+    SnapshotRetentionInventory, build_snapshot_physical_orphan_inventory,
+    build_snapshot_retention_inventory,
 };
 #[cfg(test)]
 use super::snapshot_review_pin::{MAX_ACTIVE_PINS, MAX_EXPIRED_PRUNE};
@@ -62,10 +63,10 @@ pub(crate) use codec::{
 };
 pub(crate) use storage::{
     RetainedSnapshot, SecureSnapshotStore, SnapshotFileName, SnapshotFileUsage,
-    SnapshotInventoryEntryKind, SnapshotPublication, SnapshotPublicationLease,
-    SnapshotStageReservation, SnapshotStorageError, SnapshotStorageErrorKind, SnapshotStoreAccess,
-    SnapshotStoreInventoryLease, SnapshotTempKernelState, SnapshotTempMutationLease,
-    StagedSnapshot,
+    SnapshotFinalRemovalError, SnapshotInventoryEntryKind, SnapshotPublication,
+    SnapshotPublicationLease, SnapshotStageReservation, SnapshotStorageError,
+    SnapshotStorageErrorKind, SnapshotStoreAccess, SnapshotStoreInventoryLease,
+    SnapshotTempKernelState, SnapshotTempMutationLease, StagedSnapshot,
 };
 
 const PUBLICATION_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
@@ -192,6 +193,26 @@ pub(crate) enum SnapshotRetentionBatchOutcome {
     DeferredNoEligibleSnapshot,
     RemovedTombstonedResidual { scan_id: ScanId, bytes: u64 },
     TombstonedAndRemoved { scan_id: ScanId, bytes: u64 },
+}
+
+/// One bounded physical-orphan reconciliation. The repository removes at
+/// most one fully decoded final per call and never changes scan history,
+/// temporary-lease state, pins, or retention tombstones.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SnapshotOrphanReconciliationBatchResult {
+    pub(crate) observed_at: SystemTime,
+    pub(crate) outcome: SnapshotOrphanReconciliationBatchOutcome,
+    pub(crate) orphan_count_before: u32,
+    pub(crate) orphan_count_after: u32,
+    pub(crate) orphan_charged_bytes_before: u64,
+    pub(crate) orphan_charged_bytes_after: u64,
+    pub(crate) has_more: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SnapshotOrphanReconciliationBatchOutcome {
+    NoOrphan,
+    Removed { scan_id: ScanId, bytes: u64 },
 }
 
 const fn repository_error(kind: SnapshotRepositoryErrorKind) -> SnapshotRepositoryError {
@@ -474,6 +495,163 @@ impl SnapshotRepository {
         )
         .map_err(map_history)?;
         Ok((inventory, storage))
+    }
+
+    /// Remove at most one fully proven physical orphan.
+    ///
+    /// Authority comes only from a complete physical-final inventory, absence
+    /// of any exact snapshot-path reference, a checksum-valid document whose
+    /// hashed scan ID equals its physical name, and an exact parent scan row
+    /// with no snapshot reference while the writer lease proves no publication
+    /// is currently in flight. Cap policy, pins, temporary files, and
+    /// tombstones are intentionally outside this decision.
+    pub(crate) fn reconcile_physical_orphan(
+        &self,
+        observed_at: SystemTime,
+    ) -> Result<SnapshotOrphanReconciliationBatchResult, SnapshotRepositoryError> {
+        self.reconcile_physical_orphan_with_remover(observed_at, |storage, retained| {
+            storage.remove_observed_final_reconciled(retained)
+        })
+    }
+
+    fn reconcile_physical_orphan_with_remover(
+        &self,
+        observed_at: SystemTime,
+        remove: impl FnOnce(
+            &mut SnapshotStoreInventoryLease,
+            &RetainedSnapshot,
+        )
+            -> std::result::Result<SnapshotFileUsage, SnapshotFinalRemovalError>,
+    ) -> Result<SnapshotOrphanReconciliationBatchResult, SnapshotRepositoryError> {
+        if self.access != SnapshotStoreAccess::ReadWrite {
+            return Err(repository_error(SnapshotRepositoryErrorKind::ReadOnly));
+        }
+        let observed_at = unix_ms_to_system_time(
+            system_time_to_unix_ms(observed_at, HistoryErrorKind::InvalidInput)
+                .map_err(map_history)?,
+        )
+        .map_err(map_history)?;
+        let database_guard = self
+            .database
+            .lock_current_history_connection()
+            .map_err(map_history)?;
+        self.database
+            .validate_history_guard(&database_guard)
+            .map_err(map_history)?;
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| repository_error(SnapshotRepositoryErrorKind::MissingStore))?;
+        // Lock order is permanently database -> snapshot. Publication uses
+        // the same snapshot writer lock, so no orphan can be adopted or
+        // replaced between classification and exact retained-handle unlink.
+        let mut storage = store
+            .inventory_with_writer_lease(PUBLICATION_LOCK_TIMEOUT)
+            .map_err(map_storage)?;
+        let inventory =
+            build_snapshot_physical_orphan_inventory(&database_guard.connection, &storage)
+                .map_err(map_history)?;
+        storage.revalidate().map_err(map_storage)?;
+        self.database
+            .revalidate_current_history_guard(&database_guard)
+            .map_err(map_history)?;
+
+        let orphan_count_before = u32::try_from(inventory.finals.len()).map_err(|_| {
+            repository_error(SnapshotRepositoryErrorKind::History(
+                HistoryErrorKind::QueryLimitExceeded,
+            ))
+        })?;
+        let orphan_charged_bytes_before = inventory.usage.charged_bytes;
+        let Some(candidate) = inventory.finals.first() else {
+            return Ok(SnapshotOrphanReconciliationBatchResult {
+                observed_at,
+                outcome: SnapshotOrphanReconciliationBatchOutcome::NoOrphan,
+                orphan_count_before: 0,
+                orphan_count_after: 0,
+                orphan_charged_bytes_before: 0,
+                orphan_charged_bytes_after: 0,
+                has_more: false,
+            });
+        };
+
+        let retained = storage
+            .retain_observed_final(&candidate.file_name)
+            .map_err(map_storage)?;
+        let (document, _digest) = decode_retained(&retained)?;
+        if SnapshotFileName::from_scan_id(document.metadata.scan_id.as_str().as_bytes())
+            != candidate.file_name
+        {
+            return Err(repository_error(
+                SnapshotRepositoryErrorKind::ReferenceMismatch,
+            ));
+        }
+        let parent = self
+            .database
+            .load_scan_with_guard(&database_guard, &document.metadata.scan_id)
+            .map_err(map_history)?
+            .ok_or_else(|| {
+                repository_error(SnapshotRepositoryErrorKind::History(
+                    HistoryErrorKind::CorruptData,
+                ))
+            })?;
+        if !document.metadata.root.matches_path(parent.root())
+            || parent.snapshot().is_some()
+            || !matches!(
+                parent.status(),
+                ScanStatus::Running
+                    | ScanStatus::Failed
+                    | ScanStatus::Cancelled
+                    | ScanStatus::Interrupted
+            )
+        {
+            return Err(repository_error(SnapshotRepositoryErrorKind::History(
+                HistoryErrorKind::CorruptData,
+            )));
+        }
+        storage.revalidate().map_err(map_storage)?;
+        self.database
+            .revalidate_current_history_guard(&database_guard)
+            .map_err(map_history)?;
+
+        // Freeze every accounting postcondition before the unlink boundary.
+        let orphan_count_after = orphan_count_before.checked_sub(1).ok_or_else(|| {
+            repository_error(SnapshotRepositoryErrorKind::History(
+                HistoryErrorKind::InternalState,
+            ))
+        })?;
+        let orphan_charged_bytes_after = orphan_charged_bytes_before
+            .checked_sub(candidate.usage.charged_bytes())
+            .ok_or_else(|| {
+                repository_error(SnapshotRepositoryErrorKind::History(
+                    HistoryErrorKind::InternalState,
+                ))
+            })?;
+        let removed = match remove(&mut storage, &retained) {
+            Ok(removed) => removed,
+            Err(SnapshotFinalRemovalError::BeforeEffect(error)) => return Err(map_storage(error)),
+            Err(SnapshotFinalRemovalError::OutcomeUnknown) => return Err(outcome_unknown()),
+        };
+        drop(retained);
+        if removed != candidate.usage {
+            return Err(outcome_unknown());
+        }
+        storage.revalidate().map_err(|_| outcome_unknown())?;
+        self.database
+            .revalidate_current_history_guard(&database_guard)
+            .map_err(|_| outcome_unknown())?;
+        let bytes = removed.charged_bytes();
+        Ok(SnapshotOrphanReconciliationBatchResult {
+            observed_at,
+            outcome: SnapshotOrphanReconciliationBatchOutcome::Removed {
+                scan_id: document.metadata.scan_id,
+                bytes,
+            },
+            orphan_count_before,
+            orphan_count_after,
+            orphan_charged_bytes_before,
+            orphan_charged_bytes_after,
+            has_more: orphan_count_after > 0,
+        })
     }
 
     /// Apply at most one exact physical snapshot-retention mutation.
@@ -1146,7 +1324,7 @@ impl SnapshotRepository {
     }
 
     #[cfg(test)]
-    fn publish_orphan_for_test(
+    pub(crate) fn publish_orphan_for_test(
         &self,
         document: &SnapshotDocument,
     ) -> Result<PublishedSnapshot, SnapshotRepositoryError> {
@@ -1779,6 +1957,7 @@ fn decode_reference(
 mod tests {
     use std::ffi::OsStr;
     use std::fs;
+    use std::io::Cursor;
     use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant, UNIX_EPOCH};
 
@@ -1791,7 +1970,7 @@ mod tests {
         RuleMatcher, RuleMatcherDefinition, RuleRef, RuleRevision, RuleScope, SafetyTier,
     };
     use crate::persistence::candidate_history::{NewCandidateRecord, StoredCandidateRecord};
-    use crate::persistence::history::NewScanRecord;
+    use crate::persistence::history::{NewScanRecord, TerminalScanStatus};
     use crate::{CoveragePermille, ScanIssue, ScanIssueKind};
 
     fn document(scan_id: &str, root: &Path) -> SnapshotDocument {
@@ -2008,12 +2187,405 @@ mod tests {
         })
     }
 
+    fn scan_row_count(store: &StoreCoordinator) -> i64 {
+        store.with_connection(|connection| {
+            connection
+                .query_row("SELECT count(*) FROM scans", [], |row| row.get(0))
+                .unwrap()
+        })
+    }
+
+    fn publish_running_orphan(
+        store: &StoreCoordinator,
+        repository: &SnapshotRepository,
+        document: &SnapshotDocument,
+        root: &Path,
+        started_at: SystemTime,
+    ) -> SnapshotFileName {
+        store
+            .record_scan_started(
+                &NewScanRecord::try_new(
+                    document.metadata.scan_id.clone(),
+                    root.to_path_buf(),
+                    started_at,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        drop(repository.publish_orphan_for_test(document).unwrap());
+        SnapshotFileName::from_scan_id(document.metadata.scan_id.as_str().as_bytes())
+    }
+
+    fn encoded_document(document: &SnapshotDocument) -> Vec<u8> {
+        let mut output = Cursor::new(Vec::new());
+        encode_snapshot(document, &mut output).unwrap();
+        output.into_inner()
+    }
+
     #[test]
     fn retention_removal_accounting_fails_closed_on_underflow() {
         assert_eq!(charged_bytes_after_removal(10, 4).unwrap(), 6);
         assert_eq!(
             charged_bytes_after_removal(4, 10).unwrap_err().kind,
             SnapshotRepositoryErrorKind::Storage(SnapshotStorageErrorKind::InternalState)
+        );
+    }
+
+    #[test]
+    fn physical_orphan_reconciliation_is_sorted_bounded_and_ignores_active_temps() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let root = temp.path().join("scan-root");
+        let observed_at = UNIX_EPOCH + Duration::from_millis(1_750_000_010_123);
+        let (store, repository) = open_repository(&database);
+        let first = document("scan:orphan-bounded-first", &root);
+        let second = document("scan:orphan-bounded-second", &root);
+        let first_name = publish_running_orphan(
+            &store,
+            &repository,
+            &first,
+            &root,
+            observed_at - Duration::from_secs(3),
+        );
+        let second_name = publish_running_orphan(
+            &store,
+            &repository,
+            &second,
+            &root,
+            observed_at - Duration::from_secs(2),
+        );
+
+        let temp_document = document("scan:orphan-bounded-active-temp", &root);
+        store
+            .record_scan_started(
+                &NewScanRecord::try_new(
+                    temp_document.metadata.scan_id.clone(),
+                    root.clone(),
+                    observed_at - Duration::from_secs(1),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let (staged, _, _) = repository.stage_document(&temp_document).unwrap();
+        let before_rows = (
+            scan_row_count(&store),
+            temp_lease_count(&store),
+            retention_tombstone_count(&store),
+        );
+
+        let mut expected = [
+            (first_name.clone(), first.metadata.scan_id.clone()),
+            (second_name.clone(), second.metadata.scan_id.clone()),
+        ];
+        expected.sort_by(|left, right| left.0.cmp(&right.0));
+        let result = repository
+            .reconcile_physical_orphan(observed_at + Duration::from_nanos(999_999))
+            .unwrap();
+        assert_eq!(result.observed_at, observed_at);
+        assert_eq!(result.orphan_count_before, 2);
+        assert_eq!(result.orphan_count_after, 1);
+        assert!(result.has_more);
+        let SnapshotOrphanReconciliationBatchOutcome::Removed { scan_id, bytes } = result.outcome
+        else {
+            panic!("expected one orphan removal")
+        };
+        assert_eq!(scan_id, expected[0].1);
+        assert!(bytes > 0);
+        assert_eq!(
+            result.orphan_charged_bytes_before - bytes,
+            result.orphan_charged_bytes_after
+        );
+        assert_eq!(
+            before_rows,
+            (
+                scan_row_count(&store),
+                temp_lease_count(&store),
+                retention_tombstone_count(&store),
+            )
+        );
+
+        let second_result = repository
+            .reconcile_physical_orphan(observed_at + Duration::from_millis(1))
+            .unwrap();
+        assert_eq!(second_result.orphan_count_before, 1);
+        assert_eq!(second_result.orphan_count_after, 0);
+        assert!(!second_result.has_more);
+        assert!(matches!(
+            second_result.outcome,
+            SnapshotOrphanReconciliationBatchOutcome::Removed { .. }
+        ));
+        let settled = repository
+            .reconcile_physical_orphan(observed_at + Duration::from_millis(2))
+            .unwrap();
+        assert_eq!(
+            settled.outcome,
+            SnapshotOrphanReconciliationBatchOutcome::NoOrphan
+        );
+        assert_eq!(settled.orphan_count_before, 0);
+        assert_eq!(settled.orphan_charged_bytes_before, 0);
+        staged.abandon();
+    }
+
+    #[test]
+    fn physical_orphan_reconciliation_accepts_terminal_non_success_without_mutating_history() {
+        for (label, status) in [
+            ("failed", TerminalScanStatus::Failed),
+            ("cancelled", TerminalScanStatus::Cancelled),
+            ("interrupted", TerminalScanStatus::Interrupted),
+        ] {
+            let temp = TempDir::new().unwrap();
+            let database = temp.path().join("store/dux.sqlite3");
+            let root = temp.path().join("scan-root");
+            let observed_at = UNIX_EPOCH + Duration::from_millis(1_750_000_020_000);
+            let (store, repository) = open_repository(&database);
+            let document = document(&format!("scan:orphan-terminal-{label}"), &root);
+            publish_running_orphan(
+                &store,
+                &repository,
+                &document,
+                &root,
+                observed_at - Duration::from_secs(2),
+            );
+            store
+                .record_scan_finished(
+                    &ScanCompletionRecord::try_new(
+                        document.metadata.scan_id.clone(),
+                        observed_at - Duration::from_secs(1),
+                        status,
+                        counts(),
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+            let before = store
+                .load_scan(&document.metadata.scan_id)
+                .unwrap()
+                .unwrap();
+
+            let result = repository.reconcile_physical_orphan(observed_at).unwrap();
+            assert!(matches!(
+                result.outcome,
+                SnapshotOrphanReconciliationBatchOutcome::Removed { ref scan_id, .. }
+                    if scan_id == &document.metadata.scan_id
+            ));
+            assert_eq!(
+                store
+                    .load_scan(&document.metadata.scan_id)
+                    .unwrap()
+                    .unwrap(),
+                before
+            );
+            assert_eq!(temp_lease_count(&store), 1);
+            assert_eq!(retention_tombstone_count(&store), 0);
+        }
+    }
+
+    #[test]
+    fn physical_orphan_reconciliation_rejects_missing_queued_succeeded_and_wrong_root_parents() {
+        for case in ["missing", "queued", "succeeded", "wrong-root"] {
+            let temp = TempDir::new().unwrap();
+            let database = temp.path().join("store/dux.sqlite3");
+            let root = temp.path().join("scan-root");
+            let stored_root = if case == "wrong-root" {
+                temp.path().join("different-root")
+            } else {
+                root.clone()
+            };
+            let observed_at = UNIX_EPOCH + Duration::from_millis(1_750_000_030_000);
+            let (store, repository) = open_repository(&database);
+            let document = document(&format!("scan:orphan-invalid-{case}"), &root);
+            let file_name = publish_running_orphan(
+                &store,
+                &repository,
+                &document,
+                &stored_root,
+                observed_at - Duration::from_secs(2),
+            );
+            store.with_connection(|connection| match case {
+                "missing" => {
+                    connection
+                        .execute(
+                            "DELETE FROM snapshot_temp_leases WHERE scan_id = ?1",
+                            [document.metadata.scan_id.as_str()],
+                        )
+                        .unwrap();
+                    connection
+                        .execute(
+                            "DELETE FROM scans WHERE scan_id = ?1",
+                            [document.metadata.scan_id.as_str()],
+                        )
+                        .unwrap();
+                }
+                "queued" => {
+                    connection
+                        .execute(
+                            "UPDATE scans SET status = 'queued' WHERE scan_id = ?1",
+                            [document.metadata.scan_id.as_str()],
+                        )
+                        .unwrap();
+                }
+                "succeeded" => {
+                    connection
+                        .execute(
+                            "DELETE FROM snapshot_temp_leases WHERE scan_id = ?1",
+                            [document.metadata.scan_id.as_str()],
+                        )
+                        .unwrap();
+                    connection
+                        .execute(
+                            "UPDATE scans SET status = 'succeeded', completed_at_unix_ms = ?2
+                              WHERE scan_id = ?1",
+                            rusqlite::params![
+                                document.metadata.scan_id.as_str(),
+                                1_750_000_029_000_i64
+                            ],
+                        )
+                        .unwrap();
+                }
+                "wrong-root" => {}
+                _ => unreachable!(),
+            });
+
+            assert_eq!(
+                repository
+                    .reconcile_physical_orphan(observed_at)
+                    .unwrap_err()
+                    .kind,
+                SnapshotRepositoryErrorKind::History(HistoryErrorKind::CorruptData),
+                "case {case}"
+            );
+            assert!(
+                database
+                    .parent()
+                    .unwrap()
+                    .join("snapshots")
+                    .join(file_name.as_str())
+                    .is_file()
+            );
+        }
+    }
+
+    #[test]
+    fn physical_orphan_reconciliation_rejects_corrupt_and_wrong_name_bodies() {
+        for case in ["corrupt", "wrong-name"] {
+            let temp = TempDir::new().unwrap();
+            let database = temp.path().join("store/dux.sqlite3");
+            let root = temp.path().join("scan-root");
+            let observed_at = UNIX_EPOCH + Duration::from_millis(1_750_000_040_000);
+            let (store, repository) = open_repository(&database);
+            let orphan_document = document(&format!("scan:orphan-invalid-body-{case}"), &root);
+            let file_name = publish_running_orphan(
+                &store,
+                &repository,
+                &orphan_document,
+                &root,
+                observed_at - Duration::from_secs(1),
+            );
+            let mut bytes = if case == "corrupt" {
+                encoded_document(&orphan_document)
+            } else {
+                encoded_document(&document("scan:orphan-different-body-name", &root))
+            };
+            if case == "corrupt" {
+                *bytes.last_mut().unwrap() ^= 0x01;
+            }
+            repository
+                .store
+                .as_ref()
+                .unwrap()
+                .replace_final_for_test(&file_name, &bytes)
+                .unwrap();
+
+            let error = repository
+                .reconcile_physical_orphan(observed_at)
+                .unwrap_err();
+            if case == "corrupt" {
+                assert!(matches!(
+                    error.kind,
+                    SnapshotRepositoryErrorKind::Codec(SnapshotCodecErrorKind::ChecksumMismatch)
+                ));
+            } else {
+                assert_eq!(error.kind, SnapshotRepositoryErrorKind::ReferenceMismatch);
+            }
+            assert!(
+                database
+                    .parent()
+                    .unwrap()
+                    .join("snapshots")
+                    .join(file_name.as_str())
+                    .is_file(),
+                "case {case} must leave the final untouched"
+            );
+        }
+    }
+
+    #[test]
+    fn physical_orphan_reconciliation_never_adopts_a_referenced_final() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let root = temp.path().join("scan-root");
+        let completed_at = UNIX_EPOCH + Duration::from_millis(1_750_000_045_000);
+        let (store, repository) = open_repository(&database);
+        let document = document("scan:orphan-reference-control", &root);
+        let reference = complete_snapshot(&store, &repository, &document, &root, completed_at);
+
+        let result = repository
+            .reconcile_physical_orphan(completed_at + Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(
+            result.outcome,
+            SnapshotOrphanReconciliationBatchOutcome::NoOrphan
+        );
+        assert_eq!(result.orphan_count_before, 0);
+        assert!(
+            database
+                .parent()
+                .unwrap()
+                .join("snapshots")
+                .join(reference.file_name().as_str())
+                .is_file()
+        );
+    }
+
+    #[test]
+    fn physical_orphan_reconciliation_rejects_an_invalid_clock() {
+        let invalid_clock = UNIX_EPOCH - Duration::from_millis(1);
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let (_store, repository) = open_repository(&database);
+        assert_eq!(
+            repository
+                .reconcile_physical_orphan(invalid_clock)
+                .unwrap_err()
+                .kind,
+            SnapshotRepositoryErrorKind::History(HistoryErrorKind::InvalidInput)
+        );
+    }
+
+    #[test]
+    fn physical_orphan_reconciliation_maps_post_unlink_uncertainty_to_history() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let root = temp.path().join("scan-root");
+        let observed_at = UNIX_EPOCH + Duration::from_millis(1_750_000_050_000);
+        let (store, repository) = open_repository(&database);
+        let document = document("scan:orphan-outcome-unknown", &root);
+        publish_running_orphan(
+            &store,
+            &repository,
+            &document,
+            &root,
+            observed_at - Duration::from_secs(1),
+        );
+
+        assert_eq!(
+            repository
+                .reconcile_physical_orphan_with_remover(observed_at, |_, _| {
+                    Err(SnapshotFinalRemovalError::OutcomeUnknown)
+                })
+                .unwrap_err()
+                .kind,
+            SnapshotRepositoryErrorKind::History(HistoryErrorKind::OutcomeUnknown)
         );
     }
 
@@ -3476,6 +4048,13 @@ mod tests {
                 .kind,
             SnapshotRepositoryErrorKind::History(HistoryErrorKind::CorruptData)
         );
+        assert_eq!(
+            repository
+                .reconcile_physical_orphan(completed_at + Duration::from_secs(1))
+                .unwrap_err()
+                .kind,
+            SnapshotRepositoryErrorKind::History(HistoryErrorKind::CorruptData)
+        );
     }
 
     #[cfg(unix)]
@@ -3506,6 +4085,13 @@ mod tests {
             assert_eq!(
                 repository
                     .inspect_retention_inventory(completed_at + Duration::from_secs(1))
+                    .unwrap_err()
+                    .kind,
+                SnapshotRepositoryErrorKind::History(HistoryErrorKind::CorruptData)
+            );
+            assert_eq!(
+                repository
+                    .reconcile_physical_orphan(completed_at + Duration::from_secs(1))
                     .unwrap_err()
                     .kind,
                 SnapshotRepositoryErrorKind::History(HistoryErrorKind::CorruptData)

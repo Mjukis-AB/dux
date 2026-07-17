@@ -30,6 +30,7 @@ pub enum TaskKind {
     Scan,
     HistoryMaintenance,
     SnapshotRetention,
+    SnapshotOrphanMaintenance,
 }
 
 /// Execution phase. Cancellation intent is reported separately until work is
@@ -60,6 +61,7 @@ pub enum TaskFailureKind {
     PersistenceOutcomeUnknown,
     HistoryMaintenance(HistoryMaintenanceFailureKind),
     SnapshotRetention(SnapshotRetentionFailureKind),
+    SnapshotOrphanMaintenance(SnapshotOrphanMaintenanceFailureKind),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -79,6 +81,22 @@ pub enum HistoryMaintenanceFailureKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SnapshotRetentionFailureKind {
+    InvalidClock,
+    IncompatibleSchema,
+    Busy,
+    UnsafeStorage,
+    BudgetExceeded,
+    CorruptData,
+    IncompatibleSnapshot,
+    Unavailable,
+    OutcomeUnknown,
+    InternalState,
+}
+
+/// Path-free failure categories for physical-orphan reconciliation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SnapshotOrphanMaintenanceFailureKind {
     InvalidClock,
     IncompatibleSchema,
     Busy,
@@ -137,6 +155,15 @@ pub enum TaskEventKind {
         cap_bytes: u64,
         charged_bytes_before: u64,
         charged_bytes_after: u64,
+        has_more: bool,
+    },
+    SnapshotOrphanMaintenanceBatchApplying,
+    SnapshotOrphanMaintenanceBatchFinished {
+        outcome: SnapshotOrphanMaintenanceOutcome,
+        orphan_count_before: u32,
+        orphan_count_after: u32,
+        orphan_charged_bytes_before: u64,
+        orphan_charged_bytes_after: u64,
         has_more: bool,
     },
     CancellationRequested,
@@ -293,6 +320,78 @@ impl SnapshotRetentionResult {
 
     pub const fn charged_bytes_after(&self) -> u64 {
         self.charged_bytes_after
+    }
+
+    pub const fn has_more(&self) -> bool {
+        self.has_more
+    }
+}
+
+/// Path-free outcome of one bounded physical-orphan reconciliation. Exact
+/// scan identities remain private repository observations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SnapshotOrphanMaintenanceOutcome {
+    NoOrphan,
+    Removed { bytes: u64 },
+}
+
+/// Immutable outcome from one idle-only physical-orphan batch. `has_more`
+/// asks the caller to submit a later task; core never self-enqueues.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SnapshotOrphanMaintenanceResult {
+    observed_at: SystemTime,
+    outcome: SnapshotOrphanMaintenanceOutcome,
+    orphan_count_before: u32,
+    orphan_count_after: u32,
+    orphan_charged_bytes_before: u64,
+    orphan_charged_bytes_after: u64,
+    has_more: bool,
+}
+
+impl SnapshotOrphanMaintenanceResult {
+    pub(super) const fn new(
+        observed_at: SystemTime,
+        outcome: SnapshotOrphanMaintenanceOutcome,
+        orphan_count_before: u32,
+        orphan_count_after: u32,
+        orphan_charged_bytes_before: u64,
+        orphan_charged_bytes_after: u64,
+        has_more: bool,
+    ) -> Self {
+        Self {
+            observed_at,
+            outcome,
+            orphan_count_before,
+            orphan_count_after,
+            orphan_charged_bytes_before,
+            orphan_charged_bytes_after,
+            has_more,
+        }
+    }
+
+    pub const fn observed_at(&self) -> SystemTime {
+        self.observed_at
+    }
+
+    pub const fn outcome(&self) -> SnapshotOrphanMaintenanceOutcome {
+        self.outcome
+    }
+
+    pub const fn orphan_count_before(&self) -> u32 {
+        self.orphan_count_before
+    }
+
+    pub const fn orphan_count_after(&self) -> u32 {
+        self.orphan_count_after
+    }
+
+    pub const fn orphan_charged_bytes_before(&self) -> u64 {
+        self.orphan_charged_bytes_before
+    }
+
+    pub const fn orphan_charged_bytes_after(&self) -> u64 {
+        self.orphan_charged_bytes_after
     }
 
     pub const fn has_more(&self) -> bool {
@@ -769,6 +868,13 @@ pub enum HistoryMaintenanceStartOutcome {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SnapshotRetentionStartOutcome {
+    Started(TaskId),
+    AlreadyActive(TaskId),
+    DeferredBusy,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SnapshotOrphanMaintenanceStartOutcome {
     Started(TaskId),
     AlreadyActive(TaskId),
     DeferredBusy,

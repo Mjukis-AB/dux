@@ -69,6 +69,26 @@ All notable changes to DUX will be documented in this file.
   and shared-store multi-session regressions cover the boundary. The core does
   not self-schedule; native app/FFI review-lease ownership and periodic idle
   scheduling remain future work.
+- Added bounded physical snapshot-orphan reconciliation. A separate sealed
+  repository batch now classifies typed finals against the exact indexed
+  catalog under the database-before-snapshot lock order, selects only one
+  deterministic zero-reference final, fully decodes its checksum-valid body,
+  binds its filename to the decoded scan ID, and requires an exact matching
+  `running` or terminal-non-success parent with no snapshot reference. The
+  retained identity and logical/allocation usage are rechecked through a
+  delete-capable handle, all accounting is frozen before unlink, and directory
+  durability is required for success. Post-unlink uncertainty is distinct from
+  a guaranteed pre-effect failure and maps to `OutcomeUnknown`; no scan,
+  temp-lease, tombstone, pin, or history row is changed. A separate idle-only
+  `SnapshotOrphanMaintenance` engine task accepts no authority-bearing input,
+  removes at most one final, redacts scan/name/path identity, reports bounded
+  aggregate accounting and `has_more`, and never self-enqueues. Focused
+  state/body/catalog/race/accounting/effect-boundary, cancellation/close,
+  multi-session, and redaction regressions cover the slice. Native periodic
+  scheduling, general temp/stage maintenance, clear-data actions, and native
+  Windows compile/removal runtime verification remain separate; the local MSVC
+  cross-check stops in bundled SQLite's C build because no Windows sysroot is
+  installed.
 - Added the core production snapshot-cap mutation boundary. One bounded batch
   holds the current-schema database lease before the snapshot writer lease,
   rebuilds the complete cap/latest-two/active-pin inventory, refuses new
@@ -85,10 +105,10 @@ All notable changes to DUX will be documented in this file.
   continuation, one-victim, changed-content, post-validation replacement, Unix
   identity, and Windows compile regressions cover the boundary. This remains a
   sealed repository batch whose only orchestrator is the typed core engine
-  task: app/FFI review-lease ownership, native periodic idle scheduling,
-  orphan and
-  unleased-temp/stage scavenging, clear-data actions, and native Windows runtime
-  verification remain separate.
+  task. At that checkpoint, app/FFI review-lease ownership, native periodic idle
+  scheduling, orphan and unleased-temp/stage scavenging, clear-data actions, and
+  native Windows runtime verification remained separate; the newer entry above
+  records the subsequently implemented physical-orphan boundary.
 - Added schema v8's durable snapshot temporary-file leases. Snapshot staging
   now reserves an exact recognized name while holding the permanent
   database-before-snapshot lock order, commits a bounded immutable lease row

@@ -40,6 +40,8 @@ pub use task::{
     EngineOpenError, FormatSizeBatchResult, FormattedSizeEntry, HistoryMaintenanceFailureKind,
     HistoryMaintenanceResult, HistoryMaintenanceStartOutcome, RecentScanHistory, ScanHistoryError,
     ScanRootErrorKind, ScanTaskCounts, ScanTaskResult, ScanTaskStatus,
+    SnapshotOrphanMaintenanceFailureKind, SnapshotOrphanMaintenanceOutcome,
+    SnapshotOrphanMaintenanceResult, SnapshotOrphanMaintenanceStartOutcome,
     SnapshotRetentionFailureKind, SnapshotRetentionOutcome, SnapshotRetentionResult,
     SnapshotRetentionStartOutcome, StartTaskError, TaskAccessError, TaskEvent, TaskEventBatch,
     TaskEventKind, TaskFailureKind, TaskId, TaskKind, TaskPhase, TaskSnapshot,

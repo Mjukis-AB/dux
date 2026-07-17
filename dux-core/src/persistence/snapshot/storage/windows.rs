@@ -535,17 +535,17 @@ pub(super) fn remove_retained_temp(
 pub(super) fn remove_retained_final(
     directory: &File,
     name: &str,
-    file: &File,
+    file: File,
     expected: Identity,
 ) -> Result<()> {
-    validate_named(directory, name, file, expected, Kind::RegularFile)?;
+    validate_named(directory, name, &file, expected, Kind::RegularFile)?;
     let disposition = DeleteDisposition {
         flags: DELETE_DISPOSITION_FLAG | POSIX_DISPOSITION_FLAG,
     };
     // SAFETY: the retained exact-identity final handle has DELETE access and
     // the fixed disposition buffer is live for the synchronous call.
     let removed = unsafe {
-        // DUX-DESTRUCTIVE: allow=snapshot-windows-observed-final-delete -- delete only an exact typed final observed under the retained inventory writer lease after identity and usage revalidation
+        // DUX-DESTRUCTIVE: allow=snapshot-windows-observed-final-delete -- delete only an exact typed final observed under the retained inventory writer lease after higher-layer tombstone or orphan authority plus identity and usage revalidation
         windows_sys::Win32::Storage::FileSystem::SetFileInformationByHandle(
             file.as_raw_handle(),
             DELETE_DISPOSITION_CLASS,
@@ -556,7 +556,13 @@ pub(super) fn remove_retained_final(
     if removed == 0 {
         return Err(unavailable());
     }
-    validate_private(file, Kind::RegularFile, Some(expected), false).map(drop)
+    // POSIX disposition removes the link when this delete-capable handle
+    // closes. Close it synchronously before returning so the caller's
+    // directory flush necessarily follows the namespace mutation. A safe
+    // owned `File` cannot become an invalid handle between the successful
+    // disposition and this close, and there is no fallible work in between.
+    drop(file);
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]

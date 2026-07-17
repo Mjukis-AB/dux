@@ -100,6 +100,65 @@ pub(crate) struct SnapshotOrphanFinal {
     pub(crate) usage: SnapshotFileUsage,
 }
 
+/// Complete, bounded observation of physical finals that have no scan-row
+/// snapshot-path reference. This classifier deliberately ignores cap policy,
+/// pins, tombstones, and temporary files: those facts cannot grant or withhold
+/// authority to reconcile a physically published orphan.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct SnapshotPhysicalOrphanInventory {
+    pub(super) finals: Vec<SnapshotOrphanFinal>,
+    pub(super) usage: SnapshotRetentionUsage,
+}
+
+/// Classify only physical finals against the indexed snapshot-path column.
+/// The surrounding repository owns the current-schema database guard and the
+/// snapshot inventory writer lease for the complete proof and mutation.
+pub(super) fn build_snapshot_physical_orphan_inventory(
+    connection: &Connection,
+    storage: &SnapshotStoreInventoryLease,
+) -> Result<SnapshotPhysicalOrphanInventory, HistoryError> {
+    let final_count = storage
+        .entries()
+        .iter()
+        .filter(|entry| matches!(entry.kind(), SnapshotInventoryEntryKind::Final(_)))
+        .count();
+    run_bounded_snapshot_retention_inventory_query(connection, final_count, || {
+        let mut statement = connection
+            .prepare(CATALOG_BY_SNAPSHOT_PATH)
+            .map_err(map_query_sql_error)?;
+        let mut finals = Vec::new();
+        let mut usage = SnapshotRetentionUsage::default();
+        let mut seen_scan_ids = BTreeSet::new();
+        for physical in storage.entries() {
+            let SnapshotInventoryEntryKind::Final(file_name) = physical.kind() else {
+                continue;
+            };
+            let encoded = encode_host_path(Path::new(file_name.as_str())).map_err(|_| corrupt())?;
+            let mut rows = statement
+                .query(params![encoded.encoding as i64, encoded.bytes])
+                .map_err(map_query_sql_error)?;
+            let Some(first) = rows.next().map_err(map_query_sql_error)? else {
+                usage.checked_add_file(physical.usage())?;
+                finals.push(SnapshotOrphanFinal {
+                    file_name: file_name.clone(),
+                    usage: physical.usage(),
+                });
+                continue;
+            };
+            let raw = raw_catalog_row(first).map_err(map_query_sql_error)?;
+            if rows.next().map_err(map_query_sql_error)?.is_some() {
+                return Err(corrupt());
+            }
+            let row = decode_catalog_row(raw, file_name)?;
+            if !seen_scan_ids.insert(row.scan_id) {
+                return Err(corrupt());
+            }
+        }
+        finals.sort_by(|left, right| left.file_name.cmp(&right.file_name));
+        Ok(SnapshotPhysicalOrphanInventory { finals, usage })
+    })
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SnapshotTemporaryState {
     Active,
