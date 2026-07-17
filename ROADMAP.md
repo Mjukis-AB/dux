@@ -3117,10 +3117,68 @@ Tasks:
     the mutation path; Windows native tests are compiled for CI but have not run
     on this host.
 
-    Production retention still requires app/FFI review-lease ownership and
-    native periodic idle scheduling, hard-process-death recovery for `running`
-    rows, explicit clear-data actions, and native Windows mutation-path runtime
-    verification.
+  - Native review-lease ownership and idle-maintenance scheduling completed
+    2026-07-17: FFI contract v3 replaces the smoke-only adapter with one real
+    application-scoped `EngineHandle` opened from input-only data/cache roots.
+    Opaque review sessions can be acquired only by a validated scan ID for the
+    fixed Explorer purpose; no path, filename, digest, file handle, candidate,
+    inventory, or cleanup authority crosses UniFFI. Core repeats snapshot,
+    tombstone, history, identity, and body validation during acquisition and
+    now linearizes the final publication against engine close: if close wins,
+    exact pin release is attempted before `Closed` is returned, and any
+    unresolved durable row expires naturally.
+
+    Swift's actor-owned review controller retains leases outside render state,
+    renews them every five minutes and on wake/significant time change, and
+    explicitly releases them on selection close and app shutdown. Per-scan
+    generations reject acquisition completions that arrive after release,
+    prevent an old renewal failure from removing a replacement lease, and
+    serialize/coalesce overlapping renewals. FFI additionally tracks weak
+    issued-session registrations: engine close first rejects new renewal,
+    attempts exact release for every still-live registered review, then closes
+    core; a failed durable release expires naturally. Release remains
+    idempotently available after close. Concurrent FFI close callers wait for
+    and receive the same bounded five-second quiescence result.
+
+    The same contract exposes six opaque, non-reconstructable maintenance-task
+    kinds: history, retention, physical orphan, provisioning stage, terminal
+    temp, and unleased temp. Start returns only Started, AlreadyActive, or
+    DeferredBusy plus an opaque task; poll/cancel return versioned phases,
+    stable path-free failure classes, and compact kind-tagged aggregates. Byte
+    fields contain only bytes; the four history row counters separately report
+    created daily rollups and pruned raw, daily, and AI rows. No FFI input can
+    select a victim or broaden any sealed core maintenance authority.
+
+    The menu-bar runtime lazily opens the real Rust engine on a dedicated
+    utility queue so migration/lock waits cannot block launch. One actor
+    scheduler starts after a 60-second grace, admits exactly one batch at a
+    time, rechecks Low Power Mode and serious/critical thermal state before
+    each admission, and fairly completes at most one batch of every eligible
+    kind before the normal six-hour cycle delay. Kinds are separated by one
+    minute; `has_more`, deterministic deferrals, busy admission, retryable
+    failure, and energy denial use distinct bounded delays/backoffs. A blocked
+    kind remains excluded until app restart. Activation, wake, and time-change
+    signals coalesce but cannot shorten startup grace or resource/failure
+    backoff; an energy-policy transition may advance only a deadline created by
+    the energy gate itself.
+
+    App termination is asynchronous and ordered: cancel the active maintenance
+    task, release all review leases, then close the engine. Every concurrent
+    shutdown caller awaits the same task, and duplicate AppKit termination
+    requests cannot approve exit early. Scheduler stop also cancels and awaits
+    its driver, so a suspended energy check, admission, or task poll cannot
+    publish or enqueue cancellation after engine shutdown. Deterministic Swift
+    clock/energy/task tests cover full-cycle cadence, wake coalescing, startup
+    grace, every backoff class, forced suspension at both reentrant boundaries,
+    cancellation, pending-acquire release, stale-renewal replacement,
+    overlapping renewals, and the termination gate. Rust tests
+    cover missing/running/succeeded/tombstoned/newer-schema review states,
+    expiry/release, close-acquire linearization, FFI use after close, all six
+    maintenance kinds, concurrent close, and exact pin drainage.
+
+    Production retention still requires hard-process-death recovery for
+    `running` rows, explicit clear-data actions, and native Windows
+    mutation-path runtime verification.
     Legacy external snapshot-stage siblings remain unattributable manual debt.
 - [x] Add engine integration tests with temporary HOME and database. Completed
   2026-07-16: an actual `dux-core` engine scans a fixture into an isolated

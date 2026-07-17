@@ -3,7 +3,8 @@ import SwiftUI
 @main
 @MainActor
 struct DuxApp: App {
-    @State private var model = AppModel()
+    @NSApplicationDelegateAdaptor(DuxAppDelegate.self) private var appDelegate
+    @State private var model = AppRuntime.shared.model
 
     var body: some Scene {
         MenuBarExtra {

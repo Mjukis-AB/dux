@@ -1,7 +1,7 @@
 # DUX macOS application
 
-This directory will contain the native macOS application. The current Phase 0
-spike packages the shared Rust library before the Xcode project is introduced.
+This directory contains the native macOS menu-bar application and its generated
+Swift bindings to the shared Rust engine.
 
 ## Build the Rust XCFramework
 
@@ -92,13 +92,30 @@ The `se.mjukis.dux.spike` bundle identifier is intentionally temporary and must
 not be used for TCC, launch-at-login, or release identity testing. The production
 identifier and signing identity remain an explicit later decision.
 
-The spike app owns one opaque `DuxEngine` through `EngineService`. The service
-serializes synchronous calls and explicit close on its dedicated queue, maps
-generated typed errors to app-owned errors, converts generated records to a
-Sendable app value, and publishes that value through a `@MainActor` model. ARC
-release frees the Rust object but is not a substitute for explicit close or
-later task cancellation. Run the linked lifecycle and concurrency tests with
-the same `xcodebuild` arguments above, replacing `build` with `test`.
+The app owns one opaque real `DuxEngine` through `EngineService`. Construction,
+migration, every synchronous UniFFI call, and explicit close run lazily on its
+dedicated utility queue; app launch never opens the database on the main actor.
+The service maps generated errors to app-owned errors and converts generated
+records before they reach render state. ARC release is not a substitute for
+explicit cancellation, review release, or close. Run the linked lifecycle and
+concurrency tests with the same `xcodebuild` arguments above, replacing `build`
+with `test`.
+
+`AppRuntime` owns the engine service, private-store maintenance scheduler, and
+Explorer review controller. Shutdown is ordered: cancel maintenance, release
+all reviews, then close Rust. Review leases renew every five minutes and on
+wake/significant time change; generation tokens discard acquisitions or renewal
+failures that complete after the selected review changed. FFI close also drains
+still-live registered review pins and rejects later renewal.
+
+Private-store maintenance is deliberately separate from user cleanup and from
+Milestone 8 automations. After a 60-second startup grace, the scheduler runs at
+most one sealed Rust batch at a time across history, snapshot retention,
+physical orphans, provisioning stages, terminal temps, and unleased temps. It
+uses one-minute inter-batch spacing, a six-hour normal cycle, distinct bounded
+backoffs, Low Power Mode/thermal gates, and wake handling that cannot erase
+startup grace or a failure/resource backoff. No Swift or FFI input selects a
+path, inventory item, or victim.
 
 The application shell is menu bar-first. `MenuBarExtra` must remain the first
 scene so the macOS 14 automatic scene-launch behavior does not open Explorer at

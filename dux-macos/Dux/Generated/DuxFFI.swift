@@ -451,6 +451,22 @@ fileprivate struct FfiConverterUInt64: FfiConverterPrimitive {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterInt64: FfiConverterPrimitive {
+    typealias FfiType = Int64
+    typealias SwiftType = Int64
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Int64 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: Int64, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterBool : FfiConverter {
     typealias FfiType = Int8
     typealias SwiftType = Bool
@@ -521,36 +537,24 @@ fileprivate struct FfiConverterString: FfiConverter {
 
 
 
-/**
- * Opaque application-scoped entry point to the shared engine.
- *
- * The current methods still exercise the Phase 0 smoke surface. Later engine
- * extraction will add task and snapshot APIs without exposing core internals.
- */
 public protocol DuxEngineProtocol: AnyObject, Sendable {
 
+    func acquireExplorerSnapshotReview(scanId: String) throws  -> SnapshotReviewSession
+
     /**
-     * Close the session, returning whether this call performed the transition.
+     * Close the engine and wait for at most five seconds for worker quiescence.
+     * Returns whether all workers have quiesced; repeated calls return the
+     * first call's final observation without reopening storage.
      */
     func close()  -> Bool
 
-    /**
-     * Return a typed formatted-size value from `dux-core`.
-     */
     func formatSize(bytes: UInt64) throws  -> FormattedSize
 
-    /**
-     * Return library and FFI-contract versions for the integration handshake.
-     */
     func libraryVersion() throws  -> LibraryVersion
 
+    func startMaintenance(kind: MaintenanceKind) throws  -> MaintenanceStart
+
 }
-/**
- * Opaque application-scoped entry point to the shared engine.
- *
- * The current methods still exercise the Phase 0 smoke surface. Later engine
- * extraction will add task and snapshot APIs without exposing core internals.
- */
 open class DuxEngine: DuxEngineProtocol, @unchecked Sendable {
     fileprivate let handle: UInt64
 
@@ -590,13 +594,11 @@ open class DuxEngine: DuxEngineProtocol, @unchecked Sendable {
     public func uniffiCloneHandle() -> UInt64 {
         return try! rustCall { uniffi_dux_ffi_fn_clone_duxengine(self.handle, $0) }
     }
-    /**
-     * Create one application-scoped engine session.
-     */
-public convenience init() {
+public convenience init(storage: EngineStorageRoots)throws  {
     let handle =
-        try! rustCall() {
-    uniffi_dux_ffi_fn_constructor_duxengine_new($0
+        try rustCallWithError(FfiConverterTypeEngineError_lift) {
+    uniffi_dux_ffi_fn_constructor_duxengine_new(
+        FfiConverterTypeEngineStorageRoots_lower(storage),$0
     )
 }
     self.init(unsafeFromHandle: handle)
@@ -614,8 +616,19 @@ public convenience init() {
 
 
 
+open func acquireExplorerSnapshotReview(scanId: String)throws  -> SnapshotReviewSession  {
+    return try  FfiConverterTypeSnapshotReviewSession_lift(try rustCallWithError(FfiConverterTypeEngineError_lift) {
+    uniffi_dux_ffi_fn_method_duxengine_acquire_explorer_snapshot_review(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(scanId),$0
+    )
+})
+}
+
     /**
-     * Close the session, returning whether this call performed the transition.
+     * Close the engine and wait for at most five seconds for worker quiescence.
+     * Returns whether all workers have quiesced; repeated calls return the
+     * first call's final observation without reopening storage.
      */
 open func close() -> Bool  {
     return try!  FfiConverterBool.lift(try! rustCall() {
@@ -625,9 +638,6 @@ open func close() -> Bool  {
 })
 }
 
-    /**
-     * Return a typed formatted-size value from `dux-core`.
-     */
 open func formatSize(bytes: UInt64)throws  -> FormattedSize  {
     return try  FfiConverterTypeFormattedSize_lift(try rustCallWithError(FfiConverterTypeEngineError_lift) {
     uniffi_dux_ffi_fn_method_duxengine_format_size(
@@ -637,13 +647,19 @@ open func formatSize(bytes: UInt64)throws  -> FormattedSize  {
 })
 }
 
-    /**
-     * Return library and FFI-contract versions for the integration handshake.
-     */
 open func libraryVersion()throws  -> LibraryVersion  {
     return try  FfiConverterTypeLibraryVersion_lift(try rustCallWithError(FfiConverterTypeEngineError_lift) {
     uniffi_dux_ffi_fn_method_duxengine_library_version(
             self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+open func startMaintenance(kind: MaintenanceKind)throws  -> MaintenanceStart  {
+    return try  FfiConverterTypeMaintenanceStart_lift(try rustCallWithError(FfiConverterTypeEngineError_lift) {
+    uniffi_dux_ffi_fn_method_duxengine_start_maintenance(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeMaintenanceKind_lower(kind),$0
     )
 })
 }
@@ -696,28 +712,332 @@ public func FfiConverterTypeDuxEngine_lower(_ value: DuxEngine) -> UInt64 {
 
 
 
+
+
+public protocol MaintenanceTaskProtocol: AnyObject, Sendable {
+
+    func cancel() throws  -> MaintenanceCancelOutcome
+
+    func poll() throws  -> MaintenancePoll
+
+}
+open class MaintenanceTask: MaintenanceTaskProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_dux_ffi_fn_clone_maintenancetask(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_dux_ffi_fn_free_maintenancetask(handle, $0) }
+    }
+
+
+
+
+open func cancel()throws  -> MaintenanceCancelOutcome  {
+    return try  FfiConverterTypeMaintenanceCancelOutcome_lift(try rustCallWithError(FfiConverterTypeEngineError_lift) {
+    uniffi_dux_ffi_fn_method_maintenancetask_cancel(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+open func poll()throws  -> MaintenancePoll  {
+    return try  FfiConverterTypeMaintenancePoll_lift(try rustCallWithError(FfiConverterTypeEngineError_lift) {
+    uniffi_dux_ffi_fn_method_maintenancetask_poll(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+
+
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMaintenanceTask: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = MaintenanceTask
+
+    public static func lift(_ handle: UInt64) throws -> MaintenanceTask {
+        return MaintenanceTask(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: MaintenanceTask) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MaintenanceTask {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: MaintenanceTask, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMaintenanceTask_lift(_ handle: UInt64) throws -> MaintenanceTask {
+    return try FfiConverterTypeMaintenanceTask.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMaintenanceTask_lower(_ value: MaintenanceTask) -> UInt64 {
+    return FfiConverterTypeMaintenanceTask.lower(value)
+}
+
+
+
+
+
+
+public protocol SnapshotReviewSessionProtocol: AnyObject, Sendable {
+
+    func info() throws  -> SnapshotReviewInfo
+
+    func release() throws  -> ReviewReleaseOutcome
+
+    func renew() throws  -> SnapshotReviewInfo
+
+}
+open class SnapshotReviewSession: SnapshotReviewSessionProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_dux_ffi_fn_clone_snapshotreviewsession(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_dux_ffi_fn_free_snapshotreviewsession(handle, $0) }
+    }
+
+
+
+
+open func info()throws  -> SnapshotReviewInfo  {
+    return try  FfiConverterTypeSnapshotReviewInfo_lift(try rustCallWithError(FfiConverterTypeEngineError_lift) {
+    uniffi_dux_ffi_fn_method_snapshotreviewsession_info(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+open func release()throws  -> ReviewReleaseOutcome  {
+    return try  FfiConverterTypeReviewReleaseOutcome_lift(try rustCallWithError(FfiConverterTypeEngineError_lift) {
+    uniffi_dux_ffi_fn_method_snapshotreviewsession_release(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+open func renew()throws  -> SnapshotReviewInfo  {
+    return try  FfiConverterTypeSnapshotReviewInfo_lift(try rustCallWithError(FfiConverterTypeEngineError_lift) {
+    uniffi_dux_ffi_fn_method_snapshotreviewsession_renew(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+
+
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSnapshotReviewSession: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = SnapshotReviewSession
+
+    public static func lift(_ handle: UInt64) throws -> SnapshotReviewSession {
+        return SnapshotReviewSession(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: SnapshotReviewSession) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SnapshotReviewSession {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: SnapshotReviewSession, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotReviewSession_lift(_ handle: UInt64) throws -> SnapshotReviewSession {
+    return try FfiConverterTypeSnapshotReviewSession.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotReviewSession_lower(_ value: SnapshotReviewSession) -> UInt64 {
+    return FfiConverterTypeSnapshotReviewSession.lower(value)
+}
+
+
+
+
 /**
- * One formatted byte count used by the initial Swift integration smoke test.
+ * Input-only adapter storage roots. No path is returned by this contract.
  */
+public struct EngineStorageRoots: Equatable, Hashable {
+    public let dataRoot: String
+    public let cacheRoot: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(dataRoot: String, cacheRoot: String) {
+        self.dataRoot = dataRoot
+        self.cacheRoot = cacheRoot
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension EngineStorageRoots: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeEngineStorageRoots: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> EngineStorageRoots {
+        return
+            try EngineStorageRoots(
+                dataRoot: FfiConverterString.read(from: &buf),
+                cacheRoot: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: EngineStorageRoots, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.dataRoot, into: &buf)
+        FfiConverterString.write(value.cacheRoot, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEngineStorageRoots_lift(_ buf: RustBuffer) throws -> EngineStorageRoots {
+    return try FfiConverterTypeEngineStorageRoots.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEngineStorageRoots_lower(_ value: EngineStorageRoots) -> RustBuffer {
+    return FfiConverterTypeEngineStorageRoots.lower(value)
+}
+
+
 public struct FormattedSize: Equatable, Hashable {
-    /**
-     * Original byte count, preserved so the display string is not authoritative.
-     */
     public let bytes: UInt64
-    /**
-     * Current CLI-style rendering used only to prove a typed Rust result.
-     */
     public let display: String
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(
-        /**
-         * Original byte count, preserved so the display string is not authoritative.
-         */bytes: UInt64,
-        /**
-         * Current CLI-style rendering used only to prove a typed Rust result.
-         */display: String) {
+    public init(bytes: UInt64, display: String) {
         self.bytes = bytes
         self.display = display
     }
@@ -765,28 +1085,13 @@ public func FfiConverterTypeFormattedSize_lower(_ value: FormattedSize) -> RustB
 }
 
 
-/**
- * Version information used to reject an incompatible generated binding.
- */
 public struct LibraryVersion: Equatable, Hashable {
-    /**
-     * Version of the `dux-ffi` Rust library.
-     */
     public let libraryVersion: String
-    /**
-     * Version of the exported FFI contract, independent of product schemas.
-     */
     public let ffiContractVersion: UInt32
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(
-        /**
-         * Version of the `dux-ffi` Rust library.
-         */libraryVersion: String,
-        /**
-         * Version of the exported FFI contract, independent of product schemas.
-         */ffiContractVersion: UInt32) {
+    public init(libraryVersion: String, ffiContractVersion: UInt32) {
         self.libraryVersion = libraryVersion
         self.ffiContractVersion = ffiContractVersion
     }
@@ -834,17 +1139,343 @@ public func FfiConverterTypeLibraryVersion_lower(_ value: LibraryVersion) -> Rus
 }
 
 
+public struct MaintenancePoll: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let kind: MaintenanceKind
+    public let phase: TaskPhase
+    public let cancellationRequested: Bool
+    public let revision: UInt64
+    public let failure: MaintenanceFailure?
+    public let result: MaintenanceResult?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, kind: MaintenanceKind, phase: TaskPhase, cancellationRequested: Bool, revision: UInt64, failure: MaintenanceFailure?, result: MaintenanceResult?) {
+        self.recordVersion = recordVersion
+        self.kind = kind
+        self.phase = phase
+        self.cancellationRequested = cancellationRequested
+        self.revision = revision
+        self.failure = failure
+        self.result = result
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension MaintenancePoll: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMaintenancePoll: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MaintenancePoll {
+        return
+            try MaintenancePoll(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                kind: FfiConverterTypeMaintenanceKind.read(from: &buf),
+                phase: FfiConverterTypeTaskPhase.read(from: &buf),
+                cancellationRequested: FfiConverterBool.read(from: &buf),
+                revision: FfiConverterUInt64.read(from: &buf),
+                failure: FfiConverterOptionTypeMaintenanceFailure.read(from: &buf),
+                result: FfiConverterOptionTypeMaintenanceResult.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: MaintenancePoll, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterTypeMaintenanceKind.write(value.kind, into: &buf)
+        FfiConverterTypeTaskPhase.write(value.phase, into: &buf)
+        FfiConverterBool.write(value.cancellationRequested, into: &buf)
+        FfiConverterUInt64.write(value.revision, into: &buf)
+        FfiConverterOptionTypeMaintenanceFailure.write(value.failure, into: &buf)
+        FfiConverterOptionTypeMaintenanceResult.write(value.result, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMaintenancePoll_lift(_ buf: RustBuffer) throws -> MaintenancePoll {
+    return try FfiConverterTypeMaintenancePoll.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMaintenancePoll_lower(_ value: MaintenancePoll) -> RustBuffer {
+    return FfiConverterTypeMaintenancePoll.lower(value)
+}
+
+
 /**
- * Stable errors produced by the engine-session boundary.
+ * One path-free terminal observation. Fields not used by a kind are zero.
+ * Their meanings are fixed by `kind` and `outcome`; no field carries cleanup
+ * authority. History uses the four `*_count_after` fields for created daily
+ * rollups, pruned raw samples, pruned daily rollups, and pruned AI insights.
+ * Snapshot residual kinds use count pairs for their documented inventories;
+ * byte fields always contain bytes and never row counts.
  */
+public struct MaintenanceResult: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let kind: MaintenanceKind
+    public let observedAtUnixMs: Int64
+    public let outcome: MaintenanceOutcome
+    public let primaryCountBefore: UInt64
+    public let primaryCountAfter: UInt64
+    public let secondaryCountBefore: UInt64
+    public let secondaryCountAfter: UInt64
+    public let tertiaryCountBefore: UInt64
+    public let tertiaryCountAfter: UInt64
+    public let quaternaryCountBefore: UInt64
+    public let quaternaryCountAfter: UInt64
+    public let chargedBytesBefore: UInt64
+    public let chargedBytesAfter: UInt64
+    public let removedBytes: UInt64
+    public let capBytes: UInt64
+    public let hasMore: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, kind: MaintenanceKind, observedAtUnixMs: Int64, outcome: MaintenanceOutcome, primaryCountBefore: UInt64, primaryCountAfter: UInt64, secondaryCountBefore: UInt64, secondaryCountAfter: UInt64, tertiaryCountBefore: UInt64, tertiaryCountAfter: UInt64, quaternaryCountBefore: UInt64, quaternaryCountAfter: UInt64, chargedBytesBefore: UInt64, chargedBytesAfter: UInt64, removedBytes: UInt64, capBytes: UInt64, hasMore: Bool) {
+        self.recordVersion = recordVersion
+        self.kind = kind
+        self.observedAtUnixMs = observedAtUnixMs
+        self.outcome = outcome
+        self.primaryCountBefore = primaryCountBefore
+        self.primaryCountAfter = primaryCountAfter
+        self.secondaryCountBefore = secondaryCountBefore
+        self.secondaryCountAfter = secondaryCountAfter
+        self.tertiaryCountBefore = tertiaryCountBefore
+        self.tertiaryCountAfter = tertiaryCountAfter
+        self.quaternaryCountBefore = quaternaryCountBefore
+        self.quaternaryCountAfter = quaternaryCountAfter
+        self.chargedBytesBefore = chargedBytesBefore
+        self.chargedBytesAfter = chargedBytesAfter
+        self.removedBytes = removedBytes
+        self.capBytes = capBytes
+        self.hasMore = hasMore
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension MaintenanceResult: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMaintenanceResult: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MaintenanceResult {
+        return
+            try MaintenanceResult(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                kind: FfiConverterTypeMaintenanceKind.read(from: &buf),
+                observedAtUnixMs: FfiConverterInt64.read(from: &buf),
+                outcome: FfiConverterTypeMaintenanceOutcome.read(from: &buf),
+                primaryCountBefore: FfiConverterUInt64.read(from: &buf),
+                primaryCountAfter: FfiConverterUInt64.read(from: &buf),
+                secondaryCountBefore: FfiConverterUInt64.read(from: &buf),
+                secondaryCountAfter: FfiConverterUInt64.read(from: &buf),
+                tertiaryCountBefore: FfiConverterUInt64.read(from: &buf),
+                tertiaryCountAfter: FfiConverterUInt64.read(from: &buf),
+                quaternaryCountBefore: FfiConverterUInt64.read(from: &buf),
+                quaternaryCountAfter: FfiConverterUInt64.read(from: &buf),
+                chargedBytesBefore: FfiConverterUInt64.read(from: &buf),
+                chargedBytesAfter: FfiConverterUInt64.read(from: &buf),
+                removedBytes: FfiConverterUInt64.read(from: &buf),
+                capBytes: FfiConverterUInt64.read(from: &buf),
+                hasMore: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: MaintenanceResult, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterTypeMaintenanceKind.write(value.kind, into: &buf)
+        FfiConverterInt64.write(value.observedAtUnixMs, into: &buf)
+        FfiConverterTypeMaintenanceOutcome.write(value.outcome, into: &buf)
+        FfiConverterUInt64.write(value.primaryCountBefore, into: &buf)
+        FfiConverterUInt64.write(value.primaryCountAfter, into: &buf)
+        FfiConverterUInt64.write(value.secondaryCountBefore, into: &buf)
+        FfiConverterUInt64.write(value.secondaryCountAfter, into: &buf)
+        FfiConverterUInt64.write(value.tertiaryCountBefore, into: &buf)
+        FfiConverterUInt64.write(value.tertiaryCountAfter, into: &buf)
+        FfiConverterUInt64.write(value.quaternaryCountBefore, into: &buf)
+        FfiConverterUInt64.write(value.quaternaryCountAfter, into: &buf)
+        FfiConverterUInt64.write(value.chargedBytesBefore, into: &buf)
+        FfiConverterUInt64.write(value.chargedBytesAfter, into: &buf)
+        FfiConverterUInt64.write(value.removedBytes, into: &buf)
+        FfiConverterUInt64.write(value.capBytes, into: &buf)
+        FfiConverterBool.write(value.hasMore, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMaintenanceResult_lift(_ buf: RustBuffer) throws -> MaintenanceResult {
+    return try FfiConverterTypeMaintenanceResult.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMaintenanceResult_lower(_ value: MaintenanceResult) -> RustBuffer {
+    return FfiConverterTypeMaintenanceResult.lower(value)
+}
+
+
+public struct MaintenanceStart {
+    public let recordVersion: UInt32
+    public let disposition: MaintenanceStartDisposition
+    public let task: MaintenanceTask?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, disposition: MaintenanceStartDisposition, task: MaintenanceTask?) {
+        self.recordVersion = recordVersion
+        self.disposition = disposition
+        self.task = task
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension MaintenanceStart: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMaintenanceStart: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MaintenanceStart {
+        return
+            try MaintenanceStart(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                disposition: FfiConverterTypeMaintenanceStartDisposition.read(from: &buf),
+                task: FfiConverterOptionTypeMaintenanceTask.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: MaintenanceStart, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterTypeMaintenanceStartDisposition.write(value.disposition, into: &buf)
+        FfiConverterOptionTypeMaintenanceTask.write(value.task, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMaintenanceStart_lift(_ buf: RustBuffer) throws -> MaintenanceStart {
+    return try FfiConverterTypeMaintenanceStart.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMaintenanceStart_lower(_ value: MaintenanceStart) -> RustBuffer {
+    return FfiConverterTypeMaintenanceStart.lower(value)
+}
+
+
+public struct SnapshotReviewInfo: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let scanId: String
+    public let expiresAtUnixMs: Int64
+    public let released: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, scanId: String, expiresAtUnixMs: Int64, released: Bool) {
+        self.recordVersion = recordVersion
+        self.scanId = scanId
+        self.expiresAtUnixMs = expiresAtUnixMs
+        self.released = released
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SnapshotReviewInfo: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSnapshotReviewInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SnapshotReviewInfo {
+        return
+            try SnapshotReviewInfo(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                scanId: FfiConverterString.read(from: &buf),
+                expiresAtUnixMs: FfiConverterInt64.read(from: &buf),
+                released: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SnapshotReviewInfo, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterString.write(value.scanId, into: &buf)
+        FfiConverterInt64.write(value.expiresAtUnixMs, into: &buf)
+        FfiConverterBool.write(value.released, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotReviewInfo_lift(_ buf: RustBuffer) throws -> SnapshotReviewInfo {
+    return try FfiConverterTypeSnapshotReviewInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotReviewInfo_lower(_ value: SnapshotReviewInfo) -> RustBuffer {
+    return FfiConverterTypeSnapshotReviewInfo.lower(value)
+}
+
+
 public enum EngineError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
 
 
 
-    /**
-     * The session was explicitly closed and can no longer perform work.
-     */
     case Closed
+    case InvalidStorage
+    case StorageUnavailable
+    case RegistryUnavailable
+    case InvalidScanId
+    case ScanNotFound
+    case SnapshotUnavailable
+    case ReviewExpired
+    case ReadOnlyStore
+    case IncompatibleSchema
+    case Busy
+    case UnsafeStorage
+    case BudgetExceeded
+    case CorruptData
+    case IncompatibleSnapshot
+    case OutcomeUnknown
+    case InternalState
 
 
 
@@ -875,6 +1506,22 @@ public struct FfiConverterTypeEngineError: FfiConverterRustBuffer {
 
 
         case 1: return .Closed
+        case 2: return .InvalidStorage
+        case 3: return .StorageUnavailable
+        case 4: return .RegistryUnavailable
+        case 5: return .InvalidScanId
+        case 6: return .ScanNotFound
+        case 7: return .SnapshotUnavailable
+        case 8: return .ReviewExpired
+        case 9: return .ReadOnlyStore
+        case 10: return .IncompatibleSchema
+        case 11: return .Busy
+        case 12: return .UnsafeStorage
+        case 13: return .BudgetExceeded
+        case 14: return .CorruptData
+        case 15: return .IncompatibleSnapshot
+        case 16: return .OutcomeUnknown
+        case 17: return .InternalState
 
          default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -889,6 +1536,70 @@ public struct FfiConverterTypeEngineError: FfiConverterRustBuffer {
 
         case .Closed:
             writeInt(&buf, Int32(1))
+
+
+        case .InvalidStorage:
+            writeInt(&buf, Int32(2))
+
+
+        case .StorageUnavailable:
+            writeInt(&buf, Int32(3))
+
+
+        case .RegistryUnavailable:
+            writeInt(&buf, Int32(4))
+
+
+        case .InvalidScanId:
+            writeInt(&buf, Int32(5))
+
+
+        case .ScanNotFound:
+            writeInt(&buf, Int32(6))
+
+
+        case .SnapshotUnavailable:
+            writeInt(&buf, Int32(7))
+
+
+        case .ReviewExpired:
+            writeInt(&buf, Int32(8))
+
+
+        case .ReadOnlyStore:
+            writeInt(&buf, Int32(9))
+
+
+        case .IncompatibleSchema:
+            writeInt(&buf, Int32(10))
+
+
+        case .Busy:
+            writeInt(&buf, Int32(11))
+
+
+        case .UnsafeStorage:
+            writeInt(&buf, Int32(12))
+
+
+        case .BudgetExceeded:
+            writeInt(&buf, Int32(13))
+
+
+        case .CorruptData:
+            writeInt(&buf, Int32(14))
+
+
+        case .IncompatibleSnapshot:
+            writeInt(&buf, Int32(15))
+
+
+        case .OutcomeUnknown:
+            writeInt(&buf, Int32(16))
+
+
+        case .InternalState:
+            writeInt(&buf, Int32(17))
 
         }
     }
@@ -908,11 +1619,798 @@ public func FfiConverterTypeEngineError_lift(_ buf: RustBuffer) throws -> Engine
 public func FfiConverterTypeEngineError_lower(_ value: EngineError) -> RustBuffer {
     return FfiConverterTypeEngineError.lower(value)
 }
-/**
- * Return the live Rust engine-object count for binding lifetime diagnostics.
- *
- * This is an integration-test observation point, not application session state.
- */
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum MaintenanceCancelOutcome: Equatable, Hashable {
+
+    case cancelledBeforeStart
+    case requested
+    case alreadyRequested
+    case alreadyTerminal
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension MaintenanceCancelOutcome: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMaintenanceCancelOutcome: FfiConverterRustBuffer {
+    typealias SwiftType = MaintenanceCancelOutcome
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MaintenanceCancelOutcome {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .cancelledBeforeStart
+
+        case 2: return .requested
+
+        case 3: return .alreadyRequested
+
+        case 4: return .alreadyTerminal
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: MaintenanceCancelOutcome, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .cancelledBeforeStart:
+            writeInt(&buf, Int32(1))
+
+
+        case .requested:
+            writeInt(&buf, Int32(2))
+
+
+        case .alreadyRequested:
+            writeInt(&buf, Int32(3))
+
+
+        case .alreadyTerminal:
+            writeInt(&buf, Int32(4))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMaintenanceCancelOutcome_lift(_ buf: RustBuffer) throws -> MaintenanceCancelOutcome {
+    return try FfiConverterTypeMaintenanceCancelOutcome.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMaintenanceCancelOutcome_lower(_ value: MaintenanceCancelOutcome) -> RustBuffer {
+    return FfiConverterTypeMaintenanceCancelOutcome.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum MaintenanceFailure: Equatable, Hashable {
+
+    case invalidClock
+    case incompatibleSchema
+    case busy
+    case unsafeStorage
+    case budgetExceeded
+    case corruptData
+    case incompatibleSnapshot
+    case unavailable
+    case outcomeUnknown
+    case internalState
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension MaintenanceFailure: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMaintenanceFailure: FfiConverterRustBuffer {
+    typealias SwiftType = MaintenanceFailure
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MaintenanceFailure {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .invalidClock
+
+        case 2: return .incompatibleSchema
+
+        case 3: return .busy
+
+        case 4: return .unsafeStorage
+
+        case 5: return .budgetExceeded
+
+        case 6: return .corruptData
+
+        case 7: return .incompatibleSnapshot
+
+        case 8: return .unavailable
+
+        case 9: return .outcomeUnknown
+
+        case 10: return .internalState
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: MaintenanceFailure, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .invalidClock:
+            writeInt(&buf, Int32(1))
+
+
+        case .incompatibleSchema:
+            writeInt(&buf, Int32(2))
+
+
+        case .busy:
+            writeInt(&buf, Int32(3))
+
+
+        case .unsafeStorage:
+            writeInt(&buf, Int32(4))
+
+
+        case .budgetExceeded:
+            writeInt(&buf, Int32(5))
+
+
+        case .corruptData:
+            writeInt(&buf, Int32(6))
+
+
+        case .incompatibleSnapshot:
+            writeInt(&buf, Int32(7))
+
+
+        case .unavailable:
+            writeInt(&buf, Int32(8))
+
+
+        case .outcomeUnknown:
+            writeInt(&buf, Int32(9))
+
+
+        case .internalState:
+            writeInt(&buf, Int32(10))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMaintenanceFailure_lift(_ buf: RustBuffer) throws -> MaintenanceFailure {
+    return try FfiConverterTypeMaintenanceFailure.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMaintenanceFailure_lower(_ value: MaintenanceFailure) -> RustBuffer {
+    return FfiConverterTypeMaintenanceFailure.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum MaintenanceKind: Equatable, Hashable {
+
+    case history
+    case snapshotRetention
+    case snapshotOrphan
+    case snapshotProvisioningStage
+    case snapshotTerminalTemp
+    case snapshotUnleasedTemp
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension MaintenanceKind: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMaintenanceKind: FfiConverterRustBuffer {
+    typealias SwiftType = MaintenanceKind
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MaintenanceKind {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .history
+
+        case 2: return .snapshotRetention
+
+        case 3: return .snapshotOrphan
+
+        case 4: return .snapshotProvisioningStage
+
+        case 5: return .snapshotTerminalTemp
+
+        case 6: return .snapshotUnleasedTemp
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: MaintenanceKind, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .history:
+            writeInt(&buf, Int32(1))
+
+
+        case .snapshotRetention:
+            writeInt(&buf, Int32(2))
+
+
+        case .snapshotOrphan:
+            writeInt(&buf, Int32(3))
+
+
+        case .snapshotProvisioningStage:
+            writeInt(&buf, Int32(4))
+
+
+        case .snapshotTerminalTemp:
+            writeInt(&buf, Int32(5))
+
+
+        case .snapshotUnleasedTemp:
+            writeInt(&buf, Int32(6))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMaintenanceKind_lift(_ buf: RustBuffer) throws -> MaintenanceKind {
+    return try FfiConverterTypeMaintenanceKind.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMaintenanceKind_lower(_ value: MaintenanceKind) -> RustBuffer {
+    return FfiConverterTypeMaintenanceKind.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum MaintenanceOutcome: Equatable, Hashable {
+
+    case historyApplied
+    case retentionUnderCap
+    case retentionDeferredUnstable
+    case retentionDeferredNoEligibleSnapshot
+    case retentionRemovedTombstonedResidual
+    case retentionTombstonedAndRemoved
+    case orphanNone
+    case orphanRemoved
+    case stageNone
+    case stageDeferredUnproven
+    case stageRemovedMarkerOnly
+    case stageRemovedMarkerComplete
+    case terminalTempNone
+    case terminalTempDeferredActive
+    case terminalTempReconciledRowOnly
+    case terminalTempRemoved
+    case unleasedTempNone
+    case unleasedTempDeferredActive
+    case unleasedTempRemoved
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension MaintenanceOutcome: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMaintenanceOutcome: FfiConverterRustBuffer {
+    typealias SwiftType = MaintenanceOutcome
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MaintenanceOutcome {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .historyApplied
+
+        case 2: return .retentionUnderCap
+
+        case 3: return .retentionDeferredUnstable
+
+        case 4: return .retentionDeferredNoEligibleSnapshot
+
+        case 5: return .retentionRemovedTombstonedResidual
+
+        case 6: return .retentionTombstonedAndRemoved
+
+        case 7: return .orphanNone
+
+        case 8: return .orphanRemoved
+
+        case 9: return .stageNone
+
+        case 10: return .stageDeferredUnproven
+
+        case 11: return .stageRemovedMarkerOnly
+
+        case 12: return .stageRemovedMarkerComplete
+
+        case 13: return .terminalTempNone
+
+        case 14: return .terminalTempDeferredActive
+
+        case 15: return .terminalTempReconciledRowOnly
+
+        case 16: return .terminalTempRemoved
+
+        case 17: return .unleasedTempNone
+
+        case 18: return .unleasedTempDeferredActive
+
+        case 19: return .unleasedTempRemoved
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: MaintenanceOutcome, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .historyApplied:
+            writeInt(&buf, Int32(1))
+
+
+        case .retentionUnderCap:
+            writeInt(&buf, Int32(2))
+
+
+        case .retentionDeferredUnstable:
+            writeInt(&buf, Int32(3))
+
+
+        case .retentionDeferredNoEligibleSnapshot:
+            writeInt(&buf, Int32(4))
+
+
+        case .retentionRemovedTombstonedResidual:
+            writeInt(&buf, Int32(5))
+
+
+        case .retentionTombstonedAndRemoved:
+            writeInt(&buf, Int32(6))
+
+
+        case .orphanNone:
+            writeInt(&buf, Int32(7))
+
+
+        case .orphanRemoved:
+            writeInt(&buf, Int32(8))
+
+
+        case .stageNone:
+            writeInt(&buf, Int32(9))
+
+
+        case .stageDeferredUnproven:
+            writeInt(&buf, Int32(10))
+
+
+        case .stageRemovedMarkerOnly:
+            writeInt(&buf, Int32(11))
+
+
+        case .stageRemovedMarkerComplete:
+            writeInt(&buf, Int32(12))
+
+
+        case .terminalTempNone:
+            writeInt(&buf, Int32(13))
+
+
+        case .terminalTempDeferredActive:
+            writeInt(&buf, Int32(14))
+
+
+        case .terminalTempReconciledRowOnly:
+            writeInt(&buf, Int32(15))
+
+
+        case .terminalTempRemoved:
+            writeInt(&buf, Int32(16))
+
+
+        case .unleasedTempNone:
+            writeInt(&buf, Int32(17))
+
+
+        case .unleasedTempDeferredActive:
+            writeInt(&buf, Int32(18))
+
+
+        case .unleasedTempRemoved:
+            writeInt(&buf, Int32(19))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMaintenanceOutcome_lift(_ buf: RustBuffer) throws -> MaintenanceOutcome {
+    return try FfiConverterTypeMaintenanceOutcome.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMaintenanceOutcome_lower(_ value: MaintenanceOutcome) -> RustBuffer {
+    return FfiConverterTypeMaintenanceOutcome.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum MaintenanceStartDisposition: Equatable, Hashable {
+
+    case started
+    case alreadyActive
+    case deferredBusy
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension MaintenanceStartDisposition: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMaintenanceStartDisposition: FfiConverterRustBuffer {
+    typealias SwiftType = MaintenanceStartDisposition
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MaintenanceStartDisposition {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .started
+
+        case 2: return .alreadyActive
+
+        case 3: return .deferredBusy
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: MaintenanceStartDisposition, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .started:
+            writeInt(&buf, Int32(1))
+
+
+        case .alreadyActive:
+            writeInt(&buf, Int32(2))
+
+
+        case .deferredBusy:
+            writeInt(&buf, Int32(3))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMaintenanceStartDisposition_lift(_ buf: RustBuffer) throws -> MaintenanceStartDisposition {
+    return try FfiConverterTypeMaintenanceStartDisposition.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMaintenanceStartDisposition_lower(_ value: MaintenanceStartDisposition) -> RustBuffer {
+    return FfiConverterTypeMaintenanceStartDisposition.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum ReviewReleaseOutcome: Equatable, Hashable {
+
+    case released
+    case alreadyReleased
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension ReviewReleaseOutcome: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeReviewReleaseOutcome: FfiConverterRustBuffer {
+    typealias SwiftType = ReviewReleaseOutcome
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ReviewReleaseOutcome {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .released
+
+        case 2: return .alreadyReleased
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: ReviewReleaseOutcome, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .released:
+            writeInt(&buf, Int32(1))
+
+
+        case .alreadyReleased:
+            writeInt(&buf, Int32(2))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeReviewReleaseOutcome_lift(_ buf: RustBuffer) throws -> ReviewReleaseOutcome {
+    return try FfiConverterTypeReviewReleaseOutcome.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeReviewReleaseOutcome_lower(_ value: ReviewReleaseOutcome) -> RustBuffer {
+    return FfiConverterTypeReviewReleaseOutcome.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum TaskPhase: Equatable, Hashable {
+
+    case queued
+    case running
+    case succeeded
+    case failed
+    case cancelled
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension TaskPhase: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTaskPhase: FfiConverterRustBuffer {
+    typealias SwiftType = TaskPhase
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TaskPhase {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .queued
+
+        case 2: return .running
+
+        case 3: return .succeeded
+
+        case 4: return .failed
+
+        case 5: return .cancelled
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: TaskPhase, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .queued:
+            writeInt(&buf, Int32(1))
+
+
+        case .running:
+            writeInt(&buf, Int32(2))
+
+
+        case .succeeded:
+            writeInt(&buf, Int32(3))
+
+
+        case .failed:
+            writeInt(&buf, Int32(4))
+
+
+        case .cancelled:
+            writeInt(&buf, Int32(5))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTaskPhase_lift(_ buf: RustBuffer) throws -> TaskPhase {
+    return try FfiConverterTypeTaskPhase.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTaskPhase_lower(_ value: TaskPhase) -> RustBuffer {
+    return FfiConverterTypeTaskPhase.lower(value)
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeMaintenanceTask: FfiConverterRustBuffer {
+    typealias SwiftType = MaintenanceTask?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeMaintenanceTask.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeMaintenanceTask.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeMaintenanceResult: FfiConverterRustBuffer {
+    typealias SwiftType = MaintenanceResult?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeMaintenanceResult.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeMaintenanceResult.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeMaintenanceFailure: FfiConverterRustBuffer {
+    typealias SwiftType = MaintenanceFailure?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeMaintenanceFailure.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeMaintenanceFailure.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+public func libraryVersion() -> LibraryVersion  {
+    return try!  FfiConverterTypeLibraryVersion_lift(try! rustCall() {
+    uniffi_dux_ffi_fn_func_library_version($0
+    )
+})
+}
 public func liveEngineInstanceCount() -> UInt64  {
     return try!  FfiConverterUInt64.lift(try! rustCall() {
     uniffi_dux_ffi_fn_func_live_engine_instance_count($0
@@ -935,19 +2433,43 @@ private let initializationResult: InitializationResult = {
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
-    if (uniffi_dux_ffi_checksum_func_live_engine_instance_count() != 60269) {
+    if (uniffi_dux_ffi_checksum_func_library_version() != 34481) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_dux_ffi_checksum_method_duxengine_close() != 352) {
+    if (uniffi_dux_ffi_checksum_func_live_engine_instance_count() != 11788) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_dux_ffi_checksum_method_duxengine_format_size() != 34252) {
+    if (uniffi_dux_ffi_checksum_method_duxengine_acquire_explorer_snapshot_review() != 56224) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_dux_ffi_checksum_method_duxengine_library_version() != 15034) {
+    if (uniffi_dux_ffi_checksum_method_duxengine_close() != 17149) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_dux_ffi_checksum_constructor_duxengine_new() != 6502) {
+    if (uniffi_dux_ffi_checksum_method_duxengine_format_size() != 55932) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_duxengine_library_version() != 14309) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_duxengine_start_maintenance() != 4775) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_maintenancetask_cancel() != 6237) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_maintenancetask_poll() != 5519) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_snapshotreviewsession_info() != 45428) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_snapshotreviewsession_release() != 11466) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_snapshotreviewsession_renew() != 3715) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_constructor_duxengine_new() != 46135) {
         return InitializationResult.apiChecksumMismatch
     }
 

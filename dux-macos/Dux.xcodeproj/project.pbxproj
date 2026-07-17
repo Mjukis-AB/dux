@@ -7,19 +7,26 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		02F49E38EAA6B05B5B6E7BB0 /* MaintenanceScheduler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0E28592DDBF7BFA26427D66A /* MaintenanceScheduler.swift */; };
 		03CCE3D63051DAED03CB23DE /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6B1C410140302F8947E4C31A /* AppModel.swift */; };
 		05F712D29B4F3BDF444C32B3 /* CapacityBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = C762D5BE39976247D2390515 /* CapacityBar.swift */; };
+		18686331A2B756CD12599F22 /* AppRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = F5E7867AEAC34A5EF08EF4A3 /* AppRuntime.swift */; };
+		2647F71DC9189100B9FD3096 /* DuxAppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5886CE7BF8E925F97031749F /* DuxAppDelegate.swift */; };
 		2DE25E271D830CD5F1372C3A /* AppActivation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0111F34C431E515A86A780F4 /* AppActivation.swift */; };
 		69E28EFAD6A4109B80F1FC0C /* EngineService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 78A0F475B15FE85FDC5B8C9A /* EngineService.swift */; };
 		6D2CB0DD262B22CF018B0874 /* DuxFFI.swift in Sources */ = {isa = PBXBuildFile; fileRef = EF48DC1674437397B29209BE /* DuxFFI.swift */; };
 		793B703D206DC486C21E7D0C /* DuxFFI.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 56D9D007E6D5ECD0CC81FA89 /* DuxFFI.xcframework */; };
+		80066EDFA86C1475A5BEE0CD /* SnapshotReviewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B352437ADF86C831A87FB1B1 /* SnapshotReviewController.swift */; };
 		82252F3716D168BB22A360E9 /* MenuBarContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D62CBDBBBB0B3CE5E59D884E /* MenuBarContentView.swift */; };
 		87AF9A6CCBAE4C0B4B4D6785 /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = 5D0DB9F7F6DF9D1645B78CA1 /* Localizable.xcstrings */; };
 		9033D6BF38DA8C7EE5FC6710 /* EngineServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00371DEF2482E0BC47D1A5D0 /* EngineServiceTests.swift */; };
 		B184EB4EE1399E7D26F41D7B /* VolumeMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC650EAC7E25F66CC42436F6 /* VolumeMonitor.swift */; };
 		B334563BD340D9E0B20D16D3 /* DuxApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 992E2D118DDE512C123CF820 /* DuxApp.swift */; };
+		B34BE4E0B8AE46D166283EC0 /* DuxAppDelegateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4E504B7A8AC2DDFCF50B5EBD /* DuxAppDelegateTests.swift */; };
 		B5B300842B55B2131DB658FC /* VolumeMonitorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2FCFB814644FA433F09F5895 /* VolumeMonitorTests.swift */; };
 		B69227AEE2C40A616AA49D4C /* EngineSmokeResult.swift in Sources */ = {isa = PBXBuildFile; fileRef = 583F42C1E385E7BF1A920096 /* EngineSmokeResult.swift */; };
+		C310092B690811A25EE68AA6 /* MaintenanceSchedulerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CC5DC5A1B28AAFC688385CA /* MaintenanceSchedulerTests.swift */; };
+		DCF5B8FBAFD549C1DE06FCA8 /* SnapshotReviewControllerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0EB23A8797C0C79213B54953 /* SnapshotReviewControllerTests.swift */; };
 		E0A86A133058832D8BCD65DF /* DuxSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 90E79F7E2E1AE1AE3886E44C /* DuxSettingsView.swift */; };
 		E81F7E7B392E1FC53DCA2694 /* ExplorerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C323FB00501BAB48AEB63FB /* ExplorerView.swift */; };
 		FF16E00002EB5CBC2AEBB6D1 /* VolumeCapacitySnapshot.swift in Sources */ = {isa = PBXBuildFile; fileRef = 682051DD7F1B44E0D477AF57 /* VolumeCapacitySnapshot.swift */; };
@@ -39,10 +46,15 @@
 		00371DEF2482E0BC47D1A5D0 /* EngineServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EngineServiceTests.swift; sourceTree = "<group>"; };
 		0111F34C431E515A86A780F4 /* AppActivation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppActivation.swift; sourceTree = "<group>"; };
 		0C323FB00501BAB48AEB63FB /* ExplorerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExplorerView.swift; sourceTree = "<group>"; };
+		0E28592DDBF7BFA26427D66A /* MaintenanceScheduler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MaintenanceScheduler.swift; sourceTree = "<group>"; };
+		0EB23A8797C0C79213B54953 /* SnapshotReviewControllerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SnapshotReviewControllerTests.swift; sourceTree = "<group>"; };
 		20BFD0F38533F3DEC52AE762 /* DUX.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = DUX.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		2CC5DC5A1B28AAFC688385CA /* MaintenanceSchedulerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MaintenanceSchedulerTests.swift; sourceTree = "<group>"; };
 		2FCFB814644FA433F09F5895 /* VolumeMonitorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VolumeMonitorTests.swift; sourceTree = "<group>"; };
+		4E504B7A8AC2DDFCF50B5EBD /* DuxAppDelegateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DuxAppDelegateTests.swift; sourceTree = "<group>"; };
 		56D9D007E6D5ECD0CC81FA89 /* DuxFFI.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = DuxFFI.xcframework; path = Generated/DuxFFI.xcframework; sourceTree = "<group>"; };
 		583F42C1E385E7BF1A920096 /* EngineSmokeResult.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EngineSmokeResult.swift; sourceTree = "<group>"; };
+		5886CE7BF8E925F97031749F /* DuxAppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DuxAppDelegate.swift; sourceTree = "<group>"; };
 		5D0DB9F7F6DF9D1645B78CA1 /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = Localizable.xcstrings; sourceTree = "<group>"; };
 		682051DD7F1B44E0D477AF57 /* VolumeCapacitySnapshot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VolumeCapacitySnapshot.swift; sourceTree = "<group>"; };
 		6B1C410140302F8947E4C31A /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
@@ -50,10 +62,12 @@
 		78A0F475B15FE85FDC5B8C9A /* EngineService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EngineService.swift; sourceTree = "<group>"; };
 		90E79F7E2E1AE1AE3886E44C /* DuxSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DuxSettingsView.swift; sourceTree = "<group>"; };
 		992E2D118DDE512C123CF820 /* DuxApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DuxApp.swift; sourceTree = "<group>"; };
+		B352437ADF86C831A87FB1B1 /* SnapshotReviewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SnapshotReviewController.swift; sourceTree = "<group>"; };
 		C762D5BE39976247D2390515 /* CapacityBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CapacityBar.swift; sourceTree = "<group>"; };
 		CC650EAC7E25F66CC42436F6 /* VolumeMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VolumeMonitor.swift; sourceTree = "<group>"; };
 		D62CBDBBBB0B3CE5E59D884E /* MenuBarContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarContentView.swift; sourceTree = "<group>"; };
 		EF48DC1674437397B29209BE /* DuxFFI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DuxFFI.swift; sourceTree = "<group>"; };
+		F5E7867AEAC34A5EF08EF4A3 /* AppRuntime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppRuntime.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -123,6 +137,8 @@
 			isa = PBXGroup;
 			children = (
 				78A0F475B15FE85FDC5B8C9A /* EngineService.swift */,
+				0E28592DDBF7BFA26427D66A /* MaintenanceScheduler.swift */,
+				B352437ADF86C831A87FB1B1 /* SnapshotReviewController.swift */,
 				CC650EAC7E25F66CC42436F6 /* VolumeMonitor.swift */,
 			);
 			path = Services;
@@ -150,7 +166,9 @@
 			children = (
 				0111F34C431E515A86A780F4 /* AppActivation.swift */,
 				6B1C410140302F8947E4C31A /* AppModel.swift */,
+				F5E7867AEAC34A5EF08EF4A3 /* AppRuntime.swift */,
 				992E2D118DDE512C123CF820 /* DuxApp.swift */,
+				5886CE7BF8E925F97031749F /* DuxAppDelegate.swift */,
 			);
 			path = App;
 			sourceTree = "<group>";
@@ -158,7 +176,10 @@
 		D99006BA2888B4F4325AACFB /* DuxTests */ = {
 			isa = PBXGroup;
 			children = (
+				4E504B7A8AC2DDFCF50B5EBD /* DuxAppDelegateTests.swift */,
 				00371DEF2482E0BC47D1A5D0 /* EngineServiceTests.swift */,
+				2CC5DC5A1B28AAFC688385CA /* MaintenanceSchedulerTests.swift */,
+				0EB23A8797C0C79213B54953 /* SnapshotReviewControllerTests.swift */,
 				2FCFB814644FA433F09F5895 /* VolumeMonitorTests.swift */,
 			);
 			path = DuxTests;
@@ -257,7 +278,10 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B34BE4E0B8AE46D166283EC0 /* DuxAppDelegateTests.swift in Sources */,
 				9033D6BF38DA8C7EE5FC6710 /* EngineServiceTests.swift in Sources */,
+				C310092B690811A25EE68AA6 /* MaintenanceSchedulerTests.swift in Sources */,
+				DCF5B8FBAFD549C1DE06FCA8 /* SnapshotReviewControllerTests.swift in Sources */,
 				B5B300842B55B2131DB658FC /* VolumeMonitorTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -268,14 +292,18 @@
 			files = (
 				2DE25E271D830CD5F1372C3A /* AppActivation.swift in Sources */,
 				03CCE3D63051DAED03CB23DE /* AppModel.swift in Sources */,
+				18686331A2B756CD12599F22 /* AppRuntime.swift in Sources */,
 				05F712D29B4F3BDF444C32B3 /* CapacityBar.swift in Sources */,
 				B334563BD340D9E0B20D16D3 /* DuxApp.swift in Sources */,
+				2647F71DC9189100B9FD3096 /* DuxAppDelegate.swift in Sources */,
 				6D2CB0DD262B22CF018B0874 /* DuxFFI.swift in Sources */,
 				E0A86A133058832D8BCD65DF /* DuxSettingsView.swift in Sources */,
 				69E28EFAD6A4109B80F1FC0C /* EngineService.swift in Sources */,
 				B69227AEE2C40A616AA49D4C /* EngineSmokeResult.swift in Sources */,
 				E81F7E7B392E1FC53DCA2694 /* ExplorerView.swift in Sources */,
+				02F49E38EAA6B05B5B6E7BB0 /* MaintenanceScheduler.swift in Sources */,
 				82252F3716D168BB22A360E9 /* MenuBarContentView.swift in Sources */,
+				80066EDFA86C1475A5BEE0CD /* SnapshotReviewController.swift in Sources */,
 				FF16E00002EB5CBC2AEBB6D1 /* VolumeCapacitySnapshot.swift in Sources */,
 				B184EB4EE1399E7D26F41D7B /* VolumeMonitor.swift in Sources */,
 			);

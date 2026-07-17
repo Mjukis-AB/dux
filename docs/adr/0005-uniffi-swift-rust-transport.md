@@ -54,6 +54,24 @@ smoke methods. It proves transport behavior, not engine extraction, task
 cancellation, callback retention, paging performance, or cleanup authority.
 Those capabilities retain their own gates below and in ADR 0004.
 
+## Current realization
+
+FFI contract v3 now replaces that historical first handle with the real shared
+engine session. The app supplies input-only private data/cache roots; storage
+paths never return across the boundary. Six maintenance kinds use opaque task
+objects with nonblocking versioned path-free poll/cancel records, and exact
+Explorer reviews use opaque scan-bound lease objects. No task accepts a path,
+cap, inventory, victim, candidate, or cleanup instruction. Review sessions
+expose only scan ID, expiry, renewal, and idempotent release.
+
+The Swift adapter lazily constructs and synchronizes the engine on its utility
+queue. FFI close invalidates renewal, attempts exact release for every
+still-live registered review, then performs bounded core shutdown; a failed
+durable release expires naturally, and concurrent close callers observe the same
+result. The app still releases reviews before close. This is evidence that the
+accepted opaque-object design scales to coarse asynchronous ownership; it does
+not satisfy the still-separate paging, planner, executor, or cleanup gates.
+
 ## Decision
 
 Use UniFFI's built-in Swift bindings for DUX's private in-process Swift/Rust

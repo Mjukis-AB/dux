@@ -26,5 +26,8 @@ dux-core = { path = "../dux-core", version = "0.5.0" }
 thiserror = { workspace = true }
 uniffi = { workspace = true }
 
+[dev-dependencies]
+tempfile = "3"
+
 [lints]
 workspace = true

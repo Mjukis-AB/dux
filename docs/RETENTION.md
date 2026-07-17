@@ -81,9 +81,14 @@ phase. A successful task publishes one finished event and immutable typed
 result. Expected failures are stable, path-free categories; a panic becomes an
 internal task failure and always releases exclusive admission.
 
-The native app/FFI idle scheduler is not wired yet. It must treat `DeferredBusy`
-and `has_more` as rescheduling hints, apply its own wake/energy policy, and must
-not turn maintenance into foreground or cleanup authority.
+FFI contract v3 and the native app now own this idle boundary. UniFFI exposes
+only opaque maintenance tasks and path-free typed aggregates. The in-process
+scheduler starts after a 60-second grace, rechecks Low Power Mode and thermal
+state, executes at most one batch at a time, completes one fair six-kind cycle
+with one-minute spacing, then waits six hours. `DeferredBusy`, `has_more`,
+deterministic deferrals, retryable failures, and energy denial have separate
+bounded delays. Wake/lifecycle signals coalesce but never erase startup grace
+or a resource/failure backoff. This scheduling grants no new cleanup authority.
 
 ## Snapshot-cap engine orchestration
 
@@ -125,9 +130,10 @@ use stable path-free clock, schema, contention, unsafe-storage, budget,
 corruption, incompatible-snapshot, unavailable, outcome-unknown, and internal
 categories.
 
-This core task is not production scheduling. The native app/FFI still has to
-own review-lease acquire/renew/release/drop and choose periodic, wake, energy,
-and backoff policy before it may request these idle batches automatically.
+This core task is not itself scheduling. The native app/FFI owns explicit
+review-lease acquire/renew/release/drop and the periodic, wake, energy, and
+backoff policy described above; core still performs exactly one independently
+revalidated batch for each admitted request and never self-enqueues.
 
 ## Snapshot policy
 
@@ -210,18 +216,21 @@ postcondition matches.
 
 Dropping a review lease performs no SQLite write because destruction can occur
 during unwinding or while another persistence lock is held. The retained handle
-closes and the durable row expires naturally. Normal Explorer/review close will
-call explicit release once those app/FFI surfaces exist. Process liveness is not
-used to shorten a lease; expiry is the correctness boundary. Candidate status
-and cleanup execution remain separate facts and gain no retention or cleanup
-authority from this lease.
+closes and the durable row expires naturally. The app's actor-owned Explorer
+controller now renews every five minutes and on wake/time change, explicitly
+releases on review close and shutdown, and drops/releases on renewal failure.
+Process liveness is not used to shorten a lease; expiry is the correctness
+boundary. Candidate status and cleanup execution remain separate facts and gain
+no retention or cleanup authority from this lease.
 
 An expired lease object can still own its retained file handle even after
 another process prunes the durable row. Its load and renewal always report
-expiry, including after that prune, and release remains idempotent. The future
-app/FFI owner must promptly release or drop the object after expiry or renewal
-failure: logical retention may unlink the name, but storage blocks can remain
-open until the retained handle closes.
+expiry, including after that prune, and release remains idempotent. The native
+owner promptly releases or drops the object after expiry or renewal failure;
+FFI engine close also invalidates renewal and attempts exact release for every
+still-live registered session before core close. A failed durable release
+expires naturally. Logical retention may unlink the name, but storage blocks
+can otherwise remain open until the retained handle closes.
 
 Schema v7 adds only the production lookup index needed to reconcile a bounded
 snapshot-directory inventory with immutable scan history. The partial
@@ -457,8 +466,8 @@ complete 64-row bound. Unix executes the unlink path; native Windows
 compile/runtime mutation-path verification remains open.
 
 This capability does not scavenge provisioning stages, recover a `running`
-scan or its row-bound temp, schedule itself through app/FFI, own review leases,
-or clear the store.
+scan or its row-bound temp, or clear the store. The app/FFI scheduler can only
+request this sealed one-batch operation; it cannot choose or widen its target.
 
 ### Snapshot provisioning-stage reconciliation contract
 
@@ -557,15 +566,14 @@ Publication and retention share this lock order:
 3. snapshot writer lock.
 
 Core cap enforcement, retained-handle final deletion, exact tombstoned residual
-handling, and typed one-batch engine invocation are implemented. Automatic
-production scheduling is not enabled until app/FFI owns the review-lease
-lifecycle and a native periodic idle scheduler requests bounded batches with
-appropriate backoff. Physical-orphan reconciliation is the separate implemented
-capability below, and terminal row-bound temp reconciliation is the separate
-implemented capability above. Unleased physical-temp and exact-marker-owned
-root-local provisioning-stage reconciliation are separate implemented
-capabilities above. Broad/unproven stage scavenging and explicit clear-data
-actions remain future maintenance capabilities. A prior
+handling, typed one-batch engine invocation, app/FFI review-lease ownership,
+and native periodic idle scheduling with bounded backoff are implemented.
+Physical-orphan reconciliation is the separate implemented capability below,
+and terminal row-bound temp reconciliation is the separate implemented
+capability above. Unleased physical-temp and exact-marker-owned root-local
+provisioning-stage reconciliation are separate implemented capabilities above.
+Broad/unproven stage scavenging and explicit clear-data actions remain future
+maintenance capabilities. A prior
 inventory report is never authority; each writer
 recomputes every proof under the lock order above. A name prefix alone never
 proves that a temporary or stage directory belongs to DUX.

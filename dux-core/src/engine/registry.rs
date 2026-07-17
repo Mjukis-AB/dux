@@ -26,6 +26,9 @@ use super::settings::{
     SnapshotRetentionCap, SnapshotRetentionCapError, SnapshotRetentionCapSource,
     SnapshotRetentionCapUpdate,
 };
+use super::snapshot_review::{
+    SnapshotReviewError, SnapshotReviewSession, map_repository_error as map_snapshot_review_error,
+};
 use super::task::{
     CancelOutcome, CandidateEvaluationTaskFailureKind, CandidateEvaluationTaskStatus,
     CandidateHistoryError, CloseOutcome, DurableCandidateEvaluation,
@@ -66,10 +69,11 @@ use crate::persistence::{
     CandidateHistoryStatus, CandidateReviewAction, CleanupSessionId, CompleteCandidateRecord,
     HistoryErrorKind, HostPathObservationEncoding, MAX_RECENT_SCAN_HISTORY_LIMIT,
     NewCandidateRecord, NewScanRecord, ScanCompletionRecord, ScanCounts, ScanStatus,
-    StoredCleanupErrorCategory, StoredCleanupHistoryCursor, StoredCleanupHistoryObservation,
-    StoredCleanupItemStatus, StoredCleanupItemSummary, StoredCleanupMode,
-    StoredCleanupRecordFormat, StoredCleanupSessionStatus, StoredCleanupSessionSummary,
-    StoredCleanupStatusCounts, StoredCleanupTrigger, TerminalScanStatus, observe_host_path,
+    SnapshotReviewPurpose, StoredCleanupErrorCategory, StoredCleanupHistoryCursor,
+    StoredCleanupHistoryObservation, StoredCleanupItemStatus, StoredCleanupItemSummary,
+    StoredCleanupMode, StoredCleanupRecordFormat, StoredCleanupSessionStatus,
+    StoredCleanupSessionSummary, StoredCleanupStatusCounts, StoredCleanupTrigger,
+    TerminalScanStatus, observe_host_path,
 };
 #[cfg(test)]
 use crate::persistence::{CleanupTrigger, NewCleanupSessionRecord, StoredCandidateRecord};
@@ -770,6 +774,67 @@ impl EngineHandle {
         &self,
     ) -> Result<DatabaseStatus, crate::persistence::DatabaseOpenErrorKind> {
         self.inner.store.status().map_err(|error| error.kind)
+    }
+
+    /// Acquire one exact Explorer-only review lease by durable scan identity.
+    ///
+    /// The scan observation used to find the reference grants no authority:
+    /// the snapshot repository repeats the complete history, tombstone,
+    /// identity, and file validation while acquiring its durable pin.
+    pub fn acquire_explorer_snapshot_review(
+        &self,
+        scan_id: &ScanId,
+    ) -> Result<SnapshotReviewSession, SnapshotReviewError> {
+        self.acquire_explorer_snapshot_review_with_hook(scan_id, || {})
+    }
+
+    #[cfg(test)]
+    fn acquire_explorer_snapshot_review_with_test_hook(
+        &self,
+        scan_id: &ScanId,
+        after_lifecycle_preflight: impl FnOnce(),
+    ) -> Result<SnapshotReviewSession, SnapshotReviewError> {
+        self.acquire_explorer_snapshot_review_with_hook(scan_id, after_lifecycle_preflight)
+    }
+
+    fn acquire_explorer_snapshot_review_with_hook(
+        &self,
+        scan_id: &ScanId,
+        after_lifecycle_preflight: impl FnOnce(),
+    ) -> Result<SnapshotReviewSession, SnapshotReviewError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(SnapshotReviewError::Closed);
+        }
+        after_lifecycle_preflight();
+        let scan = self
+            .inner
+            .store
+            .load_scan(scan_id)
+            .map_err(|error| {
+                map_snapshot_review_error(SnapshotRepositoryErrorKind::History(error.kind))
+            })?
+            .ok_or(SnapshotReviewError::ScanNotFound)?;
+        let reference = scan
+            .snapshot()
+            .cloned()
+            .ok_or(SnapshotReviewError::SnapshotUnavailable)?;
+        let lease = self
+            .inner
+            .snapshots
+            .acquire_review_lease(
+                &reference,
+                SnapshotReviewPurpose::Explorer,
+                SystemTime::now(),
+            )
+            .map_err(|error| map_snapshot_review_error(error.kind))?;
+        // Linearize successful acquisition before close. If close won while
+        // storage validation was in flight, do not publish a new session and
+        // remove its exact durable pin while the lease is still available.
+        if self.lifecycle() != EngineLifecycle::Open {
+            let _ = lease.release();
+            return Err(SnapshotReviewError::Closed);
+        }
+        Ok(SnapshotReviewSession::new(scan_id.clone(), lease))
     }
 
     /// Load the effective, versioned snapshot-store size cap.

@@ -42,7 +42,8 @@ pub use engine::{
     EngineOpenError, FormatSizeBatchResult, FormattedSizeEntry, RecentScanHistory,
     ScanHistoryError, ScanRootErrorKind, ScanTaskCounts, ScanTaskResult, ScanTaskStatus,
     SnapshotRetentionCap, SnapshotRetentionCapError, SnapshotRetentionCapSource,
-    SnapshotRetentionCapUpdate, StartTaskError, TaskAccessError, TaskEvent, TaskEventBatch,
+    SnapshotRetentionCapUpdate, SnapshotReviewError, SnapshotReviewReleaseOutcome,
+    SnapshotReviewSession, StartTaskError, TaskAccessError, TaskEvent, TaskEventBatch,
     TaskEventKind, TaskFailureKind, TaskId, TaskKind, TaskPhase, TaskSnapshot,
 };
 pub use error::{DuxError, Result};

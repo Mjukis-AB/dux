@@ -37,6 +37,172 @@ fn wait_terminal(engine: &EngineHandle, id: TaskId) -> TaskSnapshot {
     }
 }
 
+#[test]
+fn explorer_review_facade_is_scan_bound_expiring_and_idempotently_released() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("scan-root");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("payload"), b"snapshot review").unwrap();
+    let engine = EngineHandle::open(config(&temp)).unwrap();
+
+    assert!(matches!(
+        engine.acquire_explorer_snapshot_review(&ScanId::new("scan:missing").unwrap()),
+        Err(SnapshotReviewError::ScanNotFound)
+    ));
+
+    let running_id = ScanId::new("scan:running-review").unwrap();
+    let running =
+        NewScanRecord::try_new(running_id.clone(), root.clone(), SystemTime::now()).unwrap();
+    engine
+        .inner
+        .store
+        .record_scan_started_reconciled(&running)
+        .unwrap();
+    assert!(matches!(
+        engine.acquire_explorer_snapshot_review(&running_id),
+        Err(SnapshotReviewError::SnapshotUnavailable)
+    ));
+
+    let task = engine.start_scan(root).unwrap();
+    assert_eq!(wait_terminal(&engine, task).phase, TaskPhase::Succeeded);
+    let scan_id = engine.scan_result(task).unwrap().unwrap().scan_id().clone();
+    let mut review = engine.acquire_explorer_snapshot_review(&scan_id).unwrap();
+    assert_eq!(review.scan_id(), &scan_id);
+    let expiry = review.expires_at().unwrap();
+    assert_eq!(
+        review.renew_at_for_test(expiry).unwrap_err(),
+        SnapshotReviewError::LeaseExpired
+    );
+    assert_eq!(
+        review.release().unwrap(),
+        super::super::snapshot_review::SnapshotReviewReleaseOutcome::Released
+    );
+    assert!(review.is_released());
+    assert_eq!(
+        review.release().unwrap(),
+        super::super::snapshot_review::SnapshotReviewReleaseOutcome::AlreadyReleased
+    );
+
+    engine.close();
+    assert!(engine.wait_until_closed(TEST_TIMEOUT));
+    assert!(matches!(
+        engine.acquire_explorer_snapshot_review(&scan_id),
+        Err(SnapshotReviewError::Closed)
+    ));
+}
+
+#[test]
+fn explorer_review_rejects_tombstoned_snapshot_through_path_free_facade() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("scan-root");
+    std::fs::create_dir(&root).unwrap();
+    let engine = EngineHandle::open(config(&temp)).unwrap();
+    let mut scan_ids = Vec::new();
+    for index in 0..3 {
+        std::fs::write(root.join("payload"), format!("snapshot review {index}")).unwrap();
+        let task = engine.start_scan(root.clone()).unwrap();
+        assert_eq!(wait_terminal(&engine, task).phase, TaskPhase::Succeeded);
+        scan_ids.push(engine.scan_result(task).unwrap().unwrap().scan_id().clone());
+    }
+    let tombstoned = scan_ids.remove(0);
+    engine.set_snapshot_retention_cap(0).unwrap();
+    let retention = started_snapshot_retention(
+        engine
+            .start_snapshot_retention_at(SystemTime::now() + Duration::from_secs(60))
+            .unwrap(),
+    );
+    assert_eq!(
+        wait_terminal(&engine, retention).phase,
+        TaskPhase::Succeeded
+    );
+    assert!(matches!(
+        engine
+            .snapshot_retention_result(retention)
+            .unwrap()
+            .unwrap()
+            .outcome(),
+        SnapshotRetentionOutcome::TombstonedAndRemoved { bytes } if bytes > 0
+    ));
+    assert!(
+        engine
+            .inner
+            .store
+            .load_scan(&tombstoned)
+            .unwrap()
+            .unwrap()
+            .snapshot()
+            .is_some()
+    );
+    assert!(matches!(
+        engine.acquire_explorer_snapshot_review(&tombstoned),
+        Err(SnapshotReviewError::SnapshotUnavailable)
+    ));
+}
+
+#[test]
+fn close_wins_inflight_review_acquisition_without_leaking_a_pin() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("scan-root");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("payload"), b"snapshot review").unwrap();
+    let engine = EngineHandle::open(config(&temp)).unwrap();
+    let task = engine.start_scan(root).unwrap();
+    assert_eq!(wait_terminal(&engine, task).phase, TaskPhase::Succeeded);
+    let scan_id = engine.scan_result(task).unwrap().unwrap().scan_id().clone();
+    let (preflight_tx, preflight_rx) = mpsc::channel();
+    let (continue_tx, continue_rx) = mpsc::channel();
+    let acquiring = engine.clone();
+    let acquisition = std::thread::spawn(move || {
+        acquiring.acquire_explorer_snapshot_review_with_test_hook(&scan_id, move || {
+            preflight_tx.send(()).unwrap();
+            continue_rx.recv().unwrap();
+        })
+    });
+    preflight_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+
+    assert_eq!(engine.close(), CloseOutcome::Initiated);
+    assert!(engine.wait_until_closed(TEST_TIMEOUT));
+    continue_tx.send(()).unwrap();
+    assert!(matches!(
+        acquisition.join().unwrap(),
+        Err(SnapshotReviewError::Closed)
+    ));
+    let pin_count = engine.inner.store.with_connection(|connection| {
+        connection
+            .query_row("SELECT count(*) FROM snapshot_review_pins", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap()
+    });
+    assert_eq!(pin_count, 0);
+}
+
+#[test]
+fn acquired_review_remains_renewable_and_releasable_after_engine_close() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("scan-root");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("payload"), b"snapshot review").unwrap();
+    let engine = EngineHandle::open(config(&temp)).unwrap();
+    let task = engine.start_scan(root).unwrap();
+    assert_eq!(wait_terminal(&engine, task).phase, TaskPhase::Succeeded);
+    let scan_id = engine.scan_result(task).unwrap().unwrap().scan_id().clone();
+    let mut review = engine.acquire_explorer_snapshot_review(&scan_id).unwrap();
+    let expiry = review.expires_at().unwrap();
+
+    assert_eq!(engine.close(), CloseOutcome::Initiated);
+    assert!(engine.wait_until_closed(TEST_TIMEOUT));
+    assert!(
+        review
+            .renew_at_for_test(expiry - Duration::from_millis(1))
+            .is_ok()
+    );
+    assert_eq!(
+        review.release().unwrap(),
+        super::super::snapshot_review::SnapshotReviewReleaseOutcome::Released
+    );
+}
+
 fn final_snapshot_count(config: &EngineConfig) -> usize {
     std::fs::read_dir(config.snapshots_directory())
         .unwrap()
@@ -725,6 +891,10 @@ fn newer_database_never_provisions_missing_snapshot_storage() {
         engine.recent_scan_history(1),
         Err(ScanHistoryError::IncompatibleSchema)
     );
+    assert!(matches!(
+        engine.acquire_explorer_snapshot_review(&ScanId::new("scan:future-review-schema").unwrap()),
+        Err(SnapshotReviewError::IncompatibleSchema)
+    ));
     assert_eq!(
         engine.candidate_history_for_scan(&ScanId::new("scan:future-schema").unwrap()),
         Err(CandidateHistoryError::IncompatibleSchema)

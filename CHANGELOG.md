@@ -5,6 +5,28 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Added the real macOS engine/maintenance runtime through FFI contract v3.
+  `DuxEngine` now opens the shared Rust engine from input-only private data and
+  cache roots, exposes all six sealed maintenance kinds as opaque cancellable
+  tasks with versioned path-free results, and exposes Explorer-only snapshot
+  review sessions without paths, filenames, digests, handles, inventories, or
+  cleanup authority. History row counts are distinct from every byte field.
+  Review acquisition now linearizes against core close; FFI close rejects new
+  renewals, attempts exact release for every still-live registered review, and
+  gives concurrent callers one bounded quiescence result. A failed durable
+  release expires naturally. The Swift engine opens lazily on a utility queue,
+  its actor-owned review controller uses five-minute/wake renewal plus
+  generation-safe explicit release, and app shutdown is ordered maintenance →
+  reviews → engine with duplicate termination requests coalesced. A native
+  energy-aware scheduler runs one fair six-kind cycle after a 60-second grace,
+  spaces normal batches by one minute, waits six hours between cycles, and
+  preserves distinct `has_more`, deferral, busy, failure, and energy backoffs
+  across activation/wake signals. Scheduler shutdown awaits any suspended
+  driver before engine close. Rust and linked Swift regressions cover
+  tombstone/schema/close acquisition edges, pin drainage, concurrent close,
+  every maintenance kind, startup grace, cadence/backoff, pending acquisition,
+  stale renewal replacement, overlapping renewal, cancellation, and duplicate
+  termination.
 - Added bounded root-local snapshot provisioning-stage reconciliation. Under a
   current-schema database guard, one complete raw/native root inventory proves
   only exact canonical private stages containing the 16-byte store marker alone

@@ -465,6 +465,16 @@ EXCEPTIONS = {
     "build-bindings-staging-remove": ExceptionSpec(
         "dux-macos/scripts/generate-bindings.sh", "shell-remove"
     ),
+    "test-swift-engine-fixture-remove": ExceptionSpec(
+        "dux-macos/DuxTests/EngineServiceTests.swift",
+        "swift-filesystem-effect",
+        "test",
+    ),
+    "test-swift-storage-roots-fixture-remove": ExceptionSpec(
+        "dux-macos/DuxTests/EngineServiceTests.swift",
+        "swift-filesystem-effect",
+        "test",
+    ),
     "release-checksum-sidecars-remove": ExceptionSpec(
         ".github/workflows/release.yml", "shell-remove"
     ),
@@ -552,6 +562,8 @@ EXCEPTION_PRIMITIVES = {
     "build-xcframework-output-remove": "rm",
     "build-xcframework-publish-move": "mv",
     "build-bindings-staging-remove": "rm",
+    "test-swift-engine-fixture-remove": "removeItem",
+    "test-swift-storage-roots-fixture-remove": "removeItem",
     "release-checksum-sidecars-remove": "rm",
     "lint-list-repository-sources": "subprocess.run",
     "test-lint-rejected-xcframework-output": "subprocess.run",

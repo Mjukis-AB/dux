@@ -2,11 +2,41 @@ import XCTest
 @testable import DUX
 
 final class EngineServiceTests: XCTestCase {
+    @MainActor
+    func testDefaultInitializationDefersEngineOpenOffMainActor() async throws {
+        let baseline = liveEngineInstanceCount()
+        let service = EngineService()
+        XCTAssertEqual(liveEngineInstanceCount(), baseline)
+
+        let closed = await service.close()
+        XCTAssertTrue(closed)
+    }
+
+    @MainActor
+    func testFirstRealEngineOpenIsLazyAndRunsOffMainActor() async throws {
+        let baseline = liveEngineInstanceCount()
+
+        do {
+            let fixture = try TestStorageRootsFixture()
+            let service = EngineService(storageRoots: fixture.storageRoots)
+            XCTAssertEqual(liveEngineInstanceCount(), baseline)
+
+            let result = try await service.loadSmokeResult(bytes: 1_536)
+            XCTAssertTrue(result.executedOffMainThread)
+            XCTAssertEqual(liveEngineInstanceCount(), baseline + 1)
+            let closed = await service.close()
+            XCTAssertTrue(closed)
+        }
+
+        XCTAssertEqual(liveEngineInstanceCount(), baseline)
+    }
+
     func testLoadsTypedRustValuesOffTheMainThread() async throws {
-        let result = try await EngineService().loadSmokeResult(bytes: 1_536)
+        let fixture = try TestEngineFixture()
+        let result = try await EngineService(engine: fixture.engine).loadSmokeResult(bytes: 1_536)
 
         XCTAssertEqual(result.libraryVersion, "0.5.0")
-        XCTAssertEqual(result.ffiContractVersion, 2)
+        XCTAssertEqual(result.ffiContractVersion, 3)
         XCTAssertEqual(result.bytes, 1_536)
         XCTAssertEqual(result.displaySize, "1.5 KB")
         XCTAssertTrue(result.executedOffMainThread)
@@ -14,7 +44,10 @@ final class EngineServiceTests: XCTestCase {
 
     @MainActor
     func testAppModelPublishesLoadedStateOnTheMainActor() async {
-        let model = AppModel()
+        guard let fixture = try? TestEngineFixture() else {
+            return XCTFail("Expected a temporary engine")
+        }
+        let model = AppModel(engineService: EngineService(engine: fixture.engine))
 
         await model.loadEngineSmokeResult()
 
@@ -29,13 +62,14 @@ final class EngineServiceTests: XCTestCase {
         weak var weakEngine: DuxEngine?
 
         do {
-            let engine = DuxEngine()
+            let fixture = try TestEngineFixture()
+            let engine = fixture.engine
             weakEngine = engine
 
             XCTAssertEqual(liveEngineInstanceCount(), baseline + 1)
-            XCTAssertEqual(try engine.libraryVersion().ffiContractVersion, 2)
+            XCTAssertEqual(try engine.libraryVersion().ffiContractVersion, 3)
             XCTAssertTrue(engine.close())
-            XCTAssertFalse(engine.close())
+            XCTAssertTrue(engine.close())
             XCTAssertThrowsError(try engine.formatSize(bytes: 1_536)) { error in
                 XCTAssertEqual(error as? EngineError, .Closed)
             }
@@ -46,13 +80,16 @@ final class EngineServiceTests: XCTestCase {
     }
 
     func testEngineServiceMapsClosedError() async {
-        let engine = DuxEngine()
+        guard let fixture = try? TestEngineFixture() else {
+            return XCTFail("Expected a temporary engine")
+        }
+        let engine = fixture.engine
         let service = EngineService(engine: engine)
 
         let firstClose = await service.close()
         let secondClose = await service.close()
         XCTAssertTrue(firstClose)
-        XCTAssertFalse(secondClose)
+        XCTAssertTrue(secondClose)
 
         do {
             _ = try await service.loadSmokeResult(bytes: 1_536)
@@ -102,7 +139,7 @@ private actor CountingEngineService: EngineServing {
         await Task.yield()
         return EngineSmokeResult(
             libraryVersion: "test",
-            ffiContractVersion: 2,
+            ffiContractVersion: 3,
             bytes: bytes,
             displaySize: "test",
             executedOffMainThread: true
@@ -111,6 +148,51 @@ private actor CountingEngineService: EngineServing {
 
     func currentLoadCount() -> Int {
         loadCount
+    }
+}
+
+private final class TestEngineFixture {
+    let engine: DuxEngine
+
+    private let root: URL
+
+    init() throws {
+        root = FileManager.default.temporaryDirectory
+            .appending(path: "dux-swift-tests-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        engine = try DuxEngine(
+            storage: EngineStorageRoots(
+                dataRoot: root.appending(path: "data", directoryHint: .isDirectory).path,
+                cacheRoot: root.appending(path: "cache", directoryHint: .isDirectory).path
+            )
+        )
+    }
+
+    deinit {
+        _ = engine.close()
+        // DUX-DESTRUCTIVE: allow=test-swift-storage-roots-fixture-remove -- remove only this fixture's UUID-named temporary root
+        try? FileManager.default.removeItem(at: root)
+    }
+}
+
+private final class TestStorageRootsFixture {
+    let storageRoots: EngineStorageRoots
+
+    private let root: URL
+
+    init() throws {
+        root = FileManager.default.temporaryDirectory
+            .appending(path: "dux-swift-lazy-tests-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        storageRoots = EngineStorageRoots(
+            dataRoot: root.appending(path: "data", directoryHint: .isDirectory).path,
+            cacheRoot: root.appending(path: "cache", directoryHint: .isDirectory).path
+        )
+    }
+
+    deinit {
+        // DUX-DESTRUCTIVE: allow=test-swift-engine-fixture-remove -- remove only this fixture's UUID-named temporary root
+        try? FileManager.default.removeItem(at: root)
     }
 }
 

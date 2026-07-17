@@ -10,6 +10,7 @@ mod cleanup_history;
 mod config;
 mod registry;
 mod settings;
+mod snapshot_review;
 mod task;
 
 pub use candidate_history::{
@@ -31,6 +32,9 @@ pub use registry::EngineHandle;
 pub use settings::{
     SnapshotRetentionCap, SnapshotRetentionCapError, SnapshotRetentionCapSource,
     SnapshotRetentionCapUpdate,
+};
+pub use snapshot_review::{
+    SnapshotReviewError, SnapshotReviewReleaseOutcome, SnapshotReviewSession,
 };
 pub use task::{
     CancelOutcome, CandidateEvaluationTaskFailureKind, CandidateEvaluationTaskStatus,
