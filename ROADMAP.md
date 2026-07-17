@@ -3541,7 +3541,39 @@ Tasks:
   unsigned universal arm64/x86_64 Debug and Release apps target macOS 14.
   Signed install and sign-in-cycle validation remains explicitly gated by
   Milestone 9's production identity.
-- [ ] Implement notification permission UI but do not notify repeatedly.
+- [x] Implement notification permission UI but do not notify repeatedly.
+  Completed 2026-07-17: Settings now reads and presents macOS's authoritative
+  notification authorization state, distinguishes not requested, denied,
+  allowed, provisional/quiet, and unknown future states, and refreshes after
+  returning active. Authorization is requested only from an explicit **Allow
+  notifications…** button while the last confirmed state is Not Determined;
+  opening Settings, app activation, startup, and ordinary refreshes never show
+  the system prompt. Denied and unknown states remain truthfully retryable, and
+  determined states provide honest guidance to System Settings without relying
+  on an undocumented per-app deep link.
+
+  The actor-owned service rechecks Not Determined before requesting only Alert
+  and Sound authorization. Its deliberately narrow protocol can read status or
+  request permission but cannot construct, add, deliver, remove, or respond to
+  a notification. `AppModel` retains the last confirmed status during work,
+  coalesces duplicate calls, survives caller cancellation, re-reads macOS after
+  every request or error, treats Denied as a settled user choice, and never
+  persists competing permission truth. No notification-center delegate,
+  notification content, pressure episode, cooldown, deep link, scan, AI, plan,
+  scheduling, or cleanup authority was added. Transition-based delivery, the
+  24-hour per-level cooldown, and Recommendations deep links remain explicitly
+  owned by Milestone 6.
+
+  Nineteen focused linked tests cover every known authorization status, typed
+  domain-gated errors, exact request options, bounded/localized presentation,
+  stable accessibility actions, explicit-only requests, settled/error races,
+  external changes, duplicate requests, and caller cancellation. One production
+  integration test reads the current status only and never requests permission.
+  The complete 159-test linked Swift suite, full Rust format/lint/workspace-test
+  gates, 20 destructive-boundary checker tests, and 173-source authority scan
+  pass. XcodeGen is deterministic, Debug/Release Swift bindings are
+  byte-identical, and unsigned universal arm64/x86_64 Debug and Release apps
+  target macOS 14.
 - [ ] Implement permission/coverage onboarding.
 - [ ] Add signed/notarized local release script.
 

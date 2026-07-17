@@ -42,6 +42,13 @@ normative cleanup and privacy boundary in the [security design](SECURITY_DESIGN.
 and accepted technical decisions in the
 [architecture decision records](docs/adr/README.md).
 
+The current macOS checkpoint is a read-only menu-bar helper with cached
+startup-disk pressure, an explicit Home scan, an Explorer Overview, configurable
+pressure thresholds, Launch at Login, and notification authorization Settings.
+Notification permission is optional and explicit; this version schedules and
+delivers no alerts. Drill-down, recommendations, notification delivery, AI
+explanations, and cleanup remain later roadmap milestones.
+
 ```bash
 # Build and run directly from the repo
 cargo run -p dux-cli

@@ -63,6 +63,10 @@ struct DuxSettingsView: View {
                 loginItemSettings(model: model)
             }
 
+            Section("Notifications") {
+                notificationPermissionSettings(model: model)
+            }
+
             Section("Disk pressure") {
                 Text(
                     "DUX enters each pressure level when available storage reaches the "
@@ -203,9 +207,10 @@ struct DuxSettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 620, height: 730)
+        .frame(width: 620, height: 800)
         .task {
             await model.refreshLoginItemState()
+            await model.refreshNotificationAuthorizationState()
             await model.loadDiskPressurePolicy()
             await model.loadInitialState()
         }
@@ -213,7 +218,10 @@ struct DuxSettingsView: View {
             guard phase == .active else {
                 return
             }
-            Task { await model.refreshLoginItemState() }
+            Task {
+                await model.refreshLoginItemState()
+                await model.refreshNotificationAuthorizationState()
+            }
         }
     }
 
@@ -285,6 +293,87 @@ struct DuxSettingsView: View {
         Text("Uses macOS Login Items. DUX installs no daemon or privileged helper.")
             .font(.caption)
             .foregroundStyle(.secondary)
+    }
+
+    @ViewBuilder
+    private func notificationPermissionSettings(model: AppModel) -> some View {
+        let presentation = NotificationAuthorizationPresentation.make(
+            state: model.notificationAuthorizationState
+        )
+
+        LabeledContent("Permission") {
+            HStack(spacing: 8) {
+                if let progressLabel = presentation.progressLabel {
+                    ProgressView()
+                        .controlSize(.small)
+                        .accessibilityIdentifier(
+                            NotificationAuthorizationAccessibility.progress
+                        )
+                        .accessibilityLabel(Text(verbatim: progressLabel))
+                }
+                Text(verbatim: presentation.statusTitle)
+            }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier(NotificationAuthorizationAccessibility.status)
+
+        Text(verbatim: presentation.statusDetail)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+
+        HStack {
+            if presentation.showsRequestAction {
+                Button("Allow notifications…") {
+                    Task { await model.requestNotificationAuthorization() }
+                }
+                .accessibilityIdentifier(
+                    NotificationAuthorizationAccessibility.request
+                )
+                .accessibilityHint(
+                    "Asks macOS for permission only; DUX does not schedule an alert"
+                )
+            }
+
+            if presentation.showsSystemSettingsAction {
+                Button("Open System Settings…") {
+                    AppActivation.openNotificationSettings()
+                }
+                .accessibilityIdentifier(
+                    NotificationAuthorizationAccessibility.openSystemSettings
+                )
+                .accessibilityHint(
+                    "Opens System Settings; choose Notifications, then DUX"
+                )
+            }
+
+            if presentation.showsRefreshAction {
+                Button("Check again") {
+                    Task { await model.refreshNotificationAuthorizationState() }
+                }
+                .accessibilityIdentifier(
+                    NotificationAuthorizationAccessibility.refresh
+                )
+                .accessibilityHint("Reads the notification permission from macOS again")
+            }
+        }
+
+        if let message = presentation.errorMessage {
+            Label {
+                Text(verbatim: message)
+            } icon: {
+                Image(systemName: "exclamationmark.triangle")
+            }
+            .foregroundStyle(.red)
+            .accessibilityIdentifier(NotificationAuthorizationAccessibility.error)
+        }
+
+        Text(
+            String(
+                localized: "Permission is optional and reserved for future low-disk pressure alerts. It grants no scan, scheduling, or cleanup authority."
+            )
+        )
+        .font(.caption)
+        .foregroundStyle(.secondary)
     }
 
     private func policyRow(

@@ -18,6 +18,7 @@ final class AppModel: DuxCapacitySampling {
     var diskPressurePolicyDraft = DiskPressurePolicyDraft.defaults
     private(set) var scanState = AppScanState.idle
     private(set) var loginItemState = LoginItemState.idle
+    private(set) var notificationAuthorizationState = NotificationAuthorizationState.idle
 
     private let engineService: any EngineServing
     private let volumeMonitor: any VolumeMonitoring
@@ -26,6 +27,7 @@ final class AppModel: DuxCapacitySampling {
     private let homeScanService: any HomeScanServing
     private let homeScanClock: any HomeScanPollingClock
     private let loginItemService: any LoginItemServing
+    private let notificationService: any NotificationServing
 
     @ObservationIgnored
     private var engineLoadTask: Task<Void, Never>?
@@ -57,6 +59,10 @@ final class AppModel: DuxCapacitySampling {
     private var loginItemTask: Task<Void, Never>?
     @ObservationIgnored
     private var loginItemGeneration: UInt64 = 0
+    @ObservationIgnored
+    private var notificationAuthorizationTask: Task<Void, Never>?
+    @ObservationIgnored
+    private var notificationAuthorizationGeneration: UInt64 = 0
 
     init(
         engineService: any EngineServing = EngineService(),
@@ -67,7 +73,8 @@ final class AppModel: DuxCapacitySampling {
             UserDefaultsMenuBarLabelPreferenceStore(),
         homeScanService: (any HomeScanServing)? = nil,
         homeScanClock: any HomeScanPollingClock = ContinuousHomeScanPollingClock(),
-        loginItemService: any LoginItemServing = LoginItemService()
+        loginItemService: any LoginItemServing = LoginItemService(),
+        notificationService: any NotificationServing = NotificationService()
     ) {
         self.engineService = engineService
         self.volumeMonitor = volumeMonitor
@@ -79,6 +86,7 @@ final class AppModel: DuxCapacitySampling {
         )
         self.homeScanClock = homeScanClock
         self.loginItemService = loginItemService
+        self.notificationService = notificationService
         menuBarLabelMode = menuBarLabelPreferenceStore.load()
     }
 
@@ -333,6 +341,82 @@ final class AppModel: DuxCapacitySampling {
         await task.value
     }
 
+    func refreshNotificationAuthorizationState() async {
+        if let notificationAuthorizationTask {
+            await notificationAuthorizationTask.value
+            return
+        }
+
+        notificationAuthorizationGeneration &+= 1
+        let generation = notificationAuthorizationGeneration
+        notificationAuthorizationState = NotificationAuthorizationState(
+            status: notificationAuthorizationState.status,
+            activity: .loading,
+            failure: nil
+        )
+        let service = notificationService
+        let task = Task { @MainActor [weak self] in
+            let status = await service.authorizationStatus()
+            guard !Task.isCancelled, let self,
+                  generation == self.notificationAuthorizationGeneration else {
+                return
+            }
+            self.notificationAuthorizationState = NotificationAuthorizationState(
+                status: status,
+                activity: nil,
+                failure: nil
+            )
+            self.notificationAuthorizationTask = nil
+        }
+        notificationAuthorizationTask = task
+        await task.value
+    }
+
+    func requestNotificationAuthorization() async {
+        if let notificationAuthorizationTask {
+            await notificationAuthorizationTask.value
+            return
+        }
+        guard notificationAuthorizationState.status == .notDetermined else {
+            return
+        }
+
+        notificationAuthorizationGeneration &+= 1
+        let generation = notificationAuthorizationGeneration
+        notificationAuthorizationState = NotificationAuthorizationState(
+            status: .notDetermined,
+            activity: .requesting,
+            failure: nil
+        )
+        let service = notificationService
+        let task = Task { @MainActor [weak self] in
+            let operationFailure: NotificationAuthorizationFailureReason?
+            do {
+                try await service.requestAuthorization()
+                operationFailure = nil
+            } catch {
+                operationFailure = Self.notificationAuthorizationFailure(for: error)
+            }
+
+            let confirmedStatus = await service.authorizationStatus()
+            let failure = confirmedStatus.isSettled
+                ? nil
+                : operationFailure ?? .outcomeUnknown
+            guard !Task.isCancelled, let self,
+                  generation == self.notificationAuthorizationGeneration else {
+                return
+            }
+            self.notificationAuthorizationState = NotificationAuthorizationState(
+                status: confirmedStatus,
+                activity: nil,
+                failure: failure
+            )
+            self.notificationAuthorizationTask = nil
+        }
+        notificationAuthorizationTask = task
+        await task.value
+    }
+
     func startHomeScan() async {
         guard !homeScanIsInvalidated else {
             return
@@ -556,6 +640,18 @@ final class AppModel: DuxCapacitySampling {
         case .invalidSignature: .invalidSignature
         case .denied: .denied
         case .serviceUnavailable: .serviceUnavailable
+        case .unexpected: .unexpected
+        }
+    }
+
+    private static func notificationAuthorizationFailure(
+        for error: Error
+    ) -> NotificationAuthorizationFailureReason {
+        guard let error = error as? NotificationServiceError else {
+            return .unexpected
+        }
+        return switch error {
+        case .denied: .denied
         case .unexpected: .unexpected
         }
     }

@@ -38,6 +38,21 @@ enum AppActivation {
         open()
     }
 
+    static func openNotificationSettings() {
+        openNotificationSettings {
+            guard let url = NSWorkspace.shared.urlForApplication(
+                withBundleIdentifier: "com.apple.systempreferences"
+            ) else {
+                return
+            }
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    static func openNotificationSettings(open: () -> Void) {
+        open()
+    }
+
     static func quit() {
         NSApplication.shared.terminate(nil)
     }

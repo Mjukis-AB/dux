@@ -309,12 +309,13 @@ The following implemented controls are safe foundations, not shipping approval:
   existing Rust artifacts.
 
 The source tree configures Hardened Runtime for the app spike, but no public
-Developer ID-signed/notarized artifact exists yet. The explicit DUX FFI version
-is displayed rather than enforced by the Swift service today; this must become
-a startup rejection before real engine APIs ship. SQLite schema migration and
-store coordination are implemented, but settings/history CRUD is not. AI,
-Trash, eviction, scheduling, notifications, launch-at-login, and typed TCC
-coverage remain unimplemented.
+Developer ID-signed/notarized artifact exists yet. Swift rejects an incompatible
+explicit DUX FFI contract before engine work, and the implemented SQLite
+settings/history surfaces remain bounded observations as described below.
+Launch at Login and notification authorization Settings exist, but the former
+still requires production-identity validation and the latter has no delivery
+API. AI, Trash, eviction, scheduled cleanup, transition notifications, and typed
+TCC coverage remain unimplemented.
 
 ## 6. Cleanup authority chain
 
@@ -1782,6 +1783,17 @@ plan, approval, execution fence, or cleanup capability. The app requests scan
 cancellation and quiesces its generation-fenced publication driver before the
 maintenance/review/engine shutdown chain.
 
+Notification authorization is a separate Swift-owned observation boundary.
+Settings reads `UNUserNotificationCenter` status and may request Alert and Sound
+authorization only after an explicit action from a confirmed Not Determined
+state. The adapter rechecks that state before requesting, and the app re-reads
+the authoritative status afterward. Its protocol exposes no notification
+request, content, delivery, removal, delegate, or deep-link operation; opening
+Settings or returning active can read status but MUST NOT prompt. Authorization
+grants no scan, candidate, plan, AI, scheduling, or cleanup capability.
+Transition delivery, pressure-episode deduplication, cooldowns, and deep links
+remain absent until the Milestone 6 boundary is implemented and reviewed.
+
 Native scheduler shutdown invalidates its generation, requests cancellation for
 the current opaque task, and awaits the driver before review release or engine
 close proceeds. Results returning from a suspended energy check, maintenance
@@ -2035,6 +2047,7 @@ coverage is labelled as Home-scoped and unknown coverage stays unknown.
 | Trash executor | Absent | Platform-native implementation and integration tests |
 | Cloud eviction | Absent | Supported API plus fully-uploaded/no-local-change evidence |
 | Scheduled cleanup | Absent | Manual-history maturity and all automation gates in §10 |
+| Notification authorization | Settings reads authoritative macOS status and can explicitly request Alert/Sound permission from Not Determined; the adapter exposes no scheduling or delivery operation | Add reviewed pressure-transition episodes, cooldown, truthful content, and deep-link handling in Milestone 6 |
 | AI providers | Disabled/absent | Adversarial authority spike; remains explanation-only |
 | Signed/notarized macOS release | Design and build spike only | Full Developer ID/notarization/release validation |
 

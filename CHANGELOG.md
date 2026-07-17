@@ -5,6 +5,22 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Added authorization-only notification Settings for the macOS app. DUX reads
+  macOS's current permission, presents distinct not-requested, denied, allowed,
+  provisional, and unknown states, refreshes after returning from System
+  Settings, and shows the system prompt only after an explicit user action from
+  a confirmed Not Determined state. Duplicate requests are single-flight,
+  caller cancellation cannot abandon model state, and every attempt is followed
+  by an authoritative status read. The service requests Alert and Sound only;
+  its interface has no API for scheduling or delivering notifications. This
+  checkpoint therefore sends no alerts and adds no cooldown, deep link, scan,
+  scheduling, AI, plan, or cleanup authority; transition notifications remain
+  in Milestone 6. The focused 19-test suite and complete 159-test linked Swift
+  suite pass, including a production read-only status query that never requests
+  permission. Full Rust format/lint/workspace tests, 20 destructive-boundary
+  checker tests, and the 173-source authority scan pass. Debug/Release Swift
+  bindings are byte-identical, and unsigned universal arm64/x86_64 Debug and
+  Release apps target macOS 14.
 - Added an opt-in Launch at Login setting backed only by
   `SMAppService.mainApp`. Settings reflects macOS's authoritative registered,
   enabled, approval-required, unavailable, and unknown states; refreshes after
