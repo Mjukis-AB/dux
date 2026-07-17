@@ -56,11 +56,11 @@ Those capabilities retain their own gates below and in ADR 0004.
 
 ## Current realization
 
-FFI contract v6 now carries the real shared engine session first introduced in
-v4. The app supplies input-only private data/cache roots; storage
-paths never return across the boundary. Seven maintenance kinds use opaque task
-objects with nonblocking versioned path-free poll/cancel records, and exact
-Explorer reviews use opaque scan-bound lease objects. No task accepts a path,
+FFI contract v7 now carries the real shared engine session first introduced in
+v4. The app supplies input-only private data/cache roots; storage paths never
+return across the boundary. Seven maintenance kinds use opaque task objects
+with nonblocking versioned path-free poll/cancel records, and exact Explorer
+reviews use opaque scan-bound lease objects. No maintenance task accepts a path,
 cap, inventory, victim, candidate, or cleanup instruction. Review sessions
 expose only scan ID, expiry, renewal, and idempotent release.
 
@@ -95,13 +95,31 @@ capacity scheduler exactly once; an unchanged, failed, cancelled, or invalid
 operation cannot signal. No policy record can name a volume, path, candidate,
 plan, schedule, notification, or cleanup action.
 
+Contract v7 adds one coarse read-only discovery task. Its versioned request
+accepts a nonempty absolute root bounded to 32 KiB of control-free UTF-8. The
+root is observation scope only: core repeats filesystem-kind, symlink,
+accessibility, stable-identity, overlap, schema, and admission checks, and no
+root or descendant path returns across this M3 boundary. The native adapter
+fixes production requests to the current user's Home directory; injected roots
+exist only for isolated linked tests. An opaque `ScanTask` retains its event
+cursor privately and exposes nonblocking poll/cancel calls with authoritative
+task phase, coarse stage, cancellation intent, revision, optional cumulative
+aggregate progress, sticky event-truncation evidence, typed path-free failure,
+and a path-free terminal summary. Absence of progress is unknown, never a
+measured zero. A late cancellation cannot overwrite a successful terminal
+result. The task has no candidate detail, review selection, plan, approval,
+execution fence, or cleanup capability, and its input cannot be reused as
+planner or executor authority.
+
 The Swift adapter lazily constructs and synchronizes the engine on its utility
 queue. FFI close invalidates renewal, attempts exact release for every
 still-live registered review, then performs bounded core shutdown; a failed
 durable release expires naturally, and concurrent close callers observe the same
-result. The app still releases reviews before close. This is evidence that the
-accepted opaque-object design scales to coarse asynchronous ownership; it does
-not satisfy the still-separate paging, planner, executor, or cleanup gates.
+result. The app first requests cancellation and quiesces its scan publication
+driver, then stops maintenance and releases reviews before close. This is
+evidence that the accepted opaque-object design scales to coarse asynchronous
+ownership; it does not satisfy the still-separate snapshot paging, planner,
+executor, or cleanup gates.
 
 ## Decision
 

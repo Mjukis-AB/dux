@@ -28,18 +28,25 @@ protocol DuxSnapshotReviewLease: AnyObject, Sendable {
     func release() async
 }
 
-struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewServing, Sendable {
-    fileprivate static let expectedFFIContractVersion: UInt32 = 6
+struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewServing,
+    HomeScanServing, Sendable
+{
+    fileprivate static let expectedFFIContractVersion: UInt32 = 7
     fileprivate static let expectedRecordVersion: UInt32 = 1
 
     private let state: EngineServiceState
 
     init(
         engine: DuxEngine? = nil,
-        storageRoots: EngineStorageRoots? = nil
+        storageRoots: EngineStorageRoots? = nil,
+        homeScanRoot: URL? = nil
     ) {
         precondition(engine == nil || storageRoots == nil)
-        state = EngineServiceState(engine: engine, storageRoots: storageRoots)
+        state = EngineServiceState(
+            engine: engine,
+            storageRoots: storageRoots,
+            homeScanRoot: homeScanRoot
+        )
     }
 
     func loadStatus() async throws -> EngineStatus {
@@ -185,6 +192,40 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
                 return update
             } catch let error as PressurePolicyError {
                 throw Self.pressurePolicyError(error)
+            }
+        }
+    }
+
+    func startHomeScan() async throws -> HomeScanStartDisposition {
+        try await state.perform { state in
+            precondition(!Thread.isMainThread, "Blocking FFI work reached the main thread")
+            let home = state.homeScanRoot ?? FileManager.default.homeDirectoryForCurrentUser
+            guard home.isFileURL, home.path.hasPrefix("/") else {
+                throw HomeScanServiceError.invalidRoot
+            }
+            let engine: DuxEngine
+            do {
+                engine = try state.resolveEngine()
+            } catch let error as EngineServiceError {
+                throw Self.homeScanServiceError(error)
+            }
+            do {
+                let start = try engine.startScan(
+                    request: ScanRequest(
+                        recordVersion: Self.expectedRecordVersion,
+                        root: home.path
+                    )
+                )
+                guard start.recordVersion == Self.expectedRecordVersion else {
+                    throw HomeScanServiceError.invalidResponse
+                }
+                let task = FFIHomeScanTask(task: start.task, state: state)
+                return switch start.disposition {
+                case .started: .started(task)
+                case .alreadyActive: .alreadyActive(task)
+                }
+            } catch let error as ScanError {
+                throw Self.homeScanServiceError(error)
             }
         }
     }
@@ -375,6 +416,45 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         }
     }
 
+    fileprivate static func homeScanServiceError(_ error: ScanError) -> HomeScanServiceError {
+        switch error {
+        case .Closed: .closed
+        case .InvalidRecordVersion: .invalidResponse
+        case .InvalidRoot: .invalidRoot
+        case .RootMissing: .rootMissing
+        case .RootAccessDenied: .rootAccessDenied
+        case .RootNotDirectory: .rootNotDirectory
+        case .RootSymlink: .rootSymlink
+        case .RootChanged: .rootChanged
+        case .RootIdentityUnavailable: .rootIdentityUnavailable
+        case .UnsupportedPlatform: .unsupportedPlatform
+        case .RootUnavailable: .rootUnavailable
+        case .QueueFull: .queueFull
+        case .Busy: .busy
+        case .InputTooLarge: .inputTooLarge
+        case .ReadOnlyStore: .readOnlyStore
+        case .StorageUnavailable: .persistenceUnavailable
+        case .RegistryUnavailable: .internalState
+        case .TaskUnavailable: .taskExpired
+        case .EventHistoryUnavailable: .outcomeUnknown
+        case .WrongTaskKind: .wrongTaskKind
+        case .InternalState: .internalState
+        }
+    }
+
+    fileprivate static func homeScanServiceError(
+        _ error: EngineServiceError
+    ) -> HomeScanServiceError {
+        switch error {
+        case .closed: .closed
+        case .retryable: .busy
+        case .unavailable: .persistenceUnavailable
+        case .invalidCapacityObservation, .conflictingCapacityObservation,
+             .supersededCapacityObservation, .unexpected:
+            .internalState
+        }
+    }
+
     private static func resolvePressureEngine(
         _ state: EngineServiceState
     ) throws -> DuxEngine {
@@ -477,11 +557,13 @@ private final class EngineServiceState: @unchecked Sendable {
 
     private var engine: DuxEngine?
     private let storageRoots: EngineStorageRoots?
+    fileprivate let homeScanRoot: URL?
     private var closeResult: Bool?
 
-    init(engine: DuxEngine?, storageRoots: EngineStorageRoots?) {
+    init(engine: DuxEngine?, storageRoots: EngineStorageRoots?, homeScanRoot: URL?) {
         self.engine = engine
         self.storageRoots = storageRoots
+        self.homeScanRoot = homeScanRoot
     }
 
     fileprivate func resolveEngine() throws -> DuxEngine {
@@ -543,6 +625,337 @@ private final class EngineServiceState: @unchecked Sendable {
             state.closeResult = result
             return result
         }
+    }
+}
+
+private final class FFIHomeScanTask: HomeScanTask, @unchecked Sendable {
+    private let task: ScanTask
+    private let state: EngineServiceState
+    private var lastPoll: HomeScanTaskPoll?
+
+    init(task: ScanTask, state: EngineServiceState) {
+        self.task = task
+        self.state = state
+    }
+
+    func poll() async throws -> HomeScanTaskPoll {
+        try await state.perform { _ in
+            do {
+                let poll = try Self.map(self.task.poll(), after: self.lastPoll)
+                self.lastPoll = poll
+                return poll
+            } catch let error as ScanError {
+                throw EngineService.homeScanServiceError(error)
+            }
+        }
+    }
+
+    func requestCancellation() async throws -> HomeScanCancelOutcome {
+        try await state.perform { _ in
+            do {
+                return switch try self.task.cancel() {
+                case .cancelledBeforeStart: .cancelledBeforeStart
+                case .requested: .requested
+                case .alreadyRequested: .alreadyRequested
+                case .alreadyTerminal: .alreadyTerminal
+                }
+            } catch let error as ScanError {
+                throw EngineService.homeScanServiceError(error)
+            }
+        }
+    }
+
+    private static func map(
+        _ raw: ScanPoll,
+        after previous: HomeScanTaskPoll?
+    ) throws -> HomeScanTaskPoll {
+        guard raw.recordVersion == EngineService.expectedRecordVersion, raw.revision > 0 else {
+            throw HomeScanServiceError.invalidResponse
+        }
+        let progress = try raw.progress.map(mapProgress)
+        let result = try raw.result.map(mapResult)
+        let failure = raw.failure.map(mapFailure)
+        let phase: HomeScanTaskPhase = switch raw.phase {
+        case .queued: .queued
+        case .running: .running
+        case .succeeded: .succeeded
+        case .failed: .failed
+        case .cancelled: .cancelled
+        }
+        let stage: HomeScanTaskStage = switch raw.stage {
+        case .queued: .queued
+        case .scanning: .scanning
+        case .finalizing: .finalizing
+        case .evaluating: .evaluating
+        case .terminal: .terminal
+        }
+
+        guard validShape(
+            phase: raw.phase,
+            stage: raw.stage,
+            failure: raw.failure,
+            result: raw.result
+        ) else {
+            throw HomeScanServiceError.invalidResponse
+        }
+
+        let mapped = HomeScanTaskPoll(
+            phase: phase,
+            stage: stage,
+            cancellationRequested: raw.cancellationRequested,
+            revision: raw.revision,
+            progress: progress,
+            eventsTruncated: raw.eventsTruncated,
+            failure: failure,
+            result: result
+        )
+        guard validTerminalResult(progress: mapped.progress, result: mapped.result) else {
+            throw HomeScanServiceError.invalidResponse
+        }
+        if let previous {
+            guard
+                mapped.revision >= previous.revision,
+                !previous.cancellationRequested || mapped.cancellationRequested,
+                !previous.eventsTruncated || mapped.eventsTruncated,
+                validPhaseTransition(from: previous.phase, to: mapped.phase),
+                validStageTransition(from: previous.stage, to: mapped.stage),
+                validProgressTransition(from: previous.progress, to: mapped.progress),
+                validTerminalResult(progress: previous.progress, result: mapped.result)
+            else {
+                throw HomeScanServiceError.invalidResponse
+            }
+        }
+        return mapped
+    }
+
+    private static func mapProgress(_ raw: ScanProgress) throws -> ScanProgressFacts {
+        guard raw.recordVersion == EngineService.expectedRecordVersion else {
+            throw HomeScanServiceError.invalidResponse
+        }
+        return ScanProgressFacts(
+            files: raw.filesScanned,
+            directories: raw.directoriesScanned,
+            knownAllocatedBytes: raw.knownAllocatedBytes,
+            issueCount: raw.errorCount
+        )
+    }
+
+    private static func mapResult(_ raw: ScanTaskResult) throws -> HomeScanTaskResult {
+        guard
+            raw.recordVersion == EngineService.expectedRecordVersion,
+            validStableID(raw.scanId),
+            raw.startedAtUnixMs >= 0,
+            raw.completedAtUnixMs >= raw.startedAtUnixMs,
+            validCoverage(raw.coverage),
+            validCandidateEvaluation(raw.candidateEvaluation)
+        else {
+            throw HomeScanServiceError.invalidResponse
+        }
+
+        let succeeded = raw.status == .succeeded
+        switch raw.status {
+        case .succeeded:
+            guard
+                raw.snapshotAvailable,
+                raw.coverage.status != .unknown,
+                raw.candidateEvaluation.status != .notRun
+            else {
+                throw HomeScanServiceError.invalidResponse
+            }
+        case .failed, .cancelled, .interrupted:
+            guard
+                !raw.snapshotAvailable,
+                raw.directoryCount == 0,
+                raw.fileCount == 0,
+                raw.logicalBytes == 0,
+                raw.allocatedBytes == nil,
+                raw.candidateEvaluation.status == .notRun
+            else {
+                throw HomeScanServiceError.invalidResponse
+            }
+        }
+
+        let candidate: HomeScanCandidateEvaluation = switch raw.candidateEvaluation.status {
+        case .notRun: .notRun
+        case .succeeded:
+            .succeeded(candidateCount: raw.candidateEvaluation.candidateCount)
+        case .failed: .failed
+        }
+        return HomeScanTaskResult(
+            scanID: raw.scanId,
+            startedAt: Date(timeIntervalSince1970: Double(raw.startedAtUnixMs) / 1_000),
+            completedAt: Date(timeIntervalSince1970: Double(raw.completedAtUnixMs) / 1_000),
+            succeeded: succeeded,
+            directoryCount: raw.directoryCount,
+            fileCount: raw.fileCount,
+            logicalBytes: raw.logicalBytes,
+            allocatedBytes: raw.allocatedBytes,
+            coverage: mapCoverage(raw.coverage.status),
+            coveragePermille: raw.coverage.measuredPermille,
+            issueCount: raw.coverage.issueOccurrenceCount,
+            snapshotAvailable: raw.snapshotAvailable,
+            candidateEvaluation: candidate
+        )
+    }
+
+    private static func mapFailure(_ failure: ScanTaskFailure) -> HomeScanTaskFailure {
+        switch failure {
+        case .rootChanged: .rootChanged
+        case .scanFailed: .scanFailed
+        case .snapshotRejected: .snapshotRejected
+        case .persistenceUnavailable: .persistenceUnavailable
+        case .persistenceOutcomeUnknown: .persistenceOutcomeUnknown
+        case .internalState: .internalFailure
+        }
+    }
+
+    private static func mapCoverage(_ status: ScanCoverageStatus) -> AppScanCoverage {
+        switch status {
+        case .unknown: .unknown
+        case .complete: .complete
+        case .limitedAccess: .limitedAccess
+        case .partial: .partial
+        }
+    }
+
+    private static func validShape(
+        phase: TaskPhase,
+        stage: ScanStage,
+        failure: ScanTaskFailure?,
+        result: ScanTaskResult?
+    ) -> Bool {
+        switch phase {
+        case .queued:
+            return stage == .queued && failure == nil && result == nil
+        case .running:
+            return matchesActiveStage(stage) && failure == nil && result == nil
+        case .succeeded:
+            return stage == .terminal && failure == nil && result?.status == .succeeded
+        case .failed:
+            return stage == .terminal
+                && failure != nil
+                && (result.map { $0.status == .failed || $0.status == .interrupted } ?? true)
+        case .cancelled:
+            return stage == .terminal
+                && failure == nil
+                && (result.map { $0.status == .cancelled } ?? true)
+        }
+    }
+
+    private static func matchesActiveStage(_ stage: ScanStage) -> Bool {
+        switch stage {
+        case .scanning, .finalizing, .evaluating: true
+        case .queued, .terminal: false
+        }
+    }
+
+    private static func validStableID(_ value: String) -> Bool {
+        !value.isEmpty
+            && value.utf8.count <= 128
+            && value.unicodeScalars.allSatisfy { scalar in
+                scalar.isASCII
+                    && (CharacterSet.alphanumerics.contains(scalar)
+                        || "._-:".unicodeScalars.contains(scalar))
+            }
+    }
+
+    private static func validCoverage(_ coverage: ScanCoverageSummary) -> Bool {
+        guard
+            coverage.recordVersion == EngineService.expectedRecordVersion,
+            coverage.issueRecordCount <= 256,
+            coverage.issueOccurrenceCount >= coverage.issueRecordCount,
+            coverage.measuredPermille.map({ $0 <= 1_000 }) ?? true
+        else {
+            return false
+        }
+        switch coverage.status {
+        case .unknown:
+            return coverage.measuredPermille == nil
+                && coverage.issueRecordCount == 0
+                && coverage.issueOccurrenceCount == 0
+        case .complete:
+            return coverage.measuredPermille == 1_000
+                && coverage.issueRecordCount == 0
+                && coverage.issueOccurrenceCount == 0
+        case .limitedAccess, .partial:
+            return coverage.issueRecordCount > 0 && coverage.measuredPermille != 1_000
+        }
+    }
+
+    private static func validCandidateEvaluation(
+        _ evaluation: ScanCandidateEvaluationSummary
+    ) -> Bool {
+        guard
+            evaluation.recordVersion == EngineService.expectedRecordVersion,
+            evaluation.candidateCount <= 4_096
+        else {
+            return false
+        }
+        switch evaluation.status {
+        case .notRun:
+            return evaluation.candidateCount == 0 && evaluation.failure == nil
+        case .succeeded:
+            return evaluation.failure == nil
+        case .failed:
+            return evaluation.candidateCount == 0 && evaluation.failure != nil
+        }
+    }
+
+    private static func validPhaseTransition(
+        from previous: HomeScanTaskPhase,
+        to current: HomeScanTaskPhase
+    ) -> Bool {
+        switch previous {
+        case .queued:
+            return true
+        case .running:
+            return current != .queued
+        case .succeeded, .failed, .cancelled:
+            return current == previous
+        }
+    }
+
+    private static func validStageTransition(
+        from previous: HomeScanTaskStage,
+        to current: HomeScanTaskStage
+    ) -> Bool {
+        func rank(_ stage: HomeScanTaskStage) -> Int {
+            switch stage {
+            case .queued: 0
+            case .scanning: 1
+            case .finalizing: 2
+            case .evaluating: 3
+            case .terminal: 4
+            }
+        }
+        return rank(current) >= rank(previous)
+    }
+
+    private static func validProgressTransition(
+        from previous: ScanProgressFacts?,
+        to current: ScanProgressFacts?
+    ) -> Bool {
+        guard let previous else {
+            return true
+        }
+        guard let current else {
+            return false
+        }
+        return current.files >= previous.files
+            && current.directories >= previous.directories
+            && current.issueCount >= previous.issueCount
+    }
+
+    private static func validTerminalResult(
+        progress: ScanProgressFacts?,
+        result: HomeScanTaskResult?
+    ) -> Bool {
+        guard let progress, let result, result.succeeded else {
+            return true
+        }
+        return result.fileCount >= progress.files
+            && result.directoryCount >= progress.directories
+            && result.issueCount >= progress.issueCount
     }
 }
 

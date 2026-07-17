@@ -485,6 +485,11 @@ EXCEPTIONS = {
         "swift-filesystem-effect",
         "test",
     ),
+    "test-swift-home-scan-fixture-write": ExceptionSpec(
+        "dux-macos/DuxTests/EngineServiceTests.swift",
+        "swift-filesystem-effect",
+        "test",
+    ),
     "release-checksum-sidecars-remove": ExceptionSpec(
         ".github/workflows/release.yml", "shell-remove"
     ),
@@ -576,6 +581,7 @@ EXCEPTION_PRIMITIVES = {
     "test-swift-engine-fixture-remove": "removeItem",
     "test-swift-storage-roots-fixture-remove": "removeItem",
     "test-swift-retry-obstruction-remove": "removeItem",
+    "test-swift-home-scan-fixture-write": "write",
     "release-checksum-sidecars-remove": "rm",
     "lint-list-repository-sources": "subprocess.run",
     "test-lint-rejected-xcframework-output": "subprocess.run",

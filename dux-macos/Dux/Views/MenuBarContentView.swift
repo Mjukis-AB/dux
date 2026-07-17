@@ -7,14 +7,17 @@ struct MenuBarContentView: View {
     let model: AppModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Label("DUX Storage", systemImage: "externaldrive.fill")
-                .font(.headline)
-                .accessibilityAddTraits(.isHeader)
+        let presentation = MenuBarPopoverPresentation.make(
+            volumeState: model.volumeState,
+            scanState: model.scanState
+        )
 
-            volumeSummary
+        VStack(alignment: .leading, spacing: 14) {
+            volumeSummary(presentation.volume, actions: presentation.actions)
 
-            engineSummary
+            if let scan = presentation.scan {
+                scanSummary(scan, actions: presentation.actions)
+            }
 
             Divider()
 
@@ -26,139 +29,251 @@ struct MenuBarContentView: View {
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
-            .keyboardShortcut("o", modifiers: [.command])
+            .keyboardShortcut(
+                KeyEquivalent(MenuBarPopoverKeyboardShortcut.openExplorer),
+                modifiers: [.command]
+            )
+            .accessibilityIdentifier(MenuBarPopoverAccessibility.openExplorer)
+            .accessibilityHint("Opens or focuses the Storage Explorer window")
 
-            HStack {
-                Button {
-                    AppActivation.openSettings(using: openSettings)
-                } label: {
-                    Label("Settings…", systemImage: "gearshape")
+            HStack(spacing: 10) {
+                if presentation.actions.showScanNow {
+                    Button("Scan now") {
+                        Task { await model.startHomeScan() }
+                    }
+                    .disabled(!presentation.actions.scanNowEnabled)
+                    .keyboardShortcut(
+                        KeyEquivalent(MenuBarPopoverKeyboardShortcut.scanNow),
+                        modifiers: [.command]
+                    )
+                    .accessibilityIdentifier(MenuBarPopoverAccessibility.scanNow)
+                    .accessibilityHint("Scans the Home folder without changing files")
                 }
 
-                Spacer()
+                Button("Settings…") {
+                    AppActivation.openSettings(using: openSettings)
+                }
+                .keyboardShortcut(
+                    KeyEquivalent(MenuBarPopoverKeyboardShortcut.settings),
+                    modifiers: [.command]
+                )
+                .accessibilityIdentifier(MenuBarPopoverAccessibility.settings)
+
+                Spacer(minLength: 6)
 
                 Button("Quit DUX") {
                     AppActivation.quit()
                 }
-                .keyboardShortcut("q", modifiers: [.command])
+                .keyboardShortcut(
+                    KeyEquivalent(MenuBarPopoverKeyboardShortcut.quit),
+                    modifiers: [.command]
+                )
+                .accessibilityIdentifier(MenuBarPopoverAccessibility.quit)
             }
         }
-        .padding(18)
-        .frame(width: 360)
+        .padding(16)
+        .frame(width: 372)
+        .accessibilityIdentifier(MenuBarPopoverAccessibility.root)
         .task {
             await model.loadInitialState()
         }
     }
 
     @ViewBuilder
-    private var volumeSummary: some View {
-        switch model.volumeState {
-        case .idle, .loading:
+    private func volumeSummary(
+        _ volume: MenuBarPopoverVolumePresentation,
+        actions: MenuBarPopoverActionMatrix
+    ) -> some View {
+        switch volume {
+        case let .loading(message):
             HStack(spacing: 10) {
                 ProgressView()
                     .controlSize(.small)
-                Text("Checking startup disk…")
+                    .accessibilityLabel(Text(verbatim: message))
+                Text(verbatim: message)
                     .foregroundStyle(.secondary)
             }
-        case let .loaded(snapshot):
-            volumeSnapshot(snapshot)
-        case let .refreshing(snapshot):
-            VStack(alignment: .leading, spacing: 8) {
-                volumeSnapshot(snapshot)
-                Label("Refreshing capacity…", systemImage: "arrow.triangle.2.circlepath")
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier(MenuBarPopoverAccessibility.volumeSummary)
+
+        case let .snapshot(snapshot, status):
+            VStack(alignment: .leading, spacing: 9) {
+                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    Text(verbatim: snapshot.volumeName)
+                        .font(.subheadline.weight(.semibold))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .help(snapshot.volumeName)
+                        .accessibilityIdentifier(MenuBarPopoverAccessibility.volumeName)
+
+                    Spacer(minLength: 8)
+
+                    DiskPressureBadge(pressure: snapshot.pressure)
+                        .accessibilityIdentifier(MenuBarPopoverAccessibility.pressure)
+                }
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(verbatim: snapshot.availableHeadline)
+                        .font(.title2.bold())
+                        .monospacedDigit()
+                        .accessibilityIdentifier(MenuBarPopoverAccessibility.available)
+                        .accessibilitySortPriority(snapshot.isCritical ? 2 : 0)
+                    Text(verbatim: snapshot.totalText)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                        .accessibilityIdentifier(MenuBarPopoverAccessibility.total)
+                }
+
+                ProgressView(value: snapshot.availableFraction)
+                    .progressViewStyle(.linear)
+                    .tint(.accentColor)
+                    .accessibilityIdentifier(MenuBarPopoverAccessibility.capacityBar)
+                    .accessibilityLabel(Text(verbatim: snapshot.availabilityBasisText))
+                    .accessibilityValue(Text(verbatim: snapshot.availablePercentText))
+
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(verbatim: snapshot.availabilityBasisText)
+                    Spacer(minLength: 8)
+                    Text(verbatim: snapshot.availablePercentText)
+                        .monospacedDigit()
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+                Text(verbatim: snapshot.freshnessText)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .accessibilityIdentifier(MenuBarPopoverAccessibility.freshness)
+
+                if let status {
+                    capacityStatus(status, actions: actions)
+                }
             }
-        case let .stale(snapshot, _):
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier(MenuBarPopoverAccessibility.volumeSummary)
+            .accessibilityLabel(Text(verbatim: snapshot.accessibilitySummary))
+
+        case let .failed(title, detail):
             VStack(alignment: .leading, spacing: 8) {
-                volumeSnapshot(snapshot)
-                Label("Last known capacity", systemImage: "exclamationmark.triangle")
+                Label(title, systemImage: "exclamationmark.triangle.fill")
+                    .fontWeight(.semibold)
+                    .foregroundStyle(.red)
+                Text(verbatim: detail)
                     .font(.caption)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(.secondary)
+                if actions.showCapacityRetry {
+                    capacityRetryButton
+                }
             }
-        case .failed:
-            Label("Storage capacity unavailable", systemImage: "exclamationmark.triangle.fill")
-                .foregroundStyle(.red)
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier(MenuBarPopoverAccessibility.volumeSummary)
         }
     }
 
-    private func volumeSnapshot(_ snapshot: VolumeCapacitySnapshot) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if let displayName = snapshot.displayName {
-                Text(verbatim: displayName)
-                    .font(.subheadline.weight(.semibold))
+    private func capacityStatus(
+        _ status: MenuBarPopoverCapacityStatus,
+        actions: MenuBarPopoverActionMatrix
+    ) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            if status.showsProgress {
+                ProgressView()
+                    .controlSize(.small)
+                    .accessibilityHidden(true)
             } else {
-                Text("Startup Disk")
+                Image(systemName: "exclamationmark.triangle")
+                    .foregroundStyle(.orange)
+                    .accessibilityHidden(true)
+            }
+            Text(verbatim: status.message)
+                .font(.caption)
+                .foregroundStyle(status.style == .stale ? .orange : .secondary)
+            Spacer(minLength: 6)
+            if actions.showCapacityRetry {
+                capacityRetryButton
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier(MenuBarPopoverAccessibility.capacityStatus)
+    }
+
+    private var capacityRetryButton: some View {
+        Button("Try again") {
+            Task { await model.refreshVolumeCapacity() }
+        }
+        .controlSize(.small)
+        .accessibilityIdentifier(MenuBarPopoverAccessibility.capacityRetry)
+        .accessibilityHint("Checks startup-disk capacity again without starting a scan")
+    }
+
+    private func scanSummary(
+        _ scan: MenuBarPopoverScanPresentation,
+        actions: MenuBarPopoverActionMatrix
+    ) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            scanIcon(for: scan)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(verbatim: scan.title)
                     .font(.subheadline.weight(.semibold))
-            }
-
-            HStack(alignment: .firstTextBaseline) {
-                Text(verbatim: StorageByteFormatter.string(from: snapshot.effectiveAvailableBytes))
-                    .font(.title2.bold())
-                    .contentTransition(.numericText())
-                Spacer()
-                Text("\(snapshot.availablePercentage)% available")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-            }
-
-            if snapshot.availabilityBasis == .importantUsage {
-                Text("Available for important use")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            } else {
-                Text("Available")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            DiskPressureBadge(pressure: snapshot.pressure)
-
-            CapacityBar(snapshot: snapshot)
-
-            HStack {
-                Text("Used")
-                Spacer()
-                if let usedBytes = snapshot.usedBytes {
-                    Text(verbatim: StorageByteFormatter.string(from: usedBytes))
-                } else {
-                    Text("Unavailable")
+                if let detail = scan.detail {
+                    Text(verbatim: detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if scan.showsIndeterminateProgress {
+                    ProgressView()
+                        .progressViewStyle(.linear)
+                        .accessibilityIdentifier(MenuBarPopoverAccessibility.scanProgress)
+                        .accessibilityLabel(Text(verbatim: scan.title))
+                        .accessibilityValue(
+                            Text(verbatim: scan.progressAccessibilityValue ?? "")
+                        )
                 }
             }
-            .font(.caption)
-            .foregroundStyle(.secondary)
+
+            Spacer(minLength: 6)
+
+            if actions.showScanCancel {
+                Button("Cancel") {
+                    Task { await model.cancelHomeScan() }
+                }
+                .controlSize(.small)
+                .disabled(!actions.scanCancelEnabled)
+                .keyboardShortcut(
+                    KeyEquivalent(MenuBarPopoverKeyboardShortcut.cancelScan),
+                    modifiers: [.command]
+                )
+                .accessibilityIdentifier(MenuBarPopoverAccessibility.scanCancel)
+                .accessibilityHint("Stops the scan; previous results remain available")
+            }
         }
+        .padding(10)
+        .background(.quaternary, in: RoundedRectangle(cornerRadius: 9))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier(MenuBarPopoverAccessibility.scanStatus)
     }
 
     @ViewBuilder
-    private var engineSummary: some View {
-        switch model.engineState {
-        case .idle, .loading:
-            HStack(spacing: 10) {
-                ProgressView()
-                    .controlSize(.small)
-                Text("Connecting to the storage engine…")
-                    .foregroundStyle(.secondary)
-            }
-            .accessibilityElement(children: .combine)
-        case let .loaded(result):
-            HStack(alignment: .top, spacing: 10) {
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
-                    .accessibilityHidden(true)
-
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("Storage engine ready")
-                        .fontWeight(.medium)
-                    Text(verbatim: "v\(result.libraryVersion) · FFI \(result.ffiContractVersion)")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .accessibilityElement(children: .combine)
-        case .failed:
-            Label("Storage engine unavailable", systemImage: "exclamationmark.triangle.fill")
+    private func scanIcon(for scan: MenuBarPopoverScanPresentation) -> some View {
+        switch scan.style {
+        case .progress:
+            ProgressView()
+                .controlSize(.small)
+                .accessibilityHidden(true)
+        case .success:
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundStyle(.green)
+                .accessibilityHidden(true)
+        case .cancelled:
+            Image(systemName: "stop.circle")
+                .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
+        case .failure:
+            Image(systemName: "exclamationmark.triangle.fill")
                 .foregroundStyle(.red)
+                .accessibilityHidden(true)
         }
     }
 }

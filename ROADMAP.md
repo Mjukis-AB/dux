@@ -1246,14 +1246,12 @@ get_history(query) -> HistoryPageDto
 record_ai_insight(input_digest, insight)
 ```
 
-Current capacity realization (FFI contract v6):
+Current native realization (FFI contract v7):
 `observe_startup_volume(versioned Foundation facts) -> versioned path-free
 status` is the first production volume endpoint. It returns Rust-owned pressure,
 headline source/boundaries, prior durable pressure, and history disposition.
 The adapter fixes the mount to `/`; no path crosses from Swift, and incomplete
-or important-only evidence is explicitly evaluation-only. Paged scan and
-candidate DTOs remain later endpoints rather than being inferred from this
-telemetry call.
+or important-only evidence is explicitly evaluation-only.
 
 Contract v6 retains those startup records at v1 and adds separate versioned
 `get_disk_pressure_policy`, `set_disk_pressure_policy`, and
@@ -1262,6 +1260,17 @@ Default/Stored provenance, monotonic revision, optional update time, changed
 disposition, and typed validation/storage failures. A policy is never supplied
 with a capacity observation, and none of these DTOs can express a path, scan,
 candidate, plan, notification, schedule, or cleanup action.
+
+Contract v7 adds `start_scan(versioned discovery scope) -> opaque ScanTask`.
+The request admits only a bounded, absolute, control-free root and grants
+read-only observation scope, never cleanup or planning authority. The M3 native
+adapter fixes that root to Home. Poll/cancel records retain their cursor inside
+Rust and expose only authoritative phase, coarse stage, cancellation intent,
+revision, optional cumulative path-free progress, sticky truncation evidence,
+typed failure, and a path-free terminal summary. Missing progress is unknown,
+not zero, and late cancellation cannot replace the task's terminal outcome.
+Paged snapshot children, issue details, candidate details, planner inputs, and
+execution remain separately gated later endpoints.
 
 Requirements:
 
@@ -3417,7 +3426,30 @@ Tasks:
   fallback, one-write AppModel propagation, and accessibility contracts. The
   full 82-test linked Swift suite passes, and unsigned universal Debug and
   Release apps contain both arm64 and x86_64 at the macOS 14 deployment target.
-- [ ] Implement popover layout with cached status and scan progress.
+- [x] Implement popover layout with cached status and scan progress. Completed
+  2026-07-17: the menu-bar popover renders the cached startup-volume identity,
+  Rust-owned pressure classification, effective available and total capacity,
+  percentage, availability basis, and freshness without starting a scan or
+  fabricating missing data. Refresh keeps the last confirmed measurement and
+  marks it stale on failure. Scan now explicitly starts one shared Home scan;
+  reopening the popover does not start or duplicate work, cancellation remains
+  visible until Rust reports a terminal outcome, late success is represented
+  honestly, and the last successful result remains available through retries,
+  cancellation, and failures. Stable keyboard shortcuts and VoiceOver
+  identifiers cover every action and status region.
+
+  UniFFI contract v7 exposes a bounded read-only discovery request and an opaque
+  task whose polls/results contain only aggregate path-free progress and counts.
+  Only the exact same canonical root can coalesce; non-equivalent overlapping
+  roots return typed Busy rather than attaching a broader request to narrower
+  work. The boundary grants no path detail, candidate, plan, approval, AI, or
+  cleanup authority. Blocking FFI calls stay on the engine utility queue, Swift
+  validates monotonic snapshots and generation-fences callbacks, and shutdown
+  requests scan cancellation before closing maintenance, review, and engine
+  state. The complete 105-test linked Swift suite, the full Rust workspace test
+  and lint gates (including 735 core tests), the 20-test destructive-boundary
+  checker suite, and unsigned universal arm64/x86_64 Debug and Release builds at
+  the macOS 14 deployment target pass.
 - [ ] Implement Explorer window shell and Overview.
 - [ ] Implement launch-at-login setting.
 - [ ] Implement notification permission UI but do not notify repeatedly.

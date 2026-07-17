@@ -152,7 +152,8 @@ bar, Explorer, and Settings scenes. Capacity is never derived from directory
 scan totals, and the Rust engine pressure evaluator remains the only owner of
 Healthy/Warning/Critical thresholds and hysteresis.
 
-Settings uses FFI contract v6's typed pressure-policy get/set/reset calls. Rust
+Settings uses FFI contract v7's carried-forward typed pressure-policy
+get/set/reset calls. Rust
 persists canonical exact integer configuration and remains the sole semantic
 validator/evaluator. Swift holds GiB and percentage edits as text and converts
 them with checked integer arithmetic, so arbitrary stored byte values round-trip
@@ -160,3 +161,17 @@ without `Double`, `Decimal`, or silent rounding. A changed save or reset routes
 one manual signal through the capacity scheduler; unchanged, failed, cancelled,
 or superseded operations signal nothing. Policy state is classification-only
 and carries no scan, notification, schedule, plan, or cleanup authority.
+
+The menu popover uses only cached startup-volume state until the user explicitly
+chooses Scan now. It shows the volume name, Rust-classified pressure, effective
+available bytes, total, percentage, capacity basis, and sample freshness; a
+refresh keeps the cached observation visible and a failed refresh labels it
+stale. The Scan now action is fixed to the current user's Home directory and
+starts one application-owned scan driver. FFI v7's opaque scan task is polled on
+the same utility queue at 500 ms intervals and returns only optional cumulative
+aggregate progress and a path-free terminal summary. No current path, file
+name, node, candidate detail, plan, or cleanup authority crosses into render
+state. Cancellation remains visibly pending until Rust reports the terminal
+outcome, and a late success remains success. App shutdown requests scan
+cancellation and quiesces the publication driver before maintenance, review,
+and engine shutdown.

@@ -16,11 +16,14 @@ final class AppModel: DuxCapacitySampling {
     private(set) var diskPressurePolicy: DiskPressurePolicy?
     private(set) var diskPressurePolicyState = DiskPressurePolicyState.idle
     var diskPressurePolicyDraft = DiskPressurePolicyDraft.defaults
+    private(set) var scanState = AppScanState.idle
 
     private let engineService: any EngineServing
     private let volumeMonitor: any VolumeMonitoring
     private let capacityResampleRequester: any DuxCapacityResampleRequesting
     private let menuBarLabelPreferenceStore: any MenuBarLabelPreferenceStoring
+    private let homeScanService: any HomeScanServing
+    private let homeScanClock: any HomeScanPollingClock
 
     @ObservationIgnored
     private var engineLoadTask: Task<Void, Never>?
@@ -36,6 +39,18 @@ final class AppModel: DuxCapacitySampling {
     private var pressurePolicyGeneration: UInt64 = 0
     @ObservationIgnored
     private var pressurePolicyIsInvalidated = false
+    @ObservationIgnored
+    private var homeScanDriverTask: Task<Void, Never>?
+    @ObservationIgnored
+    private var activeHomeScanTask: (any HomeScanTask)?
+    @ObservationIgnored
+    private var homeScanGeneration: UInt64 = 0
+    @ObservationIgnored
+    private var homeScanCancellationRequested = false
+    @ObservationIgnored
+    private var latestHomeScanProgress: ScanProgressFacts?
+    @ObservationIgnored
+    private var homeScanIsInvalidated = false
 
     init(
         engineService: any EngineServing = EngineService(),
@@ -43,12 +58,19 @@ final class AppModel: DuxCapacitySampling {
         capacityResampleRequester: any DuxCapacityResampleRequesting =
             NoopDuxCapacityResampleRequester(),
         menuBarLabelPreferenceStore: any MenuBarLabelPreferenceStoring =
-            UserDefaultsMenuBarLabelPreferenceStore()
+            UserDefaultsMenuBarLabelPreferenceStore(),
+        homeScanService: (any HomeScanServing)? = nil,
+        homeScanClock: any HomeScanPollingClock = ContinuousHomeScanPollingClock()
     ) {
         self.engineService = engineService
         self.volumeMonitor = volumeMonitor
         self.capacityResampleRequester = capacityResampleRequester
         self.menuBarLabelPreferenceStore = menuBarLabelPreferenceStore
+        self.homeScanService = resolvedHomeScanService(
+            engineService: engineService,
+            override: homeScanService
+        )
+        self.homeScanClock = homeScanClock
         menuBarLabelMode = menuBarLabelPreferenceStore.load()
     }
 
@@ -210,6 +232,111 @@ final class AppModel: DuxCapacitySampling {
         diskPressurePolicyState = diskPressurePolicy == nil ? .idle : .ready
     }
 
+    func startHomeScan() async {
+        guard !homeScanIsInvalidated else {
+            return
+        }
+        if let homeScanDriverTask {
+            await homeScanDriverTask.value
+            return
+        }
+
+        homeScanGeneration &+= 1
+        let generation = homeScanGeneration
+        homeScanCancellationRequested = false
+        latestHomeScanProgress = nil
+        scanState.phase = .queued
+
+        let service = homeScanService
+        let clock = homeScanClock
+        let driver = Task { @MainActor [weak self] in
+            guard let self else {
+                return
+            }
+            do {
+                let started = try await service.startHomeScan()
+                let task = started.task
+                guard self.isCurrentHomeScan(generation) else {
+                    _ = try? await task.requestCancellation()
+                    return
+                }
+                self.activeHomeScanTask = task
+                if self.homeScanCancellationRequested {
+                    _ = try? await task.requestCancellation()
+                }
+
+                while self.isCurrentHomeScan(generation) {
+                    let poll = try await task.poll()
+                    guard self.isCurrentHomeScan(generation) else {
+                        _ = try? await task.requestCancellation()
+                        return
+                    }
+                    let terminal = self.publishHomeScanPoll(poll)
+                    if terminal {
+                        self.finishHomeScanDriver(generation: generation)
+                        return
+                    }
+                    try await clock.sleepUntilNextPoll()
+                }
+                _ = try? await task.requestCancellation()
+            } catch is CancellationError {
+                return
+            } catch {
+                guard self.isCurrentHomeScan(generation) else {
+                    return
+                }
+                if let task = self.activeHomeScanTask {
+                    _ = try? await task.requestCancellation()
+                }
+                guard self.isCurrentHomeScan(generation) else {
+                    return
+                }
+                self.scanState.phase = .failed(Self.homeScanFailure(for: error))
+                self.finishHomeScanDriver(generation: generation)
+            }
+        }
+        homeScanDriverTask = driver
+        await driver.value
+    }
+
+    func cancelHomeScan() async {
+        guard
+            !homeScanIsInvalidated,
+            scanState.phase.isActive,
+            !homeScanCancellationRequested
+        else {
+            return
+        }
+        homeScanCancellationRequested = true
+        scanState.phase = .cancellationRequested(latestHomeScanProgress)
+        guard let activeHomeScanTask else {
+            return
+        }
+        _ = try? await activeHomeScanTask.requestCancellation()
+    }
+
+    func shutdownHomeScan() async {
+        guard !homeScanIsInvalidated else {
+            if let homeScanDriverTask {
+                await homeScanDriverTask.value
+            }
+            return
+        }
+        homeScanIsInvalidated = true
+        homeScanCancellationRequested = true
+        homeScanGeneration &+= 1
+
+        let task = activeHomeScanTask
+        let driver = homeScanDriverTask
+        activeHomeScanTask = nil
+        homeScanDriverTask = nil
+        if let task {
+            _ = try? await task.requestCancellation()
+        }
+        driver?.cancel()
+        await driver?.value
+    }
+
     private func publishVolumeRefresh(
         _ result: Result<VolumeCapacitySnapshot, Error>,
         generation: UInt64
@@ -316,6 +443,95 @@ final class AppModel: DuxCapacitySampling {
             return .draft(error)
         }
         return .unexpected
+    }
+
+    private func isCurrentHomeScan(_ generation: UInt64) -> Bool {
+        !homeScanIsInvalidated && generation == homeScanGeneration
+    }
+
+    private func publishHomeScanPoll(_ poll: HomeScanTaskPoll) -> Bool {
+        if let progress = poll.progress {
+            latestHomeScanProgress = progress
+        }
+
+        switch poll.phase {
+        case .queued:
+            if homeScanCancellationRequested || poll.cancellationRequested {
+                homeScanCancellationRequested = true
+                scanState.phase = .cancellationRequested(latestHomeScanProgress)
+            } else {
+                scanState.phase = .queued
+            }
+            return false
+        case .running:
+            if homeScanCancellationRequested || poll.cancellationRequested {
+                homeScanCancellationRequested = true
+                scanState.phase = .cancellationRequested(latestHomeScanProgress)
+                return false
+            }
+            scanState.phase = switch poll.stage {
+            case .queued: .queued
+            case .scanning: .scanning(latestHomeScanProgress)
+            case .finalizing: .finalizing(latestHomeScanProgress)
+            case .evaluating: .evaluating(latestHomeScanProgress)
+            case .terminal: .failed(.invalidResponse)
+            }
+            return poll.stage == .terminal
+        case .succeeded:
+            guard let summary = poll.result?.successfulSummary else {
+                scanState.phase = .failed(.invalidResponse)
+                return true
+            }
+            scanState.lastSuccessful = summary
+            scanState.phase = .succeeded(summary)
+            return true
+        case .failed:
+            scanState.phase = .failed(Self.homeScanFailure(for: poll.failure))
+            return true
+        case .cancelled:
+            scanState.phase = .cancelled
+            return true
+        }
+    }
+
+    private func finishHomeScanDriver(generation: UInt64) {
+        guard generation == homeScanGeneration else {
+            return
+        }
+        activeHomeScanTask = nil
+        homeScanDriverTask = nil
+        homeScanCancellationRequested = false
+    }
+
+    private static func homeScanFailure(for failure: HomeScanTaskFailure?) -> AppScanFailure {
+        switch failure {
+        case .rootChanged: .rootUnavailable
+        case .scanFailed: .scanFailed
+        case .snapshotRejected: .snapshotRejected
+        case .persistenceUnavailable: .storageUnavailable
+        case .persistenceOutcomeUnknown: .outcomeUnknown
+        case .internalFailure, .none: .unexpected
+        }
+    }
+
+    private static func homeScanFailure(for error: Error) -> AppScanFailure {
+        guard let error = error as? HomeScanServiceError else {
+            return .unexpected
+        }
+        return switch error {
+        case .closed: .closed
+        case .queueFull, .busy: .busy
+        case .inputTooLarge, .invalidRoot, .rootMissing, .rootAccessDenied, .rootNotDirectory,
+             .rootSymlink, .rootChanged, .rootIdentityUnavailable, .unsupportedPlatform,
+             .rootUnavailable:
+            .rootUnavailable
+        case .persistenceUnavailable, .budgetExceeded: .storageUnavailable
+        case .readOnlyStore, .incompatibleSchema, .unsafeStorage, .corruptData:
+            .incompatibleStorage
+        case .taskExpired: .taskExpired
+        case .outcomeUnknown: .outcomeUnknown
+        case .wrongTaskKind, .internalState, .invalidResponse: .invalidResponse
+        }
     }
 
     private static func volumeFailure(for error: Error) -> VolumeCapacityFailure {

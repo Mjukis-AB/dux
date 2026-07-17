@@ -2782,12 +2782,18 @@ impl EngineHandle {
             return Err(StartTaskError::QueueFull);
         }
         if let Some(scope) = &scan_scope
-            && let Some(existing) = registry
+            && let Some((active, existing)) = registry
                 .active_scan_roots
                 .iter()
-                .find_map(|(active, id)| super::config::paths_overlap(active, scope).then_some(*id))
+                .find(|(active, _)| super::config::paths_overlap(active, scope))
         {
-            return Err(StartTaskError::ScanAlreadyActive { existing });
+            return if active.as_path() == scope.as_path() {
+                Err(StartTaskError::ScanAlreadyActive {
+                    existing: *existing,
+                })
+            } else {
+                Err(StartTaskError::ScanScopeBusy)
+            };
         }
         let id = TASK_IDS.allocate()?;
         let record = TaskRecord::new(

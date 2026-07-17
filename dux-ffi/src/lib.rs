@@ -6,12 +6,16 @@ use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use dux_core::engine::{
-    CancelOutcome as CoreCancelOutcome, CapacityHistoryDisposition as CoreHistoryDisposition,
-    DiskPressurePolicy as CorePressurePolicy, DiskPressurePolicyError as CorePressurePolicyError,
+    CancelOutcome as CoreCancelOutcome,
+    CandidateEvaluationTaskFailureKind as CoreCandidateEvaluationFailure,
+    CandidateEvaluationTaskStatus as CoreCandidateEvaluationStatus,
+    CapacityHistoryDisposition as CoreHistoryDisposition, DiskPressurePolicy as CorePressurePolicy,
+    DiskPressurePolicyError as CorePressurePolicyError,
     DiskPressurePolicySource as CorePressurePolicySource,
     DiskPressurePolicyUpdate as CorePressurePolicyUpdate, EngineConfig, EngineHandle,
     EngineOpenError, HistoryMaintenanceStartOutcome,
     ScanRecoveryMaintenanceOutcome as CoreScanRecoveryOutcome, ScanRecoveryMaintenanceStartOutcome,
+    ScanRootErrorKind, ScanTaskResult as CoreScanTaskResult, ScanTaskStatus as CoreScanTaskStatus,
     SnapshotOrphanMaintenanceOutcome as CoreOrphanOutcome, SnapshotOrphanMaintenanceStartOutcome,
     SnapshotProvisioningStageMaintenanceOutcome as CoreStageOutcome,
     SnapshotProvisioningStageMaintenanceStartOutcome,
@@ -22,19 +26,23 @@ use dux_core::engine::{
     SnapshotTerminalTempMaintenanceOutcome as CoreTerminalTempOutcome,
     SnapshotTerminalTempMaintenanceStartOutcome,
     SnapshotUnleasedTempMaintenanceOutcome as CoreUnleasedTempOutcome,
-    SnapshotUnleasedTempMaintenanceStartOutcome, StartTaskError, TaskFailureKind, TaskId,
-    TaskPhase as CoreTaskPhase, VolumeCapacityObservation as CoreVolumeObservation,
+    SnapshotUnleasedTempMaintenanceStartOutcome, StartTaskError, TaskAccessError,
+    TaskEventBatch as CoreTaskEventBatch, TaskEventKind as CoreTaskEventKind, TaskFailureKind,
+    TaskId, TaskKind as CoreTaskKind, TaskPhase as CoreTaskPhase,
+    VolumeCapacityObservation as CoreVolumeObservation,
     VolumeCapacityStatusError as CoreVolumeStatusError,
 };
 use dux_core::{
     AvailableCapacitySource as CoreCapacitySource, DatabaseOpenErrorKind,
     DiskPressure as CoreDiskPressure, DiskPressureConfig, DiskPressureConfigError,
-    DiskPressureRecoveryMargin, DiskPressureThreshold, ScanId, SnapshotOpenErrorKind,
-    VolumeCapacity, VolumeId,
+    DiskPressureRecoveryMargin, DiskPressureThreshold, ScanCoverageStatus as CoreCoverageStatus,
+    ScanId, SnapshotOpenErrorKind, VolumeCapacity, VolumeId,
 };
 
-const FFI_CONTRACT_VERSION: u32 = 6;
+const FFI_CONTRACT_VERSION: u32 = 7;
 const FFI_RECORD_VERSION: u32 = 1;
+const SCAN_EVENT_PAGE_LIMIT: u16 = 64;
+const MAX_SCAN_ROOT_UTF8_BYTES: usize = 32 * 1_024;
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 static LIVE_ENGINE_INSTANCE_COUNT: AtomicU64 = AtomicU64::new(0);
 
@@ -243,6 +251,196 @@ pub enum EngineError {
     InternalState,
 }
 
+/// Versioned read-only discovery request. `root` is input scope only: it is
+/// validated by the core and is never returned as cleanup authority.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct ScanRequest {
+    pub record_version: u32,
+    pub root: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum ScanStartDisposition {
+    Started,
+    AlreadyActive,
+}
+
+#[derive(Clone, uniffi::Record)]
+pub struct ScanStart {
+    pub record_version: u32,
+    pub disposition: ScanStartDisposition,
+    pub task: Arc<ScanTask>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum ScanStage {
+    Queued,
+    Scanning,
+    Finalizing,
+    Evaluating,
+    Terminal,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum ScanTerminalStatus {
+    Succeeded,
+    Failed,
+    Cancelled,
+    Interrupted,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum ScanCoverageStatus {
+    Unknown,
+    Complete,
+    LimitedAccess,
+    Partial,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct ScanCoverageSummary {
+    pub record_version: u32,
+    pub status: ScanCoverageStatus,
+    pub measured_permille: Option<u16>,
+    pub issue_record_count: u64,
+    pub issue_occurrence_count: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum ScanCandidateEvaluationStatus {
+    NotRun,
+    Succeeded,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum ScanCandidateEvaluationFailure {
+    Cancelled,
+    CatalogInvalid,
+    ContextInvalid,
+    EvaluationFailed,
+    CandidateInvalid,
+    LimitExceeded,
+    InternalState,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct ScanCandidateEvaluationSummary {
+    pub record_version: u32,
+    pub status: ScanCandidateEvaluationStatus,
+    pub candidate_count: u32,
+    pub failure: Option<ScanCandidateEvaluationFailure>,
+}
+
+/// Frozen, path-free terminal summary. It is discovery history only and does
+/// not carry a target, plan, approval, or cleanup capability.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct ScanTaskResult {
+    pub record_version: u32,
+    pub scan_id: String,
+    pub started_at_unix_ms: i64,
+    pub completed_at_unix_ms: i64,
+    pub status: ScanTerminalStatus,
+    pub directory_count: u64,
+    pub file_count: u64,
+    pub logical_bytes: u64,
+    pub allocated_bytes: Option<u64>,
+    pub snapshot_available: bool,
+    pub coverage: ScanCoverageSummary,
+    pub candidate_evaluation: ScanCandidateEvaluationSummary,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum ScanTaskFailure {
+    RootChanged,
+    ScanFailed,
+    SnapshotRejected,
+    PersistenceUnavailable,
+    PersistenceOutcomeUnknown,
+    InternalState,
+}
+
+/// Latest measured scanner heartbeat. Its absence means that no aggregate
+/// progress event has been observed; it must not be presented as measured zero.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct ScanProgress {
+    pub record_version: u32,
+    pub files_scanned: u64,
+    pub directories_scanned: u64,
+    pub known_allocated_bytes: u64,
+    pub error_count: u64,
+}
+
+/// One path-free aggregate observation. The task retains its event cursor
+/// privately; `events_truncated` records whether any aggregate events were
+/// already gone from the bounded core ring before this object observed them.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct ScanPoll {
+    pub record_version: u32,
+    pub phase: TaskPhase,
+    pub stage: ScanStage,
+    pub cancellation_requested: bool,
+    pub revision: u64,
+    pub progress: Option<ScanProgress>,
+    pub events_truncated: bool,
+    pub failure: Option<ScanTaskFailure>,
+    pub result: Option<ScanTaskResult>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum ScanCancelOutcome {
+    CancelledBeforeStart,
+    Requested,
+    AlreadyRequested,
+    AlreadyTerminal,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error, uniffi::Error)]
+pub enum ScanError {
+    #[error("engine session is closed")]
+    Closed,
+    #[error("scan request record version is unsupported")]
+    InvalidRecordVersion,
+    #[error("scan root must be an absolute discovery scope")]
+    InvalidRoot,
+    #[error("scan root does not exist")]
+    RootMissing,
+    #[error("scan root is not accessible")]
+    RootAccessDenied,
+    #[error("scan root is not a directory")]
+    RootNotDirectory,
+    #[error("scan root is a symbolic link")]
+    RootSymlink,
+    #[error("scan root changed while it was validated")]
+    RootChanged,
+    #[error("scan root identity is unavailable")]
+    RootIdentityUnavailable,
+    #[error("scan root is unsupported on this platform")]
+    UnsupportedPlatform,
+    #[error("scan root is temporarily unavailable")]
+    RootUnavailable,
+    #[error("engine task queue is full")]
+    QueueFull,
+    #[error("an overlapping scan scope is already active")]
+    Busy,
+    #[error("scan request exceeds the engine input bound")]
+    InputTooLarge,
+    #[error("durable store is read-only")]
+    ReadOnlyStore,
+    #[error("durable scan storage is unavailable")]
+    StorageUnavailable,
+    #[error("engine task registry is unavailable")]
+    RegistryUnavailable,
+    #[error("scan task is unknown or no longer retained")]
+    TaskUnavailable,
+    #[error("scan event history is internally inconsistent")]
+    EventHistoryUnavailable,
+    #[error("opaque task does not refer to a scan")]
+    WrongTaskKind,
+    #[error("internal scan bridge state is invalid")]
+    InternalState,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum MaintenanceKind {
     ScanRecovery,
@@ -436,6 +634,158 @@ impl SnapshotReviewSession {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct ScanProgressState {
+    event_cursor: u64,
+    stage: ScanStage,
+    has_progress: bool,
+    files_scanned: u64,
+    directories_scanned: u64,
+    known_allocated_bytes: u64,
+    error_count: u64,
+    events_truncated: bool,
+}
+
+impl Default for ScanProgressState {
+    fn default() -> Self {
+        Self {
+            event_cursor: 0,
+            stage: ScanStage::Queued,
+            has_progress: false,
+            files_scanned: 0,
+            directories_scanned: 0,
+            known_allocated_bytes: 0,
+            error_count: 0,
+            events_truncated: false,
+        }
+    }
+}
+
+impl ScanProgressState {
+    fn apply(&mut self, batch: CoreTaskEventBatch) {
+        self.events_truncated |= batch.truncated;
+        for event in batch.events {
+            match event.kind {
+                CoreTaskEventKind::Queued => self.stage = ScanStage::Queued,
+                CoreTaskEventKind::Started => self.stage = ScanStage::Scanning,
+                CoreTaskEventKind::ScanProgress {
+                    files,
+                    directories,
+                    known_allocated_bytes,
+                    errors,
+                } => {
+                    self.stage = ScanStage::Scanning;
+                    self.has_progress = true;
+                    self.files_scanned = files;
+                    self.directories_scanned = directories;
+                    self.known_allocated_bytes = known_allocated_bytes;
+                    self.error_count = errors;
+                }
+                CoreTaskEventKind::ScanFinalizing => self.stage = ScanStage::Finalizing,
+                CoreTaskEventKind::CandidateEvaluationStarted
+                | CoreTaskEventKind::CandidateEvaluationFinished { .. } => {
+                    self.stage = ScanStage::Evaluating;
+                }
+                CoreTaskEventKind::Terminal { .. } => self.stage = ScanStage::Terminal,
+                CoreTaskEventKind::Progress { .. }
+                | CoreTaskEventKind::CancellationRequested
+                | CoreTaskEventKind::ScanRecoveryMaintenanceBatchApplying
+                | CoreTaskEventKind::ScanRecoveryMaintenanceBatchFinished { .. }
+                | CoreTaskEventKind::HistoryMaintenanceBatchApplying
+                | CoreTaskEventKind::HistoryMaintenanceBatchFinished { .. }
+                | CoreTaskEventKind::SnapshotRetentionBatchApplying
+                | CoreTaskEventKind::SnapshotRetentionBatchFinished { .. }
+                | CoreTaskEventKind::SnapshotOrphanMaintenanceBatchApplying
+                | CoreTaskEventKind::SnapshotOrphanMaintenanceBatchFinished { .. }
+                | CoreTaskEventKind::SnapshotProvisioningStageMaintenanceBatchApplying
+                | CoreTaskEventKind::SnapshotProvisioningStageMaintenanceBatchFinished { .. }
+                | CoreTaskEventKind::SnapshotTerminalTempMaintenanceBatchApplying
+                | CoreTaskEventKind::SnapshotTerminalTempMaintenanceBatchFinished { .. }
+                | CoreTaskEventKind::SnapshotUnleasedTempMaintenanceBatchApplying
+                | CoreTaskEventKind::SnapshotUnleasedTempMaintenanceBatchFinished { .. } => {}
+                _ => {}
+            }
+        }
+        self.event_cursor = batch.next_sequence;
+    }
+}
+
+#[derive(uniffi::Object)]
+pub struct ScanTask {
+    engine: EngineHandle,
+    id: TaskId,
+    progress: Mutex<ScanProgressState>,
+}
+
+#[uniffi::export]
+impl ScanTask {
+    pub fn poll(&self) -> Result<ScanPoll, ScanError> {
+        let mut progress = self.progress.lock().map_err(|_| ScanError::InternalState)?;
+        let events = self
+            .engine
+            .task_events(self.id, progress.event_cursor, SCAN_EVENT_PAGE_LIMIT)
+            .map_err(map_scan_access_error)?;
+        progress.apply(events);
+
+        let snapshot = self
+            .engine
+            .task_snapshot(self.id)
+            .map_err(map_scan_access_error)?;
+        if snapshot.kind != CoreTaskKind::Scan {
+            return Err(ScanError::WrongTaskKind);
+        }
+        if snapshot.phase == CoreTaskPhase::Running && progress.stage == ScanStage::Queued {
+            progress.stage = ScanStage::Scanning;
+        }
+        if snapshot.phase.is_terminal() {
+            progress.stage = ScanStage::Terminal;
+        }
+
+        let result = if snapshot.result_available {
+            self.engine
+                .scan_result(self.id)
+                .map_err(map_scan_access_error)?
+                .map(|result| scan_task_result(&result))
+                .transpose()?
+        } else {
+            None
+        };
+        let failure = snapshot.failure.map(map_scan_task_failure);
+        validate_scan_terminal_observation(snapshot.phase, failure, result.as_ref())?;
+
+        Ok(ScanPoll {
+            record_version: FFI_RECORD_VERSION,
+            phase: map_phase(snapshot.phase),
+            stage: progress.stage,
+            cancellation_requested: snapshot.cancellation_requested,
+            revision: snapshot.revision,
+            progress: progress.has_progress.then_some(ScanProgress {
+                record_version: FFI_RECORD_VERSION,
+                files_scanned: progress.files_scanned,
+                directories_scanned: progress.directories_scanned,
+                known_allocated_bytes: progress.known_allocated_bytes,
+                error_count: progress.error_count,
+            }),
+            events_truncated: progress.events_truncated,
+            failure,
+            result,
+        })
+    }
+
+    pub fn cancel(&self) -> Result<ScanCancelOutcome, ScanError> {
+        match self
+            .engine
+            .cancel_task(self.id)
+            .map_err(map_scan_access_error)?
+        {
+            CoreCancelOutcome::CancelledBeforeStart => Ok(ScanCancelOutcome::CancelledBeforeStart),
+            CoreCancelOutcome::Requested => Ok(ScanCancelOutcome::Requested),
+            CoreCancelOutcome::AlreadyRequested => Ok(ScanCancelOutcome::AlreadyRequested),
+            CoreCancelOutcome::AlreadyTerminal => Ok(ScanCancelOutcome::AlreadyTerminal),
+        }
+    }
+}
+
 #[derive(uniffi::Object)]
 pub struct MaintenanceTask {
     engine: EngineHandle,
@@ -612,6 +962,32 @@ impl DuxEngine {
         })
     }
 
+    pub fn start_scan(&self, request: ScanRequest) -> Result<ScanStart, ScanError> {
+        if request.record_version != FFI_RECORD_VERSION {
+            return Err(ScanError::InvalidRecordVersion);
+        }
+        if request.root.len() > MAX_SCAN_ROOT_UTF8_BYTES {
+            return Err(ScanError::InputTooLarge);
+        }
+        if request.root.is_empty() || request.root.chars().any(char::is_control) {
+            return Err(ScanError::InvalidRoot);
+        }
+        let root = PathBuf::from(request.root);
+        if !root.is_absolute() {
+            return Err(ScanError::InvalidRoot);
+        }
+        self.with_scan_engine(|engine| match engine.start_scan(root) {
+            Ok(id) => Ok(scan_start(engine, id, ScanStartDisposition::Started)),
+            Err(StartTaskError::ScanAlreadyActive { existing }) => Ok(scan_start(
+                engine,
+                existing,
+                ScanStartDisposition::AlreadyActive,
+            )),
+            Err(StartTaskError::ScanScopeBusy) => Err(ScanError::Busy),
+            Err(error) => Err(map_scan_start_error(error)),
+        })
+    }
+
     pub fn acquire_explorer_snapshot_review(
         &self,
         scan_id: String,
@@ -721,6 +1097,17 @@ impl DuxEngine {
         }
     }
 
+    fn with_scan_engine<T>(
+        &self,
+        operation: impl FnOnce(&EngineHandle) -> Result<T, ScanError>,
+    ) -> Result<T, ScanError> {
+        let state = self.state.lock().map_err(|_| ScanError::InternalState)?;
+        match &*state {
+            EngineState::Open(engine) => operation(engine),
+            EngineState::Closing | EngineState::Closed { .. } => Err(ScanError::Closed),
+        }
+    }
+
     fn release_registered_reviews(&self) {
         let reviews = match self.reviews.lock() {
             Ok(mut reviews) => std::mem::take(&mut *reviews),
@@ -750,6 +1137,227 @@ pub fn library_version() -> LibraryVersion {
 #[uniffi::export]
 pub fn live_engine_instance_count() -> u64 {
     LIVE_ENGINE_INSTANCE_COUNT.load(Ordering::Relaxed)
+}
+
+fn scan_start(engine: &EngineHandle, id: TaskId, disposition: ScanStartDisposition) -> ScanStart {
+    ScanStart {
+        record_version: FFI_RECORD_VERSION,
+        disposition,
+        task: Arc::new(ScanTask {
+            engine: engine.clone(),
+            id,
+            progress: Mutex::new(ScanProgressState::default()),
+        }),
+    }
+}
+
+fn scan_task_result(result: &CoreScanTaskResult) -> Result<ScanTaskResult, ScanError> {
+    let counts = result.counts();
+    let coverage = result.coverage();
+    let issue_record_count =
+        u64::try_from(coverage.issues().len()).map_err(|_| ScanError::InternalState)?;
+    let issue_occurrence_count = coverage.issues().iter().try_fold(0_u64, |total, issue| {
+        total
+            .checked_add(u64::from(issue.occurrence_count()))
+            .ok_or(ScanError::InternalState)
+    })?;
+    Ok(ScanTaskResult {
+        record_version: FFI_RECORD_VERSION,
+        scan_id: result.scan_id().as_str().to_owned(),
+        started_at_unix_ms: scan_system_time_ms(result.started_at())?,
+        completed_at_unix_ms: scan_system_time_ms(result.completed_at())?,
+        status: map_scan_terminal_status(result.status()),
+        directory_count: counts.directory_count,
+        file_count: counts.file_count,
+        logical_bytes: counts.logical_bytes,
+        allocated_bytes: counts.allocated_bytes,
+        snapshot_available: result.snapshot_available(),
+        coverage: ScanCoverageSummary {
+            record_version: FFI_RECORD_VERSION,
+            status: map_scan_coverage_status(coverage.status()),
+            measured_permille: coverage.measured_permille().map(|value| value.get()),
+            issue_record_count,
+            issue_occurrence_count,
+        },
+        candidate_evaluation: map_scan_candidate_evaluation(result.candidate_evaluation()),
+    })
+}
+
+fn map_scan_terminal_status(status: CoreScanTaskStatus) -> ScanTerminalStatus {
+    match status {
+        CoreScanTaskStatus::Succeeded => ScanTerminalStatus::Succeeded,
+        CoreScanTaskStatus::Failed => ScanTerminalStatus::Failed,
+        CoreScanTaskStatus::Cancelled => ScanTerminalStatus::Cancelled,
+        CoreScanTaskStatus::Interrupted => ScanTerminalStatus::Interrupted,
+        _ => ScanTerminalStatus::Interrupted,
+    }
+}
+
+fn map_scan_coverage_status(status: CoreCoverageStatus) -> ScanCoverageStatus {
+    match status {
+        CoreCoverageStatus::Unknown => ScanCoverageStatus::Unknown,
+        CoreCoverageStatus::Complete => ScanCoverageStatus::Complete,
+        CoreCoverageStatus::LimitedAccess => ScanCoverageStatus::LimitedAccess,
+        CoreCoverageStatus::Partial => ScanCoverageStatus::Partial,
+    }
+}
+
+fn map_scan_candidate_evaluation(
+    status: CoreCandidateEvaluationStatus,
+) -> ScanCandidateEvaluationSummary {
+    let (status, candidate_count, failure) = match status {
+        CoreCandidateEvaluationStatus::NotRun => (ScanCandidateEvaluationStatus::NotRun, 0, None),
+        CoreCandidateEvaluationStatus::Succeeded { candidate_count } => (
+            ScanCandidateEvaluationStatus::Succeeded,
+            candidate_count,
+            None,
+        ),
+        CoreCandidateEvaluationStatus::Failed { kind } => (
+            ScanCandidateEvaluationStatus::Failed,
+            0,
+            Some(map_scan_candidate_evaluation_failure(kind)),
+        ),
+        _ => (
+            ScanCandidateEvaluationStatus::Failed,
+            0,
+            Some(ScanCandidateEvaluationFailure::InternalState),
+        ),
+    };
+    ScanCandidateEvaluationSummary {
+        record_version: FFI_RECORD_VERSION,
+        status,
+        candidate_count,
+        failure,
+    }
+}
+
+fn map_scan_candidate_evaluation_failure(
+    failure: CoreCandidateEvaluationFailure,
+) -> ScanCandidateEvaluationFailure {
+    match failure {
+        CoreCandidateEvaluationFailure::Cancelled => ScanCandidateEvaluationFailure::Cancelled,
+        CoreCandidateEvaluationFailure::CatalogInvalid => {
+            ScanCandidateEvaluationFailure::CatalogInvalid
+        }
+        CoreCandidateEvaluationFailure::ContextInvalid => {
+            ScanCandidateEvaluationFailure::ContextInvalid
+        }
+        CoreCandidateEvaluationFailure::EvaluationFailed => {
+            ScanCandidateEvaluationFailure::EvaluationFailed
+        }
+        CoreCandidateEvaluationFailure::CandidateInvalid => {
+            ScanCandidateEvaluationFailure::CandidateInvalid
+        }
+        CoreCandidateEvaluationFailure::LimitExceeded => {
+            ScanCandidateEvaluationFailure::LimitExceeded
+        }
+        _ => ScanCandidateEvaluationFailure::InternalState,
+    }
+}
+
+fn map_scan_task_failure(failure: TaskFailureKind) -> ScanTaskFailure {
+    match failure {
+        TaskFailureKind::ScanRootChanged => ScanTaskFailure::RootChanged,
+        TaskFailureKind::ScanFailed => ScanTaskFailure::ScanFailed,
+        TaskFailureKind::SnapshotRejected => ScanTaskFailure::SnapshotRejected,
+        TaskFailureKind::PersistenceUnavailable => ScanTaskFailure::PersistenceUnavailable,
+        TaskFailureKind::PersistenceOutcomeUnknown => ScanTaskFailure::PersistenceOutcomeUnknown,
+        TaskFailureKind::InternalFailure => ScanTaskFailure::InternalState,
+        TaskFailureKind::ScanRecoveryMaintenance(_)
+        | TaskFailureKind::HistoryMaintenance(_)
+        | TaskFailureKind::SnapshotRetention(_)
+        | TaskFailureKind::SnapshotOrphanMaintenance(_)
+        | TaskFailureKind::SnapshotProvisioningStageMaintenance(_)
+        | TaskFailureKind::SnapshotTerminalTempMaintenance(_)
+        | TaskFailureKind::SnapshotUnleasedTempMaintenance(_) => ScanTaskFailure::InternalState,
+        _ => ScanTaskFailure::InternalState,
+    }
+}
+
+fn validate_scan_terminal_observation(
+    phase: CoreTaskPhase,
+    failure: Option<ScanTaskFailure>,
+    result: Option<&ScanTaskResult>,
+) -> Result<(), ScanError> {
+    let valid = match phase {
+        CoreTaskPhase::Queued | CoreTaskPhase::Running => failure.is_none() && result.is_none(),
+        CoreTaskPhase::Succeeded => {
+            failure.is_none()
+                && result.is_some_and(|result| result.status == ScanTerminalStatus::Succeeded)
+        }
+        CoreTaskPhase::Failed => {
+            failure.is_some()
+                && result.is_none_or(|result| {
+                    matches!(
+                        result.status,
+                        ScanTerminalStatus::Failed | ScanTerminalStatus::Interrupted
+                    )
+                })
+        }
+        CoreTaskPhase::Cancelled => {
+            failure.is_none()
+                && result.is_none_or(|result| result.status == ScanTerminalStatus::Cancelled)
+        }
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(ScanError::InternalState)
+    }
+}
+
+fn map_scan_start_error(error: StartTaskError) -> ScanError {
+    match error {
+        StartTaskError::Closed => ScanError::Closed,
+        StartTaskError::QueueFull => ScanError::QueueFull,
+        StartTaskError::InputTooLarge { .. } => ScanError::InputTooLarge,
+        StartTaskError::InvalidScanRoot { reason } => map_scan_root_error(reason),
+        StartTaskError::ScanAlreadyActive { .. } => ScanError::InternalState,
+        StartTaskError::ScanScopeBusy => ScanError::Busy,
+        StartTaskError::ReadOnlyStore => ScanError::ReadOnlyStore,
+        StartTaskError::PersistenceUnavailable => ScanError::StorageUnavailable,
+        StartTaskError::TaskIdExhausted | StartTaskError::InternalState => {
+            ScanError::RegistryUnavailable
+        }
+        _ => ScanError::InternalState,
+    }
+}
+
+fn map_scan_root_error(error: ScanRootErrorKind) -> ScanError {
+    match error {
+        ScanRootErrorKind::InvalidPath => ScanError::InvalidRoot,
+        ScanRootErrorKind::Missing => ScanError::RootMissing,
+        ScanRootErrorKind::AccessDenied => ScanError::RootAccessDenied,
+        ScanRootErrorKind::NotDirectory => ScanError::RootNotDirectory,
+        ScanRootErrorKind::Symlink => ScanError::RootSymlink,
+        ScanRootErrorKind::ChangedDuringValidation => ScanError::RootChanged,
+        ScanRootErrorKind::IdentityUnavailable => ScanError::RootIdentityUnavailable,
+        ScanRootErrorKind::UnsupportedPlatform => ScanError::UnsupportedPlatform,
+        ScanRootErrorKind::Unavailable => ScanError::RootUnavailable,
+        _ => ScanError::InternalState,
+    }
+}
+
+fn map_scan_access_error(error: TaskAccessError) -> ScanError {
+    match error {
+        TaskAccessError::Closed => ScanError::Closed,
+        TaskAccessError::UnknownTask => ScanError::TaskUnavailable,
+        TaskAccessError::InvalidEventLimit { .. } | TaskAccessError::InvalidEventCursor => {
+            ScanError::EventHistoryUnavailable
+        }
+        TaskAccessError::WrongTaskKind => ScanError::WrongTaskKind,
+        TaskAccessError::InternalState => ScanError::RegistryUnavailable,
+    }
+}
+
+fn scan_system_time_ms(value: SystemTime) -> Result<i64, ScanError> {
+    i64::try_from(
+        value
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| ScanError::InternalState)?
+            .as_millis(),
+    )
+    .map_err(|_| ScanError::InternalState)
 }
 
 fn start_maintenance(
@@ -1355,6 +1963,7 @@ fn map_start_error(error: StartTaskError) -> EngineError {
         StartTaskError::Closed => EngineError::Closed,
         StartTaskError::ReadOnlyStore => EngineError::ReadOnlyStore,
         StartTaskError::PersistenceUnavailable => EngineError::StorageUnavailable,
+        StartTaskError::ScanScopeBusy => EngineError::Busy,
         StartTaskError::InternalState | StartTaskError::TaskIdExhausted => {
             EngineError::RegistryUnavailable
         }
@@ -1400,14 +2009,334 @@ mod tests {
     }
 
     #[test]
-    fn reports_contract_six_and_preserves_legacy_formatting() {
+    fn reports_contract_seven_and_preserves_legacy_formatting() {
         let _guard = ENGINE_TEST_LOCK.lock().unwrap();
         let (_temp, engine) = engine();
-        assert_eq!(library_version().ffi_contract_version, 6);
+        assert_eq!(library_version().ffi_contract_version, 7);
         assert_eq!(engine.library_version().unwrap(), library_version());
         assert_eq!(engine.format_size(1536).unwrap().display, "1.5 KB");
         assert!(engine.close());
         assert_eq!(engine.format_size(1), Err(EngineError::Closed));
+    }
+
+    fn scan_request(root: &std::path::Path) -> ScanRequest {
+        ScanRequest {
+            record_version: FFI_RECORD_VERSION,
+            root: root.to_string_lossy().into_owned(),
+        }
+    }
+
+    fn wait_for_scan(task: &ScanTask) -> ScanPoll {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let poll = task.poll().unwrap();
+            if matches!(
+                poll.phase,
+                TaskPhase::Succeeded | TaskPhase::Failed | TaskPhase::Cancelled
+            ) {
+                return poll;
+            }
+            assert!(Instant::now() < deadline, "scan did not become terminal");
+            std::thread::yield_now();
+        }
+    }
+
+    #[test]
+    fn scan_progress_fold_retains_latest_aggregate_stage_and_truncation() {
+        use dux_core::engine::{TaskEvent as CoreTaskEvent, TaskEventKind};
+
+        let mut state = ScanProgressState::default();
+        state.apply(CoreTaskEventBatch {
+            events: vec![
+                CoreTaskEvent {
+                    sequence: 4,
+                    kind: TaskEventKind::Started,
+                },
+                CoreTaskEvent {
+                    sequence: 5,
+                    kind: TaskEventKind::ScanProgress {
+                        files: 12,
+                        directories: 3,
+                        known_allocated_bytes: 4096,
+                        errors: 2,
+                    },
+                },
+                CoreTaskEvent {
+                    sequence: 6,
+                    kind: TaskEventKind::ScanFinalizing,
+                },
+            ],
+            next_sequence: 6,
+            oldest_available_sequence: 4,
+            truncated: true,
+            terminal: false,
+        });
+        assert_eq!(state.event_cursor, 6);
+        assert_eq!(state.stage, ScanStage::Finalizing);
+        assert!(state.has_progress);
+        assert_eq!(state.files_scanned, 12);
+        assert_eq!(state.directories_scanned, 3);
+        assert_eq!(state.known_allocated_bytes, 4096);
+        assert_eq!(state.error_count, 2);
+        assert!(state.events_truncated);
+
+        state.apply(CoreTaskEventBatch {
+            events: vec![CoreTaskEvent {
+                sequence: 7,
+                kind: TaskEventKind::CandidateEvaluationStarted,
+            }],
+            next_sequence: 7,
+            oldest_available_sequence: 4,
+            truncated: false,
+            terminal: false,
+        });
+        assert_eq!(state.stage, ScanStage::Evaluating);
+        assert!(state.events_truncated);
+    }
+
+    #[test]
+    fn scan_start_and_access_errors_map_each_core_category() {
+        for (input, expected) in [
+            (ScanRootErrorKind::InvalidPath, ScanError::InvalidRoot),
+            (ScanRootErrorKind::Missing, ScanError::RootMissing),
+            (ScanRootErrorKind::AccessDenied, ScanError::RootAccessDenied),
+            (ScanRootErrorKind::NotDirectory, ScanError::RootNotDirectory),
+            (ScanRootErrorKind::Symlink, ScanError::RootSymlink),
+            (
+                ScanRootErrorKind::ChangedDuringValidation,
+                ScanError::RootChanged,
+            ),
+            (
+                ScanRootErrorKind::IdentityUnavailable,
+                ScanError::RootIdentityUnavailable,
+            ),
+            (
+                ScanRootErrorKind::UnsupportedPlatform,
+                ScanError::UnsupportedPlatform,
+            ),
+            (ScanRootErrorKind::Unavailable, ScanError::RootUnavailable),
+        ] {
+            assert_eq!(map_scan_root_error(input), expected);
+        }
+        assert_eq!(
+            map_scan_start_error(StartTaskError::Closed),
+            ScanError::Closed
+        );
+        assert_eq!(
+            map_scan_start_error(StartTaskError::QueueFull),
+            ScanError::QueueFull
+        );
+        assert_eq!(
+            map_scan_start_error(StartTaskError::InputTooLarge { limit: 1 }),
+            ScanError::InputTooLarge
+        );
+        assert_eq!(
+            map_scan_start_error(StartTaskError::ReadOnlyStore),
+            ScanError::ReadOnlyStore
+        );
+        assert_eq!(
+            map_scan_start_error(StartTaskError::PersistenceUnavailable),
+            ScanError::StorageUnavailable
+        );
+        assert_eq!(
+            map_scan_start_error(StartTaskError::ScanScopeBusy),
+            ScanError::Busy
+        );
+        assert_eq!(
+            map_scan_start_error(StartTaskError::TaskIdExhausted),
+            ScanError::RegistryUnavailable
+        );
+        assert_eq!(
+            map_scan_start_error(StartTaskError::InternalState),
+            ScanError::RegistryUnavailable
+        );
+
+        for (input, expected) in [
+            (TaskAccessError::Closed, ScanError::Closed),
+            (TaskAccessError::UnknownTask, ScanError::TaskUnavailable),
+            (
+                TaskAccessError::InvalidEventLimit { max: 64 },
+                ScanError::EventHistoryUnavailable,
+            ),
+            (
+                TaskAccessError::InvalidEventCursor,
+                ScanError::EventHistoryUnavailable,
+            ),
+            (TaskAccessError::WrongTaskKind, ScanError::WrongTaskKind),
+            (
+                TaskAccessError::InternalState,
+                ScanError::RegistryUnavailable,
+            ),
+        ] {
+            assert_eq!(map_scan_access_error(input), expected);
+        }
+
+        for (input, expected) in [
+            (
+                TaskFailureKind::ScanRootChanged,
+                ScanTaskFailure::RootChanged,
+            ),
+            (TaskFailureKind::ScanFailed, ScanTaskFailure::ScanFailed),
+            (
+                TaskFailureKind::SnapshotRejected,
+                ScanTaskFailure::SnapshotRejected,
+            ),
+            (
+                TaskFailureKind::PersistenceUnavailable,
+                ScanTaskFailure::PersistenceUnavailable,
+            ),
+            (
+                TaskFailureKind::PersistenceOutcomeUnknown,
+                ScanTaskFailure::PersistenceOutcomeUnknown,
+            ),
+            (
+                TaskFailureKind::InternalFailure,
+                ScanTaskFailure::InternalState,
+            ),
+        ] {
+            assert_eq!(map_scan_task_failure(input), expected);
+        }
+    }
+
+    #[test]
+    fn public_scan_succeeds_with_consistent_path_free_terminal_summary() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (temp, engine) = engine();
+        let root = temp.path().join("scan-success");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("payload.bin"), b"ffi scan payload").unwrap();
+
+        let start = engine.start_scan(scan_request(&root)).unwrap();
+        assert_eq!(start.record_version, FFI_RECORD_VERSION);
+        assert_eq!(start.disposition, ScanStartDisposition::Started);
+        let terminal = wait_for_scan(&start.task);
+        assert_eq!(terminal.record_version, FFI_RECORD_VERSION);
+        assert_eq!(terminal.phase, TaskPhase::Succeeded);
+        assert_eq!(terminal.stage, ScanStage::Terminal);
+        assert!(!terminal.cancellation_requested);
+        assert_eq!(terminal.failure, None);
+        assert!(!terminal.events_truncated);
+
+        let result = terminal.result.expect("successful scan result");
+        assert_eq!(result.record_version, FFI_RECORD_VERSION);
+        assert!(result.scan_id.starts_with("scan:"));
+        assert!(result.started_at_unix_ms <= result.completed_at_unix_ms);
+        assert_eq!(result.status, ScanTerminalStatus::Succeeded);
+        assert!(result.file_count >= 1);
+        assert!(result.directory_count >= 1);
+        assert!(result.logical_bytes >= 16);
+        assert!(result.snapshot_available);
+        assert_eq!(result.coverage.record_version, FFI_RECORD_VERSION);
+        assert_eq!(result.coverage.status, ScanCoverageStatus::Complete);
+        assert_eq!(result.coverage.measured_permille, Some(1_000));
+        assert_eq!(result.coverage.issue_record_count, 0);
+        assert_eq!(result.coverage.issue_occurrence_count, 0);
+        assert_eq!(
+            result.candidate_evaluation.status,
+            ScanCandidateEvaluationStatus::Succeeded
+        );
+        assert_eq!(result.candidate_evaluation.failure, None);
+        assert_eq!(
+            start.task.cancel().unwrap(),
+            ScanCancelOutcome::AlreadyTerminal
+        );
+        assert!(engine.close());
+        assert_eq!(start.task.poll(), Err(ScanError::Closed));
+    }
+
+    #[test]
+    fn public_scan_starts_and_maps_cancellation() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (temp, engine) = engine();
+        let root = temp.path().join("scan-active");
+        std::fs::create_dir(&root).unwrap();
+        for index in 0..2_000 {
+            std::fs::write(root.join(format!("payload-{index}")), b"x").unwrap();
+        }
+
+        let start = engine.start_scan(scan_request(&root)).unwrap();
+        assert_eq!(start.disposition, ScanStartDisposition::Started);
+        let cancellation = start.task.cancel().unwrap();
+        assert!(matches!(
+            cancellation,
+            ScanCancelOutcome::CancelledBeforeStart
+                | ScanCancelOutcome::Requested
+                | ScanCancelOutcome::AlreadyRequested
+                | ScanCancelOutcome::AlreadyTerminal
+        ));
+        let terminal = wait_for_scan(&start.task);
+        assert_eq!(terminal.stage, ScanStage::Terminal);
+        assert!(matches!(
+            terminal.phase,
+            TaskPhase::Cancelled | TaskPhase::Succeeded
+        ));
+        if terminal.phase == TaskPhase::Cancelled {
+            assert_eq!(terminal.failure, None);
+            assert!(
+                terminal
+                    .result
+                    .is_none_or(|result| { result.status == ScanTerminalStatus::Cancelled })
+            );
+        }
+        assert!(engine.close());
+    }
+
+    #[test]
+    fn public_scan_rejects_unbounded_invalid_and_unavailable_roots() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (temp, engine) = engine();
+
+        let mut wrong_version = scan_request(temp.path());
+        wrong_version.record_version += 1;
+        assert!(matches!(
+            engine.start_scan(wrong_version),
+            Err(ScanError::InvalidRecordVersion)
+        ));
+        for root in [
+            String::new(),
+            "relative".to_owned(),
+            "/tmp/control\npath".to_owned(),
+        ] {
+            assert!(matches!(
+                engine.start_scan(ScanRequest {
+                    record_version: FFI_RECORD_VERSION,
+                    root,
+                }),
+                Err(ScanError::InvalidRoot)
+            ));
+        }
+        assert!(matches!(
+            engine.start_scan(ScanRequest {
+                record_version: FFI_RECORD_VERSION,
+                root: format!("/{}", "x".repeat(MAX_SCAN_ROOT_UTF8_BYTES)),
+            }),
+            Err(ScanError::InputTooLarge)
+        ));
+        assert!(matches!(
+            engine.start_scan(ScanRequest {
+                record_version: FFI_RECORD_VERSION,
+                root: format!("/{}", "x".repeat(MAX_SCAN_ROOT_UTF8_BYTES - 1)),
+            }),
+            Err(ScanError::RootMissing | ScanError::RootUnavailable)
+        ));
+
+        let missing = temp.path().join("missing");
+        assert!(matches!(
+            engine.start_scan(scan_request(&missing)),
+            Err(ScanError::RootMissing)
+        ));
+        let file = temp.path().join("not-a-directory");
+        std::fs::write(&file, b"file").unwrap();
+        assert!(matches!(
+            engine.start_scan(scan_request(&file)),
+            Err(ScanError::RootNotDirectory)
+        ));
+
+        assert!(engine.close());
+        assert!(matches!(
+            engine.start_scan(scan_request(temp.path())),
+            Err(ScanError::Closed)
+        ));
     }
 
     fn startup_observation(

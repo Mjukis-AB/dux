@@ -1417,6 +1417,8 @@ pub enum StartTaskError {
     InvalidScanRoot { reason: ScanRootErrorKind },
     #[error("a scan for this filesystem object is already active as task {existing:?}")]
     ScanAlreadyActive { existing: TaskId },
+    #[error("an overlapping but non-equivalent scan scope is already active")]
+    ScanScopeBusy,
     #[error("the durable engine store is read-only")]
     ReadOnlyStore,
     #[error("the durable engine store is unavailable")]

@@ -56,13 +56,15 @@ final class DuxAppDelegateTests: XCTestCase {
         let maintenance = RuntimeMaintenanceSpy(recorder: recorder)
         let capacity = RuntimeCapacitySpy(recorder: recorder)
         let reviews = RuntimeReviewSpy(recorder: recorder)
+        let scans = RuntimeScanSpy(recorder: recorder)
         let model = AppModel(engineService: engine)
         let runtime = AppRuntime(
             model: model,
             engineService: engine,
             scheduler: maintenance,
             capacityScheduler: capacity,
-            reviews: reviews
+            reviews: reviews,
+            scans: scans
         )
 
         await runtime.start()
@@ -78,10 +80,12 @@ final class DuxAppDelegateTests: XCTestCase {
         XCTAssertTrue(events.contains("reviews:renew"))
         XCTAssertTrue(events.contains("capacity:volumes"))
         XCTAssertEqual(events.filter { $0 == "engine:close" }.count, 1)
+        let scanShutdown = try XCTUnwrap(events.firstIndex(of: "scans:shutdown"))
         let capacityStop = try XCTUnwrap(events.firstIndex(of: "capacity:stop"))
         let maintenanceStop = try XCTUnwrap(events.firstIndex(of: "maintenance:stop"))
         let reviewsShutdown = try XCTUnwrap(events.firstIndex(of: "reviews:shutdown"))
         let engineClose = try XCTUnwrap(events.firstIndex(of: "engine:close"))
+        XCTAssertLessThan(scanShutdown, capacityStop)
         XCTAssertLessThan(capacityStop, maintenanceStop)
         XCTAssertLessThan(maintenanceStop, reviewsShutdown)
         XCTAssertLessThan(reviewsShutdown, engineClose)
@@ -149,7 +153,7 @@ private actor RuntimeEngineSpy: EngineServing, DuxEngineClosing {
     init(recorder: RuntimeEventRecorder) { self.recorder = recorder }
 
     func loadStatus() async throws -> EngineStatus {
-        EngineStatus(libraryVersion: "test", ffiContractVersion: 6, executedOffMainThread: true)
+        EngineStatus(libraryVersion: "test", ffiContractVersion: 7, executedOffMainThread: true)
     }
 
     func observeVolumeCapacity(
@@ -228,4 +232,14 @@ private actor RuntimeReviewSpy: DuxReviewManaging {
     init(recorder: RuntimeEventRecorder) { self.recorder = recorder }
     func renewNow() async { await recorder.append("reviews:renew") }
     func shutdown() async { await recorder.append("reviews:shutdown") }
+}
+
+@MainActor
+private final class RuntimeScanSpy: DuxScanManaging {
+    let recorder: RuntimeEventRecorder
+    init(recorder: RuntimeEventRecorder) { self.recorder = recorder }
+
+    func shutdownHomeScan() async {
+        await recorder.append("scans:shutdown")
+    }
 }

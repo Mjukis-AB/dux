@@ -7822,8 +7822,8 @@ fn overlapping_scan_scope_is_rejected_then_released() {
         Err(StartTaskError::ScanAlreadyActive { existing: first })
     );
     assert_eq!(
-        engine.start_scan(child),
-        Err(StartTaskError::ScanAlreadyActive { existing: first })
+        engine.start_scan(child.clone()),
+        Err(StartTaskError::ScanScopeBusy)
     );
     assert_eq!(engine.cancel_task(first).unwrap(), CancelOutcome::Requested);
     release_tx.send(()).unwrap();
@@ -7832,6 +7832,30 @@ fn overlapping_scan_scope_is_rejected_then_released() {
     assert_eq!(
         wait_terminal(&engine, replacement).phase,
         TaskPhase::Succeeded
+    );
+
+    let (child_started_tx, child_started_rx) = mpsc::channel();
+    let (child_release_tx, child_release_rx) = mpsc::channel();
+    let child_scan = engine
+        .start_scan_with_before_traversal_hook(child, move |_| {
+            child_started_tx.send(()).unwrap();
+            child_release_rx.recv().unwrap();
+        })
+        .unwrap();
+    child_started_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    let parent = temp.path().join("scan-root");
+    assert_eq!(
+        engine.start_scan(parent),
+        Err(StartTaskError::ScanScopeBusy)
+    );
+    assert_eq!(
+        engine.cancel_task(child_scan).unwrap(),
+        CancelOutcome::Requested
+    );
+    child_release_tx.send(()).unwrap();
+    assert_eq!(
+        wait_terminal(&engine, child_scan).phase,
+        TaskPhase::Cancelled
     );
 }
 

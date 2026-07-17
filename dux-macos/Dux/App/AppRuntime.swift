@@ -21,6 +21,11 @@ protocol DuxReviewManaging: Sendable {
     func shutdown() async
 }
 
+@MainActor
+protocol DuxScanManaging: AnyObject {
+    func shutdownHomeScan() async
+}
+
 struct SystemDuxMaintenanceEnergyPolicy: DuxMaintenanceEnergyPolicy {
     func permitsMaintenance() async -> Bool {
         let process = ProcessInfo.processInfo
@@ -49,6 +54,7 @@ final class AppRuntime {
     private let capacityScheduler: any DuxCapacityScheduling
     private let capacityResampleRouter: DuxCapacityResampleRouter?
     private let reviews: any DuxReviewManaging
+    private let scans: any DuxScanManaging
     private var started = false
     private var shuttingDown = false
     private var shutdownTask: Task<Void, Never>?
@@ -68,6 +74,7 @@ final class AppRuntime {
             capacityResampleRequester: capacityResampleRouter
         )
         self.model = model
+        scans = model
         capacityScheduler = DuxCapacitySamplingScheduler(sampler: model)
     }
 
@@ -76,7 +83,8 @@ final class AppRuntime {
         engineService: any DuxEngineClosing,
         scheduler: any DuxMaintenanceScheduling,
         capacityScheduler: any DuxCapacityScheduling,
-        reviews: any DuxReviewManaging
+        reviews: any DuxReviewManaging,
+        scans: (any DuxScanManaging)? = nil
     ) {
         self.model = model
         self.engineService = engineService
@@ -84,6 +92,7 @@ final class AppRuntime {
         self.capacityScheduler = capacityScheduler
         capacityResampleRouter = nil
         self.reviews = reviews
+        self.scans = scans ?? model
     }
 
     func start() async {
@@ -125,8 +134,10 @@ final class AppRuntime {
         let capacityResampleRouter = capacityResampleRouter
         let scheduler = scheduler
         let reviews = reviews
+        let scans = scans
         let engineService = engineService
         let task = Task {
+            await scans.shutdownHomeScan()
             await capacityResampleRouter?.invalidate()
             await capacityScheduler.stop()
             await scheduler.stop()
@@ -142,3 +153,4 @@ extension EngineService: DuxEngineClosing {}
 extension DuxMaintenanceScheduler: DuxMaintenanceScheduling {}
 extension DuxCapacitySamplingScheduler: DuxCapacityScheduling {}
 extension DuxSnapshotReviewController: DuxReviewManaging {}
+extension AppModel: DuxScanManaging {}

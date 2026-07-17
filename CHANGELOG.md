@@ -5,6 +5,27 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Added the native menu-bar capacity and Home-scan popover through UniFFI
+  contract v7. The popover renders the cached startup-volume name, Rust-owned
+  pressure, effective available capacity, total, percentage, availability
+  basis, and freshness without starting a scan or inventing missing values;
+  refresh failures retain the last measurement as explicitly stale. An
+  explicit Scan now action starts one shared Home scan, shows only optional
+  cumulative path-free progress, exposes cancellation intent until Rust reports
+  the terminal outcome, and retains the last successful scan through retries,
+  cancellation, and failures. The new opaque scan task accepts one bounded
+  read-only discovery root, while its polls and terminal summaries contain no
+  path, candidate detail, plan, approval, or cleanup capability. All blocking
+  FFI work remains on the engine utility queue, app shutdown requests scan
+  cancellation before maintenance/reviews/engine close, and stable keyboard
+  shortcuts plus VoiceOver identifiers cover every action and status region.
+  Focused Rust and linked Swift tests cover request validation, single-flight
+  lifecycle, malformed records, progress monotonicity, late cancellation,
+  cached-result retention, shutdown ordering, honest capacity presentation,
+  localization, and accessibility. The complete 105-test linked Swift suite,
+  full Rust workspace test and lint gates, destructive-boundary checks, and
+  unsigned universal arm64/x86_64 Debug and Release builds at the macOS 14
+  deployment target pass.
 - Added three persistent menu-bar label modes: Icon only, Icon and free space
   (GiB), and Icon and free space (%), defaulting to free GiB. A validated
   versioned Swift-owned UserDefaults preference updates the shared status item

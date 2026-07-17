@@ -45,7 +45,7 @@ final class EngineServiceTests: XCTestCase {
         // DUX-DESTRUCTIVE: allow=test-swift-retry-obstruction-remove -- remove only this test fixture's deliberate file obstruction
         try FileManager.default.removeItem(at: dataRoot)
         let status = try await service.loadStatus()
-        XCTAssertEqual(status.ffiContractVersion, 6)
+        XCTAssertEqual(status.ffiContractVersion, 7)
         let closed = await service.close()
         XCTAssertTrue(closed)
     }
@@ -55,7 +55,7 @@ final class EngineServiceTests: XCTestCase {
         let result = try await EngineService(engine: fixture.engine).loadStatus()
 
         XCTAssertEqual(result.libraryVersion, "0.5.0")
-        XCTAssertEqual(result.ffiContractVersion, 6)
+        XCTAssertEqual(result.ffiContractVersion, 7)
         XCTAssertTrue(result.executedOffMainThread)
     }
 
@@ -158,6 +158,281 @@ final class EngineServiceTests: XCTestCase {
             XCTAssertEqual(error, .invalidResponse)
         } catch {
             XCTFail("Unexpected error: \(error)")
+        }
+    }
+
+    func testRealHomeScanUsesInjectedTemporaryScopeAndReturnsValidatedSummary() async throws {
+        let fixture = try TestEngineFixture()
+        let service = EngineService(
+            engine: fixture.engine,
+            homeScanRoot: fixture.homeScanRoot
+        )
+        // DUX-DESTRUCTIVE: allow=test-swift-home-scan-fixture-write -- write only one payload inside this UUID-named temporary scan root
+        try Data("scan payload".utf8).write(
+            to: fixture.homeScanRoot.appending(path: "payload")
+        )
+
+        let start = try await service.startHomeScan()
+        let task = start.task
+        let deadline = ContinuousClock.now + .seconds(5)
+        let terminal: HomeScanTaskPoll
+        while true {
+            let poll = try await task.poll()
+            if poll.phase.isTerminal {
+                terminal = poll
+                break
+            }
+            XCTAssertLessThan(ContinuousClock.now, deadline)
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        XCTAssertEqual(terminal.phase, .succeeded)
+        let result = try XCTUnwrap(terminal.result)
+        XCTAssertTrue(result.succeeded)
+        XCTAssertEqual(result.fileCount, 1)
+        XCTAssertEqual(result.logicalBytes, UInt64("scan payload".utf8.count))
+        XCTAssertTrue(result.snapshotAvailable)
+        XCTAssertNotEqual(result.coverage, .unknown)
+        XCTAssertNotNil(result.successfulSummary)
+    }
+
+    func testHomeScanAdapterPassesOnlyResolvedHomeAndRunsAllFFIOffMain() async throws {
+        let generatedTask = RecordingGeneratedScanTask(
+            polls: [generatedActivePoll(revision: 1)]
+        )
+        let engine = RecordingScanEngine(task: generatedTask)
+        let service = EngineService(engine: engine)
+
+        let start = try await service.startHomeScan()
+        _ = try await start.task.poll()
+        _ = try await start.task.requestCancellation()
+
+        XCTAssertEqual(
+            engine.request?.root,
+            FileManager.default.homeDirectoryForCurrentUser.path
+        )
+        XCTAssertEqual(engine.request?.recordVersion, 1)
+        XCTAssertEqual(engine.calledOnMain, false)
+        XCTAssertEqual(generatedTask.pollCalledOnMain, false)
+        XCTAssertEqual(generatedTask.cancelCalledOnMain, false)
+    }
+
+    func testHomeScanAdapterRejectsVersionContradictionAndRevisionRegression() async throws {
+        let wrongVersion = RecordingGeneratedScanTask(
+            polls: [
+                ScanPoll(
+                    recordVersion: 2,
+                    phase: .running,
+                    stage: .scanning,
+                    cancellationRequested: false,
+                    revision: 1,
+                    progress: nil,
+                    eventsTruncated: false,
+                    failure: nil,
+                    result: nil
+                ),
+            ]
+        )
+        let wrongVersionTask = try await EngineService(
+            engine: RecordingScanEngine(task: wrongVersion)
+        ).startHomeScan().task
+        await XCTAssertThrowsHomeScanError(.invalidResponse) {
+            _ = try await wrongVersionTask.poll()
+        }
+
+        let regressing = RecordingGeneratedScanTask(
+            polls: [
+                generatedActivePoll(revision: 2),
+                generatedActivePoll(revision: 1),
+            ]
+        )
+        let regressingTask = try await EngineService(
+            engine: RecordingScanEngine(task: regressing)
+        ).startHomeScan().task
+        _ = try await regressingTask.poll()
+        await XCTAssertThrowsHomeScanError(.invalidResponse) {
+            _ = try await regressingTask.poll()
+        }
+    }
+
+    func testHomeScanAdapterAcceptsSameRevisionWithMonotonicProgress() async throws {
+        let first = ScanProgress(
+            recordVersion: 1,
+            filesScanned: 1,
+            directoriesScanned: 1,
+            knownAllocatedBytes: 64,
+            errorCount: 0
+        )
+        let second = ScanProgress(
+            recordVersion: 1,
+            filesScanned: 2,
+            directoriesScanned: 1,
+            knownAllocatedBytes: 96,
+            errorCount: 0
+        )
+        let generated = RecordingGeneratedScanTask(
+            polls: [
+                generatedActivePoll(revision: 2, progress: first),
+                generatedActivePoll(revision: 2, progress: second),
+            ]
+        )
+        let task = try await EngineService(
+            engine: RecordingScanEngine(task: generated)
+        ).startHomeScan().task
+
+        _ = try await task.poll()
+        let advanced = try await task.poll()
+
+        XCTAssertEqual(advanced.revision, 2)
+        XCTAssertEqual(advanced.progress?.files, 2)
+        XCTAssertEqual(advanced.progress?.knownAllocatedBytes, 96)
+    }
+
+    func testHomeScanAdapterMapsEveryTypedStartError() async {
+        let cases: [(ScanError, HomeScanServiceError)] = [
+            (.Closed, .closed),
+            (.InvalidRecordVersion, .invalidResponse),
+            (.InvalidRoot, .invalidRoot),
+            (.RootMissing, .rootMissing),
+            (.RootAccessDenied, .rootAccessDenied),
+            (.RootNotDirectory, .rootNotDirectory),
+            (.RootSymlink, .rootSymlink),
+            (.RootChanged, .rootChanged),
+            (.RootIdentityUnavailable, .rootIdentityUnavailable),
+            (.UnsupportedPlatform, .unsupportedPlatform),
+            (.RootUnavailable, .rootUnavailable),
+            (.QueueFull, .queueFull),
+            (.Busy, .busy),
+            (.InputTooLarge, .inputTooLarge),
+            (.ReadOnlyStore, .readOnlyStore),
+            (.StorageUnavailable, .persistenceUnavailable),
+            (.RegistryUnavailable, .internalState),
+            (.TaskUnavailable, .taskExpired),
+            (.EventHistoryUnavailable, .outcomeUnknown),
+            (.WrongTaskKind, .wrongTaskKind),
+            (.InternalState, .internalState),
+        ]
+
+        for (ffiError, expected) in cases {
+            let service = EngineService(engine: ThrowingScanEngine(error: ffiError))
+            await XCTAssertThrowsHomeScanError(expected) {
+                _ = try await service.startHomeScan()
+            }
+        }
+    }
+
+    func testHomeScanAdapterRejectsMalformedStartRecord() async {
+        let engine = RecordingScanEngine(
+            task: RecordingGeneratedScanTask(polls: [generatedActivePoll(revision: 1)]),
+            startRecordVersion: 2
+        )
+        await XCTAssertThrowsHomeScanError(.invalidResponse) {
+            _ = try await EngineService(engine: engine).startHomeScan()
+        }
+    }
+
+    func testHomeScanAdapterRejectsMalformedNestedAndTerminalRecords() async throws {
+        let malformedCoverage = ScanTaskResult(
+            recordVersion: 1,
+            scanId: "scan:test",
+            startedAtUnixMs: 1,
+            completedAtUnixMs: 2,
+            status: .succeeded,
+            directoryCount: 1,
+            fileCount: 1,
+            logicalBytes: 1,
+            allocatedBytes: 1,
+            snapshotAvailable: true,
+            coverage: ScanCoverageSummary(
+                recordVersion: 1,
+                status: .complete,
+                measuredPermille: 999,
+                issueRecordCount: 0,
+                issueOccurrenceCount: 0
+            ),
+            candidateEvaluation: ScanCandidateEvaluationSummary(
+                recordVersion: 1,
+                status: .succeeded,
+                candidateCount: 0,
+                failure: nil
+            )
+        )
+        let malformed = RecordingGeneratedScanTask(
+            polls: [generatedSuccessPoll(result: malformedCoverage)]
+        )
+        let malformedTask = try await EngineService(
+            engine: RecordingScanEngine(task: malformed)
+        ).startHomeScan().task
+        await XCTAssertThrowsHomeScanError(.invalidResponse) {
+            _ = try await malformedTask.poll()
+        }
+
+        let contradictory = RecordingGeneratedScanTask(
+            polls: [
+                ScanPoll(
+                    recordVersion: 1,
+                    phase: .running,
+                    stage: .terminal,
+                    cancellationRequested: false,
+                    revision: 2,
+                    progress: nil,
+                    eventsTruncated: false,
+                    failure: nil,
+                    result: nil
+                ),
+            ]
+        )
+        let contradictoryTask = try await EngineService(
+            engine: RecordingScanEngine(task: contradictory)
+        ).startHomeScan().task
+        await XCTAssertThrowsHomeScanError(.invalidResponse) {
+            _ = try await contradictoryTask.poll()
+        }
+
+        let measuredProgress = ScanProgress(
+            recordVersion: 1,
+            filesScanned: 4,
+            directoriesScanned: 3,
+            knownAllocatedBytes: 128,
+            errorCount: 2
+        )
+        let regressingResult = ScanTaskResult(
+            recordVersion: 1,
+            scanId: "scan:regressing-counts",
+            startedAtUnixMs: 1,
+            completedAtUnixMs: 2,
+            status: .succeeded,
+            directoryCount: 1,
+            fileCount: 1,
+            logicalBytes: 1,
+            allocatedBytes: 1,
+            snapshotAvailable: true,
+            coverage: ScanCoverageSummary(
+                recordVersion: 1,
+                status: .complete,
+                measuredPermille: 1_000,
+                issueRecordCount: 0,
+                issueOccurrenceCount: 0
+            ),
+            candidateEvaluation: ScanCandidateEvaluationSummary(
+                recordVersion: 1,
+                status: .succeeded,
+                candidateCount: 0,
+                failure: nil
+            )
+        )
+        let regressingCounts = RecordingGeneratedScanTask(
+            polls: [
+                generatedActivePoll(revision: 2, progress: measuredProgress),
+                generatedSuccessPoll(result: regressingResult),
+            ]
+        )
+        let regressingCountsTask = try await EngineService(
+            engine: RecordingScanEngine(task: regressingCounts)
+        ).startHomeScan().task
+        _ = try await regressingCountsTask.poll()
+        await XCTAssertThrowsHomeScanError(.invalidResponse) {
+            _ = try await regressingCountsTask.poll()
         }
     }
 
@@ -314,7 +589,7 @@ final class EngineServiceTests: XCTestCase {
             weakEngine = engine
 
             XCTAssertEqual(liveEngineInstanceCount(), baseline + 1)
-            XCTAssertEqual(try engine.libraryVersion().ffiContractVersion, 6)
+            XCTAssertEqual(try engine.libraryVersion().ffiContractVersion, 7)
             XCTAssertTrue(engine.close())
             XCTAssertTrue(engine.close())
             XCTAssertThrowsError(try engine.formatSize(bytes: 1_536)) { error in
@@ -547,7 +822,7 @@ private actor CountingEngineService: EngineServing {
         await Task.yield()
         return EngineStatus(
             libraryVersion: "test",
-            ffiContractVersion: 6,
+            ffiContractVersion: 7,
             executedOffMainThread: true
         )
     }
@@ -587,6 +862,7 @@ private actor CountingEngineService: EngineServing {
 
 private final class TestEngineFixture {
     let engine: DuxEngine
+    let homeScanRoot: URL
 
     private let root: URL
 
@@ -594,6 +870,11 @@ private final class TestEngineFixture {
         root = FileManager.default.temporaryDirectory
             .appending(path: "dux-swift-tests-\(UUID().uuidString)", directoryHint: .isDirectory)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        homeScanRoot = root.appending(path: "home", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(
+            at: homeScanRoot,
+            withIntermediateDirectories: false
+        )
         engine = try DuxEngine(
             storage: EngineStorageRoots(
                 dataRoot: root.appending(path: "data", directoryHint: .isDirectory).path,
@@ -606,6 +887,126 @@ private final class TestEngineFixture {
         _ = engine.close()
         // DUX-DESTRUCTIVE: allow=test-swift-storage-roots-fixture-remove -- remove only this fixture's UUID-named temporary root
         try? FileManager.default.removeItem(at: root)
+    }
+}
+
+private final class RecordingScanEngine: DuxEngine, @unchecked Sendable {
+    private let task: ScanTask
+    private let startRecordVersion: UInt32
+    private(set) var request: ScanRequest?
+    private(set) var calledOnMain: Bool?
+
+    required init(unsafeFromHandle handle: UInt64) {
+        fatalError("RecordingScanEngine cannot be lifted from an FFI handle: \(handle)")
+    }
+
+    init(task: ScanTask, startRecordVersion: UInt32 = 1) {
+        self.task = task
+        self.startRecordVersion = startRecordVersion
+        super.init(noHandle: NoHandle())
+    }
+
+    override func startScan(request: ScanRequest) throws -> ScanStart {
+        self.request = request
+        calledOnMain = Thread.isMainThread
+        return ScanStart(
+            recordVersion: startRecordVersion,
+            disposition: .started,
+            task: task
+        )
+    }
+}
+
+private final class ThrowingScanEngine: DuxEngine, @unchecked Sendable {
+    private let error: ScanError
+
+    required init(unsafeFromHandle handle: UInt64) {
+        fatalError("ThrowingScanEngine cannot be lifted from an FFI handle: \(handle)")
+    }
+
+    init(error: ScanError) {
+        self.error = error
+        super.init(noHandle: NoHandle())
+    }
+
+    override func startScan(request: ScanRequest) throws -> ScanStart {
+        _ = request
+        throw error
+    }
+}
+
+private final class RecordingGeneratedScanTask: ScanTask, @unchecked Sendable {
+    private var polls: [ScanPoll]
+    private(set) var pollCalledOnMain: Bool?
+    private(set) var cancelCalledOnMain: Bool?
+
+    required init(unsafeFromHandle handle: UInt64) {
+        fatalError("RecordingGeneratedScanTask cannot be lifted from an FFI handle: \(handle)")
+    }
+
+    init(polls: [ScanPoll]) {
+        self.polls = polls
+        super.init(noHandle: NoHandle())
+    }
+
+    override func poll() throws -> ScanPoll {
+        pollCalledOnMain = Thread.isMainThread
+        guard !polls.isEmpty else {
+            throw ScanError.InternalState
+        }
+        return polls.removeFirst()
+    }
+
+    override func cancel() throws -> ScanCancelOutcome {
+        cancelCalledOnMain = Thread.isMainThread
+        return .requested
+    }
+}
+
+private func generatedActivePoll(
+    revision: UInt64,
+    progress: ScanProgress? = nil
+) -> ScanPoll {
+    ScanPoll(
+        recordVersion: 1,
+        phase: .running,
+        stage: .scanning,
+        cancellationRequested: false,
+        revision: revision,
+        progress: progress,
+        eventsTruncated: false,
+        failure: nil,
+        result: nil
+    )
+}
+
+private func generatedSuccessPoll(result: ScanTaskResult) -> ScanPoll {
+    ScanPoll(
+        recordVersion: 1,
+        phase: .succeeded,
+        stage: .terminal,
+        cancellationRequested: false,
+        revision: 3,
+        progress: nil,
+        eventsTruncated: false,
+        failure: nil,
+        result: result
+    )
+}
+
+private func XCTAssertThrowsHomeScanError(
+    _ expected: HomeScanServiceError,
+    operation: () async throws -> Void,
+    file: StaticString = #filePath,
+    line: UInt = #line
+) async {
+    do {
+        try await operation()
+        XCTFail("Expected HomeScanServiceError.\(expected)", file: file, line: line)
+    } catch let error as HomeScanServiceError {
+        XCTAssertEqual(error, expected, file: file, line: line)
+    } catch {
+        XCTFail("Unexpected error: \(error)", file: file, line: line)
     }
 }
 
@@ -764,7 +1165,7 @@ private actor FlakyEngineService: EngineServing {
         }
         return EngineStatus(
             libraryVersion: "test",
-            ffiContractVersion: 6,
+            ffiContractVersion: 7,
             executedOffMainThread: true
         )
     }
