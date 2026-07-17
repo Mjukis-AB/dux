@@ -92,6 +92,17 @@
     "%@ available percent" : {},
     "%@ must be greater than zero." : {},
     "%@ must be no more than 100 percent." : {},
+    "%@ available" : {},
+    "Changes the menu bar status immediately" : {},
+    "Filesystem available" : {},
+    "Free-space labels use startup-disk capacity available for important use, with filesystem availability as a clearly disclosed fallback." : {},
+    "Icon and free space (%)" : {},
+    "Icon and free space (GiB)" : {},
+    "Icon only" : {},
+    "Last known capacity; the latest refresh failed" : {},
+    "Menu bar label" : {},
+    "Measured %@" : {},
+    "Refreshing capacity; showing the last measured value" : {},
     "Used" : {}
   },
   "version" : "1.0"

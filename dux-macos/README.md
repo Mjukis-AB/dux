@@ -131,6 +131,19 @@ menu action opens Explorer or Settings. The generated Info.plist sets
 `LSUIElement=true`, so closing Explorer leaves DUX running without a default
 Dock icon. User-facing shell keys live in `Dux/Resources/Localizable.xcstrings`.
 
+The shared model also owns the menu-bar label preference. Settings can select
+Icon only, Icon and free space (GiB), or Icon and free space (%); free GiB is the
+first-run default. The stable `menuBar.labelMode.v1` UserDefaults value is a
+Swift-only presentation preference, so it does not cross FFI or affect engine
+policy. Missing, malformed, and unknown future values fall back in memory
+without being overwritten. The status item reads the existing cached capacity
+state and never starts a sample or scan. Visible values are conservatively
+floored with checked integer arithmetic, refreshing/stale states retain their
+last measurement, and loading/failure states show no invented capacity. Its
+monochrome pressure symbols have distinct shapes, while VoiceOver always
+receives pressure, GiB, percent, capacity basis, and freshness even in Icon-only
+mode.
+
 `VolumeMonitor` samples the startup volume (`/`) through Foundation on a utility
 queue. It prefers `volumeAvailableCapacityForImportantUsage`, records whether it
 had to fall back to ordinary filesystem availability, and retains both values

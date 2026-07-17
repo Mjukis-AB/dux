@@ -37,6 +37,9 @@ final class CapacitySamplingSchedulerTests: XCTestCase {
         await clock.advance(by: 20)
         await scheduler.signal(.wake)
         try await eventually { await sampler.sampleCount == 2 }
+        try await eventually {
+            await scheduler.snapshot().nextDeadline?.milliseconds == 320
+        }
         let scheduled = await scheduler.snapshot()
         XCTAssertEqual(scheduled.nextDeadline?.milliseconds, 320)
         await scheduler.stop()

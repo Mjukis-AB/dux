@@ -52,6 +52,15 @@ Rust ownership is defined by [ADR 0004](0004-shared-rust-engine.md). SwiftUI
 views must not reproduce scanner, classification, candidate, safety, or cleanup
 policy.
 
+The native presentation layer owns non-authoritative display preferences. The
+menu-bar label mode is therefore a validated, versioned UserDefaults value in
+the shared `AppModel`, rather than a Rust/SQLite/FFI setting. Its three modes
+render only the cached Rust-classified startup-volume observation and cannot
+start sampling, scanning, planning, or cleanup. Missing or unknown preference
+values fall back in memory without rewriting future data. Capacity and pressure
+remain engine/monitor observations; Swift owns only compact conservative
+formatting, appearance-independent symbols, localization, and accessibility.
+
 ## Implementation constraints
 
 ### Scene and navigation model

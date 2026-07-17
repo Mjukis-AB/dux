@@ -15,7 +15,9 @@
 		2DE25E271D830CD5F1372C3A /* AppActivation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0111F34C431E515A86A780F4 /* AppActivation.swift */; };
 		31B4EBAA95F5CC5C76F7A21A /* CapacitySamplingScheduler.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD60DEE8D3093DACB89BB3DA /* CapacitySamplingScheduler.swift */; };
 		3937244C9B394E27C9AF99F7 /* CapacitySamplingSchedulerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 35ED975AE2F8C3C5A18228C7 /* CapacitySamplingSchedulerTests.swift */; };
+		3C46D3A8CBE75A16588EE5CF /* MenuBarLabelModeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E004627B4660D326FE7632E2 /* MenuBarLabelModeTests.swift */; };
 		4AF950C2A6897A027867C885 /* DiskPressurePolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = E680E94BFA1DCB3FAFFC2C49 /* DiskPressurePolicy.swift */; };
+		53A99BB7C2F6B03B07AE2CF6 /* MenuBarLabelMode.swift in Sources */ = {isa = PBXBuildFile; fileRef = A3EB2B2F30087D31F3248328 /* MenuBarLabelMode.swift */; };
 		69E28EFAD6A4109B80F1FC0C /* EngineService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 78A0F475B15FE85FDC5B8C9A /* EngineService.swift */; };
 		6D2CB0DD262B22CF018B0874 /* DuxFFI.swift in Sources */ = {isa = PBXBuildFile; fileRef = EF48DC1674437397B29209BE /* DuxFFI.swift */; };
 		6E80A759C1939343E81107EC /* CapacityResampleRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 76FE4A0BA11BA5271764EAEE /* CapacityResampleRouter.swift */; };
@@ -25,6 +27,7 @@
 		82252F3716D168BB22A360E9 /* MenuBarContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D62CBDBBBB0B3CE5E59D884E /* MenuBarContentView.swift */; };
 		87AF9A6CCBAE4C0B4B4D6785 /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = 5D0DB9F7F6DF9D1645B78CA1 /* Localizable.xcstrings */; };
 		9033D6BF38DA8C7EE5FC6710 /* EngineServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00371DEF2482E0BC47D1A5D0 /* EngineServiceTests.swift */; };
+		9A55E0195EA32915D5B991E1 /* MenuBarStatusLabel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 891135824269D084AB770521 /* MenuBarStatusLabel.swift */; };
 		A3936C11E7E090E3BDA6E986 /* EngineStatus.swift in Sources */ = {isa = PBXBuildFile; fileRef = ECB9598639A40687815737D2 /* EngineStatus.swift */; };
 		B184EB4EE1399E7D26F41D7B /* VolumeMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC650EAC7E25F66CC42436F6 /* VolumeMonitor.swift */; };
 		B334563BD340D9E0B20D16D3 /* DuxApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 992E2D118DDE512C123CF820 /* DuxApp.swift */; };
@@ -68,13 +71,16 @@
 		757D490EB8939DA31C6EF02D /* DiskPressurePolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiskPressurePolicyTests.swift; sourceTree = "<group>"; };
 		76FE4A0BA11BA5271764EAEE /* CapacityResampleRouter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CapacityResampleRouter.swift; sourceTree = "<group>"; };
 		78A0F475B15FE85FDC5B8C9A /* EngineService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EngineService.swift; sourceTree = "<group>"; };
+		891135824269D084AB770521 /* MenuBarStatusLabel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarStatusLabel.swift; sourceTree = "<group>"; };
 		90E79F7E2E1AE1AE3886E44C /* DuxSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DuxSettingsView.swift; sourceTree = "<group>"; };
 		992E2D118DDE512C123CF820 /* DuxApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DuxApp.swift; sourceTree = "<group>"; };
+		A3EB2B2F30087D31F3248328 /* MenuBarLabelMode.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarLabelMode.swift; sourceTree = "<group>"; };
 		B352437ADF86C831A87FB1B1 /* SnapshotReviewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SnapshotReviewController.swift; sourceTree = "<group>"; };
 		C762D5BE39976247D2390515 /* CapacityBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CapacityBar.swift; sourceTree = "<group>"; };
 		CC650EAC7E25F66CC42436F6 /* VolumeMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VolumeMonitor.swift; sourceTree = "<group>"; };
 		D62CBDBBBB0B3CE5E59D884E /* MenuBarContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarContentView.swift; sourceTree = "<group>"; };
 		DD60DEE8D3093DACB89BB3DA /* CapacitySamplingScheduler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CapacitySamplingScheduler.swift; sourceTree = "<group>"; };
+		E004627B4660D326FE7632E2 /* MenuBarLabelModeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarLabelModeTests.swift; sourceTree = "<group>"; };
 		E680E94BFA1DCB3FAFFC2C49 /* DiskPressurePolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiskPressurePolicy.swift; sourceTree = "<group>"; };
 		ECB9598639A40687815737D2 /* EngineStatus.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EngineStatus.swift; sourceTree = "<group>"; };
 		EF48DC1674437397B29209BE /* DuxFFI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DuxFFI.swift; sourceTree = "<group>"; };
@@ -107,6 +113,7 @@
 			children = (
 				E680E94BFA1DCB3FAFFC2C49 /* DiskPressurePolicy.swift */,
 				ECB9598639A40687815737D2 /* EngineStatus.swift */,
+				A3EB2B2F30087D31F3248328 /* MenuBarLabelMode.swift */,
 				682051DD7F1B44E0D477AF57 /* VolumeCapacitySnapshot.swift */,
 			);
 			path = Models;
@@ -142,6 +149,7 @@
 				90E79F7E2E1AE1AE3886E44C /* DuxSettingsView.swift */,
 				0C323FB00501BAB48AEB63FB /* ExplorerView.swift */,
 				D62CBDBBBB0B3CE5E59D884E /* MenuBarContentView.swift */,
+				891135824269D084AB770521 /* MenuBarStatusLabel.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -197,6 +205,7 @@
 				4E504B7A8AC2DDFCF50B5EBD /* DuxAppDelegateTests.swift */,
 				00371DEF2482E0BC47D1A5D0 /* EngineServiceTests.swift */,
 				2CC5DC5A1B28AAFC688385CA /* MaintenanceSchedulerTests.swift */,
+				E004627B4660D326FE7632E2 /* MenuBarLabelModeTests.swift */,
 				0EB23A8797C0C79213B54953 /* SnapshotReviewControllerTests.swift */,
 				2FCFB814644FA433F09F5895 /* VolumeMonitorTests.swift */,
 			);
@@ -302,6 +311,7 @@
 				B34BE4E0B8AE46D166283EC0 /* DuxAppDelegateTests.swift in Sources */,
 				9033D6BF38DA8C7EE5FC6710 /* EngineServiceTests.swift in Sources */,
 				C310092B690811A25EE68AA6 /* MaintenanceSchedulerTests.swift in Sources */,
+				3C46D3A8CBE75A16588EE5CF /* MenuBarLabelModeTests.swift in Sources */,
 				DCF5B8FBAFD549C1DE06FCA8 /* SnapshotReviewControllerTests.swift in Sources */,
 				B5B300842B55B2131DB658FC /* VolumeMonitorTests.swift in Sources */,
 			);
@@ -327,6 +337,8 @@
 				E81F7E7B392E1FC53DCA2694 /* ExplorerView.swift in Sources */,
 				02F49E38EAA6B05B5B6E7BB0 /* MaintenanceScheduler.swift in Sources */,
 				82252F3716D168BB22A360E9 /* MenuBarContentView.swift in Sources */,
+				53A99BB7C2F6B03B07AE2CF6 /* MenuBarLabelMode.swift in Sources */,
+				9A55E0195EA32915D5B991E1 /* MenuBarStatusLabel.swift in Sources */,
 				80066EDFA86C1475A5BEE0CD /* SnapshotReviewController.swift in Sources */,
 				FF16E00002EB5CBC2AEBB6D1 /* VolumeCapacitySnapshot.swift in Sources */,
 				B184EB4EE1399E7D26F41D7B /* VolumeMonitor.swift in Sources */,

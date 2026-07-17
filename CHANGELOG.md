@@ -5,6 +5,21 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Added three persistent menu-bar label modes: Icon only, Icon and free space
+  (GiB), and Icon and free space (%), defaulting to free GiB. A validated
+  versioned Swift-owned UserDefaults preference updates the shared status item
+  immediately from Settings and falls back without rewriting missing, corrupt,
+  or future values. The label reads only cached startup-volume state, never
+  starts a sample or scan, preserves the last value during refresh/failure,
+  uses important-use availability with the disclosed filesystem fallback, and
+  never fabricates zero. Exact checked integer formatting conservatively floors
+  binary GiB and percent to tenths without overflow. Monochrome shape-distinct
+  pressure symbols do not rely on color, and every mode speaks pressure,
+  capacity, percent, basis, and freshness through one stable VoiceOver element.
+  Focused tests cover all modes/states, locale and integer boundaries, valid SF
+  Symbols, preference compatibility, immediate one-write propagation, and
+  accessibility identifiers; the complete 82-test linked suite and universal
+  arm64/x86_64 Debug and Release app builds pass.
 - Added persistent user-configurable disk-pressure thresholds through SQLite
   schema v10 and UniFFI contract v6. The exact `disk_pressure_policy` setting
   stores canonical schema-v1 JSON with checked revisions and Default/Stored

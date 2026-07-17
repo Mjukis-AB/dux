@@ -3392,7 +3392,31 @@ Tasks:
   verification is recorded with this checkpoint's commit. This preference
   changes classification only and grants no cleanup, notification, scan, or
   scheduling authority.
-- [ ] Implement menu bar label modes.
+- [x] Implement menu bar label modes. Completed 2026-07-17: the status item now
+  supports Icon only, Icon and free space (GiB), and Icon and free space (%)
+  modes, with free GiB as the useful first-run default. One validated,
+  versioned Swift-owned UserDefaults preference lives in the shared `AppModel`,
+  updates immediately from Settings, preserves every stable raw mode across
+  launch, and treats missing, corrupt, or future values as the default without
+  rewriting them. This presentation-only preference never enters Rust, SQLite,
+  FFI, sampling, scanning, or cleanup authority.
+
+  The label consumes only the existing cached startup-volume state. It uses
+  important-use availability when Foundation supplies it and the already
+  disclosed filesystem fallback otherwise; it starts no work. Exact integer
+  formatting floors to tenths of binary GiB or percent so the compact value
+  cannot round free capacity upward, handles `UInt64.max` without overflow, and
+  localizes the decimal separator. Loading/failure states invent no zero value,
+  while refreshing and stale states retain the last measurement. Monochrome,
+  shape-distinct Healthy/Warning/Critical/Unknown symbols remain legible across
+  menu-bar appearances without relying on color. Every mode, including Icon
+  only, exposes a stable VoiceOver identifier and a localized spoken summary of
+  pressure, GiB, percent, availability basis, and freshness. Focused linked
+  tests cover all modes and render states, exact boundaries/locales/integer
+  extremes, system-symbol availability, preference default/round-trip/future
+  fallback, one-write AppModel propagation, and accessibility contracts. The
+  full 82-test linked Swift suite passes, and unsigned universal Debug and
+  Release apps contain both arm64 and x86_64 at the macOS 14 deployment target.
 - [ ] Implement popover layout with cached status and scan progress.
 - [ ] Implement Explorer window shell and Overview.
 - [ ] Implement launch-at-login setting.

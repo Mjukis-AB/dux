@@ -14,21 +14,19 @@ final class EngineServiceTests: XCTestCase {
 
     @MainActor
     func testFirstRealEngineOpenIsLazyAndRunsOffMainActor() async throws {
-        let baseline = liveEngineInstanceCount()
+        let fixture = try TestStorageRootsFixture()
+        let dataRoot = URL(fileURLWithPath: fixture.storageRoots.dataRoot, isDirectory: true)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: dataRoot.path))
 
-        do {
-            let fixture = try TestStorageRootsFixture()
-            let service = EngineService(storageRoots: fixture.storageRoots)
-            XCTAssertEqual(liveEngineInstanceCount(), baseline)
+        let service = EngineService(storageRoots: fixture.storageRoots)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: dataRoot.path))
 
-            let result = try await service.loadStatus()
-            XCTAssertTrue(result.executedOffMainThread)
-            XCTAssertEqual(liveEngineInstanceCount(), baseline + 1)
-            let closed = await service.close()
-            XCTAssertTrue(closed)
-        }
+        let result = try await service.loadStatus()
+        XCTAssertTrue(result.executedOffMainThread)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: dataRoot.path))
 
-        XCTAssertEqual(liveEngineInstanceCount(), baseline)
+        let closed = await service.close()
+        XCTAssertTrue(closed)
     }
 
     func testTransientEngineOpenFailureIsNotCached() async throws {

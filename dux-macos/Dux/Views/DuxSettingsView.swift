@@ -1,5 +1,9 @@
 import SwiftUI
 
+enum MenuBarLabelAccessibility {
+    static let picker = "menu-bar-label-mode"
+}
+
 enum DiskPressurePolicyAccessibility {
     static let criticalGiB = "pressure-policy-critical-gib"
     static let criticalPercent = "pressure-policy-critical-percent"
@@ -35,6 +39,20 @@ struct DuxSettingsView: View {
                 LabeledContent("App mode") {
                     Text("Menu bar helper")
                 }
+                Picker("Menu bar label", selection: $model.menuBarLabelMode) {
+                    ForEach(MenuBarLabelMode.allCases) { mode in
+                        Text(verbatim: mode.localizedTitle())
+                            .tag(mode)
+                    }
+                }
+                .accessibilityIdentifier(MenuBarLabelAccessibility.picker)
+                .accessibilityHint("Changes the menu bar status immediately")
+                Text(
+                    "Free-space labels use startup-disk capacity available for important use, "
+                        + "with filesystem availability as a clearly disclosed fallback."
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
                 Text("Closing Explorer keeps DUX available from the menu bar.")
                     .foregroundStyle(.secondary)
             }

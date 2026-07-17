@@ -10,8 +10,10 @@ struct DuxApp: App {
         MenuBarExtra {
             MenuBarContentView(model: model)
         } label: {
-            Image(systemName: "externaldrive.fill")
-                .accessibilityLabel("DUX storage status")
+            MenuBarStatusLabel(
+                mode: model.menuBarLabelMode,
+                volumeState: model.volumeState
+            )
         }
         .menuBarExtraStyle(.window)
 

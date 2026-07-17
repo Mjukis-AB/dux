@@ -5,6 +5,14 @@ import Observation
 final class AppModel: DuxCapacitySampling {
     private(set) var engineState = EngineConnectionState.idle
     private(set) var volumeState = VolumeCapacityState.idle
+    var menuBarLabelMode: MenuBarLabelMode {
+        didSet {
+            guard menuBarLabelMode != oldValue else {
+                return
+            }
+            menuBarLabelPreferenceStore.save(menuBarLabelMode)
+        }
+    }
     private(set) var diskPressurePolicy: DiskPressurePolicy?
     private(set) var diskPressurePolicyState = DiskPressurePolicyState.idle
     var diskPressurePolicyDraft = DiskPressurePolicyDraft.defaults
@@ -12,6 +20,7 @@ final class AppModel: DuxCapacitySampling {
     private let engineService: any EngineServing
     private let volumeMonitor: any VolumeMonitoring
     private let capacityResampleRequester: any DuxCapacityResampleRequesting
+    private let menuBarLabelPreferenceStore: any MenuBarLabelPreferenceStoring
 
     @ObservationIgnored
     private var engineLoadTask: Task<Void, Never>?
@@ -32,11 +41,15 @@ final class AppModel: DuxCapacitySampling {
         engineService: any EngineServing = EngineService(),
         volumeMonitor: any VolumeMonitoring = VolumeMonitor(),
         capacityResampleRequester: any DuxCapacityResampleRequesting =
-            NoopDuxCapacityResampleRequester()
+            NoopDuxCapacityResampleRequester(),
+        menuBarLabelPreferenceStore: any MenuBarLabelPreferenceStoring =
+            UserDefaultsMenuBarLabelPreferenceStore()
     ) {
         self.engineService = engineService
         self.volumeMonitor = volumeMonitor
         self.capacityResampleRequester = capacityResampleRequester
+        self.menuBarLabelPreferenceStore = menuBarLabelPreferenceStore
+        menuBarLabelMode = menuBarLabelPreferenceStore.load()
     }
 
     func loadInitialState() async {
