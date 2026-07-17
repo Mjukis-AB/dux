@@ -48,4 +48,8 @@ pub use scan_coverage::{
     ScanIssueKind,
 };
 pub(crate) use scan_coverage::{MAX_SCAN_ISSUE_OCCURRENCES, MAX_SCAN_ISSUES};
-pub use volume::DiskPressure;
+pub use volume::{
+    AvailableCapacitySource, DiskPressure, DiskPressureConfig, DiskPressureConfigError,
+    DiskPressureEvaluation, DiskPressureRecoveryMargin, DiskPressureThreshold, VolumeCapacity,
+    VolumeCapacityError,
+};

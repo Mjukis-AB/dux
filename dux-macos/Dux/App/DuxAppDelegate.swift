@@ -1,5 +1,13 @@
 import AppKit
 
+@MainActor
+protocol DuxAppRuntimeServing: AnyObject {
+    func start() async
+    func signalMaintenance(_ trigger: DuxMaintenanceTrigger) async
+    func signalCapacity(_ trigger: DuxCapacitySamplingTrigger) async
+    func shutdown() async
+}
+
 enum DuxTerminationDisposition {
     case terminateNow
     case waitForExistingShutdown
@@ -32,19 +40,29 @@ final class DuxTerminationGate {
 final class DuxAppDelegate: NSObject, NSApplicationDelegate {
     private var observers: [NSObjectProtocol] = []
     private let terminationGate = DuxTerminationGate()
+    private let runtime: any DuxAppRuntimeServing
+
+    override convenience init() {
+        self.init(runtime: AppRuntime.shared)
+    }
+
+    init(runtime: any DuxAppRuntimeServing) {
+        self.runtime = runtime
+        super.init()
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         _ = notification
         installObservers()
         Task {
-            await AppRuntime.shared.start()
+            await runtime.start()
         }
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
         _ = notification
         Task {
-            await AppRuntime.shared.signalMaintenance(.applicationBecameActive)
+            await runtime.signalMaintenance(.applicationBecameActive)
         }
     }
 
@@ -56,7 +74,7 @@ final class DuxAppDelegate: NSObject, NSApplicationDelegate {
             return .terminateLater
         case .beginShutdown:
             Task {
-                await AppRuntime.shared.shutdown()
+                await runtime.shutdown()
                 terminationGate.approve()
                 sender.reply(toApplicationShouldTerminate: true)
             }
@@ -80,10 +98,27 @@ final class DuxAppDelegate: NSObject, NSApplicationDelegate {
                 queue: .main
             ) { _ in
                 Task { @MainActor in
-                    await AppRuntime.shared.signalMaintenance(.wake)
+                    await self.handleWake()
                 }
             }
         )
+        for name in [
+            NSWorkspace.didMountNotification,
+            NSWorkspace.didUnmountNotification,
+            NSWorkspace.didRenameVolumeNotification,
+        ] {
+            observers.append(
+                NSWorkspace.shared.notificationCenter.addObserver(
+                    forName: name,
+                    object: nil,
+                    queue: .main
+                ) { _ in
+                    Task { @MainActor in
+                        await self.handleVolumesChanged()
+                    }
+                }
+            )
+        }
         for (name, trigger) in [
             (Notification.Name.NSSystemClockDidChange, DuxMaintenanceTrigger.significantTimeChange),
             (Notification.Name.NSProcessInfoPowerStateDidChange, .energyPolicyChanged),
@@ -99,11 +134,20 @@ final class DuxAppDelegate: NSObject, NSApplicationDelegate {
                     queue: .main
                 ) { _ in
                     Task { @MainActor in
-                        await AppRuntime.shared.signalMaintenance(trigger)
+                        await self.runtime.signalMaintenance(trigger)
                     }
                 }
             )
         }
+    }
+
+    func handleWake() async {
+        await runtime.signalCapacity(.wake)
+        await runtime.signalMaintenance(.wake)
+    }
+
+    func handleVolumesChanged() async {
+        await runtime.signalCapacity(.volumesChanged)
     }
 
     private func removeObservers() {
@@ -114,3 +158,5 @@ final class DuxAppDelegate: NSObject, NSApplicationDelegate {
         observers.removeAll(keepingCapacity: false)
     }
 }
+
+extension AppRuntime: DuxAppRuntimeServing {}

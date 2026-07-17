@@ -5,6 +5,26 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Added native startup-volume pressure monitoring through FFI contract v5. The
+  menu-bar runtime samples immediately, every five minutes, on wake, and after
+  volume changes while keeping one generation-fenced request in flight. Rust is
+  the sole policy owner for important-capacity preference, default
+  Warning/Critical thresholds, and two-dimensional recovery hysteresis. A
+  bounded engine-session baseline preserves hysteresis for newer observations
+  that security policy forbids persisting. For durable observations, the engine
+  selects the newest valid session/durable baseline, loads durable state, admits
+  hourly or transition history, commits, and reconciles ambiguity inside one
+  writer-leased SQLite transaction. Missing stable identity, incomplete
+  metadata, and important-only observations remain useful path-free display
+  telemetry but cannot advance history. Swift preserves cached values as
+  refreshing or stale, never invents used bytes from important capacity, and
+  performs all Foundation and UniFFI work off the main actor. Core/store/FFI
+  boundary and race tests plus the linked Swift suite cover hysteresis, cadence,
+  reopen, retry, suppressed-observation ordering across engine sessions,
+  lifecycle signals, cancellation, honest partial observations,
+  accessibility presentation, and the normal sampling budget. This is read-only
+  status telemetry and grants no cleanup authority. Custom threshold persistence
+  and controls remain an explicit Milestone 3 settings task.
 - Added conservative hard-process-death recovery for schema-v9 claimed running
   scans. Start and normal completion atomically create/consume one exact private
   process-instance claim; a bounded indexed same-scope keyset pass drops every

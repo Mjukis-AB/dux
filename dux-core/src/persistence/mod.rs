@@ -79,6 +79,10 @@ pub(crate) use candidate_history::StoredCandidateRecord;
 pub(crate) use candidate_history::{
     CandidateHistoryStatus, CompleteCandidateRecord, NewCandidateRecord,
 };
+pub(crate) use capacity_history::{
+    CapacityObservationOutcome, CapacityPressureBaseline, CapacityWriteOutcome,
+    RawCapacityObservation,
+};
 pub(crate) use cleanup_history::CleanupSessionId;
 #[cfg(test)]
 pub(crate) use cleanup_history::{CleanupTrigger, NewCleanupSessionRecord};

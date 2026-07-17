@@ -20,10 +20,11 @@ use super::candidate_history::{
     transition_candidate_evaluation, transition_candidate_review,
 };
 use super::capacity_history::{
-    CapacityPage, CapacityPageCursor, CapacityWriteOutcome, CapacityWriteReason,
-    PreparedCapacitySample, RawCapacitySample, StoredCapacitySample, exact_raw_and_volume_match,
+    CapacityObservationOutcome, CapacityPage, CapacityPageCursor, CapacityPressureBaseline,
+    CapacityWriteOutcome, CapacityWriteReason, PreparedCapacitySample, RawCapacityObservation,
+    RawCapacitySample, StoredCapacitySample, exact_raw_and_volume_match,
     exact_volume_observation_match, load_latest_raw_capacity_sample, load_raw_capacity_page,
-    validate_capacity_volume, write_raw_capacity_sample,
+    validate_capacity_volume, validate_ephemeral_capacity_observation, write_raw_capacity_sample,
 };
 use super::cleanup_history::{
     CleanupSessionId, NewCleanupSessionRecord, PreparedCleanupSession, StoredCleanupSessionRecord,
@@ -68,6 +69,67 @@ const MIGRATION_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 
 static COORDINATORS: OnceLock<Mutex<HashMap<StoreIdentity, Weak<StoreCoordinator>>>> =
     OnceLock::new();
+
+fn select_capacity_pressure_baseline(
+    durable: Option<&StoredCapacitySample>,
+    session: Option<CapacityPressureBaseline>,
+    observed_at: SystemTime,
+    observed_capacity: crate::domain::VolumeCapacity,
+) -> Result<crate::domain::DiskPressure, HistoryError> {
+    if let Some(durable) = durable {
+        validate_capacity_observation_order(
+            observed_at,
+            durable.sampled_at,
+            stored_capacity_matches(durable, observed_capacity),
+        )?;
+    }
+    if let Some(session) = session {
+        validate_capacity_observation_order(
+            observed_at,
+            session.sampled_at,
+            session.capacity == observed_capacity,
+        )?;
+    }
+
+    match (durable, session) {
+        (Some(durable), Some(session)) => match durable.sampled_at.cmp(&session.sampled_at) {
+            std::cmp::Ordering::Greater => Ok(durable.pressure),
+            std::cmp::Ordering::Less => Ok(session.pressure),
+            std::cmp::Ordering::Equal => {
+                if !stored_capacity_matches(durable, session.capacity) {
+                    return Err(HistoryError::new(HistoryErrorKind::AlreadyExists));
+                }
+                Ok(durable.pressure)
+            }
+        },
+        (Some(durable), None) => Ok(durable.pressure),
+        (None, Some(session)) => Ok(session.pressure),
+        (None, None) => Ok(crate::domain::DiskPressure::Unknown),
+    }
+}
+
+fn validate_capacity_observation_order(
+    observed_at: SystemTime,
+    baseline_at: SystemTime,
+    exact_facts_match: bool,
+) -> Result<(), HistoryError> {
+    match observed_at.cmp(&baseline_at) {
+        std::cmp::Ordering::Less => Err(HistoryError::new(HistoryErrorKind::InvalidTransition)),
+        std::cmp::Ordering::Equal if !exact_facts_match => {
+            Err(HistoryError::new(HistoryErrorKind::AlreadyExists))
+        }
+        std::cmp::Ordering::Equal | std::cmp::Ordering::Greater => Ok(()),
+    }
+}
+
+fn stored_capacity_matches(
+    stored: &StoredCapacitySample,
+    capacity: crate::domain::VolumeCapacity,
+) -> bool {
+    stored.total_bytes == capacity.total_bytes()
+        && Some(stored.available_bytes) == capacity.available_bytes()
+        && stored.important_available_bytes == capacity.important_available_bytes()
+}
 
 /// Semantic user review intent. Persistence resolves the exact source status
 /// while holding the same transaction that performs the compare-and-set.
@@ -325,6 +387,200 @@ impl StoreCoordinator {
         reason: CapacityWriteReason,
     ) -> Result<CapacityWriteOutcome, HistoryError> {
         self.record_raw_capacity_sample_with_hook(sample, reason, || Ok(()))
+    }
+
+    /// Atomically derive and persist pressure for one capacity observation.
+    ///
+    /// Loading the previous pressure, applying hysteresis, selecting transition
+    /// admission, and writing all happen while holding the same cross-process
+    /// writer lease. This prevents two app/CLI processes from losing a
+    /// transition. Important-only observations are evaluated against the
+    /// latest durable pressure but deliberately cause no SQLite mutation.
+    pub(crate) fn observe_capacity(
+        &self,
+        observation: &RawCapacityObservation,
+        config: crate::domain::DiskPressureConfig,
+        session_baseline: Option<CapacityPressureBaseline>,
+    ) -> Result<CapacityObservationOutcome, HistoryError> {
+        self.observe_capacity_with_hook(observation, config, session_baseline, || Ok(()))
+    }
+
+    fn observe_capacity_with_hook(
+        &self,
+        observation: &RawCapacityObservation,
+        config: crate::domain::DiskPressureConfig,
+        session_baseline: Option<CapacityPressureBaseline>,
+        after_commit: impl FnOnce() -> Result<(), HistoryError>,
+    ) -> Result<CapacityObservationOutcome, HistoryError> {
+        let mut guard = self.lock_current_history_connection()?;
+        if observation.capacity().available_bytes().is_none() {
+            let transaction = guard
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Deferred)
+                .map_err(map_write_sql_error)?;
+            let latest = load_latest_raw_capacity_sample(&transaction, observation.volume_id())?;
+            let has_volume = validate_ephemeral_capacity_observation(
+                &transaction,
+                observation.volume_id(),
+                latest.as_slice(),
+                observation.sampled_at(),
+            )?;
+            if latest.is_some() && !has_volume {
+                return Err(HistoryError::new(HistoryErrorKind::CorruptData));
+            }
+            let previous = select_capacity_pressure_baseline(
+                latest.as_ref(),
+                session_baseline,
+                observation.sampled_at(),
+                observation.capacity(),
+            )?;
+            let evaluation = config.evaluate(observation.capacity(), previous);
+            transaction.commit().map_err(map_write_sql_error)?;
+            self.revalidate_current_history_guard(&guard)?;
+            return Ok(CapacityObservationOutcome {
+                evaluation,
+                previous_durable_pressure: latest.as_ref().map(|sample| sample.pressure),
+                write: None,
+            });
+        }
+
+        let mut attempted_outcome = None;
+        let attempt = (|| {
+            let transaction = guard
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(map_write_sql_error)?;
+            // Re-read under the SQLite write transaction. The advisory writer
+            // lease already fences cooperating processes; this second read
+            // also makes the policy dependency explicit at the mutation site.
+            let transactional_latest =
+                load_latest_raw_capacity_sample(&transaction, observation.volume_id())?;
+            let transactional_previous = select_capacity_pressure_baseline(
+                transactional_latest.as_ref(),
+                session_baseline,
+                observation.sampled_at(),
+                observation.capacity(),
+            )?;
+            let transactional_evaluation =
+                config.evaluate(observation.capacity(), transactional_previous);
+            let transactional_sample = observation
+                .with_pressure(transactional_evaluation.pressure())?
+                .ok_or_else(|| HistoryError::new(HistoryErrorKind::InternalState))?;
+            let transactional_prepared = PreparedCapacitySample::prepare(&transactional_sample)?;
+            let transactional_reason = match transactional_latest.as_ref() {
+                Some(previous) if previous.pressure != transactional_evaluation.pressure() => {
+                    CapacityWriteReason::PressureTransition
+                }
+                Some(_) | None => CapacityWriteReason::Routine,
+            };
+            let outcome = write_raw_capacity_sample(
+                &transaction,
+                &transactional_prepared,
+                transactional_reason,
+            )?;
+            let previous_durable_pressure =
+                transactional_latest.as_ref().map(|sample| sample.pressure);
+            attempted_outcome = Some((
+                outcome,
+                transactional_evaluation,
+                previous_durable_pressure,
+                transactional_prepared,
+            ));
+            transaction.commit().map_err(map_write_sql_error)?;
+            after_commit()?;
+            self.revalidate_current_history_guard(&guard)?;
+            Ok(CapacityObservationOutcome {
+                evaluation: transactional_evaluation,
+                previous_durable_pressure,
+                write: Some(outcome),
+            })
+        })();
+        let failure = match attempt {
+            Ok(outcome) => return Ok(outcome),
+            Err(error) => error,
+        };
+
+        let Some((
+            attempted_write,
+            attempted_evaluation,
+            attempted_previous_pressure,
+            attempted_prepared,
+        )) = attempted_outcome
+        else {
+            return Err(failure);
+        };
+        if self.revalidate_current_history_guard(&guard).is_err() {
+            return Err(HistoryError::new(HistoryErrorKind::OutcomeUnknown));
+        }
+        let reconciled = match attempted_write {
+            CapacityWriteOutcome::Inserted | CapacityWriteOutcome::ExistingExact => {
+                exact_raw_and_volume_match(&guard.connection, &attempted_prepared)
+            }
+            CapacityWriteOutcome::Suppressed => {
+                exact_volume_observation_match(&guard.connection, &attempted_prepared)
+            }
+        };
+        match reconciled {
+            Ok(true) => Ok(CapacityObservationOutcome {
+                evaluation: attempted_evaluation,
+                previous_durable_pressure: attempted_previous_pressure,
+                write: Some(attempted_write),
+            }),
+            Ok(false) => Err(failure),
+            Err(_) => Err(HistoryError::new(HistoryErrorKind::OutcomeUnknown)),
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn observe_capacity_after_commit_failure_for_test(
+        &self,
+        observation: &RawCapacityObservation,
+        config: crate::domain::DiskPressureConfig,
+    ) -> Result<CapacityObservationOutcome, HistoryError> {
+        self.observe_capacity_with_hook(observation, config, None, || {
+            Err(HistoryError::new(HistoryErrorKind::DatabaseUnavailable))
+        })
+    }
+
+    /// Evaluate an intentionally ephemeral observation against the latest
+    /// durable pressure without mutating volume metadata or sample history.
+    pub(crate) fn evaluate_capacity(
+        &self,
+        volume_id: &crate::domain::VolumeId,
+        sampled_at: SystemTime,
+        capacity: crate::domain::VolumeCapacity,
+        config: crate::domain::DiskPressureConfig,
+        session_baseline: Option<CapacityPressureBaseline>,
+    ) -> Result<CapacityObservationOutcome, HistoryError> {
+        let mut guard = self.lock_current_history_connection()?;
+        let transaction = guard
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Deferred)
+            .map_err(map_write_sql_error)?;
+        let latest = load_latest_raw_capacity_sample(&transaction, volume_id)?;
+        let has_volume = validate_ephemeral_capacity_observation(
+            &transaction,
+            volume_id,
+            latest.as_slice(),
+            sampled_at,
+        )?;
+        if latest.is_some() && !has_volume {
+            return Err(HistoryError::new(HistoryErrorKind::CorruptData));
+        }
+        let previous = select_capacity_pressure_baseline(
+            latest.as_ref(),
+            session_baseline,
+            sampled_at,
+            capacity,
+        );
+        let result = config.evaluate(capacity, previous?);
+        transaction.commit().map_err(map_write_sql_error)?;
+        self.revalidate_current_history_guard(&guard)?;
+        Ok(CapacityObservationOutcome {
+            evaluation: result,
+            previous_durable_pressure: latest.as_ref().map(|sample| sample.pressure),
+            write: None,
+        })
     }
 
     fn record_raw_capacity_sample_with_hook(

@@ -713,6 +713,7 @@ struct EngineInner {
     config: EngineConfig,
     store: Arc<StoreCoordinator>,
     snapshots: Arc<SnapshotRepository>,
+    startup_volume_pressure: Mutex<super::volume_status::StartupVolumePressureBaseline>,
     shared: Arc<Shared>,
     workers: Mutex<Option<Vec<JoinHandle<()>>>>,
 }
@@ -801,6 +802,9 @@ impl EngineHandle {
                 config,
                 store,
                 snapshots,
+                startup_volume_pressure: Mutex::new(
+                    super::volume_status::StartupVolumePressureBaseline::new(),
+                ),
                 shared,
                 workers: Mutex::new(Some(workers)),
             }),
@@ -816,6 +820,24 @@ impl EngineHandle {
         &self,
     ) -> Result<DatabaseStatus, crate::persistence::DatabaseOpenErrorKind> {
         self.inner.store.status().map_err(|error| error.kind)
+    }
+
+    /// Evaluate one startup-volume capacity observation, retaining durable
+    /// history when evidence is complete and a bounded session pressure
+    /// baseline otherwise. The returned DTO is path-free and grants no cleanup
+    /// authority.
+    pub fn observe_volume_capacity(
+        &self,
+        observation: super::VolumeCapacityObservation,
+    ) -> Result<super::VolumeCapacityStatus, super::VolumeCapacityStatusError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(super::VolumeCapacityStatusError::Closed);
+        }
+        super::volume_status::observe_volume_capacity(
+            &self.inner.store,
+            &self.inner.startup_volume_pressure,
+            observation,
+        )
     }
 
     /// Acquire one exact Explorer-only review lease by durable scan identity.

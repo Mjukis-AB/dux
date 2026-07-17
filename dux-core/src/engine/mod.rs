@@ -1,9 +1,9 @@
 //! Shared engine lifecycle and bounded task orchestration.
 //!
-//! The engine runs read-only formatting, durable full-scan, bounded DUX-owned
-//! history and snapshot-maintenance tasks, and typed settings operations. It
-//! grants no cleanup authority; FFI transport and cleanup execution remain
-//! separate boundaries.
+//! The engine runs read-only formatting, deterministic volume-pressure status,
+//! durable full-scan, bounded DUX-owned history and snapshot-maintenance tasks,
+//! and typed settings operations. It grants no cleanup authority; FFI
+//! transport and cleanup execution remain separate boundaries.
 
 mod candidate_history;
 mod cleanup_history;
@@ -12,6 +12,7 @@ mod registry;
 mod settings;
 mod snapshot_review;
 mod task;
+mod volume_status;
 
 pub use candidate_history::{
     CandidateDetailError, CandidateReviewCommand, CandidateReviewError, CandidateReviewResult,
@@ -57,4 +58,8 @@ pub use task::{
     SnapshotUnleasedTempMaintenanceResult, SnapshotUnleasedTempMaintenanceStartOutcome,
     StartTaskError, TaskAccessError, TaskEvent, TaskEventBatch, TaskEventKind, TaskFailureKind,
     TaskId, TaskKind, TaskPhase, TaskSnapshot,
+};
+pub use volume_status::{
+    CapacityHistoryDisposition, VolumeCapacityObservation, VolumeCapacityStatus,
+    VolumeCapacityStatusError,
 };

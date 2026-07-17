@@ -1,5 +1,26 @@
 import Foundation
 
+protocol DuxEngineClosing: Sendable {
+    func close() async -> Bool
+}
+
+protocol DuxMaintenanceScheduling: Sendable {
+    func start() async
+    func signal(_ trigger: DuxMaintenanceTrigger) async
+    func stop() async
+}
+
+protocol DuxCapacityScheduling: Sendable {
+    func start() async
+    func signal(_ trigger: DuxCapacitySamplingTrigger) async
+    func stop() async
+}
+
+protocol DuxReviewManaging: Sendable {
+    func renewNow() async
+    func shutdown() async
+}
+
 struct SystemDuxMaintenanceEnergyPolicy: DuxMaintenanceEnergyPolicy {
     func permitsMaintenance() async -> Bool {
         let process = ProcessInfo.processInfo
@@ -23,9 +44,10 @@ final class AppRuntime {
 
     let model: AppModel
 
-    private let engineService: EngineService
-    private let scheduler: DuxMaintenanceScheduler
-    private let reviews: DuxSnapshotReviewController
+    private let engineService: any DuxEngineClosing
+    private let scheduler: any DuxMaintenanceScheduling
+    private let capacityScheduler: any DuxCapacityScheduling
+    private let reviews: any DuxReviewManaging
     private var started = false
     private var shuttingDown = false
     private var shutdownTask: Task<Void, Never>?
@@ -38,7 +60,23 @@ final class AppRuntime {
             energyPolicy: SystemDuxMaintenanceEnergyPolicy()
         )
         reviews = DuxSnapshotReviewController(service: engineService)
-        model = AppModel(engineService: engineService)
+        let model = AppModel(engineService: engineService)
+        self.model = model
+        capacityScheduler = DuxCapacitySamplingScheduler(sampler: model)
+    }
+
+    init(
+        model: AppModel,
+        engineService: any DuxEngineClosing,
+        scheduler: any DuxMaintenanceScheduling,
+        capacityScheduler: any DuxCapacityScheduling,
+        reviews: any DuxReviewManaging
+    ) {
+        self.model = model
+        self.engineService = engineService
+        self.scheduler = scheduler
+        self.capacityScheduler = capacityScheduler
+        self.reviews = reviews
     }
 
     func start() async {
@@ -46,7 +84,16 @@ final class AppRuntime {
             return
         }
         started = true
-        await scheduler.start()
+        async let maintenance: Void = scheduler.start()
+        async let capacity: Void = capacityScheduler.start()
+        _ = await (maintenance, capacity)
+    }
+
+    func signalCapacity(_ trigger: DuxCapacitySamplingTrigger) async {
+        guard started, !shuttingDown else {
+            return
+        }
+        await capacityScheduler.signal(trigger)
     }
 
     func signalMaintenance(_ trigger: DuxMaintenanceTrigger) async {
@@ -65,10 +112,12 @@ final class AppRuntime {
             return
         }
         shuttingDown = true
+        let capacityScheduler = capacityScheduler
         let scheduler = scheduler
         let reviews = reviews
         let engineService = engineService
         let task = Task {
+            await capacityScheduler.stop()
             await scheduler.stop()
             await reviews.shutdown()
             _ = await engineService.close()
@@ -77,3 +126,8 @@ final class AppRuntime {
         await task.value
     }
 }
+
+extension EngineService: DuxEngineClosing {}
+extension DuxMaintenanceScheduler: DuxMaintenanceScheduling {}
+extension DuxCapacitySamplingScheduler: DuxCapacityScheduling {}
+extension DuxSnapshotReviewController: DuxReviewManaging {}

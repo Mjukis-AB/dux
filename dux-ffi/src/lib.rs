@@ -6,10 +6,10 @@ use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use dux_core::engine::{
-    CancelOutcome as CoreCancelOutcome, EngineConfig, EngineHandle, EngineOpenError,
-    HistoryMaintenanceStartOutcome, ScanRecoveryMaintenanceOutcome as CoreScanRecoveryOutcome,
-    ScanRecoveryMaintenanceStartOutcome, SnapshotOrphanMaintenanceOutcome as CoreOrphanOutcome,
-    SnapshotOrphanMaintenanceStartOutcome,
+    CancelOutcome as CoreCancelOutcome, CapacityHistoryDisposition as CoreHistoryDisposition,
+    EngineConfig, EngineHandle, EngineOpenError, HistoryMaintenanceStartOutcome,
+    ScanRecoveryMaintenanceOutcome as CoreScanRecoveryOutcome, ScanRecoveryMaintenanceStartOutcome,
+    SnapshotOrphanMaintenanceOutcome as CoreOrphanOutcome, SnapshotOrphanMaintenanceStartOutcome,
     SnapshotProvisioningStageMaintenanceOutcome as CoreStageOutcome,
     SnapshotProvisioningStageMaintenanceStartOutcome,
     SnapshotRetentionOutcome as CoreRetentionOutcome, SnapshotRetentionStartOutcome,
@@ -20,11 +20,15 @@ use dux_core::engine::{
     SnapshotTerminalTempMaintenanceStartOutcome,
     SnapshotUnleasedTempMaintenanceOutcome as CoreUnleasedTempOutcome,
     SnapshotUnleasedTempMaintenanceStartOutcome, StartTaskError, TaskFailureKind, TaskId,
-    TaskPhase as CoreTaskPhase,
+    TaskPhase as CoreTaskPhase, VolumeCapacityObservation as CoreVolumeObservation,
+    VolumeCapacityStatusError as CoreVolumeStatusError,
 };
-use dux_core::{DatabaseOpenErrorKind, ScanId, SnapshotOpenErrorKind};
+use dux_core::{
+    AvailableCapacitySource as CoreCapacitySource, DatabaseOpenErrorKind,
+    DiskPressure as CoreDiskPressure, ScanId, SnapshotOpenErrorKind, VolumeCapacity, VolumeId,
+};
 
-const FFI_CONTRACT_VERSION: u32 = 4;
+const FFI_CONTRACT_VERSION: u32 = 5;
 const FFI_RECORD_VERSION: u32 = 1;
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 static LIVE_ENGINE_INSTANCE_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -39,6 +43,65 @@ pub struct LibraryVersion {
 pub struct FormattedSize {
     pub bytes: u64,
     pub display: String,
+}
+
+/// Foundation-derived startup-volume facts. The mount path is intentionally
+/// fixed inside this adapter and never crosses the FFI boundary.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct StartupVolumeObservation {
+    pub record_version: u32,
+    pub stable_volume_id: Option<String>,
+    pub display_name: Option<String>,
+    pub filesystem: Option<String>,
+    pub is_internal: Option<bool>,
+    pub is_removable: Option<bool>,
+    pub sampled_at_unix_ms: i64,
+    pub total_bytes: u64,
+    pub ordinary_available_bytes: Option<u64>,
+    pub important_available_bytes: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum VolumePressure {
+    Healthy,
+    Warning,
+    Critical,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum VolumeCapacitySource {
+    ImportantUsage,
+    Ordinary,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum VolumeHistoryDisposition {
+    Stored,
+    ExistingExact,
+    SuppressedByHourlyCadence,
+    NotStoredMissingOrdinaryAvailability,
+    NotStoredMissingStableIdentity,
+    NotStoredIncompleteMetadata,
+}
+
+/// Canonical path-free result. It is presentation telemetry and carries no
+/// cleanup target or authority.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct StartupVolumeStatus {
+    pub record_version: u32,
+    pub stable_volume_id: Option<String>,
+    pub sampled_at_unix_ms: i64,
+    pub total_bytes: u64,
+    pub ordinary_available_bytes: Option<u64>,
+    pub important_available_bytes: Option<u64>,
+    pub headline_available_bytes: u64,
+    pub headline_source: VolumeCapacitySource,
+    pub pressure: VolumePressure,
+    pub previous_durable_pressure: Option<VolumePressure>,
+    pub critical_boundary_bytes: u64,
+    pub warning_boundary_bytes: u64,
+    pub history_disposition: VolumeHistoryDisposition,
 }
 
 /// Input-only adapter storage roots. No path is returned by this contract.
@@ -60,6 +123,12 @@ pub enum EngineError {
     RegistryUnavailable,
     #[error("scan identity is invalid")]
     InvalidScanId,
+    #[error("volume capacity observation is invalid")]
+    InvalidCapacityObservation,
+    #[error("a different capacity observation already exists at this time")]
+    ConflictingCapacityObservation,
+    #[error("a newer capacity observation already exists")]
+    SupersededCapacityObservation,
     #[error("scan does not exist")]
     ScanNotFound,
     #[error("scan snapshot is unavailable")]
@@ -370,6 +439,56 @@ impl DuxEngine {
             Ok(FormattedSize {
                 bytes,
                 display: dux_core::format_size(bytes),
+            })
+        })
+    }
+
+    pub fn observe_startup_volume(
+        &self,
+        observation: StartupVolumeObservation,
+    ) -> Result<StartupVolumeStatus, EngineError> {
+        if observation.record_version != FFI_RECORD_VERSION {
+            return Err(EngineError::InvalidCapacityObservation);
+        }
+        let stable_volume_id = parse_macos_volume_id(observation.stable_volume_id)?;
+        let sampled_at = unix_ms_to_system_time(observation.sampled_at_unix_ms)?;
+        let capacity = VolumeCapacity::new(
+            observation.total_bytes,
+            observation.ordinary_available_bytes,
+            observation.important_available_bytes,
+        )
+        .map_err(|_| EngineError::InvalidCapacityObservation)?;
+        let core = CoreVolumeObservation::try_new(
+            stable_volume_id,
+            PathBuf::from("/"),
+            observation.display_name,
+            observation.filesystem,
+            observation.is_internal,
+            observation.is_removable,
+            sampled_at,
+            capacity,
+        )
+        .map_err(map_volume_status_error)?;
+        self.with_engine(|engine| {
+            let status = engine
+                .observe_volume_capacity(core)
+                .map_err(map_volume_status_error)?;
+            Ok(StartupVolumeStatus {
+                record_version: FFI_RECORD_VERSION,
+                stable_volume_id: status.volume_id().map(ToString::to_string),
+                sampled_at_unix_ms: system_time_ms(status.sampled_at())?,
+                total_bytes: status.total_bytes(),
+                ordinary_available_bytes: status.ordinary_available_bytes(),
+                important_available_bytes: status.important_available_bytes(),
+                headline_available_bytes: status.headline_available_bytes(),
+                headline_source: map_capacity_source(status.headline_source()),
+                pressure: map_volume_pressure(status.pressure()),
+                previous_durable_pressure: status
+                    .previous_durable_pressure()
+                    .map(map_volume_pressure),
+                critical_boundary_bytes: status.critical_boundary_bytes(),
+                warning_boundary_bytes: status.warning_boundary_bytes(),
+                history_disposition: map_history_disposition(status.history_disposition()),
             })
         })
     }
@@ -877,6 +996,88 @@ fn map_review_error(error: CoreReviewError) -> EngineError {
         _ => EngineError::InternalState,
     }
 }
+
+fn map_volume_status_error(error: CoreVolumeStatusError) -> EngineError {
+    match error {
+        CoreVolumeStatusError::Closed => EngineError::Closed,
+        CoreVolumeStatusError::InvalidObservation => EngineError::InvalidCapacityObservation,
+        CoreVolumeStatusError::ConflictingObservation => {
+            EngineError::ConflictingCapacityObservation
+        }
+        CoreVolumeStatusError::SupersededObservation => EngineError::SupersededCapacityObservation,
+        CoreVolumeStatusError::ReadOnlyStore => EngineError::ReadOnlyStore,
+        CoreVolumeStatusError::IncompatibleSchema => EngineError::IncompatibleSchema,
+        CoreVolumeStatusError::Busy => EngineError::Busy,
+        CoreVolumeStatusError::UnsafeStorage => EngineError::UnsafeStorage,
+        CoreVolumeStatusError::BudgetExceeded => EngineError::BudgetExceeded,
+        CoreVolumeStatusError::CorruptData => EngineError::CorruptData,
+        CoreVolumeStatusError::Unavailable => EngineError::StorageUnavailable,
+        CoreVolumeStatusError::OutcomeUnknown => EngineError::OutcomeUnknown,
+        CoreVolumeStatusError::InternalState => EngineError::InternalState,
+    }
+}
+
+fn map_volume_pressure(pressure: CoreDiskPressure) -> VolumePressure {
+    match pressure {
+        CoreDiskPressure::Healthy => VolumePressure::Healthy,
+        CoreDiskPressure::Warning => VolumePressure::Warning,
+        CoreDiskPressure::Critical => VolumePressure::Critical,
+        CoreDiskPressure::Unknown => VolumePressure::Unknown,
+    }
+}
+
+fn map_capacity_source(source: CoreCapacitySource) -> VolumeCapacitySource {
+    match source {
+        CoreCapacitySource::ImportantUsage => VolumeCapacitySource::ImportantUsage,
+        CoreCapacitySource::Ordinary => VolumeCapacitySource::Ordinary,
+    }
+}
+
+fn map_history_disposition(disposition: CoreHistoryDisposition) -> VolumeHistoryDisposition {
+    match disposition {
+        CoreHistoryDisposition::Stored => VolumeHistoryDisposition::Stored,
+        CoreHistoryDisposition::ExistingExact => VolumeHistoryDisposition::ExistingExact,
+        CoreHistoryDisposition::SuppressedByHourlyCadence => {
+            VolumeHistoryDisposition::SuppressedByHourlyCadence
+        }
+        CoreHistoryDisposition::NotStoredMissingOrdinaryAvailability => {
+            VolumeHistoryDisposition::NotStoredMissingOrdinaryAvailability
+        }
+        CoreHistoryDisposition::NotStoredMissingStableIdentity => {
+            VolumeHistoryDisposition::NotStoredMissingStableIdentity
+        }
+        CoreHistoryDisposition::NotStoredIncompleteMetadata => {
+            VolumeHistoryDisposition::NotStoredIncompleteMetadata
+        }
+    }
+}
+
+fn parse_macos_volume_id(value: Option<String>) -> Result<Option<VolumeId>, EngineError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let value = value.trim();
+    let bytes = value.as_bytes();
+    let canonical_shape = bytes.len() == 36
+        && bytes.iter().enumerate().all(|(index, byte)| match index {
+            8 | 13 | 18 | 23 => *byte == b'-',
+            _ => byte.is_ascii_hexdigit(),
+        });
+    if !canonical_shape {
+        return Err(EngineError::InvalidCapacityObservation);
+    }
+    VolumeId::new(format!("volume:macos:{}", value.to_ascii_lowercase()))
+        .map(Some)
+        .map_err(|_| EngineError::InvalidCapacityObservation)
+}
+
+fn unix_ms_to_system_time(value: i64) -> Result<SystemTime, EngineError> {
+    let millis = u64::try_from(value).map_err(|_| EngineError::InvalidCapacityObservation)?;
+    UNIX_EPOCH
+        .checked_add(Duration::from_millis(millis))
+        .ok_or(EngineError::InvalidCapacityObservation)
+}
+
 fn map_open_error(error: EngineOpenError) -> EngineError {
     match error {
         EngineOpenError::CandidateCatalogInvalid => EngineError::InternalState,
@@ -956,14 +1157,102 @@ mod tests {
     }
 
     #[test]
-    fn reports_contract_four_and_preserves_smoke_formatting() {
+    fn reports_contract_five_and_preserves_legacy_formatting() {
         let _guard = ENGINE_TEST_LOCK.lock().unwrap();
         let (_temp, engine) = engine();
-        assert_eq!(library_version().ffi_contract_version, 4);
+        assert_eq!(library_version().ffi_contract_version, 5);
         assert_eq!(engine.library_version().unwrap(), library_version());
         assert_eq!(engine.format_size(1536).unwrap().display, "1.5 KB");
         assert!(engine.close());
         assert_eq!(engine.format_size(1), Err(EngineError::Closed));
+    }
+
+    fn startup_observation(
+        sampled_at_unix_ms: i64,
+        ordinary_available_bytes: Option<u64>,
+        important_available_bytes: Option<u64>,
+    ) -> StartupVolumeObservation {
+        StartupVolumeObservation {
+            record_version: FFI_RECORD_VERSION,
+            stable_volume_id: Some("01234567-89AB-CDEF-0123-456789ABCDEF".into()),
+            display_name: Some("Macintosh HD".into()),
+            filesystem: Some("APFS".into()),
+            is_internal: Some(true),
+            is_removable: Some(false),
+            sampled_at_unix_ms,
+            total_bytes: 1_024 * 1_024 * 1_024 * 1_024,
+            ordinary_available_bytes,
+            important_available_bytes,
+        }
+    }
+
+    #[test]
+    fn startup_volume_round_trip_is_path_free_versioned_and_honest() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (_temp, engine) = engine();
+        let gib = 1_024 * 1_024 * 1_024;
+        let stored = engine
+            .observe_startup_volume(startup_observation(
+                3_600_000,
+                Some(100 * gib),
+                Some(20 * gib),
+            ))
+            .unwrap();
+        assert_eq!(stored.record_version, 1);
+        assert_eq!(
+            stored.stable_volume_id.as_deref(),
+            Some("volume:macos:01234567-89ab-cdef-0123-456789abcdef")
+        );
+        assert_eq!(stored.pressure, VolumePressure::Warning);
+        assert_eq!(stored.headline_source, VolumeCapacitySource::ImportantUsage);
+        assert_eq!(stored.history_disposition, VolumeHistoryDisposition::Stored);
+        assert_eq!(stored.previous_durable_pressure, None);
+
+        let important_only = engine
+            .observe_startup_volume(startup_observation(3_600_001, None, Some(5 * gib)))
+            .unwrap();
+        assert_eq!(important_only.ordinary_available_bytes, None);
+        assert_eq!(important_only.pressure, VolumePressure::Critical);
+        assert_eq!(
+            important_only.history_disposition,
+            VolumeHistoryDisposition::NotStoredMissingOrdinaryAvailability
+        );
+        assert_eq!(
+            important_only.previous_durable_pressure,
+            Some(VolumePressure::Warning)
+        );
+    }
+
+    #[test]
+    fn startup_volume_rejects_malformed_input_and_use_after_close() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (_temp, engine) = engine();
+        let gib = 1_024 * 1_024 * 1_024;
+        let mut invalid_id = startup_observation(1, Some(gib), Some(gib));
+        invalid_id.stable_volume_id = Some("not-a-uuid".into());
+        assert_eq!(
+            engine.observe_startup_volume(invalid_id),
+            Err(EngineError::InvalidCapacityObservation)
+        );
+        let mut wrong_version = startup_observation(1, Some(gib), Some(gib));
+        wrong_version.record_version = FFI_RECORD_VERSION + 1;
+        assert_eq!(
+            engine.observe_startup_volume(wrong_version),
+            Err(EngineError::InvalidCapacityObservation)
+        );
+        assert_eq!(
+            engine.observe_startup_volume(startup_observation(-1, Some(gib), Some(gib))),
+            Err(EngineError::InvalidCapacityObservation)
+        );
+        assert_eq!(
+            engine.observe_startup_volume(startup_observation(2, None, None)),
+            Err(EngineError::InvalidCapacityObservation)
+        );
+        assert!(engine.close());
+        assert_eq!(
+            engine.observe_startup_volume(startup_observation(3, Some(gib), Some(gib))),
+            Err(EngineError::Closed)
+        );
     }
 
     #[test]

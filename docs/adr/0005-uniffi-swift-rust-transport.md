@@ -56,8 +56,8 @@ Those capabilities retain their own gates below and in ADR 0004.
 
 ## Current realization
 
-FFI contract v4 now replaces that historical first handle with the real shared
-engine session. The app supplies input-only private data/cache roots; storage
+FFI contract v5 now carries the real shared engine session first introduced in
+v4. The app supplies input-only private data/cache roots; storage
 paths never return across the boundary. Seven maintenance kinds use opaque task
 objects with nonblocking versioned path-free poll/cancel records, and exact
 Explorer reviews use opaque scan-bound lease objects. No task accepts a path,
@@ -68,6 +68,20 @@ The seventh task is scan recovery. It exposes only bounded page counts and
 typed outcomes; process-instance identities and recovery-scope keys remain
 private to Rust. As with every maintenance task, the transport cannot select a
 scan, owner, or victim and cannot acquire cleanup authority.
+
+Contract v5 additionally exposes one synchronous, versioned, path-free
+startup-volume observation/status pair. Swift supplies optional canonical
+volume UUID evidence, optional Foundation metadata, a timestamp, total
+capacity, and independent ordinary/important availability; the adapter fixes
+the observed mount to `/` inside Rust rather than accepting an arbitrary path.
+Rust returns the selected headline source, deterministic pressure, effective
+boundaries, prior durable pressure, and an explicit history disposition. Missing
+identity, incomplete metadata, and important-only observations remain ephemeral
+and cannot mutate volume or sample history. A bounded per-engine session slot
+retains only the newest display-pressure baseline so those observations still
+receive hysteresis without becoming durable identity evidence. The generated
+call remains confined to `EngineService`'s utility queue, and neither input nor
+output can express a scan, candidate, plan, path, or cleanup instruction.
 
 The Swift adapter lazily constructs and synchronizes the engine on its utility
 queue. FFI close invalidates renewal, attempts exact release for every

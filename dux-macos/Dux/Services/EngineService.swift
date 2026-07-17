@@ -1,8 +1,13 @@
 import Dispatch
 import Foundation
 
-protocol EngineServing: Sendable {
-    func loadSmokeResult(bytes: UInt64) async throws -> EngineSmokeResult
+protocol DuxVolumeStatusServing: Sendable {
+    func observeVolumeCapacity(_ snapshot: VolumeCapacitySnapshot) async throws
+        -> VolumeCapacitySnapshot
+}
+
+protocol EngineServing: DuxVolumeStatusServing, Sendable {
+    func loadStatus() async throws -> EngineStatus
 }
 
 protocol DuxSnapshotReviewServing: Sendable {
@@ -16,7 +21,8 @@ protocol DuxSnapshotReviewLease: AnyObject, Sendable {
 }
 
 struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewServing, Sendable {
-    fileprivate static let expectedFFIContractVersion: UInt32 = 4
+    fileprivate static let expectedFFIContractVersion: UInt32 = 5
+    fileprivate static let expectedRecordVersion: UInt32 = 1
 
     private let state: EngineServiceState
 
@@ -28,7 +34,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         state = EngineServiceState(engine: engine, storageRoots: storageRoots)
     }
 
-    func loadSmokeResult(bytes: UInt64) async throws -> EngineSmokeResult {
+    func loadStatus() async throws -> EngineStatus {
         try await state.perform { state in
             let executedOffMainThread = !Thread.isMainThread
             precondition(executedOffMainThread, "Blocking FFI work reached the main thread")
@@ -38,13 +44,76 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
                 guard version.ffiContractVersion == Self.expectedFFIContractVersion else {
                     throw EngineServiceError.unexpected("incompatible FFI contract")
                 }
-                let size = try engine.formatSize(bytes: bytes)
-                return EngineSmokeResult(
+                return EngineStatus(
                     libraryVersion: version.libraryVersion,
                     ffiContractVersion: version.ffiContractVersion,
-                    bytes: size.bytes,
-                    displaySize: size.display,
                     executedOffMainThread: executedOffMainThread
+                )
+            } catch let error as EngineError {
+                throw Self.serviceError(error)
+            }
+        }
+    }
+
+    func observeVolumeCapacity(
+        _ snapshot: VolumeCapacitySnapshot
+    ) async throws -> VolumeCapacitySnapshot {
+        try await state.perform { state in
+            precondition(!Thread.isMainThread, "Blocking FFI work reached the main thread")
+            let milliseconds = snapshot.sampledAt.timeIntervalSince1970 * 1_000
+            guard
+                milliseconds.isFinite,
+                milliseconds >= 0,
+                milliseconds <= Double(Int64.max)
+            else {
+                throw EngineServiceError.invalidCapacityObservation
+            }
+            let sampledAtUnixMS = Int64(milliseconds.rounded(.towardZero))
+            let engine = try state.resolveEngine()
+            do {
+                let status = try engine.observeStartupVolume(
+                    observation: StartupVolumeObservation(
+                        recordVersion: Self.expectedRecordVersion,
+                        stableVolumeId: snapshot.stableVolumeID,
+                        displayName: snapshot.displayName,
+                        filesystem: snapshot.filesystem,
+                        isInternal: snapshot.isInternal,
+                        isRemovable: snapshot.isRemovable,
+                        sampledAtUnixMs: sampledAtUnixMS,
+                        totalBytes: snapshot.totalBytes,
+                        ordinaryAvailableBytes: snapshot.filesystemAvailableBytes,
+                        importantAvailableBytes: snapshot.importantAvailableBytes
+                    )
+                )
+                guard
+                    status.recordVersion == Self.expectedRecordVersion,
+                    status.sampledAtUnixMs == sampledAtUnixMS,
+                    status.totalBytes == snapshot.totalBytes,
+                    status.ordinaryAvailableBytes == snapshot.filesystemAvailableBytes,
+                    status.importantAvailableBytes == snapshot.importantAvailableBytes,
+                    status.headlineAvailableBytes <= status.totalBytes,
+                    status.criticalBoundaryBytes <= status.warningBoundaryBytes,
+                    status.warningBoundaryBytes <= status.totalBytes,
+                    Self.hasConsistentHistoryEvidence(status, observation: snapshot)
+                else {
+                    throw EngineServiceError.unexpected("invalid volume status record")
+                }
+                let basis = Self.capacityBasis(status.headlineSource)
+                guard
+                    status.headlineAvailableBytes == snapshot.effectiveAvailableBytes,
+                    basis == snapshot.availabilityBasis
+                else {
+                    throw EngineServiceError.unexpected("volume status changed observed capacity")
+                }
+                return snapshot.applying(
+                    stableVolumeID: status.stableVolumeId,
+                    pressure: Self.pressure(status.pressure),
+                    criticalBoundaryBytes: status.criticalBoundaryBytes,
+                    warningBoundaryBytes: status.warningBoundaryBytes,
+                    historyDisposition: Self.historyDisposition(status.historyDisposition),
+                    sampledAt: Date(
+                        timeIntervalSince1970: Double(status.sampledAtUnixMs) / 1_000
+                    )
                 )
             } catch let error as EngineError {
                 throw Self.serviceError(error)
@@ -141,8 +210,83 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         switch error {
         case .Closed:
             .closed
+        case .InvalidCapacityObservation:
+            .invalidCapacityObservation
+        case .ConflictingCapacityObservation:
+            .conflictingCapacityObservation
+        case .SupersededCapacityObservation:
+            .supersededCapacityObservation
+        case .Busy, .StorageUnavailable, .RegistryUnavailable, .BudgetExceeded:
+            .retryable
+        case .ReadOnlyStore, .IncompatibleSchema, .UnsafeStorage, .CorruptData,
+             .OutcomeUnknown, .InternalState:
+            .unavailable
         default:
             .unexpected(String(describing: error))
+        }
+    }
+
+    private static func capacityBasis(_ source: VolumeCapacitySource) -> VolumeCapacityBasis {
+        switch source {
+        case .importantUsage: .importantUsage
+        case .ordinary: .filesystemAvailable
+        }
+    }
+
+    private static func pressure(_ pressure: VolumePressure) -> DiskPressureLevel {
+        switch pressure {
+        case .healthy: .healthy
+        case .warning: .warning
+        case .critical: .critical
+        case .unknown: .unknown
+        }
+    }
+
+    private static func historyDisposition(
+        _ disposition: VolumeHistoryDisposition
+    ) -> VolumeCapacityHistoryDisposition {
+        switch disposition {
+        case .stored: .stored
+        case .existingExact: .existingExact
+        case .suppressedByHourlyCadence: .suppressedByHourlyCadence
+        case .notStoredMissingOrdinaryAvailability:
+            .notStoredMissingOrdinaryAvailability
+        case .notStoredMissingStableIdentity:
+            .notStoredMissingStableIdentity
+        case .notStoredIncompleteMetadata:
+            .notStoredIncompleteMetadata
+        }
+    }
+
+    static func hasConsistentHistoryEvidence(
+        _ status: StartupVolumeStatus,
+        observation: VolumeCapacitySnapshot
+    ) -> Bool {
+        let expectedStableID = observation.stableVolumeID
+            .flatMap { UUID(uuidString: $0) }
+            .map { "volume:macos:\($0.uuidString.lowercased())" }
+        guard status.stableVolumeId == expectedStableID else {
+            return false
+        }
+        let hasCompleteMetadata = observation.displayName != nil
+            && observation.filesystem != nil
+            && observation.isInternal != nil
+            && observation.isRemovable != nil
+
+        switch status.historyDisposition {
+        case .stored, .existingExact, .suppressedByHourlyCadence:
+            return expectedStableID != nil
+                && observation.filesystemAvailableBytes != nil
+                && hasCompleteMetadata
+        case .notStoredMissingOrdinaryAvailability:
+            return expectedStableID != nil
+                && observation.filesystemAvailableBytes == nil
+        case .notStoredMissingStableIdentity:
+            return expectedStableID == nil
+        case .notStoredIncompleteMetadata:
+            return expectedStableID != nil
+                && observation.filesystemAvailableBytes != nil
+                && !hasCompleteMetadata
         }
     }
 
@@ -152,7 +296,8 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         switch error {
         case .Busy, .StorageUnavailable, .RegistryUnavailable, .BudgetExceeded:
             .retryable
-        case .Closed, .InvalidStorage, .InvalidScanId, .ScanNotFound,
+        case .Closed, .InvalidStorage, .InvalidScanId, .InvalidCapacityObservation,
+             .ConflictingCapacityObservation, .SupersededCapacityObservation, .ScanNotFound,
              .SnapshotUnavailable, .ReviewExpired, .ReadOnlyStore,
              .IncompatibleSchema, .UnsafeStorage, .CorruptData,
              .IncompatibleSnapshot, .OutcomeUnknown, .InternalState:
@@ -164,12 +309,12 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
 private final class EngineServiceState: @unchecked Sendable {
     fileprivate let queue = DispatchQueue(label: "se.mjukis.dux.engine", qos: .utility)
 
-    private var engine: Result<DuxEngine, EngineServiceError>?
+    private var engine: DuxEngine?
     private let storageRoots: EngineStorageRoots?
     private var closeResult: Bool?
 
     init(engine: DuxEngine?, storageRoots: EngineStorageRoots?) {
-        self.engine = engine.map(Result.success)
+        self.engine = engine
         self.storageRoots = storageRoots
     }
 
@@ -179,25 +324,24 @@ private final class EngineServiceState: @unchecked Sendable {
             throw EngineServiceError.closed
         }
         if let engine {
-            return try engine.get()
+            return engine
         }
 
-        let opened: Result<DuxEngine, EngineServiceError>
         do {
             guard libraryVersion().ffiContractVersion == EngineService.expectedFFIContractVersion else {
                 throw EngineServiceError.unexpected("incompatible FFI contract")
             }
             let roots = try storageRoots ?? EngineService.defaultStorageRoots()
-            opened = .success(try DuxEngine(storage: roots))
+            let opened = try DuxEngine(storage: roots)
+            engine = opened
+            return opened
         } catch let error as EngineError {
-            opened = .failure(EngineService.serviceError(error))
+            throw EngineService.serviceError(error)
         } catch let error as EngineServiceError {
-            opened = .failure(error)
+            throw error
         } catch {
-            opened = .failure(.unexpected("engine initialization failed"))
+            throw EngineServiceError.unexpected("engine initialization failed")
         }
-        engine = opened
-        return try opened.get()
     }
 
     fileprivate func perform<T: Sendable>(
@@ -229,13 +373,7 @@ private final class EngineServiceState: @unchecked Sendable {
             if let closeResult = state.closeResult {
                 return closeResult
             }
-            let result: Bool
-            switch state.engine {
-            case let .success(engine):
-                result = engine.close()
-            case .failure, .none:
-                result = true
-            }
+            let result = state.engine?.close() ?? true
             state.closeResult = result
             return result
         }

@@ -552,6 +552,8 @@ public protocol DuxEngineProtocol: AnyObject, Sendable {
 
     func libraryVersion() throws  -> LibraryVersion
 
+    func observeStartupVolume(observation: StartupVolumeObservation) throws  -> StartupVolumeStatus
+
     func startMaintenance(kind: MaintenanceKind) throws  -> MaintenanceStart
 
 }
@@ -651,6 +653,15 @@ open func libraryVersion()throws  -> LibraryVersion  {
     return try  FfiConverterTypeLibraryVersion_lift(try rustCallWithError(FfiConverterTypeEngineError_lift) {
     uniffi_dux_ffi_fn_method_duxengine_library_version(
             self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+open func observeStartupVolume(observation: StartupVolumeObservation)throws  -> StartupVolumeStatus  {
+    return try  FfiConverterTypeStartupVolumeStatus_lift(try rustCallWithError(FfiConverterTypeEngineError_lift) {
+    uniffi_dux_ffi_fn_method_duxengine_observe_startup_volume(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeStartupVolumeObservation_lower(observation),$0
     )
 })
 }
@@ -1458,6 +1469,198 @@ public func FfiConverterTypeSnapshotReviewInfo_lower(_ value: SnapshotReviewInfo
 }
 
 
+/**
+ * Foundation-derived startup-volume facts. The mount path is intentionally
+ * fixed inside this adapter and never crosses the FFI boundary.
+ */
+public struct StartupVolumeObservation: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let stableVolumeId: String?
+    public let displayName: String?
+    public let filesystem: String?
+    public let isInternal: Bool?
+    public let isRemovable: Bool?
+    public let sampledAtUnixMs: Int64
+    public let totalBytes: UInt64
+    public let ordinaryAvailableBytes: UInt64?
+    public let importantAvailableBytes: UInt64?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, stableVolumeId: String?, displayName: String?, filesystem: String?, isInternal: Bool?, isRemovable: Bool?, sampledAtUnixMs: Int64, totalBytes: UInt64, ordinaryAvailableBytes: UInt64?, importantAvailableBytes: UInt64?) {
+        self.recordVersion = recordVersion
+        self.stableVolumeId = stableVolumeId
+        self.displayName = displayName
+        self.filesystem = filesystem
+        self.isInternal = isInternal
+        self.isRemovable = isRemovable
+        self.sampledAtUnixMs = sampledAtUnixMs
+        self.totalBytes = totalBytes
+        self.ordinaryAvailableBytes = ordinaryAvailableBytes
+        self.importantAvailableBytes = importantAvailableBytes
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension StartupVolumeObservation: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeStartupVolumeObservation: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> StartupVolumeObservation {
+        return
+            try StartupVolumeObservation(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                stableVolumeId: FfiConverterOptionString.read(from: &buf),
+                displayName: FfiConverterOptionString.read(from: &buf),
+                filesystem: FfiConverterOptionString.read(from: &buf),
+                isInternal: FfiConverterOptionBool.read(from: &buf),
+                isRemovable: FfiConverterOptionBool.read(from: &buf),
+                sampledAtUnixMs: FfiConverterInt64.read(from: &buf),
+                totalBytes: FfiConverterUInt64.read(from: &buf),
+                ordinaryAvailableBytes: FfiConverterOptionUInt64.read(from: &buf),
+                importantAvailableBytes: FfiConverterOptionUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: StartupVolumeObservation, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterOptionString.write(value.stableVolumeId, into: &buf)
+        FfiConverterOptionString.write(value.displayName, into: &buf)
+        FfiConverterOptionString.write(value.filesystem, into: &buf)
+        FfiConverterOptionBool.write(value.isInternal, into: &buf)
+        FfiConverterOptionBool.write(value.isRemovable, into: &buf)
+        FfiConverterInt64.write(value.sampledAtUnixMs, into: &buf)
+        FfiConverterUInt64.write(value.totalBytes, into: &buf)
+        FfiConverterOptionUInt64.write(value.ordinaryAvailableBytes, into: &buf)
+        FfiConverterOptionUInt64.write(value.importantAvailableBytes, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeStartupVolumeObservation_lift(_ buf: RustBuffer) throws -> StartupVolumeObservation {
+    return try FfiConverterTypeStartupVolumeObservation.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeStartupVolumeObservation_lower(_ value: StartupVolumeObservation) -> RustBuffer {
+    return FfiConverterTypeStartupVolumeObservation.lower(value)
+}
+
+
+/**
+ * Canonical path-free result. It is presentation telemetry and carries no
+ * cleanup target or authority.
+ */
+public struct StartupVolumeStatus: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let stableVolumeId: String?
+    public let sampledAtUnixMs: Int64
+    public let totalBytes: UInt64
+    public let ordinaryAvailableBytes: UInt64?
+    public let importantAvailableBytes: UInt64?
+    public let headlineAvailableBytes: UInt64
+    public let headlineSource: VolumeCapacitySource
+    public let pressure: VolumePressure
+    public let previousDurablePressure: VolumePressure?
+    public let criticalBoundaryBytes: UInt64
+    public let warningBoundaryBytes: UInt64
+    public let historyDisposition: VolumeHistoryDisposition
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, stableVolumeId: String?, sampledAtUnixMs: Int64, totalBytes: UInt64, ordinaryAvailableBytes: UInt64?, importantAvailableBytes: UInt64?, headlineAvailableBytes: UInt64, headlineSource: VolumeCapacitySource, pressure: VolumePressure, previousDurablePressure: VolumePressure?, criticalBoundaryBytes: UInt64, warningBoundaryBytes: UInt64, historyDisposition: VolumeHistoryDisposition) {
+        self.recordVersion = recordVersion
+        self.stableVolumeId = stableVolumeId
+        self.sampledAtUnixMs = sampledAtUnixMs
+        self.totalBytes = totalBytes
+        self.ordinaryAvailableBytes = ordinaryAvailableBytes
+        self.importantAvailableBytes = importantAvailableBytes
+        self.headlineAvailableBytes = headlineAvailableBytes
+        self.headlineSource = headlineSource
+        self.pressure = pressure
+        self.previousDurablePressure = previousDurablePressure
+        self.criticalBoundaryBytes = criticalBoundaryBytes
+        self.warningBoundaryBytes = warningBoundaryBytes
+        self.historyDisposition = historyDisposition
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension StartupVolumeStatus: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeStartupVolumeStatus: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> StartupVolumeStatus {
+        return
+            try StartupVolumeStatus(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                stableVolumeId: FfiConverterOptionString.read(from: &buf),
+                sampledAtUnixMs: FfiConverterInt64.read(from: &buf),
+                totalBytes: FfiConverterUInt64.read(from: &buf),
+                ordinaryAvailableBytes: FfiConverterOptionUInt64.read(from: &buf),
+                importantAvailableBytes: FfiConverterOptionUInt64.read(from: &buf),
+                headlineAvailableBytes: FfiConverterUInt64.read(from: &buf),
+                headlineSource: FfiConverterTypeVolumeCapacitySource.read(from: &buf),
+                pressure: FfiConverterTypeVolumePressure.read(from: &buf),
+                previousDurablePressure: FfiConverterOptionTypeVolumePressure.read(from: &buf),
+                criticalBoundaryBytes: FfiConverterUInt64.read(from: &buf),
+                warningBoundaryBytes: FfiConverterUInt64.read(from: &buf),
+                historyDisposition: FfiConverterTypeVolumeHistoryDisposition.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: StartupVolumeStatus, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterOptionString.write(value.stableVolumeId, into: &buf)
+        FfiConverterInt64.write(value.sampledAtUnixMs, into: &buf)
+        FfiConverterUInt64.write(value.totalBytes, into: &buf)
+        FfiConverterOptionUInt64.write(value.ordinaryAvailableBytes, into: &buf)
+        FfiConverterOptionUInt64.write(value.importantAvailableBytes, into: &buf)
+        FfiConverterUInt64.write(value.headlineAvailableBytes, into: &buf)
+        FfiConverterTypeVolumeCapacitySource.write(value.headlineSource, into: &buf)
+        FfiConverterTypeVolumePressure.write(value.pressure, into: &buf)
+        FfiConverterOptionTypeVolumePressure.write(value.previousDurablePressure, into: &buf)
+        FfiConverterUInt64.write(value.criticalBoundaryBytes, into: &buf)
+        FfiConverterUInt64.write(value.warningBoundaryBytes, into: &buf)
+        FfiConverterTypeVolumeHistoryDisposition.write(value.historyDisposition, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeStartupVolumeStatus_lift(_ buf: RustBuffer) throws -> StartupVolumeStatus {
+    return try FfiConverterTypeStartupVolumeStatus.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeStartupVolumeStatus_lower(_ value: StartupVolumeStatus) -> RustBuffer {
+    return FfiConverterTypeStartupVolumeStatus.lower(value)
+}
+
+
 public enum EngineError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
 
 
@@ -1467,6 +1670,9 @@ public enum EngineError: Swift.Error, Equatable, Hashable, Foundation.LocalizedE
     case StorageUnavailable
     case RegistryUnavailable
     case InvalidScanId
+    case InvalidCapacityObservation
+    case ConflictingCapacityObservation
+    case SupersededCapacityObservation
     case ScanNotFound
     case SnapshotUnavailable
     case ReviewExpired
@@ -1513,18 +1719,21 @@ public struct FfiConverterTypeEngineError: FfiConverterRustBuffer {
         case 3: return .StorageUnavailable
         case 4: return .RegistryUnavailable
         case 5: return .InvalidScanId
-        case 6: return .ScanNotFound
-        case 7: return .SnapshotUnavailable
-        case 8: return .ReviewExpired
-        case 9: return .ReadOnlyStore
-        case 10: return .IncompatibleSchema
-        case 11: return .Busy
-        case 12: return .UnsafeStorage
-        case 13: return .BudgetExceeded
-        case 14: return .CorruptData
-        case 15: return .IncompatibleSnapshot
-        case 16: return .OutcomeUnknown
-        case 17: return .InternalState
+        case 6: return .InvalidCapacityObservation
+        case 7: return .ConflictingCapacityObservation
+        case 8: return .SupersededCapacityObservation
+        case 9: return .ScanNotFound
+        case 10: return .SnapshotUnavailable
+        case 11: return .ReviewExpired
+        case 12: return .ReadOnlyStore
+        case 13: return .IncompatibleSchema
+        case 14: return .Busy
+        case 15: return .UnsafeStorage
+        case 16: return .BudgetExceeded
+        case 17: return .CorruptData
+        case 18: return .IncompatibleSnapshot
+        case 19: return .OutcomeUnknown
+        case 20: return .InternalState
 
          default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -1557,52 +1766,64 @@ public struct FfiConverterTypeEngineError: FfiConverterRustBuffer {
             writeInt(&buf, Int32(5))
 
 
-        case .ScanNotFound:
+        case .InvalidCapacityObservation:
             writeInt(&buf, Int32(6))
 
 
-        case .SnapshotUnavailable:
+        case .ConflictingCapacityObservation:
             writeInt(&buf, Int32(7))
 
 
-        case .ReviewExpired:
+        case .SupersededCapacityObservation:
             writeInt(&buf, Int32(8))
 
 
-        case .ReadOnlyStore:
+        case .ScanNotFound:
             writeInt(&buf, Int32(9))
 
 
-        case .IncompatibleSchema:
+        case .SnapshotUnavailable:
             writeInt(&buf, Int32(10))
 
 
-        case .Busy:
+        case .ReviewExpired:
             writeInt(&buf, Int32(11))
 
 
-        case .UnsafeStorage:
+        case .ReadOnlyStore:
             writeInt(&buf, Int32(12))
 
 
-        case .BudgetExceeded:
+        case .IncompatibleSchema:
             writeInt(&buf, Int32(13))
 
 
-        case .CorruptData:
+        case .Busy:
             writeInt(&buf, Int32(14))
 
 
-        case .IncompatibleSnapshot:
+        case .UnsafeStorage:
             writeInt(&buf, Int32(15))
 
 
-        case .OutcomeUnknown:
+        case .BudgetExceeded:
             writeInt(&buf, Int32(16))
 
 
-        case .InternalState:
+        case .CorruptData:
             writeInt(&buf, Int32(17))
+
+
+        case .IncompatibleSnapshot:
+            writeInt(&buf, Int32(18))
+
+
+        case .OutcomeUnknown:
+            writeInt(&buf, Int32(19))
+
+
+        case .InternalState:
+            writeInt(&buf, Int32(20))
 
         }
     }
@@ -2372,6 +2593,321 @@ public func FfiConverterTypeTaskPhase_lower(_ value: TaskPhase) -> RustBuffer {
 }
 
 
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum VolumeCapacitySource: Equatable, Hashable {
+
+    case importantUsage
+    case ordinary
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension VolumeCapacitySource: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeVolumeCapacitySource: FfiConverterRustBuffer {
+    typealias SwiftType = VolumeCapacitySource
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> VolumeCapacitySource {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .importantUsage
+
+        case 2: return .ordinary
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: VolumeCapacitySource, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .importantUsage:
+            writeInt(&buf, Int32(1))
+
+
+        case .ordinary:
+            writeInt(&buf, Int32(2))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeVolumeCapacitySource_lift(_ buf: RustBuffer) throws -> VolumeCapacitySource {
+    return try FfiConverterTypeVolumeCapacitySource.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeVolumeCapacitySource_lower(_ value: VolumeCapacitySource) -> RustBuffer {
+    return FfiConverterTypeVolumeCapacitySource.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum VolumeHistoryDisposition: Equatable, Hashable {
+
+    case stored
+    case existingExact
+    case suppressedByHourlyCadence
+    case notStoredMissingOrdinaryAvailability
+    case notStoredMissingStableIdentity
+    case notStoredIncompleteMetadata
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension VolumeHistoryDisposition: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeVolumeHistoryDisposition: FfiConverterRustBuffer {
+    typealias SwiftType = VolumeHistoryDisposition
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> VolumeHistoryDisposition {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .stored
+
+        case 2: return .existingExact
+
+        case 3: return .suppressedByHourlyCadence
+
+        case 4: return .notStoredMissingOrdinaryAvailability
+
+        case 5: return .notStoredMissingStableIdentity
+
+        case 6: return .notStoredIncompleteMetadata
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: VolumeHistoryDisposition, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .stored:
+            writeInt(&buf, Int32(1))
+
+
+        case .existingExact:
+            writeInt(&buf, Int32(2))
+
+
+        case .suppressedByHourlyCadence:
+            writeInt(&buf, Int32(3))
+
+
+        case .notStoredMissingOrdinaryAvailability:
+            writeInt(&buf, Int32(4))
+
+
+        case .notStoredMissingStableIdentity:
+            writeInt(&buf, Int32(5))
+
+
+        case .notStoredIncompleteMetadata:
+            writeInt(&buf, Int32(6))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeVolumeHistoryDisposition_lift(_ buf: RustBuffer) throws -> VolumeHistoryDisposition {
+    return try FfiConverterTypeVolumeHistoryDisposition.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeVolumeHistoryDisposition_lower(_ value: VolumeHistoryDisposition) -> RustBuffer {
+    return FfiConverterTypeVolumeHistoryDisposition.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum VolumePressure: Equatable, Hashable {
+
+    case healthy
+    case warning
+    case critical
+    case unknown
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension VolumePressure: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeVolumePressure: FfiConverterRustBuffer {
+    typealias SwiftType = VolumePressure
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> VolumePressure {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .healthy
+
+        case 2: return .warning
+
+        case 3: return .critical
+
+        case 4: return .unknown
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: VolumePressure, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .healthy:
+            writeInt(&buf, Int32(1))
+
+
+        case .warning:
+            writeInt(&buf, Int32(2))
+
+
+        case .critical:
+            writeInt(&buf, Int32(3))
+
+
+        case .unknown:
+            writeInt(&buf, Int32(4))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeVolumePressure_lift(_ buf: RustBuffer) throws -> VolumePressure {
+    return try FfiConverterTypeVolumePressure.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeVolumePressure_lower(_ value: VolumePressure) -> RustBuffer {
+    return FfiConverterTypeVolumePressure.lower(value)
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionUInt64: FfiConverterRustBuffer {
+    typealias SwiftType = UInt64?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterUInt64.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterUInt64.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionBool: FfiConverterRustBuffer {
+    typealias SwiftType = Bool?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterBool.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterBool.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
+    typealias SwiftType = String?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterString.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterString.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
@@ -2443,6 +2979,30 @@ fileprivate struct FfiConverterOptionTypeMaintenanceFailure: FfiConverterRustBuf
         }
     }
 }
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeVolumePressure: FfiConverterRustBuffer {
+    typealias SwiftType = VolumePressure?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeVolumePressure.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeVolumePressure.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
 public func libraryVersion() -> LibraryVersion  {
     return try!  FfiConverterTypeLibraryVersion_lift(try! rustCall() {
     uniffi_dux_ffi_fn_func_library_version($0
@@ -2487,6 +3047,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_library_version() != 14309) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_duxengine_observe_startup_volume() != 49642) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_start_maintenance() != 4775) {

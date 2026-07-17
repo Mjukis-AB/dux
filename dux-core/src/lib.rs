@@ -27,24 +27,27 @@ pub use cache::{
     is_cache_valid, load_cache, save_cache, spot_check_mtimes,
 };
 pub use domain::{
-    ActivityGuard, BlockReason, CLEANUP_PLAN_VALIDITY, Candidate, CandidateAction,
-    CandidateCategory, CandidateId, CandidateValidationError, CleanupMode, CleanupPlan,
-    CleanupPlanId, CleanupPlanItem, CleanupPlanValidationError, CoveragePermille,
-    CoveragePermilleError, DiskPressure, Evidence, EvidenceKind, LocalizedTextKey, OperationStatus,
-    PlanWarning, ProvenanceUrl, Rule, RuleDefinition, RuleGuards, RuleId, RuleMatcher,
-    RuleMatcherDefinition, RuleRef, RuleRevision, RuleScope, RuleValidationError, SafetyTier,
-    ScanCoverage, ScanCoverageStatus, ScanId, ScanIssue, ScanIssueKind, StableIdError, VolumeId,
+    ActivityGuard, AvailableCapacitySource, BlockReason, CLEANUP_PLAN_VALIDITY, Candidate,
+    CandidateAction, CandidateCategory, CandidateId, CandidateValidationError, CleanupMode,
+    CleanupPlan, CleanupPlanId, CleanupPlanItem, CleanupPlanValidationError, CoveragePermille,
+    CoveragePermilleError, DiskPressure, DiskPressureConfig, DiskPressureConfigError,
+    DiskPressureEvaluation, DiskPressureRecoveryMargin, DiskPressureThreshold, Evidence,
+    EvidenceKind, LocalizedTextKey, OperationStatus, PlanWarning, ProvenanceUrl, Rule,
+    RuleDefinition, RuleGuards, RuleId, RuleMatcher, RuleMatcherDefinition, RuleRef, RuleRevision,
+    RuleScope, RuleValidationError, SafetyTier, ScanCoverage, ScanCoverageStatus, ScanId,
+    ScanIssue, ScanIssueKind, StableIdError, VolumeCapacity, VolumeCapacityError, VolumeId,
 };
 pub use engine::{
-    CancelOutcome, CandidateEvaluationTaskFailureKind, CandidateEvaluationTaskStatus, CloseOutcome,
-    DurableScanCounts, DurableScanCoverage, DurableScanStatus, DurableScanSummary, EngineConfig,
-    EngineConfigError, EngineConfigField, EngineConfigReason, EngineHandle, EngineLifecycle,
-    EngineOpenError, FormatSizeBatchResult, FormattedSizeEntry, RecentScanHistory,
-    ScanHistoryError, ScanRootErrorKind, ScanTaskCounts, ScanTaskResult, ScanTaskStatus,
-    SnapshotRetentionCap, SnapshotRetentionCapError, SnapshotRetentionCapSource,
-    SnapshotRetentionCapUpdate, SnapshotReviewError, SnapshotReviewReleaseOutcome,
-    SnapshotReviewSession, StartTaskError, TaskAccessError, TaskEvent, TaskEventBatch,
-    TaskEventKind, TaskFailureKind, TaskId, TaskKind, TaskPhase, TaskSnapshot,
+    CancelOutcome, CandidateEvaluationTaskFailureKind, CandidateEvaluationTaskStatus,
+    CapacityHistoryDisposition, CloseOutcome, DurableScanCounts, DurableScanCoverage,
+    DurableScanStatus, DurableScanSummary, EngineConfig, EngineConfigError, EngineConfigField,
+    EngineConfigReason, EngineHandle, EngineLifecycle, EngineOpenError, FormatSizeBatchResult,
+    FormattedSizeEntry, RecentScanHistory, ScanHistoryError, ScanRootErrorKind, ScanTaskCounts,
+    ScanTaskResult, ScanTaskStatus, SnapshotRetentionCap, SnapshotRetentionCapError,
+    SnapshotRetentionCapSource, SnapshotRetentionCapUpdate, SnapshotReviewError,
+    SnapshotReviewReleaseOutcome, SnapshotReviewSession, StartTaskError, TaskAccessError,
+    TaskEvent, TaskEventBatch, TaskEventKind, TaskFailureKind, TaskId, TaskKind, TaskPhase,
+    TaskSnapshot, VolumeCapacityObservation, VolumeCapacityStatus, VolumeCapacityStatusError,
 };
 pub use error::{DuxError, Result};
 pub use persistence::{

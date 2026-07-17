@@ -280,6 +280,11 @@ EXCEPTIONS = {
         "rust-process-spawn",
         "spawn_persistence_helper",
     ),
+    "test-capacity-cross-process-helper-spawn": ExceptionSpec(
+        "dux-core/src/engine/volume_status.rs",
+        "rust-process-spawn",
+        "test:newer_cross_process_durable_pressure_supersedes_local_ephemeral_baseline",
+    ),
     "test-persistence-displace-shm": ExceptionSpec(
         "dux-core/src/persistence/persistence_tests.rs",
         "rust-filesystem-effect",
@@ -475,6 +480,11 @@ EXCEPTIONS = {
         "swift-filesystem-effect",
         "test",
     ),
+    "test-swift-retry-obstruction-remove": ExceptionSpec(
+        "dux-macos/DuxTests/EngineServiceTests.swift",
+        "swift-filesystem-effect",
+        "test",
+    ),
     "release-checksum-sidecars-remove": ExceptionSpec(
         ".github/workflows/release.yml", "shell-remove"
     ),
@@ -516,6 +526,7 @@ EXCEPTION_PRIMITIVES = {
     "finder-reveal": "Command::new",
     "test-cli-inspection-spawn": "Command::new",
     "test-persistence-helper-spawn": "Command::new",
+    "test-capacity-cross-process-helper-spawn": "Command::new",
     "test-persistence-displace-shm": "rename",
     "test-persistence-truncate-owned-database": "set_len",
     "test-state-replaced-multi-item": "rename",
@@ -564,6 +575,7 @@ EXCEPTION_PRIMITIVES = {
     "build-bindings-staging-remove": "rm",
     "test-swift-engine-fixture-remove": "removeItem",
     "test-swift-storage-roots-fixture-remove": "removeItem",
+    "test-swift-retry-obstruction-remove": "removeItem",
     "release-checksum-sidecars-remove": "rm",
     "lint-list-repository-sources": "subprocess.run",
     "test-lint-rejected-xcframework-output": "subprocess.run",
@@ -578,6 +590,7 @@ CLIPPY_SUPPRESSION_COUNTS = {
     "dux-core/src/cache/mod.rs": 2,
     "dux-core/src/path_validation/protected.rs": 1,
     "dux-core/src/engine/registry_tests.rs": 1,
+    "dux-core/src/engine/volume_status.rs": 1,
     "dux-core/src/persistence/persistence_tests.rs": 3,
     "dux-core/src/persistence/storage.rs": 1,
     "dux-core/src/persistence/storage/windows.rs": 2,

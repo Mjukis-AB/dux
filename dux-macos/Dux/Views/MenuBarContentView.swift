@@ -61,42 +61,72 @@ struct MenuBarContentView: View {
                     .foregroundStyle(.secondary)
             }
         case let .loaded(snapshot):
+            volumeSnapshot(snapshot)
+        case let .refreshing(snapshot):
             VStack(alignment: .leading, spacing: 8) {
-                if let displayName = snapshot.displayName {
-                    Text(verbatim: displayName)
-                        .font(.subheadline.weight(.semibold))
-                } else {
-                    Text("Startup Disk")
-                        .font(.subheadline.weight(.semibold))
-                }
-
-                Text(verbatim: StorageByteFormatter.string(from: snapshot.effectiveAvailableBytes))
-                    .font(.title2.bold())
-                    .contentTransition(.numericText())
-
-                if snapshot.availabilityBasis == .importantUsage {
-                    Text("Available for important use")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                } else {
-                    Text("Available")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                CapacityBar(snapshot: snapshot)
-
-                HStack {
-                    Text("Used")
-                    Spacer()
-                    Text(verbatim: "\(snapshot.usedPercentage)%")
-                }
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                volumeSnapshot(snapshot)
+                Label("Refreshing capacity…", systemImage: "arrow.triangle.2.circlepath")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        case let .stale(snapshot, _):
+            VStack(alignment: .leading, spacing: 8) {
+                volumeSnapshot(snapshot)
+                Label("Last known capacity", systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
             }
         case .failed:
             Label("Storage capacity unavailable", systemImage: "exclamationmark.triangle.fill")
                 .foregroundStyle(.red)
+        }
+    }
+
+    private func volumeSnapshot(_ snapshot: VolumeCapacitySnapshot) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let displayName = snapshot.displayName {
+                Text(verbatim: displayName)
+                    .font(.subheadline.weight(.semibold))
+            } else {
+                Text("Startup Disk")
+                    .font(.subheadline.weight(.semibold))
+            }
+
+            HStack(alignment: .firstTextBaseline) {
+                Text(verbatim: StorageByteFormatter.string(from: snapshot.effectiveAvailableBytes))
+                    .font(.title2.bold())
+                    .contentTransition(.numericText())
+                Spacer()
+                Text("\(snapshot.availablePercentage)% available")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+
+            if snapshot.availabilityBasis == .importantUsage {
+                Text("Available for important use")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("Available")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            DiskPressureBadge(pressure: snapshot.pressure)
+
+            CapacityBar(snapshot: snapshot)
+
+            HStack {
+                Text("Used")
+                Spacer()
+                if let usedBytes = snapshot.usedBytes {
+                    Text(verbatim: StorageByteFormatter.string(from: usedBytes))
+                } else {
+                    Text("Unavailable")
+                }
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
         }
     }
 

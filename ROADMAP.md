@@ -1246,6 +1246,15 @@ get_history(query) -> HistoryPageDto
 record_ai_insight(input_digest, insight)
 ```
 
+Current capacity realization (FFI contract v5):
+`observe_startup_volume(versioned Foundation facts) -> versioned path-free
+status` is the first production volume endpoint. It returns Rust-owned pressure,
+headline source/boundaries, prior durable pressure, and history disposition.
+The adapter fixes the mount to `/`; no path crosses from Swift, and incomplete
+or important-only evidence is explicitly evaluation-only. Paged scan and
+candidate DTOs remain later endpoints rather than being inferred from this
+telemetry call.
+
 Requirements:
 
 - DTOs are immutable/versioned at the boundary.
@@ -3261,8 +3270,110 @@ Goal: ship a useful read-only disk-pressure companion.
 
 Tasks:
 
-- [ ] Build `AppModel`, `EngineService`, and `VolumeMonitor`.
-- [ ] Implement capacity sampling and pressure hysteresis.
+- [x] Build `AppModel`, `EngineService`, and `VolumeMonitor`. Completed
+  2026-07-17: the native runtime now owns one `@MainActor` render model, a
+  retryable utility-queue engine service, and a Foundation startup-volume
+  monitor independently of menu/popover/window lifetime. Engine smoke state was
+  replaced by a versioned production status and UniFFI-v5 startup-volume call.
+  Volume refreshes are single-flight and generation-fenced: uncached work shows
+  loading, cached work remains visible while refreshing, failures preserve the
+  last good sample as explicitly stale, cancellation restores the prior state,
+  and late/superseded completions cannot publish. Engine construction remains
+  lazy, failures are not permanently cached, all blocking Foundation/Rust work
+  stays off the main actor, and shutdown invalidates capacity publication before
+  stopping maintenance, releasing reviews, and closing the engine. Ordinary
+  filesystem availability remains optional in the UI; important-only capacity
+  never fabricates used bytes or a usage percentage. Launch/wake/mount routing,
+  retry, coalescing, stale-state, cancellation, real-FFI, important-only, and
+  ordered-shutdown regressions cover the composition. The callback-to-
+  `AsyncStream` part of the general engine architecture is deliberately deferred
+  to Milestone 4's first progressive scan event source; capacity is a bounded
+  request/response operation and maintenance already has a checked typed polling
+  abstraction, so this slice introduces no synthetic callback stream.
+- [x] Implement capacity sampling and pressure hysteresis. Completed 2026-07-17:
+  a dedicated actor samples immediately at app launch, every five minutes, on
+  wake, and after mount/unmount/rename notifications. Exactly one sample may run
+  at a time; event bursts during a sample become one immediate follow-up, idle
+  events advance the cadence deadline, and stop cancels the driver plus
+  generation-invalidates an uninterruptible Foundation resource query. Wake
+  routing signals this priority status path before review/maintenance renewal.
+
+  Rust owns the deterministic policy: important-use capacity is preferred,
+  ordinary availability is the explicit fallback, Critical enters at or below
+  `min(10 GiB, 5%)`, Warning enters at or below `min(30 GiB, 10%)`, escalation is
+  immediate, and recovery must clear the applicable boundary by both 2 GiB and
+  one percentage point. Integer/u128 arithmetic makes boundaries and maximum-
+  capacity behavior deterministic without floating point.
+
+  One direct engine call serializes a single bounded, timestamped session
+  baseline, then holds the existing connection/current-schema/cross-process
+  writer boundary and one immediate SQLite transaction while it loads the
+  latest durable pressure, selects the newest valid session/durable baseline,
+  evaluates hysteresis, selects routine versus transition admission against
+  durable history, writes, commits, revalidates, and reconciles an ambiguous
+  commit. Stale or same-time-conflicting session observations fail before state
+  changes; a newer cross-process durable sample wins inside the final guard.
+  Routine history remains capped at one raw sample per UTC hour while real
+  Healthy/Warning/Critical transitions persist immediately. The versioned input
+  and returned v1 status are path-free; status exposes the headline source,
+  effective boundaries, prior durable pressure, and an explicit history
+  disposition. A missing UUID, incomplete optional metadata, or important-only
+  observation is still classified with session hysteresis for display but cannot
+  create or advance either persistence table; no stable identity is synthesized
+  from `/` or mutable labels.
+
+  Boundary, hysteresis, monotonicity, maximum-integer, reopen, hourly cadence,
+  transition, exact retry/conflict, stale observation, corrupt-state,
+  cross-writer, important-only no-write, schema fencing, and post-commit
+  reconciliation tests cover the core/store/FFI path. A separate-engine
+  regression also proves that durable `last_seen` rejects differing or
+  unverifiable equal-time retries after hourly suppression and supersedes older
+  ephemeral observations rather than losing their ordering across restart.
+  Fifty-seven linked Swift
+  tests cover the real universal FFI call, retryable engine open, lifecycle event
+  routing, wake priority, full shutdown ordering, scheduler
+  coalescing/cancellation, version rejection, history-evidence validation,
+  honest important-only and localized pressure accessibility presentation, and
+  the normal 500 ms median capacity-sample budget. The UI shows effective
+  available bytes and percent; there is no one-second timer or directory scan in
+  the idle capacity path.
+- [ ] Implement persistent user-configurable pressure thresholds as a separate
+  schema-v10 / FFI-v6 checkpoint. Keep `DiskPressureConfig` as the sole
+  validator and evaluator; expose typed versioned get/set/reset engine methods
+  rather than raw settings keys, JSON, UserDefaults, or a policy supplied with
+  each observation. Store exact canonical schema-v1 JSON at
+  `disk_pressure_policy`; absence means the current defaults at revision 0,
+  while every real set/reset advances a checked monotonic revision. An explicit
+  custom value equal to the defaults must preserve Stored provenance, and reset
+  must retain a new Default epoch rather than deleting the row. Add the policy
+  revision to raw samples and daily representatives, treating migrated rows as
+  default revision 0. A revision change resets old-policy hysteresis and forces
+  one `PolicyBaseline` sample even when pressure and UTC hour are unchanged;
+  historical classifications remain immutable.
+
+  Load the effective policy and select the revision-matched durable/session
+  baseline inside the capacity observation's final guarded transaction so a
+  concurrent process cannot change policy between evaluation and persistence.
+  Never acquire the capacity-session mutex from a settings write (the observation
+  order is session → store). FFI v6 must add strict record-v1 policy input,
+  policy/update DTOs, source/revision, and typed invalid-policy failures. Keep
+  the existing startup observation/status records at v1 and map a forced policy
+  baseline to the existing Stored disposition unless a separately named v2
+  status is genuinely required; do not silently add fields to a v1 record.
+  Swift Settings must edit exact decimal GiB and percentage values without
+  silently rounding arbitrary stored policy, explain that each boundary is the
+  smaller of bytes and percent, show validation/save/reset state accessibly, and trigger exactly
+  one generation-safe resample after a successful change. The status UI must
+  always show effective available bytes and percentage beside the label.
+
+  Tests must cover missing-row defaults without a write, explicit-default
+  provenance, reopen, invalid/malformed/newer schemas, idempotency, revision
+  overflow, ambiguous commit, cross-process serialization, v9→v10 backfill,
+  policy-change baseline insertion and subsequent cadence, revision-matched
+  ephemeral hysteresis, rollup retention, FFI v6 version/error/get-set-reset,
+  linked off-main Swift round trips, save-failure last-good state, one resample,
+  and Settings accessibility. This preference changes classification only and
+  grants no cleanup, notification, scan, or scheduling authority.
 - [ ] Implement menu bar label modes.
 - [ ] Implement popover layout with cached status and scan progress.
 - [ ] Implement Explorer window shell and Overview.

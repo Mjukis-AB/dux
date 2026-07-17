@@ -43,6 +43,55 @@ final class VolumeMonitorTests: XCTestCase {
         XCTAssertEqual(snapshot.availabilityBasis, .filesystemAvailable)
     }
 
+    func testImportantOnlyCapacityDoesNotInventUsedStorage() throws {
+        let snapshot = try VolumeMonitor.snapshot(
+            from: VolumeResourceReading(
+                localizedName: "Disk",
+                name: nil,
+                totalCapacity: 100,
+                availableCapacity: nil,
+                importantAvailableCapacity: 25
+            ),
+            at: Date(timeIntervalSince1970: 1)
+        )
+
+        XCTAssertEqual(snapshot.effectiveAvailableBytes, 25)
+        XCTAssertEqual(snapshot.availabilityBasis, .importantUsage)
+        XCTAssertNil(snapshot.usedBytes)
+        XCTAssertNil(snapshot.usedPercentage)
+        XCTAssertEqual(
+            CapacityBar.accessibilityValue(
+                for: snapshot,
+                locale: Locale(identifier: "en")
+            ),
+            "Unavailable"
+        )
+    }
+
+    func testPressurePresentationHasLocalizedVisibleAndAccessibilityText() {
+        let locale = Locale(identifier: "en")
+        let expected: [(DiskPressureLevel, String)] = [
+            (.healthy, "Healthy"),
+            (.warning, "Low space"),
+            (.critical, "Critically low space"),
+            (.unknown, "Pressure unknown"),
+        ]
+
+        for (pressure, title) in expected {
+            XCTAssertEqual(
+                DiskPressureBadge.localizedTitle(for: pressure, locale: locale),
+                title
+            )
+            XCTAssertEqual(
+                DiskPressureBadge.localizedAccessibilityLabel(
+                    for: pressure,
+                    locale: locale
+                ),
+                "Disk pressure: \(title)"
+            )
+        }
+    }
+
     func testRejectsMissingAndInvalidCapacity() {
         XCTAssertThrowsError(
             try VolumeMonitor.snapshot(
@@ -132,8 +181,27 @@ final class VolumeMonitorTests: XCTestCase {
 
         XCTAssertGreaterThan(snapshot.totalBytes, 0)
         XCTAssertLessThanOrEqual(snapshot.effectiveAvailableBytes, snapshot.totalBytes)
-        XCTAssertGreaterThanOrEqual(snapshot.usedPercentage, 0)
-        XCTAssertLessThanOrEqual(snapshot.usedPercentage, 100)
+        guard let usedPercentage = snapshot.usedPercentage else {
+            return XCTFail("Foundation supplied no ordinary filesystem capacity")
+        }
+        XCTAssertGreaterThanOrEqual(usedPercentage, 0)
+        XCTAssertLessThanOrEqual(usedPercentage, 100)
+    }
+
+    func testFoundationCapacitySampleMedianMeetsNormalBudget() async throws {
+        let monitor = VolumeMonitor()
+        var durations: [TimeInterval] = []
+        for _ in 0 ..< 5 {
+            let started = ProcessInfo.processInfo.systemUptime
+            _ = try await monitor.sampleStartupVolume()
+            durations.append(ProcessInfo.processInfo.systemUptime - started)
+        }
+        durations.sort()
+        XCTAssertLessThan(
+            durations[durations.count / 2],
+            0.5,
+            "Median startup-volume capacity sampling exceeded the 500 ms normal budget"
+        )
     }
 }
 

@@ -1,18 +1,44 @@
 import Dispatch
 import Foundation
 
-enum VolumeMonitorError: Error, Equatable {
+enum VolumeMonitorError: Error, Equatable, Sendable {
     case missingTotalCapacity
     case missingAvailableCapacity
     case invalidCapacity
 }
 
 struct VolumeResourceReading: Sendable {
+    let volumeUUIDString: String?
     let localizedName: String?
     let name: String?
+    let localizedFormatDescription: String?
+    let isInternal: Bool?
+    let isRemovable: Bool?
     let totalCapacity: Int?
     let availableCapacity: Int?
     let importantAvailableCapacity: Int64?
+
+    init(
+        volumeUUIDString: String? = nil,
+        localizedName: String?,
+        name: String?,
+        localizedFormatDescription: String? = nil,
+        isInternal: Bool? = nil,
+        isRemovable: Bool? = nil,
+        totalCapacity: Int?,
+        availableCapacity: Int?,
+        importantAvailableCapacity: Int64?
+    ) {
+        self.volumeUUIDString = volumeUUIDString
+        self.localizedName = localizedName
+        self.name = name
+        self.localizedFormatDescription = localizedFormatDescription
+        self.isInternal = isInternal
+        self.isRemovable = isRemovable
+        self.totalCapacity = totalCapacity
+        self.availableCapacity = availableCapacity
+        self.importantAvailableCapacity = importantAvailableCapacity
+    }
 }
 
 protocol VolumeResourceProviding: Sendable {
@@ -22,16 +48,24 @@ protocol VolumeResourceProviding: Sendable {
 struct FoundationVolumeResourceProvider: VolumeResourceProviding {
     func readVolumeResources(at url: URL) throws -> VolumeResourceReading {
         let values = try url.resourceValues(forKeys: [
+            .volumeUUIDStringKey,
             .volumeLocalizedNameKey,
             .volumeNameKey,
+            .volumeLocalizedFormatDescriptionKey,
+            .volumeIsInternalKey,
+            .volumeIsRemovableKey,
             .volumeTotalCapacityKey,
             .volumeAvailableCapacityKey,
             .volumeAvailableCapacityForImportantUsageKey,
         ])
 
         return VolumeResourceReading(
+            volumeUUIDString: values.volumeUUIDString,
             localizedName: values.volumeLocalizedName,
             name: values.volumeName,
+            localizedFormatDescription: values.volumeLocalizedFormatDescription,
+            isInternal: values.volumeIsInternal,
+            isRemovable: values.volumeIsRemovable,
             totalCapacity: values.volumeTotalCapacity,
             availableCapacity: values.volumeAvailableCapacity,
             importantAvailableCapacity: values.volumeAvailableCapacityForImportantUsage
@@ -63,7 +97,8 @@ struct VolumeMonitor: VolumeMonitoring, Sendable {
     }
 
     func sampleStartupVolume() async throws -> VolumeCapacitySnapshot {
-        try await withCheckedThrowingContinuation { continuation in
+        try Task.checkCancellation()
+        let snapshot = try await withCheckedThrowingContinuation { continuation in
             queue.async {
                 precondition(!Thread.isMainThread, "Volume capacity sampling reached the main thread")
 
@@ -75,6 +110,8 @@ struct VolumeMonitor: VolumeMonitoring, Sendable {
                 }
             }
         }
+        try Task.checkCancellation()
+        return snapshot
     }
 
     static func snapshot(
@@ -112,12 +149,20 @@ struct VolumeMonitor: VolumeMonitoring, Sendable {
         }
 
         return VolumeCapacitySnapshot(
+            stableVolumeID: normalizedName(reading.volumeUUIDString),
             displayName: normalizedName(reading.localizedName) ?? normalizedName(reading.name),
+            filesystem: normalizedName(reading.localizedFormatDescription),
+            isInternal: reading.isInternal,
+            isRemovable: reading.isRemovable,
             totalBytes: totalBytes,
             filesystemAvailableBytes: filesystemAvailableBytes,
             importantAvailableBytes: importantAvailableBytes,
             effectiveAvailableBytes: effectiveAvailableBytes,
             availabilityBasis: availabilityBasis,
+            pressure: .unknown,
+            criticalBoundaryBytes: nil,
+            warningBoundaryBytes: nil,
+            historyDisposition: nil,
             sampledAt: sampledAt
         )
     }

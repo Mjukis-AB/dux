@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OptionalExtension, Row, Transaction, params};
 
-use crate::domain::{DiskPressure, VolumeId};
+use crate::domain::{DiskPressure, DiskPressureEvaluation, VolumeCapacity, VolumeId};
 
 use super::codec::{EncodedBytes, StoredEncoding, decode_host_path, encode_host_path};
 use super::history::{
@@ -38,6 +38,131 @@ pub(crate) enum CapacityWriteOutcome {
     Inserted,
     ExistingExact,
     Suppressed,
+}
+
+/// The one non-durable pressure baseline retained by an engine session.
+/// Capacity facts accompany the pressure so equal-timestamp durable and
+/// session observations can be reconciled deterministically.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CapacityPressureBaseline {
+    pub(crate) sampled_at: SystemTime,
+    pub(crate) capacity: VolumeCapacity,
+    pub(crate) pressure: DiskPressure,
+}
+
+impl CapacityPressureBaseline {
+    pub(crate) const fn new(
+        sampled_at: SystemTime,
+        capacity: VolumeCapacity,
+        pressure: DiskPressure,
+    ) -> Self {
+        Self {
+            sampled_at,
+            capacity,
+            pressure,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RawCapacityObservation {
+    volume_id: VolumeId,
+    mount_path: PathBuf,
+    display_name: String,
+    filesystem: String,
+    is_internal: bool,
+    is_removable: bool,
+    sampled_at: SystemTime,
+    capacity: VolumeCapacity,
+}
+
+impl RawCapacityObservation {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn try_new(
+        volume_id: VolumeId,
+        mount_path: PathBuf,
+        display_name: String,
+        filesystem: String,
+        is_internal: bool,
+        is_removable: bool,
+        sampled_at: SystemTime,
+        capacity: VolumeCapacity,
+    ) -> Result<Self, HistoryError> {
+        if !mount_path.is_absolute() {
+            return Err(invalid());
+        }
+        encode_host_path(&mount_path).map_err(|_| invalid())?;
+        validate_text(
+            &display_name,
+            MAX_DISPLAY_NAME_BYTES,
+            HistoryErrorKind::InvalidInput,
+        )?;
+        validate_text(
+            &filesystem,
+            MAX_FILESYSTEM_BYTES,
+            HistoryErrorKind::InvalidInput,
+        )?;
+        let sampled_ms = system_time_to_unix_ms(sampled_at, HistoryErrorKind::InvalidInput)?;
+        let sampled_at = unix_ms_to_system_time(sampled_ms, HistoryErrorKind::InvalidInput)?;
+        // SQLite's frozen raw schema uses signed integers. Important-only
+        // status is never persisted, so it need not be rejected solely for
+        // exceeding that storage representation.
+        if capacity.available_bytes().is_some() && capacity.total_bytes() > i64::MAX as u64 {
+            return Err(invalid());
+        }
+        Ok(Self {
+            volume_id,
+            mount_path,
+            display_name,
+            filesystem,
+            is_internal,
+            is_removable,
+            sampled_at,
+            capacity,
+        })
+    }
+
+    pub(super) fn with_pressure(
+        &self,
+        pressure: DiskPressure,
+    ) -> Result<Option<RawCapacitySample>, HistoryError> {
+        let Some(available_bytes) = self.capacity.available_bytes() else {
+            return Ok(None);
+        };
+        RawCapacitySample::try_new(
+            self.volume_id.clone(),
+            self.mount_path.clone(),
+            self.display_name.clone(),
+            self.filesystem.clone(),
+            self.is_internal,
+            self.is_removable,
+            self.sampled_at,
+            self.capacity.total_bytes(),
+            available_bytes,
+            self.capacity.important_available_bytes(),
+            pressure,
+        )
+        .map(Some)
+    }
+
+    pub(crate) fn volume_id(&self) -> &VolumeId {
+        &self.volume_id
+    }
+
+    pub(crate) const fn capacity(&self) -> VolumeCapacity {
+        self.capacity
+    }
+
+    pub(crate) const fn sampled_at(&self) -> SystemTime {
+        self.sampled_at
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CapacityObservationOutcome {
+    pub(crate) evaluation: DiskPressureEvaluation,
+    pub(crate) previous_durable_pressure: Option<DiskPressure>,
+    pub(crate) write: Option<CapacityWriteOutcome>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -224,9 +349,12 @@ pub(super) fn write_raw_capacity_sample(
         if volume.last_seen_unix_ms > prepared.sampled_at_unix_ms {
             return Err(HistoryError::new(HistoryErrorKind::InvalidTransition));
         }
-        if volume.last_seen_unix_ms == prepared.sampled_at_unix_ms
-            && !volume.exactly_matches(prepared)
-        {
+        // A missing exact raw row at last_seen means the earlier observation
+        // was cadence-suppressed. The volumes row intentionally carries only
+        // mutable identity metadata, not the suppressed capacity facts, so an
+        // equal-time retry cannot be proven exact after a restart. Fail closed
+        // instead of adopting different capacity under the same timestamp.
+        if volume.last_seen_unix_ms == prepared.sampled_at_unix_ms {
             return Err(HistoryError::new(HistoryErrorKind::AlreadyExists));
         }
     }
@@ -330,6 +458,37 @@ pub(super) fn validate_capacity_volume(
         if &sample.volume_id != volume_id || !volume.contains_sample(sample)? {
             return Err(corrupt());
         }
+    }
+    Ok(true)
+}
+
+/// Validate the durable volume interval and reject an ephemeral observation
+/// that is not strictly newer than its last complete observation.
+///
+/// `volumes.last_seen` advances for cadence-suppressed observations, while the
+/// corresponding capacity facts are deliberately not retained. Consequently
+/// an equal timestamp cannot be shown to be an exact retry after an engine
+/// restart and must fail closed as a collision.
+pub(super) fn validate_ephemeral_capacity_observation(
+    connection: &Connection,
+    volume_id: &VolumeId,
+    samples: &[StoredCapacitySample],
+    sampled_at: SystemTime,
+) -> Result<bool, HistoryError> {
+    let Some(volume) = load_volume_observation(connection, volume_id)? else {
+        return Ok(false);
+    };
+    for sample in samples {
+        if &sample.volume_id != volume_id || !volume.contains_sample(sample)? {
+            return Err(corrupt());
+        }
+    }
+    let sampled_at_unix_ms = system_time_to_unix_ms(sampled_at, HistoryErrorKind::InvalidInput)?;
+    if sampled_at_unix_ms < volume.last_seen_unix_ms {
+        return Err(HistoryError::new(HistoryErrorKind::InvalidTransition));
+    }
+    if sampled_at_unix_ms == volume.last_seen_unix_ms {
+        return Err(HistoryError::new(HistoryErrorKind::AlreadyExists));
     }
     Ok(true)
 }
@@ -886,6 +1045,73 @@ mod tests {
             pressure,
         )
         .unwrap()
+    }
+
+    fn observation_at(sampled_at_unix_ms: u64, available_bytes: u64) -> RawCapacityObservation {
+        RawCapacityObservation::try_new(
+            VolumeId::new("volume:observed").unwrap(),
+            PathBuf::from("/"),
+            "Startup".to_owned(),
+            "apfs".to_owned(),
+            true,
+            false,
+            UNIX_EPOCH + Duration::from_millis(sampled_at_unix_ms),
+            VolumeCapacity::new(1_024 * 1_024 * 1_024 * 1_024, Some(available_bytes), None)
+                .unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn atomic_observation_reconciles_ambiguous_insert_exact_suppression_and_transition() {
+        let temp = TempDir::new().unwrap();
+        let store = StoreCoordinator::open(&temp.path().join("store/dux.sqlite3")).unwrap();
+        let gib = 1_024 * 1_024 * 1_024;
+        let first = observation_at(BASE_HOUR_MS, 100 * gib);
+        let inserted = store
+            .observe_capacity_after_commit_failure_for_test(
+                &first,
+                crate::DiskPressureConfig::default(),
+            )
+            .unwrap();
+        assert_eq!(inserted.write, Some(CapacityWriteOutcome::Inserted));
+
+        let exact = store
+            .observe_capacity_after_commit_failure_for_test(
+                &first,
+                crate::DiskPressureConfig::default(),
+            )
+            .unwrap();
+        assert_eq!(exact.write, Some(CapacityWriteOutcome::ExistingExact));
+
+        let routine = observation_at(BASE_HOUR_MS + 60_000, 90 * gib);
+        let suppressed = store
+            .observe_capacity_after_commit_failure_for_test(
+                &routine,
+                crate::DiskPressureConfig::default(),
+            )
+            .unwrap();
+        assert_eq!(suppressed.write, Some(CapacityWriteOutcome::Suppressed));
+
+        let transition = observation_at(BASE_HOUR_MS + 120_000, 5 * gib);
+        let transitioned = store
+            .observe_capacity_after_commit_failure_for_test(
+                &transition,
+                crate::DiskPressureConfig::default(),
+            )
+            .unwrap();
+        assert_eq!(transitioned.write, Some(CapacityWriteOutcome::Inserted));
+        assert_eq!(transitioned.evaluation.pressure(), DiskPressure::Critical);
+        store.with_connection(|connection| {
+            assert_eq!(
+                connection
+                    .query_row("SELECT count(*) FROM disk_samples", [], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                    .unwrap(),
+                2
+            );
+        });
     }
 
     #[test]
