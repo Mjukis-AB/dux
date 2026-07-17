@@ -49,6 +49,9 @@ use super::snapshot_temp_lease::{
     reconcile_snapshot_temp_lease_delete, reconcile_snapshot_temp_lease_insert,
     snapshot_temp_lease_state,
 };
+use super::snapshot_terminal_temp_inventory::{
+    SnapshotTerminalTempPhysicalState, build_snapshot_terminal_temp_inventory,
+};
 use super::store::{HistoryConnectionGuard, StoreCoordinator};
 
 mod codec;
@@ -66,7 +69,7 @@ pub(crate) use storage::{
     SnapshotFinalRemovalError, SnapshotInventoryEntryKind, SnapshotPublication,
     SnapshotPublicationLease, SnapshotStageReservation, SnapshotStorageError,
     SnapshotStorageErrorKind, SnapshotStoreAccess, SnapshotStoreInventoryLease,
-    SnapshotTempKernelState, SnapshotTempMutationLease, StagedSnapshot,
+    SnapshotTempKernelState, SnapshotTempMutationLease, SnapshotTempRemovalError, StagedSnapshot,
 };
 
 const PUBLICATION_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
@@ -215,6 +218,29 @@ pub(crate) enum SnapshotOrphanReconciliationBatchOutcome {
     Removed { scan_id: ScanId, bytes: u64 },
 }
 
+/// One bounded reconciliation of immutable terminal-parent snapshot-temp
+/// debt. Exact scan and temporary-file identities never leave persistence.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SnapshotTerminalTempReconciliationBatchResult {
+    pub(crate) observed_at: SystemTime,
+    pub(crate) outcome: SnapshotTerminalTempReconciliationBatchOutcome,
+    pub(crate) terminal_lease_count_before: u32,
+    pub(crate) terminal_lease_count_after: u32,
+    pub(crate) active_terminal_lease_count_before: u32,
+    pub(crate) active_terminal_lease_count_after: u32,
+    pub(crate) terminal_charged_bytes_before: u64,
+    pub(crate) terminal_charged_bytes_after: u64,
+    pub(crate) has_more: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SnapshotTerminalTempReconciliationBatchOutcome {
+    NoTerminalResidual,
+    DeferredActive,
+    ReconciledRowOnly { scan_id: ScanId },
+    RemovedTempAndLease { scan_id: ScanId, bytes: u64 },
+}
+
 const fn repository_error(kind: SnapshotRepositoryErrorKind) -> SnapshotRepositoryError {
     SnapshotRepositoryError { kind }
 }
@@ -263,6 +289,10 @@ impl SnapshotRepositoryError {
 
 fn map_history(error: HistoryError) -> SnapshotRepositoryError {
     repository_error(SnapshotRepositoryErrorKind::History(error.kind))
+}
+
+const fn history_repository_error(kind: HistoryErrorKind) -> SnapshotRepositoryError {
+    repository_error(SnapshotRepositoryErrorKind::History(kind))
 }
 
 #[allow(
@@ -495,6 +525,213 @@ impl SnapshotRepository {
         )
         .map_err(map_history)?;
         Ok((inventory, storage))
+    }
+
+    /// Reconcile at most one exact snapshot-temp lease whose fully decoded
+    /// parent scan is failed, cancelled, or interrupted.
+    ///
+    /// The caller supplies no name or identity. Authority is derived from the
+    /// complete bounded lease population and physical inventory while holding
+    /// the permanent database-before-snapshot lock order. Running rows,
+    /// unleased temps, and provisioning stages are outside this operation.
+    pub(crate) fn reconcile_terminal_snapshot_temp_residual(
+        &self,
+        observed_at: SystemTime,
+    ) -> Result<SnapshotTerminalTempReconciliationBatchResult, SnapshotRepositoryError> {
+        self.reconcile_terminal_snapshot_temp_residual_with_hooks(
+            observed_at,
+            |storage, name| storage.remove_observed_quiescent_temp_reconciled(name),
+            || Ok(()),
+        )
+    }
+
+    fn reconcile_terminal_snapshot_temp_residual_with_hooks(
+        &self,
+        observed_at: SystemTime,
+        remove: impl FnOnce(
+            &mut SnapshotStoreInventoryLease,
+            &str,
+        ) -> std::result::Result<SnapshotFileUsage, SnapshotTempRemovalError>,
+        after_row_commit: impl FnOnce() -> Result<(), HistoryError>,
+    ) -> Result<SnapshotTerminalTempReconciliationBatchResult, SnapshotRepositoryError> {
+        if self.access != SnapshotStoreAccess::ReadWrite {
+            return Err(repository_error(SnapshotRepositoryErrorKind::ReadOnly));
+        }
+        let observed_at = unix_ms_to_system_time(
+            system_time_to_unix_ms(observed_at, HistoryErrorKind::InvalidInput)
+                .map_err(map_history)?,
+        )
+        .map_err(map_history)?;
+        let mut database_guard = self
+            .database
+            .lock_current_history_connection()
+            .map_err(map_history)?;
+        self.database
+            .validate_history_guard(&database_guard)
+            .map_err(map_history)?;
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| repository_error(SnapshotRepositoryErrorKind::MissingStore))?;
+        let mut storage = store
+            .inventory_with_writer_lease(PUBLICATION_LOCK_TIMEOUT)
+            .map_err(map_storage)?;
+        let leases =
+            inspect_snapshot_temp_leases(&database_guard.connection).map_err(map_history)?;
+        let inventory =
+            build_snapshot_terminal_temp_inventory(&storage, leases).map_err(map_history)?;
+        storage.revalidate().map_err(map_storage)?;
+        self.database
+            .revalidate_current_history_guard(&database_guard)
+            .map_err(map_history)?;
+
+        let terminal_lease_count_before = u32::try_from(inventory.entries.len()).map_err(|_| {
+            repository_error(SnapshotRepositoryErrorKind::History(
+                HistoryErrorKind::QueryLimitExceeded,
+            ))
+        })?;
+        let active_terminal_lease_count_before = inventory.active_count;
+        let terminal_charged_bytes_before = inventory.charged_bytes;
+        let Some(candidate) = inventory.first_actionable() else {
+            let outcome = if terminal_lease_count_before == 0 {
+                SnapshotTerminalTempReconciliationBatchOutcome::NoTerminalResidual
+            } else {
+                SnapshotTerminalTempReconciliationBatchOutcome::DeferredActive
+            };
+            return Ok(SnapshotTerminalTempReconciliationBatchResult {
+                observed_at,
+                outcome,
+                terminal_lease_count_before,
+                terminal_lease_count_after: terminal_lease_count_before,
+                active_terminal_lease_count_before,
+                active_terminal_lease_count_after: active_terminal_lease_count_before,
+                terminal_charged_bytes_before,
+                terminal_charged_bytes_after: terminal_charged_bytes_before,
+                has_more: terminal_lease_count_before > 0,
+            });
+        };
+
+        // The joined status used for bounded classification is not mutation
+        // authority. Fully decode the exact selected parent and require its
+        // complete terminal/no-snapshot shape before any physical or SQL
+        // effect.
+        let parent = self
+            .database
+            .load_scan_with_guard(&database_guard, candidate.lease.scan_id())
+            .map_err(map_history)?
+            .ok_or_else(|| {
+                repository_error(SnapshotRepositoryErrorKind::History(
+                    HistoryErrorKind::CorruptData,
+                ))
+            })?;
+        if !matches!(
+            parent.status(),
+            ScanStatus::Failed | ScanStatus::Cancelled | ScanStatus::Interrupted
+        ) || parent.snapshot().is_some()
+        {
+            return Err(repository_error(SnapshotRepositoryErrorKind::History(
+                HistoryErrorKind::CorruptData,
+            )));
+        }
+        storage.revalidate().map_err(map_storage)?;
+        self.database
+            .revalidate_current_history_guard(&database_guard)
+            .map_err(map_history)?;
+
+        // Freeze all aggregate postconditions before either the unlink or the
+        // exact-row transaction begins.
+        let terminal_lease_count_after = terminal_lease_count_before
+            .checked_sub(1)
+            .ok_or_else(|| history_repository_error(HistoryErrorKind::InternalState))?;
+        let active_terminal_lease_count_after = active_terminal_lease_count_before;
+        let (terminal_charged_bytes_after, removed_bytes, physical_effect) =
+            match candidate.physical {
+                SnapshotTerminalTempPhysicalState::Missing => {
+                    // Row-before-file creation plus both retained locks proves
+                    // that a compliant creator cannot still publish this name.
+                    // Revalidate and durably flush the complete directory
+                    // immediately before the metadata-only effect.
+                    storage.sync_directory_state().map_err(map_storage)?;
+                    (terminal_charged_bytes_before, None, false)
+                }
+                SnapshotTerminalTempPhysicalState::Active => {
+                    return Err(history_repository_error(HistoryErrorKind::InternalState));
+                }
+                SnapshotTerminalTempPhysicalState::Quiescent(expected_usage) => {
+                    let terminal_charged_bytes_after = terminal_charged_bytes_before
+                        .checked_sub(expected_usage.charged_bytes())
+                        .ok_or_else(|| history_repository_error(HistoryErrorKind::InternalState))?;
+                    let removed = match remove(&mut storage, candidate.lease.temp_name()) {
+                        Ok(removed) => removed,
+                        Err(SnapshotTempRemovalError::BeforeEffect(error)) => {
+                            return Err(map_storage(error));
+                        }
+                        Err(SnapshotTempRemovalError::OutcomeUnknown) => {
+                            return Err(outcome_unknown());
+                        }
+                    };
+                    if removed != expected_usage {
+                        return Err(outcome_unknown());
+                    }
+                    storage.revalidate().map_err(|_| outcome_unknown())?;
+                    (
+                        terminal_charged_bytes_after,
+                        Some(removed.charged_bytes()),
+                        true,
+                    )
+                }
+            };
+
+        let expected = candidate.lease.as_prepared();
+        if let Err(error) = self.delete_temp_lease_with_guard_and_hook(
+            &mut database_guard,
+            &expected,
+            after_row_commit,
+        ) {
+            return if physical_effect {
+                Err(outcome_unknown())
+            } else {
+                Err(error)
+            };
+        }
+        if snapshot_temp_lease_state(&database_guard.connection, &expected)
+            .map_err(|_| outcome_unknown())?
+            != SnapshotTempLeaseState::Missing
+        {
+            return Err(outcome_unknown());
+        }
+        storage.revalidate().map_err(|_| {
+            if physical_effect {
+                outcome_unknown()
+            } else {
+                repository_error(SnapshotRepositoryErrorKind::Storage(
+                    SnapshotStorageErrorKind::UnsafeObject,
+                ))
+            }
+        })?;
+        self.database
+            .revalidate_current_history_guard(&database_guard)
+            .map_err(|_| outcome_unknown())?;
+
+        let scan_id = parent.id().clone();
+        let outcome = match removed_bytes {
+            Some(bytes) => SnapshotTerminalTempReconciliationBatchOutcome::RemovedTempAndLease {
+                scan_id,
+                bytes,
+            },
+            None => SnapshotTerminalTempReconciliationBatchOutcome::ReconciledRowOnly { scan_id },
+        };
+        Ok(SnapshotTerminalTempReconciliationBatchResult {
+            observed_at,
+            outcome,
+            terminal_lease_count_before,
+            terminal_lease_count_after,
+            active_terminal_lease_count_before,
+            active_terminal_lease_count_after,
+            terminal_charged_bytes_before,
+            terminal_charged_bytes_after,
+            has_more: terminal_lease_count_after > 0,
+        })
     }
 
     /// Remove at most one fully proven physical orphan.
@@ -1321,6 +1558,63 @@ impl SnapshotRepository {
             publication,
             temp_lease,
         })
+    }
+
+    /// Leave one exact schema-v8 row-only or quiescent row-bound temp for
+    /// engine/repository maintenance tests. The caller must have recorded the
+    /// matching running scan and may terminalize it after this helper returns.
+    #[cfg(test)]
+    pub(crate) fn leave_snapshot_temp_residual_for_test(
+        &self,
+        document: &SnapshotDocument,
+        create_file: bool,
+    ) -> Result<(), SnapshotRepositoryError> {
+        if self.access != SnapshotStoreAccess::ReadWrite {
+            return Err(repository_error(SnapshotRepositoryErrorKind::ReadOnly));
+        }
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| repository_error(SnapshotRepositoryErrorKind::MissingStore))?;
+        let lease_id = SnapshotTempLeaseId::random().map_err(map_history)?;
+        let owner = current_process_instance().map_err(map_process_identity)?;
+        let mut database_guard = self
+            .database
+            .lock_current_history_connection()
+            .map_err(map_history)?;
+        self.reconcile_existing_temp_lease_with_guard(
+            &mut database_guard,
+            store,
+            &document.metadata.scan_id,
+        )?;
+        let file_name =
+            SnapshotFileName::from_scan_id(document.metadata.scan_id.as_str().as_bytes());
+        let mut reservation = store
+            .reserve_stage(file_name.clone(), PUBLICATION_LOCK_TIMEOUT)
+            .map_err(map_storage)?;
+        let lease = PreparedSnapshotTempLease::prepare(
+            lease_id,
+            document.metadata.scan_id.clone(),
+            file_name,
+            reservation.temp_name().to_owned(),
+            owner,
+            SystemTime::now(),
+        )
+        .map_err(map_history)?;
+        self.insert_temp_lease_with_guard(&mut database_guard, &lease)?;
+        if create_file {
+            let mut staged = reservation.create().map_err(map_storage)?;
+            std::io::Write::write_all(&mut staged, b"terminal-temp-residual").map_err(|_| {
+                repository_error(SnapshotRepositoryErrorKind::Storage(
+                    SnapshotStorageErrorKind::Unavailable,
+                ))
+            })?;
+            staged.sync_all().map_err(map_storage)?;
+            staged.abandon();
+        }
+        drop(reservation);
+        drop(database_guard);
+        Ok(())
     }
 
     #[cfg(test)]
@@ -2175,6 +2469,43 @@ mod tests {
         })
     }
 
+    fn record_running_scan(
+        store: &StoreCoordinator,
+        document: &SnapshotDocument,
+        root: &Path,
+        started_at: SystemTime,
+    ) {
+        store
+            .record_scan_started(
+                &NewScanRecord::try_new(
+                    document.metadata.scan_id.clone(),
+                    root.to_path_buf(),
+                    started_at,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+    }
+
+    fn terminalize_scan(
+        store: &StoreCoordinator,
+        document: &SnapshotDocument,
+        completed_at: SystemTime,
+        status: TerminalScanStatus,
+    ) {
+        store
+            .record_scan_finished(
+                &ScanCompletionRecord::try_new(
+                    document.metadata.scan_id.clone(),
+                    completed_at,
+                    status,
+                    counts(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+    }
+
     fn retention_tombstone_count(store: &StoreCoordinator) -> i64 {
         store.with_connection(|connection| {
             connection
@@ -2615,6 +2946,446 @@ mod tests {
         external
             .pragma_update(None, "user_version", current)
             .unwrap();
+    }
+
+    #[test]
+    fn terminal_temp_row_only_reconciles_every_allowed_status_without_changing_parent() {
+        for (label, status) in [
+            ("failed", TerminalScanStatus::Failed),
+            ("cancelled", TerminalScanStatus::Cancelled),
+            ("interrupted", TerminalScanStatus::Interrupted),
+        ] {
+            let temp = TempDir::new().unwrap();
+            let database = temp.path().join("store/dux.sqlite3");
+            let root = temp.path().join("scan-root");
+            let base = UNIX_EPOCH + Duration::from_millis(1_750_000_030_000);
+            let document = document(&format!("scan:terminal-temp-row-only:{label}"), &root);
+            let (store, repository) = open_repository(&database);
+            record_running_scan(&store, &document, &root, base);
+            repository
+                .leave_snapshot_temp_residual_for_test(&document, false)
+                .unwrap();
+            terminalize_scan(&store, &document, base + Duration::from_secs(1), status);
+            let parent_before = store
+                .load_scan(&document.metadata.scan_id)
+                .unwrap()
+                .unwrap();
+
+            let result = repository
+                .reconcile_terminal_snapshot_temp_residual(
+                    base + Duration::from_secs(2) + Duration::from_micros(999),
+                )
+                .unwrap();
+            assert_eq!(
+                result.observed_at,
+                base + Duration::from_secs(2),
+                "batch time must be millisecond canonical"
+            );
+            assert!(matches!(
+                result.outcome,
+                SnapshotTerminalTempReconciliationBatchOutcome::ReconciledRowOnly {
+                    ref scan_id
+                } if scan_id == &document.metadata.scan_id
+            ));
+            assert_eq!(result.terminal_lease_count_before, 1);
+            assert_eq!(result.terminal_lease_count_after, 0);
+            assert_eq!(result.active_terminal_lease_count_before, 0);
+            assert_eq!(result.active_terminal_lease_count_after, 0);
+            assert_eq!(result.terminal_charged_bytes_before, 0);
+            assert_eq!(result.terminal_charged_bytes_after, 0);
+            assert!(!result.has_more);
+            assert_eq!(temp_lease_count(&store), 0);
+            assert_eq!(
+                store
+                    .load_scan(&document.metadata.scan_id)
+                    .unwrap()
+                    .unwrap(),
+                parent_before
+            );
+            assert_eq!(retention_tombstone_count(&store), 0);
+        }
+    }
+
+    #[test]
+    fn terminal_temp_quiescent_removal_is_one_item_and_exactly_accounted() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let root = temp.path().join("scan-root");
+        let base = UNIX_EPOCH + Duration::from_millis(1_750_000_031_000);
+        let document = document("scan:terminal-temp-quiescent", &root);
+        let (store, repository) = open_repository(&database);
+        record_running_scan(&store, &document, &root, base);
+        repository
+            .leave_snapshot_temp_residual_for_test(&document, true)
+            .unwrap();
+        terminalize_scan(
+            &store,
+            &document,
+            base + Duration::from_secs(1),
+            TerminalScanStatus::Failed,
+        );
+        let before = repository.inspect_retention_inventory(base).unwrap();
+        let expected_bytes = before.totals.temporary_quiescent.charged_bytes;
+        assert!(expected_bytes > 0);
+
+        let result = repository
+            .reconcile_terminal_snapshot_temp_residual(base + Duration::from_secs(2))
+            .unwrap();
+        assert!(matches!(
+            result.outcome,
+            SnapshotTerminalTempReconciliationBatchOutcome::RemovedTempAndLease {
+                ref scan_id,
+                bytes
+            } if scan_id == &document.metadata.scan_id && bytes == expected_bytes
+        ));
+        assert_eq!(result.terminal_lease_count_before, 1);
+        assert_eq!(result.terminal_lease_count_after, 0);
+        assert_eq!(result.terminal_charged_bytes_before, expected_bytes);
+        assert_eq!(result.terminal_charged_bytes_after, 0);
+        assert_eq!(temp_lease_count(&store), 0);
+        let after = repository.inspect_retention_inventory(base).unwrap();
+        assert!(after.temporary_files.is_empty());
+        assert!(after.residual_temp_leases.is_empty());
+    }
+
+    #[test]
+    fn active_terminal_temp_defers_but_does_not_starve_later_row_only_debt() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let root = temp.path().join("scan-root");
+        let base = UNIX_EPOCH + Duration::from_millis(1_750_000_032_000);
+        let active_document = document("scan:terminal-temp-active-first", &root);
+        let row_only_document = document("scan:terminal-temp-row-only-second", &root);
+        let (store, repository) = open_repository(&database);
+
+        record_running_scan(&store, &active_document, &root, base);
+        let (active_stage, _, _) = repository.stage_document(&active_document).unwrap();
+        terminalize_scan(
+            &store,
+            &active_document,
+            base + Duration::from_secs(1),
+            TerminalScanStatus::Interrupted,
+        );
+        record_running_scan(
+            &store,
+            &row_only_document,
+            &root,
+            base + Duration::from_secs(2),
+        );
+        repository
+            .leave_snapshot_temp_residual_for_test(&row_only_document, false)
+            .unwrap();
+        terminalize_scan(
+            &store,
+            &row_only_document,
+            base + Duration::from_secs(3),
+            TerminalScanStatus::Cancelled,
+        );
+
+        let first = repository
+            .reconcile_terminal_snapshot_temp_residual(base + Duration::from_secs(4))
+            .unwrap();
+        assert!(matches!(
+            first.outcome,
+            SnapshotTerminalTempReconciliationBatchOutcome::ReconciledRowOnly {
+                ref scan_id
+            } if scan_id == &row_only_document.metadata.scan_id
+        ));
+        assert_eq!(first.terminal_lease_count_before, 2);
+        assert_eq!(first.terminal_lease_count_after, 1);
+        assert_eq!(first.active_terminal_lease_count_before, 1);
+        assert_eq!(first.active_terminal_lease_count_after, 1);
+        assert!(first.has_more);
+
+        let deferred = repository
+            .reconcile_terminal_snapshot_temp_residual(base + Duration::from_secs(5))
+            .unwrap();
+        assert_eq!(
+            deferred.outcome,
+            SnapshotTerminalTempReconciliationBatchOutcome::DeferredActive
+        );
+        assert_eq!(deferred.terminal_lease_count_before, 1);
+        assert_eq!(deferred.active_terminal_lease_count_before, 1);
+        assert!(deferred.has_more);
+
+        active_stage.abandon();
+        let settled = repository
+            .reconcile_terminal_snapshot_temp_residual(base + Duration::from_secs(6))
+            .unwrap();
+        assert!(matches!(
+            settled.outcome,
+            SnapshotTerminalTempReconciliationBatchOutcome::RemovedTempAndLease {
+                ref scan_id,
+                ..
+            } if scan_id == &active_document.metadata.scan_id
+        ));
+        assert_eq!(temp_lease_count(&store), 0);
+    }
+
+    #[test]
+    fn terminal_temp_selection_is_oldest_created_then_one_item_per_batch() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let root = temp.path().join("scan-root");
+        let base = UNIX_EPOCH + Duration::from_millis(1_750_000_032_500);
+        let older = document("scan:terminal-temp-z-older", &root);
+        let newer = document("scan:terminal-temp-a-newer", &root);
+        let (store, repository) = open_repository(&database);
+
+        for (document, created_at) in [
+            (&older, base + Duration::from_millis(1)),
+            (&newer, base + Duration::from_millis(2)),
+        ] {
+            record_running_scan(&store, document, &root, base);
+            let mut guard = store.lock_current_history_connection().unwrap();
+            let (reservation, lease) = reserve_prepared_temp_lease(
+                &repository,
+                &guard,
+                &document.metadata.scan_id,
+                created_at,
+            );
+            repository
+                .insert_temp_lease_with_guard(&mut guard, &lease)
+                .unwrap();
+            drop(reservation);
+            drop(guard);
+            terminalize_scan(
+                &store,
+                document,
+                base + Duration::from_secs(1),
+                TerminalScanStatus::Failed,
+            );
+        }
+
+        let first = repository
+            .reconcile_terminal_snapshot_temp_residual(base + Duration::from_secs(2))
+            .unwrap();
+        assert!(matches!(
+            first.outcome,
+            SnapshotTerminalTempReconciliationBatchOutcome::ReconciledRowOnly {
+                ref scan_id
+            } if scan_id == &older.metadata.scan_id
+        ));
+        assert_eq!(first.terminal_lease_count_before, 2);
+        assert_eq!(first.terminal_lease_count_after, 1);
+        assert!(first.has_more);
+        assert_eq!(temp_lease_count(&store), 1);
+
+        let second = repository
+            .reconcile_terminal_snapshot_temp_residual(base + Duration::from_secs(3))
+            .unwrap();
+        assert!(matches!(
+            second.outcome,
+            SnapshotTerminalTempReconciliationBatchOutcome::ReconciledRowOnly {
+                ref scan_id
+            } if scan_id == &newer.metadata.scan_id
+        ));
+        assert_eq!(second.terminal_lease_count_before, 1);
+        assert_eq!(second.terminal_lease_count_after, 0);
+        assert!(!second.has_more);
+    }
+
+    #[test]
+    fn running_rows_and_unleased_temps_are_outside_terminal_maintenance() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let root = temp.path().join("scan-root");
+        let base = UNIX_EPOCH + Duration::from_millis(1_750_000_033_000);
+        let running = document("scan:terminal-temp-running", &root);
+        let unleased_document = document("scan:terminal-temp-unleased", &root);
+        let (store, repository) = open_repository(&database);
+        let stage_sibling = temp.path().join(".dux-snapshot-stage-fixture");
+        fs::create_dir(&stage_sibling).unwrap();
+        fs::write(stage_sibling.join("sentinel"), b"unowned-stage-debt").unwrap();
+        record_running_scan(&store, &running, &root, base);
+        repository
+            .leave_snapshot_temp_residual_for_test(&running, true)
+            .unwrap();
+
+        let unleased_name =
+            SnapshotFileName::from_scan_id(unleased_document.metadata.scan_id.as_str().as_bytes());
+        let mut reservation = repository
+            .store
+            .as_ref()
+            .unwrap()
+            .reserve_stage(unleased_name, PUBLICATION_LOCK_TIMEOUT)
+            .unwrap();
+        reservation.create().unwrap().abandon();
+        drop(reservation);
+
+        let result = repository
+            .reconcile_terminal_snapshot_temp_residual(base + Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(
+            result.outcome,
+            SnapshotTerminalTempReconciliationBatchOutcome::NoTerminalResidual
+        );
+        assert_eq!(result.terminal_lease_count_before, 0);
+        assert_eq!(result.terminal_charged_bytes_before, 0);
+        assert!(!result.has_more);
+        assert_eq!(temp_lease_count(&store), 1);
+        let inventory = repository.inspect_retention_inventory(base).unwrap();
+        assert_eq!(inventory.temporary_files.len(), 2);
+        assert!(inventory.temporary_files.iter().any(|temporary| matches!(
+            temporary.state,
+            super::super::snapshot_retention_inventory::SnapshotTemporaryState::QuiescentAtObservation
+        )));
+        assert!(inventory.temporary_files.iter().any(|temporary| matches!(
+            temporary.state,
+            super::super::snapshot_retention_inventory::SnapshotTemporaryState::Unleased
+        )));
+        assert!(inventory.residual_temp_leases.is_empty());
+        assert_eq!(
+            fs::read(stage_sibling.join("sentinel")).unwrap(),
+            b"unowned-stage-debt"
+        );
+    }
+
+    #[test]
+    fn terminal_temp_requires_a_fully_valid_selected_parent() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let root = temp.path().join("scan-root");
+        let base = UNIX_EPOCH + Duration::from_millis(1_750_000_034_000);
+        let document = document("scan:terminal-temp-corrupt-parent", &root);
+        let (store, repository) = open_repository(&database);
+        record_running_scan(&store, &document, &root, base);
+        repository
+            .leave_snapshot_temp_residual_for_test(&document, false)
+            .unwrap();
+        terminalize_scan(
+            &store,
+            &document,
+            base + Duration::from_secs(1),
+            TerminalScanStatus::Failed,
+        );
+        store.with_connection(|connection| {
+            connection
+                .execute(
+                    "UPDATE scans SET root_path = x'72656c6174697665', root_path_encoding = 1
+                     WHERE scan_id = ?1",
+                    [document.metadata.scan_id.as_str()],
+                )
+                .unwrap();
+        });
+
+        let error = repository
+            .reconcile_terminal_snapshot_temp_residual(base + Duration::from_secs(2))
+            .unwrap_err();
+        assert_eq!(
+            error.kind,
+            SnapshotRepositoryErrorKind::History(HistoryErrorKind::CorruptData)
+        );
+        assert_eq!(temp_lease_count(&store), 1);
+    }
+
+    #[test]
+    fn terminal_temp_effect_and_commit_uncertainty_fail_closed() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let root = temp.path().join("scan-root");
+        let base = UNIX_EPOCH + Duration::from_millis(1_750_000_035_000);
+        let document = document("scan:terminal-temp-uncertain-remove", &root);
+        let (store, repository) = open_repository(&database);
+        record_running_scan(&store, &document, &root, base);
+        repository
+            .leave_snapshot_temp_residual_for_test(&document, true)
+            .unwrap();
+        terminalize_scan(
+            &store,
+            &document,
+            base + Duration::from_secs(1),
+            TerminalScanStatus::Interrupted,
+        );
+        let error = repository
+            .reconcile_terminal_snapshot_temp_residual_with_hooks(
+                base + Duration::from_secs(2),
+                |_, _| Err(SnapshotTempRemovalError::OutcomeUnknown),
+                || Ok(()),
+            )
+            .unwrap_err();
+        assert_eq!(
+            error.kind,
+            SnapshotRepositoryErrorKind::History(HistoryErrorKind::OutcomeUnknown)
+        );
+        assert_eq!(temp_lease_count(&store), 1);
+
+        let invalid_clock = repository
+            .reconcile_terminal_snapshot_temp_residual(UNIX_EPOCH - Duration::from_millis(1))
+            .unwrap_err();
+        assert_eq!(
+            invalid_clock.kind,
+            SnapshotRepositoryErrorKind::History(HistoryErrorKind::InvalidInput)
+        );
+    }
+
+    #[test]
+    fn terminal_temp_exactly_reconciles_commit_failure_but_not_schema_uncertainty() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let root = temp.path().join("scan-root");
+        let base = UNIX_EPOCH + Duration::from_millis(1_750_000_036_000);
+        let row_only = document("scan:terminal-temp-exact-commit", &root);
+        let (store, repository) = open_repository(&database);
+        record_running_scan(&store, &row_only, &root, base);
+        repository
+            .leave_snapshot_temp_residual_for_test(&row_only, false)
+            .unwrap();
+        terminalize_scan(
+            &store,
+            &row_only,
+            base + Duration::from_secs(1),
+            TerminalScanStatus::Failed,
+        );
+        let reconciled = repository
+            .reconcile_terminal_snapshot_temp_residual_with_hooks(
+                base + Duration::from_secs(2),
+                |storage, name| storage.remove_observed_quiescent_temp_reconciled(name),
+                || Err(HistoryError::new(HistoryErrorKind::DatabaseUnavailable)),
+            )
+            .unwrap();
+        assert!(matches!(
+            reconciled.outcome,
+            SnapshotTerminalTempReconciliationBatchOutcome::ReconciledRowOnly { .. }
+        ));
+        assert_eq!(temp_lease_count(&store), 0);
+
+        let physical = document("scan:terminal-temp-schema-uncertain", &root);
+        record_running_scan(&store, &physical, &root, base + Duration::from_secs(3));
+        repository
+            .leave_snapshot_temp_residual_for_test(&physical, true)
+            .unwrap();
+        terminalize_scan(
+            &store,
+            &physical,
+            base + Duration::from_secs(4),
+            TerminalScanStatus::Cancelled,
+        );
+        let error = repository
+            .reconcile_terminal_snapshot_temp_residual_with_hooks(
+                base + Duration::from_secs(5),
+                |storage, name| storage.remove_observed_quiescent_temp_reconciled(name),
+                || {
+                    install_future_schema(&database);
+                    Ok(())
+                },
+            )
+            .unwrap_err();
+        assert_eq!(
+            error.kind,
+            SnapshotRepositoryErrorKind::History(HistoryErrorKind::OutcomeUnknown)
+        );
+        let external = rusqlite::Connection::open(&database).unwrap();
+        assert_eq!(
+            external
+                .query_row("SELECT count(*) FROM snapshot_temp_leases", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            0
+        );
+        drop(external);
+        restore_current_schema(&database);
     }
 
     fn reserve_prepared_temp_lease(

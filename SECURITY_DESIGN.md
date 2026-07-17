@@ -1207,11 +1207,11 @@ crash can therefore leave a row-only residual or a row-bound quiescent temp.
 Recognized pre-v8 or otherwise unleased temps remain possible and are never
 adopted. Startup validates but does not generally scavenge at most 64 physical
 temps or 64 rows; a 65th makes the relevant inventory unavailable, and an
-individual temp may be large. The exact same-scan retry described below is the
-only implemented reconciliation. Provisioning siblings, terminal-scan rows,
-and unleased temps remain explicit availability/footprint debt for later
-bounded, identity-safe maintenance, never permission to recursively delete an
-unproven path.
+individual temp may be large. Exact same-scan retry and the separate bounded
+terminal-row reconciler described below are implemented. Provisioning
+siblings, running-scan rows, and unleased temps remain explicit
+availability/footprint debt for later bounded, identity-safe maintenance,
+never permission to recursively delete an unproven path.
 
 Symlinked storage roots, ownership mismatch, unsupported schema versions, and
 unsafe permissions block writes. Older clients fail read-only rather than
@@ -1342,7 +1342,7 @@ accounting unstable; all physical classes remain charged and non-evictable.
 Quiescence is only an observation, so this inventory cannot authorize
 scavenging or cap enforcement.
 
-An exact same-scan retry is the only implemented temp mutation outside normal
+An exact same-scan retry is the publication path's temp mutation outside normal
 publication/abort. Under database then snapshot exclusion, a contended kernel
 lock returns busy. A quiescent temp must match the row's exact name and prior
 identity, be reopened and locked nonblockingly, pass retained/name validation,
@@ -1363,12 +1363,42 @@ corruption. If the guard cannot be established, the handle is close-only. This
 does not turn a physical unleased observation into adoption or scavenging
 authority.
 
+Terminal snapshot-temp maintenance is a separate sealed one-row authority.
+Under a current-schema database guard followed by the snapshot writer lease, it
+classifies the complete bounded immutable lease population through joined
+parent status; those aggregate observations are not mutation authority. Before
+any effect, it fully decodes the selected actionable row's exact parent and
+accepts only `failed`, `cancelled`, or `interrupted` with no snapshot reference.
+`running`, missing, queued, succeeded, malformed, or snapshot-bearing selected
+parents grant no mutation. Stored PID, process instance, creation time, age,
+and a prior quiescent observation never prove writer death or authorize scan
+settlement.
+
+The batch counts all terminal row-bound residuals, skips active files so they
+cannot starve later actionable debt, and selects at most the first deterministic
+row-only or quiescent row. A row-only residual may consume only its exact row
+after the locked directory state is durably confirmed. A physical temp must be
+reopened no-follow, identity- and exact-usage-matched, kernel-locked
+nonblockingly again, and name/private-object revalidated. Checked accounting is
+frozen before its physical-first removal. The delete-capable handle closes
+before directory sync; a known pre-unlink failure is distinct from post-unlink
+`OutcomeUnknown`, which retains the row. Only after durable removal may the
+exact row be consumed. The parent scan and every final, tombstone, pin,
+candidate, cleanup, evaluation, and unrelated temp row remain unchanged.
+
+The corresponding typed idle-only engine task accepts no scan, lease, owner,
+name, root, path, inventory, or candidate. It exposes path-free aggregate
+outcomes/counts/bytes, invokes one repository batch, linearizes cancellation at
+Applying, and never self-schedules. Native scheduling must back off active-only
+debt. Running-row recovery, unleased temps, and provisioning stages remain
+outside this authority.
+
 The v8 temp protocol itself is not a broad scavenger or retention-victim
 decision. The repository's separate cap writer may unlink only an exact
 tombstoned final; it gains no authority over temp rows or names. App/FFI
-ownership and scheduling, unrelated terminal temp residual maintenance,
+ownership and scheduling, hard-process-death recovery for running rows,
 unleased-temp and `.dux-snapshot-stage-*` scavenging, and native Windows runtime
-verification of the new lock/removal paths remain future gates.
+verification of the lock/removal paths remain future gates.
 
 The snapshot cap itself is now a typed, exact-key setting. The canonical
 value-schema-v1 `snapshot_retention` object contains only `cap_bytes`; absence
@@ -1418,9 +1448,9 @@ execution. Cancellation and close are linearized with
 `SnapshotRetentionBatchApplying`: an earlier request prevents the repository
 call, while a later request remains intent and cannot rewrite the exact result.
 Native app/FFI review-lease ownership and periodic idle scheduling, general
-temp/stage maintenance, physical-orphan maintenance, and clear-data remain
-outside this cap authority. Physical-orphan maintenance has the separate
-implemented boundary below.
+unleased-temp/stage maintenance, physical-orphan maintenance, terminal-temp
+maintenance, and clear-data remain outside this cap authority. Physical-orphan
+and terminal-temp maintenance have separate implemented boundaries.
 
 Physical-orphan reconciliation is a separate, one-final authority and never a
 cap-policy fallback. A current-schema database guard and then snapshot writer
@@ -1444,7 +1474,7 @@ snapshot tuple to retire, and it never settles the scan, consumes a temp lease,
 or rewrites history. Temporary files and provisioning stages neither supply
 authority nor become targets. Its separate idle-only engine task accepts no
 authority-bearing input and publishes only path-free aggregate observations;
-it never self-schedules. Native scheduling, temp/stage maintenance, scan-row
+it never self-schedules. Native scheduling, unleased-temp/stage maintenance, scan-row
 recovery, clear-data, and native Windows mutation verification remain separate.
 
 Clearing DUX data removes only DUX-owned stores after the same storage-root and
@@ -1754,10 +1784,10 @@ incident as a substitute for deterministic local evidence.
 | macOS app cleanup | Absent | Entire cleanup release gate in §17.3 |
 | Legacy CLI deletion | Active arbitrary-descendant permanent path routed through a temporary core adapter; strict-target/volume/identity rechecks only; scanned-byte estimates labeled in CLI | Replace adapter with reviewed plan/approval/executor chain without weakening current checks |
 | Centralized executor | Production executor absent; temporary legacy adapter is containment only | Typed admission, integration with the existing cross-process lease/journal, and live target revalidation required |
-| Engine/FFI task and plan API | Core handle, pre-worker catalog/SQLite/snapshot compatibility handshake, bounded per-session registry, read-only formatting, durable full-scan plus deterministic candidate-evaluation tasks, a bounded path-free recent-scan history DTO, an exact-scan path-free durable candidate-discovery DTO, bounded lossless candidate path/evidence pages, semantic scan-bound review intent, bounded recent and exact-session path-free cleanup-history DTOs, typed idle-only one-batch history, snapshot-retention, and physical-orphan tasks, and typed path-free snapshot-cap get/set/reset are implemented. Scan admission fences schema skew and overlapping session-local roots; maintenance preflights closed/active/busy without storage, rechecks schema/admission, and linearizes cancellation with its Applying point of no return. Snapshot cap and physical-orphan maintenance accept no caller cap, inventory, victim, scan identity, or path and expose only aggregate observations. Typed results/events/history/settings expose observations and bounded policy only; detail/review/cleanup-history DTOs cannot become planner inputs. App architecture owns one session; CLI status/history consume only the scan-history Rust DTO, UniFFI remains smoke-only, and no plan/cleanup authority exists | FFI version rejection plus bounded scan/candidate-history/cleanup-history/detail/review/maintenance/settings/plan transport and cancellation; native periodic idle scheduling and review-lease ownership, planner lifecycle, priority, and cross-process scan leasing remain later |
-| SQLite compatibility store | Checksummed v1/v2/v3/v4/v5/v6/v7/v8 migrations with exact per-version fingerprints, lossless bounded path codec, bounded full/lightweight inspection, private atomic provisioning with durable initialization evidence, cross-platform process writer/version-race coverage, durable writer-locked cleanup-lock layout upgrade, private tri-state process-instance liveness evidence, newer-schema read-only transition, rollback/WAL recovery, engine-integrated scan lifecycle/coverage, atomic exact-snapshot candidate-evaluation batches, VM/time/decoded-memory-bounded exact-scan evaluation and exact-candidate observations, typed review state with semantic scan-bound commands, sealed evaluator invalidation state, claim-preserving atomic planner/journal candidate projection, planned-cleanup history, bounded path-free cleanup-history scalar/exact observations, exact expiry settlement, a bounded cleanup-lock-coupled owner-generation journal state machine, authorizer-constrained bounded capacity/AI-cache retention, exact-identity append-only snapshot tombstones, bounded explicit snapshot-review leases, the partial lossless snapshot-path retention lookup, one exact-key typed snapshot-cap setting, bounded immutable snapshot-temp leases with row-before-file creation and atomic success consumption, one-victim locked cap enforcement with exact tombstone reconciliation, and bounded exact-path orphan classification plus exact guarded parent/root/status validation are implemented; stored paths, status, and policy remain non-authoritative observations | Planner engine lifecycle, Windows host-scope proof, native Windows temp/final-removal verification, general terminal/unleased-temp/stage reconciliation, app/FFI cap/detail/review-lease lifecycle plus native periodic idle scheduling, executor integration, hard-process-death scan-row recovery, and bounded identity-safe abandoned-stage maintenance |
+| Engine/FFI task and plan API | Core handle, pre-worker catalog/SQLite/snapshot compatibility handshake, bounded per-session registry, read-only formatting, durable full-scan plus deterministic candidate-evaluation tasks, a bounded path-free recent-scan history DTO, an exact-scan path-free durable candidate-discovery DTO, bounded lossless candidate path/evidence pages, semantic scan-bound review intent, bounded recent and exact-session path-free cleanup-history DTOs, typed idle-only one-batch history, snapshot-retention, physical-orphan, and terminal snapshot-temp tasks, and typed path-free snapshot-cap get/set/reset are implemented. Scan admission fences schema skew and overlapping session-local roots; maintenance preflights closed/active/busy without storage, rechecks schema/admission, and linearizes cancellation with its Applying point of no return. Snapshot cap, physical-orphan, and terminal-temp maintenance accept no caller cap, inventory, victim, scan/lease identity, owner, name, or path and expose only aggregate observations. Typed results/events/history/settings expose observations and bounded policy only; detail/review/cleanup-history DTOs cannot become planner inputs. App architecture owns one session; CLI status/history consume only the scan-history Rust DTO, UniFFI remains smoke-only, and no plan/cleanup authority exists | FFI version rejection plus bounded scan/candidate-history/cleanup-history/detail/review/maintenance/settings/plan transport and cancellation; native periodic idle scheduling and review-lease ownership, planner lifecycle, priority, and cross-process scan leasing remain later |
+| SQLite compatibility store | Checksummed v1/v2/v3/v4/v5/v6/v7/v8 migrations with exact per-version fingerprints, lossless bounded path codec, bounded full/lightweight inspection, private atomic provisioning with durable initialization evidence, cross-platform process writer/version-race coverage, durable writer-locked cleanup-lock layout upgrade, private tri-state process-instance liveness evidence, newer-schema read-only transition, rollback/WAL recovery, engine-integrated scan lifecycle/coverage, atomic exact-snapshot candidate-evaluation batches, VM/time/decoded-memory-bounded exact-scan evaluation and exact-candidate observations, typed review state with semantic scan-bound commands, sealed evaluator invalidation state, claim-preserving atomic planner/journal candidate projection, planned-cleanup history, bounded path-free cleanup-history scalar/exact observations, exact expiry settlement, a bounded cleanup-lock-coupled owner-generation journal state machine, authorizer-constrained bounded capacity/AI-cache retention, exact-identity append-only snapshot tombstones, bounded explicit snapshot-review leases, the partial lossless snapshot-path retention lookup, one exact-key typed snapshot-cap setting, bounded immutable snapshot-temp leases with row-before-file creation and atomic success consumption, one-victim locked cap enforcement with exact tombstone reconciliation, bounded exact-path orphan classification plus exact guarded parent/root/status validation, and one-row terminal temp-lease reconciliation are implemented; stored paths, status, and policy remain non-authoritative observations | Planner engine lifecycle, Windows host-scope proof, native Windows temp/final-removal verification, unleased-temp/stage reconciliation, app/FFI cap/detail/review-lease lifecycle plus native periodic idle scheduling, executor integration, hard-process-death scan-row recovery, and bounded identity-safe abandoned-stage maintenance |
 | Capacity sample persistence | Typed raw SQLite-v2 writes and bounded latest/cursor reads are implemented with opaque stable volume IDs, separate ordinary/important availability, hourly routine suppression, immediate stored-pressure transitions, monotonic metadata, storage/schema-gated exact retry reconciliation, volume/sample interval checks, hostile-row validation, version-skew fencing, exact-last-observation UTC daily rollups, 30-day raw retention, and 365-complete-day daily retention; important-only UI observations are not persisted. Core engine maintenance can run one bounded batch only while its session is idle | Swift/engine/FFI/CLI sampling wiring, Rust pressure evaluation/hysteresis, pressure episodes, and native app/FFI idle-periodic scheduling |
-| Binary full-tree snapshot store | Independent v1 wire has bounded pre-allocation, exact graph/path/aggregate/flag semantics, frozen golden digests, SHA-256 references, private marker-owned storage, unique temps, atomic no-replace publication, read-only final handles, database→snapshot lock ordering, version-skew fencing, exact file-first scan-summary-plus-coverage reconciliation, schema-v5 tombstone-before-file load gating, schema-v6 sealed retained-handle review leases, schema-v7's bounded sequential-handle inventory with exact-root latest-two ranking, strict pin reconciliation, final/control revalidation, settings-backed cap input, and logical/allocated/charged accounting, plus schema-v8 row-before-file temp leases, retained kernel writer locks, active/quiescent/unleased reporting, exact same-scan residual retry, and atomic success consumption. A sealed one-final cap batch repeats policy under the final locks, fully validates the observed body, commits the tombstone first, and performs identity-safe retained unlink plus directory durability or exact residual retry. A separate sealed one-final orphan batch proves zero references, fully validates the body-derived filename and exact guarded parent/root/status, performs checked accounting, and removes only the identity/usage-revalidated final with typed post-unlink uncertainty. The core engine can request exactly one of either batch without supplying authority-bearing inputs. Durable engine tasks publish only a completed-only fresh-scan converter's lossless canonical DFS nodes and fail-closed hard-link accounting; standalone inventory observations remain non-authoritative | Explorer/FFI integration and review-lease lifecycle, memory benchmarks, general terminal/unleased-temp and provisioning-stage maintenance, native periodic idle scheduling, and native Windows temp/final-removal plus sparse/compressed-allocation verification |
+| Binary full-tree snapshot store | Independent v1 wire has bounded pre-allocation, exact graph/path/aggregate/flag semantics, frozen golden digests, SHA-256 references, private marker-owned storage, unique temps, atomic no-replace publication, read-only final handles, database→snapshot lock ordering, version-skew fencing, exact file-first scan-summary-plus-coverage reconciliation, schema-v5 tombstone-before-file load gating, schema-v6 sealed retained-handle review leases, schema-v7's bounded sequential-handle inventory with exact-root latest-two ranking, strict pin reconciliation, final/control revalidation, settings-backed cap input, and logical/allocated/charged accounting, plus schema-v8 row-before-file temp leases, retained kernel writer locks, active/quiescent/unleased reporting, exact same-scan residual retry, and atomic success consumption. A separate terminal-temp batch now consumes at most one exact failed/cancelled/interrupted row-only or quiescent residual after guarded parent validation, physical-first identity/usage revalidation, checked accounting, handle-close-before-sync durability, and exact row reconciliation. A sealed one-final cap batch repeats policy under the final locks, fully validates the observed body, commits the tombstone first, and performs identity-safe retained unlink plus directory durability or exact residual retry. A separate sealed one-final orphan batch proves zero references, fully validates the body-derived filename and exact guarded parent/root/status, performs checked accounting, and removes only the identity/usage-revalidated final with typed post-unlink uncertainty. The core engine can request exactly one cap, orphan, or terminal-temp batch without supplying authority-bearing inputs. Durable engine tasks publish only a completed-only fresh-scan converter's lossless canonical DFS nodes and fail-closed hard-link accounting; standalone inventory observations remain non-authoritative | Explorer/FFI integration and review-lease lifecycle, memory benchmarks, unleased-temp and provisioning-stage maintenance plus running-row recovery, native periodic idle scheduling, and native Windows temp/final-removal plus sparse/compressed-allocation verification |
 | Typed scan coverage/issues | Implemented as bounded semantic domain values, authoritative scanner terminal outcomes, engine task results/events, atomic SQLite-v2 summary children, truthful fresh/legacy-cache CLI labels, and changed-hard-link observations; observations grant no plan or cleanup authority | FFI/Swift transport, paged Explorer details, and permission onboarding |
 | Cache semantic/input validation | Atomic write plus CRC/version only; full-file read before bounds | Bounded reads, tree/path semantics, private permissions, retention, and migration |
 | Hard-link accounting and policy | Fresh completed scans deterministically count allocation once per stable identity and fail conflicts/unknown identity closed; no cleanup policy or authority derives from it | Native Windows sparse/compressed verification plus explicit planner/executor per-mode admission and live revalidation rules |

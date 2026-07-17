@@ -288,9 +288,9 @@ residual lease. Active and unleased files make accounting unstable. Quiescence
 is only a point-in-time observation, not cleanup authority. All three physical
 classes are charged and excluded from normal snapshot victims.
 
-The only implemented physical temp reconciliation is an exact same-scan retry.
-While retaining the current-schema database guard and then snapshot writer
-lock, it rejects an active file as busy. For a quiescent row-bound file it
+The publication path's physical temp reconciliation is an exact same-scan
+retry. While retaining the current-schema database guard and then snapshot
+writer lock, it rejects an active file as busy. For a quiescent row-bound file it
 reopens the exact name, requires the observed identity, acquires the kernel lock
 nonblockingly, revalidates the retained file and name, unlinks it, and flushes
 the directory before deleting the exact row. A row-without-file residual may
@@ -312,17 +312,71 @@ unchanged, and returns corruption. This does not adopt or sweep an observed
 unleased temp. If the database/current-schema guard cannot be established, the
 handle is closed without mutation instead.
 
-This protocol is not a general scavenger. It does not sweep unrelated or
-terminal-scan leases, remove unleased pre-v8 temps, or touch
-`.dux-snapshot-stage-*` provisioning siblings. Native Windows runtime coverage
-of the new kernel-liveness and retained-temp removal path is still required;
-the implementation does not claim that verification from Unix tests.
+This publication protocol is not a general scavenger. The separate bounded
+terminal-row reconciler below can consume failed, cancelled, or interrupted
+row-bound debt. Neither path settles a running scan, removes an unleased pre-v8
+temp, or touches `.dux-snapshot-stage-*` provisioning siblings. Native Windows
+runtime coverage of the kernel-liveness and retained-temp removal path is still
+required; the implementation does not claim that verification from Unix tests.
 
 This physical-driven operation is bounded even when immutable history grows
 without limit. It therefore cannot enumerate every old missing historical
 reference. Exact snapshot loads still surface a requested missing file; a
 future diagnostic history pager must be separately bounded and must never feed
 cleanup authority without revalidation under the final locks.
+
+### Terminal snapshot-temp reconciliation contract
+
+Terminal-temp maintenance is a separate sealed capability for row-bound crash
+debt. One batch holds the current-schema database guard and then the snapshot
+writer lease while it decodes the complete at-most-64-row immutable lease
+population and one bounded physical inventory. Aggregate counts classify rows
+from the lease query's joined parent status and are observations only. Before
+any effect, the first actionable row's exact parent is fully decoded and must
+be `failed`, `cancelled`, or `interrupted` with no snapshot reference.
+`running`, missing, queued, succeeded, malformed, or snapshot-bearing selected
+parents grant no mutation. Stored owner identity, PID, creation time, age, and
+apparent quiescence never terminalize a scan or prove writer death.
+
+Rows are considered in deterministic immutable order. An active row-bound temp
+is counted but skipped so it cannot starve a later actionable row; if every
+terminal residual is active, the batch returns `DeferredActive` without
+mutation. For the first actionable row, a row-without-file residual may consume
+only its exact lease after the locked directory state is durably confirmed.
+Row-before-file creation cannot still be pending once both locks are held. A
+quiescent physical temp is reopened no-follow, required to match the observed
+identity and exact logical/allocation usage, kernel-locked nonblockingly again,
+and name/private-object revalidated. Checked count and charged-byte
+postconditions are frozen before physical removal.
+
+For a physical residual, removal always precedes row deletion. The
+delete-capable handle is consumed and closed before the snapshot directory is
+synced, including on Windows where POSIX disposition takes effect at handle
+close. A known pre-unlink error leaves both file and row intact. Once unlink
+succeeds, directory-durability uncertainty is `OutcomeUnknown` and the exact
+row remains retry debt. After durable removal, failure to prove the exact row
+deletion also becomes `OutcomeUnknown`; a later batch can safely converge from
+a row-only residual. No scan, final, tombstone, pin, candidate, cleanup,
+evaluation, or unrelated temp row is changed.
+
+The repository API is
+`SnapshotRepository::reconcile_terminal_snapshot_temp_residual`. The typed
+idle-only engine starts through
+`EngineHandle::start_snapshot_terminal_temp_maintenance`, publishes
+`SnapshotTerminalTempMaintenanceBatchApplying` and
+`SnapshotTerminalTempMaintenanceBatchFinished` events, and exposes the typed
+`SnapshotTerminalTempMaintenanceResult` through
+`EngineHandle::snapshot_terminal_temp_maintenance_result`. Applying is the
+cancellation point of no return, one task performs exactly one repository call,
+and core never loops or self-enqueues. Results distinguish
+`NoTerminalResidual`, `DeferredActive`, `ReconciledRowOnly`, and
+`RemovedTemp { bytes }`, with only canonical time, terminal/active counts,
+charged bytes, and `has_more`. Scan IDs, lease IDs, owners, names, roots, and
+paths stay private. Native scheduling must apply backoff to active-only debt.
+
+This authority never adopts an unleased temp, touches a provisioning stage, or
+recovers a `running` scan left behind by hard process death. Those require
+separate ownership and liveness boundaries.
 
 Production cap enforcement is a sealed, one-final-per-call repository batch.
 It acquires the current-schema database guard before the snapshot writer lease,
@@ -374,9 +428,10 @@ handling, and typed one-batch engine invocation are implemented. Automatic
 production scheduling is not enabled until app/FFI owns the review-lease
 lifecycle and a native periodic idle scheduler requests bounded batches with
 appropriate backoff. Physical-orphan reconciliation is the separate implemented
-capability below. General terminal/unleased-temp and provisioning-stage
-scavenging and explicit clear-data actions remain future maintenance
-capabilities. A prior inventory report is never authority; each writer
+capability below, and terminal row-bound temp reconciliation is the separate
+implemented capability above. Unleased-temp and provisioning-stage scavenging
+and explicit clear-data actions remain future maintenance capabilities. A
+prior inventory report is never authority; each writer
 recomputes every proof under the lock order above. A name prefix alone never
 proves that a temporary or stage directory belongs to DUX.
 

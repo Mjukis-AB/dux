@@ -409,15 +409,36 @@ failures are retryable storage failures; uncertainty after unlink is
 publishes path-free aggregate observations, invokes one batch, and never
 self-enqueues.
 
-An exact same-scan retry is the sole implemented temp reconciliation. With the
-database guard held before the snapshot writer lock, it returns busy for a
+An exact same-scan retry is the publication path's temp reconciliation. With
+the database guard held before the snapshot writer lock, it returns busy for a
 contended kernel lock. It may reopen, identity-revalidate, nonblockingly lock,
 unlink, and directory-flush only the quiescent temp named by that scan's exact
-row, then delete the row. A row-only residual can be deleted under the same
-locks because the row-before-file reservation cannot still create after those
-locks were released. It never adopts or removes an unleased temp. Normal abort
-also removes and flushes its retained current-call temp before exact row
-consumption; broad startup or retention scavenging is not implemented.
+row, then delete the row. A compliant creator completes row-before-file
+creation before it releases those same locks, so creation cannot still be
+pending once maintenance holds both and a row-only residual can be deleted. It
+never adopts or removes an unleased temp. Normal abort also removes and flushes
+its retained current-call temp before exact row consumption; broad startup,
+unleased-temp, and provisioning-stage scavenging is not implemented.
+
+A separate bounded terminal-temp batch classifies the complete immutable lease
+population through joined parent status, but those aggregate observations grant
+no mutation. It holds the current-schema database guard before the snapshot
+writer lease, inspects that bounded population and physical inventory, skips
+active row-bound files, and selects at most the first deterministic row-only or
+quiescent residual. The selected row's fully decoded exact parent must be
+`failed`, `cancelled`, or `interrupted` with no snapshot reference. `running`
+rows, unleased temps, provisioning stages, PID/owner/age evidence, cap state,
+pins, and final-snapshot policy cannot authorize this operation.
+
+For a quiescent residual, exact name, identity, logical/allocation usage, and a
+second nonblocking kernel lock are revalidated before checked accounting and
+physical removal. The delete handle closes before directory sync; post-unlink
+durability uncertainty is `OutcomeUnknown` and retains the row. Only after
+durable physical removal is the exact row consumed. A row-only residual first
+durably confirms the locked directory state, then consumes only its row. The
+batch never changes its parent scan or any final, tombstone, pin, or unrelated
+history. Its idle-only engine task accepts no identity or path, exposes only
+aggregate counts/bytes, performs one batch, and never self-enqueues.
 
 The retained current-call handle remains narrow rollback authority over its
 own exact identity even if its row is concurrently deleted or replaced under
@@ -430,8 +451,8 @@ and cannot be used to adopt an unleased name.
 Initial snapshot-directory provisioning uses a private marker-complete sibling
 stage and atomic no-replace directory publication. A racing winner is reopened
 and fully validated. Losing or interrupted `.dux-snapshot-stage-*` siblings,
-unrelated or terminal-scan lease residuals, and unleased recognized snapshot
-temps are deliberately not recursively scavenged in this checkpoint.
+unleased recognized snapshot temps, and `running` lease rows are deliberately
+not scavenged by this checkpoint.
 
 ## 10. Compatibility and failure behavior
 
@@ -472,10 +493,10 @@ This checkpoint does not implement:
 - app/FFI review-lease ownership and native periodic idle scheduling (the core
   engine can request exactly one sealed batch, but this does not change the
   snapshot wire or enable product scheduling);
-- general terminal-row, unleased-temp, or provisioning-stage scavenging beyond
-  the exact same-scan residual retry;
-- native Windows sparse/compressed-allocation runtime verification and bounded
-  accounting probes for slow filesystem drivers;
+- unleased-temp or provisioning-stage scavenging and hard-process-death recovery
+  of `running` temp-lease parents;
+- native Windows temp/final-removal and sparse/compressed-allocation runtime
+  verification plus bounded accounting probes for slow filesystem drivers;
 - Explorer paging/indexes and measured 1M/5M-node memory budgets;
 - migration from or hardening of the legacy CLI cache.
 

@@ -63,6 +63,7 @@ mod snapshot_retention;
 mod snapshot_retention_inventory;
 mod snapshot_review_pin;
 mod snapshot_temp_lease;
+mod snapshot_terminal_temp_inventory;
 mod status;
 mod storage;
 mod store;

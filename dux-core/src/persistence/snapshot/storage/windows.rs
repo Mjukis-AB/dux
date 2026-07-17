@@ -508,17 +508,18 @@ pub(super) fn publish_directory_no_replace(
 pub(super) fn remove_retained_temp(
     directory: &File,
     name: &str,
-    file: &File,
+    file: File,
     expected: Identity,
 ) -> Result<()> {
-    validate_named(directory, name, file, expected, Kind::RegularFile)?;
+    validate_named(directory, name, &file, expected, Kind::RegularFile)?;
     let disposition = DeleteDisposition {
         flags: DELETE_DISPOSITION_FLAG | POSIX_DISPOSITION_FLAG,
     };
-    // SAFETY: the retained, exact-identity current-call temp handle has DELETE
-    // access and the fixed disposition buffer is live for the synchronous call.
+    // SAFETY: the retained exact-identity current-call or row-bound quiescent
+    // temp handle has DELETE access and the fixed disposition buffer is live
+    // for the synchronous call.
     let removed = unsafe {
-        // DUX-DESTRUCTIVE: allow=snapshot-windows-current-temp-delete -- unlink only the current publication call's retained create-new private temp after exact handle-relative identity revalidation
+        // DUX-DESTRUCTIVE: allow=snapshot-windows-current-temp-delete -- unlink only a retained current-call or exact row-bound quiescent snapshot temp after exact handle-relative identity revalidation
         windows_sys::Win32::Storage::FileSystem::SetFileInformationByHandle(
             file.as_raw_handle(),
             DELETE_DISPOSITION_CLASS,
@@ -529,7 +530,11 @@ pub(super) fn remove_retained_temp(
     if removed == 0 {
         return Err(unavailable());
     }
-    validate_private(file, Kind::RegularFile, Some(expected), false).map(drop)
+    // POSIX disposition removes the link when this delete-capable handle
+    // closes. Close it synchronously before the caller flushes the directory;
+    // there is no fallible work after the successful disposition.
+    drop(file);
+    Ok(())
 }
 
 pub(super) fn remove_retained_final(
@@ -1419,8 +1424,7 @@ mod tests {
             .unwrap(),
             Publication::Collision
         );
-        remove_retained_temp(&directory, "collision.tmp", &collision, collision_identity).unwrap();
-        drop(collision);
+        remove_retained_temp(&directory, "collision.tmp", collision, collision_identity).unwrap();
         assert!(
             open_named_regular(&directory, &path, "collision.tmp", false)
                 .unwrap()

@@ -31,6 +31,7 @@ pub enum TaskKind {
     HistoryMaintenance,
     SnapshotRetention,
     SnapshotOrphanMaintenance,
+    SnapshotTerminalTempMaintenance,
 }
 
 /// Execution phase. Cancellation intent is reported separately until work is
@@ -62,6 +63,7 @@ pub enum TaskFailureKind {
     HistoryMaintenance(HistoryMaintenanceFailureKind),
     SnapshotRetention(SnapshotRetentionFailureKind),
     SnapshotOrphanMaintenance(SnapshotOrphanMaintenanceFailureKind),
+    SnapshotTerminalTempMaintenance(SnapshotTerminalTempMaintenanceFailureKind),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -104,6 +106,21 @@ pub enum SnapshotOrphanMaintenanceFailureKind {
     BudgetExceeded,
     CorruptData,
     IncompatibleSnapshot,
+    Unavailable,
+    OutcomeUnknown,
+    InternalState,
+}
+
+/// Path-free failure categories for terminal snapshot-temp reconciliation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SnapshotTerminalTempMaintenanceFailureKind {
+    InvalidClock,
+    IncompatibleSchema,
+    Busy,
+    UnsafeStorage,
+    BudgetExceeded,
+    CorruptData,
     Unavailable,
     OutcomeUnknown,
     InternalState,
@@ -164,6 +181,17 @@ pub enum TaskEventKind {
         orphan_count_after: u32,
         orphan_charged_bytes_before: u64,
         orphan_charged_bytes_after: u64,
+        has_more: bool,
+    },
+    SnapshotTerminalTempMaintenanceBatchApplying,
+    SnapshotTerminalTempMaintenanceBatchFinished {
+        outcome: SnapshotTerminalTempMaintenanceOutcome,
+        terminal_lease_count_before: u32,
+        terminal_lease_count_after: u32,
+        active_terminal_lease_count_before: u32,
+        active_terminal_lease_count_after: u32,
+        terminal_charged_bytes_before: u64,
+        terminal_charged_bytes_after: u64,
         has_more: bool,
     },
     CancellationRequested,
@@ -392,6 +420,95 @@ impl SnapshotOrphanMaintenanceResult {
 
     pub const fn orphan_charged_bytes_after(&self) -> u64 {
         self.orphan_charged_bytes_after
+    }
+
+    pub const fn has_more(&self) -> bool {
+        self.has_more
+    }
+}
+
+/// Path-free outcome of one bounded terminal snapshot-temp reconciliation.
+/// Exact scan, lease, owner, and temporary-file identities stay private.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SnapshotTerminalTempMaintenanceOutcome {
+    NoTerminalResidual,
+    DeferredActive,
+    ReconciledRowOnly,
+    RemovedTemp { bytes: u64 },
+}
+
+/// Immutable outcome from one idle-only terminal snapshot-temp batch.
+/// `has_more` asks the caller to submit a later task; core never self-enqueues.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SnapshotTerminalTempMaintenanceResult {
+    observed_at: SystemTime,
+    outcome: SnapshotTerminalTempMaintenanceOutcome,
+    terminal_lease_count_before: u32,
+    terminal_lease_count_after: u32,
+    active_terminal_lease_count_before: u32,
+    active_terminal_lease_count_after: u32,
+    terminal_charged_bytes_before: u64,
+    terminal_charged_bytes_after: u64,
+    has_more: bool,
+}
+
+impl SnapshotTerminalTempMaintenanceResult {
+    #[allow(clippy::too_many_arguments)]
+    pub(super) const fn new(
+        observed_at: SystemTime,
+        outcome: SnapshotTerminalTempMaintenanceOutcome,
+        terminal_lease_count_before: u32,
+        terminal_lease_count_after: u32,
+        active_terminal_lease_count_before: u32,
+        active_terminal_lease_count_after: u32,
+        terminal_charged_bytes_before: u64,
+        terminal_charged_bytes_after: u64,
+        has_more: bool,
+    ) -> Self {
+        Self {
+            observed_at,
+            outcome,
+            terminal_lease_count_before,
+            terminal_lease_count_after,
+            active_terminal_lease_count_before,
+            active_terminal_lease_count_after,
+            terminal_charged_bytes_before,
+            terminal_charged_bytes_after,
+            has_more,
+        }
+    }
+
+    pub const fn observed_at(&self) -> SystemTime {
+        self.observed_at
+    }
+
+    pub const fn outcome(&self) -> SnapshotTerminalTempMaintenanceOutcome {
+        self.outcome
+    }
+
+    pub const fn terminal_lease_count_before(&self) -> u32 {
+        self.terminal_lease_count_before
+    }
+
+    pub const fn terminal_lease_count_after(&self) -> u32 {
+        self.terminal_lease_count_after
+    }
+
+    pub const fn active_terminal_lease_count_before(&self) -> u32 {
+        self.active_terminal_lease_count_before
+    }
+
+    pub const fn active_terminal_lease_count_after(&self) -> u32 {
+        self.active_terminal_lease_count_after
+    }
+
+    pub const fn terminal_charged_bytes_before(&self) -> u64 {
+        self.terminal_charged_bytes_before
+    }
+
+    pub const fn terminal_charged_bytes_after(&self) -> u64 {
+        self.terminal_charged_bytes_after
     }
 
     pub const fn has_more(&self) -> bool {
@@ -875,6 +992,13 @@ pub enum SnapshotRetentionStartOutcome {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SnapshotOrphanMaintenanceStartOutcome {
+    Started(TaskId),
+    AlreadyActive(TaskId),
+    DeferredBusy,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SnapshotTerminalTempMaintenanceStartOutcome {
     Started(TaskId),
     AlreadyActive(TaskId),
     DeferredBusy,

@@ -60,6 +60,16 @@ pub(crate) enum SnapshotFinalRemovalError {
     OutcomeUnknown,
 }
 
+/// Exact effect boundary for one observed temporary-file removal.
+/// `BeforeEffect` guarantees that no unlink/disposition succeeded.
+/// `OutcomeUnknown` means the namespace mutation succeeded but its directory
+/// durability could not be established.
+#[derive(Debug)]
+pub(crate) enum SnapshotTempRemovalError {
+    BeforeEffect(SnapshotStorageError),
+    OutcomeUnknown,
+}
+
 impl SnapshotStorageError {
     const fn new(kind: SnapshotStorageErrorKind) -> Self {
         Self { kind }
@@ -407,49 +417,115 @@ impl SnapshotStoreInventoryLease {
         Ok(())
     }
 
+    /// Revalidate the complete retained observation and durably confirm the
+    /// current snapshot-directory namespace without mutating it.
+    pub(crate) fn sync_directory_state(&self) -> Result<()> {
+        self.revalidate()?;
+        platform::sync_directory(&self.store.directory)
+    }
+
     /// Reacquire and remove one exact row-bound temp after a nonblocking
     /// quiescence proof. The caller must keep the matching SQLite row and this
     /// writer lease live until it has durably consumed that row.
     pub(crate) fn remove_quiescent_temp(&mut self, name: &str) -> Result<()> {
-        let observed = self
+        self.remove_observed_quiescent_temp_reconciled(name)
+            .map(drop)
+            .map_err(|error| match error {
+                SnapshotTempRemovalError::BeforeEffect(error) => error,
+                SnapshotTempRemovalError::OutcomeUnknown => {
+                    SnapshotStorageError::new(SnapshotStorageErrorKind::Unavailable)
+                }
+            })
+    }
+
+    /// Remove one fully proven quiescent temporary file while preserving its
+    /// exact physical effect boundary for durable row reconciliation.
+    pub(crate) fn remove_observed_quiescent_temp_reconciled(
+        &mut self,
+        name: &str,
+    ) -> std::result::Result<SnapshotFileUsage, SnapshotTempRemovalError> {
+        self.remove_quiescent_temp_with_sync(name, platform::sync_directory)
+    }
+
+    fn remove_quiescent_temp_with_sync(
+        &mut self,
+        name: &str,
+        sync_directory: impl FnOnce(&File) -> Result<()>,
+    ) -> std::result::Result<SnapshotFileUsage, SnapshotTempRemovalError> {
+        let before_effect = SnapshotTempRemovalError::BeforeEffect;
+        let position = self
             .entries
             .iter()
-            .find(|entry| entry.name == name)
-            .ok_or_else(unsafe_inventory_object)?;
+            .position(|entry| entry.name == name)
+            .ok_or_else(|| before_effect(unsafe_inventory_object()))?;
+        let observed = &self.entries[position];
         if !matches!(observed.kind, SnapshotInventoryEntryKind::RecognizedTemp)
             || observed.temp_kernel_state != Some(SnapshotTempKernelState::Quiescent)
         {
-            return Err(unsafe_inventory_object());
+            return Err(before_effect(unsafe_inventory_object()));
         }
         let Some((file, identity)) =
-            platform::open_named_temp_for_removal(&self.store.directory, &self.store.path, name)?
+            platform::open_named_temp_for_removal(&self.store.directory, &self.store.path, name)
+                .map_err(before_effect)?
         else {
-            return Err(unsafe_inventory_object());
+            return Err(before_effect(unsafe_inventory_object()));
         };
-        if Identity(identity) != observed.identity {
-            return Err(unsafe_inventory_object());
+        if Identity(identity) != observed.identity
+            || snapshot_file_usage(&file).map_err(before_effect)? != observed.usage
+        {
+            return Err(before_effect(unsafe_inventory_object()));
         }
         match FileExt::try_lock(&file) {
             Ok(()) => {}
             Err(TryLockError::WouldBlock) => {
-                return Err(SnapshotStorageError::new(SnapshotStorageErrorKind::Busy));
+                return Err(before_effect(SnapshotStorageError::new(
+                    SnapshotStorageErrorKind::Busy,
+                )));
             }
             Err(TryLockError::Error(_)) => {
-                return Err(SnapshotStorageError::new(
+                return Err(before_effect(SnapshotStorageError::new(
                     SnapshotStorageErrorKind::Unavailable,
-                ));
+                )));
             }
         }
-        platform::validate_retained(&file, identity, platform::Kind::RegularFile, true)?;
+        platform::validate_retained(&file, identity, platform::Kind::RegularFile, true)
+            .map_err(before_effect)?;
         platform::validate_named(
             &self.store.directory,
             name,
             &file,
             identity,
             platform::Kind::RegularFile,
-        )?;
-        platform::remove_retained_temp(&self.store.directory, name, &file, identity)?;
-        platform::sync_directory(&self.store.directory)
+        )
+        .map_err(before_effect)?;
+        if snapshot_file_usage(&file).map_err(before_effect)? != observed.usage {
+            return Err(before_effect(unsafe_inventory_object()));
+        }
+
+        // Freeze every accounting postcondition before the physical effect so
+        // no arithmetic failure can be mislabeled as an unlink failure.
+        let removed = observed.usage;
+        let entries_usage = self
+            .entries_usage
+            .checked_sub(removed)
+            .map_err(before_effect)?;
+        let total_usage = self
+            .total_usage
+            .checked_sub(removed)
+            .map_err(before_effect)?;
+
+        // The platform call consumes and closes the delete-capable, locked
+        // handle before returning. From that success onward only directory
+        // durability remains uncertain.
+        platform::remove_retained_temp(&self.store.directory, name, file, identity)
+            .map_err(before_effect)?;
+        sync_directory(&self.store.directory)
+            .map_err(|_| SnapshotTempRemovalError::OutcomeUnknown)?;
+
+        self.entries.remove(position);
+        self.entries_usage = entries_usage;
+        self.total_usage = total_usage;
+        Ok(removed)
     }
 
     /// Retain one exact final from this inventory observation for content
@@ -1511,7 +1587,7 @@ impl StagedSnapshot {
         platform::remove_retained_temp(
             &self.store.directory,
             &self.temp_name,
-            &file,
+            file,
             self.identity.0,
         )?;
         platform::sync_directory(&self.store.directory)
@@ -2178,14 +2254,16 @@ mod platform {
     pub(super) fn remove_retained_temp(
         directory: &File,
         name: &str,
-        file: &File,
+        file: File,
         expected: Identity,
     ) -> Result<()> {
         use nix::unistd::{UnlinkatFlags, unlinkat};
-        validate_named(directory, name, file, expected, Kind::RegularFile)?;
-        // DUX-DESTRUCTIVE: allow=snapshot-current-temp-unlink -- remove only the current call's retained create-new private snapshot temp after exact identity revalidation
+        validate_named(directory, name, &file, expected, Kind::RegularFile)?;
+        // DUX-DESTRUCTIVE: allow=snapshot-current-temp-unlink -- remove only a retained current-call or exact row-bound quiescent snapshot temp after exact identity revalidation
         unlinkat(directory, name, UnlinkatFlags::NoRemoveDir)
-            .map_err(|_| SnapshotStorageError::new(SnapshotStorageErrorKind::Unavailable))
+            .map_err(|_| SnapshotStorageError::new(SnapshotStorageErrorKind::Unavailable))?;
+        drop(file);
+        Ok(())
     }
 
     pub(super) fn remove_retained_final(
@@ -2712,6 +2790,272 @@ mod tests {
                 .entries()
                 .iter()
                 .all(|entry| entry.name() != removed_name.as_str())
+        );
+    }
+
+    #[test]
+    fn reconciled_temp_removal_updates_exact_inventory_accounting() {
+        let temp = TempDir::new().unwrap();
+        private_database_root(&temp);
+        let database = database_path(&temp);
+        let store = open_rw(&database);
+        let mut staged = store
+            .stage(
+                SnapshotFileName::from_scan_id(b"reconciled-temp-accounting"),
+                Duration::from_millis(100),
+            )
+            .unwrap();
+        staged.write_all(b"temporary snapshot bytes").unwrap();
+        staged.sync_all().unwrap();
+        let temp_name = staged.temp_name.clone();
+        staged.abandon();
+
+        let snapshot_root = database.parent().unwrap().join(DIRECTORY_NAME);
+        let mut inventory = store
+            .inventory_with_writer_lease(Duration::from_millis(100))
+            .unwrap();
+        let expected_usage = inventory
+            .entries()
+            .iter()
+            .find(|entry| entry.name() == temp_name)
+            .unwrap()
+            .usage();
+        let before_entries_usage = inventory.entries_usage();
+        let before_total_usage = inventory.total_usage();
+
+        assert_eq!(
+            inventory
+                .remove_observed_quiescent_temp_reconciled(&temp_name)
+                .unwrap(),
+            expected_usage
+        );
+        assert!(!snapshot_root.join(&temp_name).exists());
+        assert!(
+            inventory
+                .entries()
+                .iter()
+                .all(|entry| entry.name() != temp_name)
+        );
+        assert_eq!(
+            inventory.entries_usage(),
+            before_entries_usage.checked_sub(expected_usage).unwrap()
+        );
+        assert_eq!(
+            inventory.total_usage(),
+            before_total_usage.checked_sub(expected_usage).unwrap()
+        );
+        inventory.revalidate().unwrap();
+    }
+
+    #[test]
+    fn legacy_temp_removal_wrapper_preserves_durable_success_behavior() {
+        let temp = TempDir::new().unwrap();
+        private_database_root(&temp);
+        let database = database_path(&temp);
+        let store = open_rw(&database);
+        let staged = store
+            .stage(
+                SnapshotFileName::from_scan_id(b"legacy-temp-removal-wrapper"),
+                Duration::from_millis(100),
+            )
+            .unwrap();
+        let temp_name = staged.temp_name.clone();
+        staged.abandon();
+
+        let mut inventory = store
+            .inventory_with_writer_lease(Duration::from_millis(100))
+            .unwrap();
+        inventory.remove_quiescent_temp(&temp_name).unwrap();
+        assert!(
+            inventory
+                .entries()
+                .iter()
+                .all(|entry| entry.name() != temp_name)
+        );
+        inventory.revalidate().unwrap();
+    }
+
+    #[test]
+    fn reconciled_temp_removal_rejects_active_observation_before_effect() {
+        let temp = TempDir::new().unwrap();
+        private_database_root(&temp);
+        let database = database_path(&temp);
+        let store = open_rw(&database);
+        let staged = store
+            .stage(
+                SnapshotFileName::from_scan_id(b"reconciled-active-temp"),
+                Duration::from_millis(100),
+            )
+            .unwrap();
+        let temp_name = staged.temp_name.clone();
+        let snapshot_path = database
+            .parent()
+            .unwrap()
+            .join(DIRECTORY_NAME)
+            .join(&temp_name);
+        let mut inventory = store
+            .inventory_with_writer_lease(Duration::from_millis(100))
+            .unwrap();
+
+        match inventory
+            .remove_observed_quiescent_temp_reconciled(&temp_name)
+            .unwrap_err()
+        {
+            SnapshotTempRemovalError::BeforeEffect(error) => {
+                assert_eq!(error.kind(), SnapshotStorageErrorKind::UnsafeObject);
+            }
+            SnapshotTempRemovalError::OutcomeUnknown => {
+                panic!("active observation must fail before physical removal")
+            }
+        }
+        assert!(snapshot_path.exists());
+        drop(inventory);
+        staged.abandon();
+    }
+
+    #[test]
+    fn reconciled_temp_removal_rejects_usage_change_before_effect() {
+        let temp = TempDir::new().unwrap();
+        private_database_root(&temp);
+        let database = database_path(&temp);
+        let store = open_rw(&database);
+        let mut staged = store
+            .stage(
+                SnapshotFileName::from_scan_id(b"reconciled-temp-usage-change"),
+                Duration::from_millis(100),
+            )
+            .unwrap();
+        staged.write_all(b"initial bytes").unwrap();
+        staged.sync_all().unwrap();
+        let temp_name = staged.temp_name.clone();
+        staged.abandon();
+
+        let snapshot_path = database
+            .parent()
+            .unwrap()
+            .join(DIRECTORY_NAME)
+            .join(&temp_name);
+        let mut inventory = store
+            .inventory_with_writer_lease(Duration::from_millis(100))
+            .unwrap();
+        let mut changed = fs::OpenOptions::new()
+            .append(true)
+            .open(&snapshot_path)
+            .unwrap();
+        changed.write_all(b" changed").unwrap();
+        changed.sync_all().unwrap();
+        drop(changed);
+
+        match inventory
+            .remove_observed_quiescent_temp_reconciled(&temp_name)
+            .unwrap_err()
+        {
+            SnapshotTempRemovalError::BeforeEffect(error) => {
+                assert_eq!(error.kind(), SnapshotStorageErrorKind::UnsafeObject);
+            }
+            SnapshotTempRemovalError::OutcomeUnknown => {
+                panic!("usage change must fail before physical removal")
+            }
+        }
+        assert!(snapshot_path.exists());
+    }
+
+    #[test]
+    fn reconciled_temp_removal_freezes_accounting_before_effect() {
+        let temp = TempDir::new().unwrap();
+        private_database_root(&temp);
+        let database = database_path(&temp);
+        let store = open_rw(&database);
+        let mut staged = store
+            .stage(
+                SnapshotFileName::from_scan_id(b"reconciled-temp-accounting-underflow"),
+                Duration::from_millis(100),
+            )
+            .unwrap();
+        staged.write_all(b"nonempty temporary bytes").unwrap();
+        staged.sync_all().unwrap();
+        let temp_name = staged.temp_name.clone();
+        staged.abandon();
+
+        let snapshot_path = database
+            .parent()
+            .unwrap()
+            .join(DIRECTORY_NAME)
+            .join(&temp_name);
+        let mut inventory = store
+            .inventory_with_writer_lease(Duration::from_millis(100))
+            .unwrap();
+        inventory.entries_usage = SnapshotFileUsage::default();
+
+        match inventory
+            .remove_observed_quiescent_temp_reconciled(&temp_name)
+            .unwrap_err()
+        {
+            SnapshotTempRemovalError::BeforeEffect(error) => {
+                assert_eq!(error.kind(), SnapshotStorageErrorKind::UnsafeObject);
+            }
+            SnapshotTempRemovalError::OutcomeUnknown => {
+                panic!("accounting underflow must fail before physical removal")
+            }
+        }
+        assert!(snapshot_path.exists());
+    }
+
+    #[test]
+    fn reconciled_temp_removal_reports_post_unlink_sync_failure_as_outcome_unknown() {
+        let temp = TempDir::new().unwrap();
+        private_database_root(&temp);
+        let database = database_path(&temp);
+        let store = open_rw(&database);
+        let mut staged = store
+            .stage(
+                SnapshotFileName::from_scan_id(b"reconciled-temp-sync-unknown"),
+                Duration::from_millis(100),
+            )
+            .unwrap();
+        staged.write_all(b"temporary snapshot bytes").unwrap();
+        staged.sync_all().unwrap();
+        let temp_name = staged.temp_name.clone();
+        staged.abandon();
+
+        let snapshot_path = database
+            .parent()
+            .unwrap()
+            .join(DIRECTORY_NAME)
+            .join(&temp_name);
+        let mut inventory = store
+            .inventory_with_writer_lease(Duration::from_millis(100))
+            .unwrap();
+        let before_entries_usage = inventory.entries_usage();
+        let before_total_usage = inventory.total_usage();
+
+        let error = inventory
+            .remove_quiescent_temp_with_sync(&temp_name, |_| {
+                Err(SnapshotStorageError::new(
+                    SnapshotStorageErrorKind::Unavailable,
+                ))
+            })
+            .unwrap_err();
+        assert!(matches!(error, SnapshotTempRemovalError::OutcomeUnknown));
+        assert_eq!(inventory.entries_usage(), before_entries_usage);
+        assert_eq!(inventory.total_usage(), before_total_usage);
+        assert!(
+            inventory
+                .entries()
+                .iter()
+                .any(|entry| entry.name() == temp_name)
+        );
+        assert!(!snapshot_path.exists());
+        drop(inventory);
+
+        let fresh = store
+            .inventory_with_writer_lease(Duration::from_millis(100))
+            .unwrap();
+        assert!(
+            fresh
+                .entries()
+                .iter()
+                .all(|entry| entry.name() != temp_name)
         );
     }
 

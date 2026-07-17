@@ -232,7 +232,6 @@ impl StoredSnapshotTempLease {
             || self.temp_name == expected.temp_name
     }
 
-    #[cfg(test)]
     pub(super) fn id(&self) -> &SnapshotTempLeaseId {
         &self.id
     }
@@ -255,12 +254,10 @@ impl StoredSnapshotTempLease {
         &self.owner
     }
 
-    #[cfg(test)]
     pub(super) const fn created_at_unix_ms(&self) -> i64 {
         self.created_at_unix_ms
     }
 
-    #[cfg(test)]
     pub(super) const fn parent_status(&self) -> SnapshotTempLeaseParentStatus {
         self.parent_status
     }

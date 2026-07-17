@@ -2935,10 +2935,61 @@ Tasks:
     by the bundled SQLite C build's missing Windows sysroot, so native Windows
     compile/runtime verification remains open.
 
+  - Terminal snapshot-temp reconciliation sub-checkpoint completed 2026-07-17:
+    `SnapshotRepository::reconcile_terminal_snapshot_temp_residual` now owns a
+    separate one-row maintenance boundary for durable temp leases. Under the
+    permanent database-before-snapshot lock order, it classifies the complete
+    at-most-64-row immutable lease population through joined parent status and
+    matches one bounded physical inventory. Those aggregate counts are
+    observations only. Before any effect, the selected actionable row's exact
+    fully decoded parent must be `failed`, `cancelled`, or `interrupted` with no
+    snapshot reference. Active entries are skipped so they cannot starve later
+    actionable debt, and at most the first deterministic row-only or quiescent
+    residual is selected. Missing, queued, succeeded, running, malformed,
+    snapshot-bearing, or conflicting selected parent/lease evidence grants no
+    mutation. PID, owner, age, and a prior quiescent observation are never
+    liveness or recovery authority.
+
+    Row-only debt first durably confirms the locked snapshot-directory state,
+    then consumes only the exact immutable lease row. Quiescent debt is reopened
+    no-follow, identity- and exact-usage-matched, kernel-locked nonblockingly,
+    and name/private-object revalidated. Count, active-count, and charged-byte
+    postconditions are checked before a physical-first unlink; the delete handle
+    is consumed and closed before directory sync, and only then may the exact
+    row be deleted. Guaranteed pre-effect errors remain distinct from
+    post-unlink `OutcomeUnknown`, and a later batch safely converges through a
+    row-only residual. Running rows, unleased temps, provisioning stages, scans,
+    finals, tombstones, pins, and unrelated history remain untouched.
+
+    `EngineHandle::start_snapshot_terminal_temp_maintenance` exposes exactly one
+    sealed repository call through a typed idle-only
+    `SnapshotTerminalTempMaintenance` task. The public
+    `SnapshotTerminalTempMaintenanceBatchApplying` and
+    `SnapshotTerminalTempMaintenanceBatchFinished` events plus
+    `SnapshotTerminalTempMaintenanceResult` retrieval discard scan, lease,
+    owner, name, root, and path identity while reporting
+    `NoTerminalResidual`, `DeferredActive`, `ReconciledRowOnly`, or
+    `RemovedTemp { bytes }`, canonical time, bounded terminal/active counts,
+    charged bytes, and `has_more`. Applying linearizes cancellation and close;
+    core never loops or self-enqueues. Focused tests cover all three admissible
+    terminal states, row-only and physical removal, active deferral without
+    starvation, running and unleased exclusion, deterministic one-at-a-time
+    accounting, identity revalidation and usage races, pre/post-effect failures,
+    exact row-delete reconciliation, hostile rows/parents, schema and clock
+    failures, redaction, every maintenance admission pair, cancellation/close,
+    panic release, and two engine sessions. Structural module boundaries keep
+    scans, finals, pins, candidates, and unrelated history outside this sealed
+    authority. Unix exercises the unlink path. The MSVC Rust typecheck passes
+    only when `libsqlite3-sys` is redirected through the host `pkg-config`
+    bypass; the ordinary bundled-SQLite cross-build remains blocked by the
+    missing Windows C sysroot, and native Windows mutation-path runtime
+    verification remains open.
+
     Production retention still requires app/FFI review-lease ownership and
-    native periodic idle scheduling, bounded marker-owned
-    terminal/unleased-temp and provisioning-stage scavenging, explicit clear-
-    data actions, and native Windows mutation-path runtime verification.
+    native periodic idle scheduling, bounded marker-owned unleased-temp and
+    provisioning-stage scavenging, hard-process-death recovery for `running`
+    rows, explicit clear-data actions, and native Windows mutation-path runtime
+    verification.
 - [x] Add engine integration tests with temporary HOME and database. Completed
   2026-07-16: an actual `dux-core` engine scans a fixture into an isolated
   platform-correct application-support/cache layout, closes to full worker

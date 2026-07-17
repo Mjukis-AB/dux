@@ -69,6 +69,25 @@ All notable changes to DUX will be documented in this file.
   and shared-store multi-session regressions cover the boundary. The core does
   not self-schedule; native app/FFI review-lease ownership and periodic idle
   scheduling remain future work.
+- Added bounded terminal snapshot-temp reconciliation. A separate sealed
+  repository batch now inspects the complete bounded lease population and
+  physical inventory under the database-before-snapshot lock order, accepts
+  only exact failed/cancelled/interrupted parents with no snapshot, skips active
+  row-bound files without starving later actionable debt, and reconciles at
+  most one deterministic row-only or quiescent residual. Physical removal is
+  identity-, usage-, name-, and kernel-lock-revalidated and precedes exact row
+  consumption; checked accounting is frozen before unlink, the delete handle
+  closes before directory sync, and post-effect uncertainty remains typed as
+  `OutcomeUnknown`. Running rows, unleased temps, stages, scans, finals,
+  tombstones, pins, and unrelated history remain untouched. The typed idle-only
+  `SnapshotTerminalTempMaintenance` task accepts no authority-bearing input,
+  performs one batch, publishes only aggregate counts/bytes, linearizes
+  cancellation at Applying, and never self-enqueues. Focused status,
+  row-only/physical, active/starvation, exclusion, ordering, accounting,
+  corruption, race, effect-boundary, commit/schema, redaction, cancellation,
+  panic, and multi-session tests cover the slice. Native scheduling, running-row
+  recovery, unleased/stage maintenance, clear-data, and native Windows runtime
+  verification remain separate.
 - Added bounded physical snapshot-orphan reconciliation. A separate sealed
   repository batch now classifies typed finals against the exact indexed
   catalog under the database-before-snapshot lock order, selects only one
@@ -86,9 +105,10 @@ All notable changes to DUX will be documented in this file.
   state/body/catalog/race/accounting/effect-boundary, cancellation/close,
   multi-session, and redaction regressions cover the slice. Native periodic
   scheduling, general temp/stage maintenance, clear-data actions, and native
-  Windows compile/removal runtime verification remain separate; the local MSVC
-  cross-check stops in bundled SQLite's C build because no Windows sysroot is
-  installed.
+  Windows compile/removal runtime verification were separate at that checkpoint;
+  the newer terminal-temp entry above records the row-bound portion now
+  implemented. The local MSVC cross-check stops in bundled SQLite's C build
+  because no Windows sysroot is installed.
 - Added the core production snapshot-cap mutation boundary. One bounded batch
   holds the current-schema database lease before the snapshot writer lease,
   rebuilds the complete cap/latest-two/active-pin inventory, refuses new
@@ -495,6 +515,10 @@ All notable changes to DUX will be documented in this file.
 - Added off-main startup-volume capacity sampling for the macOS shell. The menu bar and Explorer prefer Foundation's important-usage capacity, explicitly fall back to ordinary filesystem availability, and render an accessible capacity summary without requiring a directory scan.
 
 ### Fixed
+- Corrected the macOS CI deployment-target checks to use the generated
+  `DUX.app/Contents/MacOS/DUX` product path, so the already-built universal
+  Debug and Release artifacts are actually inspected instead of failing on a
+  stale mixed-case path.
 - Legacy CLI deletion planning now validates the complete target as an absolute, control-free, valid-text, normal-component strict descendant and rejects filesystem-boundary crossings for the target, ancestors, and marker evidence. This closes a forged-cache terminal `.`/`..` alias that could otherwise escape or collapse the selected scan root before permanent removal.
 - Exact `$HOME/Library` and `$HOME/AppData` roots are now denied by protected-path policy; only their descendants and scan scopes return the non-authoritative specific-rule requirement.
 - Prevented deletion of the active scan root.

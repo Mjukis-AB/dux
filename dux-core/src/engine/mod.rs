@@ -1,7 +1,7 @@
 //! Shared engine lifecycle and bounded task orchestration.
 //!
 //! The engine runs read-only formatting, durable full-scan, bounded DUX-owned
-//! history and snapshot-retention tasks, and typed settings operations. It
+//! history and snapshot-maintenance tasks, and typed settings operations. It
 //! grants no cleanup authority; FFI transport and cleanup execution remain
 //! separate boundaries.
 
@@ -43,6 +43,8 @@ pub use task::{
     SnapshotOrphanMaintenanceFailureKind, SnapshotOrphanMaintenanceOutcome,
     SnapshotOrphanMaintenanceResult, SnapshotOrphanMaintenanceStartOutcome,
     SnapshotRetentionFailureKind, SnapshotRetentionOutcome, SnapshotRetentionResult,
-    SnapshotRetentionStartOutcome, StartTaskError, TaskAccessError, TaskEvent, TaskEventBatch,
-    TaskEventKind, TaskFailureKind, TaskId, TaskKind, TaskPhase, TaskSnapshot,
+    SnapshotRetentionStartOutcome, SnapshotTerminalTempMaintenanceFailureKind,
+    SnapshotTerminalTempMaintenanceOutcome, SnapshotTerminalTempMaintenanceResult,
+    SnapshotTerminalTempMaintenanceStartOutcome, StartTaskError, TaskAccessError, TaskEvent,
+    TaskEventBatch, TaskEventKind, TaskFailureKind, TaskId, TaskKind, TaskPhase, TaskSnapshot,
 };
