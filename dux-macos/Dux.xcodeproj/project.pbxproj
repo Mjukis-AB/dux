@@ -19,6 +19,7 @@
 		3937244C9B394E27C9AF99F7 /* CapacitySamplingSchedulerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 35ED975AE2F8C3C5A18228C7 /* CapacitySamplingSchedulerTests.swift */; };
 		3B97B92A1826913CFEAC3ED5 /* NotificationAuthorizationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C5CC6787D484FCC35A64D673 /* NotificationAuthorizationTests.swift */; };
 		3C46D3A8CBE75A16588EE5CF /* MenuBarLabelModeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E004627B4660D326FE7632E2 /* MenuBarLabelModeTests.swift */; };
+		42CD58B9CAC44FAE445C714F /* MenuBarVisibility.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A94D886E3FFA68AA4DA2CF2 /* MenuBarVisibility.swift */; };
 		4AF950C2A6897A027867C885 /* DiskPressurePolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = E680E94BFA1DCB3FAFFC2C49 /* DiskPressurePolicy.swift */; };
 		53A99BB7C2F6B03B07AE2CF6 /* MenuBarLabelMode.swift in Sources */ = {isa = PBXBuildFile; fileRef = A3EB2B2F30087D31F3248328 /* MenuBarLabelMode.swift */; };
 		53C29759B7F11F41AC74A3F7 /* ExplorerScanPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6AD9855FF446277F0FD7CF61 /* ExplorerScanPresentation.swift */; };
@@ -42,6 +43,7 @@
 		B184EB4EE1399E7D26F41D7B /* VolumeMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC650EAC7E25F66CC42436F6 /* VolumeMonitor.swift */; };
 		B334563BD340D9E0B20D16D3 /* DuxApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 992E2D118DDE512C123CF820 /* DuxApp.swift */; };
 		B34BE4E0B8AE46D166283EC0 /* DuxAppDelegateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4E504B7A8AC2DDFCF50B5EBD /* DuxAppDelegateTests.swift */; };
+		B51064C365EA8AE0DDBF40E2 /* MenuBarVisibilityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 52FFCCF28BCAB4846F17BB92 /* MenuBarVisibilityTests.swift */; };
 		B5B300842B55B2131DB658FC /* VolumeMonitorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2FCFB814644FA433F09F5895 /* VolumeMonitorTests.swift */; };
 		C310092B690811A25EE68AA6 /* MaintenanceSchedulerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CC5DC5A1B28AAFC688385CA /* MaintenanceSchedulerTests.swift */; };
 		C7DCAA20F9922B9BB2764FB7 /* MenuBarPopoverPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = F9367596E4BB11327AFC097D /* MenuBarPopoverPresentation.swift */; };
@@ -81,8 +83,10 @@
 		33280A17F88457163775239A /* NotificationAuthorizationState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationAuthorizationState.swift; sourceTree = "<group>"; };
 		35ED975AE2F8C3C5A18228C7 /* CapacitySamplingSchedulerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CapacitySamplingSchedulerTests.swift; sourceTree = "<group>"; };
 		4E504B7A8AC2DDFCF50B5EBD /* DuxAppDelegateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DuxAppDelegateTests.swift; sourceTree = "<group>"; };
+		52FFCCF28BCAB4846F17BB92 /* MenuBarVisibilityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarVisibilityTests.swift; sourceTree = "<group>"; };
 		56D9D007E6D5ECD0CC81FA89 /* DuxFFI.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = DuxFFI.xcframework; path = Generated/DuxFFI.xcframework; sourceTree = "<group>"; };
 		5886CE7BF8E925F97031749F /* DuxAppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DuxAppDelegate.swift; sourceTree = "<group>"; };
+		5A94D886E3FFA68AA4DA2CF2 /* MenuBarVisibility.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarVisibility.swift; sourceTree = "<group>"; };
 		5D0DB9F7F6DF9D1645B78CA1 /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = Localizable.xcstrings; sourceTree = "<group>"; };
 		682051DD7F1B44E0D477AF57 /* VolumeCapacitySnapshot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VolumeCapacitySnapshot.swift; sourceTree = "<group>"; };
 		6AD9855FF446277F0FD7CF61 /* ExplorerScanPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExplorerScanPresentation.swift; sourceTree = "<group>"; };
@@ -149,6 +153,7 @@
 				09BEEFC99984A8BEF618627B /* LoginItemState.swift */,
 				A3EB2B2F30087D31F3248328 /* MenuBarLabelMode.swift */,
 				F9367596E4BB11327AFC097D /* MenuBarPopoverPresentation.swift */,
+				5A94D886E3FFA68AA4DA2CF2 /* MenuBarVisibility.swift */,
 				33280A17F88457163775239A /* NotificationAuthorizationState.swift */,
 				682051DD7F1B44E0D477AF57 /* VolumeCapacitySnapshot.swift */,
 			);
@@ -250,6 +255,7 @@
 				2CC5DC5A1B28AAFC688385CA /* MaintenanceSchedulerTests.swift */,
 				E004627B4660D326FE7632E2 /* MenuBarLabelModeTests.swift */,
 				D1B0106BC09B05FB4A3315F0 /* MenuBarPopoverPresentationTests.swift */,
+				52FFCCF28BCAB4846F17BB92 /* MenuBarVisibilityTests.swift */,
 				C5CC6787D484FCC35A64D673 /* NotificationAuthorizationTests.swift */,
 				0EB23A8797C0C79213B54953 /* SnapshotReviewControllerTests.swift */,
 				2FCFB814644FA433F09F5895 /* VolumeMonitorTests.swift */,
@@ -362,6 +368,7 @@
 				C310092B690811A25EE68AA6 /* MaintenanceSchedulerTests.swift in Sources */,
 				3C46D3A8CBE75A16588EE5CF /* MenuBarLabelModeTests.swift in Sources */,
 				54A8ED9BB36CC23FC6A7A9E2 /* MenuBarPopoverPresentationTests.swift in Sources */,
+				B51064C365EA8AE0DDBF40E2 /* MenuBarVisibilityTests.swift in Sources */,
 				3B97B92A1826913CFEAC3ED5 /* NotificationAuthorizationTests.swift in Sources */,
 				DCF5B8FBAFD549C1DE06FCA8 /* SnapshotReviewControllerTests.swift in Sources */,
 				B5B300842B55B2131DB658FC /* VolumeMonitorTests.swift in Sources */,
@@ -397,6 +404,7 @@
 				53A99BB7C2F6B03B07AE2CF6 /* MenuBarLabelMode.swift in Sources */,
 				C7DCAA20F9922B9BB2764FB7 /* MenuBarPopoverPresentation.swift in Sources */,
 				9A55E0195EA32915D5B991E1 /* MenuBarStatusLabel.swift in Sources */,
+				42CD58B9CAC44FAE445C714F /* MenuBarVisibility.swift in Sources */,
 				A0C7722803205A5B40CF76E9 /* NotificationAuthorizationState.swift in Sources */,
 				041D8F8DA2BD852A65EECE10 /* NotificationService.swift in Sources */,
 				80066EDFA86C1475A5BEE0CD /* SnapshotReviewController.swift in Sources */,

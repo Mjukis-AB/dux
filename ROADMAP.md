@@ -3491,12 +3491,40 @@ Tasks:
   fallback, one-write AppModel propagation, and accessibility contracts. The
   full 82-test linked Swift suite passes, and unsigned universal Debug and
   Release apps contain both arm64 and x86_64 at the macOS 14 deployment target.
-- [ ] Implement conditional menu bar visibility. Keep Always visible as the
-  default and add the independent percentage-only policy specified in §12.2,
-  including exact cached-capacity evaluation, one-percentage-point exit
-  hysteresis, unknown-state fail-open behavior, a tested explicit-reopen escape
-  hatch, versioned validated preference storage, accessible Settings controls,
-  and proof that visibility changes start no scan or capacity query.
+- [x] Implement conditional menu bar visibility. Completed 2026-07-17: Settings
+  keeps **Always visible** as the first-run default and offers the opt-in
+  **Only when free space is low** mode with an exact whole-percentage threshold
+  from 1 through 100, defaulting to 10%. One versioned Swift-owned UserDefaults
+  value stores the validated mode and threshold together. Missing, malformed,
+  out-of-range, and future values fail back to the default in memory without
+  rewriting unknown data. No derived insertion, pressure, or reveal state is
+  persisted.
+
+  The shared `AppModel` derives `MenuBarExtra` insertion only from that
+  preference and the existing cached effective startup-volume capacity. It
+  starts neither a capacity query nor a directory scan and never crosses FFI,
+  SQLite, or Rust pressure-policy boundaries. Entry is immediate and inclusive
+  at the configured percentage. Recovery hides only at one full percentage
+  point above it, using overflow-safe basis-point integer arithmetic; a 100%
+  threshold remains visible. Refreshing and stale states use their last cached
+  measurement, while missing, loading, failed, and otherwise unknown capacity
+  remain visible so uncertainty cannot remove the user's control surface.
+  Launch at Login uses the same policy without opening Explorer.
+
+  Reopening the running app from Finder, Spotlight, or `open` reveals the item
+  for the remainder of that process session without changing the stored
+  preference. This provides a tested escape hatch if a healthy disk hides the
+  item. Settings explains the cache-only behavior and exposes stable VoiceOver
+  identifiers for both controls. Fifteen focused linked tests cover preference
+  compatibility, exact arithmetic and boundaries, threshold entry, hysteresis,
+  cached refresh/stale behavior, unknown fail-open behavior, no-work preference
+  changes, the session reveal override, and delegate routing. The complete
+  170-test linked Swift suite, full Rust format/lint/workspace-test gates,
+  20 destructive-boundary checker tests, and 175-source authority scan pass.
+  XcodeGen is deterministic, Debug/Release Swift bindings are byte-identical,
+  and unsigned universal arm64/x86_64 Debug and Release apps target macOS 14.
+  This remains presentation-only and grants no sampling, scan, notification,
+  scheduling, AI, plan, or cleanup authority.
 - [x] Implement popover layout with cached status and scan progress. Completed
   2026-07-17: the menu-bar popover renders the cached startup-volume identity,
   Rust-owned pressure classification, effective available and total capacity,

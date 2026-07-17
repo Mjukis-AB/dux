@@ -49,6 +49,49 @@ struct DuxSettingsView: View {
                 }
                 .accessibilityIdentifier(MenuBarLabelAccessibility.picker)
                 .accessibilityHint("Changes the menu bar status immediately")
+                Picker(
+                    "Menu bar visibility",
+                    selection: Binding(
+                        get: { model.menuBarVisibilityPreference.mode },
+                        set: { model.setMenuBarVisibilityMode($0) }
+                    )
+                ) {
+                    ForEach(MenuBarVisibilityMode.allCases) { mode in
+                        Text(verbatim: mode.localizedTitle())
+                            .tag(mode)
+                    }
+                }
+                .accessibilityIdentifier(MenuBarVisibilityAccessibility.mode)
+                .accessibilityHint("Controls when DUX appears in the menu bar")
+
+                if model.menuBarVisibilityPreference.mode == .belowFreePercent {
+                    Stepper(
+                        value: Binding(
+                            get: { model.menuBarVisibilityPreference.thresholdPercent },
+                            set: { model.setMenuBarVisibilityThresholdPercent($0) }
+                        ),
+                        in: 1 ... 100
+                    ) {
+                        LabeledContent("Show at or below") {
+                            Text(
+                                verbatim:
+                                    "\(model.menuBarVisibilityPreference.thresholdPercent)% free"
+                            )
+                        }
+                    }
+                    .accessibilityIdentifier(MenuBarVisibilityAccessibility.threshold)
+                    .accessibilityHint(
+                        "Sets the free-space percentage that makes DUX visible"
+                    )
+
+                    Text(
+                        "DUX uses its cached startup-disk capacity and does not start a scan. "
+                            + "It stays visible when capacity is unknown, and reopening the app "
+                            + "reveals it for the rest of this session."
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
                 Text(
                     "Free-space labels use startup-disk capacity available for important use, "
                         + "with filesystem availability as a clearly disclosed fallback."

@@ -5,6 +5,7 @@ protocol DuxAppRuntimeServing: AnyObject {
     func start() async
     func signalMaintenance(_ trigger: DuxMaintenanceTrigger) async
     func signalCapacity(_ trigger: DuxCapacitySamplingTrigger) async
+    func revealMenuBarItemForSession()
     func shutdown() async
 }
 
@@ -64,6 +65,16 @@ final class DuxAppDelegate: NSObject, NSApplicationDelegate {
         Task {
             await runtime.signalMaintenance(.applicationBecameActive)
         }
+    }
+
+    func applicationShouldHandleReopen(
+        _ sender: NSApplication,
+        hasVisibleWindows flag: Bool
+    ) -> Bool {
+        _ = sender
+        _ = flag
+        runtime.revealMenuBarItemForSession()
+        return true
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {

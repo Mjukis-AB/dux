@@ -5,6 +5,21 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Added opt-in conditional menu-bar visibility. DUX remains always visible by
+  default; Settings can instead show it when cached effective startup-disk free
+  space is at or below a validated whole percentage from 1 through 100. Entry
+  is immediate, hiding requires one full percentage point of recovery, and
+  unknown capacity fails open. Refreshing and stale states use the last cached
+  sample, while preference changes start no scan or capacity query. Missing,
+  malformed, out-of-range, and future versioned UserDefaults values fall back
+  without being rewritten. Reopening the running app reveals the item for the
+  rest of that process session without changing the preference. Fifteen focused
+  tests and the complete 170-test linked Swift suite pass, as do full Rust
+  format/lint/workspace tests, 20 destructive-boundary tests, and the 175-source
+  authority scan. XcodeGen is deterministic, Debug/Release bindings are
+  byte-identical, and unsigned universal arm64/x86_64 Debug and Release apps
+  target macOS 14. The policy is Swift-only presentation state and adds no FFI,
+  pressure-policy, notification, scheduling, AI, plan, or cleanup authority.
 - Added authorization-only notification Settings for the macOS app. DUX reads
   macOS's current permission, presents distinct not-requested, denied, allowed,
   provisional, and unknown states, refreshes after returning from System

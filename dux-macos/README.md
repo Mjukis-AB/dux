@@ -170,6 +170,18 @@ monochrome pressure symbols have distinct shapes, while VoiceOver always
 receives pressure, GiB, percent, capacity basis, and freshness even in Icon-only
 mode.
 
+Settings also owns a separate Swift-only menu-bar visibility preference.
+Always visible is the default; the opt-in conditional mode inserts the item at
+or below a validated whole free-space percentage and hides it only after one
+additional percentage point of recovery. The evaluator reads the same cached
+effective startup-volume capacity as the label and starts no sample or scan.
+Refreshing and stale states retain their cached decision input, while unknown
+capacity keeps the item visible. Reopening the already-running app from Finder,
+Spotlight, or `open` reveals it for the rest of that process session without
+changing the stored preference. Only the validated preference is persisted;
+insertion and reveal state are derived presentation state and never enter FFI or
+Rust pressure policy.
+
 `VolumeMonitor` samples the startup volume (`/`) through Foundation on a utility
 queue. It prefers `volumeAvailableCapacityForImportantUsage`, records whether it
 had to fall back to ordinary filesystem availability, and retains both values

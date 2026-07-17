@@ -50,6 +50,19 @@ final class DuxAppDelegateTests: XCTestCase {
         await wake.value
     }
 
+    func testExplicitReopenRevealsMenuBarItemForSession() {
+        let runtime = RuntimeSpy()
+        let delegate = DuxAppDelegate(runtime: runtime)
+
+        XCTAssertTrue(
+            delegate.applicationShouldHandleReopen(
+                NSApplication.shared,
+                hasVisibleWindows: false
+            )
+        )
+        XCTAssertEqual(runtime.revealCount, 1)
+    }
+
     func testRuntimeStartsBothSchedulersOnceAndStopsCapacityBeforeEngineClose() async throws {
         let recorder = RuntimeEventRecorder()
         let engine = RuntimeEngineSpy(recorder: recorder)
@@ -95,9 +108,11 @@ final class DuxAppDelegateTests: XCTestCase {
 @MainActor
 private final class RuntimeSpy: DuxAppRuntimeServing {
     private var recorded: [String] = []
+    private(set) var revealCount = 0
 
     func start() async {}
     func shutdown() async {}
+    func revealMenuBarItemForSession() { revealCount += 1 }
 
     func signalMaintenance(_ trigger: DuxMaintenanceTrigger) async {
         recorded.append("maintenance:\(trigger == .wake ? "wake" : "other")")
@@ -122,6 +137,7 @@ private final class DelayedMaintenanceRuntimeSpy: DuxAppRuntimeServing {
 
     func start() async {}
     func shutdown() async {}
+    func revealMenuBarItemForSession() {}
 
     func signalMaintenance(_ trigger: DuxMaintenanceTrigger) async {
         _ = trigger

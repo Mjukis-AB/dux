@@ -1704,6 +1704,15 @@ the frozen production identifier. The separately launched CLI has its own
 process and TCC context; the app MUST NOT imply that GUI access transfers to it
 or use the CLI as an access bypass.
 
+Conditional menu-bar visibility is presentation policy, not storage or cleanup
+policy. It may consume only the app's cached effective startup-volume capacity;
+changing its validated Swift-owned preference MUST NOT trigger a sample, scan,
+FFI call, notification, or filesystem effect. Missing or failed capacity MUST
+keep the control surface visible, and an explicit reopen MUST reveal it for the
+remainder of the process session without persisting derived insertion or reveal
+state. This policy MUST NOT override or impersonate Rust-owned disk-pressure
+classification.
+
 ## 14. Target FFI and client boundary
 
 The UniFFI boundary is private and versioned independently from product,

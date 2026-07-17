@@ -4,7 +4,11 @@ import Observation
 @Observable
 final class AppModel: DuxCapacitySampling {
     private(set) var engineState = EngineConnectionState.idle
-    private(set) var volumeState = VolumeCapacityState.idle
+    private(set) var volumeState = VolumeCapacityState.idle {
+        didSet {
+            updateMenuBarVisibility()
+        }
+    }
     var menuBarLabelMode: MenuBarLabelMode {
         didSet {
             guard menuBarLabelMode != oldValue else {
@@ -19,6 +23,8 @@ final class AppModel: DuxCapacitySampling {
     private(set) var scanState = AppScanState.idle
     private(set) var loginItemState = LoginItemState.idle
     private(set) var notificationAuthorizationState = NotificationAuthorizationState.idle
+    private(set) var menuBarVisibilityPreference: MenuBarVisibilityPreference
+    private(set) var isMenuBarItemInserted = true
 
     private let engineService: any EngineServing
     private let volumeMonitor: any VolumeMonitoring
@@ -28,6 +34,7 @@ final class AppModel: DuxCapacitySampling {
     private let homeScanClock: any HomeScanPollingClock
     private let loginItemService: any LoginItemServing
     private let notificationService: any NotificationServing
+    private let menuBarVisibilityPreferenceStore: any MenuBarVisibilityPreferenceStoring
 
     @ObservationIgnored
     private var engineLoadTask: Task<Void, Never>?
@@ -63,6 +70,8 @@ final class AppModel: DuxCapacitySampling {
     private var notificationAuthorizationTask: Task<Void, Never>?
     @ObservationIgnored
     private var notificationAuthorizationGeneration: UInt64 = 0
+    @ObservationIgnored
+    private var menuBarRevealOverride = false
 
     init(
         engineService: any EngineServing = EngineService(),
@@ -74,7 +83,9 @@ final class AppModel: DuxCapacitySampling {
         homeScanService: (any HomeScanServing)? = nil,
         homeScanClock: any HomeScanPollingClock = ContinuousHomeScanPollingClock(),
         loginItemService: any LoginItemServing = LoginItemService(),
-        notificationService: any NotificationServing = NotificationService()
+        notificationService: any NotificationServing = NotificationService(),
+        menuBarVisibilityPreferenceStore: any MenuBarVisibilityPreferenceStoring =
+            UserDefaultsMenuBarVisibilityPreferenceStore()
     ) {
         self.engineService = engineService
         self.volumeMonitor = volumeMonitor
@@ -87,7 +98,10 @@ final class AppModel: DuxCapacitySampling {
         self.homeScanClock = homeScanClock
         self.loginItemService = loginItemService
         self.notificationService = notificationService
+        self.menuBarVisibilityPreferenceStore = menuBarVisibilityPreferenceStore
         menuBarLabelMode = menuBarLabelPreferenceStore.load()
+        menuBarVisibilityPreference = menuBarVisibilityPreferenceStore.load()
+        updateMenuBarVisibility()
     }
 
     func loadInitialState() async {
@@ -417,6 +431,32 @@ final class AppModel: DuxCapacitySampling {
         await task.value
     }
 
+    func setMenuBarVisibilityMode(_ mode: MenuBarVisibilityMode) {
+        let preference = menuBarVisibilityPreference.changing(mode: mode)
+        guard preference != menuBarVisibilityPreference else {
+            return
+        }
+        menuBarVisibilityPreference = preference
+        menuBarVisibilityPreferenceStore.save(preference)
+        updateMenuBarVisibility()
+    }
+
+    func setMenuBarVisibilityThresholdPercent(_ thresholdPercent: Int) {
+        guard let preference = menuBarVisibilityPreference.changing(
+            thresholdPercent: thresholdPercent
+        ), preference != menuBarVisibilityPreference else {
+            return
+        }
+        menuBarVisibilityPreference = preference
+        menuBarVisibilityPreferenceStore.save(preference)
+        updateMenuBarVisibility()
+    }
+
+    func revealMenuBarItemForSession() {
+        menuBarRevealOverride = true
+        isMenuBarItemInserted = true
+    }
+
     func startHomeScan() async {
         guard !homeScanIsInvalidated else {
             return
@@ -654,6 +694,18 @@ final class AppModel: DuxCapacitySampling {
         case .denied: .denied
         case .unexpected: .unexpected
         }
+    }
+
+    private func updateMenuBarVisibility() {
+        if menuBarRevealOverride {
+            isMenuBarItemInserted = true
+            return
+        }
+        isMenuBarItemInserted = MenuBarVisibilityEvaluator.shouldInsert(
+            preference: menuBarVisibilityPreference,
+            volumeState: volumeState,
+            currentlyInserted: isMenuBarItemInserted
+        )
     }
 
     private func isCurrentHomeScan(_ generation: UInt64) -> Bool {

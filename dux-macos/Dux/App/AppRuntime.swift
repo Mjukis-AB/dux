@@ -123,6 +123,10 @@ final class AppRuntime {
         await scheduler.signal(trigger)
     }
 
+    func revealMenuBarItemForSession() {
+        model.revealMenuBarItemForSession()
+    }
+
     func shutdown() async {
         if let shutdownTask {
             await shutdownTask.value

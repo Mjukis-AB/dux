@@ -7,7 +7,14 @@ struct DuxApp: App {
     @State private var model = AppRuntime.shared.model
 
     var body: some Scene {
-        MenuBarExtra {
+        MenuBarExtra(
+            isInserted: Binding(
+                get: { model.isMenuBarItemInserted },
+                set: { _ in
+                    // Settings policy and the explicit reopen escape hatch own insertion.
+                }
+            )
+        ) {
             MenuBarContentView(model: model)
         } label: {
             MenuBarStatusLabel(
