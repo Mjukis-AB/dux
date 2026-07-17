@@ -45,6 +45,8 @@ pub use task::{
     SnapshotRetentionFailureKind, SnapshotRetentionOutcome, SnapshotRetentionResult,
     SnapshotRetentionStartOutcome, SnapshotTerminalTempMaintenanceFailureKind,
     SnapshotTerminalTempMaintenanceOutcome, SnapshotTerminalTempMaintenanceResult,
-    SnapshotTerminalTempMaintenanceStartOutcome, StartTaskError, TaskAccessError, TaskEvent,
+    SnapshotTerminalTempMaintenanceStartOutcome, SnapshotUnleasedTempMaintenanceFailureKind,
+    SnapshotUnleasedTempMaintenanceOutcome, SnapshotUnleasedTempMaintenanceResult,
+    SnapshotUnleasedTempMaintenanceStartOutcome, StartTaskError, TaskAccessError, TaskEvent,
     TaskEventBatch, TaskEventKind, TaskFailureKind, TaskId, TaskKind, TaskPhase, TaskSnapshot,
 };

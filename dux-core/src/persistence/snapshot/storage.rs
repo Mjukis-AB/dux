@@ -370,9 +370,10 @@ impl SnapshotControlUsage {
 /// are opened and closed sequentially so the 2,048-entry bound does not become
 /// a file-descriptor requirement. Its mutations are limited to one re-proven
 /// quiescent temp or one exact observed final; higher persistence must first
-/// bind either name to durable same-scan, tombstone, or exact unreferenced
-/// orphan authority. The storage type itself offers no generic temp,
-/// snapshot-policy, or user-data cleanup authority.
+/// bind the name to durable same-scan authority, prove its absence from the
+/// complete bounded temp-lease population, or establish tombstone/exact
+/// unreferenced-orphan authority. The storage type itself offers no generic
+/// temp, snapshot-policy, or user-data cleanup authority.
 pub(crate) struct SnapshotStoreInventoryLease {
     store: Arc<StoreInner>,
     entries: Vec<SnapshotInventoryEntry>,
@@ -441,6 +442,17 @@ impl SnapshotStoreInventoryLease {
     /// Remove one fully proven quiescent temporary file while preserving its
     /// exact physical effect boundary for durable row reconciliation.
     pub(crate) fn remove_observed_quiescent_temp_reconciled(
+        &mut self,
+        name: &str,
+    ) -> std::result::Result<SnapshotFileUsage, SnapshotTempRemovalError> {
+        self.remove_quiescent_temp_with_sync(name, platform::sync_directory)
+    }
+
+    /// Remove one observed quiescent temporary only after higher persistence
+    /// has proved that its exact name is absent from the complete bounded
+    /// durable lease population. This storage-only capability does not inspect
+    /// SQLite or infer the absence of a lease itself.
+    pub(crate) fn remove_observed_unleased_temp_reconciled(
         &mut self,
         name: &str,
     ) -> std::result::Result<SnapshotFileUsage, SnapshotTempRemovalError> {
@@ -1754,11 +1766,13 @@ fn is_recognized_temp_name(name: &str) -> bool {
         && random.len() == 32
         && !pid.is_empty()
         && pid.len() <= 10
+        && !(pid.len() > 1 && pid.starts_with('0'))
         && digest
             .bytes()
             .chain(random.bytes())
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         && pid.bytes().all(|byte| byte.is_ascii_digit())
+        && pid.parse::<u32>().is_ok_and(|pid| pid > 0)
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -2259,7 +2273,7 @@ mod platform {
     ) -> Result<()> {
         use nix::unistd::{UnlinkatFlags, unlinkat};
         validate_named(directory, name, &file, expected, Kind::RegularFile)?;
-        // DUX-DESTRUCTIVE: allow=snapshot-current-temp-unlink -- remove only a retained current-call or exact row-bound quiescent snapshot temp after exact identity revalidation
+        // DUX-DESTRUCTIVE: allow=snapshot-current-temp-unlink -- remove only a retained current-call, exact row-bound quiescent temp, or exact quiescent unleased temp selected from complete bounded lease and physical inventories after identity revalidation
         unlinkat(directory, name, UnlinkatFlags::NoRemoveDir)
             .map_err(|_| SnapshotStorageError::new(SnapshotStorageErrorKind::Unavailable))?;
         drop(file);
@@ -2845,6 +2859,118 @@ mod tests {
             before_total_usage.checked_sub(expected_usage).unwrap()
         );
         inventory.revalidate().unwrap();
+    }
+
+    #[test]
+    fn unleased_temp_capability_removes_only_the_exact_quiescent_observation() {
+        let temp = TempDir::new().unwrap();
+        private_database_root(&temp);
+        let database = database_path(&temp);
+        let store = open_rw(&database);
+        let final_name = SnapshotFileName::from_scan_id(b"unleased-capability-final");
+        let mut final_stage = store
+            .stage(final_name.clone(), Duration::from_millis(100))
+            .unwrap();
+        final_stage.write_all(b"immutable final bytes").unwrap();
+        drop(final_stage.publish_no_replace().unwrap());
+
+        let mut temp_stage = store
+            .stage(
+                SnapshotFileName::from_scan_id(b"unleased-capability-temp"),
+                Duration::from_millis(100),
+            )
+            .unwrap();
+        temp_stage.write_all(b"unleased temporary bytes").unwrap();
+        temp_stage.sync_all().unwrap();
+        let temp_name = temp_stage.temp_name.clone();
+        temp_stage.abandon();
+
+        let snapshot_root = database.parent().unwrap().join(DIRECTORY_NAME);
+        let mut inventory = store
+            .inventory_with_writer_lease(Duration::from_millis(100))
+            .unwrap();
+        let expected_usage = inventory
+            .entries()
+            .iter()
+            .find(|entry| entry.name() == temp_name)
+            .unwrap()
+            .usage();
+        let before_entries_usage = inventory.entries_usage();
+        let before_total_usage = inventory.total_usage();
+
+        match inventory
+            .remove_observed_unleased_temp_reconciled(final_name.as_str())
+            .unwrap_err()
+        {
+            SnapshotTempRemovalError::BeforeEffect(error) => {
+                assert_eq!(error.kind(), SnapshotStorageErrorKind::UnsafeObject);
+            }
+            SnapshotTempRemovalError::OutcomeUnknown => {
+                panic!("a final-name rejection must precede any physical effect")
+            }
+        }
+        assert!(snapshot_root.join(final_name.as_str()).exists());
+        assert!(snapshot_root.join(&temp_name).exists());
+
+        assert_eq!(
+            inventory
+                .remove_observed_unleased_temp_reconciled(&temp_name)
+                .unwrap(),
+            expected_usage
+        );
+        assert!(!snapshot_root.join(&temp_name).exists());
+        assert!(snapshot_root.join(final_name.as_str()).exists());
+        assert_eq!(
+            inventory.entries_usage(),
+            before_entries_usage.checked_sub(expected_usage).unwrap()
+        );
+        assert_eq!(
+            inventory.total_usage(),
+            before_total_usage.checked_sub(expected_usage).unwrap()
+        );
+        inventory.revalidate().unwrap();
+    }
+
+    #[test]
+    fn noncanonical_unleased_temp_pid_names_are_never_recognized_or_removed() {
+        for pid in ["0", "01", "4294967296"] {
+            let temp = TempDir::new().unwrap();
+            private_database_root(&temp);
+            let database = database_path(&temp);
+            let store = open_rw(&database);
+            // Keep the exact generated layout: digest.pid.random.tmp.
+            let name = format!(
+                ".snapshot-{}.{}.{}.tmp",
+                "a".repeat(FINAL_HEX_LENGTH),
+                pid,
+                "b".repeat(32),
+            );
+            assert!(!is_recognized_temp_name(&name));
+            let (mut file, _) = platform::create_private_file_exclusive(
+                &store.inner.directory,
+                &store.inner.path,
+                &name,
+            )
+            .unwrap()
+            .unwrap();
+            file.write_all(b"not generated by DUX").unwrap();
+            file.sync_all().unwrap();
+            drop(file);
+
+            let error = match store.inventory_with_writer_lease(Duration::from_millis(100)) {
+                Ok(_) => panic!("noncanonical temp name must make inventory unavailable"),
+                Err(error) => error,
+            };
+            assert_eq!(error.kind(), SnapshotStorageErrorKind::UnsafeObject);
+            assert!(
+                database
+                    .parent()
+                    .unwrap()
+                    .join(DIRECTORY_NAME)
+                    .join(&name)
+                    .exists()
+            );
+        }
     }
 
     #[test]

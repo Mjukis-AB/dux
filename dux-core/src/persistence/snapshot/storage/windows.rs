@@ -515,11 +515,12 @@ pub(super) fn remove_retained_temp(
     let disposition = DeleteDisposition {
         flags: DELETE_DISPOSITION_FLAG | POSIX_DISPOSITION_FLAG,
     };
-    // SAFETY: the retained exact-identity current-call or row-bound quiescent
-    // temp handle has DELETE access and the fixed disposition buffer is live
-    // for the synchronous call.
+    // SAFETY: the retained exact-identity current-call, row-bound quiescent, or
+    // complete-inventory-proven unleased quiescent temp handle has DELETE
+    // access and the fixed disposition buffer is live for the synchronous
+    // call.
     let removed = unsafe {
-        // DUX-DESTRUCTIVE: allow=snapshot-windows-current-temp-delete -- unlink only a retained current-call or exact row-bound quiescent snapshot temp after exact handle-relative identity revalidation
+        // DUX-DESTRUCTIVE: allow=snapshot-windows-current-temp-delete -- unlink only a retained current-call, exact row-bound quiescent temp, or exact quiescent unleased temp selected from complete bounded lease and physical inventories after handle-relative identity revalidation
         windows_sys::Win32::Storage::FileSystem::SetFileInformationByHandle(
             file.as_raw_handle(),
             DELETE_DISPOSITION_CLASS,

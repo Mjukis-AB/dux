@@ -69,6 +69,30 @@ All notable changes to DUX will be documented in this file.
   and shared-store multi-session regressions cover the boundary. The core does
   not self-schedule; native app/FFI review-lease ownership and periodic idle
   scheduling remain future work.
+- Added bounded physical-only unleased snapshot-temp reconciliation. A separate
+  repository batch holds the current-schema database guard before the snapshot
+  writer lease, subtracts the complete at-most-64-row immutable lease-name
+  population from one bounded marker-owned physical inventory, and removes at
+  most the first lexicographic quiescent exact-generated-grammar temp. The
+  effect boundary freshly repeats no-follow name/identity, exact
+  logical/allocation usage, private-file, one-link, and second nonblocking
+  kernel-lock proof; prefix, PID, owner, age, mtime, and prior quiescence alone
+  never grant authority. Active entries are skipped without starvation,
+  checked accounting precedes unlink, the delete handle closes before directory
+  sync, and post-effect uncertainty is `OutcomeUnknown`. The batch performs no
+  SQLite mutation or adoption and never maps the temp to a scan. The typed
+  idle-only `SnapshotUnleasedTempMaintenance` task accepts no authority-bearing
+  input, invokes one batch, exposes only aggregate `NoUnleasedTemp`,
+  `DeferredActive`, or `Removed { bytes }` results and counts, linearizes
+  cancellation at Applying, and never self-enqueues. Focused deterministic,
+  accounting, active/backoff, exclusion, effect-boundary, redaction,
+  admission/cancellation, failure-mapping, and multi-session tests cover the
+  slice. Windows pre-v8 writable handles deny delete sharing; Unix may detach
+  an incompatible old writer's open inode, but its later current-schema/name
+  publication proof fails. Avoiding that same-user availability race requires
+  not running old and current binaries concurrently on the owner-private store.
+  App/FFI scheduling and review leases, provisioning-stage and running-row
+  recovery, clear-data, and native Windows runtime verification remain future.
 - Added bounded terminal snapshot-temp reconciliation. A separate sealed
   repository batch now inspects the complete bounded lease population and
   physical inventory under the database-before-snapshot lock order, accepts
@@ -86,8 +110,9 @@ All notable changes to DUX will be documented in this file.
   row-only/physical, active/starvation, exclusion, ordering, accounting,
   corruption, race, effect-boundary, commit/schema, redaction, cancellation,
   panic, and multi-session tests cover the slice. Native scheduling, running-row
-  recovery, unleased/stage maintenance, clear-data, and native Windows runtime
-  verification remain separate.
+  recovery, provisioning-stage maintenance, clear-data, and native Windows
+  runtime verification remain separate; the newer entry above records the
+  independent physical-only unleased-temp boundary.
 - Added bounded physical snapshot-orphan reconciliation. A separate sealed
   repository batch now classifies typed finals against the exact indexed
   catalog under the database-before-snapshot lock order, selects only one
@@ -105,10 +130,11 @@ All notable changes to DUX will be documented in this file.
   state/body/catalog/race/accounting/effect-boundary, cancellation/close,
   multi-session, and redaction regressions cover the slice. Native periodic
   scheduling, general temp/stage maintenance, clear-data actions, and native
-  Windows compile/removal runtime verification were separate at that checkpoint;
-  the newer terminal-temp entry above records the row-bound portion now
-  implemented. The local MSVC cross-check stops in bundled SQLite's C build
-  because no Windows sysroot is installed.
+  Windows compile/removal runtime verification were separate at that
+  checkpoint; the newer terminal-temp and unleased-temp entries above record
+  the row-bound and physical-only portions now implemented. The local MSVC
+  cross-check stops in bundled SQLite's C build because no Windows sysroot is
+  installed.
 - Added the core production snapshot-cap mutation boundary. One bounded batch
   holds the current-schema database lease before the snapshot writer lease,
   rebuilds the complete cap/latest-two/active-pin inventory, refuses new
@@ -127,8 +153,9 @@ All notable changes to DUX will be documented in this file.
   sealed repository batch whose only orchestrator is the typed core engine
   task. At that checkpoint, app/FFI review-lease ownership, native periodic idle
   scheduling, orphan and unleased-temp/stage scavenging, clear-data actions, and
-  native Windows runtime verification remained separate; the newer entry above
-  records the subsequently implemented physical-orphan boundary.
+  native Windows runtime verification remained separate; the newer entries
+  above record the subsequently implemented physical-orphan, terminal-row, and
+  physical-only unleased-temp boundaries.
 - Added schema v8's durable snapshot temporary-file leases. Snapshot staging
   now reserves an exact recognized name while holding the permanent
   database-before-snapshot lock order, commits a bounded immutable lease row
@@ -138,9 +165,10 @@ All notable changes to DUX will be documented in this file.
   class, and reports row-without-file residuals separately. An exact same-scan
   retry may remove only a row-bound, identity-revalidated temp after acquiring
   its kernel lock and durably flushing the directory; active temps return busy,
-  while unleased temps are never adopted or removed. Normal abort removes the
-  physical temp before consuming its exact row, and successful publication
-  atomically consumes that row with the succeeded scan/evaluation transaction
+  while unleased temps are never adopted or removed by that path. Normal abort
+  removes the physical temp before consuming its exact row, and successful
+  publication atomically consumes that row with the succeeded scan/evaluation
+  transaction
   while retaining snapshot-writer exclusion. Drop remains close-only. Focused
   migration, hostile-row, row-before-file, active/quiescent, same-process retry,
   atomic completion, and cross-process kernel-lock tests cover the implemented

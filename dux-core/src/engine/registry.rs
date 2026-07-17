@@ -39,7 +39,9 @@ use super::task::{
     SnapshotRetentionFailureKind, SnapshotRetentionOutcome, SnapshotRetentionResult,
     SnapshotRetentionStartOutcome, SnapshotTerminalTempMaintenanceFailureKind,
     SnapshotTerminalTempMaintenanceOutcome, SnapshotTerminalTempMaintenanceResult,
-    SnapshotTerminalTempMaintenanceStartOutcome, StartTaskError, TaskAccessError, TaskEvent,
+    SnapshotTerminalTempMaintenanceStartOutcome, SnapshotUnleasedTempMaintenanceFailureKind,
+    SnapshotUnleasedTempMaintenanceOutcome, SnapshotUnleasedTempMaintenanceResult,
+    SnapshotUnleasedTempMaintenanceStartOutcome, StartTaskError, TaskAccessError, TaskEvent,
     TaskEventBatch, TaskEventKind, TaskFailureKind, TaskId, TaskKind, TaskPhase, TaskSnapshot,
 };
 use crate::domain::{
@@ -53,6 +55,7 @@ use crate::persistence::snapshot::{
     HostValue, SnapshotCodecErrorKind, SnapshotOrphanReconciliationBatchOutcome,
     SnapshotRepository, SnapshotRepositoryErrorKind, SnapshotRetentionBatchOutcome,
     SnapshotStorageErrorKind, SnapshotStoreAccess, SnapshotTerminalTempReconciliationBatchOutcome,
+    SnapshotUnleasedTempReconciliationBatchOutcome,
 };
 use crate::persistence::{
     CandidateEvaluationCompletion, CandidateEvaluationFailureKind, CandidateEvaluationIdentity,
@@ -160,6 +163,7 @@ enum TaskResult {
     SnapshotRetention(Arc<SnapshotRetentionResult>),
     SnapshotOrphanMaintenance(Arc<SnapshotOrphanMaintenanceResult>),
     SnapshotTerminalTempMaintenance(Arc<SnapshotTerminalTempMaintenanceResult>),
+    SnapshotUnleasedTempMaintenance(Arc<SnapshotUnleasedTempMaintenanceResult>),
     #[cfg(test)]
     TestOnly,
 }
@@ -355,6 +359,37 @@ impl TaskContext {
         }
     }
 
+    /// Order cancellation against the first repository operation that may
+    /// remove an unleased, marker-owned snapshot temporary.
+    fn try_begin_snapshot_unleased_temp_maintenance_batch(&self) -> bool {
+        let mut registry = self.shared.lock_registry_recover();
+        let event_limit = self.shared.limits.events_per_task;
+        if let Some(record) = registry.records.get_mut(&self.id)
+            && record.kind == TaskKind::SnapshotUnleasedTempMaintenance
+            && record.phase == TaskPhase::Running
+            && !record.cancellation_requested
+        {
+            record.push_event(
+                TaskEventKind::SnapshotUnleasedTempMaintenanceBatchApplying,
+                event_limit,
+            );
+            true
+        } else {
+            false
+        }
+    }
+
+    fn report_snapshot_unleased_temp_maintenance_finished(&self, kind: TaskEventKind) {
+        let mut registry = self.shared.lock_registry_recover();
+        let event_limit = self.shared.limits.events_per_task;
+        if let Some(record) = registry.records.get_mut(&self.id)
+            && record.kind == TaskKind::SnapshotUnleasedTempMaintenance
+            && !record.phase.is_terminal()
+        {
+            record.push_event(kind, event_limit);
+        }
+    }
+
     fn install_scan_cancellation(&self, token: CancellationToken) {
         let mut registry = self.shared.lock_registry_recover();
         if let Some(record) = registry.records.get_mut(&self.id) {
@@ -458,6 +493,7 @@ struct Registry {
     active_snapshot_retention: Option<TaskId>,
     active_snapshot_orphan_maintenance: Option<TaskId>,
     active_snapshot_terminal_temp_maintenance: Option<TaskId>,
+    active_snapshot_unleased_temp_maintenance: Option<TaskId>,
 }
 
 impl Registry {
@@ -474,6 +510,7 @@ impl Registry {
             active_snapshot_retention: None,
             active_snapshot_orphan_maintenance: None,
             active_snapshot_terminal_temp_maintenance: None,
+            active_snapshot_unleased_temp_maintenance: None,
         }
     }
 
@@ -507,6 +544,11 @@ impl Registry {
             && self.active_snapshot_terminal_temp_maintenance == Some(id)
         {
             self.active_snapshot_terminal_temp_maintenance = None;
+        }
+        if kind == TaskKind::SnapshotUnleasedTempMaintenance
+            && self.active_snapshot_unleased_temp_maintenance == Some(id)
+        {
+            self.active_snapshot_unleased_temp_maintenance = None;
         }
     }
 }
@@ -1556,6 +1598,148 @@ impl EngineHandle {
         Ok(None)
     }
 
+    /// Reconcile at most one recognized unleased snapshot temporary. Exact
+    /// filename identity stays inside persistence; `has_more` is only a later
+    /// idle-rescheduling hint.
+    pub fn start_snapshot_unleased_temp_maintenance(
+        &self,
+    ) -> Result<SnapshotUnleasedTempMaintenanceStartOutcome, StartTaskError> {
+        self.start_snapshot_unleased_temp_maintenance_with_hooks(
+            SystemTime::now,
+            || {},
+            || {},
+            || {},
+        )
+    }
+
+    #[cfg(test)]
+    fn start_snapshot_unleased_temp_maintenance_at(
+        &self,
+        observed_at: SystemTime,
+    ) -> Result<SnapshotUnleasedTempMaintenanceStartOutcome, StartTaskError> {
+        self.start_snapshot_unleased_temp_maintenance_with_hooks(
+            move || observed_at,
+            || {},
+            || {},
+            || {},
+        )
+    }
+
+    #[cfg(test)]
+    fn start_snapshot_unleased_temp_maintenance_with_test_hooks(
+        &self,
+        observed_at: SystemTime,
+        before_batch: impl FnOnce() + Send + 'static,
+        after_applying: impl FnOnce() + Send + 'static,
+        after_batch: impl FnOnce() + Send + 'static,
+    ) -> Result<SnapshotUnleasedTempMaintenanceStartOutcome, StartTaskError> {
+        self.start_snapshot_unleased_temp_maintenance_with_hooks(
+            move || observed_at,
+            before_batch,
+            after_applying,
+            after_batch,
+        )
+    }
+
+    fn start_snapshot_unleased_temp_maintenance_with_hooks(
+        &self,
+        clock: impl FnOnce() -> SystemTime + Send + 'static,
+        before_batch: impl FnOnce() + Send + 'static,
+        after_applying: impl FnOnce() + Send + 'static,
+        after_batch: impl FnOnce() + Send + 'static,
+    ) -> Result<SnapshotUnleasedTempMaintenanceStartOutcome, StartTaskError> {
+        if let Some(outcome) = self.snapshot_unleased_temp_maintenance_preflight()? {
+            return Ok(outcome);
+        }
+        let status = self
+            .inner
+            .store
+            .status()
+            .map_err(|_| StartTaskError::PersistenceUnavailable)?;
+        if !matches!(
+            status.access,
+            crate::persistence::DatabaseAccess::ReadWriteCurrent
+        ) {
+            return Err(StartTaskError::ReadOnlyStore);
+        }
+        let snapshots = Arc::clone(&self.inner.snapshots);
+        self.submit_snapshot_unleased_temp_maintenance(Box::new(move |context| {
+            if context.is_cancellation_requested() {
+                return WorkOutcome::Cancelled(None);
+            }
+            let observed_at = clock();
+            before_batch();
+            if !context.try_begin_snapshot_unleased_temp_maintenance_batch() {
+                return WorkOutcome::Cancelled(None);
+            }
+            // Applying is the point of no return. Later cancellation remains
+            // visible intent but cannot suppress an exact repository result.
+            after_applying();
+            match snapshots.reconcile_unleased_snapshot_temp(observed_at) {
+                Ok(result) => {
+                    let outcome =
+                        public_snapshot_unleased_temp_maintenance_outcome(&result.outcome);
+                    let result = Arc::new(SnapshotUnleasedTempMaintenanceResult::new(
+                        result.observed_at,
+                        outcome,
+                        result.unleased_temp_count_before,
+                        result.unleased_temp_count_after,
+                        result.active_unleased_temp_count_before,
+                        result.active_unleased_temp_count_after,
+                        result.unleased_charged_bytes_before,
+                        result.unleased_charged_bytes_after,
+                        result.has_more,
+                    ));
+                    after_batch();
+                    context.report_snapshot_unleased_temp_maintenance_finished(
+                        TaskEventKind::SnapshotUnleasedTempMaintenanceBatchFinished {
+                            outcome: result.outcome(),
+                            unleased_temp_count_before: result.unleased_temp_count_before(),
+                            unleased_temp_count_after: result.unleased_temp_count_after(),
+                            active_unleased_temp_count_before: result
+                                .active_unleased_temp_count_before(),
+                            active_unleased_temp_count_after: result
+                                .active_unleased_temp_count_after(),
+                            unleased_charged_bytes_before: result.unleased_charged_bytes_before(),
+                            unleased_charged_bytes_after: result.unleased_charged_bytes_after(),
+                            has_more: result.has_more(),
+                        },
+                    );
+                    WorkOutcome::Succeeded(TaskResult::SnapshotUnleasedTempMaintenance(result))
+                }
+                Err(error) => WorkOutcome::Failed(
+                    map_snapshot_unleased_temp_maintenance_failure(error.kind),
+                    None,
+                ),
+            }
+        }))
+    }
+
+    fn snapshot_unleased_temp_maintenance_preflight(
+        &self,
+    ) -> Result<Option<SnapshotUnleasedTempMaintenanceStartOutcome>, StartTaskError> {
+        let registry = self
+            .inner
+            .shared
+            .registry
+            .lock()
+            .map_err(|_| StartTaskError::InternalState)?;
+        if registry.lifecycle != EngineLifecycle::Open {
+            return Err(StartTaskError::Closed);
+        }
+        if let Some(existing) = registry.active_snapshot_unleased_temp_maintenance {
+            return Ok(Some(
+                SnapshotUnleasedTempMaintenanceStartOutcome::AlreadyActive(existing),
+            ));
+        }
+        if registry.running_tasks != 0 || !registry.queue.is_empty() {
+            return Ok(Some(
+                SnapshotUnleasedTempMaintenanceStartOutcome::DeferredBusy,
+            ));
+        }
+        Ok(None)
+    }
+
     /// Start one full, no-follow, same-filesystem scan. Root validation and
     /// overlapping-scope admission are synchronous; the durable scan ID is
     /// generated only after a worker starts, so queued cancellation leaves no
@@ -1711,7 +1895,8 @@ impl EngineHandle {
                 | TaskResult::HistoryMaintenance(_)
                 | TaskResult::SnapshotRetention(_)
                 | TaskResult::SnapshotOrphanMaintenance(_)
-                | TaskResult::SnapshotTerminalTempMaintenance(_),
+                | TaskResult::SnapshotTerminalTempMaintenance(_)
+                | TaskResult::SnapshotUnleasedTempMaintenance(_),
             ) => {
                 return Err(TaskAccessError::WrongTaskKind);
             }
@@ -1737,7 +1922,8 @@ impl EngineHandle {
                 | TaskResult::HistoryMaintenance(_)
                 | TaskResult::SnapshotRetention(_)
                 | TaskResult::SnapshotOrphanMaintenance(_)
-                | TaskResult::SnapshotTerminalTempMaintenance(_),
+                | TaskResult::SnapshotTerminalTempMaintenance(_)
+                | TaskResult::SnapshotUnleasedTempMaintenance(_),
             ) => {
                 return Err(TaskAccessError::WrongTaskKind);
             }
@@ -1766,7 +1952,8 @@ impl EngineHandle {
                 | TaskResult::Scan(_)
                 | TaskResult::SnapshotRetention(_)
                 | TaskResult::SnapshotOrphanMaintenance(_)
-                | TaskResult::SnapshotTerminalTempMaintenance(_),
+                | TaskResult::SnapshotTerminalTempMaintenance(_)
+                | TaskResult::SnapshotUnleasedTempMaintenance(_),
             ) => {
                 return Err(TaskAccessError::WrongTaskKind);
             }
@@ -1795,7 +1982,8 @@ impl EngineHandle {
                 | TaskResult::Scan(_)
                 | TaskResult::HistoryMaintenance(_)
                 | TaskResult::SnapshotOrphanMaintenance(_)
-                | TaskResult::SnapshotTerminalTempMaintenance(_),
+                | TaskResult::SnapshotTerminalTempMaintenance(_)
+                | TaskResult::SnapshotUnleasedTempMaintenance(_),
             ) => return Err(TaskAccessError::WrongTaskKind),
             #[cfg(test)]
             Some(TaskResult::TestOnly) => return Err(TaskAccessError::WrongTaskKind),
@@ -1822,7 +2010,8 @@ impl EngineHandle {
                 | TaskResult::Scan(_)
                 | TaskResult::HistoryMaintenance(_)
                 | TaskResult::SnapshotRetention(_)
-                | TaskResult::SnapshotTerminalTempMaintenance(_),
+                | TaskResult::SnapshotTerminalTempMaintenance(_)
+                | TaskResult::SnapshotUnleasedTempMaintenance(_),
             ) => return Err(TaskAccessError::WrongTaskKind),
             #[cfg(test)]
             Some(TaskResult::TestOnly) => return Err(TaskAccessError::WrongTaskKind),
@@ -1849,7 +2038,36 @@ impl EngineHandle {
                 | TaskResult::Scan(_)
                 | TaskResult::HistoryMaintenance(_)
                 | TaskResult::SnapshotRetention(_)
-                | TaskResult::SnapshotOrphanMaintenance(_),
+                | TaskResult::SnapshotOrphanMaintenance(_)
+                | TaskResult::SnapshotUnleasedTempMaintenance(_),
+            ) => return Err(TaskAccessError::WrongTaskKind),
+            #[cfg(test)]
+            Some(TaskResult::TestOnly) => return Err(TaskAccessError::WrongTaskKind),
+            None => None,
+        })
+    }
+
+    pub fn snapshot_unleased_temp_maintenance_result(
+        &self,
+        id: TaskId,
+    ) -> Result<Option<Arc<SnapshotUnleasedTempMaintenanceResult>>, TaskAccessError> {
+        let registry = self.lock_open_registry()?;
+        let record = registry
+            .records
+            .get(&id)
+            .ok_or(TaskAccessError::UnknownTask)?;
+        if record.kind != TaskKind::SnapshotUnleasedTempMaintenance {
+            return Err(TaskAccessError::WrongTaskKind);
+        }
+        Ok(match &record.result {
+            Some(TaskResult::SnapshotUnleasedTempMaintenance(result)) => Some(Arc::clone(result)),
+            Some(
+                TaskResult::FormatSizeBatch(_)
+                | TaskResult::Scan(_)
+                | TaskResult::HistoryMaintenance(_)
+                | TaskResult::SnapshotRetention(_)
+                | TaskResult::SnapshotOrphanMaintenance(_)
+                | TaskResult::SnapshotTerminalTempMaintenance(_),
             ) => return Err(TaskAccessError::WrongTaskKind),
             #[cfg(test)]
             Some(TaskResult::TestOnly) => return Err(TaskAccessError::WrongTaskKind),
@@ -2125,6 +2343,44 @@ impl EngineHandle {
         registry.queue.push_back(Job { id, work });
         self.inner.shared.workers_ready.notify_one();
         Ok(SnapshotTerminalTempMaintenanceStartOutcome::Started(id))
+    }
+
+    fn submit_snapshot_unleased_temp_maintenance(
+        &self,
+        work: Work,
+    ) -> Result<SnapshotUnleasedTempMaintenanceStartOutcome, StartTaskError> {
+        let mut registry = self
+            .inner
+            .shared
+            .registry
+            .lock()
+            .map_err(|_| StartTaskError::InternalState)?;
+        if registry.lifecycle != EngineLifecycle::Open {
+            return Err(StartTaskError::Closed);
+        }
+        if let Some(existing) = registry.active_snapshot_unleased_temp_maintenance {
+            return Ok(SnapshotUnleasedTempMaintenanceStartOutcome::AlreadyActive(
+                existing,
+            ));
+        }
+        // Unleased-temp reconciliation shares the same idle-only boundary as
+        // every other maintenance class. Rechecking here closes the admission
+        // race between the compatibility probe and foreground submission.
+        if registry.running_tasks != 0 || !registry.queue.is_empty() {
+            return Ok(SnapshotUnleasedTempMaintenanceStartOutcome::DeferredBusy);
+        }
+        let id = TASK_IDS.allocate()?;
+        let record = TaskRecord::new(
+            id,
+            TaskKind::SnapshotUnleasedTempMaintenance,
+            None,
+            self.inner.shared.limits.events_per_task,
+        );
+        registry.active_snapshot_unleased_temp_maintenance = Some(id);
+        registry.records.insert(id, record);
+        registry.queue.push_back(Job { id, work });
+        self.inner.shared.workers_ready.notify_one();
+        Ok(SnapshotUnleasedTempMaintenanceStartOutcome::Started(id))
     }
 
     fn lock_open_registry(&self) -> Result<std::sync::MutexGuard<'_, Registry>, TaskAccessError> {
@@ -3174,6 +3430,22 @@ const fn public_snapshot_terminal_temp_maintenance_outcome(
     }
 }
 
+const fn public_snapshot_unleased_temp_maintenance_outcome(
+    outcome: &SnapshotUnleasedTempReconciliationBatchOutcome,
+) -> SnapshotUnleasedTempMaintenanceOutcome {
+    match outcome {
+        SnapshotUnleasedTempReconciliationBatchOutcome::NoUnleasedTemp => {
+            SnapshotUnleasedTempMaintenanceOutcome::NoUnleasedTemp
+        }
+        SnapshotUnleasedTempReconciliationBatchOutcome::DeferredActive => {
+            SnapshotUnleasedTempMaintenanceOutcome::DeferredActive
+        }
+        SnapshotUnleasedTempReconciliationBatchOutcome::Removed { bytes } => {
+            SnapshotUnleasedTempMaintenanceOutcome::Removed { bytes: *bytes }
+        }
+    }
+}
+
 const fn map_snapshot_retention_failure(kind: SnapshotRepositoryErrorKind) -> TaskFailureKind {
     let kind = match kind {
         SnapshotRepositoryErrorKind::ReadOnly
@@ -3394,6 +3666,89 @@ const fn map_snapshot_terminal_temp_maintenance_failure(
         },
     };
     TaskFailureKind::SnapshotTerminalTempMaintenance(kind)
+}
+
+const fn map_snapshot_unleased_temp_maintenance_failure(
+    kind: SnapshotRepositoryErrorKind,
+) -> TaskFailureKind {
+    let kind = match kind {
+        SnapshotRepositoryErrorKind::ReadOnly
+        | SnapshotRepositoryErrorKind::MissingStore
+        | SnapshotRepositoryErrorKind::ReviewLeaseExpired => {
+            SnapshotUnleasedTempMaintenanceFailureKind::InternalState
+        }
+        SnapshotRepositoryErrorKind::MissingSnapshot
+        | SnapshotRepositoryErrorKind::SnapshotUnavailable
+        | SnapshotRepositoryErrorKind::ReferenceMismatch => {
+            SnapshotUnleasedTempMaintenanceFailureKind::CorruptData
+        }
+        // Unleased temp bytes are deliberately never decoded. Reaching an
+        // incompatible snapshot through this boundary is a contract violation.
+        SnapshotRepositoryErrorKind::IncompatibleVersion => {
+            SnapshotUnleasedTempMaintenanceFailureKind::InternalState
+        }
+        SnapshotRepositoryErrorKind::Codec(kind) => match kind {
+            SnapshotCodecErrorKind::InvalidInput | SnapshotCodecErrorKind::IncompatibleVersion => {
+                SnapshotUnleasedTempMaintenanceFailureKind::InternalState
+            }
+            SnapshotCodecErrorKind::Io => SnapshotUnleasedTempMaintenanceFailureKind::Unavailable,
+            SnapshotCodecErrorKind::LimitExceeded => {
+                SnapshotUnleasedTempMaintenanceFailureKind::BudgetExceeded
+            }
+            SnapshotCodecErrorKind::InvalidMagic
+            | SnapshotCodecErrorKind::InvalidLength
+            | SnapshotCodecErrorKind::ChecksumMismatch
+            | SnapshotCodecErrorKind::CorruptData => {
+                SnapshotUnleasedTempMaintenanceFailureKind::CorruptData
+            }
+        },
+        SnapshotRepositoryErrorKind::Storage(kind) => match kind {
+            SnapshotStorageErrorKind::InvalidConfiguration
+            | SnapshotStorageErrorKind::InternalState => {
+                SnapshotUnleasedTempMaintenanceFailureKind::InternalState
+            }
+            SnapshotStorageErrorKind::UnsafeRoot
+            | SnapshotStorageErrorKind::UnsafeObject
+            | SnapshotStorageErrorKind::UnrecognizedStore => {
+                SnapshotUnleasedTempMaintenanceFailureKind::UnsafeStorage
+            }
+            SnapshotStorageErrorKind::Unavailable => {
+                SnapshotUnleasedTempMaintenanceFailureKind::Unavailable
+            }
+            SnapshotStorageErrorKind::Busy => SnapshotUnleasedTempMaintenanceFailureKind::Busy,
+        },
+        SnapshotRepositoryErrorKind::History(kind) => match kind {
+            HistoryErrorKind::InvalidInput => {
+                SnapshotUnleasedTempMaintenanceFailureKind::InvalidClock
+            }
+            HistoryErrorKind::IncompatibleSchema => {
+                SnapshotUnleasedTempMaintenanceFailureKind::IncompatibleSchema
+            }
+            HistoryErrorKind::QueryLimitExceeded => {
+                SnapshotUnleasedTempMaintenanceFailureKind::BudgetExceeded
+            }
+            HistoryErrorKind::Busy => SnapshotUnleasedTempMaintenanceFailureKind::Busy,
+            HistoryErrorKind::UnsafeStorage => {
+                SnapshotUnleasedTempMaintenanceFailureKind::UnsafeStorage
+            }
+            HistoryErrorKind::CorruptData => {
+                SnapshotUnleasedTempMaintenanceFailureKind::CorruptData
+            }
+            HistoryErrorKind::DatabaseUnavailable => {
+                SnapshotUnleasedTempMaintenanceFailureKind::Unavailable
+            }
+            HistoryErrorKind::OutcomeUnknown => {
+                SnapshotUnleasedTempMaintenanceFailureKind::OutcomeUnknown
+            }
+            HistoryErrorKind::AlreadyExists
+            | HistoryErrorKind::NotFound
+            | HistoryErrorKind::InvalidTransition
+            | HistoryErrorKind::InternalState => {
+                SnapshotUnleasedTempMaintenanceFailureKind::InternalState
+            }
+        },
+    };
+    TaskFailureKind::SnapshotUnleasedTempMaintenance(kind)
 }
 
 const fn public_candidate_evaluation_failure(

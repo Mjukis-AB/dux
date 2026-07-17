@@ -52,6 +52,9 @@ use super::snapshot_temp_lease::{
 use super::snapshot_terminal_temp_inventory::{
     SnapshotTerminalTempPhysicalState, build_snapshot_terminal_temp_inventory,
 };
+use super::snapshot_unleased_temp_inventory::{
+    SnapshotUnleasedTempPhysicalState, build_snapshot_unleased_temp_inventory,
+};
 use super::store::{HistoryConnectionGuard, StoreCoordinator};
 
 mod codec;
@@ -239,6 +242,29 @@ pub(crate) enum SnapshotTerminalTempReconciliationBatchOutcome {
     DeferredActive,
     ReconciledRowOnly { scan_id: ScanId },
     RemovedTempAndLease { scan_id: ScanId, bytes: u64 },
+}
+
+/// One bounded reconciliation of a recognized snapshot temp that has no exact
+/// row in the complete immutable lease population. The private physical name
+/// never leaves persistence.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SnapshotUnleasedTempReconciliationBatchResult {
+    pub(crate) observed_at: SystemTime,
+    pub(crate) outcome: SnapshotUnleasedTempReconciliationBatchOutcome,
+    pub(crate) unleased_temp_count_before: u32,
+    pub(crate) unleased_temp_count_after: u32,
+    pub(crate) active_unleased_temp_count_before: u32,
+    pub(crate) active_unleased_temp_count_after: u32,
+    pub(crate) unleased_charged_bytes_before: u64,
+    pub(crate) unleased_charged_bytes_after: u64,
+    pub(crate) has_more: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SnapshotUnleasedTempReconciliationBatchOutcome {
+    NoUnleasedTemp,
+    DeferredActive,
+    Removed { bytes: u64 },
 }
 
 const fn repository_error(kind: SnapshotRepositoryErrorKind) -> SnapshotRepositoryError {
@@ -731,6 +757,131 @@ impl SnapshotRepository {
             terminal_charged_bytes_before,
             terminal_charged_bytes_after,
             has_more: terminal_lease_count_after > 0,
+        })
+    }
+
+    /// Reconcile at most one marker-owned recognized snapshot temp whose exact
+    /// name is absent from the complete bounded durable lease population.
+    ///
+    /// The caller supplies no name or identity. This physical-only boundary
+    /// retains the current-schema database guard before the snapshot writer
+    /// lease, skips active names, and never adopts the temp or mutates SQLite.
+    /// Row-bound temps, provisioning stages, scans, and final snapshots are
+    /// outside this operation.
+    pub(crate) fn reconcile_unleased_snapshot_temp(
+        &self,
+        observed_at: SystemTime,
+    ) -> Result<SnapshotUnleasedTempReconciliationBatchResult, SnapshotRepositoryError> {
+        self.reconcile_unleased_snapshot_temp_with_remover(observed_at, |storage, name| {
+            storage.remove_observed_unleased_temp_reconciled(name)
+        })
+    }
+
+    fn reconcile_unleased_snapshot_temp_with_remover(
+        &self,
+        observed_at: SystemTime,
+        remove: impl FnOnce(
+            &mut SnapshotStoreInventoryLease,
+            &str,
+        ) -> std::result::Result<SnapshotFileUsage, SnapshotTempRemovalError>,
+    ) -> Result<SnapshotUnleasedTempReconciliationBatchResult, SnapshotRepositoryError> {
+        if self.access != SnapshotStoreAccess::ReadWrite {
+            return Err(repository_error(SnapshotRepositoryErrorKind::ReadOnly));
+        }
+        let observed_at = unix_ms_to_system_time(
+            system_time_to_unix_ms(observed_at, HistoryErrorKind::InvalidInput)
+                .map_err(map_history)?,
+        )
+        .map_err(map_history)?;
+        let database_guard = self
+            .database
+            .lock_current_history_connection()
+            .map_err(map_history)?;
+        self.database
+            .validate_history_guard(&database_guard)
+            .map_err(map_history)?;
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| repository_error(SnapshotRepositoryErrorKind::MissingStore))?;
+        let mut storage = store
+            .inventory_with_writer_lease(PUBLICATION_LOCK_TIMEOUT)
+            .map_err(map_storage)?;
+        let leases =
+            inspect_snapshot_temp_leases(&database_guard.connection).map_err(map_history)?;
+        let inventory =
+            build_snapshot_unleased_temp_inventory(&storage, &leases).map_err(map_history)?;
+        storage.revalidate().map_err(map_storage)?;
+        self.database
+            .revalidate_current_history_guard(&database_guard)
+            .map_err(map_history)?;
+
+        let unleased_temp_count_before = u32::try_from(inventory.entries.len())
+            .map_err(|_| history_repository_error(HistoryErrorKind::QueryLimitExceeded))?;
+        let active_unleased_temp_count_before = inventory.active_count;
+        let unleased_charged_bytes_before = inventory.charged_bytes;
+        let Some(candidate) = inventory.first_actionable() else {
+            let outcome = if unleased_temp_count_before == 0 {
+                SnapshotUnleasedTempReconciliationBatchOutcome::NoUnleasedTemp
+            } else {
+                SnapshotUnleasedTempReconciliationBatchOutcome::DeferredActive
+            };
+            return Ok(SnapshotUnleasedTempReconciliationBatchResult {
+                observed_at,
+                outcome,
+                unleased_temp_count_before,
+                unleased_temp_count_after: unleased_temp_count_before,
+                active_unleased_temp_count_before,
+                active_unleased_temp_count_after: active_unleased_temp_count_before,
+                unleased_charged_bytes_before,
+                unleased_charged_bytes_after: unleased_charged_bytes_before,
+                has_more: unleased_temp_count_before > 0,
+            });
+        };
+
+        let expected_usage = match candidate.state {
+            SnapshotUnleasedTempPhysicalState::Quiescent(usage) => usage,
+            SnapshotUnleasedTempPhysicalState::Active(_) => {
+                return Err(history_repository_error(HistoryErrorKind::InternalState));
+            }
+        };
+        let unleased_temp_count_after = unleased_temp_count_before
+            .checked_sub(1)
+            .ok_or_else(|| history_repository_error(HistoryErrorKind::InternalState))?;
+        let active_unleased_temp_count_after = active_unleased_temp_count_before;
+        let unleased_charged_bytes_after = unleased_charged_bytes_before
+            .checked_sub(expected_usage.charged_bytes())
+            .ok_or_else(|| history_repository_error(HistoryErrorKind::InternalState))?;
+
+        let removed = match remove(&mut storage, &candidate.name) {
+            Ok(removed) => removed,
+            Err(SnapshotTempRemovalError::BeforeEffect(error)) => {
+                return Err(map_storage(error));
+            }
+            Err(SnapshotTempRemovalError::OutcomeUnknown) => {
+                return Err(outcome_unknown());
+            }
+        };
+        if removed != expected_usage {
+            return Err(outcome_unknown());
+        }
+        storage.revalidate().map_err(|_| outcome_unknown())?;
+        self.database
+            .revalidate_current_history_guard(&database_guard)
+            .map_err(|_| outcome_unknown())?;
+
+        Ok(SnapshotUnleasedTempReconciliationBatchResult {
+            observed_at,
+            outcome: SnapshotUnleasedTempReconciliationBatchOutcome::Removed {
+                bytes: removed.charged_bytes(),
+            },
+            unleased_temp_count_before,
+            unleased_temp_count_after,
+            active_unleased_temp_count_before,
+            active_unleased_temp_count_after,
+            unleased_charged_bytes_before,
+            unleased_charged_bytes_after,
+            has_more: unleased_temp_count_after > 0,
         })
     }
 
@@ -1617,6 +1768,42 @@ impl SnapshotRepository {
         Ok(())
     }
 
+    /// Leave one physical recognized temp with no durable lease row for
+    /// repository/engine maintenance tests. Returning the staged handle keeps
+    /// its kernel lock active; a quiescent fixture closes the handle here.
+    #[cfg(test)]
+    pub(crate) fn leave_unleased_snapshot_temp_for_test(
+        &self,
+        seed: &[u8],
+        active: bool,
+    ) -> Result<Option<StagedSnapshot>, SnapshotRepositoryError> {
+        if self.access != SnapshotStoreAccess::ReadWrite {
+            return Err(repository_error(SnapshotRepositoryErrorKind::ReadOnly));
+        }
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| repository_error(SnapshotRepositoryErrorKind::MissingStore))?;
+        let mut staged = store
+            .stage(
+                SnapshotFileName::from_scan_id(seed),
+                PUBLICATION_LOCK_TIMEOUT,
+            )
+            .map_err(map_storage)?;
+        std::io::Write::write_all(&mut staged, b"unleased-temp-fixture").map_err(|_| {
+            repository_error(SnapshotRepositoryErrorKind::Storage(
+                SnapshotStorageErrorKind::Unavailable,
+            ))
+        })?;
+        staged.sync_all().map_err(map_storage)?;
+        if active {
+            Ok(Some(staged))
+        } else {
+            staged.abandon();
+            Ok(None)
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn publish_orphan_for_test(
         &self,
@@ -2330,6 +2517,26 @@ mod tests {
             logical_bytes: 10,
             allocated_bytes: Some(16),
         }
+    }
+
+    fn create_unleased_temp(
+        repository: &SnapshotRepository,
+        seed: &[u8],
+        contents: &[u8],
+    ) -> (String, StagedSnapshot) {
+        let store = repository.store.as_ref().unwrap();
+        let mut reservation = store
+            .reserve_stage(
+                SnapshotFileName::from_scan_id(seed),
+                PUBLICATION_LOCK_TIMEOUT,
+            )
+            .unwrap();
+        let name = reservation.temp_name().to_owned();
+        let mut staged = reservation.create().unwrap();
+        std::io::Write::write_all(&mut staged, contents).unwrap();
+        staged.sync_all().unwrap();
+        drop(reservation);
+        (name, staged)
     }
 
     fn evaluation_identity(seed: u8) -> CandidateEvaluationIdentity {
@@ -3194,7 +3401,9 @@ mod tests {
         let running = document("scan:terminal-temp-running", &root);
         let unleased_document = document("scan:terminal-temp-unleased", &root);
         let (store, repository) = open_repository(&database);
-        let stage_sibling = temp.path().join(".dux-snapshot-stage-fixture");
+        let stage_sibling = temp
+            .path()
+            .join(".dux-snapshot-stage-11111111111111111111111111111111");
         fs::create_dir(&stage_sibling).unwrap();
         fs::write(stage_sibling.join("sentinel"), b"unowned-stage-debt").unwrap();
         record_running_scan(&store, &running, &root, base);
@@ -3239,6 +3448,204 @@ mod tests {
             fs::read(stage_sibling.join("sentinel")).unwrap(),
             b"unowned-stage-debt"
         );
+    }
+
+    #[test]
+    fn unleased_temp_reconciliation_is_lexical_one_at_a_time_and_exactly_accounted() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let (_store, repository) = open_repository(&database);
+        let observed_at = UNIX_EPOCH + Duration::from_millis(1_750_000_033_100);
+        let (first_name, first_stage) =
+            create_unleased_temp(&repository, b"unleased-first", b"first unleased bytes");
+        first_stage.abandon();
+        let (second_name, second_stage) = create_unleased_temp(
+            &repository,
+            b"unleased-second",
+            b"second and longer unleased bytes",
+        );
+        second_stage.abandon();
+        let expected_first_name = first_name.min(second_name);
+        let selected_name = std::cell::RefCell::new(None);
+
+        let first = repository
+            .reconcile_unleased_snapshot_temp_with_remover(observed_at, |storage, name| {
+                selected_name.replace(Some(name.to_owned()));
+                storage.remove_observed_unleased_temp_reconciled(name)
+            })
+            .unwrap();
+        assert_eq!(selected_name.into_inner().unwrap(), expected_first_name);
+        assert!(matches!(
+            first.outcome,
+            SnapshotUnleasedTempReconciliationBatchOutcome::Removed { bytes } if bytes > 0
+        ));
+        assert_eq!(first.unleased_temp_count_before, 2);
+        assert_eq!(first.unleased_temp_count_after, 1);
+        assert_eq!(first.active_unleased_temp_count_before, 0);
+        assert_eq!(first.active_unleased_temp_count_after, 0);
+        assert!(first.unleased_charged_bytes_before > first.unleased_charged_bytes_after);
+        assert!(first.has_more);
+
+        let second = repository
+            .reconcile_unleased_snapshot_temp(observed_at + Duration::from_millis(1))
+            .unwrap();
+        assert!(matches!(
+            second.outcome,
+            SnapshotUnleasedTempReconciliationBatchOutcome::Removed { bytes } if bytes > 0
+        ));
+        assert_eq!(second.unleased_temp_count_before, 1);
+        assert_eq!(second.unleased_temp_count_after, 0);
+        assert_eq!(
+            second.unleased_charged_bytes_before,
+            first.unleased_charged_bytes_after
+        );
+        assert_eq!(second.unleased_charged_bytes_after, 0);
+        assert!(!second.has_more);
+
+        let empty = repository
+            .reconcile_unleased_snapshot_temp(observed_at + Duration::from_millis(2))
+            .unwrap();
+        assert_eq!(
+            empty.outcome,
+            SnapshotUnleasedTempReconciliationBatchOutcome::NoUnleasedTemp
+        );
+        assert_eq!(empty.unleased_temp_count_before, 0);
+        assert!(!empty.has_more);
+    }
+
+    #[test]
+    fn active_unleased_temp_does_not_starve_quiescent_debt_and_then_defers() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let (_store, repository) = open_repository(&database);
+        let observed_at = UNIX_EPOCH + Duration::from_millis(1_750_000_033_200);
+        let (_active_name, active_stage) =
+            create_unleased_temp(&repository, b"unleased-active", b"active bytes");
+        let (_quiescent_name, quiescent_stage) =
+            create_unleased_temp(&repository, b"unleased-quiescent", b"quiescent bytes");
+        quiescent_stage.abandon();
+
+        let first = repository
+            .reconcile_unleased_snapshot_temp(observed_at)
+            .unwrap();
+        assert!(matches!(
+            first.outcome,
+            SnapshotUnleasedTempReconciliationBatchOutcome::Removed { .. }
+        ));
+        assert_eq!(first.unleased_temp_count_before, 2);
+        assert_eq!(first.unleased_temp_count_after, 1);
+        assert_eq!(first.active_unleased_temp_count_before, 1);
+        assert_eq!(first.active_unleased_temp_count_after, 1);
+        assert!(first.has_more);
+
+        let deferred = repository
+            .reconcile_unleased_snapshot_temp(observed_at + Duration::from_millis(1))
+            .unwrap();
+        assert_eq!(
+            deferred.outcome,
+            SnapshotUnleasedTempReconciliationBatchOutcome::DeferredActive
+        );
+        assert_eq!(deferred.unleased_temp_count_before, 1);
+        assert_eq!(deferred.active_unleased_temp_count_before, 1);
+        assert!(deferred.has_more);
+
+        active_stage.abandon();
+        let settled = repository
+            .reconcile_unleased_snapshot_temp(observed_at + Duration::from_millis(2))
+            .unwrap();
+        assert!(matches!(
+            settled.outcome,
+            SnapshotUnleasedTempReconciliationBatchOutcome::Removed { .. }
+        ));
+        assert_eq!(settled.unleased_temp_count_after, 0);
+        assert!(!settled.has_more);
+    }
+
+    #[test]
+    fn unleased_temp_reconciliation_never_consumes_row_bound_or_stage_debt() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let root = temp.path().join("scan-root");
+        let observed_at = UNIX_EPOCH + Duration::from_millis(1_750_000_033_300);
+        let row_bound = document("scan:unleased-row-bound", &root);
+        let (store, repository) = open_repository(&database);
+        record_running_scan(&store, &row_bound, &root, observed_at);
+        repository
+            .leave_snapshot_temp_residual_for_test(&row_bound, true)
+            .unwrap();
+        let stage_sibling = temp
+            .path()
+            .join(".dux-snapshot-stage-11111111111111111111111111111111");
+        fs::create_dir(&stage_sibling).unwrap();
+        fs::write(stage_sibling.join("sentinel"), b"stage debt").unwrap();
+        let (_name, unleased_stage) =
+            create_unleased_temp(&repository, b"unleased-with-row", b"unleased bytes");
+        unleased_stage.abandon();
+
+        let result = repository
+            .reconcile_unleased_snapshot_temp(observed_at + Duration::from_millis(1))
+            .unwrap();
+        assert!(matches!(
+            result.outcome,
+            SnapshotUnleasedTempReconciliationBatchOutcome::Removed { .. }
+        ));
+        assert_eq!(result.unleased_temp_count_before, 1);
+        assert_eq!(temp_lease_count(&store), 1);
+        assert_eq!(
+            store
+                .load_scan(&row_bound.metadata.scan_id)
+                .unwrap()
+                .unwrap()
+                .status(),
+            ScanStatus::Running
+        );
+        let inventory = repository.inspect_retention_inventory(observed_at).unwrap();
+        assert!(matches!(
+            inventory.temporary_files.as_slice(),
+            [temporary]
+                if temporary.state
+                    == super::super::snapshot_retention_inventory::SnapshotTemporaryState::QuiescentAtObservation
+        ));
+        assert_eq!(
+            fs::read(stage_sibling.join("sentinel")).unwrap(),
+            b"stage debt"
+        );
+    }
+
+    #[test]
+    fn unleased_temp_effect_uncertainty_and_invalid_clock_fail_closed() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let (_store, repository) = open_repository(&database);
+        assert_eq!(
+            repository
+                .reconcile_unleased_snapshot_temp(UNIX_EPOCH - Duration::from_millis(1))
+                .unwrap_err()
+                .kind,
+            SnapshotRepositoryErrorKind::History(HistoryErrorKind::InvalidInput)
+        );
+
+        let (_name, stage) =
+            create_unleased_temp(&repository, b"unleased-unknown", b"unknown bytes");
+        stage.abandon();
+        let observed_at = UNIX_EPOCH + Duration::from_millis(1_750_000_033_400);
+        assert_eq!(
+            repository
+                .reconcile_unleased_snapshot_temp_with_remover(observed_at, |_, _| {
+                    Err(SnapshotTempRemovalError::OutcomeUnknown)
+                })
+                .unwrap_err()
+                .kind,
+            SnapshotRepositoryErrorKind::History(HistoryErrorKind::OutcomeUnknown)
+        );
+
+        let retry = repository
+            .reconcile_unleased_snapshot_temp(observed_at + Duration::from_millis(1))
+            .unwrap();
+        assert!(matches!(
+            retry.outcome,
+            SnapshotUnleasedTempReconciliationBatchOutcome::Removed { .. }
+        ));
     }
 
     #[test]
@@ -3950,7 +4357,7 @@ mod tests {
     }
 
     #[test]
-    fn unleased_legacy_temp_remains_unknown_and_is_never_reconciled() {
+    fn unleased_legacy_temp_remains_explicit_non_authoritative_inventory_debt() {
         let temp = TempDir::new().unwrap();
         let database = temp.path().join("store/dux.sqlite3");
         let (_store, repository) = open_repository(&database);

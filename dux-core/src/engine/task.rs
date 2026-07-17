@@ -32,6 +32,7 @@ pub enum TaskKind {
     SnapshotRetention,
     SnapshotOrphanMaintenance,
     SnapshotTerminalTempMaintenance,
+    SnapshotUnleasedTempMaintenance,
 }
 
 /// Execution phase. Cancellation intent is reported separately until work is
@@ -64,6 +65,7 @@ pub enum TaskFailureKind {
     SnapshotRetention(SnapshotRetentionFailureKind),
     SnapshotOrphanMaintenance(SnapshotOrphanMaintenanceFailureKind),
     SnapshotTerminalTempMaintenance(SnapshotTerminalTempMaintenanceFailureKind),
+    SnapshotUnleasedTempMaintenance(SnapshotUnleasedTempMaintenanceFailureKind),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -115,6 +117,21 @@ pub enum SnapshotOrphanMaintenanceFailureKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SnapshotTerminalTempMaintenanceFailureKind {
+    InvalidClock,
+    IncompatibleSchema,
+    Busy,
+    UnsafeStorage,
+    BudgetExceeded,
+    CorruptData,
+    Unavailable,
+    OutcomeUnknown,
+    InternalState,
+}
+
+/// Path-free failure categories for unleased snapshot-temp reconciliation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SnapshotUnleasedTempMaintenanceFailureKind {
     InvalidClock,
     IncompatibleSchema,
     Busy,
@@ -192,6 +209,17 @@ pub enum TaskEventKind {
         active_terminal_lease_count_after: u32,
         terminal_charged_bytes_before: u64,
         terminal_charged_bytes_after: u64,
+        has_more: bool,
+    },
+    SnapshotUnleasedTempMaintenanceBatchApplying,
+    SnapshotUnleasedTempMaintenanceBatchFinished {
+        outcome: SnapshotUnleasedTempMaintenanceOutcome,
+        unleased_temp_count_before: u32,
+        unleased_temp_count_after: u32,
+        active_unleased_temp_count_before: u32,
+        active_unleased_temp_count_after: u32,
+        unleased_charged_bytes_before: u64,
+        unleased_charged_bytes_after: u64,
         has_more: bool,
     },
     CancellationRequested,
@@ -509,6 +537,94 @@ impl SnapshotTerminalTempMaintenanceResult {
 
     pub const fn terminal_charged_bytes_after(&self) -> u64 {
         self.terminal_charged_bytes_after
+    }
+
+    pub const fn has_more(&self) -> bool {
+        self.has_more
+    }
+}
+
+/// Path-free outcome of one bounded unleased snapshot-temp reconciliation.
+/// The exact temporary-file identity stays private inside persistence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SnapshotUnleasedTempMaintenanceOutcome {
+    NoUnleasedTemp,
+    DeferredActive,
+    Removed { bytes: u64 },
+}
+
+/// Immutable outcome from one idle-only unleased snapshot-temp batch.
+/// `has_more` asks the caller to submit a later task; core never self-enqueues.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SnapshotUnleasedTempMaintenanceResult {
+    observed_at: SystemTime,
+    outcome: SnapshotUnleasedTempMaintenanceOutcome,
+    unleased_temp_count_before: u32,
+    unleased_temp_count_after: u32,
+    active_unleased_temp_count_before: u32,
+    active_unleased_temp_count_after: u32,
+    unleased_charged_bytes_before: u64,
+    unleased_charged_bytes_after: u64,
+    has_more: bool,
+}
+
+impl SnapshotUnleasedTempMaintenanceResult {
+    #[allow(clippy::too_many_arguments)]
+    pub(super) const fn new(
+        observed_at: SystemTime,
+        outcome: SnapshotUnleasedTempMaintenanceOutcome,
+        unleased_temp_count_before: u32,
+        unleased_temp_count_after: u32,
+        active_unleased_temp_count_before: u32,
+        active_unleased_temp_count_after: u32,
+        unleased_charged_bytes_before: u64,
+        unleased_charged_bytes_after: u64,
+        has_more: bool,
+    ) -> Self {
+        Self {
+            observed_at,
+            outcome,
+            unleased_temp_count_before,
+            unleased_temp_count_after,
+            active_unleased_temp_count_before,
+            active_unleased_temp_count_after,
+            unleased_charged_bytes_before,
+            unleased_charged_bytes_after,
+            has_more,
+        }
+    }
+
+    pub const fn observed_at(&self) -> SystemTime {
+        self.observed_at
+    }
+
+    pub const fn outcome(&self) -> SnapshotUnleasedTempMaintenanceOutcome {
+        self.outcome
+    }
+
+    pub const fn unleased_temp_count_before(&self) -> u32 {
+        self.unleased_temp_count_before
+    }
+
+    pub const fn unleased_temp_count_after(&self) -> u32 {
+        self.unleased_temp_count_after
+    }
+
+    pub const fn active_unleased_temp_count_before(&self) -> u32 {
+        self.active_unleased_temp_count_before
+    }
+
+    pub const fn active_unleased_temp_count_after(&self) -> u32 {
+        self.active_unleased_temp_count_after
+    }
+
+    pub const fn unleased_charged_bytes_before(&self) -> u64 {
+        self.unleased_charged_bytes_before
+    }
+
+    pub const fn unleased_charged_bytes_after(&self) -> u64 {
+        self.unleased_charged_bytes_after
     }
 
     pub const fn has_more(&self) -> bool {
@@ -999,6 +1115,13 @@ pub enum SnapshotOrphanMaintenanceStartOutcome {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SnapshotTerminalTempMaintenanceStartOutcome {
+    Started(TaskId),
+    AlreadyActive(TaskId),
+    DeferredBusy,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SnapshotUnleasedTempMaintenanceStartOutcome {
     Started(TaskId),
     AlreadyActive(TaskId),
     DeferredBusy,

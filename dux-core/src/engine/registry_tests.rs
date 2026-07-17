@@ -75,6 +75,15 @@ fn started_snapshot_terminal_temp_maintenance(
     }
 }
 
+fn started_snapshot_unleased_temp_maintenance(
+    outcome: SnapshotUnleasedTempMaintenanceStartOutcome,
+) -> TaskId {
+    match outcome {
+        SnapshotUnleasedTempMaintenanceStartOutcome::Started(id) => id,
+        other => panic!("expected started snapshot unleased-temp maintenance, got {other:?}"),
+    }
+}
+
 fn publish_running_orphan(
     engine: &EngineHandle,
     root: &std::path::Path,
@@ -3981,6 +3990,908 @@ fn snapshot_terminal_temp_maintenance_serializes_across_engine_sessions() {
         let debug = format!("{result:?}");
         assert!(!debug.contains("cross-session-terminal-temp-private"));
         assert!(!debug.contains(root.to_string_lossy().as_ref()));
+    }
+}
+
+#[test]
+fn snapshot_unleased_temp_maintenance_runs_one_typed_path_free_noop_batch() {
+    let (_temp, engine) = engine_with_limits(RegistryLimits::testing(1, 2, 4, 8));
+    let observed = SystemTime::UNIX_EPOCH + Duration::from_millis(60_000);
+    let id = started_snapshot_unleased_temp_maintenance(
+        engine
+            .start_snapshot_unleased_temp_maintenance_at(observed)
+            .unwrap(),
+    );
+    let terminal = wait_terminal(&engine, id);
+    assert_eq!(terminal.kind, TaskKind::SnapshotUnleasedTempMaintenance);
+    assert_eq!(terminal.phase, TaskPhase::Succeeded);
+    assert!(terminal.result_available);
+    let result = engine
+        .snapshot_unleased_temp_maintenance_result(id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.observed_at(), observed);
+    assert_eq!(
+        result.outcome(),
+        SnapshotUnleasedTempMaintenanceOutcome::NoUnleasedTemp
+    );
+    assert_eq!(result.unleased_temp_count_before(), 0);
+    assert_eq!(result.unleased_temp_count_after(), 0);
+    assert_eq!(result.active_unleased_temp_count_before(), 0);
+    assert_eq!(result.active_unleased_temp_count_after(), 0);
+    assert_eq!(result.unleased_charged_bytes_before(), 0);
+    assert_eq!(result.unleased_charged_bytes_after(), 0);
+    assert!(!result.has_more());
+    assert_eq!(
+        engine
+            .snapshot_terminal_temp_maintenance_result(id)
+            .unwrap_err(),
+        TaskAccessError::WrongTaskKind
+    );
+    assert_eq!(
+        engine.snapshot_orphan_maintenance_result(id).unwrap_err(),
+        TaskAccessError::WrongTaskKind
+    );
+    assert_eq!(
+        engine.snapshot_retention_result(id).unwrap_err(),
+        TaskAccessError::WrongTaskKind
+    );
+    assert_eq!(
+        engine.history_maintenance_result(id).unwrap_err(),
+        TaskAccessError::WrongTaskKind
+    );
+    assert_eq!(
+        engine.scan_result(id).unwrap_err(),
+        TaskAccessError::WrongTaskKind
+    );
+
+    let events = engine.task_events(id, 0, 8).unwrap().events;
+    let applying = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event.kind,
+                TaskEventKind::SnapshotUnleasedTempMaintenanceBatchApplying
+            )
+        })
+        .unwrap();
+    let finished = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event.kind,
+                TaskEventKind::SnapshotUnleasedTempMaintenanceBatchFinished {
+                    outcome: SnapshotUnleasedTempMaintenanceOutcome::NoUnleasedTemp,
+                    unleased_temp_count_before: 0,
+                    unleased_temp_count_after: 0,
+                    active_unleased_temp_count_before: 0,
+                    active_unleased_temp_count_after: 0,
+                    unleased_charged_bytes_before: 0,
+                    unleased_charged_bytes_after: 0,
+                    has_more: false,
+                }
+            )
+        })
+        .unwrap();
+    let terminal_event = events
+        .iter()
+        .position(|event| matches!(event.kind, TaskEventKind::Terminal { .. }))
+        .unwrap();
+    assert!(applying < finished && finished < terminal_event);
+}
+
+#[test]
+fn snapshot_unleased_temp_maintenance_is_one_at_a_time_accounted_and_defers_active() {
+    let temp = TempDir::new().unwrap();
+    let config = config(&temp);
+    let engine =
+        EngineHandle::open_with_limits(config, RegistryLimits::testing(1, 4, 16, 8)).unwrap();
+    let active_seed: &[u8] = b"active-unleased-private-seed";
+    let first_seed: &[u8] = b"first-unleased-private-seed";
+    let second_seed: &[u8] = b"second-unleased-private-seed";
+    let active = engine
+        .inner
+        .snapshots
+        .leave_unleased_snapshot_temp_for_test(active_seed, true)
+        .unwrap()
+        .unwrap();
+    engine
+        .inner
+        .snapshots
+        .leave_unleased_snapshot_temp_for_test(first_seed, false)
+        .unwrap();
+    engine
+        .inner
+        .snapshots
+        .leave_unleased_snapshot_temp_for_test(second_seed, false)
+        .unwrap();
+    let base = SystemTime::UNIX_EPOCH + Duration::from_millis(61_000);
+
+    let first = started_snapshot_unleased_temp_maintenance(
+        engine
+            .start_snapshot_unleased_temp_maintenance_at(base)
+            .unwrap(),
+    );
+    assert_eq!(wait_terminal(&engine, first).phase, TaskPhase::Succeeded);
+    let first_result = engine
+        .snapshot_unleased_temp_maintenance_result(first)
+        .unwrap()
+        .unwrap();
+    let first_bytes = match first_result.outcome() {
+        SnapshotUnleasedTempMaintenanceOutcome::Removed { bytes } => bytes,
+        other => panic!("expected unleased temp removal, got {other:?}"),
+    };
+    assert!(first_bytes > 0);
+    assert_eq!(first_result.unleased_temp_count_before(), 3);
+    assert_eq!(first_result.unleased_temp_count_after(), 2);
+    assert_eq!(first_result.active_unleased_temp_count_before(), 1);
+    assert_eq!(first_result.active_unleased_temp_count_after(), 1);
+    assert_eq!(
+        first_result.unleased_charged_bytes_before() - first_bytes,
+        first_result.unleased_charged_bytes_after()
+    );
+    assert!(first_result.has_more());
+    assert!(
+        engine
+            .inner
+            .shared
+            .lock_registry_recover()
+            .active_snapshot_unleased_temp_maintenance
+            .is_none()
+    );
+
+    let second = started_snapshot_unleased_temp_maintenance(
+        engine
+            .start_snapshot_unleased_temp_maintenance_at(base + Duration::from_millis(1))
+            .unwrap(),
+    );
+    assert_eq!(wait_terminal(&engine, second).phase, TaskPhase::Succeeded);
+    let second_result = engine
+        .snapshot_unleased_temp_maintenance_result(second)
+        .unwrap()
+        .unwrap();
+    let second_bytes = match second_result.outcome() {
+        SnapshotUnleasedTempMaintenanceOutcome::Removed { bytes } => bytes,
+        other => panic!("expected unleased temp removal, got {other:?}"),
+    };
+    assert_eq!(second_result.unleased_temp_count_before(), 2);
+    assert_eq!(second_result.unleased_temp_count_after(), 1);
+    assert_eq!(second_result.active_unleased_temp_count_before(), 1);
+    assert_eq!(second_result.active_unleased_temp_count_after(), 1);
+    assert_eq!(
+        second_result.unleased_charged_bytes_before() - second_bytes,
+        second_result.unleased_charged_bytes_after()
+    );
+    assert!(second_result.has_more());
+
+    let deferred = started_snapshot_unleased_temp_maintenance(
+        engine
+            .start_snapshot_unleased_temp_maintenance_at(base + Duration::from_millis(2))
+            .unwrap(),
+    );
+    assert_eq!(wait_terminal(&engine, deferred).phase, TaskPhase::Succeeded);
+    let deferred_result = engine
+        .snapshot_unleased_temp_maintenance_result(deferred)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        deferred_result.outcome(),
+        SnapshotUnleasedTempMaintenanceOutcome::DeferredActive
+    );
+    assert_eq!(deferred_result.unleased_temp_count_before(), 1);
+    assert_eq!(deferred_result.unleased_temp_count_after(), 1);
+    assert_eq!(deferred_result.active_unleased_temp_count_before(), 1);
+    assert_eq!(deferred_result.active_unleased_temp_count_after(), 1);
+    assert_eq!(
+        deferred_result.unleased_charged_bytes_before(),
+        deferred_result.unleased_charged_bytes_after()
+    );
+    assert!(deferred_result.has_more());
+
+    active.abandon();
+    let final_task = started_snapshot_unleased_temp_maintenance(
+        engine
+            .start_snapshot_unleased_temp_maintenance_at(base + Duration::from_millis(3))
+            .unwrap(),
+    );
+    assert_eq!(
+        wait_terminal(&engine, final_task).phase,
+        TaskPhase::Succeeded
+    );
+    let final_result = engine
+        .snapshot_unleased_temp_maintenance_result(final_task)
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        final_result.outcome(),
+        SnapshotUnleasedTempMaintenanceOutcome::Removed { bytes } if bytes > 0
+    ));
+    assert_eq!(final_result.unleased_temp_count_after(), 0);
+    assert_eq!(final_result.unleased_charged_bytes_after(), 0);
+    assert!(!final_result.has_more());
+
+    for result in [
+        &*first_result,
+        &*second_result,
+        &*deferred_result,
+        &*final_result,
+    ] {
+        let debug = format!("{result:?}");
+        for seed in [active_seed, first_seed, second_seed] {
+            assert!(!debug.contains(std::str::from_utf8(seed).unwrap()));
+        }
+        assert!(!debug.contains(".snapshot-"));
+    }
+}
+
+#[test]
+fn snapshot_unleased_temp_maintenance_is_idle_deduplicated_and_cross_exclusive() {
+    let (_temp, engine) = engine_with_limits(RegistryLimits::testing(1, 3, 16, 8));
+
+    let (foreground_started_tx, foreground_started_rx) = mpsc::channel();
+    let (foreground_release_tx, foreground_release_rx) = mpsc::channel();
+    let foreground = engine
+        .submit_test(Box::new(move |_| {
+            foreground_started_tx.send(()).unwrap();
+            foreground_release_rx.recv().unwrap();
+            WorkOutcome::Succeeded(TaskResult::TestOnly)
+        }))
+        .unwrap();
+    foreground_started_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    assert_eq!(
+        engine.start_snapshot_unleased_temp_maintenance().unwrap(),
+        SnapshotUnleasedTempMaintenanceStartOutcome::DeferredBusy
+    );
+    foreground_release_tx.send(()).unwrap();
+    wait_terminal(&engine, foreground);
+
+    let (history_started_tx, history_started_rx) = mpsc::channel();
+    let (history_release_tx, history_release_rx) = mpsc::channel();
+    let history = started_maintenance(
+        engine
+            .start_history_maintenance_with_test_hooks(
+                SystemTime::UNIX_EPOCH + Duration::from_millis(62_000),
+                move || {
+                    history_started_tx.send(()).unwrap();
+                    history_release_rx.recv().unwrap();
+                },
+                || {},
+            )
+            .unwrap(),
+    );
+    history_started_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    assert_eq!(
+        engine.start_snapshot_unleased_temp_maintenance().unwrap(),
+        SnapshotUnleasedTempMaintenanceStartOutcome::DeferredBusy
+    );
+    history_release_tx.send(()).unwrap();
+    wait_terminal(&engine, history);
+
+    let (retention_started_tx, retention_started_rx) = mpsc::channel();
+    let (retention_release_tx, retention_release_rx) = mpsc::channel();
+    let retention = started_snapshot_retention(
+        engine
+            .start_snapshot_retention_with_test_hooks(
+                SystemTime::UNIX_EPOCH + Duration::from_millis(62_001),
+                move || {
+                    retention_started_tx.send(()).unwrap();
+                    retention_release_rx.recv().unwrap();
+                },
+                || {},
+                || {},
+            )
+            .unwrap(),
+    );
+    retention_started_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    assert_eq!(
+        engine.start_snapshot_unleased_temp_maintenance().unwrap(),
+        SnapshotUnleasedTempMaintenanceStartOutcome::DeferredBusy
+    );
+    retention_release_tx.send(()).unwrap();
+    wait_terminal(&engine, retention);
+
+    let (orphan_started_tx, orphan_started_rx) = mpsc::channel();
+    let (orphan_release_tx, orphan_release_rx) = mpsc::channel();
+    let orphan = started_snapshot_orphan_maintenance(
+        engine
+            .start_snapshot_orphan_maintenance_with_test_hooks(
+                SystemTime::UNIX_EPOCH + Duration::from_millis(62_002),
+                move || {
+                    orphan_started_tx.send(()).unwrap();
+                    orphan_release_rx.recv().unwrap();
+                },
+                || {},
+                || {},
+            )
+            .unwrap(),
+    );
+    orphan_started_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    assert_eq!(
+        engine.start_snapshot_unleased_temp_maintenance().unwrap(),
+        SnapshotUnleasedTempMaintenanceStartOutcome::DeferredBusy
+    );
+    orphan_release_tx.send(()).unwrap();
+    wait_terminal(&engine, orphan);
+
+    let (terminal_started_tx, terminal_started_rx) = mpsc::channel();
+    let (terminal_release_tx, terminal_release_rx) = mpsc::channel();
+    let terminal = started_snapshot_terminal_temp_maintenance(
+        engine
+            .start_snapshot_terminal_temp_maintenance_with_test_hooks(
+                SystemTime::UNIX_EPOCH + Duration::from_millis(62_003),
+                move || {
+                    terminal_started_tx.send(()).unwrap();
+                    terminal_release_rx.recv().unwrap();
+                },
+                || {},
+                || {},
+            )
+            .unwrap(),
+    );
+    terminal_started_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    assert_eq!(
+        engine.start_snapshot_unleased_temp_maintenance().unwrap(),
+        SnapshotUnleasedTempMaintenanceStartOutcome::DeferredBusy
+    );
+    terminal_release_tx.send(()).unwrap();
+    wait_terminal(&engine, terminal);
+
+    let (unleased_started_tx, unleased_started_rx) = mpsc::channel();
+    let (unleased_release_tx, unleased_release_rx) = mpsc::channel();
+    let unleased = started_snapshot_unleased_temp_maintenance(
+        engine
+            .start_snapshot_unleased_temp_maintenance_with_test_hooks(
+                SystemTime::UNIX_EPOCH + Duration::from_millis(62_004),
+                move || {
+                    unleased_started_tx.send(()).unwrap();
+                    unleased_release_rx.recv().unwrap();
+                },
+                || {},
+                || {},
+            )
+            .unwrap(),
+    );
+    unleased_started_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    assert_eq!(
+        engine.start_snapshot_unleased_temp_maintenance().unwrap(),
+        SnapshotUnleasedTempMaintenanceStartOutcome::AlreadyActive(unleased)
+    );
+    assert_eq!(
+        engine.start_history_maintenance().unwrap(),
+        HistoryMaintenanceStartOutcome::DeferredBusy
+    );
+    assert_eq!(
+        engine.start_snapshot_retention().unwrap(),
+        SnapshotRetentionStartOutcome::DeferredBusy
+    );
+    assert_eq!(
+        engine.start_snapshot_orphan_maintenance().unwrap(),
+        SnapshotOrphanMaintenanceStartOutcome::DeferredBusy
+    );
+    assert_eq!(
+        engine.start_snapshot_terminal_temp_maintenance().unwrap(),
+        SnapshotTerminalTempMaintenanceStartOutcome::DeferredBusy
+    );
+    unleased_release_tx.send(()).unwrap();
+    assert_eq!(wait_terminal(&engine, unleased).phase, TaskPhase::Succeeded);
+}
+
+#[test]
+fn snapshot_unleased_temp_cancellation_is_linearized_at_applying() {
+    let temp = TempDir::new().unwrap();
+    let engine =
+        EngineHandle::open_with_limits(config(&temp), RegistryLimits::testing(1, 2, 8, 8)).unwrap();
+    let private_seed = b"cancel-unleased-temp-private";
+    engine
+        .inner
+        .snapshots
+        .leave_unleased_snapshot_temp_for_test(private_seed, false)
+        .unwrap();
+    let observed = SystemTime::UNIX_EPOCH + Duration::from_millis(63_000);
+
+    let (before_tx, before_rx) = mpsc::channel();
+    let (before_release_tx, before_release_rx) = mpsc::channel();
+    let cancelled = started_snapshot_unleased_temp_maintenance(
+        engine
+            .start_snapshot_unleased_temp_maintenance_with_test_hooks(
+                observed,
+                move || {
+                    before_tx.send(()).unwrap();
+                    before_release_rx.recv().unwrap();
+                },
+                || {},
+                || {},
+            )
+            .unwrap(),
+    );
+    before_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    assert_eq!(
+        engine.cancel_task(cancelled).unwrap(),
+        CancelOutcome::Requested
+    );
+    before_release_tx.send(()).unwrap();
+    assert_eq!(
+        wait_terminal(&engine, cancelled).phase,
+        TaskPhase::Cancelled
+    );
+    assert!(
+        engine
+            .task_events(cancelled, 0, 8)
+            .unwrap()
+            .events
+            .iter()
+            .all(|event| !matches!(
+                event.kind,
+                TaskEventKind::SnapshotUnleasedTempMaintenanceBatchApplying
+            ))
+    );
+
+    let (applying_tx, applying_rx) = mpsc::channel();
+    let (applying_release_tx, applying_release_rx) = mpsc::channel();
+    let applied = started_snapshot_unleased_temp_maintenance(
+        engine
+            .start_snapshot_unleased_temp_maintenance_with_test_hooks(
+                observed + Duration::from_millis(1),
+                || {},
+                move || {
+                    applying_tx.send(()).unwrap();
+                    applying_release_rx.recv().unwrap();
+                },
+                || {},
+            )
+            .unwrap(),
+    );
+    applying_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    assert_eq!(
+        engine.cancel_task(applied).unwrap(),
+        CancelOutcome::Requested
+    );
+    applying_release_tx.send(()).unwrap();
+    let terminal = wait_terminal(&engine, applied);
+    assert_eq!(terminal.phase, TaskPhase::Succeeded);
+    assert!(terminal.cancellation_requested);
+    let result = engine
+        .snapshot_unleased_temp_maintenance_result(applied)
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        result.outcome(),
+        SnapshotUnleasedTempMaintenanceOutcome::Removed { bytes } if bytes > 0
+    ));
+    assert!(!format!("{result:?}").contains(std::str::from_utf8(private_seed).unwrap()));
+}
+
+#[test]
+fn snapshot_unleased_temp_close_is_linearized_at_applying() {
+    let run = |close_after_applying: bool| {
+        let temp = TempDir::new().unwrap();
+        let engine =
+            EngineHandle::open_with_limits(config(&temp), RegistryLimits::testing(1, 2, 8, 8))
+                .unwrap();
+        engine
+            .inner
+            .snapshots
+            .leave_unleased_snapshot_temp_for_test(
+                if close_after_applying {
+                    b"close-after-unleased-private"
+                } else {
+                    b"close-before-unleased-private"
+                },
+                false,
+            )
+            .unwrap();
+        let (blocked_tx, blocked_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let observed = SystemTime::UNIX_EPOCH + Duration::from_millis(64_000);
+        let task = if close_after_applying {
+            started_snapshot_unleased_temp_maintenance(
+                engine
+                    .start_snapshot_unleased_temp_maintenance_with_test_hooks(
+                        observed,
+                        || {},
+                        move || {
+                            blocked_tx.send(()).unwrap();
+                            release_rx.recv().unwrap();
+                        },
+                        || {},
+                    )
+                    .unwrap(),
+            )
+        } else {
+            started_snapshot_unleased_temp_maintenance(
+                engine
+                    .start_snapshot_unleased_temp_maintenance_with_test_hooks(
+                        observed,
+                        move || {
+                            blocked_tx.send(()).unwrap();
+                            release_rx.recv().unwrap();
+                        },
+                        || {},
+                        || {},
+                    )
+                    .unwrap(),
+            )
+        };
+        blocked_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+        assert_eq!(engine.close(), CloseOutcome::Initiated);
+        release_tx.send(()).unwrap();
+        assert!(engine.wait_until_closed(TEST_TIMEOUT));
+
+        let registry = engine.inner.shared.lock_registry_recover();
+        let record = registry.records.get(&task).unwrap();
+        assert!(record.cancellation_requested);
+        let applying_seen = record.events.iter().any(|event| {
+            matches!(
+                event.kind,
+                TaskEventKind::SnapshotUnleasedTempMaintenanceBatchApplying
+            )
+        });
+        if close_after_applying {
+            assert_eq!(record.phase, TaskPhase::Succeeded);
+            assert!(applying_seen);
+            assert!(matches!(
+                record.result,
+                Some(TaskResult::SnapshotUnleasedTempMaintenance(_))
+            ));
+        } else {
+            assert_eq!(record.phase, TaskPhase::Cancelled);
+            assert!(!applying_seen);
+            assert!(record.result.is_none());
+        }
+    };
+
+    run(false);
+    run(true);
+}
+
+#[test]
+fn snapshot_unleased_temp_failure_and_outcome_mapping_is_exhaustive() {
+    let assert_mapping = |input, expected| {
+        assert_eq!(
+            map_snapshot_unleased_temp_maintenance_failure(input),
+            TaskFailureKind::SnapshotUnleasedTempMaintenance(expected)
+        );
+    };
+    for input in [
+        SnapshotRepositoryErrorKind::ReadOnly,
+        SnapshotRepositoryErrorKind::MissingStore,
+        SnapshotRepositoryErrorKind::ReviewLeaseExpired,
+        SnapshotRepositoryErrorKind::IncompatibleVersion,
+    ] {
+        assert_mapping(
+            input,
+            SnapshotUnleasedTempMaintenanceFailureKind::InternalState,
+        );
+    }
+    for input in [
+        SnapshotRepositoryErrorKind::MissingSnapshot,
+        SnapshotRepositoryErrorKind::SnapshotUnavailable,
+        SnapshotRepositoryErrorKind::ReferenceMismatch,
+    ] {
+        assert_mapping(
+            input,
+            SnapshotUnleasedTempMaintenanceFailureKind::CorruptData,
+        );
+    }
+    for (input, expected) in [
+        (
+            SnapshotCodecErrorKind::InvalidInput,
+            SnapshotUnleasedTempMaintenanceFailureKind::InternalState,
+        ),
+        (
+            SnapshotCodecErrorKind::Io,
+            SnapshotUnleasedTempMaintenanceFailureKind::Unavailable,
+        ),
+        (
+            SnapshotCodecErrorKind::LimitExceeded,
+            SnapshotUnleasedTempMaintenanceFailureKind::BudgetExceeded,
+        ),
+        (
+            SnapshotCodecErrorKind::IncompatibleVersion,
+            SnapshotUnleasedTempMaintenanceFailureKind::InternalState,
+        ),
+        (
+            SnapshotCodecErrorKind::InvalidMagic,
+            SnapshotUnleasedTempMaintenanceFailureKind::CorruptData,
+        ),
+        (
+            SnapshotCodecErrorKind::InvalidLength,
+            SnapshotUnleasedTempMaintenanceFailureKind::CorruptData,
+        ),
+        (
+            SnapshotCodecErrorKind::ChecksumMismatch,
+            SnapshotUnleasedTempMaintenanceFailureKind::CorruptData,
+        ),
+        (
+            SnapshotCodecErrorKind::CorruptData,
+            SnapshotUnleasedTempMaintenanceFailureKind::CorruptData,
+        ),
+    ] {
+        assert_mapping(SnapshotRepositoryErrorKind::Codec(input), expected);
+    }
+    for (input, expected) in [
+        (
+            SnapshotStorageErrorKind::InvalidConfiguration,
+            SnapshotUnleasedTempMaintenanceFailureKind::InternalState,
+        ),
+        (
+            SnapshotStorageErrorKind::UnsafeRoot,
+            SnapshotUnleasedTempMaintenanceFailureKind::UnsafeStorage,
+        ),
+        (
+            SnapshotStorageErrorKind::UnsafeObject,
+            SnapshotUnleasedTempMaintenanceFailureKind::UnsafeStorage,
+        ),
+        (
+            SnapshotStorageErrorKind::UnrecognizedStore,
+            SnapshotUnleasedTempMaintenanceFailureKind::UnsafeStorage,
+        ),
+        (
+            SnapshotStorageErrorKind::Unavailable,
+            SnapshotUnleasedTempMaintenanceFailureKind::Unavailable,
+        ),
+        (
+            SnapshotStorageErrorKind::Busy,
+            SnapshotUnleasedTempMaintenanceFailureKind::Busy,
+        ),
+        (
+            SnapshotStorageErrorKind::InternalState,
+            SnapshotUnleasedTempMaintenanceFailureKind::InternalState,
+        ),
+    ] {
+        assert_mapping(SnapshotRepositoryErrorKind::Storage(input), expected);
+    }
+    for (input, expected) in [
+        (
+            HistoryErrorKind::InvalidInput,
+            SnapshotUnleasedTempMaintenanceFailureKind::InvalidClock,
+        ),
+        (
+            HistoryErrorKind::IncompatibleSchema,
+            SnapshotUnleasedTempMaintenanceFailureKind::IncompatibleSchema,
+        ),
+        (
+            HistoryErrorKind::QueryLimitExceeded,
+            SnapshotUnleasedTempMaintenanceFailureKind::BudgetExceeded,
+        ),
+        (
+            HistoryErrorKind::Busy,
+            SnapshotUnleasedTempMaintenanceFailureKind::Busy,
+        ),
+        (
+            HistoryErrorKind::UnsafeStorage,
+            SnapshotUnleasedTempMaintenanceFailureKind::UnsafeStorage,
+        ),
+        (
+            HistoryErrorKind::CorruptData,
+            SnapshotUnleasedTempMaintenanceFailureKind::CorruptData,
+        ),
+        (
+            HistoryErrorKind::DatabaseUnavailable,
+            SnapshotUnleasedTempMaintenanceFailureKind::Unavailable,
+        ),
+        (
+            HistoryErrorKind::OutcomeUnknown,
+            SnapshotUnleasedTempMaintenanceFailureKind::OutcomeUnknown,
+        ),
+        (
+            HistoryErrorKind::AlreadyExists,
+            SnapshotUnleasedTempMaintenanceFailureKind::InternalState,
+        ),
+        (
+            HistoryErrorKind::NotFound,
+            SnapshotUnleasedTempMaintenanceFailureKind::InternalState,
+        ),
+        (
+            HistoryErrorKind::InvalidTransition,
+            SnapshotUnleasedTempMaintenanceFailureKind::InternalState,
+        ),
+        (
+            HistoryErrorKind::InternalState,
+            SnapshotUnleasedTempMaintenanceFailureKind::InternalState,
+        ),
+    ] {
+        assert_mapping(SnapshotRepositoryErrorKind::History(input), expected);
+    }
+
+    for (input, expected) in [
+        (
+            SnapshotUnleasedTempReconciliationBatchOutcome::NoUnleasedTemp,
+            SnapshotUnleasedTempMaintenanceOutcome::NoUnleasedTemp,
+        ),
+        (
+            SnapshotUnleasedTempReconciliationBatchOutcome::DeferredActive,
+            SnapshotUnleasedTempMaintenanceOutcome::DeferredActive,
+        ),
+        (
+            SnapshotUnleasedTempReconciliationBatchOutcome::Removed { bytes: 42 },
+            SnapshotUnleasedTempMaintenanceOutcome::Removed { bytes: 42 },
+        ),
+    ] {
+        assert_eq!(
+            public_snapshot_unleased_temp_maintenance_outcome(&input),
+            expected
+        );
+    }
+}
+
+#[test]
+fn invalid_unleased_temp_clock_schema_race_and_panic_release_exclusive_admission() {
+    let temp = TempDir::new().unwrap();
+    let engine =
+        EngineHandle::open_with_limits(config(&temp), RegistryLimits::testing(1, 2, 8, 8)).unwrap();
+    let invalid = started_snapshot_unleased_temp_maintenance(
+        engine
+            .start_snapshot_unleased_temp_maintenance_at(
+                SystemTime::UNIX_EPOCH - Duration::from_millis(1),
+            )
+            .unwrap(),
+    );
+    assert_eq!(
+        wait_terminal(&engine, invalid).failure,
+        Some(TaskFailureKind::SnapshotUnleasedTempMaintenance(
+            SnapshotUnleasedTempMaintenanceFailureKind::InvalidClock
+        ))
+    );
+
+    let panicking = started_snapshot_unleased_temp_maintenance(
+        engine
+            .start_snapshot_unleased_temp_maintenance_with_test_hooks(
+                SystemTime::UNIX_EPOCH + Duration::from_millis(65_000),
+                || panic!("snapshot unleased-temp hook panic"),
+                || {},
+                || {},
+            )
+            .unwrap(),
+    );
+    assert_eq!(wait_terminal(&engine, panicking).phase, TaskPhase::Failed);
+    let replacement = started_snapshot_unleased_temp_maintenance(
+        engine
+            .start_snapshot_unleased_temp_maintenance_at(
+                SystemTime::UNIX_EPOCH + Duration::from_millis(65_001),
+            )
+            .unwrap(),
+    );
+    assert_eq!(
+        wait_terminal(&engine, replacement).phase,
+        TaskPhase::Succeeded
+    );
+
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let racing = started_snapshot_unleased_temp_maintenance(
+        engine
+            .start_snapshot_unleased_temp_maintenance_with_test_hooks(
+                SystemTime::UNIX_EPOCH + Duration::from_millis(65_002),
+                move || {
+                    started_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                },
+                || {},
+                || {},
+            )
+            .unwrap(),
+    );
+    started_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    let future = crate::persistence::DATABASE_SCHEMA_VERSION + 1;
+    engine.inner.store.with_connection(|connection| {
+        connection
+            .execute(
+                "INSERT INTO schema_migrations
+                 (version, name, checksum_sha256, applied_at_unix_ms)
+                 VALUES (?1, 'future-unleased-temp-maintenance-race', zeroblob(32), 2)",
+                [i64::from(future)],
+            )
+            .unwrap();
+        connection
+            .pragma_update(None, "user_version", future)
+            .unwrap();
+    });
+    release_tx.send(()).unwrap();
+    assert_eq!(
+        wait_terminal(&engine, racing).failure,
+        Some(TaskFailureKind::SnapshotUnleasedTempMaintenance(
+            SnapshotUnleasedTempMaintenanceFailureKind::IncompatibleSchema
+        ))
+    );
+}
+
+#[test]
+fn snapshot_unleased_temp_maintenance_serializes_across_engine_sessions() {
+    let temp = TempDir::new().unwrap();
+    let config = config(&temp);
+    let first_engine =
+        EngineHandle::open_with_limits(config.clone(), RegistryLimits::testing(1, 2, 8, 8))
+            .unwrap();
+    let private_seed = b"cross-session-unleased-temp-private";
+    first_engine
+        .inner
+        .snapshots
+        .leave_unleased_snapshot_temp_for_test(private_seed, false)
+        .unwrap();
+    let second_engine =
+        EngineHandle::open_with_limits(config, RegistryLimits::testing(1, 2, 8, 8)).unwrap();
+    let observed = SystemTime::UNIX_EPOCH + Duration::from_millis(66_000);
+    let (applying_tx, applying_rx) = mpsc::channel();
+    let (first_release_tx, first_release_rx) = mpsc::channel();
+    let (second_release_tx, second_release_rx) = mpsc::channel();
+    let first_ready = applying_tx.clone();
+    let first = started_snapshot_unleased_temp_maintenance(
+        first_engine
+            .start_snapshot_unleased_temp_maintenance_with_test_hooks(
+                observed,
+                || {},
+                move || {
+                    first_ready.send(()).unwrap();
+                    first_release_rx.recv().unwrap();
+                },
+                || {},
+            )
+            .unwrap(),
+    );
+    let second = started_snapshot_unleased_temp_maintenance(
+        second_engine
+            .start_snapshot_unleased_temp_maintenance_with_test_hooks(
+                observed,
+                || {},
+                move || {
+                    applying_tx.send(()).unwrap();
+                    second_release_rx.recv().unwrap();
+                },
+                || {},
+            )
+            .unwrap(),
+    );
+    applying_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    applying_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    first_release_tx.send(()).unwrap();
+    second_release_tx.send(()).unwrap();
+    assert_eq!(
+        wait_terminal(&first_engine, first).phase,
+        TaskPhase::Succeeded
+    );
+    assert_eq!(
+        wait_terminal(&second_engine, second).phase,
+        TaskPhase::Succeeded
+    );
+    let outcomes = [
+        first_engine
+            .snapshot_unleased_temp_maintenance_result(first)
+            .unwrap()
+            .unwrap()
+            .outcome(),
+        second_engine
+            .snapshot_unleased_temp_maintenance_result(second)
+            .unwrap()
+            .unwrap()
+            .outcome(),
+    ];
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| matches!(
+                outcome,
+                SnapshotUnleasedTempMaintenanceOutcome::Removed { .. }
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| matches!(
+                outcome,
+                SnapshotUnleasedTempMaintenanceOutcome::NoUnleasedTemp
+            ))
+            .count(),
+        1
+    );
+    for (engine, id) in [(&first_engine, first), (&second_engine, second)] {
+        let result = engine
+            .snapshot_unleased_temp_maintenance_result(id)
+            .unwrap()
+            .unwrap();
+        assert!(!format!("{result:?}").contains(std::str::from_utf8(private_seed).unwrap()));
     }
 }
 

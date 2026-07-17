@@ -314,10 +314,12 @@ handle is closed without mutation instead.
 
 This publication protocol is not a general scavenger. The separate bounded
 terminal-row reconciler below can consume failed, cancelled, or interrupted
-row-bound debt. Neither path settles a running scan, removes an unleased pre-v8
-temp, or touches `.dux-snapshot-stage-*` provisioning siblings. Native Windows
-runtime coverage of the kernel-liveness and retained-temp removal path is still
-required; the implementation does not claim that verification from Unix tests.
+row-bound debt, and the independent unleased-temp reconciler below can remove
+one fully proven physical-only item. None of these paths settles a running scan
+or touches `.dux-snapshot-stage-*` provisioning siblings. Native Windows
+runtime coverage of the kernel-liveness and retained-temp removal paths is
+still required; the implementation does not claim that verification from Unix
+tests.
 
 This physical-driven operation is bounded even when immutable history grows
 without limit. It therefore cannot enumerate every old missing historical
@@ -378,6 +380,86 @@ This authority never adopts an unleased temp, touches a provisioning stage, or
 recovers a `running` scan left behind by hard process death. Those require
 separate ownership and liveness boundaries.
 
+### Unleased snapshot-temp reconciliation contract
+
+Unleased-temp maintenance is a separate sealed physical-only capability. It
+does not infer a parent or adopt a temp into SQLite. One batch holds a
+current-schema database guard before the snapshot writer lease, inspects the
+complete at-most-64-row immutable temp-lease population, and reconciles it with
+one complete bounded physical inventory from the retained marker-owned private
+snapshot store. A physical entry is a candidate only when its whole name
+matches DUX's generated
+`.snapshot-<64 lowercase hex>.<canonical nonzero u32 PID>.<32 lowercase hex>.tmp`
+grammar and that exact case-sensitive name is absent from every inspected lease
+row. Prefix, PID, owner/process identity, age, mtime, and quiescence observed by
+an earlier pass are never authority, individually or together.
+
+The full removal proof additionally requires a fresh no-follow open of the
+same retained name, exact filesystem identity and logical/allocation usage,
+the private regular-file mode or protected owner-only DACL, exactly one link,
+name-to-handle identity, and a second nonblocking exclusive kernel lock. The
+database guard, snapshot writer lease, complete row set, and bounded physical
+inventory remain live through that proof and effect. Any missing, malformed,
+over-limit, row-bound, renamed, replaced, resized, relinked, non-private, or
+lock-contended evidence fails closed.
+
+Candidates use exact lexicographic name order. One call skips active entries so
+they cannot starve a later quiescent item and removes at most the first
+quiescent candidate. An empty set returns `NoUnleasedTemp`; active-only debt
+returns `DeferredActive`, sets `has_more`, and requires scheduler backoff.
+Before the OS effect, the batch checks the exact after-count and charged-byte
+subtraction. It then consumes and closes the locked delete-capable handle before
+syncing the snapshot directory. This ordering includes Windows POSIX
+disposition, where closing the handle applies the name removal. A failure known
+to precede unlink is a no-effect storage failure; uncertainty after unlink or
+during directory durability is `OutcomeUnknown`. Successful removal updates
+only the retained physical inventory. No SQLite row is inserted, updated, or
+deleted; no temp is adopted or mapped to a scan; and no scan, lease, final,
+tombstone, pin, provisioning stage, or unrelated history is changed.
+
+The pre-v8/version-skew boundary is explicit. Once the current-schema fence has
+won, an older DUX writer cannot pass its later schema/name revalidation and
+publish a final or history reference. On Windows, pre-v8 writable staging
+handles also denied delete sharing, so an actually live old writer prevents the
+delete-capable reopen even though it did not participate in the v8 kernel-lock
+protocol. Unix permits unlinking an open inode: an old live writer without the
+v8 advisory lock can continue writing only its detached handle, and its later
+publication fails because the name and current schema no longer match. That is
+an acknowledged same-user availability race, not authority to corrupt a final
+or SQLite. The store's 0700/0600 ownership checks or Windows protected
+owner-only DACL exclude other users; they do not defend against a malicious or
+incompatible process running as the same user. Operators must not run pre-v8
+and current DUX binaries concurrently against the same private store when that
+availability guarantee matters.
+
+The repository API is
+`SnapshotRepository::reconcile_unleased_snapshot_temp`. The typed idle-only
+engine starts through
+`EngineHandle::start_snapshot_unleased_temp_maintenance`, publishes
+`SnapshotUnleasedTempMaintenanceBatchApplying` and
+`SnapshotUnleasedTempMaintenanceBatchFinished`, and exposes its immutable
+result through
+`EngineHandle::snapshot_unleased_temp_maintenance_result`. Applying is the
+cancellation point of no return. One task performs exactly one repository
+call, accepts no name, PID, scan, lease, identity, path, inventory, or
+candidate, publishes only canonical time, aggregate unleased/active counts,
+charged bytes, `has_more`, and `NoUnleasedTemp`, `DeferredActive`, or
+`Removed { bytes }`, and never loops or self-enqueues.
+
+Focused tests cover exact row-bound exclusion from physical candidates,
+deterministic one-item removal, exact accounting, active skip/deferral and
+convergence, stage exclusion, rejection of noncanonical PID name forms, invalid
+time, pre/post-effect classification, exact-temp-only storage mutation,
+path-free engine outcomes and redaction, explicit rescheduling,
+idle/cross-maintenance admission, cancellation/close, stable failure mapping,
+and independently opened sessions. Separate lease-table tests prove the
+complete 64-row bound. Unix executes the unlink path; native Windows
+compile/runtime mutation-path verification remains open.
+
+This capability does not scavenge provisioning stages, recover a `running`
+scan or its row-bound temp, schedule itself through app/FFI, own review leases,
+or clear the store.
+
 Production cap enforcement is a sealed, one-final-per-call repository batch.
 It acquires the current-schema database guard before the snapshot writer lease,
 freshly loads the cap, and rebuilds the complete physical/history, pin, and temp
@@ -429,9 +511,10 @@ production scheduling is not enabled until app/FFI owns the review-lease
 lifecycle and a native periodic idle scheduler requests bounded batches with
 appropriate backoff. Physical-orphan reconciliation is the separate implemented
 capability below, and terminal row-bound temp reconciliation is the separate
-implemented capability above. Unleased-temp and provisioning-stage scavenging
-and explicit clear-data actions remain future maintenance capabilities. A
-prior inventory report is never authority; each writer
+implemented capability above. Unleased physical-temp reconciliation is the
+separate implemented capability above. Provisioning-stage scavenging and
+explicit clear-data actions remain future maintenance capabilities. A prior
+inventory report is never authority; each writer
 recomputes every proof under the lock order above. A name prefix alone never
 proves that a temporary or stage directory belongs to DUX.
 
@@ -506,3 +589,7 @@ lease. Otherwise the result is outcome-unknown and a later retry remains safe.
 Physical-orphan reconciliation performs no SQLite transaction and changes no
 row; its sole mutation is one proven final unlink, with guaranteed pre-effect
 failures kept distinct from post-unlink `OutcomeUnknown`.
+Unleased-temp reconciliation likewise performs no SQLite mutation: the exact
+absence of its generated name from the complete bounded lease population is
+re-proven under the retained database and snapshot locks, and its only effect
+is one identity/usage/private/name/one-link/kernel-lock-revalidated temp unlink.

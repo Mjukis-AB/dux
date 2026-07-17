@@ -2985,11 +2985,76 @@ Tasks:
     missing Windows C sysroot, and native Windows mutation-path runtime
     verification remains open.
 
+  - Unleased snapshot-temp reconciliation sub-checkpoint completed 2026-07-17:
+    `SnapshotRepository::reconcile_unleased_snapshot_temp` now owns a separate
+    physical-only, one-item maintenance boundary for recognized snapshot temps
+    whose exact names are absent from the complete durable lease population.
+    Authority is the full conjunction of the retained marker-owned private
+    snapshot store, a current-schema database guard acquired before the
+    snapshot writer lease, the complete at-most-64-row immutable lease
+    population, one bounded physical inventory, the exact generated
+    `.snapshot-<64 lowercase hex>.<canonical nonzero u32 PID>.<32 lowercase
+    hex>.tmp` grammar, absence of that exact name from every lease row, and a
+    fresh no-follow retained/name identity, exact logical/allocation usage,
+    private-file, one-link, and second nonblocking kernel-lock proof. No
+    individual fact is sufficient. In particular, prefix, embedded PID,
+    process identity, age, mtime, and a prior quiescent observation never grant
+    removal authority.
+
+    Entries are ordered by exact ASCII name. One call skips active observations
+    without letting them starve a later quiescent entry, then removes at most
+    the first lexicographic quiescent item; an empty inventory returns
+    `NoUnleasedTemp`, while active-only debt returns `DeferredActive` for an
+    explicitly backoff-controlled later request. Counts and charged-byte
+    postconditions are checked before the physical effect. The locked
+    delete-capable handle is consumed and closed before snapshot-directory
+    sync, including Windows POSIX disposition, so a known pre-effect failure is
+    distinct from post-unlink durability `OutcomeUnknown`. Success updates the
+    retained physical inventory only. The operation never adopts the file,
+    inserts or deletes SQLite data, maps it to a scan, consumes a row-bound
+    lease, settles a `running` parent, or touches finals or provisioning stages.
+
+    Pre-v8/version-skew behavior is deliberately narrower than v8's retained
+    kernel-lock protocol. A current-schema fence prevents an older writer from
+    committing its publication after v8 has won. On Windows, pre-v8 writable
+    temp handles were opened without delete sharing, so an actually live older
+    writer also prevents the delete-capable reopen. On Unix, unlink can detach
+    an older writer's still-open inode because advisory locking was not part of
+    the pre-v8 contract; that older publication subsequently fails its
+    name/current-schema revalidation and cannot create a final or history
+    reference. Avoiding that same-user availability race depends on not
+    concurrently running old and new DUX binaries against the same private
+    store. The store's 0700/0600 or protected owner-only DACL boundary excludes
+    other users, but does not claim protection from a malicious or
+    incompatible process running as the same user.
+
+    `EngineHandle::start_snapshot_unleased_temp_maintenance` exposes one sealed
+    repository call through the typed idle-only
+    `SnapshotUnleasedTempMaintenance` task. Its Applying/Finished events and
+    result getter expose only canonical time, bounded unleased/active counts,
+    charged bytes, `has_more`, and `NoUnleasedTemp`, `DeferredActive`, or
+    `Removed { bytes }`; names, PIDs, identities, roots, paths, and any inferred
+    scan mapping remain private. Applying is the cancellation point of no
+    return, the task is mutually exclusive with foreground and every other
+    maintenance kind within its engine session, and core never loops or
+    self-enqueues. Independently opened sessions serialize at the retained
+    repository locks.
+
+    Focused repository/storage tests cover empty and deterministic
+    one-at-a-time removal, exact accounting, active skip/deferral and later
+    convergence, exclusion of row-bound and provisioning-stage debt, invalid
+    clocks, effect uncertainty, exact-temp-only removal, and inventory
+    selection. Typed engine tests cover path-free no-op/removal results,
+    explicit one-item rescheduling, active deferral, idle and cross-maintenance
+    admission, cancellation/close ordering, stable clock/schema/panic failure
+    mapping, redaction, and independently opened sessions. Unix exercises the
+    unlink path. Native Windows compile/runtime mutation-path verification
+    remains open.
+
     Production retention still requires app/FFI review-lease ownership and
-    native periodic idle scheduling, bounded marker-owned unleased-temp and
-    provisioning-stage scavenging, hard-process-death recovery for `running`
-    rows, explicit clear-data actions, and native Windows mutation-path runtime
-    verification.
+    native periodic idle scheduling, bounded marker-owned provisioning-stage
+    scavenging, hard-process-death recovery for `running` rows, explicit
+    clear-data actions, and native Windows mutation-path runtime verification.
 - [x] Add engine integration tests with temporary HOME and database. Completed
   2026-07-16: an actual `dux-core` engine scans a fixture into an isolated
   platform-correct application-support/cache layout, closes to full worker

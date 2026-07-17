@@ -417,8 +417,9 @@ row, then delete the row. A compliant creator completes row-before-file
 creation before it releases those same locks, so creation cannot still be
 pending once maintenance holds both and a row-only residual can be deleted. It
 never adopts or removes an unleased temp. Normal abort also removes and flushes
-its retained current-call temp before exact row consumption; broad startup,
-unleased-temp, and provisioning-stage scavenging is not implemented.
+its retained current-call temp before exact row consumption. Broad startup and
+provisioning-stage scavenging are not implemented; unleased-temp removal uses
+the separate physical-only boundary below.
 
 A separate bounded terminal-temp batch classifies the complete immutable lease
 population through joined parent status, but those aggregate observations grant
@@ -440,6 +441,46 @@ batch never changes its parent scan or any final, tombstone, pin, or unrelated
 history. Its idle-only engine task accepts no identity or path, exposes only
 aggregate counts/bytes, performs one batch, and never self-enqueues.
 
+The separate bounded unleased-temp batch owns no database row and fabricates no
+scan relationship. While retaining the current-schema database guard before
+the snapshot writer lease, it subtracts the complete at-most-64-row immutable
+lease-name population from one bounded physical inventory of the marker-owned
+private store. A candidate must match the whole generated
+`.snapshot-<64 lowercase hex>.<canonical nonzero u32 PID>.<32 lowercase hex>.tmp`
+grammar and have no exact case-sensitive row match. Prefix, PID, owner/process
+identity, age, mtime, and an earlier quiescent observation are not authority.
+
+Entries are considered by exact lexicographic name. Active entries are skipped
+without starving a later quiescent entry; one call removes at most the first
+quiescent item. Before removal, the exact name is reopened no-follow and must
+repeat its retained identity, logical/allocation usage, private regular-file
+protection, one-link count, name-to-handle identity, and a second nonblocking
+kernel lock. Counts and charged-byte subtraction are checked before effect.
+The delete-capable locked handle is consumed and closed before directory sync;
+uncertainty after unlink is `OutcomeUnknown`. The operation performs no SQLite
+mutation or adoption and never changes a scan, row-bound lease, final,
+tombstone, pin, provisioning stage, or unrelated history.
+
+`SnapshotRepository::reconcile_unleased_snapshot_temp` is reachable only from
+the typed idle-only `SnapshotUnleasedTempMaintenance` engine task through
+`EngineHandle::start_snapshot_unleased_temp_maintenance`. Its Applying and
+Finished events and result getter expose only canonical time, bounded
+unleased/active counts, charged bytes, `has_more`, and `NoUnleasedTemp`,
+`DeferredActive`, or `Removed { bytes }`. They expose no name, PID, identity,
+path, scan inference, or mutation input; one task invokes one batch and never
+self-enqueues.
+
+Pre-v8 writers require a platform-specific version-skew qualification. The
+current-schema fence prevents an older writer from publishing after v8 wins.
+Windows pre-v8 writable temp handles denied delete sharing, so a live older
+writer prevents the deletion reopen. Unix permits unlink of an older writer's
+open, non-v8-locked inode; that writer may continue only on the detached handle
+and later fails name/current-schema publication checks. Avoiding this same-user
+availability race requires not concurrently running old and current binaries
+on the same private store. The 0700/0600 or protected owner-only DACL boundary
+excludes other users but does not make a malicious or incompatible same-user
+process part of the threat model.
+
 The retained current-call handle remains narrow rollback authority over its
 own exact identity even if its row is concurrently deleted or replaced under
 an otherwise valid current schema. Such a mismatch forbids publication; DUX
@@ -451,8 +492,9 @@ and cannot be used to adopt an unleased name.
 Initial snapshot-directory provisioning uses a private marker-complete sibling
 stage and atomic no-replace directory publication. A racing winner is reopened
 and fully validated. Losing or interrupted `.dux-snapshot-stage-*` siblings,
-unleased recognized snapshot temps, and `running` lease rows are deliberately
-not scavenged by this checkpoint.
+and `running` lease rows are deliberately not scavenged by this checkpoint.
+Inventory-observed unleased temps may now be removed only through the
+independent bounded physical-only boundary above; they are never adopted.
 
 ## 10. Compatibility and failure behavior
 
@@ -493,8 +535,9 @@ This checkpoint does not implement:
 - app/FFI review-lease ownership and native periodic idle scheduling (the core
   engine can request exactly one sealed batch, but this does not change the
   snapshot wire or enable product scheduling);
-- unleased-temp or provisioning-stage scavenging and hard-process-death recovery
-  of `running` temp-lease parents;
+- provisioning-stage scavenging and hard-process-death recovery of `running`
+  temp-lease parents;
+- explicit user clear-data actions;
 - native Windows temp/final-removal and sparse/compressed-allocation runtime
   verification plus bounded accounting probes for slow filesystem drivers;
 - Explorer paging/indexes and measured 1M/5M-node memory budgets;
