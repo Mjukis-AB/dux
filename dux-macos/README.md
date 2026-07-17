@@ -92,6 +92,42 @@ The `se.mjukis.dux.spike` bundle identifier is intentionally temporary and must
 not be used for TCC, launch-at-login, or release identity testing. The production
 identifier and signing identity remain an explicit later decision.
 
+## Build a signed and notarized local release
+
+The fail-closed release script is present before the production identity is
+frozen, but it deliberately cannot invent or use the temporary spike identity.
+After Milestone 9 selects the final bundle ID, Apple team, and signing identity,
+store notarization credentials interactively in Keychain:
+
+```bash
+xcrun notarytool store-credentials dux-notary
+```
+
+From a clean commit exactly tagged `vX.Y.Z`, with all DUX Cargo package versions
+equal to `X.Y.Z`, run:
+
+```bash
+DUX_VERSION=X.Y.Z \
+DUX_BUILD_NUMBER=1 \
+DUX_BUNDLE_IDENTIFIER=the.frozen.bundle.id \
+DUX_TEAM_ID=ABCDEFGHIJ \
+DUX_SIGNING_IDENTITY='Developer ID Application: Exact Name (ABCDEFGHIJ)' \
+DUX_NOTARYTOOL_PROFILE=dux-notary \
+./dux-macos/scripts/release-notarized-dmg.sh
+```
+
+The script accepts no password, Apple ID, or API private-key path. It runs all
+local release gates, requires matching universal Debug/Release layouts, verifies
+the reviewed empty `Config/Release.entitlements`, signs code inside-out,
+notarizes and staples the app, creates the DMG with an Applications link, then
+independently signs, notarizes, staples, mounts, and Gatekeeper-assesses the DMG
+and contained app. It publishes only after every check succeeds, under
+`target/dux-macos-release/vX.Y.Z`, with the DMG, SHA-256 sidecar, manifest,
+sanitized submission records, and full Apple notarization logs. Output is
+same-filesystem atomically published and immutable: an existing version
+directory is never overwritten. Failed private staging is retained at the path
+printed by the script for diagnosis.
+
 The app owns one opaque real `DuxEngine` through `EngineService`. Construction,
 migration, every synchronous UniFFI call, and explicit close run lazily on its
 dedicated utility queue; app launch never opens the database on the main actor.

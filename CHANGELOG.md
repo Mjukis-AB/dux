@@ -5,6 +5,29 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Added a fail-closed local macOS release workflow and reviewed empty release
+  entitlements. It requires a clean exact stable tag, matching workspace
+  versions, a non-placeholder bundle ID, explicit Team ID and Developer ID
+  Application identity, and a Keychain-only `notarytool` profile. It runs the
+  repository gates, regenerates and checks bindings/project files, builds exact
+  universal arm64/x86_64 code for macOS 14, rejects unknown nested bundles, and
+  signs known code inside-out without using recursive signing as a shortcut.
+  The app and final Applications-link DMG are each independently notarized,
+  logged, stapled, signature/entitlement/identity checked, and Gatekeeper
+  assessed. Successful output is atomically published to a new immutable
+  version directory with sanitized submission records, full Apple logs, a
+  manifest, and SHA-256 sidecar; failures retain private staging diagnostics.
+  The script rejects the temporary bundle ID and accepts no Apple ID password or
+  API private-key path. A real notarization run remains correctly blocked until
+  Milestone 9 freezes the production identity and credentials. Seven focused
+  release-script tests plus a boundary-parser regression bring the script suite
+  to 28 tests; the full Rust gates, 183-test linked Swift suite, and 180-source
+  authority scan pass. XcodeGen is deterministic, bindings remain unchanged,
+  and unsigned Debug/Release app layouts match with exact universal arm64/x86_64
+  executables targeting macOS 14. Local ad-hoc signing also verifies the empty
+  entitlement extraction and actual Hardened Runtime flag format; Developer ID
+  signing and Apple submission are intentionally unverified until identity
+  freeze.
 - Added truthful permission and coverage onboarding. A one-time menu-bar
   introduction explains local, read-only Home analysis and persists only its
   acknowledgement without starting a scan, capacity query, access probe, FFI

@@ -3665,7 +3665,33 @@ Tasks:
   source-authority counts, deterministic project generation, binding parity,
   and universal Debug/Release build results are recorded in the changelog for
   this checkpoint.
-- [ ] Add signed/notarized local release script.
+- [x] Add signed/notarized local release script. Completed 2026-07-17: the
+  fail-closed local workflow requires a clean exact `vX.Y.Z` tag, matching DUX
+  workspace versions, a non-placeholder production bundle identifier, positive
+  build number, exact Developer ID Application identity and Team ID, and a
+  Keychain-backed `notarytool` profile. It accepts no password, Apple ID, or API
+  private-key path and refuses an existing versioned output directory.
+
+  The script runs the Rust, linked Swift, destructive-boundary, generated-file,
+  matching Debug/Release layout, and universal deployment gates before signing.
+  It permits only the reviewed empty release-entitlement dictionary, rejects
+  unreviewed nested code bundles,
+  signs known nested Mach-O code before the outer app without recursive signing,
+  and verifies exact arm64/x86_64 architecture, macOS 14, bundle identity, Team
+  ID, Developer ID authority, secure timestamp, Hardened Runtime, and absent App
+  Sandbox/debug entitlements. It notarizes the app ZIP, retains and validates
+  Apple's log, staples and Gatekeeper-assesses the app, then creates a DMG with
+  an exact `/Applications` link and repeats signing, notarization, stapling,
+  integrity, mount-layout, signature, and Gatekeeper verification for the final
+  image.
+
+  Same-filesystem private staging guarantees successful output is atomically
+  published under a new immutable `target/dux-macos-release/vX.Y.Z` directory
+  with sanitized submission records,
+  complete Apple logs, a manifest, and SHA-256 sidecar. Failed work is retained
+  at the reported private staging path for diagnosis. The production identity
+  is deliberately not invented here; freezing it and performing the first real
+  Developer ID/notary run remain Milestone 9 release prerequisites.
 
 Exit criteria:
 

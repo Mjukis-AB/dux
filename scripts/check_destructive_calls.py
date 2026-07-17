@@ -470,6 +470,12 @@ EXCEPTIONS = {
     "build-bindings-staging-remove": ExceptionSpec(
         "dux-macos/scripts/generate-bindings.sh", "shell-remove"
     ),
+    "release-dmg-staging-remove": ExceptionSpec(
+        "dux-macos/scripts/release-notarized-dmg.sh", "shell-remove"
+    ),
+    "release-dmg-publish-move": ExceptionSpec(
+        "dux-macos/scripts/release-notarized-dmg.sh", "shell-move"
+    ),
     "test-swift-engine-fixture-remove": ExceptionSpec(
         "dux-macos/DuxTests/EngineServiceTests.swift",
         "swift-filesystem-effect",
@@ -513,6 +519,11 @@ EXCEPTIONS = {
     ),
     "test-lint-fixture-git-add": ExceptionSpec(
         "scripts/tests/test_check_destructive_calls.py",
+        "python-filesystem-or-process-effect",
+        "test",
+    ),
+    "test-release-script-spawn": ExceptionSpec(
+        "scripts/tests/test_macos_release_script.py",
         "python-filesystem-or-process-effect",
         "test",
     ),
@@ -578,6 +589,8 @@ EXCEPTION_PRIMITIVES = {
     "build-xcframework-output-remove": "rm",
     "build-xcframework-publish-move": "mv",
     "build-bindings-staging-remove": "rm",
+    "release-dmg-staging-remove": "rm",
+    "release-dmg-publish-move": "mv",
     "test-swift-engine-fixture-remove": "removeItem",
     "test-swift-storage-roots-fixture-remove": "removeItem",
     "test-swift-retry-obstruction-remove": "removeItem",
@@ -588,6 +601,7 @@ EXCEPTION_PRIMITIVES = {
     "test-lint-symlinked-xcframework-parent": "subprocess.run",
     "test-lint-fixture-git-init": "subprocess.run",
     "test-lint-fixture-git-add": "subprocess.run",
+    "test-release-script-spawn": "subprocess.run",
 }
 
 CLIPPY_SUPPRESSION_COUNTS = {
@@ -925,7 +939,8 @@ def _shell_matches(
                 continue
             if len(segment) == 1 and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", segment[0]):
                 name, value = segment[0].split("=", 1)
-                value_command = value.split(maxsplit=1)[0]
+                value_parts = value.split(maxsplit=1)
+                value_command = value_parts[0] if value_parts else ""
                 if pathlib.PurePosixPath(value_command).name in {"rm", "rmdir", "unlink", "mv", "truncate"}:
                     aliases[name] = value_command
             if segment[0] == "alias" and len(segment) > 1 and "=" in segment[1]:

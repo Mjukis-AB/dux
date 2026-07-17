@@ -38,6 +38,9 @@ targets:
         SWIFT_STRICT_CONCURRENCY: complete
         ENABLE_HARDENED_RUNTIME: YES
         DEAD_CODE_STRIPPING: YES
+      configs:
+        Release:
+          CODE_SIGN_ENTITLEMENTS: Config/Release.entitlements
 
   DuxTests:
     type: bundle.unit-test

@@ -53,6 +53,11 @@ Notification permission is also optional and explicit; this version schedules
 and delivers no alerts. Drill-down, recommendations, notification delivery, AI
 explanations, and cleanup remain later roadmap milestones.
 
+The repository also contains a fail-closed local Developer ID/notarization
+workflow. It deliberately rejects the temporary app identity; producing a real
+artifact remains gated on Milestone 9's frozen production bundle ID, Apple team,
+signing identity, and Keychain-backed notarization credentials.
+
 ```bash
 # Build and run directly from the repo
 cargo run -p dux-cli

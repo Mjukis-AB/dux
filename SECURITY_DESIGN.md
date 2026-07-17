@@ -306,10 +306,17 @@ The following implemented controls are safe foundations, not shipping approval:
   status, transactional checksummed upgrades, read-only newer-schema handling,
   and hardened owned-store provisioning; and
 - release dependency, checksum, action-pinning, and packaging gates for the
-  existing Rust artifacts.
+  existing Rust artifacts; and
+- a fail-closed local macOS release workflow with reviewed empty entitlements,
+  explicit inside-out Developer ID signing, two-stage app/DMG notarization and
+  stapling, Gatekeeper and identity verification, immutable versioned output,
+  and retained notarization evidence.
 
 The source tree configures Hardened Runtime for the app spike, but no public
-Developer ID-signed/notarized artifact exists yet. Swift rejects an incompatible
+Developer ID-signed/notarized artifact exists yet. The local workflow cannot run
+without a clean exact release tag and explicit production bundle, team, signing,
+and Keychain-backed notarization inputs; it rejects the temporary spike identity
+instead of inventing release values. Swift rejects an incompatible
 explicit DUX FFI contract before engine work, and the implemented SQLite
 settings/history surfaces remain bounded observations as described below.
 Launch at Login and notification authorization Settings exist, but the former
@@ -1892,6 +1899,21 @@ same reviewed source and locked UniFFI graph. CI regenerates committed bindings
 and rejects drift. Published artifacts are immutable; a correction receives a
 new version.
 
+The local release workflow MUST use only a valid Developer ID Application
+identity matching the explicit Team ID and credentials referenced through a
+`notarytool` Keychain profile. It MUST NOT accept an Apple ID password or API
+private-key path as an argument. The reviewed release entitlement file is an
+empty dictionary until a separate security review changes it. Unknown nested
+code bundles fail before signing. The app is notarized and stapled before it is
+placed into the signed DMG; the DMG is then separately notarized and stapled.
+Both Apple logs are retained and checked for accepted status and errors. Private
+staging and final version output share the validated repository-owned
+filesystem so publication is one same-filesystem rename. Output is published
+only after signature, timestamp, Hardened Runtime, exact identity,
+architecture, deployment target, entitlements, image integrity/layout, staple,
+Gatekeeper, and checksum checks pass. Actual Developer ID execution remains
+blocked until Milestone 9 freezes the production identity.
+
 Automatic updates are not yet selected. Any updater requires its own reviewed
 design covering signature keys, appcast or metadata authenticity, key custody,
 rollback, staged rollout, downgrade behavior, atomic replacement, and failure
@@ -2064,7 +2086,7 @@ coverage is labelled as Home-scoped and unknown coverage stays unknown.
 | Scheduled cleanup | Absent | Manual-history maturity and all automation gates in §10 |
 | Notification authorization | Settings reads authoritative macOS status and can explicitly request Alert/Sound permission from Not Determined; the adapter exposes no scheduling or delivery operation | Add reviewed pressure-transition episodes, cooldown, truthful content, and deep-link handling in Milestone 6 |
 | AI providers | Disabled/absent | Adversarial authority spike; remains explanation-only |
-| Signed/notarized macOS release | Design and build spike only | Full Developer ID/notarization/release validation |
+| Signed/notarized macOS release | Fail-closed local app/DMG workflow, reviewed empty entitlements, explicit signing order, notarization-log/staple/Gatekeeper checks, immutable output, and checksums are implemented; no public artifact or frozen production identity exists | Freeze identity and perform real Developer ID/notary validation, then add protected release CI in Milestone 9 |
 
 This matrix is intentionally conservative. “Implemented” means the named layer
 exists, not that cleanup is safe to expose.

@@ -154,6 +154,9 @@ class DestructiveCallLintTests(unittest.TestCase):
         self.assertEqual(lint.scan_source("tool.ps1", 'Write-Host "do not use Remove-Item"\n'), [])
         self.assertEqual(lint.scan_source("tool.cmd", "echo never run del here\n"), [])
 
+    def test_empty_shell_assignment_is_not_an_indirect_command(self) -> None:
+        self.assertEqual(lint.scan_source("script.sh", 'output_path=""\n'), [])
+
     def test_nested_rust_comments_are_ignored(self) -> None:
         source = "/* outer /* std::fs::remove_file(path); */ still comment */\nfn safe() {}\n"
         self.assertEqual(lint.scan_source("src/example.rs", source), [])
