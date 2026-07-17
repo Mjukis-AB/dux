@@ -9,12 +9,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use thiserror::Error;
 
-use crate::domain::{
-    AvailableCapacitySource, DiskPressure, DiskPressureConfig, VolumeCapacity, VolumeId,
-};
+use crate::domain::{AvailableCapacitySource, DiskPressure, VolumeCapacity, VolumeId};
 use crate::persistence::{
-    CapacityObservationOutcome, CapacityPressureBaseline, CapacityWriteOutcome, HistoryErrorKind,
-    RawCapacityObservation, StoreCoordinator,
+    CapacityPressureBaseline, CapacityWriteOutcome, HistoryErrorKind, RawCapacityObservation,
+    StoreCoordinator,
 };
 
 /// One platform capacity observation. Optional metadata remains optional so a
@@ -197,6 +195,7 @@ pub(super) struct StartupVolumePressureBaseline {
 struct SessionCapacityBaseline {
     observation: VolumeCapacityObservation,
     pressure: DiskPressure,
+    policy_revision: u64,
 }
 
 impl StartupVolumePressureBaseline {
@@ -231,18 +230,25 @@ impl StartupVolumePressureBaseline {
                     latest.observation.sampled_at,
                     latest.observation.capacity,
                     latest.pressure,
+                    latest.policy_revision,
                 )))
             }
         }
     }
 
-    fn record_success(&mut self, observation: &VolumeCapacityObservation, pressure: DiskPressure) {
+    fn record_success(
+        &mut self,
+        observation: &VolumeCapacityObservation,
+        pressure: DiskPressure,
+        policy_revision: u64,
+    ) {
         if let Some(observed_volume_id) = &observation.volume_id {
             self.known_volume_id = Some(observed_volume_id.clone());
         }
         self.latest = Some(SessionCapacityBaseline {
             observation: observation.clone(),
             pressure,
+            policy_revision,
         });
     }
 }
@@ -258,7 +264,6 @@ pub(super) fn observe_volume_capacity(
     let mut session_baseline = session_baseline
         .lock()
         .map_err(|_| VolumeCapacityStatusError::InternalState)?;
-    let config = DiskPressureConfig::default();
     let capacity = observation.capacity;
     let session_previous = session_baseline.baseline_for(&observation)?;
     let missing_ordinary = capacity.available_bytes().is_none();
@@ -269,15 +274,11 @@ pub(super) fn observe_volume_capacity(
         || observation.is_removable.is_none();
 
     let (outcome, disposition) = if missing_identity {
+        let outcome = store
+            .evaluate_unidentified_capacity(observation.sampled_at, capacity, session_previous)
+            .map_err(|error| map_history_error(error.kind))?;
         (
-            CapacityObservationOutcome {
-                evaluation: config.evaluate(
-                    capacity,
-                    session_previous.map_or(DiskPressure::Unknown, |value| value.pressure),
-                ),
-                previous_durable_pressure: None,
-                write: None,
-            },
+            outcome,
             CapacityHistoryDisposition::NotStoredMissingStableIdentity,
         )
     } else if missing_ordinary || incomplete_metadata {
@@ -289,7 +290,6 @@ pub(super) fn observe_volume_capacity(
                     .expect("missing identity handled above"),
                 observation.sampled_at,
                 capacity,
-                config,
                 session_previous,
             )
             .map_err(|error| map_history_error(error.kind))?;
@@ -325,7 +325,7 @@ pub(super) fn observe_volume_capacity(
         )
         .map_err(|error| map_history_error(error.kind))?;
         let outcome = store
-            .observe_capacity(&raw, config, session_previous)
+            .observe_capacity(&raw, session_previous)
             .map_err(|error| map_history_error(error.kind))?;
         let disposition = match outcome.write {
             Some(CapacityWriteOutcome::Inserted) => CapacityHistoryDisposition::Stored,
@@ -339,7 +339,11 @@ pub(super) fn observe_volume_capacity(
     };
 
     let evaluation = outcome.evaluation;
-    session_baseline.record_success(&observation, evaluation.pressure());
+    session_baseline.record_success(
+        &observation,
+        evaluation.pressure(),
+        outcome.effective_policy.revision,
+    );
     Ok(VolumeCapacityStatus {
         volume_id: observation.volume_id,
         sampled_at: observation.sampled_at,
@@ -397,6 +401,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::domain::{DiskPressureConfig, DiskPressureRecoveryMargin, DiskPressureThreshold};
     use crate::engine::{EngineConfig, EngineHandle};
 
     const GIB: u64 = 1_024 * 1_024 * 1_024;
@@ -461,6 +466,130 @@ mod tests {
             .query_row("SELECT count(*) FROM disk_samples", [], |row| row.get(0))
             .unwrap();
         (volumes, samples)
+    }
+
+    fn warning_at_fifty_gib() -> DiskPressureConfig {
+        DiskPressureConfig::new(
+            DiskPressureThreshold::new(10 * GIB, 500).unwrap(),
+            DiskPressureThreshold::new(50 * GIB, 1_000).unwrap(),
+            DiskPressureRecoveryMargin::new(2 * GIB, 100).unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn policy_revision_forces_baselines_and_resets_old_hysteresis() {
+        let temp = TempDir::new().unwrap();
+        let engine = EngineHandle::open(config(&temp)).unwrap();
+        let id = VolumeId::new("volume:policy-baseline").unwrap();
+        let start = UNIX_EPOCH + Duration::from_secs(10_800);
+
+        let initial = engine
+            .observe_volume_capacity(observation(
+                Some(id.clone()),
+                start,
+                Some(40 * GIB),
+                Some(40 * GIB),
+            ))
+            .unwrap();
+        assert_eq!(initial.pressure(), DiskPressure::Healthy);
+        assert_eq!(
+            initial.history_disposition(),
+            CapacityHistoryDisposition::Stored
+        );
+
+        let changed = engine
+            .set_disk_pressure_policy(warning_at_fifty_gib())
+            .unwrap();
+        assert!(changed.changed);
+        assert_eq!(changed.settings.revision, 1);
+        let policy_baseline = engine
+            .observe_volume_capacity(observation(
+                Some(id.clone()),
+                start + Duration::from_secs(60),
+                Some(40 * GIB),
+                Some(40 * GIB),
+            ))
+            .unwrap();
+        assert_eq!(policy_baseline.pressure(), DiskPressure::Warning);
+        assert_eq!(
+            policy_baseline.history_disposition(),
+            CapacityHistoryDisposition::Stored
+        );
+        let same_revision = engine
+            .observe_volume_capacity(observation(
+                Some(id.clone()),
+                start + Duration::from_secs(120),
+                Some(40 * GIB),
+                Some(40 * GIB),
+            ))
+            .unwrap();
+        assert_eq!(same_revision.pressure(), DiskPressure::Warning);
+        assert_eq!(
+            same_revision.history_disposition(),
+            CapacityHistoryDisposition::SuppressedByHourlyCadence
+        );
+
+        let reset = engine.reset_disk_pressure_policy().unwrap();
+        assert!(reset.changed);
+        assert_eq!(reset.settings.revision, 2);
+        let reset_baseline = engine
+            .observe_volume_capacity(observation(
+                Some(id),
+                start + Duration::from_secs(180),
+                Some(40 * GIB),
+                Some(40 * GIB),
+            ))
+            .unwrap();
+        assert_eq!(reset_baseline.pressure(), DiskPressure::Healthy);
+        assert_eq!(
+            reset_baseline.history_disposition(),
+            CapacityHistoryDisposition::Stored
+        );
+        assert_eq!(row_counts(engine.config().database_path()), (1, 3));
+        let revisions = Connection::open(engine.config().database_path())
+            .unwrap()
+            .prepare("SELECT policy_revision FROM disk_samples ORDER BY sampled_at_unix_ms")
+            .unwrap()
+            .query_map([], |row| row.get::<_, i64>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(revisions, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn custom_policy_classifies_every_ephemeral_evidence_shape_without_writes() {
+        let temp = TempDir::new().unwrap();
+        let engine = EngineHandle::open(config(&temp)).unwrap();
+        engine
+            .set_disk_pressure_policy(warning_at_fifty_gib())
+            .unwrap();
+        let id = VolumeId::new("volume:ephemeral-policy").unwrap();
+        let start = UNIX_EPOCH + Duration::from_secs(14_400);
+
+        let missing_id = engine
+            .observe_volume_capacity(observation(None, start, Some(40 * GIB), Some(40 * GIB)))
+            .unwrap();
+        assert_eq!(missing_id.pressure(), DiskPressure::Warning);
+        let incomplete = engine
+            .observe_volume_capacity(incomplete_observation(
+                id.clone(),
+                start + Duration::from_secs(1),
+                40 * GIB,
+            ))
+            .unwrap();
+        assert_eq!(incomplete.pressure(), DiskPressure::Warning);
+        let important_only = engine
+            .observe_volume_capacity(observation(
+                Some(id),
+                start + Duration::from_secs(2),
+                None,
+                Some(40 * GIB),
+            ))
+            .unwrap();
+        assert_eq!(important_only.pressure(), DiskPressure::Warning);
+        assert_eq!(row_counts(engine.config().database_path()), (0, 0));
     }
 
     #[test]

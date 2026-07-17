@@ -39,7 +39,8 @@ pub use domain::{
 };
 pub use engine::{
     CancelOutcome, CandidateEvaluationTaskFailureKind, CandidateEvaluationTaskStatus,
-    CapacityHistoryDisposition, CloseOutcome, DurableScanCounts, DurableScanCoverage,
+    CapacityHistoryDisposition, CloseOutcome, DiskPressurePolicy, DiskPressurePolicyError,
+    DiskPressurePolicySource, DiskPressurePolicyUpdate, DurableScanCounts, DurableScanCoverage,
     DurableScanStatus, DurableScanSummary, EngineConfig, EngineConfigError, EngineConfigField,
     EngineConfigReason, EngineHandle, EngineLifecycle, EngineOpenError, FormatSizeBatchResult,
     FormattedSizeEntry, RecentScanHistory, ScanHistoryError, ScanRootErrorKind, ScanTaskCounts,

@@ -94,6 +94,7 @@ struct StoredSample {
     available_bytes: i64,
     important_available_bytes: Option<i64>,
     pressure: String,
+    policy_revision: i64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -118,6 +119,7 @@ impl ExpectedRollup {
             && stored.available_bytes == self.representative.available_bytes
             && stored.important_available_bytes == self.representative.important_available_bytes
             && stored.pressure == self.representative.pressure
+            && stored.policy_revision == self.representative.policy_revision
     }
 }
 
@@ -270,8 +272,9 @@ fn apply_plan(
                 .execute(
                     "INSERT INTO disk_samples (
                         volume_id, sample_kind, sampled_at_unix_ms, total_bytes,
-                        available_bytes, important_available_bytes, pressure
-                     ) VALUES (?1, 'daily_rollup', ?2, ?3, ?4, ?5, ?6)",
+                        available_bytes, important_available_bytes, pressure,
+                        policy_revision
+                     ) VALUES (?1, 'daily_rollup', ?2, ?3, ?4, ?5, ?6, ?7)",
                     params![
                         expected.representative.volume_id,
                         expected.day_start_unix_ms,
@@ -279,6 +282,7 @@ fn apply_plan(
                         expected.representative.available_bytes,
                         expected.representative.important_available_bytes,
                         expected.representative.pressure,
+                        expected.representative.policy_revision,
                     ],
                 )
                 .map_err(map_retention_write_error)?;
@@ -455,7 +459,8 @@ fn sample_select() -> &'static str {
         typeof(total_bytes), total_bytes,
         typeof(available_bytes), available_bytes,
         typeof(important_available_bytes), important_available_bytes,
-        typeof(pressure), length(CAST(pressure AS BLOB)), pressure
+        typeof(pressure), length(CAST(pressure AS BLOB)), pressure,
+        typeof(policy_revision), policy_revision
      FROM disk_samples"
 }
 
@@ -471,6 +476,7 @@ fn raw_sample(row: &Row<'_>) -> rusqlite::Result<StoredSample> {
         return Err(rusqlite::Error::InvalidQuery);
     }
     require_type_length(row, 16, 17, "text", 1, 16)?;
+    require_type(row, 19, "integer")?;
     let kind: String = row.get(7)?;
     let sample_kind = match kind.as_str() {
         "raw" => SampleKind::Raw,
@@ -486,6 +492,7 @@ fn raw_sample(row: &Row<'_>) -> rusqlite::Result<StoredSample> {
         available_bytes: row.get(13)?,
         important_available_bytes: row.get(15)?,
         pressure: row.get(18)?,
+        policy_revision: row.get(20)?,
     })
 }
 
@@ -503,6 +510,7 @@ fn decode_sample(sample: StoredSample) -> Result<StoredSample, HistoryError> {
             sample.pressure.as_str(),
             "healthy" | "warning" | "critical" | "unknown"
         )
+        || sample.policy_revision < 0
         || (sample.sample_kind == SampleKind::DailyRollup
             && sample.sampled_at_unix_ms % DAY_MS != 0)
     {
@@ -879,7 +887,32 @@ mod tests {
         important: Option<u64>,
         pressure: DiskPressure,
     ) {
-        let sample = RawCapacitySample::try_new(
+        record_raw_with_revision(
+            store,
+            mount,
+            volume,
+            sampled_at_unix_ms,
+            total,
+            available,
+            important,
+            pressure,
+            0,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_raw_with_revision(
+        store: &StoreCoordinator,
+        mount: &Path,
+        volume: &str,
+        sampled_at_unix_ms: i64,
+        total: u64,
+        available: u64,
+        important: Option<u64>,
+        pressure: DiskPressure,
+        policy_revision: u64,
+    ) {
+        let sample = RawCapacitySample::try_new_with_policy_revision(
             VolumeId::new(volume).unwrap(),
             mount.to_path_buf(),
             "Test Volume".to_owned(),
@@ -891,6 +924,7 @@ mod tests {
             available,
             important,
             pressure,
+            policy_revision,
         )
         .unwrap();
         assert_eq!(
@@ -929,7 +963,7 @@ mod tests {
             Some(700),
             DiskPressure::Healthy,
         );
-        record_raw(
+        record_raw_with_revision(
             &store,
             temp.path(),
             "volume:test",
@@ -938,6 +972,7 @@ mod tests {
             300,
             None,
             DiskPressure::Warning,
+            7,
         );
         record_raw(
             &store,
@@ -965,6 +1000,7 @@ mod tests {
         assert_eq!(daily.available_bytes, 300);
         assert_eq!(daily.important_available_bytes, None);
         assert_eq!(daily.pressure, "warning");
+        assert_eq!(daily.policy_revision, 7);
         assert!(store.with_connection(|connection| {
             load_daily_rollup(connection, "volume:test", today)
                 .unwrap()

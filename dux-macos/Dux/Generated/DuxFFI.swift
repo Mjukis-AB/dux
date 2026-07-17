@@ -419,6 +419,22 @@ fileprivate final class UniffiHandleMap<T>: @unchecked Sendable {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterUInt16: FfiConverterPrimitive {
+    typealias FfiType = UInt16
+    typealias SwiftType = UInt16
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt16 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterUInt32: FfiConverterPrimitive {
     typealias FfiType = UInt32
     typealias SwiftType = UInt32
@@ -550,9 +566,15 @@ public protocol DuxEngineProtocol: AnyObject, Sendable {
 
     func formatSize(bytes: UInt64) throws  -> FormattedSize
 
+    func getDiskPressurePolicy() throws  -> PressurePolicyStatus
+
     func libraryVersion() throws  -> LibraryVersion
 
     func observeStartupVolume(observation: StartupVolumeObservation) throws  -> StartupVolumeStatus
+
+    func resetDiskPressurePolicy() throws  -> PressurePolicyUpdate
+
+    func setDiskPressurePolicy(input: PressurePolicyInput) throws  -> PressurePolicyUpdate
 
     func startMaintenance(kind: MaintenanceKind) throws  -> MaintenanceStart
 
@@ -649,6 +671,14 @@ open func formatSize(bytes: UInt64)throws  -> FormattedSize  {
 })
 }
 
+open func getDiskPressurePolicy()throws  -> PressurePolicyStatus  {
+    return try  FfiConverterTypePressurePolicyStatus_lift(try rustCallWithError(FfiConverterTypePressurePolicyError_lift) {
+    uniffi_dux_ffi_fn_method_duxengine_get_disk_pressure_policy(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
 open func libraryVersion()throws  -> LibraryVersion  {
     return try  FfiConverterTypeLibraryVersion_lift(try rustCallWithError(FfiConverterTypeEngineError_lift) {
     uniffi_dux_ffi_fn_method_duxengine_library_version(
@@ -662,6 +692,23 @@ open func observeStartupVolume(observation: StartupVolumeObservation)throws  -> 
     uniffi_dux_ffi_fn_method_duxengine_observe_startup_volume(
             self.uniffiCloneHandle(),
         FfiConverterTypeStartupVolumeObservation_lower(observation),$0
+    )
+})
+}
+
+open func resetDiskPressurePolicy()throws  -> PressurePolicyUpdate  {
+    return try  FfiConverterTypePressurePolicyUpdate_lift(try rustCallWithError(FfiConverterTypePressurePolicyError_lift) {
+    uniffi_dux_ffi_fn_method_duxengine_reset_disk_pressure_policy(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+open func setDiskPressurePolicy(input: PressurePolicyInput)throws  -> PressurePolicyUpdate  {
+    return try  FfiConverterTypePressurePolicyUpdate_lift(try rustCallWithError(FfiConverterTypePressurePolicyError_lift) {
+    uniffi_dux_ffi_fn_method_duxengine_set_disk_pressure_policy(
+            self.uniffiCloneHandle(),
+        FfiConverterTypePressurePolicyInput_lower(input),$0
     )
 })
 }
@@ -1404,6 +1451,231 @@ public func FfiConverterTypeMaintenanceStart_lift(_ buf: RustBuffer) throws -> M
 #endif
 public func FfiConverterTypeMaintenanceStart_lower(_ value: MaintenanceStart) -> RustBuffer {
     return FfiConverterTypeMaintenanceStart.lower(value)
+}
+
+
+/**
+ * Exact integer policy input. Basis points retain two decimal percentage
+ * places without floating-point conversion.
+ */
+public struct PressurePolicyInput: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let criticalAvailableBytes: UInt64
+    public let criticalAvailableBasisPoints: UInt16
+    public let warningAvailableBytes: UInt64
+    public let warningAvailableBasisPoints: UInt16
+    public let recoveryBytes: UInt64
+    public let recoveryBasisPoints: UInt16
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, criticalAvailableBytes: UInt64, criticalAvailableBasisPoints: UInt16, warningAvailableBytes: UInt64, warningAvailableBasisPoints: UInt16, recoveryBytes: UInt64, recoveryBasisPoints: UInt16) {
+        self.recordVersion = recordVersion
+        self.criticalAvailableBytes = criticalAvailableBytes
+        self.criticalAvailableBasisPoints = criticalAvailableBasisPoints
+        self.warningAvailableBytes = warningAvailableBytes
+        self.warningAvailableBasisPoints = warningAvailableBasisPoints
+        self.recoveryBytes = recoveryBytes
+        self.recoveryBasisPoints = recoveryBasisPoints
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension PressurePolicyInput: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePressurePolicyInput: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PressurePolicyInput {
+        return
+            try PressurePolicyInput(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                criticalAvailableBytes: FfiConverterUInt64.read(from: &buf),
+                criticalAvailableBasisPoints: FfiConverterUInt16.read(from: &buf),
+                warningAvailableBytes: FfiConverterUInt64.read(from: &buf),
+                warningAvailableBasisPoints: FfiConverterUInt16.read(from: &buf),
+                recoveryBytes: FfiConverterUInt64.read(from: &buf),
+                recoveryBasisPoints: FfiConverterUInt16.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PressurePolicyInput, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterUInt64.write(value.criticalAvailableBytes, into: &buf)
+        FfiConverterUInt16.write(value.criticalAvailableBasisPoints, into: &buf)
+        FfiConverterUInt64.write(value.warningAvailableBytes, into: &buf)
+        FfiConverterUInt16.write(value.warningAvailableBasisPoints, into: &buf)
+        FfiConverterUInt64.write(value.recoveryBytes, into: &buf)
+        FfiConverterUInt16.write(value.recoveryBasisPoints, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePressurePolicyInput_lift(_ buf: RustBuffer) throws -> PressurePolicyInput {
+    return try FfiConverterTypePressurePolicyInput.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePressurePolicyInput_lower(_ value: PressurePolicyInput) -> RustBuffer {
+    return FfiConverterTypePressurePolicyInput.lower(value)
+}
+
+
+/**
+ * Versioned, path-free effective pressure policy.
+ */
+public struct PressurePolicyStatus: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let source: PressurePolicySource
+    public let revision: UInt64
+    public let criticalAvailableBytes: UInt64
+    public let criticalAvailableBasisPoints: UInt16
+    public let warningAvailableBytes: UInt64
+    public let warningAvailableBasisPoints: UInt16
+    public let recoveryBytes: UInt64
+    public let recoveryBasisPoints: UInt16
+    public let updatedAtUnixMs: Int64?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, source: PressurePolicySource, revision: UInt64, criticalAvailableBytes: UInt64, criticalAvailableBasisPoints: UInt16, warningAvailableBytes: UInt64, warningAvailableBasisPoints: UInt16, recoveryBytes: UInt64, recoveryBasisPoints: UInt16, updatedAtUnixMs: Int64?) {
+        self.recordVersion = recordVersion
+        self.source = source
+        self.revision = revision
+        self.criticalAvailableBytes = criticalAvailableBytes
+        self.criticalAvailableBasisPoints = criticalAvailableBasisPoints
+        self.warningAvailableBytes = warningAvailableBytes
+        self.warningAvailableBasisPoints = warningAvailableBasisPoints
+        self.recoveryBytes = recoveryBytes
+        self.recoveryBasisPoints = recoveryBasisPoints
+        self.updatedAtUnixMs = updatedAtUnixMs
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension PressurePolicyStatus: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePressurePolicyStatus: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PressurePolicyStatus {
+        return
+            try PressurePolicyStatus(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                source: FfiConverterTypePressurePolicySource.read(from: &buf),
+                revision: FfiConverterUInt64.read(from: &buf),
+                criticalAvailableBytes: FfiConverterUInt64.read(from: &buf),
+                criticalAvailableBasisPoints: FfiConverterUInt16.read(from: &buf),
+                warningAvailableBytes: FfiConverterUInt64.read(from: &buf),
+                warningAvailableBasisPoints: FfiConverterUInt16.read(from: &buf),
+                recoveryBytes: FfiConverterUInt64.read(from: &buf),
+                recoveryBasisPoints: FfiConverterUInt16.read(from: &buf),
+                updatedAtUnixMs: FfiConverterOptionInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PressurePolicyStatus, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterTypePressurePolicySource.write(value.source, into: &buf)
+        FfiConverterUInt64.write(value.revision, into: &buf)
+        FfiConverterUInt64.write(value.criticalAvailableBytes, into: &buf)
+        FfiConverterUInt16.write(value.criticalAvailableBasisPoints, into: &buf)
+        FfiConverterUInt64.write(value.warningAvailableBytes, into: &buf)
+        FfiConverterUInt16.write(value.warningAvailableBasisPoints, into: &buf)
+        FfiConverterUInt64.write(value.recoveryBytes, into: &buf)
+        FfiConverterUInt16.write(value.recoveryBasisPoints, into: &buf)
+        FfiConverterOptionInt64.write(value.updatedAtUnixMs, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePressurePolicyStatus_lift(_ buf: RustBuffer) throws -> PressurePolicyStatus {
+    return try FfiConverterTypePressurePolicyStatus.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePressurePolicyStatus_lower(_ value: PressurePolicyStatus) -> RustBuffer {
+    return FfiConverterTypePressurePolicyStatus.lower(value)
+}
+
+
+public struct PressurePolicyUpdate: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let policy: PressurePolicyStatus
+    public let changed: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, policy: PressurePolicyStatus, changed: Bool) {
+        self.recordVersion = recordVersion
+        self.policy = policy
+        self.changed = changed
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension PressurePolicyUpdate: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePressurePolicyUpdate: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PressurePolicyUpdate {
+        return
+            try PressurePolicyUpdate(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                policy: FfiConverterTypePressurePolicyStatus.read(from: &buf),
+                changed: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PressurePolicyUpdate, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterTypePressurePolicyStatus.write(value.policy, into: &buf)
+        FfiConverterBool.write(value.changed, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePressurePolicyUpdate_lift(_ buf: RustBuffer) throws -> PressurePolicyUpdate {
+    return try FfiConverterTypePressurePolicyUpdate.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePressurePolicyUpdate_lower(_ value: PressurePolicyUpdate) -> RustBuffer {
+    return FfiConverterTypePressurePolicyUpdate.lower(value)
 }
 
 
@@ -2438,6 +2710,251 @@ public func FfiConverterTypeMaintenanceStartDisposition_lower(_ value: Maintenan
 }
 
 
+
+public enum PressurePolicyError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
+
+
+
+    case Closed
+    case InvalidRecordVersion
+    case ThresholdBytesZero
+    case ThresholdBasisPointsOutOfRange
+    case WarningBytesBelowCritical
+    case WarningBasisPointsBelowCritical
+    case WarningThresholdMatchesCritical
+    case RecoveryBytesZero
+    case RecoveryBasisPointsOutOfRange
+    case RevisionExhausted
+    case InvalidClock
+    case IncompatibleSchema
+    case Busy
+    case UnsafeStorage
+    case BudgetExceeded
+    case CorruptData
+    case Unavailable
+    case OutcomeUnknown
+    case InternalState
+
+
+
+
+
+
+    public var errorDescription: String? {
+        String(reflecting: self)
+    }
+
+}
+
+#if compiler(>=6)
+extension PressurePolicyError: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePressurePolicyError: FfiConverterRustBuffer {
+    typealias SwiftType = PressurePolicyError
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PressurePolicyError {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+
+
+
+        case 1: return .Closed
+        case 2: return .InvalidRecordVersion
+        case 3: return .ThresholdBytesZero
+        case 4: return .ThresholdBasisPointsOutOfRange
+        case 5: return .WarningBytesBelowCritical
+        case 6: return .WarningBasisPointsBelowCritical
+        case 7: return .WarningThresholdMatchesCritical
+        case 8: return .RecoveryBytesZero
+        case 9: return .RecoveryBasisPointsOutOfRange
+        case 10: return .RevisionExhausted
+        case 11: return .InvalidClock
+        case 12: return .IncompatibleSchema
+        case 13: return .Busy
+        case 14: return .UnsafeStorage
+        case 15: return .BudgetExceeded
+        case 16: return .CorruptData
+        case 17: return .Unavailable
+        case 18: return .OutcomeUnknown
+        case 19: return .InternalState
+
+         default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: PressurePolicyError, into buf: inout [UInt8]) {
+        switch value {
+
+
+
+
+
+        case .Closed:
+            writeInt(&buf, Int32(1))
+
+
+        case .InvalidRecordVersion:
+            writeInt(&buf, Int32(2))
+
+
+        case .ThresholdBytesZero:
+            writeInt(&buf, Int32(3))
+
+
+        case .ThresholdBasisPointsOutOfRange:
+            writeInt(&buf, Int32(4))
+
+
+        case .WarningBytesBelowCritical:
+            writeInt(&buf, Int32(5))
+
+
+        case .WarningBasisPointsBelowCritical:
+            writeInt(&buf, Int32(6))
+
+
+        case .WarningThresholdMatchesCritical:
+            writeInt(&buf, Int32(7))
+
+
+        case .RecoveryBytesZero:
+            writeInt(&buf, Int32(8))
+
+
+        case .RecoveryBasisPointsOutOfRange:
+            writeInt(&buf, Int32(9))
+
+
+        case .RevisionExhausted:
+            writeInt(&buf, Int32(10))
+
+
+        case .InvalidClock:
+            writeInt(&buf, Int32(11))
+
+
+        case .IncompatibleSchema:
+            writeInt(&buf, Int32(12))
+
+
+        case .Busy:
+            writeInt(&buf, Int32(13))
+
+
+        case .UnsafeStorage:
+            writeInt(&buf, Int32(14))
+
+
+        case .BudgetExceeded:
+            writeInt(&buf, Int32(15))
+
+
+        case .CorruptData:
+            writeInt(&buf, Int32(16))
+
+
+        case .Unavailable:
+            writeInt(&buf, Int32(17))
+
+
+        case .OutcomeUnknown:
+            writeInt(&buf, Int32(18))
+
+
+        case .InternalState:
+            writeInt(&buf, Int32(19))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePressurePolicyError_lift(_ buf: RustBuffer) throws -> PressurePolicyError {
+    return try FfiConverterTypePressurePolicyError.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePressurePolicyError_lower(_ value: PressurePolicyError) -> RustBuffer {
+    return FfiConverterTypePressurePolicyError.lower(value)
+}
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum PressurePolicySource: Equatable, Hashable {
+
+    case `default`
+    case stored
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension PressurePolicySource: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePressurePolicySource: FfiConverterRustBuffer {
+    typealias SwiftType = PressurePolicySource
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PressurePolicySource {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .`default`
+
+        case 2: return .stored
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: PressurePolicySource, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .`default`:
+            writeInt(&buf, Int32(1))
+
+
+        case .stored:
+            writeInt(&buf, Int32(2))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePressurePolicySource_lift(_ buf: RustBuffer) throws -> PressurePolicySource {
+    return try FfiConverterTypePressurePolicySource.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePressurePolicySource_lower(_ value: PressurePolicySource) -> RustBuffer {
+    return FfiConverterTypePressurePolicySource.lower(value)
+}
+
+
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 
@@ -2863,6 +3380,30 @@ fileprivate struct FfiConverterOptionUInt64: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionInt64: FfiConverterRustBuffer {
+    typealias SwiftType = Int64?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterInt64.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterInt64.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionBool: FfiConverterRustBuffer {
     typealias SwiftType = Bool?
 
@@ -3046,10 +3587,19 @@ private let initializationResult: InitializationResult = {
     if (uniffi_dux_ffi_checksum_method_duxengine_format_size() != 55932) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_dux_ffi_checksum_method_duxengine_get_disk_pressure_policy() != 6278) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_dux_ffi_checksum_method_duxengine_library_version() != 14309) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_observe_startup_volume() != 49642) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_duxengine_reset_disk_pressure_policy() != 23462) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_duxengine_set_disk_pressure_policy() != 62356) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_start_maintenance() != 4775) {

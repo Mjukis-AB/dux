@@ -22,7 +22,8 @@ use super::migrations::{
     panic_with_test_budget, schema_fingerprint, test_migrations, test_v1_schema_fingerprint,
     test_v2_schema_fingerprint, test_v3_schema_fingerprint, test_v4_schema_fingerprint,
     test_v5_schema_fingerprint, test_v6_schema_fingerprint, test_v7_schema_fingerprint,
-    test_v8_schema_fingerprint, test_v9_schema_fingerprint, validate_compiled_migrations,
+    test_v8_schema_fingerprint, test_v9_schema_fingerprint, test_v10_schema_fingerprint,
+    validate_compiled_migrations,
 };
 use super::process_liveness::current_process_instance;
 #[cfg(unix)]
@@ -337,6 +338,34 @@ fn helper_hold_claimed_scan() {
     drop(store);
 }
 
+#[cfg(unix)]
+fn helper_commit_pressure_policy_and_hold_writer() {
+    use crate::domain::{DiskPressureConfig, DiskPressureRecoveryMargin, DiskPressureThreshold};
+
+    const GIB: u64 = 1_024 * 1_024 * 1_024;
+    let database = helper_path("DUX_PERSISTENCE_DATABASE");
+    let ready = helper_path("DUX_PERSISTENCE_READY");
+    let release = helper_path("DUX_PERSISTENCE_RELEASE");
+    let store = StoreCoordinator::open(&database).unwrap();
+    let policy = DiskPressureConfig::new(
+        DiskPressureThreshold::new(10 * GIB, 500).unwrap(),
+        DiskPressureThreshold::new(50 * GIB, 1_000).unwrap(),
+        DiskPressureRecoveryMargin::new(2 * GIB, 100).unwrap(),
+    )
+    .unwrap();
+    store
+        .set_disk_pressure_policy_with_after_commit_hook_for_test(
+            policy,
+            UNIX_EPOCH + Duration::from_millis(2),
+            || {
+                publish_handshake(&ready);
+                wait_for_handshake(&release);
+                Ok(())
+            },
+        )
+        .unwrap();
+}
+
 #[test]
 #[ignore = "launched by the process-boundary persistence regressions"]
 fn sqlite_subprocess_helper() {
@@ -353,6 +382,8 @@ fn sqlite_subprocess_helper() {
         "hold-cleanup-lock" => helper_hold_cleanup_lock(),
         "hold-process-instance" => helper_hold_process_instance(),
         "hold-claimed-scan" => helper_hold_claimed_scan(),
+        #[cfg(unix)]
+        "commit-pressure-policy-and-hold-writer" => helper_commit_pressure_policy_and_hold_writer(),
         _ => panic!("unknown persistence helper mode"),
     }
 }
@@ -522,6 +553,32 @@ fn fresh_v7_schema() -> Connection {
 fn fresh_v8_schema() -> Connection {
     let connection = Connection::open_in_memory().unwrap();
     for migration in &test_migrations()[..8] {
+        connection.execute_batch(migration.sql).unwrap();
+        connection
+            .execute(
+                "INSERT INTO schema_migrations (
+                     version, name, checksum_sha256, applied_at_unix_ms
+                 ) VALUES (?1, ?2, ?3, 1)",
+                params![
+                    i64::from(migration.version),
+                    migration.name,
+                    migration.checksum_sha256.as_slice(),
+                ],
+            )
+            .unwrap();
+        connection
+            .pragma_update(None, "application_id", DUX_APPLICATION_ID)
+            .unwrap();
+        connection
+            .pragma_update(None, "user_version", migration.version)
+            .unwrap();
+    }
+    connection
+}
+
+fn fresh_v9_schema() -> Connection {
+    let connection = Connection::open_in_memory().unwrap();
+    for migration in &test_migrations()[..9] {
         connection.execute_batch(migration.sql).unwrap();
         connection
             .execute(
@@ -853,12 +910,177 @@ fn embedded_v8_schema_fingerprint_matches_complete_chain() {
 
 #[test]
 fn embedded_v9_schema_fingerprint_matches_complete_chain() {
-    let connection = fresh_current_schema();
+    let connection = fresh_v9_schema();
     assert_eq!(
         schema_fingerprint(&connection).unwrap(),
         test_v9_schema_fingerprint()
     );
+    assert_eq!(
+        inspect_schema(&connection).unwrap(),
+        SchemaState::Older { found: 9 }
+    );
+}
+
+#[test]
+fn embedded_v10_schema_fingerprint_matches_complete_chain() {
+    let connection = fresh_current_schema();
+    assert_eq!(
+        schema_fingerprint(&connection).unwrap(),
+        test_v10_schema_fingerprint()
+    );
     assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
+}
+
+#[test]
+fn populated_v9_upgrade_backfills_raw_and_daily_samples_to_default_policy_revision() {
+    let mut connection = fresh_v9_schema();
+    connection
+        .pragma_update(None, "foreign_keys", true)
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO volumes (
+                 volume_id, mount_path, mount_path_encoding, display_name, filesystem,
+                 is_internal, is_removable, first_seen_unix_ms, last_seen_unix_ms
+             ) VALUES ('volume:v9-policy', ?1, 1, 'Policy fixture', 'apfs', 1, 0, 1, 2)",
+            [b"/policy-fixture".as_slice()],
+        )
+        .unwrap();
+    connection
+        .execute_batch(
+            r#"INSERT INTO disk_samples (
+                 volume_id, sample_kind, sampled_at_unix_ms, total_bytes,
+                 available_bytes, important_available_bytes, pressure
+             ) VALUES
+                 ('volume:v9-policy', 'raw', 10, 1000, 400, 450, 'healthy'),
+                 ('volume:v9-policy', 'daily_rollup', 20, 1000, 300, NULL, 'warning');
+             INSERT INTO settings (
+                 setting_key, value_json, value_schema_version, updated_at_unix_ms
+             ) VALUES ('unrelated-v9-setting', '{"fixture":true}', 1, 20);"#,
+        )
+        .unwrap();
+
+    apply_pending_migrations(&mut connection, 40).unwrap();
+
+    assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
+    let samples: Vec<(String, i64)> = connection
+        .prepare(
+            "SELECT sample_kind, policy_revision
+             FROM disk_samples ORDER BY sample_kind",
+        )
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        samples,
+        [("daily_rollup".to_owned(), 0), ("raw".to_owned(), 0)]
+    );
+    let policy_rows: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM settings WHERE setting_key = 'disk_pressure_policy'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(policy_rows, 0);
+    let unrelated: String = connection
+        .query_row(
+            "SELECT value_json FROM settings WHERE setting_key = 'unrelated-v9-setting'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(unrelated, "{\"fixture\":true}");
+}
+
+#[test]
+fn v10_disk_sample_policy_revision_is_nonnegative_and_defaults_to_zero() {
+    let connection = fresh_current_schema();
+    connection
+        .pragma_update(None, "foreign_keys", true)
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO volumes (
+                 volume_id, mount_path, mount_path_encoding, display_name, filesystem,
+                 is_internal, is_removable, first_seen_unix_ms, last_seen_unix_ms
+             ) VALUES ('volume:v10-policy', ?1, 1, 'Policy fixture', 'apfs', 1, 0, 1, 2)",
+            [b"/policy-fixture".as_slice()],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO disk_samples (
+                 volume_id, sample_kind, sampled_at_unix_ms, total_bytes,
+                 available_bytes, pressure
+             ) VALUES ('volume:v10-policy', 'raw', 10, 1000, 400, 'healthy')",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO disk_samples (
+                 volume_id, sample_kind, sampled_at_unix_ms, total_bytes,
+                 available_bytes, pressure, policy_revision
+             ) VALUES ('volume:v10-policy', 'daily_rollup', 20, 1000, 300, 'warning', 7)",
+            [],
+        )
+        .unwrap();
+    assert!(
+        connection
+            .execute(
+                "INSERT INTO disk_samples (
+                     volume_id, sample_kind, sampled_at_unix_ms, total_bytes,
+                     available_bytes, pressure, policy_revision
+                 ) VALUES ('volume:v10-policy', 'raw', 30, 1000, 200, 'critical', -1)",
+                [],
+            )
+            .is_err()
+    );
+
+    let revisions: Vec<(String, i64, String)> = connection
+        .prepare(
+            "SELECT sample_kind, policy_revision, typeof(policy_revision)
+             FROM disk_samples ORDER BY sampled_at_unix_ms",
+        )
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        revisions,
+        [
+            ("raw".to_owned(), 0, "integer".to_owned()),
+            ("daily_rollup".to_owned(), 7, "integer".to_owned())
+        ]
+    );
+}
+
+#[test]
+fn v10_ledger_cannot_masquerade_over_the_v9_schema() {
+    let connection = fresh_v9_schema();
+    let migration = &test_migrations()[9];
+    connection
+        .execute(
+            "INSERT INTO schema_migrations (
+                 version, name, checksum_sha256, applied_at_unix_ms
+             ) VALUES (?1, ?2, ?3, 40)",
+            params![
+                i64::from(migration.version),
+                migration.name,
+                migration.checksum_sha256.as_slice(),
+            ],
+        )
+        .unwrap();
+    connection
+        .pragma_update(None, "user_version", migration.version)
+        .unwrap();
+
+    let error = inspect_schema(&connection).unwrap_err();
+    assert_eq!(error.kind, DatabaseOpenErrorKind::CorruptDatabase);
 }
 
 #[test]
@@ -882,7 +1104,7 @@ fn populated_v7_upgrade_adds_empty_snapshot_temp_lease_relation() {
     assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
     assert_eq!(
         schema_fingerprint(&connection).unwrap(),
-        test_v9_schema_fingerprint()
+        test_v10_schema_fingerprint()
     );
     let lease_count: i64 = connection
         .query_row("SELECT count(*) FROM snapshot_temp_leases", [], |row| {
@@ -921,7 +1143,7 @@ fn populated_v8_upgrade_preserves_running_rows_without_fabricating_claims() {
     assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
     assert_eq!(
         schema_fingerprint(&connection).unwrap(),
-        test_v9_schema_fingerprint()
+        test_v10_schema_fingerprint()
     );
     let scan: (String, Option<i64>, i64, i64) = connection
         .query_row(
@@ -978,7 +1200,7 @@ fn populated_v6_upgrade_adds_snapshot_path_lookup_without_rewriting_scans() {
     assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
     assert_eq!(
         schema_fingerprint(&connection).unwrap(),
-        test_v9_schema_fingerprint()
+        test_v10_schema_fingerprint()
     );
     let scans: Vec<(String, Option<Vec<u8>>)> = connection
         .prepare("SELECT scan_id, snapshot_relative_path FROM scans ORDER BY scan_id")
@@ -1638,7 +1860,7 @@ fn populated_v1_upgrade_preserves_legacy_candidate_and_cleanup_observations() {
     assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
     assert_eq!(
         schema_fingerprint(&connection).unwrap(),
-        test_v9_schema_fingerprint()
+        test_v10_schema_fingerprint()
     );
     let candidate: (i64, Option<String>, Option<String>) = connection
         .query_row(
@@ -1692,7 +1914,7 @@ fn populated_v1_upgrade_preserves_legacy_candidate_and_cleanup_observations() {
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
-    assert_eq!(versions, [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    assert_eq!(versions, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
 }
 
 #[test]
@@ -3004,6 +3226,86 @@ fn cross_process_writer_waiter_rechecks_version_before_writing() {
     publish_handshake(&upgrade_release);
     upgrader.wait_for_success();
     waiter.wait_for_success();
+}
+
+#[cfg(unix)]
+#[test]
+fn cross_process_policy_change_and_capacity_classification_are_serialized() {
+    use std::sync::mpsc;
+
+    use crate::domain::{DiskPressure, VolumeCapacity, VolumeId};
+
+    const GIB: u64 = 1_024 * 1_024 * 1_024;
+    const TIB: u64 = 1_024 * GIB;
+
+    fn observation(sampled_at_millis: u64) -> RawCapacityObservation {
+        RawCapacityObservation::try_new(
+            VolumeId::new("volume:cross-process-pressure-policy").unwrap(),
+            PathBuf::from("/"),
+            "Startup".to_owned(),
+            "apfs".to_owned(),
+            true,
+            false,
+            UNIX_EPOCH + Duration::from_millis(sampled_at_millis),
+            VolumeCapacity::new(TIB, Some(40 * GIB), Some(40 * GIB)).unwrap(),
+        )
+        .unwrap()
+    }
+
+    let temp = TempDir::new().unwrap();
+    let path = database_path(&temp);
+    let store = StoreCoordinator::open(&path).unwrap();
+    let initial = store
+        .observe_capacity(&observation(3_600_000), None)
+        .unwrap();
+    assert_eq!(initial.evaluation.pressure(), DiskPressure::Healthy);
+    assert_eq!(initial.effective_policy.revision, 0);
+
+    let ready = temp.path().join("policy-committed-writer-held");
+    let release = temp.path().join("policy-writer-release");
+    let mut policy_writer = spawn_persistence_helper(
+        "commit-pressure-policy-and-hold-writer",
+        &[
+            ("DUX_PERSISTENCE_DATABASE", &path),
+            ("DUX_PERSISTENCE_READY", &ready),
+            ("DUX_PERSISTENCE_RELEASE", &release),
+        ],
+    );
+    wait_for_child_handshake(&mut policy_writer, &ready);
+
+    let observing_store = Arc::clone(&store);
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let observer = std::thread::spawn(move || {
+        let result = observing_store.observe_capacity(&observation(3_601_000), None);
+        sender.send(result).unwrap();
+    });
+    assert_eq!(
+        receiver.recv_timeout(Duration::from_millis(100)),
+        Err(mpsc::RecvTimeoutError::Timeout),
+        "capacity observation bypassed the held cross-process policy writer lease"
+    );
+
+    publish_handshake(&release);
+    policy_writer.wait_for_success();
+    let outcome = receiver.recv_timeout(SUBPROCESS_TIMEOUT).unwrap().unwrap();
+    observer.join().unwrap();
+    assert_eq!(outcome.evaluation.pressure(), DiskPressure::Warning);
+    assert_eq!(outcome.effective_policy.revision, 1);
+    assert_eq!(outcome.write, Some(CapacityWriteOutcome::Inserted));
+
+    store.with_connection(|connection| {
+        let tuple = connection
+            .query_row(
+                "SELECT pressure, policy_revision
+                 FROM disk_samples
+                 ORDER BY sampled_at_unix_ms DESC
+                 LIMIT 1",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .unwrap();
+        assert_eq!(tuple, ("warning".to_owned(), 1));
+    });
 }
 
 #[test]

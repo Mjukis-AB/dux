@@ -10,7 +10,7 @@ protocol DuxMaintenanceScheduling: Sendable {
     func stop() async
 }
 
-protocol DuxCapacityScheduling: Sendable {
+protocol DuxCapacityScheduling: AnyObject, Sendable {
     func start() async
     func signal(_ trigger: DuxCapacitySamplingTrigger) async
     func stop() async
@@ -47,6 +47,7 @@ final class AppRuntime {
     private let engineService: any DuxEngineClosing
     private let scheduler: any DuxMaintenanceScheduling
     private let capacityScheduler: any DuxCapacityScheduling
+    private let capacityResampleRouter: DuxCapacityResampleRouter?
     private let reviews: any DuxReviewManaging
     private var started = false
     private var shuttingDown = false
@@ -60,7 +61,12 @@ final class AppRuntime {
             energyPolicy: SystemDuxMaintenanceEnergyPolicy()
         )
         reviews = DuxSnapshotReviewController(service: engineService)
-        let model = AppModel(engineService: engineService)
+        let capacityResampleRouter = DuxCapacityResampleRouter()
+        self.capacityResampleRouter = capacityResampleRouter
+        let model = AppModel(
+            engineService: engineService,
+            capacityResampleRequester: capacityResampleRouter
+        )
         self.model = model
         capacityScheduler = DuxCapacitySamplingScheduler(sampler: model)
     }
@@ -76,6 +82,7 @@ final class AppRuntime {
         self.engineService = engineService
         self.scheduler = scheduler
         self.capacityScheduler = capacityScheduler
+        capacityResampleRouter = nil
         self.reviews = reviews
     }
 
@@ -87,6 +94,7 @@ final class AppRuntime {
         async let maintenance: Void = scheduler.start()
         async let capacity: Void = capacityScheduler.start()
         _ = await (maintenance, capacity)
+        await capacityResampleRouter?.attach(capacityScheduler)
     }
 
     func signalCapacity(_ trigger: DuxCapacitySamplingTrigger) async {
@@ -112,11 +120,14 @@ final class AppRuntime {
             return
         }
         shuttingDown = true
+        model.invalidatePressurePolicyOperations()
         let capacityScheduler = capacityScheduler
+        let capacityResampleRouter = capacityResampleRouter
         let scheduler = scheduler
         let reviews = reviews
         let engineService = engineService
         let task = Task {
+            await capacityResampleRouter?.invalidate()
             await capacityScheduler.stop()
             await scheduler.stop()
             await reviews.shutdown()

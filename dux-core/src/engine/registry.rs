@@ -23,8 +23,9 @@ use super::cleanup_history::{
 };
 use super::config::EngineConfig;
 use super::settings::{
-    SnapshotRetentionCap, SnapshotRetentionCapError, SnapshotRetentionCapSource,
-    SnapshotRetentionCapUpdate,
+    DiskPressurePolicy, DiskPressurePolicyError, DiskPressurePolicySource,
+    DiskPressurePolicyUpdate, SnapshotRetentionCap, SnapshotRetentionCapError,
+    SnapshotRetentionCapSource, SnapshotRetentionCapUpdate,
 };
 use super::snapshot_review::{
     SnapshotReviewError, SnapshotReviewSession, map_repository_error as map_snapshot_review_error,
@@ -81,6 +82,7 @@ use crate::persistence::{
 use crate::persistence::{CleanupTrigger, NewCleanupSessionRecord, StoredCandidateRecord};
 use crate::persistence::{DatabaseStatus, StoreCoordinator};
 use crate::persistence::{
+    DiskPressurePolicySetting, DiskPressurePolicySettingSource, DiskPressurePolicySettingUpdate,
     SnapshotRetentionCapSetting, SnapshotRetentionCapSettingSource,
     SnapshotRetentionCapSettingUpdate,
 };
@@ -946,6 +948,52 @@ impl EngineHandle {
             .reset_snapshot_retention_cap()
             .map(public_snapshot_retention_cap_update)
             .map_err(|error| map_snapshot_retention_cap_error(error.kind))
+    }
+
+    /// Load the effective deterministic disk-pressure policy. This is
+    /// classification policy only and grants no cleanup or scheduling
+    /// authority.
+    pub fn disk_pressure_policy(&self) -> Result<DiskPressurePolicy, DiskPressurePolicyError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(DiskPressurePolicyError::Closed);
+        }
+        self.inner
+            .store
+            .load_disk_pressure_policy()
+            .map(public_disk_pressure_policy)
+            .map_err(|error| map_disk_pressure_policy_error(error.kind))
+    }
+
+    /// Persist one validated explicit pressure policy. This method never
+    /// acquires the capacity-session mutex; observations retain the global
+    /// session-then-store lock order.
+    pub fn set_disk_pressure_policy(
+        &self,
+        config: crate::domain::DiskPressureConfig,
+    ) -> Result<DiskPressurePolicyUpdate, DiskPressurePolicyError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(DiskPressurePolicyError::Closed);
+        }
+        self.inner
+            .store
+            .set_disk_pressure_policy(config)
+            .map(public_disk_pressure_policy_update)
+            .map_err(|error| map_disk_pressure_policy_error(error.kind))
+    }
+
+    /// Restore the versioned default while retaining a new durable Default
+    /// revision when an explicit policy was active.
+    pub fn reset_disk_pressure_policy(
+        &self,
+    ) -> Result<DiskPressurePolicyUpdate, DiskPressurePolicyError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(DiskPressurePolicyError::Closed);
+        }
+        self.inner
+            .store
+            .reset_disk_pressure_policy()
+            .map(public_disk_pressure_policy_update)
+            .map_err(|error| map_disk_pressure_policy_error(error.kind))
     }
 
     /// Load a bounded, path-free page of durable scan observations. This reads
@@ -3965,6 +4013,44 @@ fn public_snapshot_retention_cap(setting: SnapshotRetentionCapSetting) -> Snapsh
             SnapshotRetentionCapSettingSource::Stored => SnapshotRetentionCapSource::Stored,
         },
         updated_at: setting.updated_at,
+    }
+}
+
+fn public_disk_pressure_policy(setting: DiskPressurePolicySetting) -> DiskPressurePolicy {
+    DiskPressurePolicy {
+        config: setting.config,
+        source: match setting.source {
+            DiskPressurePolicySettingSource::Default => DiskPressurePolicySource::Default,
+            DiskPressurePolicySettingSource::Stored => DiskPressurePolicySource::Stored,
+        },
+        revision: setting.revision,
+        updated_at: setting.updated_at,
+    }
+}
+
+fn public_disk_pressure_policy_update(
+    update: DiskPressurePolicySettingUpdate,
+) -> DiskPressurePolicyUpdate {
+    DiskPressurePolicyUpdate {
+        settings: public_disk_pressure_policy(update.settings),
+        changed: update.changed,
+    }
+}
+
+const fn map_disk_pressure_policy_error(kind: HistoryErrorKind) -> DiskPressurePolicyError {
+    match kind {
+        HistoryErrorKind::InvalidInput => DiskPressurePolicyError::InvalidClock,
+        HistoryErrorKind::InvalidTransition => DiskPressurePolicyError::RevisionExhausted,
+        HistoryErrorKind::IncompatibleSchema => DiskPressurePolicyError::IncompatibleSchema,
+        HistoryErrorKind::QueryLimitExceeded => DiskPressurePolicyError::QueryLimitExceeded,
+        HistoryErrorKind::Busy => DiskPressurePolicyError::Busy,
+        HistoryErrorKind::UnsafeStorage => DiskPressurePolicyError::UnsafeStorage,
+        HistoryErrorKind::CorruptData => DiskPressurePolicyError::CorruptData,
+        HistoryErrorKind::DatabaseUnavailable => DiskPressurePolicyError::Unavailable,
+        HistoryErrorKind::OutcomeUnknown => DiskPressurePolicyError::OutcomeUnknown,
+        HistoryErrorKind::AlreadyExists
+        | HistoryErrorKind::NotFound
+        | HistoryErrorKind::InternalState => DiskPressurePolicyError::InternalState,
     }
 }
 

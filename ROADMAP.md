@@ -1246,7 +1246,7 @@ get_history(query) -> HistoryPageDto
 record_ai_insight(input_digest, insight)
 ```
 
-Current capacity realization (FFI contract v5):
+Current capacity realization (FFI contract v6):
 `observe_startup_volume(versioned Foundation facts) -> versioned path-free
 status` is the first production volume endpoint. It returns Rust-owned pressure,
 headline source/boundaries, prior durable pressure, and history disposition.
@@ -1254,6 +1254,14 @@ The adapter fixes the mount to `/`; no path crosses from Swift, and incomplete
 or important-only evidence is explicitly evaluation-only. Paged scan and
 candidate DTOs remain later endpoints rather than being inferred from this
 telemetry call.
+
+Contract v6 retains those startup records at v1 and adds separate versioned
+`get_disk_pressure_policy`, `set_disk_pressure_policy`, and
+`reset_disk_pressure_policy` endpoints. They expose exact integer values,
+Default/Stored provenance, monotonic revision, optional update time, changed
+disposition, and typed validation/storage failures. A policy is never supplied
+with a capacity observation, and none of these DTOs can express a path, scan,
+candidate, plan, notification, schedule, or cleanup action.
 
 Requirements:
 
@@ -3337,8 +3345,9 @@ Tasks:
   the normal 500 ms median capacity-sample budget. The UI shows effective
   available bytes and percent; there is no one-second timer or directory scan in
   the idle capacity path.
-- [ ] Implement persistent user-configurable pressure thresholds as a separate
-  schema-v10 / FFI-v6 checkpoint. Keep `DiskPressureConfig` as the sole
+- [x] Implement persistent user-configurable pressure thresholds as a separate
+  schema-v10 / FFI-v6 checkpoint. Completed 2026-07-17: `DiskPressureConfig`
+  remains the sole
   validator and evaluator; expose typed versioned get/set/reset engine methods
   rather than raw settings keys, JSON, UserDefaults, or a policy supplied with
   each observation. Store exact canonical schema-v1 JSON at
@@ -3366,14 +3375,23 @@ Tasks:
   one generation-safe resample after a successful change. The status UI must
   always show effective available bytes and percentage beside the label.
 
-  Tests must cover missing-row defaults without a write, explicit-default
+  The completed regression set covers missing-row defaults without a write, explicit-default
   provenance, reopen, invalid/malformed/newer schemas, idempotency, revision
   overflow, ambiguous commit, cross-process serialization, v9→v10 backfill,
   policy-change baseline insertion and subsequent cadence, revision-matched
   ephemeral hysteresis, rollup retention, FFI v6 version/error/get-set-reset,
   linked off-main Swift round trips, save-failure last-good state, one resample,
-  and Settings accessibility. This preference changes classification only and
-  grants no cleanup, notification, scan, or scheduling authority.
+  and stable Settings accessibility identifiers/hints. A deterministic
+  child-process test commits a new
+  policy while retaining the cross-process writer lease, proves a concurrent
+  observation cannot finish, then verifies its stored Warning/revision-1 tuple.
+  Linked Swift tests exhaust all 1...10,000 basis-point round trips, exercise
+  exact GiB conversion through `UInt64.max`, use the real Rust get/set/reset
+  boundary off-main, preserve last-good state and attempted input on failure,
+  and prove changed-only, cancellation-safe resampling. Universal Debug/Release
+  verification is recorded with this checkpoint's commit. This preference
+  changes classification only and grants no cleanup, notification, scan, or
+  scheduling authority.
 - [ ] Implement menu bar label modes.
 - [ ] Implement popover layout with cached status and scan progress.
 - [ ] Implement Explorer window shell and Overview.

@@ -47,6 +47,7 @@ mod cleanup_journal;
 mod codec;
 mod history;
 mod migrations;
+mod pressure_settings;
 #[cfg_attr(
     not(test),
     allow(
@@ -80,8 +81,7 @@ pub(crate) use candidate_history::{
     CandidateHistoryStatus, CompleteCandidateRecord, NewCandidateRecord,
 };
 pub(crate) use capacity_history::{
-    CapacityObservationOutcome, CapacityPressureBaseline, CapacityWriteOutcome,
-    RawCapacityObservation,
+    CapacityPressureBaseline, CapacityWriteOutcome, RawCapacityObservation,
 };
 pub(crate) use cleanup_history::CleanupSessionId;
 #[cfg(test)]
@@ -96,6 +96,9 @@ pub(crate) use codec::{HostPathObservationEncoding, observe_host_path};
 pub(crate) use history::{
     HistoryErrorKind, MAX_RECENT_SCAN_HISTORY_LIMIT, NewScanRecord, ScanCompletionRecord,
     ScanCounts, ScanStatus, TerminalScanStatus,
+};
+pub(crate) use pressure_settings::{
+    DiskPressurePolicySetting, DiskPressurePolicySettingSource, DiskPressurePolicySettingUpdate,
 };
 pub(crate) use scan_process_claim::{ScanRecoveryBatchOutcome, ScanRecoveryBatchResult};
 pub(crate) use settings::{

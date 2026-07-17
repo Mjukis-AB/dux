@@ -125,7 +125,7 @@ pub(crate) struct Migration {
     pub(crate) sql: &'static str,
 }
 
-const MIGRATIONS: [Migration; 9] = [
+const MIGRATIONS: [Migration; 10] = [
     Migration {
         version: 1,
         name: "initial-storage-schema",
@@ -215,6 +215,16 @@ const MIGRATIONS: [Migration; 9] = [
             0x89, 0xa2, 0xc6, 0x72,
         ],
         sql: include_str!("../../migrations/0009_scan_process_claims.sql"),
+    },
+    Migration {
+        version: 10,
+        name: "disk-pressure-policy-revisions",
+        checksum_sha256: [
+            0x33, 0xee, 0x70, 0x0c, 0xd8, 0xbc, 0x07, 0x40, 0x05, 0x64, 0x1f, 0xc6, 0x0c, 0xe7,
+            0x81, 0xc9, 0x46, 0xd2, 0xdf, 0x5b, 0xee, 0xcc, 0x7f, 0xee, 0xf4, 0xdf, 0xce, 0x69,
+            0xf8, 0x6d, 0xd7, 0x01,
+        ],
+        sql: include_str!("../../migrations/0010_disk_pressure_policy_revisions.sql"),
     },
 ];
 
@@ -610,6 +620,9 @@ const V9_EXPECTED_SCHEMA_OBJECTS: [(&str, &str); 56] = [
     ("trigger", "snapshot_temp_leases_update_guard"),
 ];
 
+// V10 changes one table definition but does not add or remove schema objects.
+const V10_EXPECTED_SCHEMA_OBJECTS: [(&str, &str); 56] = V9_EXPECTED_SCHEMA_OBJECTS;
+
 // Canonical sqlite_schema representation produced by v1. A mismatch rejects
 // supported databases rather than guessing about drift.
 const V1_SCHEMA_FINGERPRINT: [u8; 32] = [
@@ -663,6 +676,12 @@ const V8_SCHEMA_FINGERPRINT: [u8; 32] = [
 const V9_SCHEMA_FINGERPRINT: [u8; 32] = [
     0x90, 0x7a, 0x6b, 0x35, 0x60, 0x59, 0xf8, 0x27, 0x66, 0xf4, 0x79, 0x08, 0x76, 0xe9, 0x3e, 0xb2,
     0xe5, 0xf6, 0xf4, 0x47, 0x13, 0xb7, 0x3d, 0x2c, 0x34, 0x80, 0x26, 0xfb, 0xdc, 0xae, 0x8d, 0x0f,
+];
+
+// Canonical sqlite_schema representation produced by the complete v10 chain.
+const V10_SCHEMA_FINGERPRINT: [u8; 32] = [
+    0x94, 0x79, 0x70, 0x16, 0xdf, 0x91, 0x60, 0xa2, 0x81, 0xce, 0x27, 0x14, 0x84, 0x28, 0x20, 0xcc,
+    0x30, 0x65, 0x1d, 0x98, 0x15, 0x60, 0x9d, 0x30, 0x5f, 0x42, 0x42, 0x09, 0x6b, 0x76, 0xdf, 0x0b,
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -993,6 +1012,12 @@ fn validate_supported_schema(
             &V9_EXPECTED_SCHEMA_OBJECTS,
             V9_SCHEMA_FINGERPRINT,
         ),
+        10 => validate_schema(
+            connection,
+            clock,
+            &V10_EXPECTED_SCHEMA_OBJECTS,
+            V10_SCHEMA_FINGERPRINT,
+        ),
         _ => Err(corrupt_error()),
     }
 }
@@ -1283,6 +1308,11 @@ pub(super) const fn test_v8_schema_fingerprint() -> [u8; 32] {
 #[cfg(test)]
 pub(super) const fn test_v9_schema_fingerprint() -> [u8; 32] {
     V9_SCHEMA_FINGERPRINT
+}
+
+#[cfg(test)]
+pub(super) const fn test_v10_schema_fingerprint() -> [u8; 32] {
+    V10_SCHEMA_FINGERPRINT
 }
 
 #[cfg(test)]

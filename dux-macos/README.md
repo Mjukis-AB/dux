@@ -101,9 +101,11 @@ explicit cancellation, review release, or close. Run the linked lifecycle and
 concurrency tests with the same `xcodebuild` arguments above, replacing `build`
 with `test`.
 
-`AppRuntime` owns the engine service, private-store maintenance scheduler, and
-Explorer review controller. Shutdown is ordered: cancel maintenance, release
-all reviews, then close Rust. Review leases renew every five minutes and on
+`AppRuntime` owns the engine service, five-minute capacity scheduler,
+private-store maintenance scheduler, pressure-policy resample router, and
+Explorer review controller. Shutdown first generation-invalidates policy work
+and the resample router, then stops capacity sampling, cancels maintenance,
+releases all reviews, and closes Rust. Review leases renew every five minutes and on
 wake/significant time change; generation tokens discard acquisitions or renewal
 failures that complete after the selected review changed. FFI close also drains
 still-live registered review pins and rejects later renewal.
@@ -134,5 +136,14 @@ queue. It prefers `volumeAvailableCapacityForImportantUsage`, records whether it
 had to fall back to ordinary filesystem availability, and retains both values
 when available. The shared `AppModel` deduplicates initial loads across the menu
 bar, Explorer, and Settings scenes. Capacity is never derived from directory
-scan totals, and the later Rust pressure evaluator remains the only owner of
+scan totals, and the Rust engine pressure evaluator remains the only owner of
 Healthy/Warning/Critical thresholds and hysteresis.
+
+Settings uses FFI contract v6's typed pressure-policy get/set/reset calls. Rust
+persists canonical exact integer configuration and remains the sole semantic
+validator/evaluator. Swift holds GiB and percentage edits as text and converts
+them with checked integer arithmetic, so arbitrary stored byte values round-trip
+without `Double`, `Decimal`, or silent rounding. A changed save or reset routes
+one manual signal through the capacity scheduler; unchanged, failed, cancelled,
+or superseded operations signal nothing. Policy state is classification-only
+and carries no scan, notification, schedule, plan, or cleanup authority.

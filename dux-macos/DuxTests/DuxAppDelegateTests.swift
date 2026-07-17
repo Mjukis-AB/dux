@@ -149,13 +149,48 @@ private actor RuntimeEngineSpy: EngineServing, DuxEngineClosing {
     init(recorder: RuntimeEventRecorder) { self.recorder = recorder }
 
     func loadStatus() async throws -> EngineStatus {
-        EngineStatus(libraryVersion: "test", ffiContractVersion: 5, executedOffMainThread: true)
+        EngineStatus(libraryVersion: "test", ffiContractVersion: 6, executedOffMainThread: true)
     }
 
     func observeVolumeCapacity(
         _ snapshot: VolumeCapacitySnapshot
     ) async throws -> VolumeCapacitySnapshot {
         snapshot
+    }
+
+    func loadDiskPressurePolicy() async throws -> DiskPressurePolicy {
+        DiskPressurePolicy(
+            source: .default,
+            revision: 0,
+            configuration: .defaults,
+            updatedAtUnixMilliseconds: nil
+        )
+    }
+
+    func setDiskPressurePolicy(
+        _ configuration: DiskPressurePolicyConfiguration
+    ) async throws -> DiskPressurePolicyUpdateResult {
+        DiskPressurePolicyUpdateResult(
+            policy: DiskPressurePolicy(
+                source: .stored,
+                revision: 1,
+                configuration: configuration,
+                updatedAtUnixMilliseconds: 1
+            ),
+            changed: true
+        )
+    }
+
+    func resetDiskPressurePolicy() async throws -> DiskPressurePolicyUpdateResult {
+        DiskPressurePolicyUpdateResult(
+            policy: DiskPressurePolicy(
+                source: .default,
+                revision: 1,
+                configuration: .defaults,
+                updatedAtUnixMilliseconds: 1
+            ),
+            changed: true
+        )
     }
 
     func close() async -> Bool {

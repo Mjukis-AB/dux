@@ -47,7 +47,7 @@ final class EngineServiceTests: XCTestCase {
         // DUX-DESTRUCTIVE: allow=test-swift-retry-obstruction-remove -- remove only this test fixture's deliberate file obstruction
         try FileManager.default.removeItem(at: dataRoot)
         let status = try await service.loadStatus()
-        XCTAssertEqual(status.ffiContractVersion, 5)
+        XCTAssertEqual(status.ffiContractVersion, 6)
         let closed = await service.close()
         XCTAssertTrue(closed)
     }
@@ -57,8 +57,110 @@ final class EngineServiceTests: XCTestCase {
         let result = try await EngineService(engine: fixture.engine).loadStatus()
 
         XCTAssertEqual(result.libraryVersion, "0.5.0")
-        XCTAssertEqual(result.ffiContractVersion, 5)
+        XCTAssertEqual(result.ffiContractVersion, 6)
         XCTAssertTrue(result.executedOffMainThread)
+    }
+
+    @MainActor
+    func testRealPressurePolicyRoundTripPreservesExactValuesAndProvenanceOffMainActor() async throws {
+        let fixture = try TestEngineFixture()
+        let service = EngineService(engine: fixture.engine)
+        let defaults = try await service.loadDiskPressurePolicy()
+        XCTAssertEqual(defaults, testDefaultDiskPressurePolicy())
+
+        let explicitDefault = try await service.setDiskPressurePolicy(.defaults)
+        XCTAssertTrue(explicitDefault.changed)
+        XCTAssertEqual(explicitDefault.policy.source, .stored)
+        XCTAssertEqual(explicitDefault.policy.revision, 1)
+        XCTAssertEqual(explicitDefault.policy.configuration, .defaults)
+
+        let unchangedDefault = try await service.setDiskPressurePolicy(.defaults)
+        XCTAssertFalse(unchangedDefault.changed)
+        XCTAssertEqual(unchangedDefault.policy, explicitDefault.policy)
+
+        let exact = DiskPressurePolicyConfiguration(
+            criticalAvailableBytes: UInt64.max - (1 << 31),
+            criticalAvailableBasisPoints: 9_998,
+            warningAvailableBytes: UInt64.max - (1 << 30),
+            warningAvailableBasisPoints: 9_999,
+            recoveryBytes: 1,
+            recoveryBasisPoints: 1
+        )
+        let custom = try await service.setDiskPressurePolicy(exact)
+        XCTAssertTrue(custom.changed)
+        XCTAssertEqual(custom.policy.configuration, exact)
+        XCTAssertEqual(custom.policy.revision, 2)
+
+        let reset = try await service.resetDiskPressurePolicy()
+        XCTAssertTrue(reset.changed)
+        XCTAssertEqual(reset.policy.source, .default)
+        XCTAssertEqual(reset.policy.configuration, .defaults)
+        XCTAssertEqual(reset.policy.revision, 3)
+
+        let unchangedReset = try await service.resetDiskPressurePolicy()
+        XCTAssertFalse(unchangedReset.changed)
+        XCTAssertEqual(unchangedReset.policy, reset.policy)
+    }
+
+    func testPressurePolicyServiceMapsTypedValidationAndClosedErrors() async throws {
+        let fixture = try TestEngineFixture()
+        let service = EngineService(engine: fixture.engine)
+        let invalid = DiskPressurePolicyConfiguration(
+            criticalAvailableBytes: 10,
+            criticalAvailableBasisPoints: 500,
+            warningAvailableBytes: 9,
+            warningAvailableBasisPoints: 1_000,
+            recoveryBytes: 1,
+            recoveryBasisPoints: 1
+        )
+        do {
+            _ = try await service.setDiskPressurePolicy(invalid)
+            XCTFail("Expected Rust policy validation to reject warning bytes")
+        } catch let error as DiskPressurePolicyServiceError {
+            XCTAssertEqual(error, .warningBytesBelowCritical)
+        }
+
+        let closed = await service.close()
+        XCTAssertTrue(closed)
+        do {
+            _ = try await service.loadDiskPressurePolicy()
+            XCTFail("Expected a closed policy service")
+        } catch let error as DiskPressurePolicyServiceError {
+            XCTAssertEqual(error, .closed)
+        }
+    }
+
+    func testPressurePolicyServiceRejectsMalformedVersionedResponse() async {
+        let service = EngineService(engine: InvalidPressurePolicyEngine())
+        do {
+            _ = try await service.loadDiskPressurePolicy()
+            XCTFail("Expected malformed policy response rejection")
+        } catch let error as DiskPressurePolicyServiceError {
+            XCTAssertEqual(error, .invalidResponse)
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+
+    func testPressurePolicyServiceRejectsMisleadingDefaultResponses() async {
+        let service = EngineService(engine: MisleadingDefaultPressurePolicyEngine())
+        do {
+            _ = try await service.loadDiskPressurePolicy()
+            XCTFail("Expected a custom configuration labeled Default to be rejected")
+        } catch let error as DiskPressurePolicyServiceError {
+            XCTAssertEqual(error, .invalidResponse)
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        do {
+            _ = try await service.resetDiskPressurePolicy()
+            XCTFail("Expected a misleading reset response to be rejected")
+        } catch let error as DiskPressurePolicyServiceError {
+            XCTAssertEqual(error, .invalidResponse)
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
     }
 
     func testRealEngineClassifiesAndPersistsStartupVolumeOffMainThread() async throws {
@@ -214,7 +316,7 @@ final class EngineServiceTests: XCTestCase {
             weakEngine = engine
 
             XCTAssertEqual(liveEngineInstanceCount(), baseline + 1)
-            XCTAssertEqual(try engine.libraryVersion().ffiContractVersion, 5)
+            XCTAssertEqual(try engine.libraryVersion().ffiContractVersion, 6)
             XCTAssertTrue(engine.close())
             XCTAssertTrue(engine.close())
             XCTAssertThrowsError(try engine.formatSize(bytes: 1_536)) { error in
@@ -447,7 +549,7 @@ private actor CountingEngineService: EngineServing {
         await Task.yield()
         return EngineStatus(
             libraryVersion: "test",
-            ffiContractVersion: 5,
+            ffiContractVersion: 6,
             executedOffMainThread: true
         )
     }
@@ -457,6 +559,23 @@ private actor CountingEngineService: EngineServing {
     ) async throws -> VolumeCapacitySnapshot {
         volumeObservationCount += 1
         return snapshot
+    }
+
+    func loadDiskPressurePolicy() async throws -> DiskPressurePolicy {
+        testDefaultDiskPressurePolicy()
+    }
+
+    func setDiskPressurePolicy(
+        _ configuration: DiskPressurePolicyConfiguration
+    ) async throws -> DiskPressurePolicyUpdateResult {
+        DiskPressurePolicyUpdateResult(
+            policy: testStoredDiskPressurePolicy(configuration),
+            changed: true
+        )
+    }
+
+    func resetDiskPressurePolicy() async throws -> DiskPressurePolicyUpdateResult {
+        DiskPressurePolicyUpdateResult(policy: testDefaultDiskPressurePolicy(), changed: true)
     }
 
     func currentLoadCount() -> Int {
@@ -489,6 +608,64 @@ private final class TestEngineFixture {
         _ = engine.close()
         // DUX-DESTRUCTIVE: allow=test-swift-storage-roots-fixture-remove -- remove only this fixture's UUID-named temporary root
         try? FileManager.default.removeItem(at: root)
+    }
+}
+
+private final class InvalidPressurePolicyEngine: DuxEngine, @unchecked Sendable {
+    required init(unsafeFromHandle handle: UInt64) {
+        super.init(unsafeFromHandle: handle)
+    }
+
+    init() {
+        super.init(noHandle: NoHandle())
+    }
+
+    override func getDiskPressurePolicy() throws -> PressurePolicyStatus {
+        PressurePolicyStatus(
+            recordVersion: 2,
+            source: .default,
+            revision: 0,
+            criticalAvailableBytes: 1,
+            criticalAvailableBasisPoints: 1,
+            warningAvailableBytes: 2,
+            warningAvailableBasisPoints: 2,
+            recoveryBytes: 1,
+            recoveryBasisPoints: 1,
+            updatedAtUnixMs: nil
+        )
+    }
+}
+
+private final class MisleadingDefaultPressurePolicyEngine: DuxEngine, @unchecked Sendable {
+    required init(unsafeFromHandle handle: UInt64) {
+        super.init(unsafeFromHandle: handle)
+    }
+
+    init() {
+        super.init(noHandle: NoHandle())
+    }
+
+    override func getDiskPressurePolicy() throws -> PressurePolicyStatus {
+        misleadingPolicy
+    }
+
+    override func resetDiskPressurePolicy() throws -> PressurePolicyUpdate {
+        PressurePolicyUpdate(recordVersion: 1, policy: misleadingPolicy, changed: true)
+    }
+
+    private var misleadingPolicy: PressurePolicyStatus {
+        PressurePolicyStatus(
+            recordVersion: 1,
+            source: .default,
+            revision: 1,
+            criticalAvailableBytes: 1,
+            criticalAvailableBasisPoints: 1,
+            warningAvailableBytes: 2,
+            warningAvailableBasisPoints: 2,
+            recoveryBytes: 1,
+            recoveryBasisPoints: 1,
+            updatedAtUnixMs: 0
+        )
     }
 }
 
@@ -589,7 +766,7 @@ private actor FlakyEngineService: EngineServing {
         }
         return EngineStatus(
             libraryVersion: "test",
-            ffiContractVersion: 5,
+            ffiContractVersion: 6,
             executedOffMainThread: true
         )
     }
@@ -598,6 +775,23 @@ private actor FlakyEngineService: EngineServing {
         _ snapshot: VolumeCapacitySnapshot
     ) async throws -> VolumeCapacitySnapshot {
         snapshot
+    }
+
+    func loadDiskPressurePolicy() async throws -> DiskPressurePolicy {
+        testDefaultDiskPressurePolicy()
+    }
+
+    func setDiskPressurePolicy(
+        _ configuration: DiskPressurePolicyConfiguration
+    ) async throws -> DiskPressurePolicyUpdateResult {
+        DiskPressurePolicyUpdateResult(
+            policy: testStoredDiskPressurePolicy(configuration),
+            changed: true
+        )
+    }
+
+    func resetDiskPressurePolicy() async throws -> DiskPressurePolicyUpdateResult {
+        DiskPressurePolicyUpdateResult(policy: testDefaultDiskPressurePolicy(), changed: true)
     }
 
     func currentLoadCount() -> Int {
@@ -625,5 +819,25 @@ private func makeVolumeSnapshot(
         warningBoundaryBytes: nil,
         historyDisposition: nil,
         sampledAt: Date(timeIntervalSince1970: sampledAt)
+    )
+}
+
+private func testDefaultDiskPressurePolicy() -> DiskPressurePolicy {
+    DiskPressurePolicy(
+        source: .default,
+        revision: 0,
+        configuration: .defaults,
+        updatedAtUnixMilliseconds: nil
+    )
+}
+
+private func testStoredDiskPressurePolicy(
+    _ configuration: DiskPressurePolicyConfiguration
+) -> DiskPressurePolicy {
+    DiskPressurePolicy(
+        source: .stored,
+        revision: 1,
+        configuration: configuration,
+        updatedAtUnixMilliseconds: 1
     )
 }

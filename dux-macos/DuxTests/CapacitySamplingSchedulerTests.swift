@@ -103,6 +103,27 @@ final class CapacitySamplingSchedulerTests: XCTestCase {
         XCTAssertEqual(cancellationCount, 1)
     }
 
+    func testPolicyResampleRouterCoalescesPendingAttachmentAndInvalidates() async {
+        let router = DuxCapacityResampleRouter()
+        let scheduler = ResampleSchedulerSpy()
+
+        await router.requestCapacityResample()
+        await router.requestCapacityResample()
+        await router.attach(scheduler)
+        var signalCount = await scheduler.signalCount()
+        XCTAssertEqual(signalCount, 1)
+
+        await router.requestCapacityResample()
+        signalCount = await scheduler.signalCount()
+        XCTAssertEqual(signalCount, 2)
+
+        await router.invalidate()
+        await router.requestCapacityResample()
+        await router.attach(scheduler)
+        signalCount = await scheduler.signalCount()
+        XCTAssertEqual(signalCount, 2)
+    }
+
     private func makeScheduler(
         sampler: StubCapacitySampler,
         clock: ManualCapacityClock
@@ -126,6 +147,21 @@ final class CapacitySamplingSchedulerTests: XCTestCase {
         }
         XCTFail("Timed out waiting for asynchronous state")
     }
+}
+
+private actor ResampleSchedulerSpy: DuxCapacityScheduling {
+    private var signals = 0
+
+    func start() {}
+
+    func signal(_ trigger: DuxCapacitySamplingTrigger) {
+        XCTAssertEqual(trigger, .manual)
+        signals += 1
+    }
+
+    func stop() {}
+
+    func signalCount() -> Int { signals }
 }
 
 @MainActor

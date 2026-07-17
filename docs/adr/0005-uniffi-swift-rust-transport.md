@@ -56,7 +56,7 @@ Those capabilities retain their own gates below and in ADR 0004.
 
 ## Current realization
 
-FFI contract v5 now carries the real shared engine session first introduced in
+FFI contract v6 now carries the real shared engine session first introduced in
 v4. The app supplies input-only private data/cache roots; storage
 paths never return across the boundary. Seven maintenance kinds use opaque task
 objects with nonblocking versioned path-free poll/cancel records, and exact
@@ -69,7 +69,7 @@ typed outcomes; process-instance identities and recovery-scope keys remain
 private to Rust. As with every maintenance task, the transport cannot select a
 scan, owner, or victim and cannot acquire cleanup authority.
 
-Contract v5 additionally exposes one synchronous, versioned, path-free
+Contract v5 added one synchronous, versioned, path-free
 startup-volume observation/status pair. Swift supplies optional canonical
 volume UUID evidence, optional Foundation metadata, a timestamp, total
 capacity, and independent ordinary/important availability; the adapter fixes
@@ -82,6 +82,18 @@ retains only the newest display-pressure baseline so those observations still
 receive hysteresis without becoming durable identity evidence. The generated
 call remains confined to `EngineService`'s utility queue, and neither input nor
 output can express a scan, candidate, plan, path, or cleanup instruction.
+
+Contract v6 adds three synchronous, versioned, path-free pressure-policy calls:
+typed get, set, and reset. Exact integer thresholds, Default/Stored provenance,
+revision, update time, and changed disposition cross the boundary; generated
+errors distinguish every semantic validation failure from storage failures.
+Startup observation/status remain record v1, and policy cannot be supplied with
+an observation. Swift converts app-owned exact decimal strings to integer
+bytes/basis points before calling Rust, while `DiskPressureConfig` remains the
+sole semantic validator and evaluator. A changed save/reset signals the native
+capacity scheduler exactly once; an unchanged, failed, cancelled, or invalid
+operation cannot signal. No policy record can name a volume, path, candidate,
+plan, schedule, notification, or cleanup action.
 
 The Swift adapter lazily constructs and synchronizes the engine on its utility
 queue. FFI close invalidates renewal, attempts exact release for every

@@ -31,8 +31,9 @@ pub use cleanup_history::{
 pub use config::{EngineConfig, EngineConfigError, EngineConfigField, EngineConfigReason};
 pub use registry::EngineHandle;
 pub use settings::{
-    SnapshotRetentionCap, SnapshotRetentionCapError, SnapshotRetentionCapSource,
-    SnapshotRetentionCapUpdate,
+    DiskPressurePolicy, DiskPressurePolicyError, DiskPressurePolicySource,
+    DiskPressurePolicyUpdate, SnapshotRetentionCap, SnapshotRetentionCapError,
+    SnapshotRetentionCapSource, SnapshotRetentionCapUpdate,
 };
 pub use snapshot_review::{
     SnapshotReviewError, SnapshotReviewReleaseOutcome, SnapshotReviewSession,

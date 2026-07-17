@@ -5,6 +5,28 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Added persistent user-configurable disk-pressure thresholds through SQLite
+  schema v10 and UniFFI contract v6. The exact `disk_pressure_policy` setting
+  stores canonical schema-v1 JSON with checked revisions and Default/Stored
+  provenance; absence remains the current core defaults at revision 0 without
+  a write, while explicit defaults and reset epochs remain distinguishable.
+  Raw and daily capacity history retain the policy revision that classified
+  them, migrated v9 rows remain revision 0, and a real policy change resets
+  old-policy hysteresis and forces one same-hour baseline. Policy loading,
+  classification, and history insertion share the final writer-leased
+  transaction, with a cross-process regression proving observations cannot
+  bypass a committed policy whose writer lease is still held. FFI v6 exposes
+  typed versioned get/set/reset records and validation failures without
+  changing startup-capacity record v1. Native Settings edits exact decimal GiB
+  and basis-point percentages without floating point or rounding, preserves
+  last-good state and attempted input on failure, and requests exactly one
+  generation-safe capacity resample only after a changed save/reset. Linked
+  tests cover every basis-point value, exact byte round trips through
+  `UInt64.max`, locale input, hostile responses, stable Settings accessibility
+  identifiers, cancellation, changed/unchanged resampling, and real Rust
+  persistence. This policy changes
+  classification only and grants no scan, notification, scheduling, or cleanup
+  authority.
 - Added native startup-volume pressure monitoring through FFI contract v5. The
   menu-bar runtime samples immediately, every five minutes, on wake, and after
   volume changes while keeping one generation-fenced request in flight. Rust is
@@ -23,8 +45,7 @@ All notable changes to DUX will be documented in this file.
   reopen, retry, suppressed-observation ordering across engine sessions,
   lifecycle signals, cancellation, honest partial observations,
   accessibility presentation, and the normal sampling budget. This is read-only
-  status telemetry and grants no cleanup authority. Custom threshold persistence
-  and controls remain an explicit Milestone 3 settings task.
+  status telemetry and grants no cleanup authority.
 - Added conservative hard-process-death recovery for schema-v9 claimed running
   scans. Start and normal completion atomically create/consume one exact private
   process-instance claim; a bounded indexed same-scope keyset pass drops every

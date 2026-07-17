@@ -15,6 +15,7 @@ use super::codec::{EncodedBytes, StoredEncoding, decode_host_path, encode_host_p
 use super::history::{
     HistoryError, HistoryErrorKind, map_query_sql_error, map_write_sql_error, run_bounded_query,
 };
+use super::pressure_settings::DiskPressurePolicySetting;
 
 const MAX_DISPLAY_NAME_BYTES: usize = 512;
 const MAX_FILESYSTEM_BYTES: usize = 128;
@@ -31,6 +32,7 @@ const UTC_HOUR_MS: i64 = 3_600_000;
 pub(crate) enum CapacityWriteReason {
     Routine,
     PressureTransition,
+    PolicyBaseline,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -48,6 +50,7 @@ pub(crate) struct CapacityPressureBaseline {
     pub(crate) sampled_at: SystemTime,
     pub(crate) capacity: VolumeCapacity,
     pub(crate) pressure: DiskPressure,
+    pub(crate) policy_revision: u64,
 }
 
 impl CapacityPressureBaseline {
@@ -55,11 +58,13 @@ impl CapacityPressureBaseline {
         sampled_at: SystemTime,
         capacity: VolumeCapacity,
         pressure: DiskPressure,
+        policy_revision: u64,
     ) -> Self {
         Self {
             sampled_at,
             capacity,
             pressure,
+            policy_revision,
         }
     }
 }
@@ -125,11 +130,12 @@ impl RawCapacityObservation {
     pub(super) fn with_pressure(
         &self,
         pressure: DiskPressure,
+        policy_revision: u64,
     ) -> Result<Option<RawCapacitySample>, HistoryError> {
         let Some(available_bytes) = self.capacity.available_bytes() else {
             return Ok(None);
         };
-        RawCapacitySample::try_new(
+        RawCapacitySample::try_new_with_policy_revision(
             self.volume_id.clone(),
             self.mount_path.clone(),
             self.display_name.clone(),
@@ -141,6 +147,7 @@ impl RawCapacityObservation {
             available_bytes,
             self.capacity.important_available_bytes(),
             pressure,
+            policy_revision,
         )
         .map(Some)
     }
@@ -163,6 +170,7 @@ pub(crate) struct CapacityObservationOutcome {
     pub(crate) evaluation: DiskPressureEvaluation,
     pub(crate) previous_durable_pressure: Option<DiskPressure>,
     pub(crate) write: Option<CapacityWriteOutcome>,
+    pub(crate) effective_policy: DiskPressurePolicySetting,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -178,6 +186,7 @@ pub(crate) struct RawCapacitySample {
     available_bytes: u64,
     important_available_bytes: Option<u64>,
     pressure: DiskPressure,
+    policy_revision: u64,
 }
 
 impl RawCapacitySample {
@@ -194,6 +203,37 @@ impl RawCapacitySample {
         available_bytes: u64,
         important_available_bytes: Option<u64>,
         pressure: DiskPressure,
+    ) -> Result<Self, HistoryError> {
+        Self::try_new_with_policy_revision(
+            volume_id,
+            mount_path,
+            display_name,
+            filesystem,
+            is_internal,
+            is_removable,
+            sampled_at,
+            total_bytes,
+            available_bytes,
+            important_available_bytes,
+            pressure,
+            0,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn try_new_with_policy_revision(
+        volume_id: VolumeId,
+        mount_path: PathBuf,
+        display_name: String,
+        filesystem: String,
+        is_internal: bool,
+        is_removable: bool,
+        sampled_at: SystemTime,
+        total_bytes: u64,
+        available_bytes: u64,
+        important_available_bytes: Option<u64>,
+        pressure: DiskPressure,
+        policy_revision: u64,
     ) -> Result<Self, HistoryError> {
         if !mount_path.is_absolute() {
             return Err(invalid());
@@ -213,6 +253,7 @@ impl RawCapacitySample {
             || total_bytes > i64::MAX as u64
             || available_bytes > total_bytes
             || important_available_bytes.is_some_and(|available| available > total_bytes)
+            || policy_revision > i64::MAX as u64
         {
             return Err(invalid());
         }
@@ -230,6 +271,7 @@ impl RawCapacitySample {
             available_bytes,
             important_available_bytes,
             pressure,
+            policy_revision,
         })
     }
 
@@ -254,6 +296,7 @@ pub(crate) struct StoredCapacitySample {
     pub(crate) available_bytes: u64,
     pub(crate) important_available_bytes: Option<u64>,
     pub(crate) pressure: DiskPressure,
+    pub(crate) policy_revision: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -288,7 +331,7 @@ impl PreparedCapacitySample {
     pub(super) fn prepare(sample: &RawCapacitySample) -> Result<Self, HistoryError> {
         // Revalidate at the persistence boundary even though construction is
         // private, so future internal callers cannot bypass stored invariants.
-        let canonical = RawCapacitySample::try_new(
+        let canonical = RawCapacitySample::try_new_with_policy_revision(
             sample.volume_id.clone(),
             sample.mount_path.clone(),
             sample.display_name.clone(),
@@ -300,6 +343,7 @@ impl PreparedCapacitySample {
             sample.available_bytes,
             sample.important_available_bytes,
             sample.pressure,
+            sample.policy_revision,
         )?;
         Ok(Self {
             mount_path: encode_host_path(&canonical.mount_path).map_err(|_| invalid())?,
@@ -390,6 +434,7 @@ pub(super) fn write_raw_capacity_sample(
             Some(_) => CapacityWriteOutcome::Suppressed,
             None => return Err(HistoryError::new(HistoryErrorKind::InvalidTransition)),
         },
+        CapacityWriteReason::PolicyBaseline => CapacityWriteOutcome::Inserted,
     };
 
     upsert_volume_observation(transaction, prepared, volume.as_ref())?;
@@ -591,8 +636,9 @@ fn insert_raw_capacity_sample(
         .execute(
             "INSERT INTO disk_samples (
                 volume_id, sample_kind, sampled_at_unix_ms, total_bytes,
-                available_bytes, important_available_bytes, pressure
-             ) VALUES (?1, 'raw', ?2, ?3, ?4, ?5, ?6)",
+                available_bytes, important_available_bytes, pressure,
+                policy_revision
+             ) VALUES (?1, 'raw', ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 prepared.sample.volume_id.as_str(),
                 prepared.sampled_at_unix_ms,
@@ -600,6 +646,8 @@ fn insert_raw_capacity_sample(
                 prepared.available_bytes,
                 prepared.important_available_bytes,
                 pressure_as_stored(prepared.sample.pressure),
+                i64::try_from(prepared.sample.policy_revision)
+                    .map_err(|_| HistoryError::new(HistoryErrorKind::InternalState))?,
             ],
         )
         .map_err(map_write_sql_error)?;
@@ -842,6 +890,7 @@ struct RawSampleRow {
     available_bytes: i64,
     important_available_bytes: Option<i64>,
     pressure: String,
+    policy_revision: i64,
 }
 
 fn sample_select() -> &'static str {
@@ -852,7 +901,8 @@ fn sample_select() -> &'static str {
         typeof(total_bytes), total_bytes,
         typeof(available_bytes), available_bytes,
         typeof(important_available_bytes), important_available_bytes,
-        typeof(pressure), length(CAST(pressure AS BLOB)), pressure
+        typeof(pressure), length(CAST(pressure AS BLOB)), pressure,
+        typeof(policy_revision), policy_revision
      FROM disk_samples"
 }
 
@@ -867,6 +917,7 @@ fn raw_sample_row(row: &Row<'_>) -> rusqlite::Result<RawSampleRow> {
         return Err(rusqlite::Error::InvalidQuery);
     }
     validate_type_length(row, 14, 15, "text", 1, MAX_STORED_PRESSURE_BYTES)?;
+    validate_type(row, 17, "integer")?;
     Ok(RawSampleRow {
         volume_id: row.get(2)?,
         sample_kind: row.get(5)?,
@@ -875,6 +926,7 @@ fn raw_sample_row(row: &Row<'_>) -> rusqlite::Result<RawSampleRow> {
         available_bytes: row.get(11)?,
         important_available_bytes: row.get(13)?,
         pressure: row.get(16)?,
+        policy_revision: row.get(18)?,
     })
 }
 
@@ -890,6 +942,7 @@ fn decode_sample_row(raw: RawSampleRow) -> Result<StoredCapacitySample, HistoryE
     if total_bytes == 0
         || available_bytes > total_bytes
         || important_available_bytes.is_some_and(|available| available > total_bytes)
+        || raw.policy_revision < 0
     {
         return Err(corrupt());
     }
@@ -900,6 +953,7 @@ fn decode_sample_row(raw: RawSampleRow) -> Result<StoredCapacitySample, HistoryE
         available_bytes,
         important_available_bytes,
         pressure: pressure_from_stored(&raw.pressure)?,
+        policy_revision: u64::try_from(raw.policy_revision).map_err(|_| corrupt())?,
     })
 }
 
@@ -910,6 +964,7 @@ fn stored_sample_matches(stored: &StoredCapacitySample, prepared: &PreparedCapac
         && stored.available_bytes == prepared.sample.available_bytes
         && stored.important_available_bytes == prepared.sample.important_available_bytes
         && stored.pressure == prepared.sample.pressure
+        && stored.policy_revision == prepared.sample.policy_revision
 }
 
 fn pressure_as_stored(pressure: DiskPressure) -> &'static str {
@@ -1069,36 +1124,24 @@ mod tests {
         let gib = 1_024 * 1_024 * 1_024;
         let first = observation_at(BASE_HOUR_MS, 100 * gib);
         let inserted = store
-            .observe_capacity_after_commit_failure_for_test(
-                &first,
-                crate::DiskPressureConfig::default(),
-            )
+            .observe_capacity_after_commit_failure_for_test(&first)
             .unwrap();
         assert_eq!(inserted.write, Some(CapacityWriteOutcome::Inserted));
 
         let exact = store
-            .observe_capacity_after_commit_failure_for_test(
-                &first,
-                crate::DiskPressureConfig::default(),
-            )
+            .observe_capacity_after_commit_failure_for_test(&first)
             .unwrap();
         assert_eq!(exact.write, Some(CapacityWriteOutcome::ExistingExact));
 
         let routine = observation_at(BASE_HOUR_MS + 60_000, 90 * gib);
         let suppressed = store
-            .observe_capacity_after_commit_failure_for_test(
-                &routine,
-                crate::DiskPressureConfig::default(),
-            )
+            .observe_capacity_after_commit_failure_for_test(&routine)
             .unwrap();
         assert_eq!(suppressed.write, Some(CapacityWriteOutcome::Suppressed));
 
         let transition = observation_at(BASE_HOUR_MS + 120_000, 5 * gib);
         let transitioned = store
-            .observe_capacity_after_commit_failure_for_test(
-                &transition,
-                crate::DiskPressureConfig::default(),
-            )
+            .observe_capacity_after_commit_failure_for_test(&transition)
             .unwrap();
         assert_eq!(transitioned.write, Some(CapacityWriteOutcome::Inserted));
         assert_eq!(transitioned.evaluation.pressure(), DiskPressure::Critical);

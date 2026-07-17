@@ -7,7 +7,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use dux_core::engine::{
     CancelOutcome as CoreCancelOutcome, CapacityHistoryDisposition as CoreHistoryDisposition,
-    EngineConfig, EngineHandle, EngineOpenError, HistoryMaintenanceStartOutcome,
+    DiskPressurePolicy as CorePressurePolicy, DiskPressurePolicyError as CorePressurePolicyError,
+    DiskPressurePolicySource as CorePressurePolicySource,
+    DiskPressurePolicyUpdate as CorePressurePolicyUpdate, EngineConfig, EngineHandle,
+    EngineOpenError, HistoryMaintenanceStartOutcome,
     ScanRecoveryMaintenanceOutcome as CoreScanRecoveryOutcome, ScanRecoveryMaintenanceStartOutcome,
     SnapshotOrphanMaintenanceOutcome as CoreOrphanOutcome, SnapshotOrphanMaintenanceStartOutcome,
     SnapshotProvisioningStageMaintenanceOutcome as CoreStageOutcome,
@@ -25,10 +28,12 @@ use dux_core::engine::{
 };
 use dux_core::{
     AvailableCapacitySource as CoreCapacitySource, DatabaseOpenErrorKind,
-    DiskPressure as CoreDiskPressure, ScanId, SnapshotOpenErrorKind, VolumeCapacity, VolumeId,
+    DiskPressure as CoreDiskPressure, DiskPressureConfig, DiskPressureConfigError,
+    DiskPressureRecoveryMargin, DiskPressureThreshold, ScanId, SnapshotOpenErrorKind,
+    VolumeCapacity, VolumeId,
 };
 
-const FFI_CONTRACT_VERSION: u32 = 5;
+const FFI_CONTRACT_VERSION: u32 = 6;
 const FFI_RECORD_VERSION: u32 = 1;
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 static LIVE_ENGINE_INSTANCE_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -102,6 +107,89 @@ pub struct StartupVolumeStatus {
     pub critical_boundary_bytes: u64,
     pub warning_boundary_bytes: u64,
     pub history_disposition: VolumeHistoryDisposition,
+}
+
+/// Exact integer policy input. Basis points retain two decimal percentage
+/// places without floating-point conversion.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct PressurePolicyInput {
+    pub record_version: u32,
+    pub critical_available_bytes: u64,
+    pub critical_available_basis_points: u16,
+    pub warning_available_bytes: u64,
+    pub warning_available_basis_points: u16,
+    pub recovery_bytes: u64,
+    pub recovery_basis_points: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum PressurePolicySource {
+    Default,
+    Stored,
+}
+
+/// Versioned, path-free effective pressure policy.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct PressurePolicyStatus {
+    pub record_version: u32,
+    pub source: PressurePolicySource,
+    pub revision: u64,
+    pub critical_available_bytes: u64,
+    pub critical_available_basis_points: u16,
+    pub warning_available_bytes: u64,
+    pub warning_available_basis_points: u16,
+    pub recovery_bytes: u64,
+    pub recovery_basis_points: u16,
+    pub updated_at_unix_ms: Option<i64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct PressurePolicyUpdate {
+    pub record_version: u32,
+    pub policy: PressurePolicyStatus,
+    pub changed: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error, uniffi::Error)]
+pub enum PressurePolicyError {
+    #[error("engine session is closed")]
+    Closed,
+    #[error("pressure policy record version is unsupported")]
+    InvalidRecordVersion,
+    #[error("a pressure threshold byte value must be positive")]
+    ThresholdBytesZero,
+    #[error("pressure threshold basis points are outside 1 through 10000")]
+    ThresholdBasisPointsOutOfRange,
+    #[error("the warning byte threshold is below the critical threshold")]
+    WarningBytesBelowCritical,
+    #[error("the warning percentage threshold is below the critical threshold")]
+    WarningBasisPointsBelowCritical,
+    #[error("warning and critical thresholds are identical")]
+    WarningThresholdMatchesCritical,
+    #[error("the pressure recovery byte margin must be positive")]
+    RecoveryBytesZero,
+    #[error("pressure recovery basis points are outside 1 through 10000")]
+    RecoveryBasisPointsOutOfRange,
+    #[error("the pressure policy revision cannot advance")]
+    RevisionExhausted,
+    #[error("the system clock cannot be represented")]
+    InvalidClock,
+    #[error("the durable schema is incompatible")]
+    IncompatibleSchema,
+    #[error("the durable store is temporarily busy")]
+    Busy,
+    #[error("storage failed its safety checks")]
+    UnsafeStorage,
+    #[error("the bounded settings query exceeded its budget")]
+    BudgetExceeded,
+    #[error("disk-pressure settings are corrupt")]
+    CorruptData,
+    #[error("disk-pressure settings are unavailable")]
+    Unavailable,
+    #[error("the settings write outcome is unknown")]
+    OutcomeUnknown,
+    #[error("internal pressure-policy state is invalid")]
+    InternalState,
 }
 
 /// Input-only adapter storage roots. No path is returned by this contract.
@@ -493,6 +581,37 @@ impl DuxEngine {
         })
     }
 
+    pub fn get_disk_pressure_policy(&self) -> Result<PressurePolicyStatus, PressurePolicyError> {
+        self.with_pressure_engine(|engine| {
+            engine
+                .disk_pressure_policy()
+                .map_err(map_pressure_policy_error)
+                .and_then(pressure_policy_status)
+        })
+    }
+
+    pub fn set_disk_pressure_policy(
+        &self,
+        input: PressurePolicyInput,
+    ) -> Result<PressurePolicyUpdate, PressurePolicyError> {
+        let config = pressure_policy_config(input)?;
+        self.with_pressure_engine(|engine| {
+            engine
+                .set_disk_pressure_policy(config)
+                .map_err(map_pressure_policy_error)
+                .and_then(pressure_policy_update)
+        })
+    }
+
+    pub fn reset_disk_pressure_policy(&self) -> Result<PressurePolicyUpdate, PressurePolicyError> {
+        self.with_pressure_engine(|engine| {
+            engine
+                .reset_disk_pressure_policy()
+                .map_err(map_pressure_policy_error)
+                .and_then(pressure_policy_update)
+        })
+    }
+
     pub fn acquire_explorer_snapshot_review(
         &self,
         scan_id: String,
@@ -585,6 +704,20 @@ impl DuxEngine {
         match &*state {
             EngineState::Open(engine) => operation(engine),
             EngineState::Closing | EngineState::Closed { .. } => Err(EngineError::Closed),
+        }
+    }
+
+    fn with_pressure_engine<T>(
+        &self,
+        operation: impl FnOnce(&EngineHandle) -> Result<T, PressurePolicyError>,
+    ) -> Result<T, PressurePolicyError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| PressurePolicyError::InternalState)?;
+        match &*state {
+            EngineState::Open(engine) => operation(engine),
+            EngineState::Closing | EngineState::Closed { .. } => Err(PressurePolicyError::Closed),
         }
     }
 
@@ -1017,6 +1150,116 @@ fn map_volume_status_error(error: CoreVolumeStatusError) -> EngineError {
     }
 }
 
+fn pressure_policy_config(
+    input: PressurePolicyInput,
+) -> Result<DiskPressureConfig, PressurePolicyError> {
+    if input.record_version != FFI_RECORD_VERSION {
+        return Err(PressurePolicyError::InvalidRecordVersion);
+    }
+    let critical = DiskPressureThreshold::new(
+        input.critical_available_bytes,
+        input.critical_available_basis_points,
+    )
+    .map_err(map_pressure_config_error)?;
+    let warning = DiskPressureThreshold::new(
+        input.warning_available_bytes,
+        input.warning_available_basis_points,
+    )
+    .map_err(map_pressure_config_error)?;
+    let recovery =
+        DiskPressureRecoveryMargin::new(input.recovery_bytes, input.recovery_basis_points)
+            .map_err(map_pressure_config_error)?;
+    DiskPressureConfig::new(critical, warning, recovery).map_err(map_pressure_config_error)
+}
+
+fn map_pressure_config_error(error: DiskPressureConfigError) -> PressurePolicyError {
+    match error {
+        DiskPressureConfigError::ThresholdBytesZero => PressurePolicyError::ThresholdBytesZero,
+        DiskPressureConfigError::ThresholdBasisPointsOutOfRange => {
+            PressurePolicyError::ThresholdBasisPointsOutOfRange
+        }
+        DiskPressureConfigError::WarningBytesBelowCritical => {
+            PressurePolicyError::WarningBytesBelowCritical
+        }
+        DiskPressureConfigError::WarningBasisPointsBelowCritical => {
+            PressurePolicyError::WarningBasisPointsBelowCritical
+        }
+        DiskPressureConfigError::WarningThresholdMatchesCritical => {
+            PressurePolicyError::WarningThresholdMatchesCritical
+        }
+        DiskPressureConfigError::RecoveryBytesZero => PressurePolicyError::RecoveryBytesZero,
+        DiskPressureConfigError::RecoveryBasisPointsOutOfRange => {
+            PressurePolicyError::RecoveryBasisPointsOutOfRange
+        }
+    }
+}
+
+fn map_pressure_policy_error(error: CorePressurePolicyError) -> PressurePolicyError {
+    match error {
+        CorePressurePolicyError::Closed => PressurePolicyError::Closed,
+        CorePressurePolicyError::RevisionExhausted => PressurePolicyError::RevisionExhausted,
+        CorePressurePolicyError::InvalidClock => PressurePolicyError::InvalidClock,
+        CorePressurePolicyError::IncompatibleSchema => PressurePolicyError::IncompatibleSchema,
+        CorePressurePolicyError::Busy => PressurePolicyError::Busy,
+        CorePressurePolicyError::UnsafeStorage => PressurePolicyError::UnsafeStorage,
+        CorePressurePolicyError::QueryLimitExceeded => PressurePolicyError::BudgetExceeded,
+        CorePressurePolicyError::CorruptData => PressurePolicyError::CorruptData,
+        CorePressurePolicyError::Unavailable => PressurePolicyError::Unavailable,
+        CorePressurePolicyError::OutcomeUnknown => PressurePolicyError::OutcomeUnknown,
+        CorePressurePolicyError::InternalState => PressurePolicyError::InternalState,
+        _ => PressurePolicyError::InternalState,
+    }
+}
+
+fn pressure_policy_status(
+    policy: CorePressurePolicy,
+) -> Result<PressurePolicyStatus, PressurePolicyError> {
+    let critical = policy.config.critical_threshold();
+    let warning = policy.config.warning_threshold();
+    let recovery = policy.config.recovery_margin();
+    let updated_at_unix_ms = policy.updated_at.map(pressure_policy_time_ms).transpose()?;
+    if (policy.revision == 0) != updated_at_unix_ms.is_none()
+        || (policy.revision == 0 && policy.source != CorePressurePolicySource::Default)
+    {
+        return Err(PressurePolicyError::InternalState);
+    }
+    Ok(PressurePolicyStatus {
+        record_version: FFI_RECORD_VERSION,
+        source: match policy.source {
+            CorePressurePolicySource::Default => PressurePolicySource::Default,
+            CorePressurePolicySource::Stored => PressurePolicySource::Stored,
+        },
+        revision: policy.revision,
+        critical_available_bytes: critical.maximum_available_bytes(),
+        critical_available_basis_points: critical.maximum_available_basis_points(),
+        warning_available_bytes: warning.maximum_available_bytes(),
+        warning_available_basis_points: warning.maximum_available_basis_points(),
+        recovery_bytes: recovery.bytes(),
+        recovery_basis_points: recovery.basis_points(),
+        updated_at_unix_ms,
+    })
+}
+
+fn pressure_policy_update(
+    update: CorePressurePolicyUpdate,
+) -> Result<PressurePolicyUpdate, PressurePolicyError> {
+    Ok(PressurePolicyUpdate {
+        record_version: FFI_RECORD_VERSION,
+        policy: pressure_policy_status(update.settings)?,
+        changed: update.changed,
+    })
+}
+
+fn pressure_policy_time_ms(value: SystemTime) -> Result<i64, PressurePolicyError> {
+    i64::try_from(
+        value
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| PressurePolicyError::InternalState)?
+            .as_millis(),
+    )
+    .map_err(|_| PressurePolicyError::InternalState)
+}
+
 fn map_volume_pressure(pressure: CoreDiskPressure) -> VolumePressure {
     match pressure {
         CoreDiskPressure::Healthy => VolumePressure::Healthy,
@@ -1157,10 +1400,10 @@ mod tests {
     }
 
     #[test]
-    fn reports_contract_five_and_preserves_legacy_formatting() {
+    fn reports_contract_six_and_preserves_legacy_formatting() {
         let _guard = ENGINE_TEST_LOCK.lock().unwrap();
         let (_temp, engine) = engine();
-        assert_eq!(library_version().ffi_contract_version, 5);
+        assert_eq!(library_version().ffi_contract_version, 6);
         assert_eq!(engine.library_version().unwrap(), library_version());
         assert_eq!(engine.format_size(1536).unwrap().display, "1.5 KB");
         assert!(engine.close());
@@ -1184,6 +1427,125 @@ mod tests {
             ordinary_available_bytes,
             important_available_bytes,
         }
+    }
+
+    fn default_pressure_policy_input() -> PressurePolicyInput {
+        let gib = 1_024 * 1_024 * 1_024;
+        PressurePolicyInput {
+            record_version: FFI_RECORD_VERSION,
+            critical_available_bytes: 10 * gib,
+            critical_available_basis_points: 500,
+            warning_available_bytes: 30 * gib,
+            warning_available_basis_points: 1_000,
+            recovery_bytes: 2 * gib,
+            recovery_basis_points: 100,
+        }
+    }
+
+    #[test]
+    fn pressure_policy_get_set_reset_is_versioned_typed_and_path_free() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (_temp, engine) = engine();
+        let initial = engine.get_disk_pressure_policy().unwrap();
+        assert_eq!(initial.record_version, 1);
+        assert_eq!(initial.source, PressurePolicySource::Default);
+        assert_eq!(initial.revision, 0);
+        assert_eq!(initial.updated_at_unix_ms, None);
+
+        let stored = engine
+            .set_disk_pressure_policy(default_pressure_policy_input())
+            .unwrap();
+        assert!(stored.changed);
+        assert_eq!(stored.record_version, 1);
+        assert_eq!(stored.policy.source, PressurePolicySource::Stored);
+        assert_eq!(stored.policy.revision, 1);
+        assert!(stored.policy.updated_at_unix_ms.is_some());
+        assert_eq!(engine.get_disk_pressure_policy().unwrap(), stored.policy);
+
+        let exact = engine
+            .set_disk_pressure_policy(default_pressure_policy_input())
+            .unwrap();
+        assert!(!exact.changed);
+        assert_eq!(exact.policy, stored.policy);
+
+        let reset = engine.reset_disk_pressure_policy().unwrap();
+        assert!(reset.changed);
+        assert_eq!(reset.policy.source, PressurePolicySource::Default);
+        assert_eq!(reset.policy.revision, 2);
+        assert!(reset.policy.updated_at_unix_ms.is_some());
+        let exact_reset = engine.reset_disk_pressure_policy().unwrap();
+        assert!(!exact_reset.changed);
+        assert_eq!(exact_reset.policy, reset.policy);
+
+        assert!(engine.close());
+        assert_eq!(
+            engine.get_disk_pressure_policy(),
+            Err(PressurePolicyError::Closed)
+        );
+        assert_eq!(
+            engine.set_disk_pressure_policy(default_pressure_policy_input()),
+            Err(PressurePolicyError::Closed)
+        );
+        assert_eq!(
+            engine.reset_disk_pressure_policy(),
+            Err(PressurePolicyError::Closed)
+        );
+    }
+
+    #[test]
+    fn pressure_policy_input_maps_every_validation_boundary() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (_temp, engine) = engine();
+
+        let mut value = default_pressure_policy_input();
+        value.record_version += 1;
+        assert_eq!(
+            engine.set_disk_pressure_policy(value),
+            Err(PressurePolicyError::InvalidRecordVersion)
+        );
+        let mut value = default_pressure_policy_input();
+        value.critical_available_bytes = 0;
+        assert_eq!(
+            engine.set_disk_pressure_policy(value),
+            Err(PressurePolicyError::ThresholdBytesZero)
+        );
+        let mut value = default_pressure_policy_input();
+        value.critical_available_basis_points = 0;
+        assert_eq!(
+            engine.set_disk_pressure_policy(value),
+            Err(PressurePolicyError::ThresholdBasisPointsOutOfRange)
+        );
+        let mut value = default_pressure_policy_input();
+        value.warning_available_bytes = value.critical_available_bytes - 1;
+        assert_eq!(
+            engine.set_disk_pressure_policy(value),
+            Err(PressurePolicyError::WarningBytesBelowCritical)
+        );
+        let mut value = default_pressure_policy_input();
+        value.warning_available_basis_points = value.critical_available_basis_points - 1;
+        assert_eq!(
+            engine.set_disk_pressure_policy(value),
+            Err(PressurePolicyError::WarningBasisPointsBelowCritical)
+        );
+        let mut value = default_pressure_policy_input();
+        value.warning_available_bytes = value.critical_available_bytes;
+        value.warning_available_basis_points = value.critical_available_basis_points;
+        assert_eq!(
+            engine.set_disk_pressure_policy(value),
+            Err(PressurePolicyError::WarningThresholdMatchesCritical)
+        );
+        let mut value = default_pressure_policy_input();
+        value.recovery_bytes = 0;
+        assert_eq!(
+            engine.set_disk_pressure_policy(value),
+            Err(PressurePolicyError::RecoveryBytesZero)
+        );
+        let mut value = default_pressure_policy_input();
+        value.recovery_basis_points = 0;
+        assert_eq!(
+            engine.set_disk_pressure_policy(value),
+            Err(PressurePolicyError::RecoveryBasisPointsOutOfRange)
+        );
     }
 
     #[test]

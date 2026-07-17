@@ -6,7 +6,15 @@ protocol DuxVolumeStatusServing: Sendable {
         -> VolumeCapacitySnapshot
 }
 
-protocol EngineServing: DuxVolumeStatusServing, Sendable {
+protocol DuxPressurePolicyServing: Sendable {
+    func loadDiskPressurePolicy() async throws -> DiskPressurePolicy
+    func setDiskPressurePolicy(
+        _ configuration: DiskPressurePolicyConfiguration
+    ) async throws -> DiskPressurePolicyUpdateResult
+    func resetDiskPressurePolicy() async throws -> DiskPressurePolicyUpdateResult
+}
+
+protocol EngineServing: DuxVolumeStatusServing, DuxPressurePolicyServing, Sendable {
     func loadStatus() async throws -> EngineStatus
 }
 
@@ -21,7 +29,7 @@ protocol DuxSnapshotReviewLease: AnyObject, Sendable {
 }
 
 struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewServing, Sendable {
-    fileprivate static let expectedFFIContractVersion: UInt32 = 5
+    fileprivate static let expectedFFIContractVersion: UInt32 = 6
     fileprivate static let expectedRecordVersion: UInt32 = 1
 
     private let state: EngineServiceState
@@ -117,6 +125,66 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
                 )
             } catch let error as EngineError {
                 throw Self.serviceError(error)
+            }
+        }
+    }
+
+    func loadDiskPressurePolicy() async throws -> DiskPressurePolicy {
+        try await state.perform { state in
+            precondition(!Thread.isMainThread, "Blocking FFI work reached the main thread")
+            let engine = try Self.resolvePressureEngine(state)
+            do {
+                return try Self.policy(engine.getDiskPressurePolicy())
+            } catch let error as PressurePolicyError {
+                throw Self.pressurePolicyError(error)
+            }
+        }
+    }
+
+    func setDiskPressurePolicy(
+        _ configuration: DiskPressurePolicyConfiguration
+    ) async throws -> DiskPressurePolicyUpdateResult {
+        try await state.perform { state in
+            precondition(!Thread.isMainThread, "Blocking FFI work reached the main thread")
+            let engine = try Self.resolvePressureEngine(state)
+            do {
+                let response = try engine.setDiskPressurePolicy(
+                    input: PressurePolicyInput(
+                        recordVersion: Self.expectedRecordVersion,
+                        criticalAvailableBytes: configuration.criticalAvailableBytes,
+                        criticalAvailableBasisPoints: configuration.criticalAvailableBasisPoints,
+                        warningAvailableBytes: configuration.warningAvailableBytes,
+                        warningAvailableBasisPoints: configuration.warningAvailableBasisPoints,
+                        recoveryBytes: configuration.recoveryBytes,
+                        recoveryBasisPoints: configuration.recoveryBasisPoints
+                    )
+                )
+                let update = try Self.policyUpdate(response)
+                guard
+                    update.policy.source == .stored,
+                    update.policy.configuration == configuration
+                else {
+                    throw DiskPressurePolicyServiceError.invalidResponse
+                }
+                return update
+            } catch let error as PressurePolicyError {
+                throw Self.pressurePolicyError(error)
+            }
+        }
+    }
+
+    func resetDiskPressurePolicy() async throws -> DiskPressurePolicyUpdateResult {
+        try await state.perform { state in
+            precondition(!Thread.isMainThread, "Blocking FFI work reached the main thread")
+            let engine = try Self.resolvePressureEngine(state)
+            do {
+                let update = try Self.policyUpdate(engine.resetDiskPressurePolicy())
+                guard update.policy.source == .default else {
+                    throw DiskPressurePolicyServiceError.invalidResponse
+                }
+                return update
+            } catch let error as PressurePolicyError {
+                throw Self.pressurePolicyError(error)
             }
         }
     }
@@ -223,6 +291,104 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
             .unavailable
         default:
             .unexpected(String(describing: error))
+        }
+    }
+
+    private static func policy(_ status: PressurePolicyStatus) throws -> DiskPressurePolicy {
+        let configuration = DiskPressurePolicyConfiguration(
+            criticalAvailableBytes: status.criticalAvailableBytes,
+            criticalAvailableBasisPoints: status.criticalAvailableBasisPoints,
+            warningAvailableBytes: status.warningAvailableBytes,
+            warningAvailableBasisPoints: status.warningAvailableBasisPoints,
+            recoveryBytes: status.recoveryBytes,
+            recoveryBasisPoints: status.recoveryBasisPoints
+        )
+        let source: DiskPressurePolicySource = switch status.source {
+        case .default: .default
+        case .stored: .stored
+        }
+        guard
+            status.recordVersion == expectedRecordVersion,
+            status.revision <= UInt64(Int64.max),
+            configuration.criticalAvailableBytes > 0,
+            configuration.warningAvailableBytes >= configuration.criticalAvailableBytes,
+            configuration.recoveryBytes > 0,
+            (1 ... 10_000).contains(configuration.criticalAvailableBasisPoints),
+            configuration.warningAvailableBasisPoints
+                >= configuration.criticalAvailableBasisPoints,
+            (1 ... 10_000).contains(configuration.warningAvailableBasisPoints),
+            (1 ... 10_000).contains(configuration.recoveryBasisPoints),
+            configuration.warningAvailableBytes != configuration.criticalAvailableBytes
+                || configuration.warningAvailableBasisPoints
+                    != configuration.criticalAvailableBasisPoints,
+            source != .default || configuration == .defaults,
+            (status.revision == 0
+                && source == .default
+                && status.updatedAtUnixMs == nil)
+                || (status.revision > 0
+                    && status.updatedAtUnixMs.map { $0 >= 0 } == true)
+        else {
+            throw DiskPressurePolicyServiceError.invalidResponse
+        }
+        return DiskPressurePolicy(
+            source: source,
+            revision: status.revision,
+            configuration: configuration,
+            updatedAtUnixMilliseconds: status.updatedAtUnixMs
+        )
+    }
+
+    private static func policyUpdate(
+        _ response: PressurePolicyUpdate
+    ) throws -> DiskPressurePolicyUpdateResult {
+        guard response.recordVersion == expectedRecordVersion else {
+            throw DiskPressurePolicyServiceError.invalidResponse
+        }
+        return DiskPressurePolicyUpdateResult(
+            policy: try policy(response.policy),
+            changed: response.changed
+        )
+    }
+
+    private static func pressurePolicyError(
+        _ error: PressurePolicyError
+    ) -> DiskPressurePolicyServiceError {
+        switch error {
+        case .Closed: .closed
+        case .InvalidRecordVersion: .invalidRecordVersion
+        case .ThresholdBytesZero: .thresholdBytesZero
+        case .ThresholdBasisPointsOutOfRange: .thresholdBasisPointsOutOfRange
+        case .WarningBytesBelowCritical: .warningBytesBelowCritical
+        case .WarningBasisPointsBelowCritical: .warningBasisPointsBelowCritical
+        case .WarningThresholdMatchesCritical: .warningThresholdMatchesCritical
+        case .RecoveryBytesZero: .recoveryBytesZero
+        case .RecoveryBasisPointsOutOfRange: .recoveryBasisPointsOutOfRange
+        case .RevisionExhausted: .revisionExhausted
+        case .InvalidClock: .invalidClock
+        case .IncompatibleSchema: .incompatibleSchema
+        case .Busy, .BudgetExceeded: .retryable
+        case .UnsafeStorage: .unsafeStorage
+        case .CorruptData: .corruptData
+        case .Unavailable: .unavailable
+        case .OutcomeUnknown: .outcomeUnknown
+        case .InternalState: .internalState
+        }
+    }
+
+    private static func resolvePressureEngine(
+        _ state: EngineServiceState
+    ) throws -> DuxEngine {
+        do {
+            return try state.resolveEngine()
+        } catch let error as EngineServiceError {
+            throw switch error {
+            case .closed: DiskPressurePolicyServiceError.closed
+            case .retryable: DiskPressurePolicyServiceError.retryable
+            case .unavailable: DiskPressurePolicyServiceError.unavailable
+            case .invalidCapacityObservation, .conflictingCapacityObservation,
+                 .supersededCapacityObservation, .unexpected:
+                DiskPressurePolicyServiceError.invalidResponse
+            }
         }
     }
 
