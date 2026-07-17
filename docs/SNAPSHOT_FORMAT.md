@@ -235,6 +235,14 @@ The store is exactly `<SQLite database parent>/snapshots`. Engine configuration
 rejects any other snapshot location. The SQLite owner remains alive while the
 snapshot owner is used, retaining the database root's replacement guards.
 
+Corrected first provisioning creates
+`<SQLite database parent>/.dux-snapshot-stage-<32 lowercase hex>` inside that
+same retained marker-owned root, then atomically publishes it without
+replacement to the sibling `snapshots` entry. Pre-correction external stages may
+remain at `<SQLite database parent parent>/.dux-snapshot-stage-*`. Their fixed
+marker contains no target-root identity, so they are unattributable manual debt
+and are never adopted or automatically removed.
+
 The snapshot directory has independent permanent controls:
 
 ```text
@@ -249,8 +257,9 @@ multi-link files, ownership mismatches, unsafe permissions/DACLs, retained
 identity changes, or over-budget inventory fail closed.
 
 Unix directories/files are exact mode 0700/0600 even under a restrictive umask.
-macOS permits deny-only ACLs on the publication parent but rejects extended
-ACLs on final DUX objects. Windows uses protected current-user-only DACLs,
+Snapshot staging occurs inside the ACL-free private DUX root; macOS's deny-only
+publication-parent exception applies only to initial SQLite-root provisioning.
+Windows uses protected current-user-only DACLs,
 handle-relative creation/publication, retained volume/file IDs, and no-delete-
 sharing directory guards. Published files are closed and reopened read-only by
 exact destination identity before higher layers receive them.
@@ -417,9 +426,10 @@ row, then delete the row. A compliant creator completes row-before-file
 creation before it releases those same locks, so creation cannot still be
 pending once maintenance holds both and a row-only residual can be deleted. It
 never adopts or removes an unleased temp. Normal abort also removes and flushes
-its retained current-call temp before exact row consumption. Broad startup and
-provisioning-stage scavenging are not implemented; unleased-temp removal uses
-the separate physical-only boundary below.
+its retained current-call temp before exact row consumption. Broad startup
+scavenging and exact-marker-owned root-local provisioning-stage maintenance are
+not implemented; legacy external stages remain manual debt. Unleased-temp
+removal uses the separate physical-only boundary below.
 
 A separate bounded terminal-temp batch classifies the complete immutable lease
 population through joined parent status, but those aggregate observations grant
@@ -489,10 +499,20 @@ corruption. Without a valid database/current-schema guard it closes the handle
 without mutating the store. This current-call rule is not inventory authority
 and cannot be used to adopt an unleased name.
 
-Initial snapshot-directory provisioning uses a private marker-complete sibling
-stage and atomic no-replace directory publication. A racing winner is reopened
-and fully validated. Losing or interrupted `.dux-snapshot-stage-*` siblings,
-and `running` lease rows are deliberately not scavenged by this checkpoint.
+Initial snapshot-directory provisioning uses a private marker-complete
+root-local stage and same-parent atomic no-replace directory publication. A
+racing winner is reopened and fully validated. The database-root inventory
+tolerates at most 64 exact canonical private stage directories within fixed
+total-entry and 256-KiB aggregate-name budgets plus sampled elapsed-time checks
+against 250 ms. A current-user-owned Unix stage whose mode is a stricter subset of
+0700 can be interrupted creation debt; tolerating it is not cleanup authority.
+Losing or interrupted root-local stages and `running` lease
+rows are deliberately not scavenged by this checkpoint. Future automatic
+maintenance may consider only a canonical root-local stage with an exact
+snapshot-store marker and bounded known children. Empty, partial, malformed,
+linked, or extra-entry root-local stages and every legacy external stage remain
+untouched; cleanup must never recurse.
+
 Inventory-observed unleased temps may now be removed only through the
 independent bounded physical-only boundary above; they are never adopted.
 
@@ -505,6 +525,9 @@ independent bounded physical-only boundary above; they are never adopted.
   snapshot owner before publishing workers.
 - A current-to-newer schema race is rechecked under the SQLite writer lease
   before snapshot provisioning and every later mutation.
+- Root-local canonical stage-name tolerance is not ownership proof. Missing,
+  partial, wrong markers or unknown children cannot authorize removal, and
+  legacy external stages are neither migrated nor adopted.
 - Existing successful summaries retry only when every frozen completion fact
   and the fully decoded referenced document match exactly.
 - A schema-v8 temp row is created before its file and consumed atomically with
@@ -535,8 +558,9 @@ This checkpoint does not implement:
 - app/FFI review-lease ownership and native periodic idle scheduling (the core
   engine can request exactly one sealed batch, but this does not change the
   snapshot wire or enable product scheduling);
-- provisioning-stage scavenging and hard-process-death recovery of `running`
-  temp-lease parents;
+- exact-marker-owned root-local provisioning-stage maintenance and
+  hard-process-death recovery of `running` temp-lease parents; legacy external
+  stages remain manual debt;
 - explicit user clear-data actions;
 - native Windows temp/final-removal and sparse/compressed-allocation runtime
   verification plus bounded accounting probes for slow filesystem drivers;

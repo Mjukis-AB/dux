@@ -881,11 +881,19 @@ older binaries reject the upgraded store. After a successful current-schema
 migration and WAL setup DUX durably creates a separate private initialization
 sentinel, distinguishing an interrupted first provision from a previously
 initialized database later truncated to zero. The SQLite layer
-accepts only its database, ownership marker, initialization sentinel, cleanup
-lock and ready checkpoint, known SQLite sidecars, and the exact reserved
-`snapshots`, `ai`, and `logs` siblings in the final DUX directory; the later
-owners of those sibling stores must perform their own no-follow identity and
-permission validation.
+accepts only the allowed database/control/sidecar and reserved app-support
+entries (on macOS, another spelling is tolerated only when it resolves to the
+same filesystem object reached by an allowed canonical name), plus at most 64
+lexically canonical private
+`.dux-snapshot-stage-<32 lowercase hex>` directories in the final DUX
+directory. That root walk also has fixed total-entry and 256-KiB aggregate-name
+budgets plus sampled elapsed-time checks against 250 ms. The SQLite layer
+validates only canonical stage naming and a current-user-owned, no-follow directory
+whose Unix mode is 0700 or a stricter subset left before mode repair. It does
+not inspect the stage marker or children and gains no cleanup authority. Any
+future provisioning-stage maintenance must independently prove the retained
+root, canonical name, exact marker, bounded known child set, and fresh
+identity/security state.
 
 On Unix, stage children are created relative to a retained directory handle;
 the final no-replace rename is relative to a retained current-user parent that
@@ -908,10 +916,14 @@ SQLite-created Windows sidecars inherit private access and are immediately
 repaired to the exact protected file DACL before further use.
 
 The implemented application snapshot owner independently validates the exact
-reserved `snapshots` sibling. Its fixed-marker 0700/0600 or protected-DACL
-store uses bounded inventory, exclusive random temporary files, durable
-no-replace publication, single-link/no-follow identity checks, and read-only
-reopened final handles. The frozen v1 depth-first wire validates exact sibling
+reserved `snapshots` sibling. New provisioning creates
+`<SQLite database parent>/.dux-snapshot-stage-<32 lowercase hex>` inside the
+same retained, marker-owned database root and atomically publishes it without
+replacement to the sibling `snapshots` entry. It never uses the outer
+application-support parent. Its fixed-marker 0700/0600 or protected-DACL store
+uses bounded inventory, exclusive random temporary files, durable no-replace
+publication, single-link/no-follow identity checks, and read-only reopened
+final handles. The frozen v1 depth-first wire validates exact sibling
 names, graph structure, aggregates, scan flags, optional times and Unix
 identity observations, and a trailing SHA-256 digest before returning any
 document. Snapshot bytes remain non-authoritative. Mutation order is SQLite
@@ -1199,8 +1211,18 @@ Future retention maintenance must scavenge only bounded, identity-validated,
 code-owned stages; current code deliberately does not recursively delete an
 unproven path during error recovery.
 
-Snapshot provisioning can likewise leave a private
-`.dux-snapshot-stage-*` sibling in empty, marker-only, or marker-complete form.
+Corrected snapshot provisioning can leave a root-local private
+`.dux-snapshot-stage-<32 lowercase hex>` directory in empty, marker-only, or
+marker-complete form beside `snapshots`. Only a root-local canonical stage with
+the exact snapshot-store ownership marker and a bounded known child set can be
+attributed strongly enough for future automatic maintenance. Empty, partial,
+malformed, linked, or extra-entry stages remain unproven and untouched; name,
+prefix, age, PID, or private permissions alone are never removal authority, and
+stage cleanup must not recurse. Pre-correction external stages may remain
+outside the database root. Their globally fixed marker contains no root identity, so two
+databases sharing that outer parent cannot attribute them; every legacy
+external stage remains manual debt even when its marker bytes are exact.
+
 Schema v8 now commits a bounded immutable row before creating each production
 `.snapshot-*.tmp` and retains a kernel file lock while its writer is live. A
 crash can therefore leave a row-only residual or a row-bound quiescent temp.
@@ -1209,9 +1231,10 @@ adopted. Startup validates at most 64 physical temps or 64 rows; a 65th makes
 the relevant inventory unavailable, and an individual temp may be large.
 Exact same-scan retry, the separate bounded terminal-row reconciler, and the
 separate bounded physical-only unleased-temp reconciler described below are
-implemented. Provisioning siblings and running-scan rows remain explicit
-availability/footprint debt for later bounded, identity-safe maintenance,
-never permission to recursively delete an unproven path.
+implemented. Exact-marker-owned root-local provisioning stages and running-scan
+rows remain explicit availability/footprint debt for later bounded,
+identity-safe maintenance. Legacy external stages remain manual debt. None of
+these observations grants permission to recursively delete an unproven path.
 
 Symlinked storage roots, ownership mismatch, unsupported schema versions, and
 unsafe permissions block writes. Older clients fail read-only rather than

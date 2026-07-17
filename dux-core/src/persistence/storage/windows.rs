@@ -6,6 +6,7 @@ use std::os::windows::fs::FileExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle};
 use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
+use std::time::Instant;
 
 use windows_sys::Win32::Foundation::{
     CloseHandle, ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS, ERROR_FILE_NOT_FOUND,
@@ -40,8 +41,10 @@ use windows_sys::Win32::System::SystemServices::{
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
 use super::{
-    DatabaseOpenError, DatabaseOpenErrorKind, ObjectKind, PermissionPolicy, PlatformIdentity,
-    PreparedRoot, PreparedRootState, RootPublicationResult, object_error, storage_root_error,
+    DatabaseOpenError, DatabaseOpenErrorKind, MAX_SNAPSHOT_STAGES, ObjectKind, PermissionPolicy,
+    PlatformIdentity, PreparedRoot, PreparedRootState, ROOT_INVENTORY_MAX_NAME_BYTES,
+    ROOT_INVENTORY_TIMEOUT, RootPublicationResult, is_canonical_snapshot_stage_name, object_error,
+    storage_root_error,
 };
 
 const SHARE_ALL: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
@@ -492,6 +495,13 @@ pub(super) fn root_contains_only(
     root_path: &Path,
     allowed: &[&OsStr],
 ) -> Result<bool, DatabaseOpenError> {
+    let deadline = Instant::now()
+        .checked_add(ROOT_INVENTORY_TIMEOUT)
+        .ok_or_else(|| storage_root_error(DatabaseOpenErrorKind::StorageRootUnavailable))?;
+    let maximum_entries = allowed
+        .len()
+        .checked_add(MAX_SNAPSHOT_STAGES)
+        .ok_or_else(|| storage_root_error(DatabaseOpenErrorKind::StorageRootUnavailable))?;
     let expected = validate_file(
         root_directory,
         ObjectKind::Directory,
@@ -504,15 +514,68 @@ pub(super) fn root_contains_only(
         Some(expected),
         PermissionPolicy::InspectOnly,
     )?;
+    let mut entry_count = 0_usize;
+    let mut stage_count = 0_usize;
+    let mut name_bytes = 0_usize;
     for entry in fs::read_dir(root_path)
         .map_err(|_| storage_root_error(DatabaseOpenErrorKind::StorageRootUnavailable))?
     {
+        if Instant::now() > deadline {
+            return Err(storage_root_error(
+                DatabaseOpenErrorKind::StorageRootUnavailable,
+            ));
+        }
         let name = entry
             .map_err(|_| storage_root_error(DatabaseOpenErrorKind::StorageRootUnavailable))?
             .file_name();
-        if !allowed.contains(&name.as_os_str()) {
+        if Instant::now() > deadline {
+            return Err(storage_root_error(
+                DatabaseOpenErrorKind::StorageRootUnavailable,
+            ));
+        }
+        entry_count = entry_count
+            .checked_add(1)
+            .ok_or_else(|| storage_root_error(DatabaseOpenErrorKind::StorageRootUnavailable))?;
+        let native_name_bytes = name
+            .encode_wide()
+            .count()
+            .checked_mul(size_of::<u16>())
+            .ok_or_else(|| storage_root_error(DatabaseOpenErrorKind::StorageRootUnavailable))?;
+        name_bytes = name_bytes
+            .checked_add(native_name_bytes)
+            .ok_or_else(|| storage_root_error(DatabaseOpenErrorKind::StorageRootUnavailable))?;
+        if name_bytes > ROOT_INVENTORY_MAX_NAME_BYTES {
+            return Err(storage_root_error(
+                DatabaseOpenErrorKind::StorageRootUnavailable,
+            ));
+        }
+        if entry_count > maximum_entries {
             return Ok(false);
         }
+        if allowed.contains(&name.as_os_str()) {
+            continue;
+        }
+        if is_canonical_snapshot_stage_name(&name) {
+            stage_count = stage_count
+                .checked_add(1)
+                .ok_or_else(|| storage_root_error(DatabaseOpenErrorKind::StorageRootUnavailable))?;
+            if stage_count > MAX_SNAPSHOT_STAGES {
+                return Ok(false);
+            }
+            validate_file(
+                &open_target(&root_path.join(&name), ObjectKind::Directory)?,
+                ObjectKind::Directory,
+                None,
+                PermissionPolicy::RequirePrivate,
+            )?;
+            continue;
+        }
+        return Ok(false);
+    }
+    if Instant::now() > deadline {
+        return Err(storage_root_error(
+            DatabaseOpenErrorKind::StorageRootUnavailable,
+        ));
     }
     validate_file(
         &open_target(root_path, ObjectKind::Directory)?,

@@ -1901,8 +1901,17 @@ Tasks:
   handle-bound no-replace publication, a retained final-root rename guard, and
   immediate exact-DACL repair for inherited SQLite sidecars;
   reparse/device/multi-link and ambiguous DOS/ADS/alias syntax reject. The root
-  admits only SQLite objects and exact reserved `snapshots`, `ai`, and `logs`
-  siblings so later Milestone 2 stores do not invalidate the database. Failed
+  admits only the allowed SQLite/control/sidecar and reserved app-support
+  entries (on macOS, another spelling is tolerated only when it resolves to the
+  same filesystem object reached by an allowed canonical name), plus at most
+  64 lexically exact private
+  `.dux-snapshot-stage-<32 lowercase hex>` directories through a complete walk
+  with fixed total-entry and 256-KiB aggregate-name budgets plus sampled checks
+  against a 250-ms elapsed-time budget. A current-user-owned Unix stage whose
+  mode is a strict subset of 0700 is tolerated only as opaque interrupted-
+  creation debt. Tolerating that namespace keeps a crashed
+  snapshot provision reopenable; it is not ownership or deletion authority,
+  which remains with the independent snapshot owner. Failed
   or losing provisions can leave tiny private `.dux-stage-*` siblings with only
   the marker/empty database; bounded identity-safe scavenging is deferred to
   retention maintenance rather than recursively deleting an unproven path.
@@ -2480,12 +2489,16 @@ Tasks:
   bump. These bytes remain sensitive non-authoritative observations.
 
   The exact `<database parent>/snapshots` owner independently provisions a
-  marker-complete private directory, validates a bounded exact inventory, and
-  uses exclusive PID-plus-random temps, durable atomic no-replace publication,
-  collision winner validation, and read-only reopened final handles. Unix
+  marker-complete private directory. Corrected provisioning creates
+  `<database parent>/.dux-snapshot-stage-<32 lowercase hex>` inside that same
+  retained marker-owned root and atomically publishes it without replacement
+  to the sibling `snapshots` entry. It validates a bounded exact inventory and
+  uses exclusive PID-plus-random temps, collision winner validation, and
+  read-only reopened final handles. Unix
   creation repairs exact 0700/0600 modes even beneath a restrictive umask;
-  macOS accepts deny-only publication-parent ACLs but rejects final-object
-  ACLs; Windows uses protected owner-only DACLs, retained IDs, handle-relative
+  snapshot provisioning requires the ACL-free private database root; the
+  deny-only publication-parent exception applies only to initial SQLite-root
+  provisioning on macOS. Windows uses protected owner-only DACLs, retained IDs, handle-relative
   operations, reparse/multi-link rejection, no-replace tests, and read-only
   winner reopening. Read-only newer-schema startup never provisions storage.
 
@@ -2506,8 +2519,10 @@ Tasks:
   [`docs/SNAPSHOT_FORMAT.md`](docs/SNAPSHOT_FORMAT.md). Durable engine scan-task
   publication is now attached by the following checkpoint. Last-complete
   selection, latest-two/2 GiB retention, app/FFI review-lease binding, and
-  abandoned-stage/temp scavenging remain later tasks
-  and are not claimed by this checkpoint. Typed coverage/issues and the
+  exact-marker-owned root-local provisioning-stage maintenance remain later
+  tasks.
+  Pre-correction external snapshot stages are not root-bound, remain manual
+  debt, and are not claimed by this checkpoint. Typed coverage/issues and the
   completed-only fresh-scan converter were attached by following checkpoints
   without changing the v1 snapshot wire.
 - [x] Add capacity sample storage. Completed 2026-07-16: the existing SQLite
@@ -3051,10 +3066,32 @@ Tasks:
     unlink path. Native Windows compile/runtime mutation-path verification
     remains open.
 
+  - Snapshot provisioning topology correction completed 2026-07-17: new
+    `.dux-snapshot-stage-<32 lowercase hex>` directories are created inside the
+    retained marker-owned database root, beside `snapshots`, and published by
+    same-parent atomic no-replace rename. The SQLite root validator tolerates
+    only this exact private-directory grammar. The walk uses a 64-stage cap,
+    fixed total-entry and 256-KiB aggregate-name budgets, and sampled elapsed-
+    time checks against a 250-ms budget; a malformed name, unsafe
+    type/permission/DACL/reparse shape, or 65th stage fails closed. Synchronized
+    two-root contention coverage verifies each root retains only its own
+    collision loser and leaves outer legacy stages untouched, while crash-
+    reopen tests cover empty and marker-complete root-local remnants, including
+    a current-user-owned Unix stage left at mode 000 between `mkdirat` and its
+    exact-mode repair. Such a stricter-mode entry is tolerated only as opaque debt. This
+    checkpoint adds no removal authority. Legacy external sibling stages have
+    a globally fixed marker with no database identity and are never adopted or
+    automatically removed. Future maintenance may consider only a canonical root-local stage
+    with an exact ownership marker and bounded known child set; an empty,
+    partial, malformed, linked, or extra-entry stage remains untouched, and no
+    stage cleanup may recurse.
+
     Production retention still requires app/FFI review-lease ownership and
-    native periodic idle scheduling, bounded marker-owned provisioning-stage
-    scavenging, hard-process-death recovery for `running` rows, explicit
-    clear-data actions, and native Windows mutation-path runtime verification.
+    native periodic idle scheduling, bounded exact-marker-owned root-local
+    provisioning-stage maintenance, hard-process-death recovery for `running`
+    rows, explicit clear-data actions, and native Windows mutation-path runtime
+    verification.
+    Legacy external snapshot-stage siblings remain unattributable manual debt.
 - [x] Add engine integration tests with temporary HOME and database. Completed
   2026-07-16: an actual `dux-core` engine scans a fixture into an isolated
   platform-correct application-support/cache layout, closes to full worker

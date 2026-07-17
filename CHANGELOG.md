@@ -91,8 +91,10 @@ All notable changes to DUX will be documented in this file.
   an incompatible old writer's open inode, but its later current-schema/name
   publication proof fails. Avoiding that same-user availability race requires
   not running old and current binaries concurrently on the owner-private store.
-  App/FFI scheduling and review leases, provisioning-stage and running-row
-  recovery, clear-data, and native Windows runtime verification remain future.
+  App/FFI scheduling and review leases, exact-marker-owned root-local
+  provisioning-stage maintenance and running-row recovery, clear-data, and
+  native Windows runtime verification remain future. Legacy external snapshot
+  stages remain unattributable manual debt.
 - Added bounded terminal snapshot-temp reconciliation. A separate sealed
   repository batch now inspects the complete bounded lease population and
   physical inventory under the database-before-snapshot lock order, accepts
@@ -543,6 +545,23 @@ All notable changes to DUX will be documented in this file.
 - Added off-main startup-volume capacity sampling for the macOS shell. The menu bar and Explorer prefer Foundation's important-usage capacity, explicitly fall back to ordinary filesystem availability, and render an accessible capacity summary without requiring a directory scan.
 
 ### Fixed
+- Corrected snapshot-store provisioning so every new
+  `.dux-snapshot-stage-<32 lowercase hex>` is created inside its retained,
+  marker-owned database root and atomically published to the sibling
+  `snapshots` directory without replacement. The SQLite root walk uses a
+  64-stage cap, fixed total-entry and 256-KiB aggregate-name budgets, and
+  sampled elapsed-time checks against 250 ms. Malformed stage names,
+  non-directory/symlink/reparse entries, unsafe stage-directory
+  permissions/DACLs, and a 65th stage fail closed; a current-user-owned Unix stage
+  with a stricter subset of mode 0700 is tolerated as opaque interrupted
+  creation debt. Contents are intentionally not inspected here, and this
+  checkpoint adds no cleanup. Pre-correction stages outside the database root
+  are deliberately neither adopted nor removed: their fixed marker contains no
+  root identity, so two databases sharing a parent cannot safely attribute
+  them. Future automatic maintenance is limited to exact-marker-owned
+  root-local stages, while empty, partial, malformed, extra-entry, and every
+  legacy external stage remain untouched unless stronger durable proof is
+  introduced.
 - Corrected the macOS CI deployment-target checks to use the generated
   `DUX.app/Contents/MacOS/DUX` product path, so the already-built universal
   Debug and Release artifacts are actually inspected instead of failing on a

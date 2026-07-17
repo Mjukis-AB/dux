@@ -765,21 +765,33 @@ impl SecureSnapshotStore {
         database_root_identity: Identity,
         directory_path: PathBuf,
     ) -> Result<Self> {
-        let publication_parent_path = database_root_path.parent().ok_or_else(|| {
-            SnapshotStorageError::new(SnapshotStorageErrorKind::InvalidConfiguration)
-        })?;
-        let publication_parent = platform::open_publication_parent(publication_parent_path)?;
+        Self::provision_with_before_publish(
+            database_root_path,
+            database_root,
+            database_root_identity,
+            directory_path,
+            || {},
+        )
+    }
+
+    fn provision_with_before_publish(
+        database_root_path: &Path,
+        database_root: &File,
+        database_root_identity: Identity,
+        directory_path: PathBuf,
+        before_publish: impl Fn(),
+    ) -> Result<Self> {
         for _ in 0..RANDOM_ATTEMPTS {
             let stage_name = random_directory_stage_name()?;
             let Some(directory) = platform::create_private_directory_exclusive(
-                &publication_parent,
-                publication_parent_path,
+                database_root,
+                database_root_path,
                 &stage_name,
             )?
             else {
                 continue;
             };
-            let stage_path = publication_parent_path.join(&stage_name);
+            let stage_path = database_root_path.join(&stage_name);
             let directory_identity =
                 Identity(platform::identity(&directory, platform::Kind::Directory)?);
             let (marker, marker_identity) =
@@ -793,8 +805,9 @@ impl SecureSnapshotStore {
                 platform::Kind::Directory,
                 false,
             )?;
+            before_publish();
             match platform::publish_directory_no_replace(
-                &publication_parent,
+                database_root,
                 &stage_name,
                 &directory,
                 directory_identity.0,
@@ -803,7 +816,6 @@ impl SecureSnapshotStore {
             )? {
                 platform::Publication::Published => {
                     platform::sync_directory(database_root)?;
-                    platform::sync_directory(&publication_parent)?;
                     platform::validate_named(
                         database_root,
                         DIRECTORY_NAME,
@@ -823,8 +835,8 @@ impl SecureSnapshotStore {
                 }
                 platform::Publication::Collision => {
                     // The bounded marker-complete loser is deliberately not
-                    // scavenged. It is outside the SQLite-owned final root and
-                    // cannot be mistaken for a published snapshot store.
+                    // scavenged. It remains inside the database root that owns
+                    // it and cannot be mistaken for a published snapshot store.
                     let directory = platform::open_existing_directory(
                         database_root,
                         database_root_path,
@@ -1871,28 +1883,6 @@ mod platform {
         Ok(file)
     }
 
-    pub(super) fn open_publication_parent(path: &Path) -> Result<File> {
-        let file = open(
-            path,
-            OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW,
-            Mode::empty(),
-        )
-        .map(File::from)
-        .map_err(map_root_error)?;
-        let status = fstat(&file)
-            .map_err(|_| SnapshotStorageError::new(SnapshotStorageErrorKind::Unavailable))?;
-        if SFlag::from_bits_truncate(status.st_mode) & SFlag::S_IFMT != SFlag::S_IFDIR
-            || status.st_uid != geteuid().as_raw()
-            || status.st_mode & 0o022 != 0
-        {
-            return Err(SnapshotStorageError::new(
-                SnapshotStorageErrorKind::UnsafeRoot,
-            ));
-        }
-        reject_granting_acl(&file)?;
-        Ok(file)
-    }
-
     pub(super) fn open_existing_directory(
         parent: &File,
         _parent_path: &Path,
@@ -2331,74 +2321,6 @@ mod platform {
         Ok(())
     }
 
-    #[cfg(target_os = "macos")]
-    fn reject_granting_acl(file: &File) -> Result<()> {
-        use std::ffi::{c_int, c_void};
-        const ACL_TYPE_EXTENDED: c_int = 0x100;
-        const ACL_FIRST_ENTRY: c_int = 0;
-        const ACL_NEXT_ENTRY: c_int = -1;
-        const ACL_EXTENDED_DENY: c_int = 2;
-        const ACL_MAX_ENTRIES: usize = 128;
-        unsafe extern "C" {
-            fn acl_get_fd_np(fd: c_int, acl_type: c_int) -> *mut c_void;
-            fn acl_get_entry(acl: *mut c_void, entry_id: c_int, entry: *mut *mut c_void) -> c_int;
-            fn acl_get_tag_type(entry: *mut c_void, tag: *mut c_int) -> c_int;
-            fn acl_free(object: *mut c_void) -> c_int;
-        }
-        // SAFETY: the retained descriptor is live and Darwin allocates the ACL.
-        let acl = unsafe { acl_get_fd_np(file.as_raw_fd(), ACL_TYPE_EXTENDED) };
-        if acl.is_null() {
-            if Errno::last() == Errno::ENOENT {
-                return Ok(());
-            }
-            return Err(SnapshotStorageError::new(
-                SnapshotStorageErrorKind::UnsafeRoot,
-            ));
-        }
-        let inspection = (|| {
-            let mut selector = ACL_FIRST_ENTRY;
-            for _ in 0..ACL_MAX_ENTRIES {
-                let mut entry = std::ptr::null_mut();
-                // SAFETY: `acl` is live and the output pointer is writable.
-                if unsafe { acl_get_entry(acl, selector, &raw mut entry) } < 0 {
-                    if selector == ACL_NEXT_ENTRY && Errno::last() == Errno::EINVAL {
-                        return Ok(());
-                    }
-                    return Err(SnapshotStorageError::new(
-                        SnapshotStorageErrorKind::UnsafeRoot,
-                    ));
-                }
-                if entry.is_null() {
-                    return Ok(());
-                }
-                let mut tag = 0;
-                // SAFETY: `entry` belongs to the live ACL.
-                if unsafe { acl_get_tag_type(entry, &raw mut tag) } != 0 || tag != ACL_EXTENDED_DENY
-                {
-                    return Err(SnapshotStorageError::new(
-                        SnapshotStorageErrorKind::UnsafeRoot,
-                    ));
-                }
-                selector = ACL_NEXT_ENTRY;
-            }
-            Err(SnapshotStorageError::new(
-                SnapshotStorageErrorKind::UnsafeRoot,
-            ))
-        })();
-        // SAFETY: `acl` is freed exactly once.
-        if unsafe { acl_free(acl) } != 0 {
-            return Err(SnapshotStorageError::new(
-                SnapshotStorageErrorKind::UnsafeRoot,
-            ));
-        }
-        inspection
-    }
-
-    #[cfg(target_os = "linux")]
-    fn reject_granting_acl(_file: &File) -> Result<()> {
-        Ok(())
-    }
-
     fn map_root_error(error: Errno) -> SnapshotStorageError {
         match error {
             Errno::ELOOP | Errno::ENOTDIR | Errno::EISDIR => {
@@ -2428,6 +2350,8 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     // DUX-DESTRUCTIVE: allow=test-snapshot-lock-command-import -- import only the fixed Rust test-harness relaunch primitive used by the bounded cross-process writer-lock regression
     use std::process::Command;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
     use std::time::{Duration, Instant};
 
     use tempfile::TempDir;
@@ -2523,6 +2447,89 @@ mod tests {
                 & 0o7777,
             0o600
         );
+    }
+
+    #[test]
+    fn provisioning_stages_and_collision_losers_stay_inside_their_database_root() {
+        let temp = TempDir::new().unwrap();
+        let legacy_stage_name = ".dux-snapshot-stage-00000000000000000000000000000000";
+        let legacy_stage = temp.path().join(legacy_stage_name);
+        fs::create_dir(&legacy_stage).unwrap();
+        fs::write(legacy_stage.join("legacy"), b"leave untouched").unwrap();
+
+        let roots: Vec<PathBuf> = ["First", "Second"]
+            .into_iter()
+            .map(|name| {
+                let root = temp.path().join(name);
+                fs::create_dir(&root).unwrap();
+                fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+                root
+            })
+            .collect();
+        let barrier = Arc::new(Barrier::new(roots.len() * 2));
+        let mut provisioners = Vec::new();
+        for root in &roots {
+            for _ in 0..2 {
+                let root = root.clone();
+                let barrier = Arc::clone(&barrier);
+                provisioners.push(thread::spawn(move || {
+                    let directory = platform::open_private_directory(&root).unwrap();
+                    let identity = Identity(
+                        platform::identity(&directory, platform::Kind::Directory).unwrap(),
+                    );
+                    drop(
+                        SecureSnapshotStore::provision_with_before_publish(
+                            &root,
+                            &directory,
+                            identity,
+                            root.join(DIRECTORY_NAME),
+                            || {
+                                barrier.wait();
+                            },
+                        )
+                        .unwrap(),
+                    );
+                }));
+            }
+        }
+        for provisioner in provisioners {
+            provisioner.join().unwrap();
+        }
+
+        let sibling_stages: Vec<_> = fs::read_dir(temp.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .filter(|name| name.to_string_lossy().starts_with(".dux-snapshot-stage-"))
+            .collect();
+        assert_eq!(sibling_stages, [legacy_stage_name]);
+        assert_eq!(
+            fs::read(legacy_stage.join("legacy")).unwrap(),
+            b"leave untouched"
+        );
+
+        for root in roots {
+            assert!(root.join(DIRECTORY_NAME).is_dir());
+            let collision_losers: Vec<_> = fs::read_dir(&root)
+                .unwrap()
+                .map(|entry| entry.unwrap())
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".dux-snapshot-stage-")
+                })
+                .collect();
+            assert_eq!(collision_losers.len(), 1);
+            let collision_loser = collision_losers[0].path();
+            assert_eq!(
+                fs::read(collision_loser.join(MARKER_NAME)).unwrap(),
+                STORE_MARKER
+            );
+            assert_eq!(
+                fs::read(collision_loser.join(WRITER_LOCK_NAME)).unwrap(),
+                WRITER_MARKER
+            );
+        }
     }
 
     #[test]

@@ -29,8 +29,8 @@ use windows_sys::Win32::Security::{
     SetSecurityDescriptorDacl, SetSecurityDescriptorOwner, TOKEN_QUERY, TOKEN_USER, TokenUser,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    DELETE, FILE_ADD_SUBDIRECTORY, FILE_ALL_ACCESS, FILE_ATTRIBUTE_DEVICE,
-    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT, FILE_BASIC_INFO,
+    DELETE, FILE_ALL_ACCESS, FILE_ATTRIBUTE_DEVICE, FILE_ATTRIBUTE_DIRECTORY,
+    FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT, FILE_BASIC_INFO,
     FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ,
     FILE_GENERIC_WRITE, FILE_ID_BOTH_DIR_INFO, FILE_ID_INFO, FILE_READ_ATTRIBUTES,
     FILE_RENAME_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_STANDARD_INFO,
@@ -136,13 +136,16 @@ pub(super) fn open_private_directory(path: &Path) -> Result<File> {
     Ok(file)
 }
 
-pub(super) fn open_publication_parent(path: &Path) -> Result<File> {
+#[cfg(test)]
+fn open_publication_parent(path: &Path) -> Result<File> {
     let parent = path.parent().ok_or_else(unsafe_root)?;
     validate_ancestor_chain(parent)?;
     let file = open_path(
         path,
         Kind::Directory,
-        FILE_READ_ATTRIBUTES | FILE_ADD_SUBDIRECTORY | FILE_GENERIC_WRITE,
+        FILE_READ_ATTRIBUTES
+            | windows_sys::Win32::Storage::FileSystem::FILE_ADD_SUBDIRECTORY
+            | FILE_GENERIC_WRITE,
         SHARE_ALL,
     )?;
     validate_structure(&file, Kind::Directory, None, false)?;
@@ -499,7 +502,7 @@ pub(super) fn publish_directory_no_replace(
         source_directory,
         source_identity,
         Kind::Directory,
-        false,
+        true,
         destination_parent,
         destination,
     )

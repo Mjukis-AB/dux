@@ -19,6 +19,11 @@ const SIDECAR_SUFFIXES: [&str; 3] = ["-wal", "-shm", "-journal"];
 // must tolerate their presence so adding snapshots, AI cache, or logs cannot
 // make the database itself unreadable.
 const RESERVED_APP_SUPPORT_ENTRIES: [&str; 3] = ["snapshots", "ai", "logs"];
+const SNAPSHOT_STAGE_PREFIX: &str = ".dux-snapshot-stage-";
+const SNAPSHOT_STAGE_SUFFIX_LENGTH: usize = 32;
+const MAX_SNAPSHOT_STAGES: usize = 64;
+const ROOT_INVENTORY_MAX_NAME_BYTES: usize = 256 * 1024;
+const ROOT_INVENTORY_TIMEOUT: Duration = Duration::from_millis(250);
 const LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(5);
 const CONTROL_OBJECT_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -1222,6 +1227,19 @@ fn allowed_store_entry_names(database_name: &OsStr, marker_name: OsString) -> Ve
     allowed
 }
 
+fn is_canonical_snapshot_stage_name(name: &OsStr) -> bool {
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+    let Some(suffix) = name.strip_prefix(SNAPSHOT_STAGE_PREFIX) else {
+        return false;
+    };
+    suffix.len() == SNAPSHOT_STAGE_SUFFIX_LENGTH
+        && suffix
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 fn prove_dux_header(file: &File) -> Result<(), DatabaseOpenError> {
     let mut header = [0_u8; SQLITE_HEADER_LENGTH];
     platform::read_exact_at(file, &mut header, 0)
@@ -1480,16 +1498,19 @@ mod platform {
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::FileExt;
     use std::path::Path;
+    use std::time::Instant;
 
     use nix::dir::Dir;
     use nix::errno::Errno;
-    use nix::fcntl::{OFlag, open, openat};
-    use nix::sys::stat::{Mode, SFlag, fchmod, fstat, mkdirat};
+    use nix::fcntl::{AtFlags, OFlag, open, openat};
+    use nix::sys::stat::{Mode, SFlag, fchmod, fstat, fstatat, mkdirat};
     use nix::unistd::geteuid;
 
     use super::{
-        DatabaseOpenError, DatabaseOpenErrorKind, ObjectKind, PermissionPolicy, PlatformIdentity,
-        PreparedRoot, PreparedRootState, RootPublicationResult, object_error, storage_root_error,
+        DatabaseOpenError, DatabaseOpenErrorKind, MAX_SNAPSHOT_STAGES, ObjectKind,
+        PermissionPolicy, PlatformIdentity, PreparedRoot, PreparedRootState,
+        ROOT_INVENTORY_MAX_NAME_BYTES, ROOT_INVENTORY_TIMEOUT, RootPublicationResult,
+        is_canonical_snapshot_stage_name, object_error, storage_root_error,
     };
 
     const DIRECTORY_MODE: Mode = Mode::S_IRWXU;
@@ -1969,29 +1990,118 @@ mod platform {
         _root_path: &Path,
         allowed: &[&OsStr],
     ) -> Result<bool, DatabaseOpenError> {
+        let deadline = Instant::now()
+            .checked_add(ROOT_INVENTORY_TIMEOUT)
+            .ok_or_else(|| storage_root_error(DatabaseOpenErrorKind::StorageRootUnavailable))?;
+        let maximum_entries = allowed
+            .len()
+            .checked_add(MAX_SNAPSHOT_STAGES)
+            .ok_or_else(|| storage_root_error(DatabaseOpenErrorKind::StorageRootUnavailable))?;
         let clone = root_directory
             .try_clone()
             .map_err(|_| storage_root_error(DatabaseOpenErrorKind::StorageRootUnavailable))?;
         let owned: OwnedFd = clone.into();
         let mut directory = Dir::from_fd(owned)
             .map_err(|_| storage_root_error(DatabaseOpenErrorKind::StorageRootUnavailable))?;
+        let mut entry_count = 0_usize;
+        let mut stage_count = 0_usize;
+        let mut name_bytes = 0_usize;
         for entry in directory.iter() {
+            if Instant::now() > deadline {
+                return Err(storage_root_error(
+                    DatabaseOpenErrorKind::StorageRootUnavailable,
+                ));
+            }
             let entry = entry
                 .map_err(|_| storage_root_error(DatabaseOpenErrorKind::StorageRootUnavailable))?;
+            if Instant::now() > deadline {
+                return Err(storage_root_error(
+                    DatabaseOpenErrorKind::StorageRootUnavailable,
+                ));
+            }
             let bytes = entry.file_name().to_bytes();
             if bytes == b"." || bytes == b".." {
                 continue;
             }
-            let actual_name = OsStr::from_bytes(bytes);
-            if !allowed.contains(&actual_name) {
-                #[cfg(target_os = "macos")]
-                if names_resolve_to_same_entry(root_directory, actual_name, allowed)? {
-                    continue;
-                }
+            entry_count = entry_count
+                .checked_add(1)
+                .ok_or_else(|| storage_root_error(DatabaseOpenErrorKind::StorageRootUnavailable))?;
+            name_bytes = name_bytes
+                .checked_add(bytes.len())
+                .ok_or_else(|| storage_root_error(DatabaseOpenErrorKind::StorageRootUnavailable))?;
+            if name_bytes > ROOT_INVENTORY_MAX_NAME_BYTES {
+                return Err(storage_root_error(
+                    DatabaseOpenErrorKind::StorageRootUnavailable,
+                ));
+            }
+            if entry_count > maximum_entries {
                 return Ok(false);
             }
+            let actual_name = OsStr::from_bytes(bytes);
+            if allowed.contains(&actual_name) {
+                continue;
+            }
+            if is_canonical_snapshot_stage_name(actual_name) {
+                stage_count = stage_count.checked_add(1).ok_or_else(|| {
+                    storage_root_error(DatabaseOpenErrorKind::StorageRootUnavailable)
+                })?;
+                if stage_count > MAX_SNAPSHOT_STAGES {
+                    return Ok(false);
+                }
+                validate_snapshot_stage_directory(root_directory, actual_name)?;
+                continue;
+            }
+            #[cfg(target_os = "macos")]
+            if names_resolve_to_same_entry(root_directory, actual_name, allowed)? {
+                continue;
+            }
+            return Ok(false);
+        }
+        if Instant::now() > deadline {
+            return Err(storage_root_error(
+                DatabaseOpenErrorKind::StorageRootUnavailable,
+            ));
         }
         Ok(true)
+    }
+
+    fn validate_snapshot_stage_directory(
+        root_directory: &File,
+        name: &OsStr,
+    ) -> Result<(), DatabaseOpenError> {
+        let status = fstatat(root_directory, name, AtFlags::AT_SYMLINK_NOFOLLOW)
+            .map_err(|_| object_error(DatabaseOpenErrorKind::UnsafeStorageObject))?;
+        let kind = SFlag::from_bits_truncate(status.st_mode) & SFlag::S_IFMT;
+        let mode = status.st_mode & 0o7777;
+        if kind != SFlag::S_IFDIR || status.st_uid != geteuid().as_raw() || mode & !0o700 != 0 {
+            return Err(object_error(DatabaseOpenErrorKind::UnsafeStorageObject));
+        }
+
+        // `mkdirat(..., 0700)` is filtered by the process umask before the
+        // following `fchmod`. A crash in that tiny interval can therefore
+        // leave an owner-owned canonical stage with a stricter subset of 0700,
+        // including 000. It is safe to tolerate that opaque, non-traversable
+        // namespace entry so the owning store can reopen; this does not prove
+        // marker ownership and never grants cleanup authority. Exact 0700
+        // stages remain fully opened and ACL-validated below.
+        if mode != 0o700 {
+            return Ok(());
+        }
+        let directory = openat(
+            root_directory,
+            name,
+            OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW,
+            Mode::empty(),
+        )
+        .map(File::from)
+        .map_err(|_| object_error(DatabaseOpenErrorKind::UnsafeStorageObject))?;
+        validate_file(
+            &directory,
+            ObjectKind::Directory,
+            None,
+            PermissionPolicy::RequirePrivate,
+        )?;
+        Ok(())
     }
 
     #[cfg(target_os = "macos")]
@@ -2404,6 +2514,28 @@ mod tests {
             .unwrap();
     }
 
+    #[cfg(unix)]
+    fn create_private_snapshot_stage(root: &Path, name: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let stage = root.join(name);
+        fs::create_dir(&stage).unwrap();
+        fs::set_permissions(&stage, fs::Permissions::from_mode(0o700)).unwrap();
+        stage
+    }
+
+    #[cfg(unix)]
+    fn open_and_close_store(database: &Path) {
+        use super::super::store::StoreCoordinator;
+
+        drop(StoreCoordinator::open(database).unwrap());
+    }
+
+    #[cfg(unix)]
+    fn snapshot_stage_name(sequence: usize) -> String {
+        format!("{SNAPSHOT_STAGE_PREFIX}{sequence:032x}")
+    }
+
     #[cfg(target_os = "macos")]
     fn add_everyone_acl(path: &Path, tag_type: i32, granted_permissions: &[i32]) {
         use std::ffi::{CString, c_char, c_int, c_void};
@@ -2705,6 +2837,127 @@ mod tests {
         let error = SecureStorePaths::prepare(&database).err().unwrap();
         assert_eq!(error.kind, DatabaseOpenErrorKind::UnrecognizedDatabase);
         assert_eq!(fs::read(foreign).unwrap(), b"untouched");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn store_coordinator_reopens_with_exact_root_local_snapshot_stages() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new().unwrap();
+        let database = database_path(&temp);
+        open_and_close_store(&database);
+        let root = database.parent().unwrap();
+
+        create_private_snapshot_stage(root, &snapshot_stage_name(1));
+        let marker_complete = create_private_snapshot_stage(root, &snapshot_stage_name(2));
+        let interrupted_before_mode_repair =
+            create_private_snapshot_stage(root, &snapshot_stage_name(3));
+        fs::set_permissions(
+            &interrupted_before_mode_repair,
+            fs::Permissions::from_mode(0o000),
+        )
+        .unwrap();
+        for (name, bytes) in [
+            (".dux-snapshot-store", b"DUXSNAPSTOREV1\0\0".as_slice()),
+            (
+                ".dux-snapshot.writer.lock",
+                b"DUXSNAPWRITER1\0\0".as_slice(),
+            ),
+        ] {
+            let control = marker_complete.join(name);
+            fs::write(&control, bytes).unwrap();
+            fs::set_permissions(control, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+
+        open_and_close_store(&database);
+        assert!(root.join(snapshot_stage_name(1)).is_dir());
+        assert_eq!(
+            fs::read(marker_complete.join(".dux-snapshot-store")).unwrap(),
+            b"DUXSNAPSTOREV1\0\0"
+        );
+        assert_eq!(
+            fs::metadata(interrupted_before_mode_repair)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o7777,
+            0
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn root_local_snapshot_stage_inventory_rejects_malformed_and_unsafe_shapes() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        enum UnsafeShape {
+            MalformedName,
+            RegularFile,
+            SymbolicLink,
+            BroadDirectory,
+        }
+
+        for shape in [
+            UnsafeShape::MalformedName,
+            UnsafeShape::RegularFile,
+            UnsafeShape::SymbolicLink,
+            UnsafeShape::BroadDirectory,
+        ] {
+            let temp = TempDir::new().unwrap();
+            let database = database_path(&temp);
+            open_and_close_store(&database);
+            let root = database.parent().unwrap();
+            let canonical = snapshot_stage_name(1);
+            let entry = match shape {
+                UnsafeShape::MalformedName => {
+                    let malformed =
+                        format!("{SNAPSHOT_STAGE_PREFIX}AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+                    create_private_snapshot_stage(root, &malformed)
+                }
+                UnsafeShape::RegularFile => {
+                    let entry = root.join(&canonical);
+                    fs::write(&entry, b"not a stage directory").unwrap();
+                    entry
+                }
+                UnsafeShape::SymbolicLink => {
+                    let target = temp.path().join("link-target");
+                    fs::create_dir(&target).unwrap();
+                    let entry = root.join(&canonical);
+                    symlink(target, &entry).unwrap();
+                    entry
+                }
+                UnsafeShape::BroadDirectory => {
+                    let entry = create_private_snapshot_stage(root, &canonical);
+                    fs::set_permissions(&entry, fs::Permissions::from_mode(0o755)).unwrap();
+                    entry
+                }
+            };
+
+            assert!(super::super::store::StoreCoordinator::open(&database).is_err());
+            assert!(entry.exists() || entry.symlink_metadata().is_ok());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn root_local_snapshot_stage_inventory_caps_at_sixty_four_complete_entries() {
+        let temp = TempDir::new().unwrap();
+        let database = database_path(&temp);
+        open_and_close_store(&database);
+        let root = database.parent().unwrap();
+        for sequence in 0..MAX_SNAPSHOT_STAGES {
+            create_private_snapshot_stage(root, &snapshot_stage_name(sequence));
+        }
+
+        open_and_close_store(&database);
+        let sixty_fifth =
+            create_private_snapshot_stage(root, &snapshot_stage_name(MAX_SNAPSHOT_STAGES));
+        let error = super::super::store::StoreCoordinator::open(&database)
+            .err()
+            .unwrap();
+        assert_eq!(error.kind, DatabaseOpenErrorKind::UnrecognizedDatabase);
+        assert!(sixty_fifth.is_dir());
     }
 
     #[test]
