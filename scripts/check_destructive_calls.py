@@ -340,11 +340,22 @@ EXCEPTIONS = {
     "snapshot-observed-final-unlink": ExceptionSpec(
         "dux-core/src/persistence/snapshot/storage.rs", "rust-platform-delete"
     ),
+    "snapshot-provisioning-stage-control-unlink": ExceptionSpec(
+        "dux-core/src/persistence/snapshot/storage.rs", "rust-platform-delete"
+    ),
+    "snapshot-provisioning-stage-rmdir": ExceptionSpec(
+        "dux-core/src/persistence/snapshot/storage.rs", "rust-platform-delete"
+    ),
     "snapshot-windows-current-temp-delete": ExceptionSpec(
         "dux-core/src/persistence/snapshot/storage/windows.rs", "rust-platform-delete"
     ),
     "snapshot-windows-observed-final-delete": ExceptionSpec(
         "dux-core/src/persistence/snapshot/storage/windows.rs", "rust-platform-delete"
+    ),
+    "snapshot-windows-provisioning-stage-delete": ExceptionSpec(
+        "dux-core/src/persistence/snapshot/storage/windows.rs",
+        "rust-platform-delete",
+        "set_posix_delete",
     ),
     "snapshot-windows-handle-publish": ExceptionSpec(
         "dux-core/src/persistence/snapshot/storage/windows.rs", "rust-platform-delete"
@@ -386,6 +397,26 @@ EXCEPTIONS = {
     ),
     "test-snapshot-lock-command-import": ExceptionSpec(
         "dux-core/src/persistence/snapshot/storage.rs", "rust-process-spawn"
+    ),
+    "test-snapshot-provisioning-stage-fixture-control-reset": ExceptionSpec(
+        "dux-core/src/persistence/snapshot/storage.rs",
+        "rust-filesystem-effect",
+        "test:wrong_marker_and_broad_stage_mode_fail_without_effect",
+    ),
+    "test-snapshot-provisioning-stage-fixture-directory-reset": ExceptionSpec(
+        "dux-core/src/persistence/snapshot/storage.rs",
+        "rust-filesystem-effect",
+        "test:wrong_marker_and_broad_stage_mode_fail_without_effect",
+    ),
+    "test-snapshot-provisioning-stage-file-reset": ExceptionSpec(
+        "dux-core/src/persistence/snapshot/storage.rs",
+        "rust-filesystem-effect",
+        "test:canonical_stage_file_and_symlink_fail_without_touching_targets",
+    ),
+    "test-snapshot-provisioning-stage-extra-reset": ExceptionSpec(
+        "dux-core/src/persistence/snapshot/storage.rs",
+        "rust-filesystem-effect",
+        "test:extra_or_linked_provisioning_stage_children_fail_without_effect",
     ),
     "test-snapshot-referenced-file-remove": ExceptionSpec(
         "dux-core/src/persistence/snapshot.rs",
@@ -493,8 +524,11 @@ EXCEPTION_PRIMITIVES = {
     "snapshot-macos-no-replace-publish": "renameatx_np",
     "snapshot-current-temp-unlink": "unlinkat",
     "snapshot-observed-final-unlink": "unlinkat",
+    "snapshot-provisioning-stage-control-unlink": "unlinkat",
+    "snapshot-provisioning-stage-rmdir": "unlinkat",
     "snapshot-windows-current-temp-delete": "SetFileInformationByHandle",
     "snapshot-windows-observed-final-delete": "SetFileInformationByHandle",
+    "snapshot-windows-provisioning-stage-delete": "SetFileInformationByHandle",
     "snapshot-windows-handle-publish": "SetFileInformationByHandle",
     "test-snapshot-lock-helper-spawn": "Command::new",
     "test-snapshot-temp-lock-helper-spawn": "Command::new",
@@ -503,6 +537,10 @@ EXCEPTION_PRIMITIVES = {
     "test-snapshot-umask-helper-spawn": "Command::new",
     "test-snapshot-macos-parent-acl-command": "Command::new",
     "test-snapshot-macos-final-acl-command": "Command::new",
+    "test-snapshot-provisioning-stage-fixture-control-reset": "remove_file",
+    "test-snapshot-provisioning-stage-fixture-directory-reset": "remove_dir",
+    "test-snapshot-provisioning-stage-file-reset": "remove_file",
+    "test-snapshot-provisioning-stage-extra-reset": "remove_file",
     "test-snapshot-referenced-file-remove": "remove_file",
     "test-snapshot-inventory-remove-pinned-final": "remove_file",
     "test-snapshot-inventory-oversized-temp": "set_len",
@@ -531,7 +569,7 @@ CLIPPY_SUPPRESSION_COUNTS = {
     "dux-core/src/persistence/persistence_tests.rs": 3,
     "dux-core/src/persistence/storage.rs": 1,
     "dux-core/src/persistence/storage/windows.rs": 2,
-    "dux-core/src/persistence/snapshot/storage.rs": 6,
+    "dux-core/src/persistence/snapshot/storage.rs": 9,
     "dux-core/src/persistence/snapshot.rs": 3,
     "dux-cli/tests/inspection_cli.rs": 1,
 }

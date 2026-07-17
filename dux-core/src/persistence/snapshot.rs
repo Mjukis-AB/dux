@@ -74,6 +74,11 @@ pub(crate) use storage::{
     SnapshotStorageErrorKind, SnapshotStoreAccess, SnapshotStoreInventoryLease,
     SnapshotTempKernelState, SnapshotTempMutationLease, SnapshotTempRemovalError, StagedSnapshot,
 };
+use storage::{
+    SnapshotProvisioningStageReconciliation as StorageProvisioningStageReconciliation,
+    SnapshotProvisioningStageRemoval as StorageProvisioningStageRemoval,
+    SnapshotProvisioningStageRemovalError,
+};
 
 const PUBLICATION_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -265,6 +270,32 @@ pub(crate) enum SnapshotUnleasedTempReconciliationBatchOutcome {
     NoUnleasedTemp,
     DeferredActive,
     Removed { bytes: u64 },
+}
+
+/// One bounded reconciliation of root-local snapshot provisioning debt. The
+/// root-local stage identity and physical name never leave persistence.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SnapshotProvisioningStageReconciliationBatchResult {
+    pub(crate) observed_at: SystemTime,
+    pub(crate) outcome: SnapshotProvisioningStageReconciliationBatchOutcome,
+    pub(crate) total_stage_count_before: u64,
+    pub(crate) total_stage_count_after: u64,
+    pub(crate) marker_owned_count_before: u64,
+    pub(crate) marker_owned_count_after: u64,
+    pub(crate) unproven_count_before: u64,
+    pub(crate) unproven_count_after: u64,
+    pub(crate) control_charged_bytes_before: u64,
+    pub(crate) control_charged_bytes_after: u64,
+    pub(crate) has_more: bool,
+}
+
+/// Path-free result of one provisioning-stage maintenance batch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SnapshotProvisioningStageReconciliationBatchOutcome {
+    NoStage,
+    DeferredUnproven,
+    RemovedMarkerOnly { bytes: u64 },
+    RemovedMarkerComplete { bytes: u64 },
 }
 
 const fn repository_error(kind: SnapshotRepositoryErrorKind) -> SnapshotRepositoryError {
@@ -551,6 +582,121 @@ impl SnapshotRepository {
         )
         .map_err(map_history)?;
         Ok((inventory, storage))
+    }
+
+    /// Reconcile at most one exact marker-owned provisioning stage beneath
+    /// the retained database root.
+    ///
+    /// The caller supplies no path, name, root, identity, or victim. The
+    /// current-schema database guard is retained across the storage operation
+    /// so a compliant provisioner cannot race classification or removal. This
+    /// physical-only operation never reads or mutates SQLite rows.
+    pub(crate) fn reconcile_snapshot_provisioning_stage(
+        &self,
+        observed_at: SystemTime,
+    ) -> Result<SnapshotProvisioningStageReconciliationBatchResult, SnapshotRepositoryError> {
+        self.reconcile_snapshot_provisioning_stage_with_reconciler(observed_at, |store| {
+            store.reconcile_provisioning_stage()
+        })
+    }
+
+    fn reconcile_snapshot_provisioning_stage_with_reconciler(
+        &self,
+        observed_at: SystemTime,
+        reconcile: impl FnOnce(
+            &SecureSnapshotStore,
+        ) -> std::result::Result<
+            StorageProvisioningStageReconciliation,
+            SnapshotProvisioningStageRemovalError,
+        >,
+    ) -> Result<SnapshotProvisioningStageReconciliationBatchResult, SnapshotRepositoryError> {
+        if self.access != SnapshotStoreAccess::ReadWrite {
+            return Err(repository_error(SnapshotRepositoryErrorKind::ReadOnly));
+        }
+        let observed_at = unix_ms_to_system_time(
+            system_time_to_unix_ms(observed_at, HistoryErrorKind::InvalidInput)
+                .map_err(map_history)?,
+        )
+        .map_err(map_history)?;
+        let database_guard = self
+            .database
+            .lock_current_history_connection()
+            .map_err(map_history)?;
+        self.database
+            .validate_history_guard(&database_guard)
+            .map_err(map_history)?;
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| repository_error(SnapshotRepositoryErrorKind::MissingStore))?;
+
+        let reconciliation = match reconcile(store) {
+            Ok(reconciliation) => reconciliation,
+            Err(SnapshotProvisioningStageRemovalError::BeforeEffect(error)) => {
+                return Err(map_storage(error));
+            }
+            Err(SnapshotProvisioningStageRemovalError::OutcomeUnknown) => {
+                return Err(outcome_unknown());
+            }
+        };
+        let removed = reconciliation.removed_control_usage();
+        let physical_effect = matches!(
+            reconciliation.outcome(),
+            StorageProvisioningStageRemoval::RemovedMarkerOnly
+                | StorageProvisioningStageRemoval::RemovedMarkerComplete
+        );
+        self.database
+            .revalidate_current_history_guard(&database_guard)
+            .map_err(|error| {
+                if physical_effect {
+                    outcome_unknown()
+                } else {
+                    map_history(error)
+                }
+            })?;
+
+        let outcome = match (reconciliation.outcome(), removed) {
+            (StorageProvisioningStageRemoval::NoStage, None) => {
+                SnapshotProvisioningStageReconciliationBatchOutcome::NoStage
+            }
+            (StorageProvisioningStageRemoval::DeferredUnproven, None) => {
+                SnapshotProvisioningStageReconciliationBatchOutcome::DeferredUnproven
+            }
+            (StorageProvisioningStageRemoval::RemovedMarkerOnly, Some(usage)) => {
+                SnapshotProvisioningStageReconciliationBatchOutcome::RemovedMarkerOnly {
+                    bytes: usage.charged_bytes(),
+                }
+            }
+            (StorageProvisioningStageRemoval::RemovedMarkerComplete, Some(usage)) => {
+                SnapshotProvisioningStageReconciliationBatchOutcome::RemovedMarkerComplete {
+                    bytes: usage.charged_bytes(),
+                }
+            }
+            (StorageProvisioningStageRemoval::NoStage, Some(_))
+            | (StorageProvisioningStageRemoval::DeferredUnproven, Some(_)) => {
+                return Err(repository_error(SnapshotRepositoryErrorKind::Storage(
+                    SnapshotStorageErrorKind::InternalState,
+                )));
+            }
+            (StorageProvisioningStageRemoval::RemovedMarkerOnly, None)
+            | (StorageProvisioningStageRemoval::RemovedMarkerComplete, None) => {
+                return Err(outcome_unknown());
+            }
+        };
+
+        Ok(SnapshotProvisioningStageReconciliationBatchResult {
+            observed_at,
+            outcome,
+            total_stage_count_before: reconciliation.total_stage_count_before(),
+            total_stage_count_after: reconciliation.total_stage_count_after(),
+            marker_owned_count_before: reconciliation.marker_owned_count_before(),
+            marker_owned_count_after: reconciliation.marker_owned_count_after(),
+            unproven_count_before: reconciliation.unproven_count_before(),
+            unproven_count_after: reconciliation.unproven_count_after(),
+            control_charged_bytes_before: reconciliation.control_usage_before().charged_bytes(),
+            control_charged_bytes_after: reconciliation.control_usage_after().charged_bytes(),
+            has_more: reconciliation.has_more(),
+        })
     }
 
     /// Reconcile at most one exact snapshot-temp lease whose fully decoded
@@ -3153,6 +3299,194 @@ mod tests {
         external
             .pragma_update(None, "user_version", current)
             .unwrap();
+    }
+
+    #[cfg(unix)]
+    fn create_provisioning_stage(database: &Path, suffix: &str, marker_complete: bool) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let stage = database
+            .parent()
+            .unwrap()
+            .join(format!(".dux-snapshot-stage-{suffix}"));
+        fs::create_dir(&stage).unwrap();
+        fs::set_permissions(&stage, fs::Permissions::from_mode(0o700)).unwrap();
+        let marker = stage.join(".dux-snapshot-store");
+        fs::write(&marker, b"DUXSNAPSTOREV1\0\0").unwrap();
+        fs::set_permissions(&marker, fs::Permissions::from_mode(0o600)).unwrap();
+        if marker_complete {
+            let writer = stage.join(".dux-snapshot.writer.lock");
+            fs::write(&writer, b"DUXSNAPWRITER1\0\0").unwrap();
+            fs::set_permissions(&writer, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        stage
+    }
+
+    #[test]
+    fn provisioning_stage_reconciliation_canonicalizes_time_and_is_sql_read_only() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let (_store, repository) = open_repository(&database);
+        let observer = rusqlite::Connection::open(&database).unwrap();
+        let data_version_before = observer
+            .pragma_query_value(None, "data_version", |row| row.get::<_, i64>(0))
+            .unwrap();
+        let observed_at = UNIX_EPOCH + Duration::from_millis(1_750_000_060_123);
+
+        let result = repository
+            .reconcile_snapshot_provisioning_stage(observed_at + Duration::from_nanos(999_999))
+            .unwrap();
+
+        assert_eq!(result.observed_at, observed_at);
+        assert_eq!(
+            result.outcome,
+            SnapshotProvisioningStageReconciliationBatchOutcome::NoStage
+        );
+        assert_eq!(result.total_stage_count_before, 0);
+        assert_eq!(result.total_stage_count_after, 0);
+        assert_eq!(result.marker_owned_count_before, 0);
+        assert_eq!(result.marker_owned_count_after, 0);
+        assert_eq!(result.unproven_count_before, 0);
+        assert_eq!(result.unproven_count_after, 0);
+        assert_eq!(result.control_charged_bytes_before, 0);
+        assert_eq!(result.control_charged_bytes_after, 0);
+        assert!(!result.has_more);
+        assert_eq!(
+            observer
+                .pragma_query_value(None, "data_version", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            data_version_before
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn provisioning_stage_reconciliation_removes_one_proven_stage_per_batch() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let (_store, repository) = open_repository(&database);
+        let marker_only =
+            create_provisioning_stage(&database, "00000000000000000000000000000000", false);
+        let marker_complete =
+            create_provisioning_stage(&database, "11111111111111111111111111111111", true);
+        let unproven = database
+            .parent()
+            .unwrap()
+            .join(".dux-snapshot-stage-ffffffffffffffffffffffffffffffff");
+        fs::create_dir(&unproven).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&unproven, fs::Permissions::from_mode(0o700)).unwrap();
+        let observed_at = UNIX_EPOCH + Duration::from_millis(1_750_000_060_200);
+
+        let first = repository
+            .reconcile_snapshot_provisioning_stage(observed_at)
+            .unwrap();
+        assert!(matches!(
+            first.outcome,
+            SnapshotProvisioningStageReconciliationBatchOutcome::RemovedMarkerOnly { bytes }
+                if bytes > 0
+        ));
+        assert_eq!(first.total_stage_count_before, 3);
+        assert_eq!(first.total_stage_count_after, 2);
+        assert_eq!(first.marker_owned_count_before, 2);
+        assert_eq!(first.marker_owned_count_after, 1);
+        assert_eq!(first.unproven_count_before, 1);
+        assert_eq!(first.unproven_count_after, 1);
+        assert!(first.control_charged_bytes_before > first.control_charged_bytes_after);
+        assert!(first.has_more);
+        assert!(!marker_only.exists());
+        assert!(marker_complete.is_dir());
+
+        let second = repository
+            .reconcile_snapshot_provisioning_stage(observed_at + Duration::from_millis(1))
+            .unwrap();
+        assert!(matches!(
+            second.outcome,
+            SnapshotProvisioningStageReconciliationBatchOutcome::RemovedMarkerComplete { bytes }
+                if bytes > 0
+        ));
+        assert_eq!(second.total_stage_count_before, 2);
+        assert_eq!(second.total_stage_count_after, 1);
+        assert_eq!(second.marker_owned_count_before, 1);
+        assert_eq!(second.marker_owned_count_after, 0);
+        assert_eq!(
+            second.control_charged_bytes_before,
+            first.control_charged_bytes_after
+        );
+        assert_eq!(second.control_charged_bytes_after, 0);
+        assert!(!second.has_more);
+        assert!(!marker_complete.exists());
+        assert!(unproven.is_dir());
+
+        let deferred = repository
+            .reconcile_snapshot_provisioning_stage(observed_at + Duration::from_millis(2))
+            .unwrap();
+        assert_eq!(
+            deferred.outcome,
+            SnapshotProvisioningStageReconciliationBatchOutcome::DeferredUnproven
+        );
+        assert_eq!(deferred.total_stage_count_before, 1);
+        assert_eq!(deferred.total_stage_count_after, 1);
+        assert_eq!(deferred.marker_owned_count_before, 0);
+        assert_eq!(deferred.marker_owned_count_after, 0);
+        assert_eq!(deferred.unproven_count_before, 1);
+        assert_eq!(deferred.unproven_count_after, 1);
+        assert!(!deferred.has_more);
+        assert!(unproven.is_dir());
+    }
+
+    #[test]
+    fn provisioning_stage_reconciliation_rejects_invalid_clock_and_read_only_access() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let (store, repository) = open_repository(&database);
+        assert_eq!(
+            repository
+                .reconcile_snapshot_provisioning_stage(UNIX_EPOCH - Duration::from_millis(1))
+                .unwrap_err()
+                .kind,
+            SnapshotRepositoryErrorKind::History(HistoryErrorKind::InvalidInput)
+        );
+        drop(repository);
+        let read_only =
+            SnapshotRepository::open(Arc::clone(&store), SnapshotStoreAccess::ReadOnly).unwrap();
+        assert_eq!(
+            read_only
+                .reconcile_snapshot_provisioning_stage(UNIX_EPOCH)
+                .unwrap_err()
+                .kind,
+            SnapshotRepositoryErrorKind::ReadOnly
+        );
+    }
+
+    #[test]
+    fn provisioning_stage_reconciliation_revalidates_schema_and_maps_uncertain_effects() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let (_store, repository) = open_repository(&database);
+        let observed_at = UNIX_EPOCH + Duration::from_millis(1_750_000_060_300);
+
+        let skew = repository
+            .reconcile_snapshot_provisioning_stage_with_reconciler(observed_at, |store| {
+                install_future_schema(&database);
+                store.reconcile_provisioning_stage()
+            })
+            .unwrap_err();
+        assert_eq!(
+            skew.kind,
+            SnapshotRepositoryErrorKind::History(HistoryErrorKind::IncompatibleSchema)
+        );
+        restore_current_schema(&database);
+
+        let uncertain = repository
+            .reconcile_snapshot_provisioning_stage_with_reconciler(observed_at, |_| {
+                Err(SnapshotProvisioningStageRemovalError::OutcomeUnknown)
+            })
+            .unwrap_err();
+        assert_eq!(
+            uncertain.kind,
+            SnapshotRepositoryErrorKind::History(HistoryErrorKind::OutcomeUnknown)
+        );
     }
 
     #[test]

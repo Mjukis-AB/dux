@@ -2,7 +2,7 @@
 
 Status: Draft implementation specification
 
-Last updated: 2026-07-16
+Last updated: 2026-07-17
 
 Primary platform: macOS 14 or later
 
@@ -2496,7 +2496,8 @@ Tasks:
   uses exclusive PID-plus-random temps, collision winner validation, and
   read-only reopened final handles. Unix
   creation repairs exact 0700/0600 modes even beneath a restrictive umask;
-  snapshot provisioning requires the ACL-free private database root; the
+  snapshot provisioning requires the exact private database root (and, on
+  macOS, no extended ACL); the
   deny-only publication-parent exception applies only to initial SQLite-root
   provisioning on macOS. Windows uses protected owner-only DACLs, retained IDs, handle-relative
   operations, reparse/multi-link rejection, no-replace tests, and read-only
@@ -2519,8 +2520,8 @@ Tasks:
   [`docs/SNAPSHOT_FORMAT.md`](docs/SNAPSHOT_FORMAT.md). Durable engine scan-task
   publication is now attached by the following checkpoint. Last-complete
   selection, latest-two/2 GiB retention, app/FFI review-lease binding, and
-  exact-marker-owned root-local provisioning-stage maintenance remain later
-  tasks.
+  exact-marker-owned root-local provisioning-stage maintenance were later
+  tasks at this checkpoint and are recorded by the sub-checkpoints below.
   Pre-correction external snapshot stages are not root-bound, remain manual
   debt, and are not claimed by this checkpoint. Typed coverage/issues and the
   completed-only fresh-scan converter were attached by following checkpoints
@@ -3086,9 +3087,38 @@ Tasks:
     partial, malformed, linked, or extra-entry stage remains untouched, and no
     stage cleanup may recurse.
 
+  - Root-local snapshot provisioning-stage reconciliation completed
+    2026-07-17: `SnapshotRepository::reconcile_snapshot_provisioning_stage`
+    holds the current-schema database guard across one complete bounded raw/
+    native root inventory and accepts no root, name, path, identity, or victim
+    from its caller. Only an exact canonical private stage whose complete child
+    set is the 16-byte store marker alone or that marker plus the exact writer
+    marker is marker-owned. Empty and stricter-than-0700 Unix crash remnants are
+    unproven observations; they do not starve later proven debt. Wrong/partial
+    markers, writer-only or extra children, links/reparse points, broader
+    permissions/DACLs, and the 65th stage fail the whole batch before effect.
+    Legacy outer stages are outside the retained root and remain manual debt.
+
+    The storage boundary removes at most the first lexical proven stage and
+    never recurses. It freezes checked before/after counts plus exact charged
+    marker/writer bytes before mutation, then orders writer removal, stage sync,
+    marker removal, stage sync, empty-directory removal, and root sync. Known
+    pre-effect failures remain retryable; every failure after the first
+    namespace effect is `OutcomeUnknown`. A marker-removal crash may leave an
+    empty unproven directory that requires manual handling or a future durable
+    deletion journal. The separate typed idle-admitted
+    `SnapshotProvisioningStageMaintenance` engine task runs exactly one batch,
+    exposes only canonical time, aggregate counts/bytes, `has_more`, and
+    `NoStage`, `DeferredUnproven`, `RemovedMarkerOnly`, or
+    `RemovedMarkerComplete`, and never self-enqueues. Applying linearizes
+    cancellation and close. Focused hostile-shape, cap, accounting,
+    effect-boundary, redaction, admission, cancellation/close, schema-race,
+    panic-release, and two-engine convergence tests cover the slice. Unix runs
+    the mutation path; Windows native tests are compiled for CI but have not run
+    on this host.
+
     Production retention still requires app/FFI review-lease ownership and
-    native periodic idle scheduling, bounded exact-marker-owned root-local
-    provisioning-stage maintenance, hard-process-death recovery for `running`
+    native periodic idle scheduling, hard-process-death recovery for `running`
     rows, explicit clear-data actions, and native Windows mutation-path runtime
     verification.
     Legacy external snapshot-stage siblings remain unattributable manual debt.

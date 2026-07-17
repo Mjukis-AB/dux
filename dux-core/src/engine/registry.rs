@@ -36,6 +36,8 @@ use super::task::{
     ScanRootErrorKind, ScanTaskCounts, ScanTaskResult, ScanTaskStatus,
     SnapshotOrphanMaintenanceFailureKind, SnapshotOrphanMaintenanceOutcome,
     SnapshotOrphanMaintenanceResult, SnapshotOrphanMaintenanceStartOutcome,
+    SnapshotProvisioningStageMaintenanceFailureKind, SnapshotProvisioningStageMaintenanceOutcome,
+    SnapshotProvisioningStageMaintenanceResult, SnapshotProvisioningStageMaintenanceStartOutcome,
     SnapshotRetentionFailureKind, SnapshotRetentionOutcome, SnapshotRetentionResult,
     SnapshotRetentionStartOutcome, SnapshotTerminalTempMaintenanceFailureKind,
     SnapshotTerminalTempMaintenanceOutcome, SnapshotTerminalTempMaintenanceResult,
@@ -53,8 +55,9 @@ use crate::domain::{
 use crate::persistence::snapshot::from_scan::prepare_completed_scan;
 use crate::persistence::snapshot::{
     HostValue, SnapshotCodecErrorKind, SnapshotOrphanReconciliationBatchOutcome,
-    SnapshotRepository, SnapshotRepositoryErrorKind, SnapshotRetentionBatchOutcome,
-    SnapshotStorageErrorKind, SnapshotStoreAccess, SnapshotTerminalTempReconciliationBatchOutcome,
+    SnapshotProvisioningStageReconciliationBatchOutcome, SnapshotRepository,
+    SnapshotRepositoryErrorKind, SnapshotRetentionBatchOutcome, SnapshotStorageErrorKind,
+    SnapshotStoreAccess, SnapshotTerminalTempReconciliationBatchOutcome,
     SnapshotUnleasedTempReconciliationBatchOutcome,
 };
 use crate::persistence::{
@@ -162,6 +165,7 @@ enum TaskResult {
     HistoryMaintenance(Arc<HistoryMaintenanceResult>),
     SnapshotRetention(Arc<SnapshotRetentionResult>),
     SnapshotOrphanMaintenance(Arc<SnapshotOrphanMaintenanceResult>),
+    SnapshotProvisioningStageMaintenance(Arc<SnapshotProvisioningStageMaintenanceResult>),
     SnapshotTerminalTempMaintenance(Arc<SnapshotTerminalTempMaintenanceResult>),
     SnapshotUnleasedTempMaintenance(Arc<SnapshotUnleasedTempMaintenanceResult>),
     #[cfg(test)]
@@ -322,6 +326,37 @@ impl TaskContext {
         let event_limit = self.shared.limits.events_per_task;
         if let Some(record) = registry.records.get_mut(&self.id)
             && record.kind == TaskKind::SnapshotOrphanMaintenance
+            && !record.phase.is_terminal()
+        {
+            record.push_event(kind, event_limit);
+        }
+    }
+
+    /// Order cancellation against the first repository operation that may
+    /// physically remove an exact marker-owned provisioning stage.
+    fn try_begin_snapshot_provisioning_stage_maintenance_batch(&self) -> bool {
+        let mut registry = self.shared.lock_registry_recover();
+        let event_limit = self.shared.limits.events_per_task;
+        if let Some(record) = registry.records.get_mut(&self.id)
+            && record.kind == TaskKind::SnapshotProvisioningStageMaintenance
+            && record.phase == TaskPhase::Running
+            && !record.cancellation_requested
+        {
+            record.push_event(
+                TaskEventKind::SnapshotProvisioningStageMaintenanceBatchApplying,
+                event_limit,
+            );
+            true
+        } else {
+            false
+        }
+    }
+
+    fn report_snapshot_provisioning_stage_maintenance_finished(&self, kind: TaskEventKind) {
+        let mut registry = self.shared.lock_registry_recover();
+        let event_limit = self.shared.limits.events_per_task;
+        if let Some(record) = registry.records.get_mut(&self.id)
+            && record.kind == TaskKind::SnapshotProvisioningStageMaintenance
             && !record.phase.is_terminal()
         {
             record.push_event(kind, event_limit);
@@ -492,6 +527,7 @@ struct Registry {
     active_history_maintenance: Option<TaskId>,
     active_snapshot_retention: Option<TaskId>,
     active_snapshot_orphan_maintenance: Option<TaskId>,
+    active_snapshot_provisioning_stage_maintenance: Option<TaskId>,
     active_snapshot_terminal_temp_maintenance: Option<TaskId>,
     active_snapshot_unleased_temp_maintenance: Option<TaskId>,
 }
@@ -509,6 +545,7 @@ impl Registry {
             active_history_maintenance: None,
             active_snapshot_retention: None,
             active_snapshot_orphan_maintenance: None,
+            active_snapshot_provisioning_stage_maintenance: None,
             active_snapshot_terminal_temp_maintenance: None,
             active_snapshot_unleased_temp_maintenance: None,
         }
@@ -539,6 +576,11 @@ impl Registry {
             && self.active_snapshot_orphan_maintenance == Some(id)
         {
             self.active_snapshot_orphan_maintenance = None;
+        }
+        if kind == TaskKind::SnapshotProvisioningStageMaintenance
+            && self.active_snapshot_provisioning_stage_maintenance == Some(id)
+        {
+            self.active_snapshot_provisioning_stage_maintenance = None;
         }
         if kind == TaskKind::SnapshotTerminalTempMaintenance
             && self.active_snapshot_terminal_temp_maintenance == Some(id)
@@ -1456,6 +1498,151 @@ impl EngineHandle {
         Ok(None)
     }
 
+    /// Reconcile at most one exact marker-owned snapshot provisioning stage
+    /// beneath the retained database root. Exact root, name, and filesystem
+    /// identity stay inside persistence; `has_more` is only a later idle
+    /// rescheduling hint.
+    pub fn start_snapshot_provisioning_stage_maintenance(
+        &self,
+    ) -> Result<SnapshotProvisioningStageMaintenanceStartOutcome, StartTaskError> {
+        self.start_snapshot_provisioning_stage_maintenance_with_hooks(
+            SystemTime::now,
+            || {},
+            || {},
+            || {},
+        )
+    }
+
+    #[cfg(test)]
+    fn start_snapshot_provisioning_stage_maintenance_at(
+        &self,
+        observed_at: SystemTime,
+    ) -> Result<SnapshotProvisioningStageMaintenanceStartOutcome, StartTaskError> {
+        self.start_snapshot_provisioning_stage_maintenance_with_hooks(
+            move || observed_at,
+            || {},
+            || {},
+            || {},
+        )
+    }
+
+    #[cfg(test)]
+    fn start_snapshot_provisioning_stage_maintenance_with_test_hooks(
+        &self,
+        observed_at: SystemTime,
+        before_batch: impl FnOnce() + Send + 'static,
+        after_applying: impl FnOnce() + Send + 'static,
+        after_batch: impl FnOnce() + Send + 'static,
+    ) -> Result<SnapshotProvisioningStageMaintenanceStartOutcome, StartTaskError> {
+        self.start_snapshot_provisioning_stage_maintenance_with_hooks(
+            move || observed_at,
+            before_batch,
+            after_applying,
+            after_batch,
+        )
+    }
+
+    fn start_snapshot_provisioning_stage_maintenance_with_hooks(
+        &self,
+        clock: impl FnOnce() -> SystemTime + Send + 'static,
+        before_batch: impl FnOnce() + Send + 'static,
+        after_applying: impl FnOnce() + Send + 'static,
+        after_batch: impl FnOnce() + Send + 'static,
+    ) -> Result<SnapshotProvisioningStageMaintenanceStartOutcome, StartTaskError> {
+        if let Some(outcome) = self.snapshot_provisioning_stage_maintenance_preflight()? {
+            return Ok(outcome);
+        }
+        let status = self
+            .inner
+            .store
+            .status()
+            .map_err(|_| StartTaskError::PersistenceUnavailable)?;
+        if !matches!(
+            status.access,
+            crate::persistence::DatabaseAccess::ReadWriteCurrent
+        ) {
+            return Err(StartTaskError::ReadOnlyStore);
+        }
+        let snapshots = Arc::clone(&self.inner.snapshots);
+        self.submit_snapshot_provisioning_stage_maintenance(Box::new(move |context| {
+            if context.is_cancellation_requested() {
+                return WorkOutcome::Cancelled(None);
+            }
+            let observed_at = clock();
+            before_batch();
+            if !context.try_begin_snapshot_provisioning_stage_maintenance_batch() {
+                return WorkOutcome::Cancelled(None);
+            }
+            // Applying is the point of no return. Later cancellation remains
+            // visible intent but cannot suppress an exact repository result.
+            after_applying();
+            match snapshots.reconcile_snapshot_provisioning_stage(observed_at) {
+                Ok(result) => {
+                    let outcome =
+                        public_snapshot_provisioning_stage_maintenance_outcome(&result.outcome);
+                    let result = Arc::new(SnapshotProvisioningStageMaintenanceResult::new(
+                        result.observed_at,
+                        outcome,
+                        result.total_stage_count_before,
+                        result.total_stage_count_after,
+                        result.marker_owned_count_before,
+                        result.marker_owned_count_after,
+                        result.unproven_count_before,
+                        result.unproven_count_after,
+                        result.control_charged_bytes_before,
+                        result.control_charged_bytes_after,
+                        result.has_more,
+                    ));
+                    after_batch();
+                    context.report_snapshot_provisioning_stage_maintenance_finished(
+                        TaskEventKind::SnapshotProvisioningStageMaintenanceBatchFinished {
+                            outcome: result.outcome(),
+                            total_stage_count_before: result.total_stage_count_before(),
+                            total_stage_count_after: result.total_stage_count_after(),
+                            marker_owned_count_before: result.marker_owned_count_before(),
+                            marker_owned_count_after: result.marker_owned_count_after(),
+                            unproven_count_before: result.unproven_count_before(),
+                            unproven_count_after: result.unproven_count_after(),
+                            control_charged_bytes_before: result.control_charged_bytes_before(),
+                            control_charged_bytes_after: result.control_charged_bytes_after(),
+                            has_more: result.has_more(),
+                        },
+                    );
+                    WorkOutcome::Succeeded(TaskResult::SnapshotProvisioningStageMaintenance(result))
+                }
+                Err(error) => WorkOutcome::Failed(
+                    map_snapshot_provisioning_stage_maintenance_failure(error.kind),
+                    None,
+                ),
+            }
+        }))
+    }
+
+    fn snapshot_provisioning_stage_maintenance_preflight(
+        &self,
+    ) -> Result<Option<SnapshotProvisioningStageMaintenanceStartOutcome>, StartTaskError> {
+        let registry = self
+            .inner
+            .shared
+            .registry
+            .lock()
+            .map_err(|_| StartTaskError::InternalState)?;
+        if registry.lifecycle != EngineLifecycle::Open {
+            return Err(StartTaskError::Closed);
+        }
+        if let Some(existing) = registry.active_snapshot_provisioning_stage_maintenance {
+            return Ok(Some(
+                SnapshotProvisioningStageMaintenanceStartOutcome::AlreadyActive(existing),
+            ));
+        }
+        if registry.running_tasks != 0 || !registry.queue.is_empty() {
+            return Ok(Some(
+                SnapshotProvisioningStageMaintenanceStartOutcome::DeferredBusy,
+            ));
+        }
+        Ok(None)
+    }
+
     /// Reconcile at most one terminal row-bound snapshot temporary. Exact
     /// scan, lease, owner, and filename identity stays inside persistence;
     /// `has_more` is only a later idle-rescheduling hint.
@@ -1895,6 +2082,7 @@ impl EngineHandle {
                 | TaskResult::HistoryMaintenance(_)
                 | TaskResult::SnapshotRetention(_)
                 | TaskResult::SnapshotOrphanMaintenance(_)
+                | TaskResult::SnapshotProvisioningStageMaintenance(_)
                 | TaskResult::SnapshotTerminalTempMaintenance(_)
                 | TaskResult::SnapshotUnleasedTempMaintenance(_),
             ) => {
@@ -1922,6 +2110,7 @@ impl EngineHandle {
                 | TaskResult::HistoryMaintenance(_)
                 | TaskResult::SnapshotRetention(_)
                 | TaskResult::SnapshotOrphanMaintenance(_)
+                | TaskResult::SnapshotProvisioningStageMaintenance(_)
                 | TaskResult::SnapshotTerminalTempMaintenance(_)
                 | TaskResult::SnapshotUnleasedTempMaintenance(_),
             ) => {
@@ -1952,6 +2141,7 @@ impl EngineHandle {
                 | TaskResult::Scan(_)
                 | TaskResult::SnapshotRetention(_)
                 | TaskResult::SnapshotOrphanMaintenance(_)
+                | TaskResult::SnapshotProvisioningStageMaintenance(_)
                 | TaskResult::SnapshotTerminalTempMaintenance(_)
                 | TaskResult::SnapshotUnleasedTempMaintenance(_),
             ) => {
@@ -1982,6 +2172,7 @@ impl EngineHandle {
                 | TaskResult::Scan(_)
                 | TaskResult::HistoryMaintenance(_)
                 | TaskResult::SnapshotOrphanMaintenance(_)
+                | TaskResult::SnapshotProvisioningStageMaintenance(_)
                 | TaskResult::SnapshotTerminalTempMaintenance(_)
                 | TaskResult::SnapshotUnleasedTempMaintenance(_),
             ) => return Err(TaskAccessError::WrongTaskKind),
@@ -2010,6 +2201,38 @@ impl EngineHandle {
                 | TaskResult::Scan(_)
                 | TaskResult::HistoryMaintenance(_)
                 | TaskResult::SnapshotRetention(_)
+                | TaskResult::SnapshotProvisioningStageMaintenance(_)
+                | TaskResult::SnapshotTerminalTempMaintenance(_)
+                | TaskResult::SnapshotUnleasedTempMaintenance(_),
+            ) => return Err(TaskAccessError::WrongTaskKind),
+            #[cfg(test)]
+            Some(TaskResult::TestOnly) => return Err(TaskAccessError::WrongTaskKind),
+            None => None,
+        })
+    }
+
+    pub fn snapshot_provisioning_stage_maintenance_result(
+        &self,
+        id: TaskId,
+    ) -> Result<Option<Arc<SnapshotProvisioningStageMaintenanceResult>>, TaskAccessError> {
+        let registry = self.lock_open_registry()?;
+        let record = registry
+            .records
+            .get(&id)
+            .ok_or(TaskAccessError::UnknownTask)?;
+        if record.kind != TaskKind::SnapshotProvisioningStageMaintenance {
+            return Err(TaskAccessError::WrongTaskKind);
+        }
+        Ok(match &record.result {
+            Some(TaskResult::SnapshotProvisioningStageMaintenance(result)) => {
+                Some(Arc::clone(result))
+            }
+            Some(
+                TaskResult::FormatSizeBatch(_)
+                | TaskResult::Scan(_)
+                | TaskResult::HistoryMaintenance(_)
+                | TaskResult::SnapshotRetention(_)
+                | TaskResult::SnapshotOrphanMaintenance(_)
                 | TaskResult::SnapshotTerminalTempMaintenance(_)
                 | TaskResult::SnapshotUnleasedTempMaintenance(_),
             ) => return Err(TaskAccessError::WrongTaskKind),
@@ -2039,6 +2262,7 @@ impl EngineHandle {
                 | TaskResult::HistoryMaintenance(_)
                 | TaskResult::SnapshotRetention(_)
                 | TaskResult::SnapshotOrphanMaintenance(_)
+                | TaskResult::SnapshotProvisioningStageMaintenance(_)
                 | TaskResult::SnapshotUnleasedTempMaintenance(_),
             ) => return Err(TaskAccessError::WrongTaskKind),
             #[cfg(test)]
@@ -2067,6 +2291,7 @@ impl EngineHandle {
                 | TaskResult::HistoryMaintenance(_)
                 | TaskResult::SnapshotRetention(_)
                 | TaskResult::SnapshotOrphanMaintenance(_)
+                | TaskResult::SnapshotProvisioningStageMaintenance(_)
                 | TaskResult::SnapshotTerminalTempMaintenance(_),
             ) => return Err(TaskAccessError::WrongTaskKind),
             #[cfg(test)]
@@ -2305,6 +2530,44 @@ impl EngineHandle {
         registry.queue.push_back(Job { id, work });
         self.inner.shared.workers_ready.notify_one();
         Ok(SnapshotOrphanMaintenanceStartOutcome::Started(id))
+    }
+
+    fn submit_snapshot_provisioning_stage_maintenance(
+        &self,
+        work: Work,
+    ) -> Result<SnapshotProvisioningStageMaintenanceStartOutcome, StartTaskError> {
+        let mut registry = self
+            .inner
+            .shared
+            .registry
+            .lock()
+            .map_err(|_| StartTaskError::InternalState)?;
+        if registry.lifecycle != EngineLifecycle::Open {
+            return Err(StartTaskError::Closed);
+        }
+        if let Some(existing) = registry.active_snapshot_provisioning_stage_maintenance {
+            return Ok(SnapshotProvisioningStageMaintenanceStartOutcome::AlreadyActive(existing));
+        }
+        // Provisioning-stage reconciliation shares the same idle-only
+        // boundary as every other maintenance class. Rechecking here closes
+        // the admission race between the compatibility probe and submission.
+        if registry.running_tasks != 0 || !registry.queue.is_empty() {
+            return Ok(SnapshotProvisioningStageMaintenanceStartOutcome::DeferredBusy);
+        }
+        let id = TASK_IDS.allocate()?;
+        let record = TaskRecord::new(
+            id,
+            TaskKind::SnapshotProvisioningStageMaintenance,
+            None,
+            self.inner.shared.limits.events_per_task,
+        );
+        registry.active_snapshot_provisioning_stage_maintenance = Some(id);
+        registry.records.insert(id, record);
+        registry.queue.push_back(Job { id, work });
+        self.inner.shared.workers_ready.notify_one();
+        Ok(SnapshotProvisioningStageMaintenanceStartOutcome::Started(
+            id,
+        ))
     }
 
     fn submit_snapshot_terminal_temp_maintenance(
@@ -3411,6 +3674,25 @@ const fn public_snapshot_orphan_maintenance_outcome(
     }
 }
 
+const fn public_snapshot_provisioning_stage_maintenance_outcome(
+    outcome: &SnapshotProvisioningStageReconciliationBatchOutcome,
+) -> SnapshotProvisioningStageMaintenanceOutcome {
+    match outcome {
+        SnapshotProvisioningStageReconciliationBatchOutcome::NoStage => {
+            SnapshotProvisioningStageMaintenanceOutcome::NoStage
+        }
+        SnapshotProvisioningStageReconciliationBatchOutcome::DeferredUnproven => {
+            SnapshotProvisioningStageMaintenanceOutcome::DeferredUnproven
+        }
+        SnapshotProvisioningStageReconciliationBatchOutcome::RemovedMarkerOnly { bytes } => {
+            SnapshotProvisioningStageMaintenanceOutcome::RemovedMarkerOnly { bytes: *bytes }
+        }
+        SnapshotProvisioningStageReconciliationBatchOutcome::RemovedMarkerComplete { bytes } => {
+            SnapshotProvisioningStageMaintenanceOutcome::RemovedMarkerComplete { bytes: *bytes }
+        }
+    }
+}
+
 const fn public_snapshot_terminal_temp_maintenance_outcome(
     outcome: &SnapshotTerminalTempReconciliationBatchOutcome,
 ) -> SnapshotTerminalTempMaintenanceOutcome {
@@ -3582,6 +3864,90 @@ const fn map_snapshot_orphan_maintenance_failure(
         },
     };
     TaskFailureKind::SnapshotOrphanMaintenance(kind)
+}
+
+const fn map_snapshot_provisioning_stage_maintenance_failure(
+    kind: SnapshotRepositoryErrorKind,
+) -> TaskFailureKind {
+    let kind = match kind {
+        SnapshotRepositoryErrorKind::ReadOnly
+        | SnapshotRepositoryErrorKind::MissingStore
+        | SnapshotRepositoryErrorKind::ReviewLeaseExpired => {
+            SnapshotProvisioningStageMaintenanceFailureKind::InternalState
+        }
+        SnapshotRepositoryErrorKind::MissingSnapshot
+        | SnapshotRepositoryErrorKind::SnapshotUnavailable
+        | SnapshotRepositoryErrorKind::ReferenceMismatch => {
+            SnapshotProvisioningStageMaintenanceFailureKind::CorruptData
+        }
+        // Provisioning-stage control bytes are never decoded as snapshots.
+        SnapshotRepositoryErrorKind::IncompatibleVersion => {
+            SnapshotProvisioningStageMaintenanceFailureKind::InternalState
+        }
+        SnapshotRepositoryErrorKind::Codec(kind) => match kind {
+            SnapshotCodecErrorKind::InvalidInput | SnapshotCodecErrorKind::IncompatibleVersion => {
+                SnapshotProvisioningStageMaintenanceFailureKind::InternalState
+            }
+            SnapshotCodecErrorKind::Io => {
+                SnapshotProvisioningStageMaintenanceFailureKind::Unavailable
+            }
+            SnapshotCodecErrorKind::LimitExceeded => {
+                SnapshotProvisioningStageMaintenanceFailureKind::BudgetExceeded
+            }
+            SnapshotCodecErrorKind::InvalidMagic
+            | SnapshotCodecErrorKind::InvalidLength
+            | SnapshotCodecErrorKind::ChecksumMismatch
+            | SnapshotCodecErrorKind::CorruptData => {
+                SnapshotProvisioningStageMaintenanceFailureKind::CorruptData
+            }
+        },
+        SnapshotRepositoryErrorKind::Storage(kind) => match kind {
+            SnapshotStorageErrorKind::InvalidConfiguration
+            | SnapshotStorageErrorKind::InternalState => {
+                SnapshotProvisioningStageMaintenanceFailureKind::InternalState
+            }
+            SnapshotStorageErrorKind::UnsafeRoot
+            | SnapshotStorageErrorKind::UnsafeObject
+            | SnapshotStorageErrorKind::UnrecognizedStore => {
+                SnapshotProvisioningStageMaintenanceFailureKind::UnsafeStorage
+            }
+            SnapshotStorageErrorKind::Unavailable => {
+                SnapshotProvisioningStageMaintenanceFailureKind::Unavailable
+            }
+            SnapshotStorageErrorKind::Busy => SnapshotProvisioningStageMaintenanceFailureKind::Busy,
+        },
+        SnapshotRepositoryErrorKind::History(kind) => match kind {
+            HistoryErrorKind::InvalidInput => {
+                SnapshotProvisioningStageMaintenanceFailureKind::InvalidClock
+            }
+            HistoryErrorKind::IncompatibleSchema => {
+                SnapshotProvisioningStageMaintenanceFailureKind::IncompatibleSchema
+            }
+            HistoryErrorKind::QueryLimitExceeded => {
+                SnapshotProvisioningStageMaintenanceFailureKind::BudgetExceeded
+            }
+            HistoryErrorKind::Busy => SnapshotProvisioningStageMaintenanceFailureKind::Busy,
+            HistoryErrorKind::UnsafeStorage => {
+                SnapshotProvisioningStageMaintenanceFailureKind::UnsafeStorage
+            }
+            HistoryErrorKind::CorruptData => {
+                SnapshotProvisioningStageMaintenanceFailureKind::CorruptData
+            }
+            HistoryErrorKind::DatabaseUnavailable => {
+                SnapshotProvisioningStageMaintenanceFailureKind::Unavailable
+            }
+            HistoryErrorKind::OutcomeUnknown => {
+                SnapshotProvisioningStageMaintenanceFailureKind::OutcomeUnknown
+            }
+            HistoryErrorKind::AlreadyExists
+            | HistoryErrorKind::NotFound
+            | HistoryErrorKind::InvalidTransition
+            | HistoryErrorKind::InternalState => {
+                SnapshotProvisioningStageMaintenanceFailureKind::InternalState
+            }
+        },
+    };
+    TaskFailureKind::SnapshotProvisioningStageMaintenance(kind)
 }
 
 const fn map_snapshot_terminal_temp_maintenance_failure(

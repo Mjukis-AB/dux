@@ -257,8 +257,9 @@ multi-link files, ownership mismatches, unsafe permissions/DACLs, retained
 identity changes, or over-budget inventory fail closed.
 
 Unix directories/files are exact mode 0700/0600 even under a restrictive umask.
-Snapshot staging occurs inside the ACL-free private DUX root; macOS's deny-only
-publication-parent exception applies only to initial SQLite-root provisioning.
+Snapshot staging occurs inside the exact private DUX root; on macOS that root
+must have no extended ACL, and the deny-only publication-parent exception
+applies only to initial SQLite-root provisioning.
 Windows uses protected current-user-only DACLs,
 handle-relative creation/publication, retained volume/file IDs, and no-delete-
 sharing directory guards. Published files are closed and reopened read-only by
@@ -426,10 +427,10 @@ row, then delete the row. A compliant creator completes row-before-file
 creation before it releases those same locks, so creation cannot still be
 pending once maintenance holds both and a row-only residual can be deleted. It
 never adopts or removes an unleased temp. Normal abort also removes and flushes
-its retained current-call temp before exact row consumption. Broad startup
-scavenging and exact-marker-owned root-local provisioning-stage maintenance are
-not implemented; legacy external stages remain manual debt. Unleased-temp
-removal uses the separate physical-only boundary below.
+its retained current-call temp before exact row consumption. Unleased-temp
+removal uses the separate physical-only boundary below; provisioning stages use
+the independent root-local boundary described later in this section. Legacy
+external stages remain manual debt.
 
 A separate bounded terminal-temp batch classifies the complete immutable lease
 population through joined parent status, but those aggregate observations grant
@@ -504,14 +505,35 @@ root-local stage and same-parent atomic no-replace directory publication. A
 racing winner is reopened and fully validated. The database-root inventory
 tolerates at most 64 exact canonical private stage directories within fixed
 total-entry and 256-KiB aggregate-name budgets plus sampled elapsed-time checks
-against 250 ms. A current-user-owned Unix stage whose mode is a stricter subset of
-0700 can be interrupted creation debt; tolerating it is not cleanup authority.
-Losing or interrupted root-local stages and `running` lease
-rows are deliberately not scavenged by this checkpoint. Future automatic
-maintenance may consider only a canonical root-local stage with an exact
-snapshot-store marker and bounded known children. Empty, partial, malformed,
-linked, or extra-entry root-local stages and every legacy external stage remain
-untouched; cleanup must never recurse.
+against 250 ms. A current-user-owned Unix stage whose mode is a stricter subset
+of 0700 can be interrupted creation debt; tolerating it is not cleanup
+authority.
+
+The separate provisioning-stage reconciler holds the current-schema database
+guard while completely inventorying that retained root under its fixed
+2,048-entry bound and the same 256-KiB aggregate-name, 64-stage, and 250-ms
+bounds. It considers stages in exact
+ASCII lexical order and removes at most one canonical 0700/protected-DACL stage
+whose complete child set is either the exact 16-byte store marker alone or that
+marker plus the exact 16-byte writer marker. Marker and writer controls must be
+private, regular, single-link, no-follow objects whose retained identities still
+match their names. An empty or stricter-mode stage is reported as unproven and
+never starves a later proven stage. Wrong or partial markers, writer-only,
+unknown/extra children, links/reparse points, broader permissions, unsafe DACLs,
+or a 65th stage fail the whole batch before effect. Legacy external stages are
+never inventoried or adopted.
+
+Removal is non-recursive and ordered writer control, stage-directory sync,
+store marker, stage-directory sync, empty stage, then retained-root sync.
+Counts and logical/allocation-derived charged control bytes are checked before
+the first namespace mutation; directory allocation is deliberately not claimed.
+A failure before the first unlink/disposition is retryable, while any failure
+after it is `OutcomeUnknown`. A crash after marker removal can leave an empty
+unproven directory that future automatic maintenance preserves; eliminating
+that bounded debt would require a durable deletion journal. The typed idle-admitted
+engine task accepts no root, stage name, path, identity, or victim, performs one
+batch, exposes only canonical time and aggregate before/after observations, and
+never self-enqueues. `running` scan/temp-lease rows remain separate debt.
 
 Inventory-observed unleased temps may now be removed only through the
 independent bounded physical-only boundary above; they are never adopted.
@@ -525,9 +547,12 @@ independent bounded physical-only boundary above; they are never adopted.
   snapshot owner before publishing workers.
 - A current-to-newer schema race is rechecked under the SQLite writer lease
   before snapshot provisioning and every later mutation.
-- Root-local canonical stage-name tolerance is not ownership proof. Missing,
-  partial, wrong markers or unknown children cannot authorize removal, and
-  legacy external stages are neither migrated nor adopted.
+- Root-local canonical stage-name tolerance is not ownership proof. The sealed
+  reconciler additionally requires the retained root, exact marker bytes,
+  bounded complete child set, private retained identities, and fresh name
+  validation. Missing, partial, wrong markers or unknown children cannot
+  authorize removal, and legacy external stages are neither migrated nor
+  adopted.
 - Existing successful summaries retry only when every frozen completion fact
   and the fully decoded referenced document match exactly.
 - A schema-v8 temp row is created before its file and consumed atomically with
@@ -558,12 +583,13 @@ This checkpoint does not implement:
 - app/FFI review-lease ownership and native periodic idle scheduling (the core
   engine can request exactly one sealed batch, but this does not change the
   snapshot wire or enable product scheduling);
-- exact-marker-owned root-local provisioning-stage maintenance and
-  hard-process-death recovery of `running` temp-lease parents; legacy external
-  stages remain manual debt;
+- hard-process-death recovery of `running` temp-lease parents; legacy external
+  provisioning stages remain manual debt;
 - explicit user clear-data actions;
-- native Windows temp/final-removal and sparse/compressed-allocation runtime
-  verification plus bounded accounting probes for slow filesystem drivers;
+- native Windows temp/final/provisioning-stage removal and
+  sparse/compressed-allocation runtime verification plus bounded accounting
+  probes for slow filesystem drivers (Windows stage regressions are compiled
+  but have not run on this host);
 - Explorer paging/indexes and measured 1M/5M-node memory budgets;
 - migration from or hardening of the legacy CLI cache.
 

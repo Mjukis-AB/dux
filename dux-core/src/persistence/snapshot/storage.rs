@@ -33,6 +33,9 @@ const INVENTORY_DEADLINE: Duration = Duration::from_millis(250);
 const MAX_INVENTORY_ENTRIES: usize = 2_048;
 const MAX_INVENTORY_NAME_BYTES: usize = 256 * 1_024;
 const MAX_RECOGNIZED_TEMPS: usize = 64;
+const PROVISIONING_STAGE_PREFIX: &str = ".dux-snapshot-stage-";
+const PROVISIONING_STAGE_HEX_LENGTH: usize = 32;
+const MAX_PROVISIONING_STAGES: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SnapshotStorageErrorKind {
@@ -68,6 +71,86 @@ pub(crate) enum SnapshotFinalRemovalError {
 pub(crate) enum SnapshotTempRemovalError {
     BeforeEffect(SnapshotStorageError),
     OutcomeUnknown,
+}
+
+/// Exact effect boundary for one marker-owned provisioning-stage removal.
+/// `BeforeEffect` guarantees that no child unlink/disposition or directory
+/// removal succeeded. After the first namespace mutation, every failure is
+/// reported as `OutcomeUnknown` so callers must re-inventory from scratch.
+#[derive(Debug)]
+pub(crate) enum SnapshotProvisioningStageRemovalError {
+    BeforeEffect(SnapshotStorageError),
+    OutcomeUnknown,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SnapshotProvisioningStageRemoval {
+    NoStage,
+    DeferredUnproven,
+    RemovedMarkerOnly,
+    RemovedMarkerComplete,
+}
+
+/// One complete bounded observation and, when possible, one durable removal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SnapshotProvisioningStageReconciliation {
+    outcome: SnapshotProvisioningStageRemoval,
+    total_stage_count_before: u64,
+    total_stage_count_after: u64,
+    marker_owned_count_before: u64,
+    marker_owned_count_after: u64,
+    unproven_count_before: u64,
+    unproven_count_after: u64,
+    control_usage_before: SnapshotFileUsage,
+    control_usage_after: SnapshotFileUsage,
+    removed_control_usage: Option<SnapshotFileUsage>,
+    has_more: bool,
+}
+
+impl SnapshotProvisioningStageReconciliation {
+    pub(crate) const fn outcome(self) -> SnapshotProvisioningStageRemoval {
+        self.outcome
+    }
+
+    pub(crate) const fn total_stage_count_before(self) -> u64 {
+        self.total_stage_count_before
+    }
+
+    pub(crate) const fn total_stage_count_after(self) -> u64 {
+        self.total_stage_count_after
+    }
+
+    pub(crate) const fn marker_owned_count_before(self) -> u64 {
+        self.marker_owned_count_before
+    }
+
+    pub(crate) const fn marker_owned_count_after(self) -> u64 {
+        self.marker_owned_count_after
+    }
+
+    pub(crate) const fn unproven_count_before(self) -> u64 {
+        self.unproven_count_before
+    }
+
+    pub(crate) const fn unproven_count_after(self) -> u64 {
+        self.unproven_count_after
+    }
+
+    pub(crate) const fn control_usage_before(self) -> SnapshotFileUsage {
+        self.control_usage_before
+    }
+
+    pub(crate) const fn control_usage_after(self) -> SnapshotFileUsage {
+        self.control_usage_after
+    }
+
+    pub(crate) const fn removed_control_usage(self) -> Option<SnapshotFileUsage> {
+        self.removed_control_usage
+    }
+
+    pub(crate) const fn has_more(self) -> bool {
+        self.has_more
+    }
 }
 
 impl SnapshotStorageError {
@@ -148,6 +231,9 @@ fn push_lower_hex(output: &mut String, bytes: &[u8]) {
 struct Identity(platform::Identity);
 
 struct StoreInner {
+    database_root_path: PathBuf,
+    database_root: File,
+    database_root_identity: Identity,
     path: PathBuf,
     directory: File,
     directory_identity: Identity,
@@ -708,6 +794,37 @@ struct SnapshotStorageInventory {
     total_usage: SnapshotFileUsage,
 }
 
+enum ProvisioningStageOpen {
+    Private(File, platform::Identity),
+    #[cfg_attr(windows, allow(dead_code))]
+    Deferred,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProvisioningStageShape {
+    MarkerOnly,
+    MarkerComplete,
+}
+
+struct RetainedProvisioningStage {
+    name: String,
+    directory: File,
+    directory_identity: platform::Identity,
+    marker: File,
+    marker_identity: platform::Identity,
+    writer_lock: Option<(File, platform::Identity)>,
+    shape: ProvisioningStageShape,
+    control_usage: SnapshotFileUsage,
+}
+
+struct ProvisioningStageInventory {
+    total_stage_count: u64,
+    marker_owned_count: u64,
+    unproven_count: u64,
+    control_usage: SnapshotFileUsage,
+    first_marker_owned: Option<RetainedProvisioningStage>,
+}
+
 fn unsafe_inventory_object() -> SnapshotStorageError {
     SnapshotStorageError::new(SnapshotStorageErrorKind::UnsafeObject)
 }
@@ -747,7 +864,13 @@ impl SecureSnapshotStore {
         platform::validate_retained(&parent, parent_identity.0, platform::Kind::Directory, false)?;
 
         let store = match platform::open_existing_directory(&parent, parent_path, DIRECTORY_NAME)? {
-            Some(directory) => Self::from_open_directory(directory_path, directory)?,
+            Some(directory) => Self::from_open_directory(
+                parent_path.to_path_buf(),
+                parent,
+                parent_identity,
+                directory_path,
+                directory,
+            )?,
             None if access == SnapshotStoreAccess::ReadOnly => return Ok(None),
             None => Self::provision(parent_path, &parent, parent_identity, directory_path)?,
         };
@@ -823,7 +946,12 @@ impl SecureSnapshotStore {
                         directory_identity.0,
                         platform::Kind::Directory,
                     )?;
-                    return Ok(Self::from_parts(
+                    return Self::from_parts(
+                        database_root_path.to_path_buf(),
+                        database_root.try_clone().map_err(|_| {
+                            SnapshotStorageError::new(SnapshotStorageErrorKind::Unavailable)
+                        })?,
+                        database_root_identity,
                         directory_path,
                         directory,
                         directory_identity,
@@ -831,7 +959,7 @@ impl SecureSnapshotStore {
                         marker_identity,
                         writer_lock,
                         writer_lock_identity,
-                    ));
+                    );
                 }
                 platform::Publication::Collision => {
                     // The bounded marker-complete loser is deliberately not
@@ -845,7 +973,15 @@ impl SecureSnapshotStore {
                     .ok_or_else(|| {
                         SnapshotStorageError::new(SnapshotStorageErrorKind::UnsafeRoot)
                     })?;
-                    return Self::from_open_directory(directory_path, directory);
+                    return Self::from_open_directory(
+                        database_root_path.to_path_buf(),
+                        database_root.try_clone().map_err(|_| {
+                            SnapshotStorageError::new(SnapshotStorageErrorKind::Unavailable)
+                        })?,
+                        database_root_identity,
+                        directory_path,
+                        directory,
+                    );
                 }
             }
         }
@@ -854,7 +990,13 @@ impl SecureSnapshotStore {
         ))
     }
 
-    fn from_open_directory(path: PathBuf, directory: File) -> Result<Self> {
+    fn from_open_directory(
+        database_root_path: PathBuf,
+        database_root: File,
+        database_root_identity: Identity,
+        path: PathBuf,
+        directory: File,
+    ) -> Result<Self> {
         let directory_identity =
             Identity(platform::identity(&directory, platform::Kind::Directory)?);
         platform::validate_retained(
@@ -870,7 +1012,10 @@ impl SecureSnapshotStore {
         let (writer_lock, writer_lock_identity) =
             open_control(&directory, &path, WRITER_LOCK_NAME, WRITER_MARKER, true)?
                 .ok_or_else(|| SnapshotStorageError::new(SnapshotStorageErrorKind::UnsafeObject))?;
-        Ok(Self::from_parts(
+        Self::from_parts(
+            database_root_path,
+            database_root,
+            database_root_identity,
             path,
             directory,
             directory_identity,
@@ -878,11 +1023,14 @@ impl SecureSnapshotStore {
             marker_identity,
             writer_lock,
             writer_lock_identity,
-        ))
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
     fn from_parts(
+        database_root_path: PathBuf,
+        database_root: File,
+        database_root_identity: Identity,
         path: PathBuf,
         directory: File,
         directory_identity: Identity,
@@ -890,9 +1038,18 @@ impl SecureSnapshotStore {
         marker_identity: Identity,
         writer_lock: File,
         writer_lock_identity: Identity,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        platform::validate_retained(
+            &database_root,
+            database_root_identity.0,
+            platform::Kind::Directory,
+            false,
+        )?;
+        Ok(Self {
             inner: Arc::new(StoreInner {
+                database_root_path,
+                database_root,
+                database_root_identity,
                 path,
                 directory,
                 directory_identity,
@@ -902,7 +1059,7 @@ impl SecureSnapshotStore {
                 writer_lock_identity,
                 writer_in_use: AtomicBool::new(false),
             }),
-        }
+        })
     }
 
     pub(crate) fn open(&self, name: &SnapshotFileName) -> Result<Option<RetainedSnapshot>> {
@@ -997,6 +1154,304 @@ impl SecureSnapshotStore {
             total_usage: inventory.total_usage,
             _writer_lock: writer_lock,
         })
+    }
+
+    /// Completely inventory the retained database root and durably remove at
+    /// most one exact marker-owned provisioning stage. The database/root
+    /// coordination lock that excludes a compliant provisioner is owned by
+    /// the repository layer; this primitive contributes only bounded physical
+    /// observation, exact ownership proof, and descriptor-relative mutation.
+    pub(crate) fn reconcile_provisioning_stage(
+        &self,
+    ) -> std::result::Result<
+        SnapshotProvisioningStageReconciliation,
+        SnapshotProvisioningStageRemovalError,
+    > {
+        let before_effect = SnapshotProvisioningStageRemovalError::BeforeEffect;
+        let inventory = self
+            .inventory_provisioning_stages()
+            .map_err(before_effect)?;
+        let total_before = inventory.total_stage_count;
+        let marker_before = inventory.marker_owned_count;
+        let unproven_before = inventory.unproven_count;
+        let usage_before = inventory.control_usage;
+        let Some(stage) = inventory.first_marker_owned else {
+            return Ok(SnapshotProvisioningStageReconciliation {
+                outcome: if unproven_before == 0 {
+                    SnapshotProvisioningStageRemoval::NoStage
+                } else {
+                    SnapshotProvisioningStageRemoval::DeferredUnproven
+                },
+                total_stage_count_before: total_before,
+                total_stage_count_after: total_before,
+                marker_owned_count_before: marker_before,
+                marker_owned_count_after: marker_before,
+                unproven_count_before: unproven_before,
+                unproven_count_after: unproven_before,
+                control_usage_before: usage_before,
+                control_usage_after: usage_before,
+                removed_control_usage: None,
+                has_more: marker_before > 0,
+            });
+        };
+
+        let outcome = match stage.shape {
+            ProvisioningStageShape::MarkerOnly => {
+                SnapshotProvisioningStageRemoval::RemovedMarkerOnly
+            }
+            ProvisioningStageShape::MarkerComplete => {
+                SnapshotProvisioningStageRemoval::RemovedMarkerComplete
+            }
+        };
+        // Freeze every reportable postcondition before the first unlink.
+        let total_after = total_before.checked_sub(1).ok_or_else(|| {
+            before_effect(SnapshotStorageError::new(
+                SnapshotStorageErrorKind::InternalState,
+            ))
+        })?;
+        let marker_after = marker_before.checked_sub(1).ok_or_else(|| {
+            before_effect(SnapshotStorageError::new(
+                SnapshotStorageErrorKind::InternalState,
+            ))
+        })?;
+        let usage_after = usage_before
+            .checked_sub(stage.control_usage)
+            .map_err(before_effect)?;
+        let removed_usage = stage.control_usage;
+        self.remove_provisioning_stage(stage)?;
+        Ok(SnapshotProvisioningStageReconciliation {
+            outcome,
+            total_stage_count_before: total_before,
+            total_stage_count_after: total_after,
+            marker_owned_count_before: marker_before,
+            marker_owned_count_after: marker_after,
+            unproven_count_before: unproven_before,
+            unproven_count_after: unproven_before,
+            control_usage_before: usage_before,
+            control_usage_after: usage_after,
+            removed_control_usage: Some(removed_usage),
+            has_more: marker_after > 0,
+        })
+    }
+
+    fn inventory_provisioning_stages(&self) -> Result<ProvisioningStageInventory> {
+        platform::validate_retained(
+            &self.inner.database_root,
+            self.inner.database_root_identity.0,
+            platform::Kind::Directory,
+            false,
+        )?;
+        let deadline = Instant::now()
+            .checked_add(INVENTORY_DEADLINE)
+            .ok_or_else(|| SnapshotStorageError::new(SnapshotStorageErrorKind::InternalState))?;
+        let mut names = platform::inventory_provisioning_stage_names(
+            &self.inner.database_root,
+            MAX_INVENTORY_ENTRIES,
+            MAX_INVENTORY_NAME_BYTES,
+            MAX_PROVISIONING_STAGES,
+            deadline,
+        )?;
+        names.sort_unstable();
+
+        let mut marker_owned_count = 0_u64;
+        let mut unproven_count = 0_u64;
+        let mut control_usage = SnapshotFileUsage::default();
+        let mut first_marker_owned = None;
+        for name in &names {
+            if Instant::now() > deadline {
+                return Err(SnapshotStorageError::new(
+                    SnapshotStorageErrorKind::Unavailable,
+                ));
+            }
+            let Some(opened) = platform::open_provisioning_stage_for_removal(
+                &self.inner.database_root,
+                &self.inner.database_root_path,
+                name,
+            )?
+            else {
+                return Err(unsafe_inventory_object());
+            };
+            let ProvisioningStageOpen::Private(directory, directory_identity) = opened else {
+                unproven_count = unproven_count
+                    .checked_add(1)
+                    .ok_or_else(unsafe_inventory_object)?;
+                continue;
+            };
+            let children = platform::inventory(
+                &directory,
+                3,
+                MARKER_NAME.len() + WRITER_LOCK_NAME.len() + 1,
+                deadline,
+            )?;
+            if children.is_empty() {
+                unproven_count = unproven_count
+                    .checked_add(1)
+                    .ok_or_else(unsafe_inventory_object)?;
+                continue;
+            }
+            if children.len() > 2
+                || children
+                    .iter()
+                    .any(|child| child != MARKER_NAME && child != WRITER_LOCK_NAME)
+                || !children.iter().any(|child| child == MARKER_NAME)
+            {
+                return Err(unsafe_inventory_object());
+            }
+
+            let Some((marker, marker_identity)) = platform::open_stage_control_for_removal(
+                &directory,
+                &self.inner.database_root_path.join(name),
+                MARKER_NAME,
+            )?
+            else {
+                return Err(unsafe_inventory_object());
+            };
+            platform::validate_named(
+                &directory,
+                MARKER_NAME,
+                &marker,
+                marker_identity,
+                platform::Kind::RegularFile,
+            )?;
+            prove_marker(&marker, STORE_MARKER)?;
+            let marker_usage = snapshot_file_usage(&marker)?;
+
+            let writer_lock = if children.iter().any(|child| child == WRITER_LOCK_NAME) {
+                let Some((writer, writer_identity)) = platform::open_stage_control_for_removal(
+                    &directory,
+                    &self.inner.database_root_path.join(name),
+                    WRITER_LOCK_NAME,
+                )?
+                else {
+                    return Err(unsafe_inventory_object());
+                };
+                platform::validate_named(
+                    &directory,
+                    WRITER_LOCK_NAME,
+                    &writer,
+                    writer_identity,
+                    platform::Kind::RegularFile,
+                )?;
+                prove_marker(&writer, WRITER_MARKER)?;
+                Some((writer, writer_identity))
+            } else {
+                None
+            };
+            let usage = if let Some((writer, _)) = &writer_lock {
+                marker_usage.checked_add(snapshot_file_usage(writer)?)?
+            } else {
+                marker_usage
+            };
+            control_usage = control_usage.checked_add(usage)?;
+            marker_owned_count = marker_owned_count
+                .checked_add(1)
+                .ok_or_else(unsafe_inventory_object)?;
+            if first_marker_owned.is_none() {
+                first_marker_owned = Some(RetainedProvisioningStage {
+                    name: name.clone(),
+                    directory,
+                    directory_identity,
+                    marker,
+                    marker_identity,
+                    writer_lock,
+                    shape: if children.len() == 2 {
+                        ProvisioningStageShape::MarkerComplete
+                    } else {
+                        ProvisioningStageShape::MarkerOnly
+                    },
+                    control_usage: usage,
+                });
+            }
+        }
+        platform::validate_retained(
+            &self.inner.database_root,
+            self.inner.database_root_identity.0,
+            platform::Kind::Directory,
+            false,
+        )?;
+        Ok(ProvisioningStageInventory {
+            total_stage_count: u64::try_from(names.len()).map_err(|_| unsafe_inventory_object())?,
+            marker_owned_count,
+            unproven_count,
+            control_usage,
+            first_marker_owned,
+        })
+    }
+
+    fn remove_provisioning_stage(
+        &self,
+        stage: RetainedProvisioningStage,
+    ) -> std::result::Result<(), SnapshotProvisioningStageRemovalError> {
+        self.remove_provisioning_stage_with_hooks(
+            stage,
+            || Ok(()),
+            platform::sync_directory,
+            platform::sync_directory,
+        )
+    }
+
+    fn remove_provisioning_stage_with_hooks(
+        &self,
+        stage: RetainedProvisioningStage,
+        before_first_remove: impl FnOnce() -> Result<()>,
+        mut sync_stage: impl FnMut(&File) -> Result<()>,
+        sync_root: impl FnOnce(&File) -> Result<()>,
+    ) -> std::result::Result<(), SnapshotProvisioningStageRemovalError> {
+        let before_effect = SnapshotProvisioningStageRemovalError::BeforeEffect;
+        platform::validate_retained(
+            &self.inner.database_root,
+            self.inner.database_root_identity.0,
+            platform::Kind::Directory,
+            false,
+        )
+        .map_err(before_effect)?;
+        platform::validate_named(
+            &self.inner.database_root,
+            &stage.name,
+            &stage.directory,
+            stage.directory_identity,
+            platform::Kind::Directory,
+        )
+        .map_err(before_effect)?;
+        before_first_remove().map_err(before_effect)?;
+
+        let mut effect_started = false;
+        if let Some((writer, writer_identity)) = stage.writer_lock {
+            platform::remove_retained_stage_control(
+                &stage.directory,
+                WRITER_LOCK_NAME,
+                writer,
+                writer_identity,
+            )
+            .map_err(before_effect)?;
+            effect_started = true;
+            sync_stage(&stage.directory)
+                .map_err(|_| SnapshotProvisioningStageRemovalError::OutcomeUnknown)?;
+        }
+        let marker_result = platform::remove_retained_stage_control(
+            &stage.directory,
+            MARKER_NAME,
+            stage.marker,
+            stage.marker_identity,
+        );
+        if let Err(error) = marker_result {
+            return Err(if effect_started {
+                SnapshotProvisioningStageRemovalError::OutcomeUnknown
+            } else {
+                before_effect(error)
+            });
+        }
+        sync_stage(&stage.directory)
+            .map_err(|_| SnapshotProvisioningStageRemovalError::OutcomeUnknown)?;
+        platform::remove_retained_provisioning_stage(
+            &self.inner.database_root,
+            &stage.name,
+            stage.directory,
+            stage.directory_identity,
+        )
+        .map_err(|_| SnapshotProvisioningStageRemovalError::OutcomeUnknown)?;
+        sync_root(&self.inner.database_root)
+            .map_err(|_| SnapshotProvisioningStageRemovalError::OutcomeUnknown)
     }
 
     pub(crate) fn reserve_stage(
@@ -1761,6 +2216,14 @@ fn random_directory_stage_name() -> Result<String> {
     Ok(name)
 }
 
+fn is_provisioning_stage_name_bytes(name: &[u8]) -> bool {
+    name.len() == PROVISIONING_STAGE_PREFIX.len() + PROVISIONING_STAGE_HEX_LENGTH
+        && name.starts_with(PROVISIONING_STAGE_PREFIX.as_bytes())
+        && name[PROVISIONING_STAGE_PREFIX.len()..]
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
+}
+
 fn is_recognized_temp_name(name: &str) -> bool {
     let Some(rest) = name.strip_prefix(".snapshot-") else {
         return false;
@@ -1839,8 +2302,8 @@ mod platform {
 
     use nix::dir::Dir;
     use nix::errno::Errno;
-    use nix::fcntl::{OFlag, open, openat};
-    use nix::sys::stat::{FchmodatFlags, Mode, SFlag, fchmod, fchmodat, fstat, mkdirat};
+    use nix::fcntl::{AtFlags, OFlag, open, openat};
+    use nix::sys::stat::{FchmodatFlags, Mode, SFlag, fchmod, fchmodat, fstat, fstatat, mkdirat};
     use nix::unistd::geteuid;
 
     use super::{Result, SnapshotStorageError, SnapshotStorageErrorKind};
@@ -2124,6 +2587,115 @@ mod platform {
         Ok(names)
     }
 
+    pub(super) fn inventory_provisioning_stage_names(
+        directory: &File,
+        maximum_entries: usize,
+        maximum_name_bytes: usize,
+        maximum_stages: usize,
+        deadline: std::time::Instant,
+    ) -> Result<Vec<String>> {
+        let clone = directory
+            .try_clone()
+            .map_err(|_| SnapshotStorageError::new(SnapshotStorageErrorKind::Unavailable))?;
+        let owned: OwnedFd = clone.into();
+        let mut entries = Dir::from_fd(owned)
+            .map_err(|_| SnapshotStorageError::new(SnapshotStorageErrorKind::Unavailable))?;
+        let mut names = Vec::new();
+        let mut entry_count = 0_usize;
+        let mut name_bytes = 0_usize;
+        for entry in entries.iter() {
+            if std::time::Instant::now() > deadline || entry_count >= maximum_entries {
+                return Err(SnapshotStorageError::new(
+                    SnapshotStorageErrorKind::Unavailable,
+                ));
+            }
+            let entry = entry
+                .map_err(|_| SnapshotStorageError::new(SnapshotStorageErrorKind::Unavailable))?;
+            let bytes = entry.file_name().to_bytes();
+            if bytes == b"." || bytes == b".." {
+                continue;
+            }
+            entry_count = entry_count
+                .checked_add(1)
+                .ok_or_else(super::unsafe_inventory_object)?;
+            name_bytes = name_bytes
+                .checked_add(bytes.len())
+                .ok_or_else(super::unsafe_inventory_object)?;
+            if name_bytes > maximum_name_bytes {
+                return Err(SnapshotStorageError::new(
+                    SnapshotStorageErrorKind::UnsafeObject,
+                ));
+            }
+            if super::is_provisioning_stage_name_bytes(bytes) {
+                if names.len() >= maximum_stages {
+                    return Err(super::unsafe_inventory_object());
+                }
+                // The accepted grammar is ASCII, independent of every other
+                // root entry's byte encoding.
+                names.push(String::from_utf8(bytes.to_vec()).map_err(|_| {
+                    SnapshotStorageError::new(SnapshotStorageErrorKind::InternalState)
+                })?);
+            }
+        }
+        Ok(names)
+    }
+
+    pub(super) fn open_provisioning_stage_for_removal(
+        parent: &File,
+        _parent_path: &Path,
+        name: &str,
+    ) -> Result<Option<super::ProvisioningStageOpen>> {
+        let status = match fstatat(parent, name, AtFlags::AT_SYMLINK_NOFOLLOW) {
+            Ok(status) => status,
+            Err(Errno::ENOENT) => return Ok(None),
+            Err(_) => return Err(super::unsafe_inventory_object()),
+        };
+        let mode = status.st_mode & 0o7777;
+        if SFlag::from_bits_truncate(status.st_mode) & SFlag::S_IFMT != SFlag::S_IFDIR
+            || status.st_uid != geteuid().as_raw()
+            || mode & !0o700 != 0
+        {
+            return Err(super::unsafe_inventory_object());
+        }
+        // mkdirat(0700) is filtered through umask before the following chmod.
+        // A crash in that interval can leave an opaque owner-owned directory,
+        // including mode 000. It is observation-only and grants no mutation.
+        if mode != 0o700 {
+            return Ok(Some(super::ProvisioningStageOpen::Deferred));
+        }
+        let descriptor = match openat(
+            parent,
+            name,
+            OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW,
+            Mode::empty(),
+        ) {
+            Ok(descriptor) => descriptor,
+            Err(Errno::ENOENT) => return Ok(None),
+            Err(Errno::ELOOP | Errno::ENOTDIR) => return Err(super::unsafe_inventory_object()),
+            Err(_) => {
+                return Err(SnapshotStorageError::new(
+                    SnapshotStorageErrorKind::Unavailable,
+                ));
+            }
+        };
+        let directory = File::from(descriptor);
+        let object_identity = identity(&directory, Kind::Directory)?;
+        validate_named(parent, name, &directory, object_identity, Kind::Directory)?;
+        validate_retained(&directory, object_identity, Kind::Directory, false)?;
+        Ok(Some(super::ProvisioningStageOpen::Private(
+            directory,
+            object_identity,
+        )))
+    }
+
+    pub(super) fn open_stage_control_for_removal(
+        directory: &File,
+        directory_path: &Path,
+        name: &str,
+    ) -> Result<Option<(File, Identity)>> {
+        open_named_regular(directory, directory_path, name, true)
+    }
+
     pub(super) fn sync_directory(directory: &File) -> Result<()> {
         directory
             .sync_all()
@@ -2285,6 +2857,36 @@ mod platform {
         Ok(())
     }
 
+    pub(super) fn remove_retained_stage_control(
+        directory: &File,
+        name: &str,
+        file: File,
+        expected: Identity,
+    ) -> Result<()> {
+        use nix::unistd::{UnlinkatFlags, unlinkat};
+        validate_named(directory, name, &file, expected, Kind::RegularFile)?;
+        // DUX-DESTRUCTIVE: allow=snapshot-provisioning-stage-control-unlink -- unlink only an exact marker byte string retained inside a completely inventoried canonical private provisioning stage under the retained database root
+        unlinkat(directory, name, UnlinkatFlags::NoRemoveDir)
+            .map_err(|_| SnapshotStorageError::new(SnapshotStorageErrorKind::Unavailable))?;
+        drop(file);
+        Ok(())
+    }
+
+    pub(super) fn remove_retained_provisioning_stage(
+        parent: &File,
+        name: &str,
+        directory: File,
+        expected: Identity,
+    ) -> Result<()> {
+        use nix::unistd::{UnlinkatFlags, unlinkat};
+        validate_named(parent, name, &directory, expected, Kind::Directory)?;
+        // DUX-DESTRUCTIVE: allow=snapshot-provisioning-stage-rmdir -- remove only the exact retained now-empty canonical private provisioning directory after its marker-owned controls were individually unlinked
+        unlinkat(parent, name, UnlinkatFlags::RemoveDir)
+            .map_err(|_| SnapshotStorageError::new(SnapshotStorageErrorKind::Unavailable))?;
+        drop(directory);
+        Ok(())
+    }
+
     #[cfg(target_os = "macos")]
     fn reject_extended_acl(file: &File, kind: Kind) -> Result<()> {
         use std::ffi::{c_int, c_void};
@@ -2346,6 +2948,8 @@ mod platform {
 mod tests {
     use std::fs;
     use std::io::{Read, Write};
+    #[cfg(target_os = "linux")]
+    use std::os::unix::ffi::OsStringExt;
     use std::os::unix::fs::MetadataExt;
     use std::os::unix::fs::PermissionsExt;
     // DUX-DESTRUCTIVE: allow=test-snapshot-lock-command-import -- import only the fixed Rust test-harness relaunch primitive used by the bounded cross-process writer-lock regression
@@ -2375,6 +2979,27 @@ mod tests {
             .unwrap()
     }
 
+    fn provisioning_stage(root: &Path, suffix: &str, marker: bool, writer: bool) -> PathBuf {
+        assert_eq!(suffix.len(), PROVISIONING_STAGE_HEX_LENGTH);
+        let stage = root.join(format!("{PROVISIONING_STAGE_PREFIX}{suffix}"));
+        fs::create_dir(&stage).unwrap();
+        fs::set_permissions(&stage, fs::Permissions::from_mode(0o700)).unwrap();
+        if marker {
+            fs::write(stage.join(MARKER_NAME), STORE_MARKER).unwrap();
+            fs::set_permissions(stage.join(MARKER_NAME), fs::Permissions::from_mode(0o600))
+                .unwrap();
+        }
+        if writer {
+            fs::write(stage.join(WRITER_LOCK_NAME), WRITER_MARKER).unwrap();
+            fs::set_permissions(
+                stage.join(WRITER_LOCK_NAME),
+                fs::Permissions::from_mode(0o600),
+            )
+            .unwrap();
+        }
+        stage
+    }
+
     #[test]
     fn typed_name_is_exact_lowercase_single_component() {
         let name = SnapshotFileName::from_scan_id(b"scan-1");
@@ -2398,6 +3023,301 @@ mod tests {
                 .is_none()
         );
         assert!(!root.join(DIRECTORY_NAME).exists());
+    }
+
+    #[test]
+    fn provisioning_stage_reconciliation_reports_no_stage_exactly() {
+        let temp = TempDir::new().unwrap();
+        let root = private_database_root(&temp);
+        let store = open_rw(&root.join("dux.sqlite3"));
+        #[cfg(target_os = "linux")]
+        fs::write(
+            root.join(std::ffi::OsString::from_vec(vec![0xff, b'x'])),
+            b"unrelated",
+        )
+        .unwrap();
+
+        let result = store.reconcile_provisioning_stage().unwrap();
+        assert_eq!(result.outcome(), SnapshotProvisioningStageRemoval::NoStage);
+        assert_eq!(result.total_stage_count_before(), 0);
+        assert_eq!(result.total_stage_count_after(), 0);
+        assert_eq!(result.removed_control_usage(), None);
+        assert!(!result.has_more());
+    }
+
+    #[test]
+    fn empty_and_stricter_provisioning_stages_are_deferred() {
+        let temp = TempDir::new().unwrap();
+        let root = private_database_root(&temp);
+        let store = open_rw(&root.join("dux.sqlite3"));
+        let empty = provisioning_stage(&root, "00000000000000000000000000000000", false, false);
+        let stricter = provisioning_stage(&root, "11111111111111111111111111111111", false, false);
+        fs::set_permissions(&stricter, fs::Permissions::from_mode(0o500)).unwrap();
+        let opaque = provisioning_stage(&root, "22222222222222222222222222222222", false, false);
+        fs::set_permissions(&opaque, fs::Permissions::from_mode(0o000)).unwrap();
+
+        let result = store.reconcile_provisioning_stage().unwrap();
+        assert_eq!(
+            result.outcome(),
+            SnapshotProvisioningStageRemoval::DeferredUnproven
+        );
+        assert_eq!(result.total_stage_count_before(), 3);
+        assert_eq!(result.unproven_count_before(), 3);
+        assert_eq!(result.marker_owned_count_before(), 0);
+        assert!(empty.exists());
+        assert!(stricter.exists());
+        assert!(opaque.exists());
+    }
+
+    #[test]
+    fn empty_stage_does_not_starve_later_marker_owned_stage() {
+        let temp = TempDir::new().unwrap();
+        let root = private_database_root(&temp);
+        let store = open_rw(&root.join("dux.sqlite3"));
+        let empty = provisioning_stage(&root, "00000000000000000000000000000000", false, false);
+        let removable = provisioning_stage(&root, "11111111111111111111111111111111", true, false);
+
+        let result = store.reconcile_provisioning_stage().unwrap();
+        assert_eq!(
+            result.outcome(),
+            SnapshotProvisioningStageRemoval::RemovedMarkerOnly
+        );
+        assert_eq!(result.total_stage_count_before(), 2);
+        assert_eq!(result.total_stage_count_after(), 1);
+        assert_eq!(result.marker_owned_count_before(), 1);
+        assert_eq!(result.marker_owned_count_after(), 0);
+        assert_eq!(result.unproven_count_before(), 1);
+        assert_eq!(result.unproven_count_after(), 1);
+        assert_eq!(result.removed_control_usage().unwrap().logical_bytes(), 16);
+        assert_eq!(result.control_usage_after(), SnapshotFileUsage::default());
+        assert!(!result.has_more());
+        assert!(empty.exists());
+        assert!(!removable.exists());
+    }
+
+    #[test]
+    fn marker_owned_stages_are_removed_lexically_one_at_a_time_with_exact_accounting() {
+        let temp = TempDir::new().unwrap();
+        let root = private_database_root(&temp);
+        let store = open_rw(&root.join("dux.sqlite3"));
+        let first = provisioning_stage(&root, "00000000000000000000000000000000", true, true);
+        let second = provisioning_stage(&root, "11111111111111111111111111111111", true, false);
+
+        let first_result = store.reconcile_provisioning_stage().unwrap();
+        assert_eq!(
+            first_result.outcome(),
+            SnapshotProvisioningStageRemoval::RemovedMarkerComplete
+        );
+        assert_eq!(first_result.total_stage_count_before(), 2);
+        assert_eq!(first_result.total_stage_count_after(), 1);
+        assert_eq!(first_result.marker_owned_count_before(), 2);
+        assert_eq!(first_result.marker_owned_count_after(), 1);
+        assert_eq!(
+            first_result
+                .removed_control_usage()
+                .unwrap()
+                .logical_bytes(),
+            32
+        );
+        assert_eq!(first_result.control_usage_after().logical_bytes(), 16);
+        assert!(first_result.has_more());
+        assert!(!first.exists());
+        assert!(second.exists());
+
+        let second_result = store.reconcile_provisioning_stage().unwrap();
+        assert_eq!(
+            second_result.outcome(),
+            SnapshotProvisioningStageRemoval::RemovedMarkerOnly
+        );
+        assert_eq!(second_result.total_stage_count_after(), 0);
+        assert_eq!(second_result.marker_owned_count_after(), 0);
+        assert_eq!(
+            second_result.control_usage_after(),
+            SnapshotFileUsage::default()
+        );
+        assert!(!second_result.has_more());
+        assert!(!second.exists());
+    }
+
+    #[test]
+    fn malformed_provisioning_stage_fails_before_effect_and_preserves_valid_debt() {
+        let temp = TempDir::new().unwrap();
+        let root = private_database_root(&temp);
+        let store = open_rw(&root.join("dux.sqlite3"));
+        let valid = provisioning_stage(&root, "00000000000000000000000000000000", true, false);
+        let malformed = provisioning_stage(&root, "11111111111111111111111111111111", false, true);
+
+        assert!(matches!(
+            store.reconcile_provisioning_stage(),
+            Err(SnapshotProvisioningStageRemovalError::BeforeEffect(_))
+        ));
+        assert!(valid.exists());
+        assert!(valid.join(MARKER_NAME).exists());
+        assert!(malformed.exists());
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn wrong_marker_and_broad_stage_mode_fail_without_effect() {
+        let temp = TempDir::new().unwrap();
+        let root = private_database_root(&temp);
+        let store = open_rw(&root.join("dux.sqlite3"));
+        let wrong = provisioning_stage(&root, "00000000000000000000000000000000", true, false);
+        fs::write(wrong.join(MARKER_NAME), b"NOTDUXSNAPSTORE!").unwrap();
+        fs::set_permissions(wrong.join(MARKER_NAME), fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(matches!(
+            store.reconcile_provisioning_stage(),
+            Err(SnapshotProvisioningStageRemovalError::BeforeEffect(_))
+        ));
+        assert!(wrong.join(MARKER_NAME).exists());
+
+        // Remove only the test fixture's invalid stage, then independently
+        // prove that broader directory authority is rejected.
+        // DUX-DESTRUCTIVE: allow=test-snapshot-provisioning-stage-fixture-control-reset -- remove only this TempDir-owned malformed control between two independent no-effect assertions
+        fs::remove_file(wrong.join(MARKER_NAME)).unwrap();
+        // DUX-DESTRUCTIVE: allow=test-snapshot-provisioning-stage-fixture-directory-reset -- remove only the now-empty TempDir-owned malformed stage between two independent no-effect assertions
+        fs::remove_dir(&wrong).unwrap();
+        let broad = provisioning_stage(&root, "11111111111111111111111111111111", true, false);
+        fs::set_permissions(&broad, fs::Permissions::from_mode(0o750)).unwrap();
+        assert!(matches!(
+            store.reconcile_provisioning_stage(),
+            Err(SnapshotProvisioningStageRemovalError::BeforeEffect(_))
+        ));
+        assert!(broad.join(MARKER_NAME).exists());
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn canonical_stage_file_and_symlink_fail_without_touching_targets() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().unwrap();
+        let root = private_database_root(&temp);
+        let store = open_rw(&root.join("dux.sqlite3"));
+        let file_name = format!("{PROVISIONING_STAGE_PREFIX}00000000000000000000000000000000");
+        let file = root.join(&file_name);
+        fs::write(&file, b"not a directory").unwrap();
+        assert!(matches!(
+            store.reconcile_provisioning_stage(),
+            Err(SnapshotProvisioningStageRemovalError::BeforeEffect(_))
+        ));
+        assert_eq!(fs::read(&file).unwrap(), b"not a directory");
+
+        // DUX-DESTRUCTIVE: allow=test-snapshot-provisioning-stage-file-reset -- remove only the TempDir-owned hostile file fixture before the symlink case
+        fs::remove_file(&file).unwrap();
+        let target = root.join("legacy-external");
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("user-data"), b"untouched").unwrap();
+        symlink(&target, &file).unwrap();
+        assert!(matches!(
+            store.reconcile_provisioning_stage(),
+            Err(SnapshotProvisioningStageRemovalError::BeforeEffect(_))
+        ));
+        assert_eq!(fs::read(target.join("user-data")).unwrap(), b"untouched");
+        assert!(file.symlink_metadata().unwrap().file_type().is_symlink());
+    }
+
+    #[test]
+    fn provisioning_stage_candidate_cap_accepts_64_and_rejects_65_without_effect() {
+        let temp = TempDir::new().unwrap();
+        let root = private_database_root(&temp);
+        let store = open_rw(&root.join("dux.sqlite3"));
+        for value in 0_u64..64 {
+            provisioning_stage(&root, &format!("{value:032x}"), false, false);
+        }
+        let accepted = store.reconcile_provisioning_stage().unwrap();
+        assert_eq!(
+            accepted.outcome(),
+            SnapshotProvisioningStageRemoval::DeferredUnproven
+        );
+        assert_eq!(accepted.total_stage_count_before(), 64);
+        assert_eq!(accepted.unproven_count_before(), 64);
+
+        provisioning_stage(&root, &format!("{:032x}", 64_u64), false, false);
+        assert!(matches!(
+            store.reconcile_provisioning_stage(),
+            Err(SnapshotProvisioningStageRemovalError::BeforeEffect(_))
+        ));
+        for value in 0_u64..65 {
+            assert!(
+                root.join(format!("{PROVISIONING_STAGE_PREFIX}{value:032x}"))
+                    .exists()
+            );
+        }
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn extra_or_linked_provisioning_stage_children_fail_without_effect() {
+        let temp = TempDir::new().unwrap();
+        let root = private_database_root(&temp);
+        let store = open_rw(&root.join("dux.sqlite3"));
+        let stage = provisioning_stage(&root, "00000000000000000000000000000000", true, false);
+        fs::write(stage.join("extra"), b"unknown").unwrap();
+        fs::set_permissions(stage.join("extra"), fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(matches!(
+            store.reconcile_provisioning_stage(),
+            Err(SnapshotProvisioningStageRemovalError::BeforeEffect(_))
+        ));
+        assert!(stage.join(MARKER_NAME).exists());
+
+        // DUX-DESTRUCTIVE: allow=test-snapshot-provisioning-stage-extra-reset -- remove only this TempDir-owned hostile extra fixture before the independent hard-link assertion
+        fs::remove_file(stage.join("extra")).unwrap();
+        fs::hard_link(stage.join(MARKER_NAME), root.join("linked-control")).unwrap();
+        assert!(matches!(
+            store.reconcile_provisioning_stage(),
+            Err(SnapshotProvisioningStageRemovalError::BeforeEffect(_))
+        ));
+        assert!(stage.join(MARKER_NAME).exists());
+    }
+
+    #[test]
+    fn provisioning_stage_effect_boundary_is_exact_under_injected_failures() {
+        let temp = TempDir::new().unwrap();
+        let root = private_database_root(&temp);
+        let store = open_rw(&root.join("dux.sqlite3"));
+        let stage = provisioning_stage(&root, "00000000000000000000000000000000", true, false);
+        let retained = store
+            .inventory_provisioning_stages()
+            .unwrap()
+            .first_marker_owned
+            .unwrap();
+        let before = store.remove_provisioning_stage_with_hooks(
+            retained,
+            || {
+                Err(SnapshotStorageError::new(
+                    SnapshotStorageErrorKind::Unavailable,
+                ))
+            },
+            platform::sync_directory,
+            platform::sync_directory,
+        );
+        assert!(matches!(
+            before,
+            Err(SnapshotProvisioningStageRemovalError::BeforeEffect(_))
+        ));
+        assert!(stage.join(MARKER_NAME).exists());
+
+        let retained = store
+            .inventory_provisioning_stages()
+            .unwrap()
+            .first_marker_owned
+            .unwrap();
+        let after = store.remove_provisioning_stage_with_hooks(
+            retained,
+            || Ok(()),
+            platform::sync_directory,
+            |_| {
+                Err(SnapshotStorageError::new(
+                    SnapshotStorageErrorKind::Unavailable,
+                ))
+            },
+        );
+        assert!(matches!(
+            after,
+            Err(SnapshotProvisioningStageRemovalError::OutcomeUnknown)
+        ));
+        assert!(!stage.exists());
     }
 
     #[test]

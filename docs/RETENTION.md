@@ -460,6 +460,57 @@ This capability does not scavenge provisioning stages, recover a `running`
 scan or its row-bound temp, schedule itself through app/FFI, own review leases,
 or clear the store.
 
+### Snapshot provisioning-stage reconciliation contract
+
+Provisioning-stage maintenance is a separate sealed physical-only capability.
+The repository retains the current-schema database guard that excludes a
+compliant concurrent provisioner, then completely inventories raw/native names
+under the retained marker-owned database-root handle. Every entry counts toward
+fixed total-entry, 256-KiB aggregate-name, 64-stage, and 250-ms limits without
+requiring unrelated host names to be UTF-8. Only exact
+`.dux-snapshot-stage-<32 lowercase hex>` names are considered, in exact ASCII
+lexical order. Pre-correction external siblings are outside this root and are
+never adopted or removed.
+
+A proven stage is an exact current-user-owned 0700 Unix directory (and, on
+macOS, has no extended ACL), or a protected current-user-only Windows DACL
+directory with no reparse shape, whose complete
+bounded child set is the exact 16-byte store marker alone or that marker plus
+the exact 16-byte writer marker. Each control must be a private, single-link,
+no-follow regular file; its retained identity must still match its name and its
+marker bytes and logical/allocation usage must be exact. Empty stages and Unix
+owner-owned modes stricter than 0700, including mode 000 creation crashes, are
+unproven and deferred without starving a later proven stage. Partial/wrong
+markers, writer-only or extra children, links/reparse points, broader
+permissions/DACLs, changed identities, or exceeded/incomplete inventories fail
+the entire batch before effect. Name, prefix, PID, age, mtime, owner, and
+private permissions alone never authorize mutation.
+
+One call removes at most the first lexical proven stage and never recurses.
+Checked before/after counts and exact marker/writer charged bytes are frozen
+before effect; no directory allocation is claimed. Marker-complete removal is
+ordered writer control, stage sync, store marker, stage sync, empty directory,
+then retained-root sync. Marker-only removal begins at the marker step. Delete
+handles close before their durability flush. A known failure before the first
+namespace mutation is `BeforeEffect`; any failure afterward is
+`OutcomeUnknown`. A crash after marker removal can leave an empty unproven
+stage that later automatic batches intentionally preserve; a durable deletion
+journal would be required to reclaim that state safely.
+
+The repository API is
+`SnapshotRepository::reconcile_snapshot_provisioning_stage`. The typed
+idle-admitted engine starts through
+`EngineHandle::start_snapshot_provisioning_stage_maintenance`, publishes
+Applying/Finished events, and exposes its immutable path-free result through
+`EngineHandle::snapshot_provisioning_stage_maintenance_result`. It accepts no
+root, stage name, path, identity, inventory, scan, lease, cap, or victim;
+performs exactly one repository call; exposes only canonical time, aggregate
+before/after counts and control bytes, `has_more`, and `NoStage`,
+`DeferredUnproven`, `RemovedMarkerOnly`, or `RemovedMarkerComplete`; and never
+loops or self-enqueues. Applying is the cancellation/close point of no return.
+Native Windows deletion/DACL/reparse/cap regressions are present and
+cross-compiled, but this checkpoint has not run them on a Windows host.
+
 Production cap enforcement is a sealed, one-final-per-call repository batch.
 It acquires the current-schema database guard before the snapshot writer lease,
 freshly loads the cap, and rebuilds the complete physical/history, pin, and temp
@@ -511,9 +562,10 @@ production scheduling is not enabled until app/FFI owns the review-lease
 lifecycle and a native periodic idle scheduler requests bounded batches with
 appropriate backoff. Physical-orphan reconciliation is the separate implemented
 capability below, and terminal row-bound temp reconciliation is the separate
-implemented capability above. Unleased physical-temp reconciliation is the
-separate implemented capability above. Provisioning-stage scavenging and
-explicit clear-data actions remain future maintenance capabilities. A prior
+implemented capability above. Unleased physical-temp and exact-marker-owned
+root-local provisioning-stage reconciliation are separate implemented
+capabilities above. Broad/unproven stage scavenging and explicit clear-data
+actions remain future maintenance capabilities. A prior
 inventory report is never authority; each writer
 recomputes every proof under the lock order above. A name prefix alone never
 proves that a temporary or stage directory belongs to DUX.

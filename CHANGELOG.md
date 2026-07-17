@@ -5,6 +5,23 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Added bounded root-local snapshot provisioning-stage reconciliation. Under a
+  current-schema database guard, one complete raw/native root inventory proves
+  only exact canonical private stages containing the 16-byte store marker alone
+  or with the exact writer marker. Empty and stricter-mode crash remnants defer
+  without starving proven debt; malformed markers, writer-only/extra children,
+  links/reparse points, broad permissions/DACLs, or a 65th stage fail before
+  effect. One batch non-recursively removes at most the first lexical proven
+  stage in writer/sync/marker/sync/directory/root-sync order, with checked exact
+  control-byte accounting and `OutcomeUnknown` after the first namespace
+  effect. The typed idle-admitted engine task accepts no authority-bearing input,
+  publishes only canonical aggregate before/after observations and redacted
+  outcomes, linearizes cancellation/close at Applying, and never self-enqueues.
+  Unix hostile-shape/effect tests execute locally; Windows-native cases cover
+  delete-on-close, DACL/reparse, malformed, and 64/65-cap behavior and
+  cross-compile for CI, while native Windows execution remains pending. Legacy
+  external stages, unproven empty/stricter-mode debt, and malformed
+  partial-marker debt are never adopted or removed.
 - Added a bounded, path-free core cleanup-history read bridge. Recent pages use
   a 1..=64 opaque keyset cursor, preserve equal-time ordering, and expose
   lifecycle, estimates versus verified capacity deltas, graph totals, and
@@ -91,10 +108,10 @@ All notable changes to DUX will be documented in this file.
   an incompatible old writer's open inode, but its later current-schema/name
   publication proof fails. Avoiding that same-user availability race requires
   not running old and current binaries concurrently on the owner-private store.
-  App/FFI scheduling and review leases, exact-marker-owned root-local
-  provisioning-stage maintenance and running-row recovery, clear-data, and
-  native Windows runtime verification remain future. Legacy external snapshot
-  stages remain unattributable manual debt.
+  App/FFI scheduling and review leases, running-row recovery, clear-data, and
+  native Windows runtime verification remain future. Exact-marker-owned
+  root-local provisioning-stage maintenance is the separate slice above;
+  legacy external snapshot stages remain unattributable manual debt.
 - Added bounded terminal snapshot-temp reconciliation. A separate sealed
   repository batch now inspects the complete bounded lease population and
   physical inventory under the database-before-snapshot lock order, accepts
@@ -174,10 +191,11 @@ All notable changes to DUX will be documented in this file.
   while retaining snapshot-writer exclusion. Drop remains close-only. Focused
   migration, hostile-row, row-before-file, active/quiescent, same-process retry,
   atomic completion, and cross-process kernel-lock tests cover the implemented
-  boundary. This does not enable broad temp or provisioning-stage scavenging,
-  a tombstone writer, final-file unlink, app/FFI lease ownership, scheduling,
-  or production retention enforcement; native Windows runtime verification of
-  the new liveness/removal path remains outstanding.
+  boundary. This does not enable broad temp or unproven-stage scavenging, a
+  tombstone writer, final-file unlink, app/FFI lease ownership, scheduling, or
+  production retention enforcement; exact-marker-owned stage reconciliation is
+  the separate slice above, and native Windows runtime verification of the new
+  liveness/removal paths remains outstanding.
 - Added the typed snapshot-retention cap prerequisite. The exact
   `snapshot_retention` setting uses canonical deny-unknown value-schema-v1 JSON,
   defaults to 2 GiB without writing a row, accepts the full `u64` policy domain,

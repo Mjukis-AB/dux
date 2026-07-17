@@ -31,6 +31,7 @@ pub enum TaskKind {
     HistoryMaintenance,
     SnapshotRetention,
     SnapshotOrphanMaintenance,
+    SnapshotProvisioningStageMaintenance,
     SnapshotTerminalTempMaintenance,
     SnapshotUnleasedTempMaintenance,
 }
@@ -64,6 +65,7 @@ pub enum TaskFailureKind {
     HistoryMaintenance(HistoryMaintenanceFailureKind),
     SnapshotRetention(SnapshotRetentionFailureKind),
     SnapshotOrphanMaintenance(SnapshotOrphanMaintenanceFailureKind),
+    SnapshotProvisioningStageMaintenance(SnapshotProvisioningStageMaintenanceFailureKind),
     SnapshotTerminalTempMaintenance(SnapshotTerminalTempMaintenanceFailureKind),
     SnapshotUnleasedTempMaintenance(SnapshotUnleasedTempMaintenanceFailureKind),
 }
@@ -108,6 +110,22 @@ pub enum SnapshotOrphanMaintenanceFailureKind {
     BudgetExceeded,
     CorruptData,
     IncompatibleSnapshot,
+    Unavailable,
+    OutcomeUnknown,
+    InternalState,
+}
+
+/// Path-free failure categories for root-local snapshot provisioning-stage
+/// reconciliation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SnapshotProvisioningStageMaintenanceFailureKind {
+    InvalidClock,
+    IncompatibleSchema,
+    Busy,
+    UnsafeStorage,
+    BudgetExceeded,
+    CorruptData,
     Unavailable,
     OutcomeUnknown,
     InternalState,
@@ -198,6 +216,19 @@ pub enum TaskEventKind {
         orphan_count_after: u32,
         orphan_charged_bytes_before: u64,
         orphan_charged_bytes_after: u64,
+        has_more: bool,
+    },
+    SnapshotProvisioningStageMaintenanceBatchApplying,
+    SnapshotProvisioningStageMaintenanceBatchFinished {
+        outcome: SnapshotProvisioningStageMaintenanceOutcome,
+        total_stage_count_before: u64,
+        total_stage_count_after: u64,
+        marker_owned_count_before: u64,
+        marker_owned_count_after: u64,
+        unproven_count_before: u64,
+        unproven_count_after: u64,
+        control_charged_bytes_before: u64,
+        control_charged_bytes_after: u64,
         has_more: bool,
     },
     SnapshotTerminalTempMaintenanceBatchApplying,
@@ -448,6 +479,109 @@ impl SnapshotOrphanMaintenanceResult {
 
     pub const fn orphan_charged_bytes_after(&self) -> u64 {
         self.orphan_charged_bytes_after
+    }
+
+    pub const fn has_more(&self) -> bool {
+        self.has_more
+    }
+}
+
+/// Path-free outcome of one bounded root-local snapshot provisioning-stage
+/// reconciliation. Exact stage names and filesystem identities stay private.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SnapshotProvisioningStageMaintenanceOutcome {
+    NoStage,
+    DeferredUnproven,
+    RemovedMarkerOnly { bytes: u64 },
+    RemovedMarkerComplete { bytes: u64 },
+}
+
+/// Immutable outcome from one idle-only provisioning-stage batch. `has_more`
+/// asks the caller to submit a later task; core never self-enqueues.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SnapshotProvisioningStageMaintenanceResult {
+    observed_at: SystemTime,
+    outcome: SnapshotProvisioningStageMaintenanceOutcome,
+    total_stage_count_before: u64,
+    total_stage_count_after: u64,
+    marker_owned_count_before: u64,
+    marker_owned_count_after: u64,
+    unproven_count_before: u64,
+    unproven_count_after: u64,
+    control_charged_bytes_before: u64,
+    control_charged_bytes_after: u64,
+    has_more: bool,
+}
+
+impl SnapshotProvisioningStageMaintenanceResult {
+    #[allow(clippy::too_many_arguments)]
+    pub(super) const fn new(
+        observed_at: SystemTime,
+        outcome: SnapshotProvisioningStageMaintenanceOutcome,
+        total_stage_count_before: u64,
+        total_stage_count_after: u64,
+        marker_owned_count_before: u64,
+        marker_owned_count_after: u64,
+        unproven_count_before: u64,
+        unproven_count_after: u64,
+        control_charged_bytes_before: u64,
+        control_charged_bytes_after: u64,
+        has_more: bool,
+    ) -> Self {
+        Self {
+            observed_at,
+            outcome,
+            total_stage_count_before,
+            total_stage_count_after,
+            marker_owned_count_before,
+            marker_owned_count_after,
+            unproven_count_before,
+            unproven_count_after,
+            control_charged_bytes_before,
+            control_charged_bytes_after,
+            has_more,
+        }
+    }
+
+    pub const fn observed_at(&self) -> SystemTime {
+        self.observed_at
+    }
+
+    pub const fn outcome(&self) -> SnapshotProvisioningStageMaintenanceOutcome {
+        self.outcome
+    }
+
+    pub const fn total_stage_count_before(&self) -> u64 {
+        self.total_stage_count_before
+    }
+
+    pub const fn total_stage_count_after(&self) -> u64 {
+        self.total_stage_count_after
+    }
+
+    pub const fn marker_owned_count_before(&self) -> u64 {
+        self.marker_owned_count_before
+    }
+
+    pub const fn marker_owned_count_after(&self) -> u64 {
+        self.marker_owned_count_after
+    }
+
+    pub const fn unproven_count_before(&self) -> u64 {
+        self.unproven_count_before
+    }
+
+    pub const fn unproven_count_after(&self) -> u64 {
+        self.unproven_count_after
+    }
+
+    pub const fn control_charged_bytes_before(&self) -> u64 {
+        self.control_charged_bytes_before
+    }
+
+    pub const fn control_charged_bytes_after(&self) -> u64 {
+        self.control_charged_bytes_after
     }
 
     pub const fn has_more(&self) -> bool {
@@ -1108,6 +1242,13 @@ pub enum SnapshotRetentionStartOutcome {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SnapshotOrphanMaintenanceStartOutcome {
+    Started(TaskId),
+    AlreadyActive(TaskId),
+    DeferredBusy,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SnapshotProvisioningStageMaintenanceStartOutcome {
     Started(TaskId),
     AlreadyActive(TaskId),
     DeferredBusy,

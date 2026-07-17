@@ -272,6 +272,47 @@ pub(super) fn open_named_final_for_removal(
     Ok(Some((file, identity)))
 }
 
+pub(super) fn open_provisioning_stage_for_removal(
+    parent: &File,
+    _parent_path: &Path,
+    name: &str,
+) -> Result<Option<super::ProvisioningStageOpen>> {
+    let Some(directory) = open_relative(
+        parent,
+        name,
+        Kind::Directory,
+        private_directory_access() | DELETE,
+        SHARE_WITHOUT_DELETE,
+    )?
+    else {
+        return Ok(None);
+    };
+    let identity = validate_private(&directory, Kind::Directory, None, false)?;
+    validate_named(parent, name, &directory, identity, Kind::Directory)?;
+    Ok(Some(super::ProvisioningStageOpen::Private(
+        directory, identity,
+    )))
+}
+
+pub(super) fn open_stage_control_for_removal(
+    directory: &File,
+    _directory_path: &Path,
+    name: &str,
+) -> Result<Option<(File, Identity)>> {
+    let Some(file) = open_relative(
+        directory,
+        name,
+        Kind::RegularFile,
+        private_file_access(false) | DELETE,
+        SHARE_WITHOUT_DELETE,
+    )?
+    else {
+        return Ok(None);
+    };
+    let identity = validate_private(&file, Kind::RegularFile, None, true)?;
+    Ok(Some((file, identity)))
+}
+
 pub(super) fn identity(file: &File, kind: Kind) -> Result<Identity> {
     validate_structure(file, kind, None, matches!(kind, Kind::RegularFile))
 }
@@ -464,6 +505,121 @@ pub(super) fn inventory(
     Ok(names)
 }
 
+pub(super) fn inventory_provisioning_stage_names(
+    directory: &File,
+    maximum_entries: usize,
+    maximum_name_bytes: usize,
+    maximum_stages: usize,
+    deadline: Instant,
+) -> Result<Vec<String>> {
+    validate_private(directory, Kind::Directory, None, false)?;
+    let words = DIRECTORY_BUFFER_BYTES.div_ceil(size_of::<usize>());
+    let mut buffer = vec![0_usize; words];
+    let mut names = Vec::new();
+    let mut total_entries = 0_usize;
+    let mut total_name_bytes = 0_usize;
+    let mut restart = true;
+    loop {
+        if Instant::now() > deadline {
+            return Err(unsafe_root());
+        }
+        buffer.fill(0);
+        let class = if restart {
+            FileIdBothDirectoryRestartInfo
+        } else {
+            FileIdBothDirectoryInfo
+        };
+        restart = false;
+        // SAFETY: the retained directory handle is live and the aligned
+        // buffer is writable for the exact advertised byte length.
+        let ok = unsafe {
+            GetFileInformationByHandleEx(
+                directory.as_raw_handle(),
+                class,
+                buffer.as_mut_ptr().cast(),
+                DIRECTORY_BUFFER_BYTES as u32,
+            )
+        };
+        if ok == 0 {
+            // SAFETY: GetLastError immediately follows the failed call.
+            if unsafe { GetLastError() } == ERROR_NO_MORE_FILES {
+                break;
+            }
+            return Err(unavailable());
+        }
+
+        let bytes = buffer.as_ptr().cast::<u8>();
+        let mut offset = 0_usize;
+        loop {
+            let fixed = offset_of!(FILE_ID_BOTH_DIR_INFO, FileName);
+            if offset
+                .checked_add(size_of::<FILE_ID_BOTH_DIR_INFO>())
+                .is_none_or(|end| end > DIRECTORY_BUFFER_BYTES)
+            {
+                return Err(unsafe_root());
+            }
+            // SAFETY: the checked prefix is in the aligned buffer.
+            let record = unsafe {
+                std::ptr::read_unaligned(bytes.add(offset).cast::<FILE_ID_BOTH_DIR_INFO>())
+            };
+            let name_bytes = usize::try_from(record.FileNameLength).map_err(|_| unsafe_root())?;
+            if name_bytes == 0 || name_bytes % size_of::<u16>() != 0 {
+                return Err(unsafe_root());
+            }
+            let start = offset.checked_add(fixed).ok_or_else(unsafe_root)?;
+            let end = start.checked_add(name_bytes).ok_or_else(unsafe_root)?;
+            if end > DIRECTORY_BUFFER_BYTES || start % size_of::<u16>() != 0 {
+                return Err(unsafe_root());
+            }
+            // SAFETY: bounds and u16 alignment were checked above.
+            let units = unsafe {
+                std::slice::from_raw_parts(bytes.add(start).cast::<u16>(), name_bytes / 2)
+            };
+            let is_dot = units == [u16::from(b'.')];
+            let is_dot_dot = units == [u16::from(b'.'), u16::from(b'.')];
+            if !is_dot && !is_dot_dot {
+                if total_entries >= maximum_entries {
+                    return Err(unsafe_root());
+                }
+                total_entries = total_entries.checked_add(1).ok_or_else(unsafe_root)?;
+                total_name_bytes = total_name_bytes
+                    .checked_add(name_bytes)
+                    .ok_or_else(unsafe_root)?;
+                if total_name_bytes > maximum_name_bytes {
+                    return Err(unsafe_root());
+                }
+                let ascii = units
+                    .iter()
+                    .copied()
+                    .map(u8::try_from)
+                    .collect::<std::result::Result<Vec<_>, _>>();
+                if let Ok(ascii) = ascii
+                    && super::is_provisioning_stage_name_bytes(&ascii)
+                {
+                    if names.len() >= maximum_stages {
+                        return Err(super::unsafe_inventory_object());
+                    }
+                    names.push(String::from_utf8(ascii).map_err(|_| unavailable())?);
+                }
+            }
+            if record.NextEntryOffset == 0 {
+                break;
+            }
+            let next = usize::try_from(record.NextEntryOffset).map_err(|_| unsafe_root())?;
+            if next < fixed
+                || offset
+                    .checked_add(next)
+                    .is_none_or(|next| next >= DIRECTORY_BUFFER_BYTES)
+            {
+                return Err(unsafe_root());
+            }
+            offset += next;
+        }
+    }
+    validate_private(directory, Kind::Directory, None, false)?;
+    Ok(names)
+}
+
 pub(super) fn sync_directory(directory: &File) -> Result<()> {
     directory.sync_all().map_err(|_| unavailable())
 }
@@ -571,6 +727,51 @@ pub(super) fn remove_retained_final(
     // owned `File` cannot become an invalid handle between the successful
     // disposition and this close, and there is no fallible work in between.
     drop(file);
+    Ok(())
+}
+
+pub(super) fn remove_retained_stage_control(
+    directory: &File,
+    name: &str,
+    file: File,
+    expected: Identity,
+) -> Result<()> {
+    validate_named(directory, name, &file, expected, Kind::RegularFile)?;
+    set_posix_delete(&file, "snapshot-windows-provisioning-stage-control-delete")?;
+    drop(file);
+    Ok(())
+}
+
+pub(super) fn remove_retained_provisioning_stage(
+    parent: &File,
+    name: &str,
+    directory: File,
+    expected: Identity,
+) -> Result<()> {
+    validate_named(parent, name, &directory, expected, Kind::Directory)?;
+    set_posix_delete(&directory, "snapshot-windows-provisioning-stage-rmdir")?;
+    drop(directory);
+    Ok(())
+}
+
+fn set_posix_delete(file: &File, _audit_reason: &str) -> Result<()> {
+    let disposition = DeleteDisposition {
+        flags: DELETE_DISPOSITION_FLAG | POSIX_DISPOSITION_FLAG,
+    };
+    // SAFETY: the retained exact-identity marker-owned stage/control handle
+    // has DELETE access and the disposition buffer lives for the call.
+    let removed = unsafe {
+        // DUX-DESTRUCTIVE: allow=snapshot-windows-provisioning-stage-delete -- POSIX-delete only a retained exact marker-owned stage control or its retained now-empty parent directory after complete bounded inventory and identity revalidation
+        windows_sys::Win32::Storage::FileSystem::SetFileInformationByHandle(
+            file.as_raw_handle(),
+            DELETE_DISPOSITION_CLASS,
+            (&raw const disposition).cast(),
+            size_of::<DeleteDisposition>() as u32,
+        )
+    };
+    if removed == 0 {
+        return Err(unavailable());
+    }
     Ok(())
 }
 
@@ -1267,7 +1468,15 @@ mod tests {
     use std::path::PathBuf;
 
     use tempfile::TempDir;
+    use windows_sys::Win32::Security::Authorization::SetSecurityInfo;
+    use windows_sys::Win32::Security::PROTECTED_DACL_SECURITY_INFORMATION;
 
+    use super::super::{
+        MARKER_NAME, PROVISIONING_STAGE_HEX_LENGTH, PROVISIONING_STAGE_PREFIX, STORE_MARKER,
+        SecureSnapshotStore, SnapshotProvisioningStageRemoval,
+        SnapshotProvisioningStageRemovalError, SnapshotStoreAccess, WRITER_LOCK_NAME,
+        WRITER_MARKER,
+    };
     use super::*;
 
     fn private_directory(temp: &TempDir) -> (File, PathBuf) {
@@ -1277,6 +1486,287 @@ mod tests {
             .unwrap()
             .expect("unique test directory");
         (directory, path)
+    }
+
+    fn private_database_root(temp: &TempDir) -> PathBuf {
+        let parent = open_publication_parent(temp.path()).unwrap();
+        let path = temp.path().join("Dux");
+        let directory = create_private_directory_exclusive(&parent, temp.path(), "Dux")
+            .unwrap()
+            .expect("unique database root");
+        // The create handle requests DELETE while denying delete sharing. Close
+        // it before the store independently retains the root with the final
+        // non-delete access/share contract.
+        drop(directory);
+        path
+    }
+
+    fn open_store(database_root: &Path) -> SecureSnapshotStore {
+        SecureSnapshotStore::open_for_database(
+            &database_root.join("dux.sqlite3"),
+            SnapshotStoreAccess::ReadWrite,
+        )
+        .unwrap()
+        .expect("read-write access provisions a store")
+    }
+
+    fn open_store_with_fixture_root(temp: &TempDir) -> (SecureSnapshotStore, File, PathBuf) {
+        let database_root_path = private_database_root(temp);
+        let store = open_store(&database_root_path);
+        // Reopen only after the store has retained its root. This fixture
+        // handle requests no DELETE access and is therefore share-compatible.
+        let database_root = open_private_directory(&database_root_path).unwrap();
+        (store, database_root, database_root_path)
+    }
+
+    fn create_provisioning_stage(
+        database_root: &File,
+        database_root_path: &Path,
+        suffix: &str,
+        marker: Option<&[u8]>,
+        writer: bool,
+        extra: bool,
+    ) -> (File, PathBuf) {
+        assert_eq!(suffix.len(), PROVISIONING_STAGE_HEX_LENGTH);
+        let name = format!("{PROVISIONING_STAGE_PREFIX}{suffix}");
+        let stage_path = database_root_path.join(&name);
+        let stage = create_private_directory_exclusive(database_root, database_root_path, &name)
+            .unwrap()
+            .expect("unique provisioning stage");
+        if let Some(bytes) = marker {
+            let (marker, _) = create_private_file_exclusive(&stage, &stage_path, MARKER_NAME)
+                .unwrap()
+                .expect("unique stage marker");
+            (&marker).write_all(bytes).unwrap();
+            marker.sync_all().unwrap();
+        }
+        if writer {
+            let (writer, _) = create_private_file_exclusive(&stage, &stage_path, WRITER_LOCK_NAME)
+                .unwrap()
+                .expect("unique stage writer control");
+            (&writer).write_all(WRITER_MARKER).unwrap();
+            writer.sync_all().unwrap();
+        }
+        if extra {
+            let (extra, _) = create_private_file_exclusive(&stage, &stage_path, "extra")
+                .unwrap()
+                .expect("unique hostile extra entry");
+            (&extra).write_all(b"not an owned control").unwrap();
+            extra.sync_all().unwrap();
+        }
+        sync_directory(&stage).unwrap();
+        (stage, stage_path)
+    }
+
+    fn assert_before_effect(error: SnapshotProvisioningStageRemovalError) {
+        assert!(matches!(
+            error,
+            SnapshotProvisioningStageRemovalError::BeforeEffect(_)
+        ));
+    }
+
+    #[test]
+    fn provisioning_stage_marker_only_is_removed_and_reinventory_is_empty() {
+        let temp = TempDir::new().unwrap();
+        let (store, database_root, database_root_path) = open_store_with_fixture_root(&temp);
+        let (stage, stage_path) = create_provisioning_stage(
+            &database_root,
+            &database_root_path,
+            "00000000000000000000000000000000",
+            Some(STORE_MARKER),
+            false,
+            false,
+        );
+        drop(stage);
+
+        let removed = store.reconcile_provisioning_stage().unwrap();
+        assert_eq!(
+            removed.outcome(),
+            SnapshotProvisioningStageRemoval::RemovedMarkerOnly
+        );
+        assert_eq!(removed.total_stage_count_before(), 1);
+        assert_eq!(removed.total_stage_count_after(), 0);
+        assert!(!stage_path.exists());
+
+        let reinventory = store.reconcile_provisioning_stage().unwrap();
+        assert_eq!(
+            reinventory.outcome(),
+            SnapshotProvisioningStageRemoval::NoStage
+        );
+        assert_eq!(reinventory.total_stage_count_before(), 0);
+    }
+
+    #[test]
+    fn provisioning_stage_marker_complete_is_removed_and_reinventory_is_empty() {
+        let temp = TempDir::new().unwrap();
+        let (store, database_root, database_root_path) = open_store_with_fixture_root(&temp);
+        let (stage, stage_path) = create_provisioning_stage(
+            &database_root,
+            &database_root_path,
+            "00000000000000000000000000000000",
+            Some(STORE_MARKER),
+            true,
+            false,
+        );
+        drop(stage);
+
+        let removed = store.reconcile_provisioning_stage().unwrap();
+        assert_eq!(
+            removed.outcome(),
+            SnapshotProvisioningStageRemoval::RemovedMarkerComplete
+        );
+        assert_eq!(removed.removed_control_usage().unwrap().logical_bytes(), 32);
+        assert!(!stage_path.exists());
+
+        let reinventory = store.reconcile_provisioning_stage().unwrap();
+        assert_eq!(
+            reinventory.outcome(),
+            SnapshotProvisioningStageRemoval::NoStage
+        );
+    }
+
+    #[test]
+    fn malformed_marker_and_extra_entry_are_preserved_before_effect() {
+        let malformed_temp = TempDir::new().unwrap();
+        let (malformed_store, malformed_root, malformed_root_path) =
+            open_store_with_fixture_root(&malformed_temp);
+        let (malformed_stage, malformed_path) = create_provisioning_stage(
+            &malformed_root,
+            &malformed_root_path,
+            "00000000000000000000000000000000",
+            Some(b"NOTDUXSNAPSTORE!"),
+            false,
+            false,
+        );
+        drop(malformed_stage);
+
+        assert_before_effect(malformed_store.reconcile_provisioning_stage().unwrap_err());
+        assert!(malformed_path.join(MARKER_NAME).exists());
+
+        let extra_temp = TempDir::new().unwrap();
+        let (extra_store, extra_root, extra_root_path) = open_store_with_fixture_root(&extra_temp);
+        let (extra_stage, extra_path) = create_provisioning_stage(
+            &extra_root,
+            &extra_root_path,
+            "00000000000000000000000000000000",
+            Some(STORE_MARKER),
+            false,
+            true,
+        );
+        drop(extra_stage);
+
+        assert_before_effect(extra_store.reconcile_provisioning_stage().unwrap_err());
+        assert!(extra_path.join(MARKER_NAME).exists());
+        assert!(extra_path.join("extra").exists());
+    }
+
+    #[test]
+    fn provisioning_stage_reparse_point_is_rejected_when_symlinks_are_available() {
+        use std::os::windows::fs::symlink_dir;
+
+        let temp = TempDir::new().unwrap();
+        let database_root_path = private_database_root(&temp);
+        let store = open_store(&database_root_path);
+        let target = temp.path().join("outside-stage-target");
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("user-data"), b"must remain untouched").unwrap();
+        let stage_path = database_root_path.join(format!(
+            "{PROVISIONING_STAGE_PREFIX}00000000000000000000000000000000"
+        ));
+        if let Err(error) = symlink_dir(&target, &stage_path) {
+            if matches!(error.raw_os_error(), Some(5 | 1_314)) {
+                return;
+            }
+            panic!("unexpected symlink creation failure: {error}");
+        }
+
+        assert_before_effect(store.reconcile_provisioning_stage().unwrap_err());
+        assert_eq!(
+            fs::read(target.join("user-data")).unwrap(),
+            b"must remain untouched"
+        );
+        assert!(
+            stage_path
+                .symlink_metadata()
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+
+    #[test]
+    fn provisioning_stage_with_null_broad_dacl_is_rejected_before_effect() {
+        let temp = TempDir::new().unwrap();
+        let (store, database_root, database_root_path) = open_store_with_fixture_root(&temp);
+        let (stage, stage_path) = create_provisioning_stage(
+            &database_root,
+            &database_root_path,
+            "00000000000000000000000000000000",
+            Some(STORE_MARKER),
+            false,
+            false,
+        );
+        // A protected NULL DACL grants every principal full access. Deliberately
+        // broaden only this TempDir-owned fixture to prove it is never adopted.
+        // SAFETY: `stage` is a live handle with WRITE_DAC; null owner/group/SACL
+        // pointers leave those fields unchanged, and a null DACL is intentional.
+        let changed = unsafe {
+            SetSecurityInfo(
+                stage.as_raw_handle(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                null_mut(),
+                null_mut(),
+                null_mut(),
+                null_mut(),
+            )
+        };
+        assert_eq!(changed, ERROR_SUCCESS);
+        drop(stage);
+
+        assert_before_effect(store.reconcile_provisioning_stage().unwrap_err());
+        assert!(stage_path.join(MARKER_NAME).exists());
+    }
+
+    #[test]
+    fn provisioning_stage_inventory_accepts_64_and_rejects_65_without_effect() {
+        let temp = TempDir::new().unwrap();
+        let (store, database_root, database_root_path) = open_store_with_fixture_root(&temp);
+        for value in 0_u64..64 {
+            create_provisioning_stage(
+                &database_root,
+                &database_root_path,
+                &format!("{value:032x}"),
+                None,
+                false,
+                false,
+            );
+        }
+
+        let accepted = store.reconcile_provisioning_stage().unwrap();
+        assert_eq!(
+            accepted.outcome(),
+            SnapshotProvisioningStageRemoval::DeferredUnproven
+        );
+        assert_eq!(accepted.total_stage_count_before(), 64);
+        assert_eq!(accepted.unproven_count_before(), 64);
+
+        create_provisioning_stage(
+            &database_root,
+            &database_root_path,
+            "00000000000000000000000000000040",
+            None,
+            false,
+            false,
+        );
+        assert_before_effect(store.reconcile_provisioning_stage().unwrap_err());
+        for value in 0_u64..65 {
+            assert!(
+                database_root_path
+                    .join(format!("{PROVISIONING_STAGE_PREFIX}{value:032x}"))
+                    .exists()
+            );
+        }
     }
 
     #[test]

@@ -66,6 +66,15 @@ fn started_snapshot_orphan_maintenance(outcome: SnapshotOrphanMaintenanceStartOu
     }
 }
 
+fn started_snapshot_provisioning_stage_maintenance(
+    outcome: SnapshotProvisioningStageMaintenanceStartOutcome,
+) -> TaskId {
+    match outcome {
+        SnapshotProvisioningStageMaintenanceStartOutcome::Started(id) => id,
+        other => panic!("expected started snapshot provisioning-stage maintenance, got {other:?}"),
+    }
+}
+
 fn started_snapshot_terminal_temp_maintenance(
     outcome: SnapshotTerminalTempMaintenanceStartOutcome,
 ) -> TaskId {
@@ -4893,6 +4902,636 @@ fn snapshot_unleased_temp_maintenance_serializes_across_engine_sessions() {
             .unwrap();
         assert!(!format!("{result:?}").contains(std::str::from_utf8(private_seed).unwrap()));
     }
+}
+
+#[cfg(unix)]
+fn create_engine_provisioning_stage(
+    database: &std::path::Path,
+    suffix: &str,
+    marker_complete: bool,
+) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let stage = database
+        .parent()
+        .unwrap()
+        .join(format!(".dux-snapshot-stage-{suffix}"));
+    std::fs::create_dir(&stage).unwrap();
+    std::fs::set_permissions(&stage, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let marker = stage.join(".dux-snapshot-store");
+    std::fs::write(&marker, b"DUXSNAPSTOREV1\0\0").unwrap();
+    std::fs::set_permissions(&marker, std::fs::Permissions::from_mode(0o600)).unwrap();
+    if marker_complete {
+        let writer = stage.join(".dux-snapshot.writer.lock");
+        std::fs::write(&writer, b"DUXSNAPWRITER1\0\0").unwrap();
+        std::fs::set_permissions(&writer, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    stage
+}
+
+#[test]
+fn snapshot_provisioning_stage_maintenance_runs_one_typed_path_free_noop_batch() {
+    let (_temp, engine) = engine_with_limits(RegistryLimits::testing(1, 2, 4, 8));
+    let observed = SystemTime::UNIX_EPOCH + Duration::from_millis(67_000);
+    let id = started_snapshot_provisioning_stage_maintenance(
+        engine
+            .start_snapshot_provisioning_stage_maintenance_at(observed)
+            .unwrap(),
+    );
+    let terminal = wait_terminal(&engine, id);
+    assert_eq!(
+        terminal.kind,
+        TaskKind::SnapshotProvisioningStageMaintenance
+    );
+    assert_eq!(terminal.phase, TaskPhase::Succeeded);
+    assert!(terminal.result_available);
+    let result = engine
+        .snapshot_provisioning_stage_maintenance_result(id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.observed_at(), observed);
+    assert_eq!(
+        result.outcome(),
+        SnapshotProvisioningStageMaintenanceOutcome::NoStage
+    );
+    assert_eq!(result.total_stage_count_before(), 0);
+    assert_eq!(result.total_stage_count_after(), 0);
+    assert_eq!(result.marker_owned_count_before(), 0);
+    assert_eq!(result.marker_owned_count_after(), 0);
+    assert_eq!(result.unproven_count_before(), 0);
+    assert_eq!(result.unproven_count_after(), 0);
+    assert_eq!(result.control_charged_bytes_before(), 0);
+    assert_eq!(result.control_charged_bytes_after(), 0);
+    assert!(!result.has_more());
+    assert_eq!(
+        engine
+            .snapshot_unleased_temp_maintenance_result(id)
+            .unwrap_err(),
+        TaskAccessError::WrongTaskKind
+    );
+    let debug = format!("{result:?}");
+    assert!(!debug.contains(".dux-snapshot-stage-"));
+    assert!(!debug.contains("snapshots"));
+
+    let events = engine.task_events(id, 0, 8).unwrap().events;
+    let applying = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event.kind,
+                TaskEventKind::SnapshotProvisioningStageMaintenanceBatchApplying
+            )
+        })
+        .unwrap();
+    let finished = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event.kind,
+                TaskEventKind::SnapshotProvisioningStageMaintenanceBatchFinished {
+                    outcome: SnapshotProvisioningStageMaintenanceOutcome::NoStage,
+                    total_stage_count_before: 0,
+                    total_stage_count_after: 0,
+                    marker_owned_count_before: 0,
+                    marker_owned_count_after: 0,
+                    unproven_count_before: 0,
+                    unproven_count_after: 0,
+                    control_charged_bytes_before: 0,
+                    control_charged_bytes_after: 0,
+                    has_more: false,
+                }
+            )
+        })
+        .unwrap();
+    let terminal_event = events
+        .iter()
+        .position(|event| matches!(event.kind, TaskEventKind::Terminal { .. }))
+        .unwrap();
+    assert!(applying < finished && finished < terminal_event);
+}
+
+#[cfg(unix)]
+#[test]
+fn snapshot_provisioning_stage_maintenance_removes_one_per_batch_and_does_not_spin_unproven() {
+    let temp = TempDir::new().unwrap();
+    let engine =
+        EngineHandle::open_with_limits(config(&temp), RegistryLimits::testing(1, 4, 16, 16))
+            .unwrap();
+    let database = engine.inner.config.database_path();
+    let marker_only =
+        create_engine_provisioning_stage(database, "00000000000000000000000000000000", false);
+    let marker_complete =
+        create_engine_provisioning_stage(database, "11111111111111111111111111111111", true);
+    let base = SystemTime::UNIX_EPOCH + Duration::from_millis(68_000);
+
+    let first = started_snapshot_provisioning_stage_maintenance(
+        engine
+            .start_snapshot_provisioning_stage_maintenance_at(base)
+            .unwrap(),
+    );
+    assert_eq!(wait_terminal(&engine, first).phase, TaskPhase::Succeeded);
+    let first_result = engine
+        .snapshot_provisioning_stage_maintenance_result(first)
+        .unwrap()
+        .unwrap();
+    let first_bytes = match first_result.outcome() {
+        SnapshotProvisioningStageMaintenanceOutcome::RemovedMarkerOnly { bytes } => bytes,
+        other => panic!("expected marker-only removal, got {other:?}"),
+    };
+    assert!(first_bytes > 0);
+    assert_eq!(first_result.total_stage_count_before(), 2);
+    assert_eq!(first_result.total_stage_count_after(), 1);
+    assert_eq!(first_result.marker_owned_count_before(), 2);
+    assert_eq!(first_result.marker_owned_count_after(), 1);
+    assert_eq!(first_result.unproven_count_before(), 0);
+    assert_eq!(first_result.unproven_count_after(), 0);
+    assert_eq!(
+        first_result.control_charged_bytes_before() - first_bytes,
+        first_result.control_charged_bytes_after()
+    );
+    assert!(first_result.has_more());
+    assert!(!marker_only.exists());
+    assert!(marker_complete.exists());
+    let first_debug = format!("{first_result:?}");
+    assert!(!first_debug.contains("00000000000000000000000000000000"));
+    assert!(!first_debug.contains(database.parent().unwrap().to_string_lossy().as_ref()));
+
+    let second = started_snapshot_provisioning_stage_maintenance(
+        engine
+            .start_snapshot_provisioning_stage_maintenance_at(base + Duration::from_millis(1))
+            .unwrap(),
+    );
+    assert_eq!(wait_terminal(&engine, second).phase, TaskPhase::Succeeded);
+    let second_result = engine
+        .snapshot_provisioning_stage_maintenance_result(second)
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        second_result.outcome(),
+        SnapshotProvisioningStageMaintenanceOutcome::RemovedMarkerComplete { bytes }
+            if bytes > first_bytes
+    ));
+    assert_eq!(second_result.total_stage_count_before(), 1);
+    assert_eq!(second_result.total_stage_count_after(), 0);
+    assert_eq!(second_result.marker_owned_count_after(), 0);
+    assert_eq!(second_result.control_charged_bytes_after(), 0);
+    assert!(!second_result.has_more());
+    assert!(!marker_complete.exists());
+    let second_debug = format!("{second_result:?}");
+    assert!(!second_debug.contains("11111111111111111111111111111111"));
+    assert!(!second_debug.contains(database.parent().unwrap().to_string_lossy().as_ref()));
+
+    let unproven = database
+        .parent()
+        .unwrap()
+        .join(".dux-snapshot-stage-22222222222222222222222222222222");
+    std::fs::create_dir(&unproven).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&unproven, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let deferred = started_snapshot_provisioning_stage_maintenance(
+        engine
+            .start_snapshot_provisioning_stage_maintenance_at(base + Duration::from_millis(2))
+            .unwrap(),
+    );
+    assert_eq!(wait_terminal(&engine, deferred).phase, TaskPhase::Succeeded);
+    let deferred_result = engine
+        .snapshot_provisioning_stage_maintenance_result(deferred)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        deferred_result.outcome(),
+        SnapshotProvisioningStageMaintenanceOutcome::DeferredUnproven
+    );
+    assert_eq!(deferred_result.total_stage_count_before(), 1);
+    assert_eq!(deferred_result.total_stage_count_after(), 1);
+    assert_eq!(deferred_result.marker_owned_count_before(), 0);
+    assert_eq!(deferred_result.unproven_count_before(), 1);
+    assert!(!deferred_result.has_more());
+    assert!(unproven.exists());
+}
+
+#[test]
+fn snapshot_provisioning_stage_maintenance_is_idle_deduplicated_and_cross_exclusive() {
+    let (_temp, engine) = engine_with_limits(RegistryLimits::testing(1, 3, 16, 8));
+    let (foreground_started_tx, foreground_started_rx) = mpsc::channel();
+    let (foreground_release_tx, foreground_release_rx) = mpsc::channel();
+    let foreground = engine
+        .submit_test(Box::new(move |_| {
+            foreground_started_tx.send(()).unwrap();
+            foreground_release_rx.recv().unwrap();
+            WorkOutcome::Succeeded(TaskResult::TestOnly)
+        }))
+        .unwrap();
+    foreground_started_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    assert_eq!(
+        engine
+            .start_snapshot_provisioning_stage_maintenance()
+            .unwrap(),
+        SnapshotProvisioningStageMaintenanceStartOutcome::DeferredBusy
+    );
+    foreground_release_tx.send(()).unwrap();
+    wait_terminal(&engine, foreground);
+
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let stage = started_snapshot_provisioning_stage_maintenance(
+        engine
+            .start_snapshot_provisioning_stage_maintenance_with_test_hooks(
+                SystemTime::UNIX_EPOCH + Duration::from_millis(69_000),
+                move || {
+                    started_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                },
+                || {},
+                || {},
+            )
+            .unwrap(),
+    );
+    started_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    assert_eq!(
+        engine
+            .start_snapshot_provisioning_stage_maintenance()
+            .unwrap(),
+        SnapshotProvisioningStageMaintenanceStartOutcome::AlreadyActive(stage)
+    );
+    assert_eq!(
+        engine.start_history_maintenance().unwrap(),
+        HistoryMaintenanceStartOutcome::DeferredBusy
+    );
+    assert_eq!(
+        engine.start_snapshot_retention().unwrap(),
+        SnapshotRetentionStartOutcome::DeferredBusy
+    );
+    assert_eq!(
+        engine.start_snapshot_orphan_maintenance().unwrap(),
+        SnapshotOrphanMaintenanceStartOutcome::DeferredBusy
+    );
+    assert_eq!(
+        engine.start_snapshot_terminal_temp_maintenance().unwrap(),
+        SnapshotTerminalTempMaintenanceStartOutcome::DeferredBusy
+    );
+    assert_eq!(
+        engine.start_snapshot_unleased_temp_maintenance().unwrap(),
+        SnapshotUnleasedTempMaintenanceStartOutcome::DeferredBusy
+    );
+    release_tx.send(()).unwrap();
+    assert_eq!(wait_terminal(&engine, stage).phase, TaskPhase::Succeeded);
+}
+
+#[cfg(unix)]
+#[test]
+fn snapshot_provisioning_stage_cancellation_and_close_are_linearized_at_applying() {
+    let temp = TempDir::new().unwrap();
+    let engine =
+        EngineHandle::open_with_limits(config(&temp), RegistryLimits::testing(1, 2, 8, 8)).unwrap();
+    let database = engine.inner.config.database_path();
+    let stage =
+        create_engine_provisioning_stage(database, "33333333333333333333333333333333", false);
+    let observed = SystemTime::UNIX_EPOCH + Duration::from_millis(70_000);
+
+    let (before_tx, before_rx) = mpsc::channel();
+    let (before_release_tx, before_release_rx) = mpsc::channel();
+    let cancelled = started_snapshot_provisioning_stage_maintenance(
+        engine
+            .start_snapshot_provisioning_stage_maintenance_with_test_hooks(
+                observed,
+                move || {
+                    before_tx.send(()).unwrap();
+                    before_release_rx.recv().unwrap();
+                },
+                || {},
+                || {},
+            )
+            .unwrap(),
+    );
+    before_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    assert_eq!(
+        engine.cancel_task(cancelled).unwrap(),
+        CancelOutcome::Requested
+    );
+    before_release_tx.send(()).unwrap();
+    assert_eq!(
+        wait_terminal(&engine, cancelled).phase,
+        TaskPhase::Cancelled
+    );
+    assert!(stage.exists());
+
+    let (applying_tx, applying_rx) = mpsc::channel();
+    let (applying_release_tx, applying_release_rx) = mpsc::channel();
+    let applied = started_snapshot_provisioning_stage_maintenance(
+        engine
+            .start_snapshot_provisioning_stage_maintenance_with_test_hooks(
+                observed + Duration::from_millis(1),
+                || {},
+                move || {
+                    applying_tx.send(()).unwrap();
+                    applying_release_rx.recv().unwrap();
+                },
+                || {},
+            )
+            .unwrap(),
+    );
+    applying_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    assert_eq!(
+        engine.cancel_task(applied).unwrap(),
+        CancelOutcome::Requested
+    );
+    applying_release_tx.send(()).unwrap();
+    let terminal = wait_terminal(&engine, applied);
+    assert_eq!(terminal.phase, TaskPhase::Succeeded);
+    assert!(terminal.cancellation_requested);
+    assert!(!stage.exists());
+
+    let close_stage =
+        create_engine_provisioning_stage(database, "44444444444444444444444444444444", false);
+    let (close_tx, close_rx) = mpsc::channel();
+    let (close_release_tx, close_release_rx) = mpsc::channel();
+    let closing = started_snapshot_provisioning_stage_maintenance(
+        engine
+            .start_snapshot_provisioning_stage_maintenance_with_test_hooks(
+                observed + Duration::from_millis(2),
+                move || {
+                    close_tx.send(()).unwrap();
+                    close_release_rx.recv().unwrap();
+                },
+                || {},
+                || {},
+            )
+            .unwrap(),
+    );
+    close_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    assert_eq!(engine.close(), CloseOutcome::Initiated);
+    close_release_tx.send(()).unwrap();
+    assert!(engine.wait_until_closed(TEST_TIMEOUT));
+    let registry = engine.inner.shared.lock_registry_recover();
+    let record = registry.records.get(&closing).unwrap();
+    assert_eq!(record.phase, TaskPhase::Cancelled);
+    assert!(close_stage.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn snapshot_provisioning_stage_close_after_applying_preserves_exact_outcome() {
+    let temp = TempDir::new().unwrap();
+    let engine =
+        EngineHandle::open_with_limits(config(&temp), RegistryLimits::testing(1, 2, 8, 8)).unwrap();
+    let stage = create_engine_provisioning_stage(
+        engine.inner.config.database_path(),
+        "55555555555555555555555555555555",
+        false,
+    );
+    let (applying_tx, applying_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let task = started_snapshot_provisioning_stage_maintenance(
+        engine
+            .start_snapshot_provisioning_stage_maintenance_with_test_hooks(
+                SystemTime::UNIX_EPOCH + Duration::from_millis(70_003),
+                || {},
+                move || {
+                    applying_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                },
+                || {},
+            )
+            .unwrap(),
+    );
+    applying_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    assert_eq!(engine.close(), CloseOutcome::Initiated);
+    release_tx.send(()).unwrap();
+    assert!(engine.wait_until_closed(TEST_TIMEOUT));
+    let registry = engine.inner.shared.lock_registry_recover();
+    let record = registry.records.get(&task).unwrap();
+    assert_eq!(record.phase, TaskPhase::Succeeded);
+    assert!(record.cancellation_requested);
+    assert!(matches!(
+        record.result,
+        Some(TaskResult::SnapshotProvisioningStageMaintenance(_))
+    ));
+    assert!(!stage.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn snapshot_provisioning_stage_maintenance_serializes_across_engine_sessions() {
+    let temp = TempDir::new().unwrap();
+    let config = config(&temp);
+    let first_engine =
+        EngineHandle::open_with_limits(config.clone(), RegistryLimits::testing(1, 2, 8, 8))
+            .unwrap();
+    let stage = create_engine_provisioning_stage(
+        first_engine.inner.config.database_path(),
+        "66666666666666666666666666666666",
+        true,
+    );
+    let second_engine =
+        EngineHandle::open_with_limits(config, RegistryLimits::testing(1, 2, 8, 8)).unwrap();
+    let observed = SystemTime::UNIX_EPOCH + Duration::from_millis(70_004);
+    let (applying_tx, applying_rx) = mpsc::channel();
+    let (first_release_tx, first_release_rx) = mpsc::channel();
+    let (second_release_tx, second_release_rx) = mpsc::channel();
+    let first_ready = applying_tx.clone();
+    let first = started_snapshot_provisioning_stage_maintenance(
+        first_engine
+            .start_snapshot_provisioning_stage_maintenance_with_test_hooks(
+                observed,
+                || {},
+                move || {
+                    first_ready.send(()).unwrap();
+                    first_release_rx.recv().unwrap();
+                },
+                || {},
+            )
+            .unwrap(),
+    );
+    let second = started_snapshot_provisioning_stage_maintenance(
+        second_engine
+            .start_snapshot_provisioning_stage_maintenance_with_test_hooks(
+                observed,
+                || {},
+                move || {
+                    applying_tx.send(()).unwrap();
+                    second_release_rx.recv().unwrap();
+                },
+                || {},
+            )
+            .unwrap(),
+    );
+    applying_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    applying_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    first_release_tx.send(()).unwrap();
+    second_release_tx.send(()).unwrap();
+    assert_eq!(
+        wait_terminal(&first_engine, first).phase,
+        TaskPhase::Succeeded
+    );
+    assert_eq!(
+        wait_terminal(&second_engine, second).phase,
+        TaskPhase::Succeeded
+    );
+    let outcomes = [
+        first_engine
+            .snapshot_provisioning_stage_maintenance_result(first)
+            .unwrap()
+            .unwrap()
+            .outcome(),
+        second_engine
+            .snapshot_provisioning_stage_maintenance_result(second)
+            .unwrap()
+            .unwrap()
+            .outcome(),
+    ];
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| matches!(
+                outcome,
+                SnapshotProvisioningStageMaintenanceOutcome::RemovedMarkerComplete { .. }
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| matches!(
+                outcome,
+                SnapshotProvisioningStageMaintenanceOutcome::NoStage
+            ))
+            .count(),
+        1
+    );
+    assert!(!stage.exists());
+    for (engine, id) in [(&first_engine, first), (&second_engine, second)] {
+        let result = engine
+            .snapshot_provisioning_stage_maintenance_result(id)
+            .unwrap()
+            .unwrap();
+        let debug = format!("{result:?}");
+        assert!(!debug.contains("66666666666666666666666666666666"));
+        assert!(!debug.contains(temp.path().to_string_lossy().as_ref()));
+    }
+}
+
+#[test]
+fn snapshot_provisioning_stage_mappings_invalid_clock_schema_and_panic_release() {
+    for (input, expected) in [
+        (
+            SnapshotProvisioningStageReconciliationBatchOutcome::NoStage,
+            SnapshotProvisioningStageMaintenanceOutcome::NoStage,
+        ),
+        (
+            SnapshotProvisioningStageReconciliationBatchOutcome::DeferredUnproven,
+            SnapshotProvisioningStageMaintenanceOutcome::DeferredUnproven,
+        ),
+        (
+            SnapshotProvisioningStageReconciliationBatchOutcome::RemovedMarkerOnly { bytes: 42 },
+            SnapshotProvisioningStageMaintenanceOutcome::RemovedMarkerOnly { bytes: 42 },
+        ),
+        (
+            SnapshotProvisioningStageReconciliationBatchOutcome::RemovedMarkerComplete {
+                bytes: 43,
+            },
+            SnapshotProvisioningStageMaintenanceOutcome::RemovedMarkerComplete { bytes: 43 },
+        ),
+    ] {
+        assert_eq!(
+            public_snapshot_provisioning_stage_maintenance_outcome(&input),
+            expected
+        );
+    }
+    assert_eq!(
+        map_snapshot_provisioning_stage_maintenance_failure(SnapshotRepositoryErrorKind::History(
+            HistoryErrorKind::OutcomeUnknown
+        )),
+        TaskFailureKind::SnapshotProvisioningStageMaintenance(
+            SnapshotProvisioningStageMaintenanceFailureKind::OutcomeUnknown
+        )
+    );
+    assert_eq!(
+        map_snapshot_provisioning_stage_maintenance_failure(SnapshotRepositoryErrorKind::Storage(
+            SnapshotStorageErrorKind::UnsafeObject
+        )),
+        TaskFailureKind::SnapshotProvisioningStageMaintenance(
+            SnapshotProvisioningStageMaintenanceFailureKind::UnsafeStorage
+        )
+    );
+
+    let temp = TempDir::new().unwrap();
+    let engine =
+        EngineHandle::open_with_limits(config(&temp), RegistryLimits::testing(1, 2, 8, 8)).unwrap();
+    let invalid = started_snapshot_provisioning_stage_maintenance(
+        engine
+            .start_snapshot_provisioning_stage_maintenance_at(
+                SystemTime::UNIX_EPOCH - Duration::from_millis(1),
+            )
+            .unwrap(),
+    );
+    assert_eq!(
+        wait_terminal(&engine, invalid).failure,
+        Some(TaskFailureKind::SnapshotProvisioningStageMaintenance(
+            SnapshotProvisioningStageMaintenanceFailureKind::InvalidClock
+        ))
+    );
+    let panicking = started_snapshot_provisioning_stage_maintenance(
+        engine
+            .start_snapshot_provisioning_stage_maintenance_with_test_hooks(
+                SystemTime::UNIX_EPOCH + Duration::from_millis(71_000),
+                || panic!("snapshot provisioning-stage hook panic"),
+                || {},
+                || {},
+            )
+            .unwrap(),
+    );
+    assert_eq!(wait_terminal(&engine, panicking).phase, TaskPhase::Failed);
+    let replacement = started_snapshot_provisioning_stage_maintenance(
+        engine
+            .start_snapshot_provisioning_stage_maintenance_at(
+                SystemTime::UNIX_EPOCH + Duration::from_millis(71_001),
+            )
+            .unwrap(),
+    );
+    assert_eq!(
+        wait_terminal(&engine, replacement).phase,
+        TaskPhase::Succeeded
+    );
+
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let racing = started_snapshot_provisioning_stage_maintenance(
+        engine
+            .start_snapshot_provisioning_stage_maintenance_with_test_hooks(
+                SystemTime::UNIX_EPOCH + Duration::from_millis(71_002),
+                move || {
+                    started_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                },
+                || {},
+                || {},
+            )
+            .unwrap(),
+    );
+    started_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    let future = crate::persistence::DATABASE_SCHEMA_VERSION + 1;
+    engine.inner.store.with_connection(|connection| {
+        connection
+            .execute(
+                "INSERT INTO schema_migrations
+                 (version, name, checksum_sha256, applied_at_unix_ms)
+                 VALUES (?1, 'future-provisioning-stage-maintenance-race', zeroblob(32), 2)",
+                [i64::from(future)],
+            )
+            .unwrap();
+        connection
+            .pragma_update(None, "user_version", future)
+            .unwrap();
+    });
+    release_tx.send(()).unwrap();
+    assert_eq!(
+        wait_terminal(&engine, racing).failure,
+        Some(TaskFailureKind::SnapshotProvisioningStageMaintenance(
+            SnapshotProvisioningStageMaintenanceFailureKind::IncompatibleSchema
+        ))
+    );
 }
 
 #[test]

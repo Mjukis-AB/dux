@@ -42,6 +42,8 @@ pub use task::{
     ScanRootErrorKind, ScanTaskCounts, ScanTaskResult, ScanTaskStatus,
     SnapshotOrphanMaintenanceFailureKind, SnapshotOrphanMaintenanceOutcome,
     SnapshotOrphanMaintenanceResult, SnapshotOrphanMaintenanceStartOutcome,
+    SnapshotProvisioningStageMaintenanceFailureKind, SnapshotProvisioningStageMaintenanceOutcome,
+    SnapshotProvisioningStageMaintenanceResult, SnapshotProvisioningStageMaintenanceStartOutcome,
     SnapshotRetentionFailureKind, SnapshotRetentionOutcome, SnapshotRetentionResult,
     SnapshotRetentionStartOutcome, SnapshotTerminalTempMaintenanceFailureKind,
     SnapshotTerminalTempMaintenanceOutcome, SnapshotTerminalTempMaintenanceResult,
