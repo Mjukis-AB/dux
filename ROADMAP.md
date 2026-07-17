@@ -1278,7 +1278,7 @@ get_history(query) -> HistoryPageDto
 record_ai_insight(input_digest, insight)
 ```
 
-Current native realization (FFI contract v7):
+Current native realization (FFI contract v8):
 `observe_startup_volume(versioned Foundation facts) -> versioned path-free
 status` is the first production volume endpoint. It returns Rust-owned pressure,
 headline source/boundaries, prior durable pressure, and history disposition.
@@ -1303,6 +1303,16 @@ typed failure, and a path-free terminal summary. Missing progress is unknown,
 not zero, and late cancellation cannot replace the task's terminal outcome.
 Paged snapshot children, issue details, candidate details, planner inputs, and
 execution remain separately gated later endpoints.
+
+Contract v8 adds a bounded newest-first recent-scan history page used only to
+select an Explorer review target. Its path-free records contain stable scan ID,
+timestamps/status, succeeded counts, coverage, and a `snapshot_recorded` hint.
+The hint is deliberately non-authoritative: selecting it must still acquire the
+existing exact scan-bound review lease, which repeats history, tombstone,
+identity, file, and format validation. Swift rejects malformed versions,
+ordering, lifecycle/count shapes, timestamps, IDs, coverage, and snapshot hints
+before publishing app-owned models. Snapshot nodes, issue details, candidate
+paths/evidence, and treemap data remain sealed behind later bounded APIs.
 
 Requirements:
 
@@ -3709,6 +3719,13 @@ Tasks:
 
 - [ ] Expose last-complete/recent snapshot selection, paged nodes, candidate
   paths/evidence, and treemap-budget APIs over FFI under review leases.
+  - [x] 2026-07-17 slice: expose a bounded newest-first recent-scan selection
+    page through FFI contract v8 and the off-main Swift adapter. Records are
+    path-free and only advertise whether a durable snapshot reference was
+    recorded; exact availability remains gated by review-lease acquisition.
+    App-owned models identify the newest candidate in the returned page and
+    reject malformed or authority-shaped responses. Exact last-complete lookup,
+    paged nodes, candidate details, and treemap budgets remain in this task.
 - [ ] Add progressive scan events.
 - [ ] Implement treemap, synchronized list, breadcrumbs, local snapshot/history
   drill-down, history navigation, and inspector.

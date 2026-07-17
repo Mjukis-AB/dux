@@ -45,7 +45,7 @@ final class EngineServiceTests: XCTestCase {
         // DUX-DESTRUCTIVE: allow=test-swift-retry-obstruction-remove -- remove only this test fixture's deliberate file obstruction
         try FileManager.default.removeItem(at: dataRoot)
         let status = try await service.loadStatus()
-        XCTAssertEqual(status.ffiContractVersion, 7)
+        XCTAssertEqual(status.ffiContractVersion, 8)
         let closed = await service.close()
         XCTAssertTrue(closed)
     }
@@ -55,7 +55,7 @@ final class EngineServiceTests: XCTestCase {
         let result = try await EngineService(engine: fixture.engine).loadStatus()
 
         XCTAssertEqual(result.libraryVersion, "0.5.0")
-        XCTAssertEqual(result.ffiContractVersion, 7)
+        XCTAssertEqual(result.ffiContractVersion, 8)
         XCTAssertTrue(result.executedOffMainThread)
     }
 
@@ -589,7 +589,7 @@ final class EngineServiceTests: XCTestCase {
             weakEngine = engine
 
             XCTAssertEqual(liveEngineInstanceCount(), baseline + 1)
-            XCTAssertEqual(try engine.libraryVersion().ffiContractVersion, 7)
+            XCTAssertEqual(try engine.libraryVersion().ffiContractVersion, 8)
             XCTAssertTrue(engine.close())
             XCTAssertTrue(engine.close())
             XCTAssertThrowsError(try engine.formatSize(bytes: 1_536)) { error in
@@ -822,7 +822,7 @@ private actor CountingEngineService: EngineServing {
         await Task.yield()
         return EngineStatus(
             libraryVersion: "test",
-            ffiContractVersion: 7,
+            ffiContractVersion: 8,
             executedOffMainThread: true
         )
     }
@@ -1165,7 +1165,7 @@ private actor FlakyEngineService: EngineServing {
         }
         return EngineStatus(
             libraryVersion: "test",
-            ffiContractVersion: 7,
+            ffiContractVersion: 8,
             executedOffMainThread: true
         )
     }

@@ -56,7 +56,7 @@ Those capabilities retain their own gates below and in ADR 0004.
 
 ## Current realization
 
-FFI contract v7 now carries the real shared engine session first introduced in
+FFI contract v8 now carries the real shared engine session first introduced in
 v4. The app supplies input-only private data/cache roots; storage paths never
 return across the boundary. Seven maintenance kinds use opaque task objects
 with nonblocking versioned path-free poll/cancel records, and exact Explorer
@@ -110,6 +110,17 @@ measured zero. A late cancellation cannot overwrite a successful terminal
 result. The task has no candidate detail, review selection, plan, approval,
 execution fence, or cleanup capability, and its input cannot be reused as
 planner or executor authority.
+
+Contract v8 adds one bounded newest-first recent-scan history call for Explorer
+selection. Dedicated immutable records expose stable scan identity,
+timestamps/status, succeeded counts, coverage aggregates, and whether history
+recorded a snapshot reference. No root, node, file name, candidate, evidence,
+snapshot location, digest, handle, plan, or effect capability crosses. The
+recorded-reference bit is only a UI hint: every selection must acquire the
+existing scan-bound expiring review lease, whose repository checks are the
+availability and safety authority. Swift performs the call on the utility queue
+and rejects malformed versions, ordering, identity, timestamps, lifecycle/count
+shape, coverage, or snapshot hints before returning app-owned values.
 
 The Swift adapter lazily constructs and synchronizes the engine on its utility
 queue. FFI close invalidates renewal, attempts exact release for every

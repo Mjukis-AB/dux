@@ -22,6 +22,10 @@ protocol DuxSnapshotReviewServing: Sendable {
     func acquireExplorerReview(scanID: String) async throws -> any DuxSnapshotReviewLease
 }
 
+protocol DuxSnapshotHistoryServing: Sendable {
+    func loadRecentSnapshotHistory(limit: UInt16) async throws -> ExplorerSnapshotHistoryPage
+}
+
 protocol DuxSnapshotReviewLease: AnyObject, Sendable {
     var scanID: String { get }
     func renew() async throws -> Int64
@@ -29,9 +33,9 @@ protocol DuxSnapshotReviewLease: AnyObject, Sendable {
 }
 
 struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewServing,
-    HomeScanServing, Sendable
+    DuxSnapshotHistoryServing, HomeScanServing, Sendable
 {
-    fileprivate static let expectedFFIContractVersion: UInt32 = 7
+    fileprivate static let expectedFFIContractVersion: UInt32 = 8
     fileprivate static let expectedRecordVersion: UInt32 = 1
 
     private let state: EngineServiceState
@@ -270,6 +274,23 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
             }
         }
         return FFIDuxSnapshotReviewLease(lease: lease, state: state, scanID: scanID)
+    }
+
+    func loadRecentSnapshotHistory(limit: UInt16) async throws -> ExplorerSnapshotHistoryPage {
+        guard (1 ... 200).contains(limit) else {
+            throw ExplorerSnapshotHistoryError.invalidLimit
+        }
+        return try await state.perform { state in
+            precondition(!Thread.isMainThread, "Blocking FFI work reached the main thread")
+            let engine = try state.resolveEngine()
+            do {
+                return try ExplorerSnapshotHistoryAdapter.map(
+                    try engine.recentScanHistory(limit: limit)
+                )
+            } catch let error as EngineError {
+                throw Self.serviceError(error)
+            }
+        }
     }
 
     func close() async -> Bool {

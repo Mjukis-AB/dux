@@ -166,7 +166,7 @@ private actor PolicyEngineSpy: EngineServing {
     private var setWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
 
     func loadStatus() async throws -> EngineStatus {
-        EngineStatus(libraryVersion: "test", ffiContractVersion: 7, executedOffMainThread: true)
+        EngineStatus(libraryVersion: "test", ffiContractVersion: 8, executedOffMainThread: true)
     }
 
     func observeVolumeCapacity(

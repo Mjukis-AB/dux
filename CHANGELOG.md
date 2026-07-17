@@ -5,6 +5,22 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Began Milestone 4 with FFI contract v8's bounded recent-scan history page for
+  Explorer snapshot selection. The newest-first, path-free records expose only
+  stable scan identity, lifecycle timestamps/status, succeeded counts, coverage,
+  and whether SQLite recorded a snapshot reference. That hint grants no file or
+  cleanup authority: opening a selected snapshot still requires the existing
+  scan-bound expiring review lease and repeats repository validation. The Swift
+  adapter performs the call off the main thread, converts generated values to
+  app-owned immutable models, identifies the newest review candidate in the
+  bounded page, and fails closed on malformed versions, IDs, ordering,
+  lifecycle/count combinations, snapshot hints, timestamps, or coverage. Node,
+  issue, candidate-detail, and treemap payloads remain sealed for subsequent M4
+  slices. Sixteen FFI tests, four focused native tests, the complete 187-test
+  linked Swift suite, full Rust format/lint/workspace tests, all 28 script tests,
+  and the destructive-call boundary pass. Regenerated bindings and XcodeGen are
+  deterministic, and clean Debug/Release builds produce exact universal
+  arm64/x86_64 applications targeting macOS 14.
 - Added a fail-closed local macOS release workflow and reviewed empty release
   entitlements. It requires a clean exact stable tag, matching workspace
   versions, a non-placeholder bundle ID, explicit Team ID and Developer ID

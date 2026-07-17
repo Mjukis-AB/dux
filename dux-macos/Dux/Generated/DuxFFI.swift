@@ -572,6 +572,13 @@ public protocol DuxEngineProtocol: AnyObject, Sendable {
 
     func observeStartupVolume(observation: StartupVolumeObservation) throws  -> StartupVolumeStatus
 
+    /**
+     * Return a bounded, newest-first page of durable scan metadata for
+     * Explorer selection. Paths and snapshot contents remain sealed; a
+     * selected snapshot must still be opened through a review lease.
+     */
+    func recentScanHistory(limit: UInt16) throws  -> RecentScanHistoryPage
+
     func resetDiskPressurePolicy() throws  -> PressurePolicyUpdate
 
     func setDiskPressurePolicy(input: PressurePolicyInput) throws  -> PressurePolicyUpdate
@@ -694,6 +701,20 @@ open func observeStartupVolume(observation: StartupVolumeObservation)throws  -> 
     uniffi_dux_ffi_fn_method_duxengine_observe_startup_volume(
             self.uniffiCloneHandle(),
         FfiConverterTypeStartupVolumeObservation_lower(observation),$0
+    )
+})
+}
+
+    /**
+     * Return a bounded, newest-first page of durable scan metadata for
+     * Explorer selection. Paths and snapshot contents remain sealed; a
+     * selected snapshot must still be opened through a review lease.
+     */
+open func recentScanHistory(limit: UInt16)throws  -> RecentScanHistoryPage  {
+    return try  FfiConverterTypeRecentScanHistoryPage_lift(try rustCallWithError(FfiConverterTypeEngineError_lift) {
+    uniffi_dux_ffi_fn_method_duxengine_recent_scan_history(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt16.lower(limit),$0
     )
 })
 }
@@ -1280,6 +1301,151 @@ public func FfiConverterTypeFormattedSize_lower(_ value: FormattedSize) -> RustB
 }
 
 
+public struct HistoricalScanCounts: Equatable, Hashable {
+    public let directoryCount: UInt64
+    public let fileCount: UInt64
+    public let logicalBytes: UInt64
+    public let allocatedBytes: UInt64?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(directoryCount: UInt64, fileCount: UInt64, logicalBytes: UInt64, allocatedBytes: UInt64?) {
+        self.directoryCount = directoryCount
+        self.fileCount = fileCount
+        self.logicalBytes = logicalBytes
+        self.allocatedBytes = allocatedBytes
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension HistoricalScanCounts: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeHistoricalScanCounts: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> HistoricalScanCounts {
+        return
+            try HistoricalScanCounts(
+                directoryCount: FfiConverterUInt64.read(from: &buf),
+                fileCount: FfiConverterUInt64.read(from: &buf),
+                logicalBytes: FfiConverterUInt64.read(from: &buf),
+                allocatedBytes: FfiConverterOptionUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: HistoricalScanCounts, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.directoryCount, into: &buf)
+        FfiConverterUInt64.write(value.fileCount, into: &buf)
+        FfiConverterUInt64.write(value.logicalBytes, into: &buf)
+        FfiConverterOptionUInt64.write(value.allocatedBytes, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHistoricalScanCounts_lift(_ buf: RustBuffer) throws -> HistoricalScanCounts {
+    return try FfiConverterTypeHistoricalScanCounts.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHistoricalScanCounts_lower(_ value: HistoricalScanCounts) -> RustBuffer {
+    return FfiConverterTypeHistoricalScanCounts.lower(value)
+}
+
+
+/**
+ * Path-free durable scan metadata used to choose an Explorer review target.
+ * `snapshot_recorded` is only discovery evidence; acquiring the review lease
+ * repeats snapshot availability and safety validation.
+ */
+public struct HistoricalScanSummary: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let scanId: String
+    public let startedAtUnixMs: Int64
+    public let completedAtUnixMs: Int64?
+    public let status: HistoricalScanStatus
+    public let counts: HistoricalScanCounts?
+    public let coverage: ScanCoverageSummary
+    public let snapshotRecorded: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, scanId: String, startedAtUnixMs: Int64, completedAtUnixMs: Int64?, status: HistoricalScanStatus, counts: HistoricalScanCounts?, coverage: ScanCoverageSummary, snapshotRecorded: Bool) {
+        self.recordVersion = recordVersion
+        self.scanId = scanId
+        self.startedAtUnixMs = startedAtUnixMs
+        self.completedAtUnixMs = completedAtUnixMs
+        self.status = status
+        self.counts = counts
+        self.coverage = coverage
+        self.snapshotRecorded = snapshotRecorded
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension HistoricalScanSummary: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeHistoricalScanSummary: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> HistoricalScanSummary {
+        return
+            try HistoricalScanSummary(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                scanId: FfiConverterString.read(from: &buf),
+                startedAtUnixMs: FfiConverterInt64.read(from: &buf),
+                completedAtUnixMs: FfiConverterOptionInt64.read(from: &buf),
+                status: FfiConverterTypeHistoricalScanStatus.read(from: &buf),
+                counts: FfiConverterOptionTypeHistoricalScanCounts.read(from: &buf),
+                coverage: FfiConverterTypeScanCoverageSummary.read(from: &buf),
+                snapshotRecorded: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: HistoricalScanSummary, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterString.write(value.scanId, into: &buf)
+        FfiConverterInt64.write(value.startedAtUnixMs, into: &buf)
+        FfiConverterOptionInt64.write(value.completedAtUnixMs, into: &buf)
+        FfiConverterTypeHistoricalScanStatus.write(value.status, into: &buf)
+        FfiConverterOptionTypeHistoricalScanCounts.write(value.counts, into: &buf)
+        FfiConverterTypeScanCoverageSummary.write(value.coverage, into: &buf)
+        FfiConverterBool.write(value.snapshotRecorded, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHistoricalScanSummary_lift(_ buf: RustBuffer) throws -> HistoricalScanSummary {
+    return try FfiConverterTypeHistoricalScanSummary.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHistoricalScanSummary_lower(_ value: HistoricalScanSummary) -> RustBuffer {
+    return FfiConverterTypeHistoricalScanSummary.lower(value)
+}
+
+
 public struct LibraryVersion: Equatable, Hashable {
     public let libraryVersion: String
     public let ffiContractVersion: UInt32
@@ -1813,6 +1979,64 @@ public func FfiConverterTypePressurePolicyUpdate_lift(_ buf: RustBuffer) throws 
 #endif
 public func FfiConverterTypePressurePolicyUpdate_lower(_ value: PressurePolicyUpdate) -> RustBuffer {
     return FfiConverterTypePressurePolicyUpdate.lower(value)
+}
+
+
+public struct RecentScanHistoryPage: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let scans: [HistoricalScanSummary]
+    public let hasMore: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, scans: [HistoricalScanSummary], hasMore: Bool) {
+        self.recordVersion = recordVersion
+        self.scans = scans
+        self.hasMore = hasMore
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension RecentScanHistoryPage: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRecentScanHistoryPage: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RecentScanHistoryPage {
+        return
+            try RecentScanHistoryPage(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                scans: FfiConverterSequenceTypeHistoricalScanSummary.read(from: &buf),
+                hasMore: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: RecentScanHistoryPage, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterSequenceTypeHistoricalScanSummary.write(value.scans, into: &buf)
+        FfiConverterBool.write(value.hasMore, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRecentScanHistoryPage_lift(_ buf: RustBuffer) throws -> RecentScanHistoryPage {
+    return try FfiConverterTypeRecentScanHistoryPage.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRecentScanHistoryPage_lower(_ value: RecentScanHistoryPage) -> RustBuffer {
+    return FfiConverterTypeRecentScanHistoryPage.lower(value)
 }
 
 
@@ -2751,6 +2975,101 @@ public func FfiConverterTypeEngineError_lift(_ buf: RustBuffer) throws -> Engine
 public func FfiConverterTypeEngineError_lower(_ value: EngineError) -> RustBuffer {
     return FfiConverterTypeEngineError.lower(value)
 }
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum HistoricalScanStatus: Equatable, Hashable {
+
+    case queued
+    case running
+    case succeeded
+    case failed
+    case cancelled
+    case interrupted
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension HistoricalScanStatus: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeHistoricalScanStatus: FfiConverterRustBuffer {
+    typealias SwiftType = HistoricalScanStatus
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> HistoricalScanStatus {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .queued
+
+        case 2: return .running
+
+        case 3: return .succeeded
+
+        case 4: return .failed
+
+        case 5: return .cancelled
+
+        case 6: return .interrupted
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: HistoricalScanStatus, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .queued:
+            writeInt(&buf, Int32(1))
+
+
+        case .running:
+            writeInt(&buf, Int32(2))
+
+
+        case .succeeded:
+            writeInt(&buf, Int32(3))
+
+
+        case .failed:
+            writeInt(&buf, Int32(4))
+
+
+        case .cancelled:
+            writeInt(&buf, Int32(5))
+
+
+        case .interrupted:
+            writeInt(&buf, Int32(6))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHistoricalScanStatus_lift(_ buf: RustBuffer) throws -> HistoricalScanStatus {
+    return try FfiConverterTypeHistoricalScanStatus.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHistoricalScanStatus_lower(_ value: HistoricalScanStatus) -> RustBuffer {
+    return FfiConverterTypeHistoricalScanStatus.lower(value)
+}
+
 
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
@@ -4995,6 +5314,30 @@ fileprivate struct FfiConverterOptionTypeMaintenanceTask: FfiConverterRustBuffer
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeHistoricalScanCounts: FfiConverterRustBuffer {
+    typealias SwiftType = HistoricalScanCounts?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeHistoricalScanCounts.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeHistoricalScanCounts.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeMaintenanceResult: FfiConverterRustBuffer {
     typealias SwiftType = MaintenanceResult?
 
@@ -5159,6 +5502,31 @@ fileprivate struct FfiConverterOptionTypeVolumePressure: FfiConverterRustBuffer 
         }
     }
 }
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeHistoricalScanSummary: FfiConverterRustBuffer {
+    typealias SwiftType = [HistoricalScanSummary]
+
+    public static func write(_ value: [HistoricalScanSummary], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeHistoricalScanSummary.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [HistoricalScanSummary] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [HistoricalScanSummary]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeHistoricalScanSummary.read(from: &buf))
+        }
+        return seq
+    }
+}
 public func libraryVersion() -> LibraryVersion  {
     return try!  FfiConverterTypeLibraryVersion_lift(try! rustCall() {
     uniffi_dux_ffi_fn_func_library_version($0
@@ -5209,6 +5577,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_observe_startup_volume() != 49642) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_duxengine_recent_scan_history() != 13010) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_reset_disk_pressure_policy() != 23462) {

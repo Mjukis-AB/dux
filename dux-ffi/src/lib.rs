@@ -12,8 +12,9 @@ use dux_core::engine::{
     CapacityHistoryDisposition as CoreHistoryDisposition, DiskPressurePolicy as CorePressurePolicy,
     DiskPressurePolicyError as CorePressurePolicyError,
     DiskPressurePolicySource as CorePressurePolicySource,
-    DiskPressurePolicyUpdate as CorePressurePolicyUpdate, EngineConfig, EngineHandle,
-    EngineOpenError, HistoryMaintenanceStartOutcome,
+    DiskPressurePolicyUpdate as CorePressurePolicyUpdate,
+    DurableScanStatus as CoreDurableScanStatus, EngineConfig, EngineHandle, EngineOpenError,
+    HistoryMaintenanceStartOutcome, ScanHistoryError as CoreScanHistoryError,
     ScanRecoveryMaintenanceOutcome as CoreScanRecoveryOutcome, ScanRecoveryMaintenanceStartOutcome,
     ScanRootErrorKind, ScanTaskResult as CoreScanTaskResult, ScanTaskStatus as CoreScanTaskStatus,
     SnapshotOrphanMaintenanceOutcome as CoreOrphanOutcome, SnapshotOrphanMaintenanceStartOutcome,
@@ -39,9 +40,10 @@ use dux_core::{
     ScanId, SnapshotOpenErrorKind, VolumeCapacity, VolumeId,
 };
 
-const FFI_CONTRACT_VERSION: u32 = 7;
+const FFI_CONTRACT_VERSION: u32 = 8;
 const FFI_RECORD_VERSION: u32 = 1;
 const SCAN_EVENT_PAGE_LIMIT: u16 = 64;
+const RECENT_SCAN_HISTORY_PAGE_LIMIT: u16 = 200;
 const MAX_SCAN_ROOT_UTF8_BYTES: usize = 32 * 1_024;
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 static LIVE_ENGINE_INSTANCE_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -304,6 +306,46 @@ pub struct ScanCoverageSummary {
     pub measured_permille: Option<u16>,
     pub issue_record_count: u64,
     pub issue_occurrence_count: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum HistoricalScanStatus {
+    Queued,
+    Running,
+    Succeeded,
+    Failed,
+    Cancelled,
+    Interrupted,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct HistoricalScanCounts {
+    pub directory_count: u64,
+    pub file_count: u64,
+    pub logical_bytes: u64,
+    pub allocated_bytes: Option<u64>,
+}
+
+/// Path-free durable scan metadata used to choose an Explorer review target.
+/// `snapshot_recorded` is only discovery evidence; acquiring the review lease
+/// repeats snapshot availability and safety validation.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct HistoricalScanSummary {
+    pub record_version: u32,
+    pub scan_id: String,
+    pub started_at_unix_ms: i64,
+    pub completed_at_unix_ms: Option<i64>,
+    pub status: HistoricalScanStatus,
+    pub counts: Option<HistoricalScanCounts>,
+    pub coverage: ScanCoverageSummary,
+    pub snapshot_recorded: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct RecentScanHistoryPage {
+    pub record_version: u32,
+    pub scans: Vec<HistoricalScanSummary>,
+    pub has_more: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
@@ -988,6 +1030,30 @@ impl DuxEngine {
         })
     }
 
+    /// Return a bounded, newest-first page of durable scan metadata for
+    /// Explorer selection. Paths and snapshot contents remain sealed; a
+    /// selected snapshot must still be opened through a review lease.
+    pub fn recent_scan_history(&self, limit: u16) -> Result<RecentScanHistoryPage, EngineError> {
+        if !(1..=RECENT_SCAN_HISTORY_PAGE_LIMIT).contains(&limit) {
+            return Err(EngineError::BudgetExceeded);
+        }
+        self.with_engine(|engine| {
+            let history = engine
+                .recent_scan_history(usize::from(limit))
+                .map_err(map_scan_history_error)?;
+            let scans = history
+                .scans
+                .iter()
+                .map(historical_scan_summary)
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(RecentScanHistoryPage {
+                record_version: FFI_RECORD_VERSION,
+                scans,
+                has_more: history.has_more,
+            })
+        })
+    }
+
     pub fn acquire_explorer_snapshot_review(
         &self,
         scan_id: String,
@@ -1181,6 +1247,46 @@ fn scan_task_result(result: &CoreScanTaskResult) -> Result<ScanTaskResult, ScanE
         },
         candidate_evaluation: map_scan_candidate_evaluation(result.candidate_evaluation()),
     })
+}
+
+fn historical_scan_summary(
+    scan: &dux_core::engine::DurableScanSummary,
+) -> Result<HistoricalScanSummary, EngineError> {
+    let issue_record_count =
+        u64::try_from(scan.coverage.issue_record_count).map_err(|_| EngineError::InternalState)?;
+    Ok(HistoricalScanSummary {
+        record_version: FFI_RECORD_VERSION,
+        scan_id: scan.scan_id.as_str().to_owned(),
+        started_at_unix_ms: system_time_ms(scan.started_at)?,
+        completed_at_unix_ms: scan.completed_at.map(system_time_ms).transpose()?,
+        status: map_historical_scan_status(scan.status),
+        counts: scan.counts.map(|counts| HistoricalScanCounts {
+            directory_count: counts.directory_count,
+            file_count: counts.file_count,
+            logical_bytes: counts.logical_bytes,
+            allocated_bytes: counts.allocated_bytes,
+        }),
+        coverage: ScanCoverageSummary {
+            record_version: FFI_RECORD_VERSION,
+            status: map_scan_coverage_status(scan.coverage.status),
+            measured_permille: scan.coverage.measured_permille.map(|value| value.get()),
+            issue_record_count,
+            issue_occurrence_count: scan.coverage.issue_occurrence_count,
+        },
+        snapshot_recorded: scan.snapshot_recorded,
+    })
+}
+
+fn map_historical_scan_status(status: CoreDurableScanStatus) -> HistoricalScanStatus {
+    match status {
+        CoreDurableScanStatus::Queued => HistoricalScanStatus::Queued,
+        CoreDurableScanStatus::Running => HistoricalScanStatus::Running,
+        CoreDurableScanStatus::Succeeded => HistoricalScanStatus::Succeeded,
+        CoreDurableScanStatus::Failed => HistoricalScanStatus::Failed,
+        CoreDurableScanStatus::Cancelled => HistoricalScanStatus::Cancelled,
+        CoreDurableScanStatus::Interrupted => HistoricalScanStatus::Interrupted,
+        _ => HistoricalScanStatus::Interrupted,
+    }
 }
 
 fn map_scan_terminal_status(status: CoreScanTaskStatus) -> ScanTerminalStatus {
@@ -1738,6 +1844,21 @@ fn map_review_error(error: CoreReviewError) -> EngineError {
     }
 }
 
+fn map_scan_history_error(error: CoreScanHistoryError) -> EngineError {
+    match error {
+        CoreScanHistoryError::InvalidLimit { .. } => EngineError::BudgetExceeded,
+        CoreScanHistoryError::Closed => EngineError::Closed,
+        CoreScanHistoryError::IncompatibleSchema => EngineError::IncompatibleSchema,
+        CoreScanHistoryError::Busy => EngineError::Busy,
+        CoreScanHistoryError::UnsafeStorage => EngineError::UnsafeStorage,
+        CoreScanHistoryError::QueryLimitExceeded => EngineError::BudgetExceeded,
+        CoreScanHistoryError::CorruptData => EngineError::CorruptData,
+        CoreScanHistoryError::Unavailable => EngineError::StorageUnavailable,
+        CoreScanHistoryError::InternalState => EngineError::InternalState,
+        _ => EngineError::InternalState,
+    }
+}
+
 fn map_volume_status_error(error: CoreVolumeStatusError) -> EngineError {
     match error {
         CoreVolumeStatusError::Closed => EngineError::Closed,
@@ -2009,10 +2130,10 @@ mod tests {
     }
 
     #[test]
-    fn reports_contract_seven_and_preserves_legacy_formatting() {
+    fn reports_contract_eight_and_preserves_legacy_formatting() {
         let _guard = ENGINE_TEST_LOCK.lock().unwrap();
         let (_temp, engine) = engine();
-        assert_eq!(library_version().ffi_contract_version, 7);
+        assert_eq!(library_version().ffi_contract_version, 8);
         assert_eq!(engine.library_version().unwrap(), library_version());
         assert_eq!(engine.format_size(1536).unwrap().display, "1.5 KB");
         assert!(engine.close());
@@ -2240,8 +2361,55 @@ mod tests {
             start.task.cancel().unwrap(),
             ScanCancelOutcome::AlreadyTerminal
         );
+
+        let history = engine.recent_scan_history(10).unwrap();
+        assert_eq!(history.record_version, FFI_RECORD_VERSION);
+        assert!(!history.has_more);
+        assert_eq!(history.scans.len(), 1);
+        let historical = &history.scans[0];
+        assert_eq!(historical.record_version, FFI_RECORD_VERSION);
+        assert_eq!(historical.scan_id, result.scan_id);
+        assert_eq!(historical.started_at_unix_ms, result.started_at_unix_ms);
+        assert_eq!(
+            historical.completed_at_unix_ms,
+            Some(result.completed_at_unix_ms)
+        );
+        assert_eq!(historical.status, HistoricalScanStatus::Succeeded);
+        assert_eq!(
+            historical.counts,
+            Some(HistoricalScanCounts {
+                directory_count: result.directory_count,
+                file_count: result.file_count,
+                logical_bytes: result.logical_bytes,
+                allocated_bytes: result.allocated_bytes,
+            })
+        );
+        assert_eq!(historical.coverage, result.coverage);
+        assert!(historical.snapshot_recorded);
         assert!(engine.close());
         assert_eq!(start.task.poll(), Err(ScanError::Closed));
+    }
+
+    #[test]
+    fn recent_scan_history_is_bounded_empty_and_closed() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (_temp, engine) = engine();
+        assert_eq!(
+            engine.recent_scan_history(1).unwrap(),
+            RecentScanHistoryPage {
+                record_version: FFI_RECORD_VERSION,
+                scans: Vec::new(),
+                has_more: false,
+            }
+        );
+        for invalid in [0, RECENT_SCAN_HISTORY_PAGE_LIMIT + 1] {
+            assert_eq!(
+                engine.recent_scan_history(invalid),
+                Err(EngineError::BudgetExceeded)
+            );
+        }
+        assert!(engine.close());
+        assert_eq!(engine.recent_scan_history(1), Err(EngineError::Closed));
     }
 
     #[test]
