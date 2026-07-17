@@ -77,10 +77,10 @@ impl ProcessInstanceId {
             return Err(ProcessIdentityError::InvalidEncoding);
         }
         let scope_text = scope_text.ok_or(ProcessIdentityError::InvalidEncoding)?;
-        let scope = match platform {
-            Platform::Linux | Platform::Macos => Some(parse_fixed_hex(scope_text)?),
-            Platform::Windows if scope_text == "-" => None,
-            Platform::Windows => return Err(ProcessIdentityError::InvalidEncoding),
+        let scope = match (platform, scope_text) {
+            (Platform::Macos | Platform::Windows, "-") => None,
+            (Platform::Linux | Platform::Macos, value) => Some(parse_fixed_hex(value)?),
+            (Platform::Windows, _) => return Err(ProcessIdentityError::InvalidEncoding),
         };
         let nonce = parse_fixed_hex(nonce_text.ok_or(ProcessIdentityError::InvalidEncoding)?)?;
         Ok(Self {
@@ -570,28 +570,28 @@ mod platform {
     }
 
     pub(super) fn observe_process(pid: u32) -> ProcessObservation {
-        let Ok(before) = current_scope() else {
-            return ProcessObservation::Unknown;
-        };
+        let before = current_scope().ok();
         let observed = read_start_token(pid);
-        let Ok(after) = current_scope() else {
-            return ProcessObservation::Unknown;
+        let after = current_scope().ok();
+        // Some hardened runtimes deny the boot-session sysctl. Retain the
+        // exact PID/start observation but omit scope; classification then
+        // remains useful for a live exact match and can never prove death.
+        let scope = match (before, after) {
+            (Some(before), Some(after)) if before == after => Some(before),
+            _ => None,
         };
-        if before != after {
-            return ProcessObservation::Unknown;
-        }
         match observed {
             StartObservation::Running(start_token) => {
                 ProcessObservation::Running(ProcessSnapshot {
                     platform: Platform::Macos,
                     pid,
                     start_token,
-                    scope: Some(before),
+                    scope,
                 })
             }
             StartObservation::Missing => ProcessObservation::Missing {
                 platform: Platform::Macos,
-                scope: Some(before),
+                scope,
             },
             StartObservation::Unknown => ProcessObservation::Unknown,
         }
@@ -803,6 +803,11 @@ mod tests {
             ProcessInstanceId::from_stored(windows.as_str()).unwrap(),
             windows
         );
+        let unscoped_macos = fixture(Platform::Macos, None);
+        assert_eq!(
+            ProcessInstanceId::from_stored(unscoped_macos.as_str()).unwrap(),
+            unscoped_macos
+        );
         let maximum = ProcessInstanceId::from_snapshot(
             ProcessSnapshot {
                 platform: Platform::Linux,
@@ -882,34 +887,36 @@ mod tests {
     }
 
     #[test]
-    fn unscoped_windows_observations_never_prove_death() {
-        let owner = fixture(Platform::Windows, None);
-        let running = |start_token| {
-            ProcessObservation::Running(ProcessSnapshot {
-                platform: Platform::Windows,
-                pid: owner.pid,
-                start_token,
-                scope: None,
-            })
-        };
-        assert_eq!(
-            classify(&owner, running(owner.start_token)),
-            ProcessLiveness::Alive
-        );
-        assert_eq!(
-            classify(&owner, running(owner.start_token + 1)),
-            ProcessLiveness::Unknown
-        );
-        assert_eq!(
-            classify(
-                &owner,
-                ProcessObservation::Missing {
-                    platform: Platform::Windows,
+    fn unscoped_observations_never_prove_death() {
+        for platform in [Platform::Macos, Platform::Windows] {
+            let owner = fixture(platform, None);
+            let running = |start_token| {
+                ProcessObservation::Running(ProcessSnapshot {
+                    platform,
+                    pid: owner.pid,
+                    start_token,
                     scope: None,
-                }
-            ),
-            ProcessLiveness::Unknown
-        );
+                })
+            };
+            assert_eq!(
+                classify(&owner, running(owner.start_token)),
+                ProcessLiveness::Alive
+            );
+            assert_eq!(
+                classify(&owner, running(owner.start_token + 1)),
+                ProcessLiveness::Unknown
+            );
+            assert_eq!(
+                classify(
+                    &owner,
+                    ProcessObservation::Missing {
+                        platform,
+                        scope: None,
+                    },
+                ),
+                ProcessLiveness::Unknown
+            );
+        }
     }
 
     #[test]

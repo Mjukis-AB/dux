@@ -474,8 +474,11 @@ or namespace scope. The nonce prevents accidental claim reuse but is never
 liveness evidence. A tri-state probe reports `Alive`, `DefinitelyGone`, or
 `Unknown`; only a same-scope absence or changed start token can prove death.
 Foreign/changed scope, malformed or partial platform data, permission failure,
-and unsupported proof remain `Unknown`. macOS uses its boot-session UUID plus
-`proc_pidinfo`; Linux uses boot ID plus the current PID-namespace identity and
+and unsupported proof remain `Unknown`. macOS normally uses its boot-session
+UUID plus `proc_pidinfo`; if a hardened runtime denies the boot-session sysctl,
+it retains only the exact PID/start observation. That unscoped identity can
+confirm an exact live match but can never prove death or enter scoped recovery.
+Linux uses boot ID plus the current PID-namespace identity and
 `/proc/<pid>/stat`. Windows retains a process handle across creation-time and
 nonblocking exit checks, but without a reliable host/boot scope it can prove
 only an exact live match and otherwise returns `Unknown`. The codec and probe
@@ -1180,8 +1183,8 @@ the sealed mutable-journal lease couples it to an owner-generation claim.
 The separate process-instance module supplies only the liveness evidence
 described in §6.7. Its native Unix subprocess regressions distinguish an exact
 live owner from both graceful and abrupt death in one reliable boot scope;
-pure tests keep PID reuse, scope mismatch, malformed identities, and Windows'
-unscoped non-live observations fail closed. The mutable-journal lease now
+pure tests keep PID reuse, scope mismatch, malformed identities, and macOS/
+Windows unscoped non-live observations fail closed. The mutable-journal lease now
 couples that evidence to the held cleanup lock and stored owner only after
 dropping all database locks: `DefinitelyGone` supplies a one-use in-memory
 permit whose stale phase, owner, generation, heartbeat, and cancellation bit

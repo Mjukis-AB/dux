@@ -5,6 +5,17 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Completed the Milestone 2 durable history/engine foundation and automatic
+  DUX-owned retention scope, with remaining Explorer, executor, storage-control,
+  cross-process, crash-debt, and platform-qualification work assigned explicitly
+  to Milestones 4, 5, and 9. Durable scan startup on macOS now tolerates a
+  denied boot-session sysctl by retaining an unscoped exact PID/start-token
+  owner. That fallback can confirm the exact process is alive but can never
+  prove death or authorize recovery. Repeated isolated-HOME scan/reopen tests
+  cover the formerly intermittent failure. Full Rust/FFI/CLI and 105-test
+  linked Swift suites, destructive-boundary checks, byte-identical Debug/Release
+  bindings, and unsigned universal arm64/x86_64 Debug and Release app builds at
+  the macOS 14 deployment target pass.
 - Added the native menu-bar capacity and Home-scan popover through UniFFI
   contract v7. The popover renders the cached startup-volume name, Rust-owned
   pressure, effective available capacity, total, percentage, availability

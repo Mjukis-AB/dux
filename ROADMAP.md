@@ -1959,7 +1959,7 @@ Tasks:
   and sidecar-symlink tests remain platform-scoped. This foundation exposes
   status only: domain CRUD, history queries, retention, binary snapshots,
   CLI/FFI transport, and real cleanup authority remain subsequent tasks.
-- [ ] Add scan/session/candidate/cleanup persistence.
+- [x] Add durable scan, candidate, and cleanup-history persistence foundation.
   - Scan-history sub-checkpoint completed 2026-07-16: crate-private typed
     operations durably insert a running scan, compare-and-set it exactly once
     to a terminal summary, and load one validated record by stable ID. Writes
@@ -2194,7 +2194,10 @@ Tasks:
     match, but intentionally reports non-live observations as `Unknown` until
     DUX has a reliable Windows host/boot scope. Pure regressions cover canonical
     encoding, malformed and maximum-width fields, PID reuse, scope mismatch,
-    and unscoped behavior; native macOS/Linux subprocess coverage proves live,
+    and unscoped behavior. If a hardened macOS runtime denies the boot-session
+    sysctl, DUX retains an unscoped exact PID/start observation so durable work
+    can still identify its live owner; that value can never prove death or
+    enter scoped recovery. Native macOS/Linux subprocess coverage proves live,
     graceful-death, and abrupt-death classification. The module is not exposed
     through engine, FFI, CLI, Swift, AI, or cleanup execution and performs no
     journal writes. Cleanup-lock-coupled owner/generation compare-and-set
@@ -2493,10 +2496,20 @@ Tasks:
     error scrubbing, all status/error mappings, a legal 64-record page plus
     sentinel, no-mutation/path-disclosure assertions, orphaned and gapped child
     graphs, scalar lifecycle drift, and oversized payload rejection before
-    decode. The broad persistence checkbox stays open for planner/executor
-    engine lifecycle, FFI/Swift/UI/CLI transport, local path drill-down,
-    cleanup-history retention/clear-data integration, and production execution
-    history. History remains observation, never a planner witness.
+    decode. History remains observation, never a planner witness.
+
+  - M2 persistence scope completed 2026-07-17: schema versions 1 through 10,
+    the durable scan/snapshot/evaluation lifecycle, candidate review and
+    invalidation state, plan/journal coupling, and bounded scan, candidate, and
+    cleanup-history read bridges provide the shared restart-safe engine
+    foundation required by this milestone. The remaining product surfaces are
+    assigned explicitly below rather than hidden behind this broad checkbox:
+    snapshot/history drill-down and read-only detail transport are M4;
+    evaluator recovery, reviewed planner/executor orchestration, cleanup-history
+    presentation, and cross-reboot execution fencing are M5; final CLI
+    transport, cross-process scan-scope leasing, storage controls, and release
+    compatibility are M9. None of those deferred surfaces is implied complete
+    here, and no historical row grants current plan or effect authority.
 - [x] Keep binary snapshots atomic and checksummed. Completed 2026-07-16:
   `dux-core::persistence::snapshot` now owns an independent crate-private v1
   full-tree wire rather than extending the legacy CLI cache. Its frozen
@@ -2652,7 +2665,8 @@ Tasks:
   maximum-child, reopen, null-semantics, newer-schema, and exact golden JSON
   tests cover the slice.
   [`docs/CLI_JSON.md`](docs/CLI_JSON.md) is the normative v1 contract.
-- [ ] Add history retention maintenance.
+- [x] Add bounded automatic history and DUX-owned snapshot retention
+  maintenance.
   - SQLite capacity/AI-cache sub-checkpoint completed 2026-07-16: one
     current-schema, writer-leased immediate transaction creates deterministic
     UTC daily capacity rollups from the exact last raw tuple, retains raw
@@ -3203,10 +3217,11 @@ Tasks:
     maintenance kinds, concurrent close, and exact pin drainage.
 
     This FFI-v3 checkpoint was superseded by the schema-v9/FFI-v4 running-scan
-    recovery checkpoint below. Production retention still requires explicit
-    clear-data actions, cross-reboot and legacy-v8 running-row policy, and
-    native Windows mutation-path runtime verification.
-    Legacy external snapshot-stage siblings remain unattributable manual debt.
+    recovery checkpoint below. Explicit clear-data actions, cross-reboot and
+    legacy-v8 running-row policy, native Windows mutation-path qualification,
+    and diagnostics for unattributable legacy snapshot stages are assigned to
+    the M9 production-storage gates below; they are intentionally not automatic
+    retention authority.
 
   - Same-scope hard-process-death running-scan recovery completed 2026-07-17:
     schema v9 adds a strict immutable `scan_process_claims` relation. Every new
@@ -3259,6 +3274,24 @@ Tasks:
     (`stdlib.h` for MSVC and `x86_64-linux-gnu-gcc` respectively); host tests and
     the existing target-specific compile fixtures cover the changed liveness
     branches without claiming those environment-blocked checks passed.
+
+  - M2 automatic-retention scope completed 2026-07-17: bounded raw/daily
+    capacity and expired-AI pruning, latest-two/pin/cap snapshot policy,
+    one-item cap enforcement, orphan/temp/proven-stage reconciliation,
+    same-scope abandoned-scan recovery, opaque FFI tasks, and the native
+    seven-kind scheduler are implemented. User-directed data clearing remains
+    a separately confirmed M9 settings boundary. Cross-reboot, legacy-v8,
+    unattributable-stage, and Windows qualification work remains explicit M9
+    release debt and cannot be used to infer liveness or broaden removal.
+
+  - M2 closure verification completed 2026-07-17: 92 consecutive isolated-HOME
+    durable scan/reopen runs passed after the conservative macOS unscoped-owner
+    fallback. The full workspace passed with all 734 runnable core tests plus
+    one intentionally ignored subprocess helper, all 15 FFI tests, and all CLI
+    integration tests. The destructive-boundary checker scanned 163 source
+    files and its 20 tests passed; the linked macOS suite passed all 105 tests.
+    Debug and Release bindings were byte-identical, and unsigned universal
+    arm64/x86_64 Debug and Release apps both target macOS 14.0.
 - [x] Add engine integration tests with temporary HOME and database. Completed
   2026-07-16: an actual `dux-core` engine scans a fixture into an isolated
   platform-correct application-support/cache layout, closes to full worker
@@ -3470,9 +3503,11 @@ Goal: reach feature parity with CLI navigation and materially improve clarity.
 
 Tasks:
 
-- [ ] Expose paged children and treemap-budget APIs over FFI.
+- [ ] Expose last-complete/recent snapshot selection, paged nodes, candidate
+  paths/evidence, and treemap-budget APIs over FFI under review leases.
 - [ ] Add progressive scan events.
-- [ ] Implement treemap, synchronized list, breadcrumbs, history navigation, and inspector.
+- [ ] Implement treemap, synchronized list, breadcrumbs, local snapshot/history
+  drill-down, history navigation, and inspector.
 - [ ] Implement Large Files.
 - [ ] Implement scan coverage details.
 - [ ] Implement reveal, copy path, and Quick Look.
@@ -3503,6 +3538,17 @@ Tasks:
 - [ ] Implement pre/post capacity verification.
 - [ ] Implement exclusions and global permanent-cleanup disable setting.
 - [ ] Add partial failure, retry, cancellation, and changed-since-plan UI.
+- [ ] Add bounded pending-evaluation discovery and snapshot-backed restart
+  recovery; malformed or incompatible state fails closed.
+- [ ] Wire deterministic evaluator → reviewed plan → journal → executor through
+  the core engine and FFI/Swift while preserving generation, cancellation,
+  recovery, and outcome-unknown fencing.
+- [ ] Expose review intent, plan lifecycle, and path-free cleanup history through
+  FFI/Swift UI without turning history into planner authority.
+- [ ] Expand production cleanup session/item history with exact-session detail,
+  verified capacity outcomes, and separately confirmed history clearing.
+- [ ] Define and test cross-reboot and Windows-unproven cleanup-journal recovery;
+  unknown ownership must remain non-executable.
 
 Exit criteria:
 
@@ -3596,7 +3642,21 @@ Goal: make the macOS app primary without abandoning CLI users.
 Tasks:
 
 - [ ] Add Settings CLI installer/upgrader/remover.
-- [ ] Add final JSON commands and golden schema tests.
+- [ ] Add final JSON scan-detail, candidate, review-state, and cleanup-history
+  commands with golden schema tests.
+- [ ] Add cross-process scan-scope leasing and version-skew tests so app and CLI
+  cannot run conflicting overlapping scans.
+- [ ] Add Storage & Privacy settings: expose snapshot-cap get/set/reset through
+  FFI/Swift, report DUX-owned SQLite/snapshot/AI footprint, and provide
+  separately confirmed cache, history, snapshot, and reset-app-data operations
+  through narrow marker-validated core boundaries that never touch user data.
+- [ ] Resolve persistent crash debt before production release: define and test
+  cross-reboot/foreign-scope claimed-running-row behavior, a non-fabricating
+  legacy-v8 policy, bounded-exhaustion recovery, and diagnostics for
+  unattributable legacy external stages. Never infer death from age or PID.
+- [ ] Require native Windows CI evidence for temp/final/stage mutation,
+  DACL/reparse handling, and sparse/compressed allocation before claiming
+  Windows persistence-maintenance support.
 - [ ] Preserve standalone Homebrew/crates.io release.
 - [ ] Freeze the production bundle identifier, Apple Developer team, signing
   identity, and designated requirement before TCC and launch-at-login testing.

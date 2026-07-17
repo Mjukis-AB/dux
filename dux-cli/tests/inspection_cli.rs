@@ -24,7 +24,7 @@ fn status_and_history_reopen_a_durable_scan_from_an_isolated_home() {
     loop {
         let task = engine.task_snapshot(task_id).unwrap();
         if task.phase.is_terminal() {
-            assert_eq!(task.phase, TaskPhase::Succeeded);
+            assert_eq!(task.phase, TaskPhase::Succeeded, "task: {task:?}");
             break;
         }
         assert!(Instant::now() < deadline, "engine scan did not finish");

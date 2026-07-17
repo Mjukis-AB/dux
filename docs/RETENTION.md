@@ -101,6 +101,11 @@ discovery bounded without allowing foreign or earlier-boot debt to block a new
 owner. Existing v8 running rows remain unclaimed and are never guessed into an
 owner.
 
+On macOS, a hardened runtime may deny the boot-session sysctl. New work then
+retains an unscoped exact PID/start-token owner rather than failing persistence.
+It can confirm only an exact live match: it has no recovery-scope key, is not
+selected by scoped recovery, and can never prove death.
+
 One idle-only `ScanRecoveryMaintenance` batch reads and fully validates a
 64-row keyset page for the current reliable boot/namespace scope, releases the
 SQLite guard, and probes every exact owner. Only `DefinitelyGone` may be chosen.
@@ -652,8 +657,9 @@ The engine entry point is likewise separate and idle-only. It accepts no path,
 scan ID, filename, root, cap, inventory, or candidate. Public events and results
 discard the private scan ID/name and expose only canonical time, bounded orphan
 counts/charged bytes, removed bytes, and whether another explicit idle request
-may be useful. Core never loops or self-enqueues. App/FFI scheduling remains a
-later product decision.
+may be useful. Core never loops or self-enqueues. The opaque FFI task is part of
+the native seven-kind idle-maintenance scheduler; that scheduler supplies only
+cadence and does not broaden this repository authority.
 
 The sealed repository entry point is
 `SnapshotRepository::reconcile_physical_orphan`. The corresponding engine API
