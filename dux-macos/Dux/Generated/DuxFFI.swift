@@ -557,6 +557,8 @@ public protocol DuxEngineProtocol: AnyObject, Sendable {
 
     func acquireExplorerSnapshotReview(scanId: String) throws  -> SnapshotReviewSession
 
+    func acquireLatestExplorerSnapshotReview() throws  -> SnapshotReviewSession
+
     /**
      * Close the engine and wait for at most five seconds for worker quiescence.
      * Returns whether all workers have quiesced; repeated calls return the
@@ -654,6 +656,14 @@ open func acquireExplorerSnapshotReview(scanId: String)throws  -> SnapshotReview
     uniffi_dux_ffi_fn_method_duxengine_acquire_explorer_snapshot_review(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(scanId),$0
+    )
+})
+}
+
+open func acquireLatestExplorerSnapshotReview()throws  -> SnapshotReviewSession  {
+    return try  FfiConverterTypeSnapshotReviewSession_lift(try rustCallWithError(FfiConverterTypeEngineError_lift) {
+    uniffi_dux_ffi_fn_method_duxengine_acquire_latest_explorer_snapshot_review(
+            self.uniffiCloneHandle(),$0
     )
 })
 }
@@ -5562,6 +5572,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_acquire_explorer_snapshot_review() != 56224) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_duxengine_acquire_latest_explorer_snapshot_review() != 56472) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_close() != 17149) {

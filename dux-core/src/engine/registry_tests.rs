@@ -92,6 +92,71 @@ fn explorer_review_facade_is_scan_bound_expiring_and_idempotently_released() {
 }
 
 #[test]
+fn latest_explorer_review_selects_exact_newest_available_snapshot_and_skips_tombstones() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("latest-review-root");
+    std::fs::create_dir(&root).unwrap();
+    let engine = EngineHandle::open(config(&temp)).unwrap();
+
+    assert!(matches!(
+        engine.acquire_latest_explorer_snapshot_review(),
+        Err(SnapshotReviewError::SnapshotUnavailable)
+    ));
+
+    for index in 0..2 {
+        std::fs::write(root.join("payload"), format!("latest review {index}")).unwrap();
+        let task = engine.start_scan(root.clone()).unwrap();
+        assert_eq!(wait_terminal(&engine, task).phase, TaskPhase::Succeeded);
+        assert!(engine.scan_result(task).unwrap().is_some());
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let history = engine.recent_scan_history(2).unwrap();
+    let expected_newest = history.scans[0].scan_id.clone();
+    let expected_older = history.scans[1].scan_id.clone();
+    assert_ne!(expected_newest, expected_older);
+
+    let mut latest = engine.acquire_latest_explorer_snapshot_review().unwrap();
+    assert_eq!(latest.scan_id(), &expected_newest);
+    assert_eq!(
+        latest.release().unwrap(),
+        super::super::snapshot_review::SnapshotReviewReleaseOutcome::Released
+    );
+
+    engine.inner.store.with_connection(|connection| {
+        connection
+            .execute(
+                "INSERT INTO snapshot_retention_tombstones (
+                     scan_id, record_format_version, scan_status,
+                     completed_at_unix_ms, snapshot_version,
+                     snapshot_relative_path, snapshot_relative_path_encoding,
+                     snapshot_checksum_sha256, committed_at_unix_ms
+                 )
+                 SELECT scan_id, 1, status, completed_at_unix_ms,
+                        snapshot_version, snapshot_relative_path,
+                        snapshot_relative_path_encoding, snapshot_checksum_sha256,
+                        completed_at_unix_ms + 1
+                 FROM scans WHERE scan_id = ?1",
+                [expected_newest.as_str()],
+            )
+            .unwrap();
+    });
+
+    let mut fallback = engine.acquire_latest_explorer_snapshot_review().unwrap();
+    assert_eq!(fallback.scan_id(), &expected_older);
+    assert_eq!(
+        fallback.release().unwrap(),
+        super::super::snapshot_review::SnapshotReviewReleaseOutcome::Released
+    );
+
+    engine.close();
+    assert!(engine.wait_until_closed(TEST_TIMEOUT));
+    assert!(matches!(
+        engine.acquire_latest_explorer_snapshot_review(),
+        Err(SnapshotReviewError::Closed)
+    ));
+}
+
+#[test]
 fn explorer_review_rejects_tombstoned_snapshot_through_path_free_facade() {
     let temp = TempDir::new().unwrap();
     let root = temp.path().join("scan-root");

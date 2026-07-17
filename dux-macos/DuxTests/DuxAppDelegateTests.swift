@@ -182,7 +182,7 @@ private actor RuntimeEngineSpy: EngineServing, DuxEngineClosing {
     init(recorder: RuntimeEventRecorder) { self.recorder = recorder }
 
     func loadStatus() async throws -> EngineStatus {
-        EngineStatus(libraryVersion: "test", ffiContractVersion: 8, executedOffMainThread: true)
+        EngineStatus(libraryVersion: "test", ffiContractVersion: 9, executedOffMainThread: true)
     }
 
     func observeVolumeCapacity(

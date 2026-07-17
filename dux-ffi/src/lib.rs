@@ -40,7 +40,7 @@ use dux_core::{
     ScanId, SnapshotOpenErrorKind, VolumeCapacity, VolumeId,
 };
 
-const FFI_CONTRACT_VERSION: u32 = 8;
+const FFI_CONTRACT_VERSION: u32 = 9;
 const FFI_RECORD_VERSION: u32 = 1;
 const SCAN_EVENT_PAGE_LIMIT: u16 = 64;
 const RECENT_SCAN_HISTORY_PAGE_LIMIT: u16 = 200;
@@ -1066,24 +1066,20 @@ impl DuxEngine {
         let session = engine
             .acquire_explorer_snapshot_review(&scan_id)
             .map_err(map_review_error)?;
-        let review = Arc::new(SnapshotReviewSession {
-            inner: Mutex::new(session),
-            engine_closed: Arc::clone(&self.closed),
-        });
-        if self.closed.load(Ordering::Acquire) {
-            let _ = review.release_inner();
+        self.register_snapshot_review(session)
+    }
+
+    pub fn acquire_latest_explorer_snapshot_review(
+        &self,
+    ) -> Result<Arc<SnapshotReviewSession>, EngineError> {
+        let state = self.state.lock().map_err(|_| EngineError::InternalState)?;
+        let EngineState::Open(engine) = &*state else {
             return Err(EngineError::Closed);
-        }
-        let mut reviews = match self.reviews.lock() {
-            Ok(reviews) => reviews,
-            Err(_) => {
-                let _ = review.release_inner();
-                return Err(EngineError::InternalState);
-            }
         };
-        reviews.retain(|review| review.strong_count() != 0);
-        reviews.push(Arc::downgrade(&review));
-        Ok(review)
+        let session = engine
+            .acquire_latest_explorer_snapshot_review()
+            .map_err(map_review_error)?;
+        self.register_snapshot_review(session)
     }
 
     pub fn start_maintenance(
@@ -1138,6 +1134,29 @@ impl DuxEngine {
 }
 
 impl DuxEngine {
+    fn register_snapshot_review(
+        &self,
+        session: CoreReviewSession,
+    ) -> Result<Arc<SnapshotReviewSession>, EngineError> {
+        let review = Arc::new(SnapshotReviewSession {
+            inner: Mutex::new(session),
+            engine_closed: Arc::clone(&self.closed),
+        });
+        if self.closed.load(Ordering::Acquire) {
+            let _ = review.release_inner();
+            return Err(EngineError::Closed);
+        }
+        let mut reviews = match self.reviews.lock() {
+            Ok(reviews) => reviews,
+            Err(_) => {
+                let _ = review.release_inner();
+                return Err(EngineError::InternalState);
+            }
+        };
+        reviews.retain(|review| review.strong_count() != 0);
+        reviews.push(Arc::downgrade(&review));
+        Ok(review)
+    }
     fn with_engine<T>(
         &self,
         operation: impl FnOnce(&EngineHandle) -> Result<T, EngineError>,
@@ -2130,10 +2149,10 @@ mod tests {
     }
 
     #[test]
-    fn reports_contract_eight_and_preserves_legacy_formatting() {
+    fn reports_contract_nine_and_preserves_legacy_formatting() {
         let _guard = ENGINE_TEST_LOCK.lock().unwrap();
         let (_temp, engine) = engine();
-        assert_eq!(library_version().ffi_contract_version, 8);
+        assert_eq!(library_version().ffi_contract_version, 9);
         assert_eq!(engine.library_version().unwrap(), library_version());
         assert_eq!(engine.format_size(1536).unwrap().display, "1.5 KB");
         assert!(engine.close());
@@ -2777,6 +2796,10 @@ mod tests {
             engine.acquire_explorer_snapshot_review("scan:missing".into()),
             Err(EngineError::ScanNotFound)
         ));
+        assert!(matches!(
+            engine.acquire_latest_explorer_snapshot_review(),
+            Err(EngineError::SnapshotUnavailable)
+        ));
         assert!(engine.close());
     }
 
@@ -2821,6 +2844,9 @@ mod tests {
         assert!(initial.expires_at_unix_ms > 0);
         let renewed = review.renew().unwrap();
         assert!(renewed.expires_at_unix_ms >= initial.expires_at_unix_ms);
+        let latest = engine.acquire_latest_explorer_snapshot_review().unwrap();
+        assert_eq!(latest.info().unwrap().scan_id, scan_id);
+        assert_eq!(latest.release().unwrap(), ReviewReleaseOutcome::Released);
         let close_drained = engine
             .acquire_explorer_snapshot_review(scan_id.clone())
             .unwrap();

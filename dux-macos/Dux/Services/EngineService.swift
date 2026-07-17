@@ -20,6 +20,7 @@ protocol EngineServing: DuxVolumeStatusServing, DuxPressurePolicyServing, Sendab
 
 protocol DuxSnapshotReviewServing: Sendable {
     func acquireExplorerReview(scanID: String) async throws -> any DuxSnapshotReviewLease
+    func acquireLatestExplorerReview() async throws -> any DuxSnapshotReviewLease
 }
 
 protocol DuxSnapshotHistoryServing: Sendable {
@@ -35,7 +36,7 @@ protocol DuxSnapshotReviewLease: AnyObject, Sendable {
 struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewServing,
     DuxSnapshotHistoryServing, HomeScanServing, Sendable
 {
-    fileprivate static let expectedFFIContractVersion: UInt32 = 8
+    fileprivate static let expectedFFIContractVersion: UInt32 = 9
     fileprivate static let expectedRecordVersion: UInt32 = 1
 
     private let state: EngineServiceState
@@ -274,6 +275,35 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
             }
         }
         return FFIDuxSnapshotReviewLease(lease: lease, state: state, scanID: scanID)
+    }
+
+    func acquireLatestExplorerReview() async throws -> any DuxSnapshotReviewLease {
+        let (lease, info) = try await state.perform { state in
+            let engine = try state.resolveEngine()
+            do {
+                let lease = try engine.acquireLatestExplorerSnapshotReview()
+                do {
+                    return (lease, try lease.info())
+                } catch {
+                    _ = try? lease.release()
+                    throw error
+                }
+            } catch let error as EngineError {
+                throw Self.serviceError(error)
+            }
+        }
+        guard
+            info.recordVersion == Self.expectedRecordVersion,
+            !info.released,
+            info.expiresAtUnixMs > 0,
+            ExplorerSnapshotHistoryAdapter.validScanID(info.scanId)
+        else {
+            await state.performNonthrowing { _ in
+                _ = try? lease.release()
+            }
+            throw EngineServiceError.unexpected("invalid latest review record")
+        }
+        return FFIDuxSnapshotReviewLease(lease: lease, state: state, scanID: info.scanId)
     }
 
     func loadRecentSnapshotHistory(limit: UInt16) async throws -> ExplorerSnapshotHistoryPage {

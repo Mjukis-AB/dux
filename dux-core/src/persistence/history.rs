@@ -662,6 +662,53 @@ pub(super) fn load_recent_scan_records(
     })
 }
 
+/// Load the newest succeeded scan whose snapshot has not been tombstoned.
+/// Selection is bounded to one stable ID; the selected row still passes the
+/// complete scan decoder, and repository lease acquisition remains the final
+/// snapshot availability authority.
+pub(super) fn load_latest_available_snapshot_scan_record(
+    connection: &Connection,
+) -> Result<Option<ScanRecord>, HistoryError> {
+    run_bounded_query(connection, || {
+        let raw_id = connection
+            .query_row(
+                "SELECT typeof(scan.scan_id),
+                        length(CAST(scan.scan_id AS BLOB)), scan.scan_id
+                 FROM scans AS scan
+                 LEFT JOIN snapshot_retention_tombstones AS tombstone
+                   ON tombstone.scan_id = scan.scan_id
+                 WHERE scan.status = 'succeeded'
+                   AND tombstone.scan_id IS NULL
+                   AND (
+                     scan.snapshot_version IS NOT NULL OR
+                     scan.snapshot_relative_path IS NOT NULL OR
+                     scan.snapshot_relative_path_encoding IS NOT NULL OR
+                     scan.snapshot_checksum_sha256 IS NOT NULL
+                   )
+                 ORDER BY scan.started_at_unix_ms DESC, scan.scan_id ASC
+                 LIMIT 1",
+                [],
+                |row| {
+                    validate_stored_value(row, 0, 1, "text", 1, MAX_STORED_ID_BYTES)?;
+                    row.get::<_, String>(2)
+                },
+            )
+            .optional()
+            .map_err(map_query_sql_error)?;
+        let Some(raw_id) = raw_id else {
+            return Ok(None);
+        };
+        let id =
+            ScanId::new(raw_id).map_err(|_| HistoryError::new(HistoryErrorKind::CorruptData))?;
+        let record = load_scan_record_within_budget(connection, &id)?
+            .ok_or_else(|| HistoryError::new(HistoryErrorKind::CorruptData))?;
+        if record.status() != ScanStatus::Succeeded || record.snapshot().is_none() {
+            return Err(HistoryError::new(HistoryErrorKind::CorruptData));
+        }
+        Ok(Some(record))
+    })
+}
+
 struct RawScanRow {
     id: String,
     root: Vec<u8>,

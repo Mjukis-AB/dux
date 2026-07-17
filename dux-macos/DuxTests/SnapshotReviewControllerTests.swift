@@ -24,6 +24,51 @@ final class SnapshotReviewControllerTests: XCTestCase {
         XCTAssertEqual(activeAfterRelease, 0)
     }
 
+    func testAcquireLatestUsesReturnedScanIDAndRetainsLease() async throws {
+        let lease = StubSnapshotReviewLease(scanID: "scan:latest")
+        let service = StubSnapshotReviewService(leases: [lease])
+        let controller = DuxSnapshotReviewController(
+            service: service,
+            clock: SuspendedSnapshotReviewClock()
+        )
+
+        let scanID = try await controller.acquireLatest()
+
+        let acquisitions = await service.acquisitionCount()
+        let activeBeforeRelease = await controller.activeLeaseCount()
+        XCTAssertEqual(scanID, "scan:latest")
+        XCTAssertEqual(acquisitions, 1)
+        XCTAssertEqual(activeBeforeRelease, 1)
+        await controller.release(scanID: scanID)
+        let releases = await lease.releaseCount()
+        XCTAssertEqual(releases, 1)
+    }
+
+    func testConcurrentLatestAcquisitionReleasesStaleLease() async throws {
+        let first = StubSnapshotReviewLease(scanID: "scan:first")
+        let second = StubSnapshotReviewLease(scanID: "scan:second")
+        let service = StubSnapshotReviewService(leases: [first, second], suspendedReturns: 2)
+        let controller = DuxSnapshotReviewController(
+            service: service,
+            clock: SuspendedSnapshotReviewClock()
+        )
+
+        let left = Task { try await controller.acquireLatest() }
+        let right = Task { try await controller.acquireLatest() }
+        try await eventually { await service.suspendedAcquisitionCount() == 2 }
+        await service.resumeAcquisitions()
+        let results = await [left.result, right.result]
+
+        let active = await controller.activeLeaseCount()
+        let firstReleases = await first.releaseCount()
+        let secondReleases = await second.releaseCount()
+        XCTAssertEqual(active, 1)
+        XCTAssertEqual(firstReleases + secondReleases, 1)
+        XCTAssertEqual(results.filter(\.isStringSuccess).count, 1)
+        XCTAssertEqual(results.filter(\.isCancellation).count, 1)
+        await controller.shutdown()
+    }
+
     func testConcurrentDuplicateAcquisitionReleasesStaleLease() async throws {
         let first = StubSnapshotReviewLease(scanID: "scan:one")
         let second = StubSnapshotReviewLease(scanID: "scan:one")
@@ -207,6 +252,16 @@ private extension Result where Success == Void, Failure == any Error {
     }
 }
 
+private extension Result where Success == String, Failure == any Error {
+    var isStringSuccess: Bool {
+        if case .success = self { true } else { false }
+    }
+
+    var isCancellation: Bool {
+        if case let .failure(error) = self { error is CancellationError } else { false }
+    }
+}
+
 private struct SuspendedSnapshotReviewClock: DuxSnapshotReviewRenewalClock {
     func sleepForRenewalInterval() async throws {
         try await Task.sleep(for: .seconds(3_600))
@@ -228,12 +283,21 @@ private actor StubSnapshotReviewService: DuxSnapshotReviewServing {
     }
 
     func acquireExplorerReview(scanID: String) async throws -> any DuxSnapshotReviewLease {
+        let lease = try await nextLease()
+        XCTAssertEqual(lease.scanID, scanID)
+        return lease
+    }
+
+    func acquireLatestExplorerReview() async throws -> any DuxSnapshotReviewLease {
+        try await nextLease()
+    }
+
+    private func nextLease() async throws -> StubSnapshotReviewLease {
         acquisitions += 1
         guard !leases.isEmpty else {
             throw EngineServiceError.unexpected("missing test lease")
         }
         let lease = leases.removeFirst()
-        XCTAssertEqual(lease.scanID, scanID)
         if suspendedReturnsRemaining > 0 {
             suspendedReturnsRemaining -= 1
             await withCheckedContinuation { continuation in

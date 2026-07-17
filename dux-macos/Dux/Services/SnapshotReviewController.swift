@@ -11,8 +11,8 @@ struct ContinuousDuxSnapshotReviewRenewalClock: DuxSnapshotReviewRenewalClock {
 }
 
 /// Owns every live Explorer review lease independently from SwiftUI render
-/// state. The current Explorer shell has no selected snapshot, so production
-/// starts with an empty set; later paged navigation attaches here by scan ID.
+/// state. Explorer can acquire the newest available snapshot without first
+/// trusting a history hint; later paged navigation attaches here by scan ID.
 actor DuxSnapshotReviewController {
     private struct LeaseEntry: Sendable {
         let generation: UUID
@@ -24,6 +24,7 @@ actor DuxSnapshotReviewController {
 
     private var leases: [String: LeaseEntry] = [:]
     private var pendingAcquisitions: [String: UUID] = [:]
+    private var pendingLatestAcquisition: UUID?
     private var renewalTask: Task<Void, Never>?
     private var renewalInProgress = false
     private var renewalRequested = false
@@ -75,6 +76,45 @@ actor DuxSnapshotReviewController {
         }
     }
 
+    /// Acquires and retains the newest complete, non-tombstoned snapshot. The
+    /// core selects the exact snapshot and returns its scan ID with the lease,
+    /// so this path does not make an authority decision from history metadata.
+    @discardableResult
+    func acquireLatest() async throws -> String {
+        guard !isShuttingDown else {
+            throw EngineServiceError.closed
+        }
+
+        let generation = UUID()
+        pendingLatestAcquisition = generation
+        let lease: any DuxSnapshotReviewLease
+        do {
+            lease = try await service.acquireLatestExplorerReview()
+        } catch {
+            if pendingLatestAcquisition == generation {
+                pendingLatestAcquisition = nil
+            }
+            throw error
+        }
+        guard
+            !isShuttingDown,
+            pendingLatestAcquisition == generation
+        else {
+            await lease.release()
+            throw CancellationError()
+        }
+        pendingLatestAcquisition = nil
+
+        let scanID = lease.scanID
+        if leases[scanID] == nil {
+            leases[scanID] = LeaseEntry(generation: generation, lease: lease)
+            startRenewalLoopIfNeeded()
+        } else {
+            await lease.release()
+        }
+        return scanID
+    }
+
     func release(scanID: String) async {
         pendingAcquisitions.removeValue(forKey: scanID)
         guard let entry = leases.removeValue(forKey: scanID) else {
@@ -121,6 +161,7 @@ actor DuxSnapshotReviewController {
         }
         isShuttingDown = true
         pendingAcquisitions.removeAll(keepingCapacity: false)
+        pendingLatestAcquisition = nil
         renewalRequested = false
         renewalTask?.cancel()
         renewalTask = nil

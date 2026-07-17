@@ -82,7 +82,7 @@ enum ExplorerSnapshotHistoryAdapter {
         )
     }
 
-    private static func validScanID(_ value: String) -> Bool {
+    static func validScanID(_ value: String) -> Bool {
         value.hasPrefix("scan:")
             && value.utf8.count > 5
             && value.utf8.count <= 128

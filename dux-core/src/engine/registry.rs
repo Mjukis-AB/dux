@@ -61,7 +61,7 @@ use crate::domain::{
 use crate::persistence::snapshot::from_scan::prepare_completed_scan;
 use crate::persistence::snapshot::{
     HostValue, SnapshotCodecErrorKind, SnapshotOrphanReconciliationBatchOutcome,
-    SnapshotProvisioningStageReconciliationBatchOutcome, SnapshotRepository,
+    SnapshotProvisioningStageReconciliationBatchOutcome, SnapshotReference, SnapshotRepository,
     SnapshotRepositoryErrorKind, SnapshotRetentionBatchOutcome, SnapshotStorageErrorKind,
     SnapshotStoreAccess, SnapshotTerminalTempReconciliationBatchOutcome,
     SnapshotUnleasedTempReconciliationBatchOutcome,
@@ -884,11 +884,43 @@ impl EngineHandle {
             .snapshot()
             .cloned()
             .ok_or(SnapshotReviewError::SnapshotUnavailable)?;
+        self.acquire_explorer_snapshot_review_reference(scan_id, &reference)
+    }
+
+    /// Acquire the newest non-tombstoned completed snapshot as one exact
+    /// Explorer review. The history lookup is selection only; repository lease
+    /// acquisition repeats the durable and filesystem safety validation.
+    pub fn acquire_latest_explorer_snapshot_review(
+        &self,
+    ) -> Result<SnapshotReviewSession, SnapshotReviewError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(SnapshotReviewError::Closed);
+        }
+        let scan = self
+            .inner
+            .store
+            .load_latest_available_snapshot_scan()
+            .map_err(|error| {
+                map_snapshot_review_error(SnapshotRepositoryErrorKind::History(error.kind))
+            })?
+            .ok_or(SnapshotReviewError::SnapshotUnavailable)?;
+        let reference = scan
+            .snapshot()
+            .cloned()
+            .ok_or(SnapshotReviewError::InternalState)?;
+        self.acquire_explorer_snapshot_review_reference(scan.id(), &reference)
+    }
+
+    fn acquire_explorer_snapshot_review_reference(
+        &self,
+        scan_id: &ScanId,
+        reference: &SnapshotReference,
+    ) -> Result<SnapshotReviewSession, SnapshotReviewError> {
         let lease = self
             .inner
             .snapshots
             .acquire_review_lease(
-                &reference,
+                reference,
                 SnapshotReviewPurpose::Explorer,
                 SystemTime::now(),
             )

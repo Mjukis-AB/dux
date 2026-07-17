@@ -315,7 +315,7 @@ private final class MenuBarVisibilityVolumeMonitor: VolumeMonitoring, @unchecked
 
 private actor MenuBarVisibilityEngineStub: EngineServing {
     func loadStatus() async throws -> EngineStatus {
-        EngineStatus(libraryVersion: "test", ffiContractVersion: 8, executedOffMainThread: true)
+        EngineStatus(libraryVersion: "test", ffiContractVersion: 9, executedOffMainThread: true)
     }
 
     func observeVolumeCapacity(

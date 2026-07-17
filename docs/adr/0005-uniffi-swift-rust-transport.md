@@ -56,13 +56,21 @@ Those capabilities retain their own gates below and in ADR 0004.
 
 ## Current realization
 
-FFI contract v8 now carries the real shared engine session first introduced in
+FFI contract v9 now carries the real shared engine session first introduced in
 v4. The app supplies input-only private data/cache roots; storage paths never
 return across the boundary. Seven maintenance kinds use opaque task objects
 with nonblocking versioned path-free poll/cancel records, and exact Explorer
 reviews use opaque scan-bound lease objects. No maintenance task accepts a path,
 cap, inventory, victim, candidate, or cleanup instruction. Review sessions
 expose only scan ID, expiry, renewal, and idempotent release.
+
+Contract v9 adds one path-free newest-available review acquisition. The core
+selects the deterministic newest succeeded, non-tombstoned snapshot and then
+uses the same exact scan-bound lease acquisition, which repeats catalog,
+tombstone, retained-file identity, and full-format checks while pinning. The
+Swift adapter receives the authoritative selected scan ID from the lease and
+owns renewal/release; recent-history metadata remains only a presentation hint.
+No node, path, candidate, plan, or cleanup command crosses in this contract.
 
 The seventh task is scan recovery. It exposes only bounded page counts and
 typed outcomes; process-instance identities and recovery-scope keys remain

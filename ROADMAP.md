@@ -1278,7 +1278,7 @@ get_history(query) -> HistoryPageDto
 record_ai_insight(input_digest, insight)
 ```
 
-Current native realization (FFI contract v8):
+Current native realization (FFI contract v9):
 `observe_startup_volume(versioned Foundation facts) -> versioned path-free
 status` is the first production volume endpoint. It returns Rust-owned pressure,
 headline source/boundaries, prior durable pressure, and history disposition.
@@ -1313,6 +1313,16 @@ identity, file, and format validation. Swift rejects malformed versions,
 ordering, lifecycle/count shapes, timestamps, IDs, coverage, and snapshot hints
 before publishing app-owned models. Snapshot nodes, issue details, candidate
 paths/evidence, and treemap data remain sealed behind later bounded APIs.
+
+Contract v9 adds an atomic-looking newest-available review operation: Rust
+selects the exact newest succeeded snapshot not covered by an exact retention
+tombstone, then acquires the existing expiring review lease for that reference.
+The repository repeats history, tombstone, identity, file, and full-format
+validation while pinning; a selection/retention race therefore fails closed.
+Swift learns the selected stable scan ID from the acquired lease, validates it,
+owns renewal independently from render state, generation-fences overlapping
+requests, and explicitly releases stale or malformed handles. This still
+transports no paths, nodes, candidates, plans, or cleanup authority.
 
 Requirements:
 
@@ -3724,8 +3734,16 @@ Tasks:
     path-free and only advertise whether a durable snapshot reference was
     recorded; exact availability remains gated by review-lease acquisition.
     App-owned models identify the newest candidate in the returned page and
-    reject malformed or authority-shaped responses. Exact last-complete lookup,
-    paged nodes, candidate details, and treemap budgets remain in this task.
+    reject malformed or authority-shaped responses.
+  - [x] 2026-07-17 slice: acquire the exact newest complete, non-tombstoned
+    snapshot through FFI contract v9 without trusting the history hint. The
+    core chooses a deterministic scan, repeats exact repository validation
+    while pinning its review lease, and falls back to the next available
+    snapshot after retention tombstones. The native controller validates the
+    returned scan identity, retains and renews the lease outside SwiftUI render
+    state, generation-fences concurrent latest requests, and releases stale
+    handles. Paged nodes, candidate details, and treemap budgets remain in this
+    task.
 - [ ] Add progressive scan events.
 - [ ] Implement treemap, synchronized list, breadcrumbs, local snapshot/history
   drill-down, history navigation, and inspector.

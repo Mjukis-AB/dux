@@ -244,7 +244,7 @@ bar, Explorer, and Settings scenes. Capacity is never derived from directory
 scan totals, and the Rust engine pressure evaluator remains the only owner of
 Healthy/Warning/Critical thresholds and hysteresis.
 
-Settings uses FFI contract v8's carried-forward typed pressure-policy
+Settings uses FFI contract v9's carried-forward typed pressure-policy
 get/set/reset calls. Rust
 persists canonical exact integer configuration and remains the sole semantic
 validator/evaluator. Swift holds GiB and percentage edits as text and converts
@@ -267,6 +267,13 @@ crosses into render state. Cancellation remains visibly pending until Rust
 reports the terminal outcome, and a late success remains success. App shutdown
 requests scan cancellation and quiesces the publication driver before
 maintenance, review, and engine shutdown.
+
+Explorer's FFI v9 newest-snapshot entry point does not trust the recent-history
+hint. Rust selects the exact newest succeeded, non-tombstoned snapshot and
+acquires its existing expiring review lease after repeating repository and
+file-format validation. Swift validates the returned scan ID and owns lease
+renewal/release outside render state; concurrent stale acquisitions are
+released. Paths and snapshot nodes remain sealed until the later paged API.
 
 Explorer snapshot selection starts with FFI v8's bounded newest-first recent
 scan page. The native adapter validates its version, stable IDs, ordering,

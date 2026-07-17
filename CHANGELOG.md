@@ -5,6 +5,21 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Continued Milestone 4 with FFI contract v9's exact newest-available snapshot
+  review acquisition. Rust deterministically selects the newest succeeded
+  snapshot without an exact retention tombstone, then acquires the existing
+  expiring review lease while repeating catalog, tombstone, retained-file
+  identity, and full-format validation; retention races fail closed and a
+  tombstoned newest snapshot falls back to the next usable one. Swift validates
+  the authoritative scan ID returned with the lease, performs blocking calls
+  off-main, owns renewal outside render state, generation-fences concurrent
+  latest requests, and explicitly releases stale or malformed handles. No
+  paths, nodes, candidates, plans, or cleanup authority cross this boundary.
+  The complete 189-test linked Swift suite, 736-test core suite, 16 FFI tests,
+  full Rust format/lint/workspace gates, all 28 script tests, and the
+  183-source destructive boundary pass. Debug/Release bindings and XcodeGen
+  output are deterministic, and clean universal arm64/x86_64 builds target
+  macOS 14.
 - Began Milestone 4 with FFI contract v8's bounded recent-scan history page for
   Explorer snapshot selection. The newest-first, path-free records expose only
   stable scan identity, lifecycle timestamps/status, succeeded counts, coverage,
