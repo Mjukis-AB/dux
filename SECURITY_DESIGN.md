@@ -1995,6 +1995,14 @@ safe disclosure process. Until that exists, this document does not claim a
 project-operated private reporting channel. DUX does not add telemetry after an
 incident as a substitute for deterministic local evidence.
 
+The native Explorer Overview does not widen this boundary. It renders cached
+startup-volume capacity and the current path-free Home-scan aggregate from the
+single shared app model, never starts work merely because its window opened,
+and has no durable-history, review-lease, path, candidate, plan, AI, or cleanup
+transport. Its capacity composition uses ordinary filesystem availability;
+important-use availability remains a separately labelled observation. Scan
+coverage is labelled as Home-scoped and unknown coverage stays unknown.
+
 ## 19. Implementation checkpoint matrix
 
 | Control | Current state | Gate before app cleanup |

@@ -8,8 +8,18 @@ enum DuxSceneID {
 @MainActor
 enum AppActivation {
     static func openExplorer(using openWindow: OpenWindowAction) {
-        openWindow(id: DuxSceneID.explorer)
-        NSApplication.shared.activate()
+        openExplorer(
+            open: { openWindow(id: $0) },
+            activate: { NSApplication.shared.activate() }
+        )
+    }
+
+    static func openExplorer(
+        open: (String) -> Void,
+        activate: () -> Void
+    ) {
+        open(DuxSceneID.explorer)
+        activate()
     }
 
     static func openSettings(using openSettings: OpenSettingsAction) {

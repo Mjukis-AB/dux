@@ -28,7 +28,7 @@ struct DuxApp: App {
         Window("DUX Explorer", id: DuxSceneID.explorer) {
             ExplorerView(model: model)
         }
-        .defaultSize(width: 760, height: 560)
+        .defaultSize(width: 960, height: 680)
         .windowResizability(.contentMinSize)
     }
 }

@@ -5,6 +5,21 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Added the first native Explorer window: a single reusable, menu-bar-first
+  `NavigationSplitView` whose Overview reports startup-disk capacity and the
+  current in-session Home scan from the existing shared `AppModel`. Capacity
+  visuals distinguish important-use availability from ordinary filesystem
+  free space, preserve stale measurements without inventing values, and pair
+  every segment with visible and VoiceOver-readable text. Home-scan coverage is
+  explicitly scoped, retains the last confirmed aggregate while work is active
+  or ends unsuccessfully, and offers mutually exclusive scan/cancel actions.
+  Explorer never auto-scans and adds no path, history, candidate, plan, AI, or
+  cleanup transport. Stable accessibility identifiers and Command-R,
+  Command-period, and Command-comma shortcuts cover its primary interactions.
+  The complete 123-test linked Swift suite, full Rust workspace format/lint/test
+  gates, 20 destructive-boundary checker tests and the 167-source boundary
+  scan pass. Debug and Release bindings are byte-identical, and unsigned
+  universal arm64/x86_64 Debug and Release apps target macOS 14.
 - Completed the Milestone 2 durable history/engine foundation and automatic
   DUX-owned retention scope, with remaining Explorer, executor, storage-control,
   cross-process, crash-debt, and platform-qualification work assigned explicitly

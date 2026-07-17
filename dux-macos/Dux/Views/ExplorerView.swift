@@ -1,200 +1,403 @@
 import SwiftUI
 
 struct ExplorerView: View {
+    @Environment(\.openSettings) private var openSettings
+    @State private var selection = ExplorerDestination.overview
+
     let model: AppModel
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Storage Explorer")
-                        .font(.largeTitle.bold())
-                    Text("A normal window for understanding and navigating disk usage.")
-                        .foregroundStyle(.secondary)
+        let presentation = ExplorerPresentation.make(
+            volumeState: model.volumeState,
+            scanState: model.scanState
+        )
+
+        NavigationSplitView {
+            List(selection: $selection) {
+                NavigationLink(value: ExplorerDestination.overview) {
+                    Label("Overview", systemImage: "chart.pie")
                 }
+                .accessibilityIdentifier(ExplorerAccessibility.overviewDestination)
 
-                VolumeOverviewView(state: model.volumeState)
-
-                GroupBox("Shared engine connection") {
-                    EngineConnectionView(state: model.engineState)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.vertical, 6)
+                Section {
+                    Button {
+                        AppActivation.openSettings(using: openSettings)
+                    } label: {
+                        Label("Settings…", systemImage: "gearshape")
+                    }
+                    .buttonStyle(.plain)
+                    .keyboardShortcut(
+                        KeyEquivalent(ExplorerKeyboardShortcut.settings),
+                        modifiers: [.command]
+                    )
+                    .accessibilityIdentifier(ExplorerAccessibility.settingsShortcut)
                 }
-
-                Text("Drill-down navigation will build on the shared engine snapshot. Capacity remains independent from directory scan totals.")
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: 560, alignment: .leading)
             }
-            .padding(32)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .navigationTitle("Storage Explorer")
+            .navigationSplitViewColumnWidth(min: 180, ideal: 210, max: 250)
+            .accessibilityIdentifier(ExplorerAccessibility.sidebar)
+        } detail: {
+            ExplorerOverviewView(presentation: presentation)
+                .navigationTitle("Overview")
         }
-        .frame(minWidth: 620, minHeight: 420)
+        .navigationSplitViewStyle(.balanced)
+        .toolbar {
+            ToolbarItem(placement: .navigation) {
+                Label("Home", systemImage: "house")
+                    .help("The read-only scan root for this version of DUX")
+            }
+
+            ToolbarItemGroup(placement: .primaryAction) {
+                Button {
+                    Task { await model.refreshVolumeCapacity() }
+                } label: {
+                    Label("Refresh capacity", systemImage: "arrow.clockwise")
+                }
+                .disabled(!presentation.actions.refreshCapacityEnabled)
+                .help("Check startup-disk capacity without starting a scan")
+                .accessibilityIdentifier(ExplorerAccessibility.refreshCapacity)
+
+                if presentation.actions.showScanNow {
+                    Button {
+                        Task { await model.startHomeScan() }
+                    } label: {
+                        Label("Scan Home", systemImage: "magnifyingglass")
+                    }
+                    .disabled(!presentation.actions.scanNowEnabled)
+                    .help("Scan Home without changing files")
+                    .keyboardShortcut(
+                        KeyEquivalent(ExplorerKeyboardShortcut.scanNow),
+                        modifiers: [.command]
+                    )
+                    .accessibilityIdentifier(ExplorerAccessibility.scanNow)
+                }
+
+                if presentation.actions.showCancelScan {
+                    Button {
+                        Task { await model.cancelHomeScan() }
+                    } label: {
+                        Label("Cancel scan", systemImage: "stop.circle")
+                    }
+                    .disabled(!presentation.actions.cancelScanEnabled)
+                    .help("Request cancellation of the current Home scan")
+                    .keyboardShortcut(
+                        KeyEquivalent(ExplorerKeyboardShortcut.cancelScan),
+                        modifiers: [.command]
+                    )
+                    .accessibilityIdentifier(ExplorerAccessibility.cancelScan)
+                }
+            }
+        }
+        .frame(minWidth: 700, minHeight: 480)
+        .accessibilityIdentifier(ExplorerAccessibility.root)
         .task {
             await model.loadInitialState()
         }
     }
 }
 
-private struct VolumeOverviewView: View {
-    let state: VolumeCapacityState
+private struct ExplorerOverviewView: View {
+    let presentation: ExplorerPresentation
 
     var body: some View {
-        GroupBox("Startup volume") {
-            switch state {
-            case .idle, .loading:
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Storage overview")
+                        .font(.largeTitle.bold())
+                    Text("Startup-volume capacity and this window’s Home allocation scan.")
+                        .foregroundStyle(.secondary)
+                }
+
+                capacityCard(presentation.capacity)
+                scanCard(
+                    coverage: presentation.coverage,
+                    scan: presentation.scan
+                )
+            }
+            .padding(28)
+            .frame(maxWidth: 860, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    @ViewBuilder
+    private func capacityCard(_ capacity: ExplorerCapacityPresentation) -> some View {
+        GroupBox {
+            switch capacity {
+            case let .loading(message):
                 HStack(spacing: 10) {
                     ProgressView()
                         .controlSize(.small)
-                    Text("Checking startup disk…")
+                    Text(verbatim: message)
                         .foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.vertical, 6)
-            case let .loaded(snapshot):
-                snapshotContent(snapshot)
-            case let .refreshing(snapshot):
-                VStack(alignment: .leading, spacing: 10) {
-                    snapshotContent(snapshot)
-                    Label("Refreshing capacity…", systemImage: "arrow.triangle.2.circlepath")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                .padding(.vertical, 10)
+
+            case let .snapshot(snapshot, status):
+                capacitySnapshot(snapshot, status: status)
+
+            case let .failed(title, detail):
+                Label {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(verbatim: title)
+                            .font(.headline)
+                        Text(verbatim: detail)
+                            .foregroundStyle(.secondary)
+                    }
+                } icon: {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.red)
                 }
-            case let .stale(snapshot, _):
-                VStack(alignment: .leading, spacing: 10) {
-                    snapshotContent(snapshot)
-                    Label("Showing the last successful capacity sample", systemImage: "exclamationmark.triangle")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                }
-            case .failed:
-                Label("Storage capacity unavailable", systemImage: "exclamationmark.triangle.fill")
-                    .foregroundStyle(.red)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.vertical, 6)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 10)
             }
+        } label: {
+            Label("Startup disk", systemImage: "internaldrive")
         }
+        .accessibilityIdentifier(ExplorerAccessibility.capacityCard)
     }
 
-    private func snapshotContent(_ snapshot: VolumeCapacitySnapshot) -> some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(alignment: .firstTextBaseline) {
-                if let displayName = snapshot.displayName {
-                    Text(verbatim: displayName)
-                        .font(.headline)
-                } else {
-                    Text("Startup Disk")
-                        .font(.headline)
-                }
+    private func capacitySnapshot(
+        _ snapshot: ExplorerCapacitySnapshotPresentation,
+        status: ExplorerCapacityStatus?
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                Text(verbatim: snapshot.volumeName)
+                    .font(.title2.bold())
+                    .lineLimit(1)
+                    .truncationMode(.middle)
                 Spacer()
-                Text("\(snapshot.availablePercentage)% available")
-                    .font(.title3.monospacedDigit())
+                DiskPressureBadge(pressure: snapshot.pressure)
+                    .accessibilityIdentifier(ExplorerAccessibility.pressure)
             }
 
-            CapacityBar(snapshot: snapshot)
+            ExplorerSegmentedCapacityBar(
+                breakdown: snapshot.breakdown,
+                accessibilitySummary: snapshot.accessibilitySummary
+            )
 
-            DiskPressureBadge(pressure: snapshot.pressure)
-
-            Grid(alignment: .leading, horizontalSpacing: 28, verticalSpacing: 8) {
-                row(availableLabel(for: snapshot), snapshot.effectiveAvailableBytes)
-                optionalRow("Used", snapshot.usedBytes)
-                row("Total", snapshot.totalBytes)
+            HStack(alignment: .top, spacing: 12) {
+                metric(
+                    title: "Available",
+                    value: snapshot.availableValue,
+                    identifier: ExplorerAccessibility.available
+                )
+                metric(
+                    title: "Used",
+                    value: snapshot.usedValue,
+                    identifier: ExplorerAccessibility.used
+                )
+                metric(
+                    title: "Total",
+                    value: snapshot.totalValue,
+                    identifier: ExplorerAccessibility.total
+                )
             }
 
-            if snapshot.availabilityBasis == .importantUsage {
-                Text("Available for important use can include purgeable space, so it may not equal total minus used.")
+            switch snapshot.breakdown {
+            case .known:
+                HStack(spacing: 18) {
+                    ExplorerCapacityLegend(title: "Used", color: .accentColor)
+                    ExplorerCapacityLegend(title: "Filesystem available", color: .secondary)
+                }
+            case let .unavailable(message):
+                Label {
+                    Text(verbatim: message)
+                } icon: {
+                    Image(systemName: "questionmark.circle")
+                }
                     .font(.caption)
                     .foregroundStyle(.secondary)
-            } else {
-                Text("Important-usage capacity was unavailable; showing the filesystem fallback.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            }
+
+            HStack(spacing: 8) {
+                Text(verbatim: snapshot.availabilityBasis)
+                Text(verbatim: "·")
+                Text(verbatim: snapshot.freshness)
+                    .accessibilityIdentifier(ExplorerAccessibility.freshness)
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+
+            if let status {
+                capacityStatus(status)
             }
         }
-        .padding(.vertical, 6)
+        .padding(.vertical, 8)
     }
 
-    private func availableLabel(for snapshot: VolumeCapacitySnapshot) -> LocalizedStringKey {
-        snapshot.availabilityBasis == .importantUsage ? "Available for important use" : "Available"
-    }
-
-    private func row(_ label: LocalizedStringKey, _ bytes: UInt64) -> some View {
-        GridRow {
-            Text(label)
+    private func metric(
+        title: LocalizedStringKey,
+        value: String,
+        identifier: String
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.caption)
                 .foregroundStyle(.secondary)
-            Text(verbatim: StorageByteFormatter.string(from: bytes))
-                .monospacedDigit()
+            Text(verbatim: value)
+                .font(.title3.monospacedDigit().weight(.semibold))
                 .textSelection(.enabled)
         }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier(identifier)
     }
 
-    private func optionalRow(_ label: LocalizedStringKey, _ bytes: UInt64?) -> some View {
-        GridRow {
-            Text(label)
-                .foregroundStyle(.secondary)
-            if let bytes {
-                Text(verbatim: StorageByteFormatter.string(from: bytes))
-                    .monospacedDigit()
-                    .textSelection(.enabled)
-            } else {
-                Text("Unavailable")
-                    .foregroundStyle(.secondary)
+    @ViewBuilder
+    private func capacityStatus(_ status: ExplorerCapacityStatus) -> some View {
+        switch status {
+        case let .refreshing(message):
+            Label {
+                Text(verbatim: message)
+            } icon: {
+                ProgressView()
+                    .controlSize(.small)
             }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        case let .stale(message):
+            Label {
+                Text(verbatim: message)
+            } icon: {
+                Image(systemName: "exclamationmark.triangle")
+            }
+                .font(.caption)
+                .foregroundStyle(.orange)
+        }
+    }
+
+    private func scanCard(
+        coverage: ExplorerCoveragePresentation,
+        scan: ExplorerScanPresentation?
+    ) -> some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 16) {
+                Label {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(verbatim: coverage.title)
+                            .font(.headline)
+                        Text(verbatim: coverage.detail)
+                            .foregroundStyle(.secondary)
+                    }
+                } icon: {
+                    Image(systemName: coverageSymbol(for: coverage.coverage))
+                        .foregroundStyle(coverageColor(for: coverage.coverage))
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityIdentifier(ExplorerAccessibility.coverage)
+
+                if let scan {
+                    Divider()
+                    HStack(alignment: .top, spacing: 10) {
+                        if scan.showsIndeterminateProgress {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else {
+                            Image(systemName: scanSymbol(for: scan.style))
+                                .foregroundStyle(scanColor(for: scan.style))
+                        }
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(verbatim: scan.title)
+                                .font(.subheadline.weight(.semibold))
+                            if let detail = scan.detail {
+                                Text(verbatim: detail)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier(ExplorerAccessibility.scanStatus)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 8)
+        } label: {
+            Label("Home scan", systemImage: "house.and.flag")
+        }
+        .accessibilityIdentifier(ExplorerAccessibility.scanCard)
+    }
+
+    private func coverageSymbol(for coverage: AppScanCoverage) -> String {
+        switch coverage {
+        case .complete: "checkmark.shield.fill"
+        case .limitedAccess: "lock.trianglebadge.exclamationmark"
+        case .partial: "exclamationmark.shield.fill"
+        case .unknown: "questionmark.diamond"
+        }
+    }
+
+    private func coverageColor(for coverage: AppScanCoverage) -> Color {
+        switch coverage {
+        case .complete: .green
+        case .limitedAccess, .partial: .orange
+        case .unknown: .secondary
+        }
+    }
+
+    private func scanSymbol(for style: ExplorerScanStyle) -> String {
+        switch style {
+        case .progress: "arrow.triangle.2.circlepath"
+        case .success: "checkmark.circle.fill"
+        case .cancelled: "stop.circle"
+        case .failure: "exclamationmark.triangle.fill"
+        }
+    }
+
+    private func scanColor(for style: ExplorerScanStyle) -> Color {
+        switch style {
+        case .progress: .secondary
+        case .success: .green
+        case .cancelled: .secondary
+        case .failure: .red
         }
     }
 }
 
-private struct EngineConnectionView: View {
-    let state: EngineConnectionState
+private struct ExplorerSegmentedCapacityBar: View {
+    let breakdown: ExplorerCapacityBreakdown
+    let accessibilitySummary: String
 
     var body: some View {
-        switch state {
-        case .idle, .loading:
-            HStack(spacing: 10) {
-                ProgressView()
-                    .controlSize(.small)
-                Text("Connecting to the storage engine…")
-                    .foregroundStyle(.secondary)
-            }
-        case let .loaded(result):
-            VStack(alignment: .leading, spacing: 14) {
-                Grid(alignment: .leading, horizontalSpacing: 24, verticalSpacing: 8) {
-                    row("Library", result.libraryVersion)
-                    row("FFI contract", String(result.ffiContractVersion))
-                }
+        GeometryReader { geometry in
+            ZStack(alignment: .leading) {
+                RoundedRectangle(cornerRadius: 5)
+                    .fill(.quaternary)
 
-                if result.executedOffMainThread {
-                    Label(
-                        "Rust call completed off the main thread",
-                        systemImage: "checkmark.circle.fill"
-                    )
-                    .foregroundStyle(.green)
-                } else {
-                    Label(
-                        "Rust call reached the main thread",
-                        systemImage: "exclamationmark.triangle.fill"
-                    )
-                    .foregroundStyle(.red)
+                if case let .known(usedFraction) = breakdown {
+                    RoundedRectangle(cornerRadius: 5)
+                        .fill(.tint)
+                        .frame(width: geometry.size.width * usedFraction)
                 }
-            }
-        case let .failed(error):
-            switch error {
-            case .closed:
-                Label("The Rust engine session is closed.", systemImage: "xmark.circle.fill")
-                    .foregroundStyle(.red)
-            case .invalidCapacityObservation, .conflictingCapacityObservation,
-                 .supersededCapacityObservation, .retryable, .unavailable, .unexpected:
-                Label("The Rust engine could not be loaded.", systemImage: "exclamationmark.triangle.fill")
-                    .foregroundStyle(.red)
             }
         }
+        .frame(height: 12)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Storage capacity")
+        .accessibilityValue(Text(verbatim: accessibilitySummary))
+        .accessibilityIdentifier(ExplorerAccessibility.capacityBar)
     }
+}
 
-    private func row(_ label: LocalizedStringKey, _ value: String) -> some View {
-        GridRow {
-            Text(label)
-                .foregroundStyle(.secondary)
-            Text(verbatim: value)
-                .textSelection(.enabled)
+private struct ExplorerCapacityLegend: View {
+    let title: LocalizedStringKey
+    let color: Color
+
+    var body: some View {
+        Label {
+            Text(title)
+        } icon: {
+            Circle()
+                .fill(color)
+                .frame(width: 8, height: 8)
         }
+        .font(.caption)
+        .foregroundStyle(.secondary)
     }
 }

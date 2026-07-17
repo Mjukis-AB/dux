@@ -131,6 +131,18 @@ menu action opens Explorer or Settings. The generated Info.plist sets
 `LSUIElement=true`, so closing Explorer leaves DUX running without a default
 Dock icon. User-facing shell keys live in `Dux/Resources/Localizable.xcstrings`.
 
+Explorer currently contains one honest Overview destination in a
+`NavigationSplitView`, plus a direct Settings shortcut. It reads only the same
+cached startup-volume state and current in-session Home-scan aggregate already
+owned by `AppModel`; opening or reopening the window never creates another
+model, engine session, or scan. Its capacity chart uses ordinary filesystem
+availability for the used/free composition and separately labels
+important-use availability, so those unlike quantities are never subtracted.
+Unknown values remain unknown, stale values remain visible with their
+freshness, and Home coverage stays explicitly scoped. Snapshot history,
+review-lease-backed paths and drill-down, recommendations, reclaimable totals,
+cleanup, trends, and AI belong to later milestones rather than this Overview.
+
 The shared model also owns the menu-bar label preference. Settings can select
 Icon only, Icon and free space (GiB), or Icon and free space (%); free GiB is the
 first-run default. The stable `menuBar.labelMode.v1` UserDefaults value is a

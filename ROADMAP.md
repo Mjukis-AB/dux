@@ -3483,7 +3483,36 @@ Tasks:
   and lint gates (including 735 core tests), the 20-test destructive-boundary
   checker suite, and unsigned universal arm64/x86_64 Debug and Release builds at
   the macOS 14 deployment target pass.
-- [ ] Implement Explorer window shell and Overview.
+- [x] Implement Explorer window shell and Overview. Completed 2026-07-17: one
+  reusable `Window(id: "explorer")` opens after the menu-bar scene, shares the
+  process-wide `AppModel`, activates only after the open request, and does not
+  auto-scan or create another engine. Closing it leaves the `LSUIElement` app
+  running. Its `NavigationSplitView` exposes the honest Overview surface and a
+  working Settings shortcut without advertising unimplemented destinations.
+
+  Overview separates startup-disk capacity from Home-scan allocation. The
+  accessible segmented chart derives its used/filesystem-free composition only
+  when ordinary filesystem availability exists; important-use availability is
+  reported separately and unknown values are never rendered as zero. Loading,
+  refresh, stale, failure, retry, pressure, basis, and freshness states remain
+  explicit. The Home card reports only the current in-session path-free
+  aggregate, scopes every coverage label to Home, renders a percentage only
+  when Rust supplied one, and retains the last confirmed coverage while a new
+  scan is active, cancelled, or failed. Scan and cancel are mutually exclusive,
+  with Command-R, Command-period, and Command-comma shortcuts and stable
+  VoiceOver identifiers.
+
+  This slice requires no FFI revision and grants no path, durable-history,
+  snapshot-review, candidate, plan, AI, or cleanup capability. Review-lease
+  paging and drill-down remain Milestone 4; recommendations and reclaimable
+  groups remain Milestone 5; trends remain Milestone 6; permission guidance is
+  the separate Milestone 3 onboarding task. Pure presentation tests cover
+  missing/basis-sensitive capacity, stale retention, scoped coverage, retained
+  results, action exclusivity, accessibility, shortcuts, and singleton window
+  activation ordering. The complete 123-test linked Swift suite, full Rust
+  format/lint/test gates, the 20-test destructive-boundary checker and
+  167-source scan, byte-identical Debug/Release bindings, and unsigned universal
+  arm64/x86_64 Debug and Release builds at the macOS 14 deployment target pass.
 - [ ] Implement launch-at-login setting.
 - [ ] Implement notification permission UI but do not notify repeatedly.
 - [ ] Implement permission/coverage onboarding.
