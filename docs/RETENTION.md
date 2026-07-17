@@ -52,7 +52,7 @@ allows inserts/deletes only for capacity rows and deletes only from the AI cache
 table; the module exposes no general SQL surface, and its sole AI delete
 statement additionally requires the exact selected ID and expiration cutoff.
 
-## Engine orchestration
+## SQLite history-maintenance orchestration
 
 `EngineHandle::start_history_maintenance` is the only public core entry point
 for automatic SQLite retention. It is deliberately the engine's lowest-
@@ -84,6 +84,50 @@ internal task failure and always releases exclusive admission.
 The native app/FFI idle scheduler is not wired yet. It must treat `DeferredBusy`
 and `has_more` as rescheduling hints, apply its own wake/energy policy, and must
 not turn maintenance into foreground or cleanup authority.
+
+## Snapshot-cap engine orchestration
+
+`EngineHandle::start_snapshot_retention` is the sole typed engine edge into the
+sealed snapshot-cap writer. It admits a `SnapshotRetention` task only when its
+engine session is idle. A closed session returns a typed error, a duplicate
+returns `SnapshotRetentionStartOutcome::AlreadyActive` with the exact task ID,
+and foreground work or the other maintenance kind returns `DeferredBusy`.
+Those preflight outcomes do not inspect SQLite or the snapshot store and do not
+allocate a task. After the current-schema compatibility check, submission
+repeats idle and duplicate admission under the registry lock.
+
+One admitted task invokes `SnapshotRepository::enforce_retention_cap` exactly
+once. It cannot provide a cap, inventory, candidate, scan identity, or path.
+The repository rereads policy and rebuilds the complete retention proof while
+holding the database guard before the snapshot writer lock, and it removes at
+most one exact final. The engine never loops or self-enqueues; `has_more` is an
+observation for a later explicitly scheduled idle request, and deferred
+unstable accounting must not become a busy retry loop. Independently opened
+engine sessions are not globally deduplicated, but their bounded repository
+calls serialize through the shared database and snapshot leases and each
+rebuilds fresh state after acquiring them.
+
+The immutable `SnapshotRetentionResult` contains the canonical observation
+time, cap, charged bytes before and after, `has_more`, and only a path-free
+`SnapshotRetentionOutcome`: `UnderCap`, `DeferredUnstable`,
+`DeferredNoEligibleSnapshot`, `RemovedTombstonedResidual { bytes }`, or
+`TombstonedAndRemoved { bytes }`. The repository's selected scan identity is
+discarded. These values report what one bounded DUX-store maintenance attempt
+observed; they do not grant cleanup authority or identify user data.
+
+Cancellation and `SnapshotRetentionBatchApplying` are ordered under the task
+registry mutex. If cancellation or close wins, the repository is never called.
+If Applying wins, the task owns the whole bounded attempt: later cancellation
+remains visible intent, while the exact repository success or failure controls
+the terminal phase. A successful attempt emits one
+`SnapshotRetentionBatchFinished` event and retains one typed result. Failures
+use stable path-free clock, schema, contention, unsafe-storage, budget,
+corruption, incompatible-snapshot, unavailable, outcome-unknown, and internal
+categories.
+
+This core task is not production scheduling. The native app/FFI still has to
+own review-lease acquire/renew/release/drop and choose periodic, wake, energy,
+and backoff policy before it may request these idle batches automatically.
 
 ## Snapshot policy
 
@@ -325,10 +369,11 @@ Publication and retention share this lock order:
 2. cross-process writer/current-schema lease;
 3. snapshot writer lock.
 
-Core cap enforcement, retained-handle final deletion, and exact tombstoned
-residual handling are implemented. Automatic production scheduling is not
-enabled until app/FFI owns the review-lease lifecycle and an idle scheduler can
-invoke one bounded batch at a time. Physical-orphan reconciliation, general
+Core cap enforcement, retained-handle final deletion, exact tombstoned residual
+handling, and typed one-batch engine invocation are implemented. Automatic
+production scheduling is not enabled until app/FFI owns the review-lease
+lifecycle and a native periodic idle scheduler requests bounded batches with
+appropriate backoff. Physical-orphan reconciliation, general
 terminal/unleased-temp and provisioning-stage scavenging, and explicit
 clear-data actions remain separate maintenance capabilities. A prior inventory
 report is never authority; the writer recomputes every proof under the lock

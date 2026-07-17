@@ -448,7 +448,9 @@ This checkpoint does not implement:
 - cross-process overlapping-root scan leases or hard-process-death recovery of
   an engine scan left `running`;
 - FFI, Swift, or CLI scan/history transport;
-- app/FFI review-lease ownership and idle cap-batch scheduling;
+- app/FFI review-lease ownership and native periodic idle scheduling (the core
+  engine can request exactly one sealed batch, but this does not change the
+  snapshot wire or enable product scheduling);
 - physical-orphan reconciliation;
 - general terminal-row, unleased-temp, or provisioning-stage scavenging beyond
   the exact same-scan residual retry;

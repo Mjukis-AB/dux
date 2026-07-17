@@ -51,6 +51,21 @@ fn started_maintenance(outcome: HistoryMaintenanceStartOutcome) -> TaskId {
     }
 }
 
+fn started_snapshot_retention(outcome: SnapshotRetentionStartOutcome) -> TaskId {
+    match outcome {
+        SnapshotRetentionStartOutcome::Started(id) => id,
+        other => panic!("expected started snapshot retention, got {other:?}"),
+    }
+}
+
+fn publish_snapshots(engine: &EngineHandle, root: &std::path::Path, count: usize) {
+    for index in 0..count {
+        std::fs::write(root.join("payload"), format!("snapshot-{index}")).unwrap();
+        let task = engine.start_scan(root.to_path_buf()).unwrap();
+        assert_eq!(wait_terminal(engine, task).phase, TaskPhase::Succeeded);
+    }
+}
+
 fn over_budget_candidate_records(
     scan_id: &ScanId,
     completed_at: SystemTime,
@@ -525,6 +540,10 @@ fn newer_database_never_provisions_missing_snapshot_storage() {
         Err(StartTaskError::ReadOnlyStore)
     );
     assert_eq!(
+        engine.start_snapshot_retention(),
+        Err(StartTaskError::ReadOnlyStore)
+    );
+    assert_eq!(
         engine.recent_scan_history(1),
         Err(ScanHistoryError::IncompatibleSchema)
     );
@@ -929,6 +948,10 @@ fn history_maintenance_runs_one_typed_path_free_batch() {
     );
     assert_eq!(
         engine.scan_result(id).unwrap_err(),
+        TaskAccessError::WrongTaskKind
+    );
+    assert_eq!(
+        engine.snapshot_retention_result(id).unwrap_err(),
         TaskAccessError::WrongTaskKind
     );
 
@@ -1465,6 +1488,691 @@ fn invalid_maintenance_clock_fails_and_panic_releases_exclusive_admission() {
     let replacement = started_maintenance(
         engine
             .start_history_maintenance_at(SystemTime::UNIX_EPOCH + Duration::from_millis(10_000))
+            .unwrap(),
+    );
+    assert_eq!(
+        wait_terminal(&engine, replacement).phase,
+        TaskPhase::Succeeded
+    );
+}
+
+#[test]
+fn snapshot_retention_runs_one_typed_path_free_batch() {
+    let (_temp, engine) = engine_with_limits(RegistryLimits::testing(1, 2, 4, 8));
+    let observed = SystemTime::UNIX_EPOCH + Duration::from_millis(10_000);
+
+    let id = started_snapshot_retention(engine.start_snapshot_retention_at(observed).unwrap());
+    let terminal = wait_terminal(&engine, id);
+    assert_eq!(terminal.kind, TaskKind::SnapshotRetention);
+    assert_eq!(terminal.phase, TaskPhase::Succeeded);
+    assert!(terminal.result_available);
+    let result = engine.snapshot_retention_result(id).unwrap().unwrap();
+    assert_eq!(result.observed_at(), observed);
+    assert_eq!(result.outcome(), SnapshotRetentionOutcome::UnderCap);
+    assert_eq!(result.cap_bytes(), 2 * 1024 * 1024 * 1024);
+    assert_eq!(result.charged_bytes_before(), result.charged_bytes_after());
+    assert!(!result.has_more());
+    assert_eq!(
+        engine.history_maintenance_result(id).unwrap_err(),
+        TaskAccessError::WrongTaskKind
+    );
+    assert_eq!(
+        engine.scan_result(id).unwrap_err(),
+        TaskAccessError::WrongTaskKind
+    );
+
+    let events = engine.task_events(id, 0, 8).unwrap().events;
+    let applying = events
+        .iter()
+        .position(|event| matches!(event.kind, TaskEventKind::SnapshotRetentionBatchApplying))
+        .unwrap();
+    let finished = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event.kind,
+                TaskEventKind::SnapshotRetentionBatchFinished {
+                    outcome: SnapshotRetentionOutcome::UnderCap,
+                    has_more: false,
+                    ..
+                }
+            )
+        })
+        .unwrap();
+    let terminal_event = events
+        .iter()
+        .position(|event| matches!(event.kind, TaskEventKind::Terminal { .. }))
+        .unwrap();
+    assert!(applying < finished && finished < terminal_event);
+}
+
+#[test]
+fn snapshot_retention_removes_one_final_and_requires_explicit_rescheduling() {
+    let temp = TempDir::new().unwrap();
+    let config = config(&temp);
+    let root = temp.path().join("scan-root");
+    std::fs::create_dir(&root).unwrap();
+    let engine =
+        EngineHandle::open_with_limits(config.clone(), RegistryLimits::testing(1, 4, 16, 8))
+            .unwrap();
+    publish_snapshots(&engine, &root, 4);
+    assert_eq!(final_snapshot_count(&config), 4);
+    engine.set_snapshot_retention_cap(0).unwrap();
+    let observed = SystemTime::now() + Duration::from_secs(60);
+
+    let first = started_snapshot_retention(engine.start_snapshot_retention_at(observed).unwrap());
+    assert_eq!(wait_terminal(&engine, first).phase, TaskPhase::Succeeded);
+    let first_result = engine.snapshot_retention_result(first).unwrap().unwrap();
+    assert!(matches!(
+        first_result.outcome(),
+        SnapshotRetentionOutcome::TombstonedAndRemoved { bytes } if bytes > 0
+    ));
+    assert!(first_result.charged_bytes_after() < first_result.charged_bytes_before());
+    assert!(first_result.has_more());
+    assert_eq!(final_snapshot_count(&config), 3);
+
+    let second = started_snapshot_retention(
+        engine
+            .start_snapshot_retention_at(observed + Duration::from_millis(1))
+            .unwrap(),
+    );
+    assert_eq!(wait_terminal(&engine, second).phase, TaskPhase::Succeeded);
+    let second_result = engine.snapshot_retention_result(second).unwrap().unwrap();
+    assert!(matches!(
+        second_result.outcome(),
+        SnapshotRetentionOutcome::TombstonedAndRemoved { bytes } if bytes > 0
+    ));
+    assert!(!second_result.has_more());
+    assert_eq!(final_snapshot_count(&config), 2);
+
+    let protected = started_snapshot_retention(
+        engine
+            .start_snapshot_retention_at(observed + Duration::from_millis(2))
+            .unwrap(),
+    );
+    assert_eq!(
+        wait_terminal(&engine, protected).phase,
+        TaskPhase::Succeeded
+    );
+    assert_eq!(
+        engine
+            .snapshot_retention_result(protected)
+            .unwrap()
+            .unwrap()
+            .outcome(),
+        SnapshotRetentionOutcome::DeferredNoEligibleSnapshot
+    );
+    assert_eq!(final_snapshot_count(&config), 2);
+}
+
+#[test]
+fn snapshot_retention_is_idle_deduplicated_and_excludes_history_maintenance() {
+    let (_temp, engine) = engine_with_limits(RegistryLimits::testing(1, 2, 8, 8));
+    let (foreground_started_tx, foreground_started_rx) = mpsc::channel();
+    let (foreground_release_tx, foreground_release_rx) = mpsc::channel();
+    let foreground = engine
+        .submit_test(Box::new(move |_| {
+            foreground_started_tx.send(()).unwrap();
+            foreground_release_rx.recv().unwrap();
+            WorkOutcome::Succeeded(TaskResult::TestOnly)
+        }))
+        .unwrap();
+    foreground_started_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    let record_count = engine.inner.shared.lock_registry_recover().records.len();
+    assert_eq!(
+        engine.start_snapshot_retention().unwrap(),
+        SnapshotRetentionStartOutcome::DeferredBusy
+    );
+    assert_eq!(
+        engine.inner.shared.lock_registry_recover().records.len(),
+        record_count
+    );
+    foreground_release_tx.send(()).unwrap();
+    wait_terminal(&engine, foreground);
+
+    let (history_started_tx, history_started_rx) = mpsc::channel();
+    let (history_release_tx, history_release_rx) = mpsc::channel();
+    let history = started_maintenance(
+        engine
+            .start_history_maintenance_with_test_hooks(
+                SystemTime::UNIX_EPOCH + Duration::from_millis(10_000),
+                move || {
+                    history_started_tx.send(()).unwrap();
+                    history_release_rx.recv().unwrap();
+                },
+                || {},
+            )
+            .unwrap(),
+    );
+    history_started_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    assert_eq!(
+        engine.start_snapshot_retention().unwrap(),
+        SnapshotRetentionStartOutcome::DeferredBusy
+    );
+    history_release_tx.send(()).unwrap();
+    wait_terminal(&engine, history);
+
+    let (snapshot_started_tx, snapshot_started_rx) = mpsc::channel();
+    let (snapshot_release_tx, snapshot_release_rx) = mpsc::channel();
+    let snapshot = started_snapshot_retention(
+        engine
+            .start_snapshot_retention_with_test_hooks(
+                SystemTime::UNIX_EPOCH + Duration::from_millis(10_000),
+                move || {
+                    snapshot_started_tx.send(()).unwrap();
+                    snapshot_release_rx.recv().unwrap();
+                },
+                || {},
+                || {},
+            )
+            .unwrap(),
+    );
+    snapshot_started_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    assert_eq!(
+        engine.start_snapshot_retention().unwrap(),
+        SnapshotRetentionStartOutcome::AlreadyActive(snapshot)
+    );
+    assert_eq!(
+        engine.start_history_maintenance().unwrap(),
+        HistoryMaintenanceStartOutcome::DeferredBusy
+    );
+    snapshot_release_tx.send(()).unwrap();
+    assert_eq!(wait_terminal(&engine, snapshot).phase, TaskPhase::Succeeded);
+}
+
+#[test]
+fn snapshot_retention_cancellation_is_linearized_at_applying() {
+    let temp = TempDir::new().unwrap();
+    let config = config(&temp);
+    let root = temp.path().join("scan-root");
+    std::fs::create_dir(&root).unwrap();
+    let engine =
+        EngineHandle::open_with_limits(config.clone(), RegistryLimits::testing(1, 2, 8, 8))
+            .unwrap();
+    publish_snapshots(&engine, &root, 3);
+    engine.set_snapshot_retention_cap(0).unwrap();
+    let observed = SystemTime::now() + Duration::from_secs(60);
+
+    let (before_tx, before_rx) = mpsc::channel();
+    let (before_release_tx, before_release_rx) = mpsc::channel();
+    let cancelled = started_snapshot_retention(
+        engine
+            .start_snapshot_retention_with_test_hooks(
+                observed,
+                move || {
+                    before_tx.send(()).unwrap();
+                    before_release_rx.recv().unwrap();
+                },
+                || {},
+                || {},
+            )
+            .unwrap(),
+    );
+    before_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    assert_eq!(
+        engine.cancel_task(cancelled).unwrap(),
+        CancelOutcome::Requested
+    );
+    before_release_tx.send(()).unwrap();
+    assert_eq!(
+        wait_terminal(&engine, cancelled).phase,
+        TaskPhase::Cancelled
+    );
+    assert_eq!(final_snapshot_count(&config), 3);
+    assert!(
+        engine
+            .task_events(cancelled, 0, 8)
+            .unwrap()
+            .events
+            .iter()
+            .all(|event| !matches!(event.kind, TaskEventKind::SnapshotRetentionBatchApplying))
+    );
+
+    let (applying_tx, applying_rx) = mpsc::channel();
+    let (applying_release_tx, applying_release_rx) = mpsc::channel();
+    let applied = started_snapshot_retention(
+        engine
+            .start_snapshot_retention_with_test_hooks(
+                observed + Duration::from_millis(1),
+                || {},
+                move || {
+                    applying_tx.send(()).unwrap();
+                    applying_release_rx.recv().unwrap();
+                },
+                || {},
+            )
+            .unwrap(),
+    );
+    applying_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    assert_eq!(
+        engine.cancel_task(applied).unwrap(),
+        CancelOutcome::Requested
+    );
+    applying_release_tx.send(()).unwrap();
+    let terminal = wait_terminal(&engine, applied);
+    assert_eq!(terminal.phase, TaskPhase::Succeeded);
+    assert!(terminal.cancellation_requested);
+    assert!(matches!(
+        engine
+            .snapshot_retention_result(applied)
+            .unwrap()
+            .unwrap()
+            .outcome(),
+        SnapshotRetentionOutcome::TombstonedAndRemoved { .. }
+    ));
+    assert_eq!(final_snapshot_count(&config), 2);
+}
+
+#[test]
+fn snapshot_retention_serializes_distinct_victims_across_engine_sessions() {
+    let temp = TempDir::new().unwrap();
+    let config = config(&temp);
+    let root = temp.path().join("scan-root");
+    std::fs::create_dir(&root).unwrap();
+    let first_engine =
+        EngineHandle::open_with_limits(config.clone(), RegistryLimits::testing(1, 2, 16, 8))
+            .unwrap();
+    publish_snapshots(&first_engine, &root, 4);
+    first_engine.set_snapshot_retention_cap(0).unwrap();
+    let second_engine =
+        EngineHandle::open_with_limits(config.clone(), RegistryLimits::testing(1, 2, 16, 8))
+            .unwrap();
+    let observed = SystemTime::now() + Duration::from_secs(60);
+    let (applying_tx, applying_rx) = mpsc::channel();
+    let (first_release_tx, first_release_rx) = mpsc::channel();
+    let (second_release_tx, second_release_rx) = mpsc::channel();
+    let first_ready = applying_tx.clone();
+    let first = started_snapshot_retention(
+        first_engine
+            .start_snapshot_retention_with_test_hooks(
+                observed,
+                || {},
+                move || {
+                    first_ready.send(()).unwrap();
+                    first_release_rx.recv().unwrap();
+                },
+                || {},
+            )
+            .unwrap(),
+    );
+    let second = started_snapshot_retention(
+        second_engine
+            .start_snapshot_retention_with_test_hooks(
+                observed,
+                || {},
+                move || {
+                    applying_tx.send(()).unwrap();
+                    second_release_rx.recv().unwrap();
+                },
+                || {},
+            )
+            .unwrap(),
+    );
+    applying_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    applying_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    first_release_tx.send(()).unwrap();
+    second_release_tx.send(()).unwrap();
+
+    assert_eq!(
+        wait_terminal(&first_engine, first).phase,
+        TaskPhase::Succeeded
+    );
+    assert_eq!(
+        wait_terminal(&second_engine, second).phase,
+        TaskPhase::Succeeded
+    );
+    for result in [
+        first_engine
+            .snapshot_retention_result(first)
+            .unwrap()
+            .unwrap(),
+        second_engine
+            .snapshot_retention_result(second)
+            .unwrap()
+            .unwrap(),
+    ] {
+        assert!(matches!(
+            result.outcome(),
+            SnapshotRetentionOutcome::TombstonedAndRemoved { bytes } if bytes > 0
+        ));
+        assert!(!format!("{result:?}").contains("scan:"));
+        assert!(!format!("{result:?}").contains(root.to_string_lossy().as_ref()));
+    }
+    assert_eq!(final_snapshot_count(&config), 2);
+    let connection = rusqlite::Connection::open(config.database_path()).unwrap();
+    let (tombstones, distinct_victims) = connection
+        .query_row(
+            "SELECT COUNT(*), COUNT(DISTINCT scan_id)
+             FROM snapshot_retention_tombstones",
+            [],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .unwrap();
+    assert_eq!((tombstones, distinct_victims), (2, 2));
+}
+
+#[test]
+fn close_before_snapshot_retention_applying_mutates_nothing_and_quiesces() {
+    let temp = TempDir::new().unwrap();
+    let config = config(&temp);
+    let root = temp.path().join("scan-root");
+    std::fs::create_dir(&root).unwrap();
+    let engine =
+        EngineHandle::open_with_limits(config.clone(), RegistryLimits::testing(1, 2, 8, 8))
+            .unwrap();
+    publish_snapshots(&engine, &root, 3);
+    engine.set_snapshot_retention_cap(0).unwrap();
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let task = started_snapshot_retention(
+        engine
+            .start_snapshot_retention_with_test_hooks(
+                SystemTime::now() + Duration::from_secs(60),
+                move || {
+                    started_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                },
+                || {},
+                || {},
+            )
+            .unwrap(),
+    );
+    started_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    assert_eq!(engine.close(), CloseOutcome::Initiated);
+    release_tx.send(()).unwrap();
+    assert!(engine.wait_until_closed(TEST_TIMEOUT));
+
+    let registry = engine.inner.shared.lock_registry_recover();
+    let record = registry.records.get(&task).unwrap();
+    assert_eq!(record.phase, TaskPhase::Cancelled);
+    assert!(record.cancellation_requested);
+    assert!(
+        record
+            .events
+            .iter()
+            .all(|event| !matches!(event.kind, TaskEventKind::SnapshotRetentionBatchApplying))
+    );
+    drop(registry);
+    assert_eq!(final_snapshot_count(&config), 3);
+    let connection = rusqlite::Connection::open(config.database_path()).unwrap();
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM snapshot_retention_tombstones",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn snapshot_retention_failure_mapping_is_exhaustive_and_stable() {
+    let assert_mapping = |input, expected| {
+        assert_eq!(
+            map_snapshot_retention_failure(input),
+            TaskFailureKind::SnapshotRetention(expected)
+        );
+    };
+    for input in [
+        SnapshotRepositoryErrorKind::ReadOnly,
+        SnapshotRepositoryErrorKind::MissingStore,
+        SnapshotRepositoryErrorKind::ReviewLeaseExpired,
+    ] {
+        assert_mapping(input, SnapshotRetentionFailureKind::InternalState);
+    }
+    for input in [
+        SnapshotRepositoryErrorKind::MissingSnapshot,
+        SnapshotRepositoryErrorKind::SnapshotUnavailable,
+        SnapshotRepositoryErrorKind::ReferenceMismatch,
+    ] {
+        assert_mapping(input, SnapshotRetentionFailureKind::CorruptData);
+    }
+    assert_mapping(
+        SnapshotRepositoryErrorKind::IncompatibleVersion,
+        SnapshotRetentionFailureKind::IncompatibleSnapshot,
+    );
+    for (input, expected) in [
+        (
+            SnapshotCodecErrorKind::InvalidInput,
+            SnapshotRetentionFailureKind::InternalState,
+        ),
+        (
+            SnapshotCodecErrorKind::Io,
+            SnapshotRetentionFailureKind::Unavailable,
+        ),
+        (
+            SnapshotCodecErrorKind::LimitExceeded,
+            SnapshotRetentionFailureKind::BudgetExceeded,
+        ),
+        (
+            SnapshotCodecErrorKind::IncompatibleVersion,
+            SnapshotRetentionFailureKind::IncompatibleSnapshot,
+        ),
+        (
+            SnapshotCodecErrorKind::InvalidMagic,
+            SnapshotRetentionFailureKind::CorruptData,
+        ),
+        (
+            SnapshotCodecErrorKind::InvalidLength,
+            SnapshotRetentionFailureKind::CorruptData,
+        ),
+        (
+            SnapshotCodecErrorKind::ChecksumMismatch,
+            SnapshotRetentionFailureKind::CorruptData,
+        ),
+        (
+            SnapshotCodecErrorKind::CorruptData,
+            SnapshotRetentionFailureKind::CorruptData,
+        ),
+    ] {
+        assert_mapping(SnapshotRepositoryErrorKind::Codec(input), expected);
+    }
+    for (input, expected) in [
+        (
+            SnapshotStorageErrorKind::InvalidConfiguration,
+            SnapshotRetentionFailureKind::InternalState,
+        ),
+        (
+            SnapshotStorageErrorKind::UnsafeRoot,
+            SnapshotRetentionFailureKind::UnsafeStorage,
+        ),
+        (
+            SnapshotStorageErrorKind::UnsafeObject,
+            SnapshotRetentionFailureKind::UnsafeStorage,
+        ),
+        (
+            SnapshotStorageErrorKind::UnrecognizedStore,
+            SnapshotRetentionFailureKind::UnsafeStorage,
+        ),
+        (
+            SnapshotStorageErrorKind::Unavailable,
+            SnapshotRetentionFailureKind::Unavailable,
+        ),
+        (
+            SnapshotStorageErrorKind::Busy,
+            SnapshotRetentionFailureKind::Busy,
+        ),
+        (
+            SnapshotStorageErrorKind::InternalState,
+            SnapshotRetentionFailureKind::InternalState,
+        ),
+    ] {
+        assert_mapping(SnapshotRepositoryErrorKind::Storage(input), expected);
+    }
+    for (input, expected) in [
+        (
+            HistoryErrorKind::InvalidInput,
+            SnapshotRetentionFailureKind::InvalidClock,
+        ),
+        (
+            HistoryErrorKind::IncompatibleSchema,
+            SnapshotRetentionFailureKind::IncompatibleSchema,
+        ),
+        (
+            HistoryErrorKind::QueryLimitExceeded,
+            SnapshotRetentionFailureKind::BudgetExceeded,
+        ),
+        (HistoryErrorKind::Busy, SnapshotRetentionFailureKind::Busy),
+        (
+            HistoryErrorKind::UnsafeStorage,
+            SnapshotRetentionFailureKind::UnsafeStorage,
+        ),
+        (
+            HistoryErrorKind::CorruptData,
+            SnapshotRetentionFailureKind::CorruptData,
+        ),
+        (
+            HistoryErrorKind::DatabaseUnavailable,
+            SnapshotRetentionFailureKind::Unavailable,
+        ),
+        (
+            HistoryErrorKind::OutcomeUnknown,
+            SnapshotRetentionFailureKind::OutcomeUnknown,
+        ),
+        (
+            HistoryErrorKind::AlreadyExists,
+            SnapshotRetentionFailureKind::InternalState,
+        ),
+        (
+            HistoryErrorKind::NotFound,
+            SnapshotRetentionFailureKind::InternalState,
+        ),
+        (
+            HistoryErrorKind::InvalidTransition,
+            SnapshotRetentionFailureKind::InternalState,
+        ),
+        (
+            HistoryErrorKind::InternalState,
+            SnapshotRetentionFailureKind::InternalState,
+        ),
+    ] {
+        assert_mapping(SnapshotRepositoryErrorKind::History(input), expected);
+    }
+}
+
+#[test]
+fn snapshot_retention_outcome_mapping_redacts_repository_identity() {
+    let private_id = ScanId::new("scan:must-not-cross-retention-boundary").unwrap();
+    for (input, expected) in [
+        (
+            SnapshotRetentionBatchOutcome::UnderCap,
+            SnapshotRetentionOutcome::UnderCap,
+        ),
+        (
+            SnapshotRetentionBatchOutcome::DeferredUnstable,
+            SnapshotRetentionOutcome::DeferredUnstable,
+        ),
+        (
+            SnapshotRetentionBatchOutcome::DeferredNoEligibleSnapshot,
+            SnapshotRetentionOutcome::DeferredNoEligibleSnapshot,
+        ),
+        (
+            SnapshotRetentionBatchOutcome::RemovedTombstonedResidual {
+                scan_id: private_id.clone(),
+                bytes: 41,
+            },
+            SnapshotRetentionOutcome::RemovedTombstonedResidual { bytes: 41 },
+        ),
+        (
+            SnapshotRetentionBatchOutcome::TombstonedAndRemoved {
+                scan_id: private_id.clone(),
+                bytes: 42,
+            },
+            SnapshotRetentionOutcome::TombstonedAndRemoved { bytes: 42 },
+        ),
+    ] {
+        let public = public_snapshot_retention_outcome(&input);
+        assert_eq!(public, expected);
+        assert!(!format!("{public:?}").contains(private_id.as_str()));
+    }
+}
+
+#[test]
+fn schema_upgrade_while_snapshot_retention_waits_fails_without_removal() {
+    let temp = TempDir::new().unwrap();
+    let config = config(&temp);
+    let root = temp.path().join("scan-root");
+    std::fs::create_dir(&root).unwrap();
+    let engine =
+        EngineHandle::open_with_limits(config.clone(), RegistryLimits::testing(1, 2, 8, 8))
+            .unwrap();
+    publish_snapshots(&engine, &root, 3);
+    engine.set_snapshot_retention_cap(0).unwrap();
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let task = started_snapshot_retention(
+        engine
+            .start_snapshot_retention_with_test_hooks(
+                SystemTime::now() + Duration::from_secs(60),
+                move || {
+                    started_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                },
+                || {},
+                || {},
+            )
+            .unwrap(),
+    );
+    started_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    let future = crate::persistence::DATABASE_SCHEMA_VERSION + 1;
+    engine.inner.store.with_connection(|connection| {
+        connection
+            .execute(
+                "INSERT INTO schema_migrations
+                 (version, name, checksum_sha256, applied_at_unix_ms)
+                 VALUES (?1, 'future-snapshot-retention-race', zeroblob(32), 2)",
+                [i64::from(future)],
+            )
+            .unwrap();
+        connection
+            .pragma_update(None, "user_version", future)
+            .unwrap();
+    });
+    release_tx.send(()).unwrap();
+
+    let terminal = wait_terminal(&engine, task);
+    assert_eq!(terminal.phase, TaskPhase::Failed);
+    assert_eq!(
+        terminal.failure,
+        Some(TaskFailureKind::SnapshotRetention(
+            SnapshotRetentionFailureKind::IncompatibleSchema
+        ))
+    );
+    assert!(!terminal.result_available);
+    assert_eq!(final_snapshot_count(&config), 3);
+}
+
+#[test]
+fn invalid_snapshot_retention_clock_and_panic_release_exclusive_admission() {
+    let (_temp, engine) = engine_with_limits(RegistryLimits::testing(1, 2, 4, 8));
+    let invalid = started_snapshot_retention(
+        engine
+            .start_snapshot_retention_at(SystemTime::UNIX_EPOCH - Duration::from_millis(1))
+            .unwrap(),
+    );
+    assert_eq!(
+        wait_terminal(&engine, invalid).failure,
+        Some(TaskFailureKind::SnapshotRetention(
+            SnapshotRetentionFailureKind::InvalidClock
+        ))
+    );
+
+    let panicking = started_snapshot_retention(
+        engine
+            .start_snapshot_retention_with_test_hooks(
+                SystemTime::UNIX_EPOCH + Duration::from_millis(10_000),
+                || panic!("snapshot retention hook panic"),
+                || {},
+                || {},
+            )
+            .unwrap(),
+    );
+    assert_eq!(wait_terminal(&engine, panicking).phase, TaskPhase::Failed);
+    let replacement = started_snapshot_retention(
+        engine
+            .start_snapshot_retention_at(SystemTime::UNIX_EPOCH + Duration::from_millis(10_000))
             .unwrap(),
     );
     assert_eq!(

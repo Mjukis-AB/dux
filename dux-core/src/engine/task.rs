@@ -29,6 +29,7 @@ pub enum TaskKind {
     FormatSizeBatch,
     Scan,
     HistoryMaintenance,
+    SnapshotRetention,
 }
 
 /// Execution phase. Cancellation intent is reported separately until work is
@@ -58,6 +59,7 @@ pub enum TaskFailureKind {
     PersistenceUnavailable,
     PersistenceOutcomeUnknown,
     HistoryMaintenance(HistoryMaintenanceFailureKind),
+    SnapshotRetention(SnapshotRetentionFailureKind),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -69,6 +71,21 @@ pub enum HistoryMaintenanceFailureKind {
     UnsafeStorage,
     BudgetExceeded,
     CorruptData,
+    Unavailable,
+    OutcomeUnknown,
+    InternalState,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SnapshotRetentionFailureKind {
+    InvalidClock,
+    IncompatibleSchema,
+    Busy,
+    UnsafeStorage,
+    BudgetExceeded,
+    CorruptData,
+    IncompatibleSnapshot,
     Unavailable,
     OutcomeUnknown,
     InternalState,
@@ -112,6 +129,14 @@ pub enum TaskEventKind {
         raw_samples_pruned: u32,
         daily_rollups_pruned: u32,
         ai_insights_pruned: u32,
+        has_more: bool,
+    },
+    SnapshotRetentionBatchApplying,
+    SnapshotRetentionBatchFinished {
+        outcome: SnapshotRetentionOutcome,
+        cap_bytes: u64,
+        charged_bytes_before: u64,
+        charged_bytes_after: u64,
         has_more: bool,
     },
     CancellationRequested,
@@ -200,6 +225,74 @@ impl HistoryMaintenanceResult {
 
     pub const fn ai_insights_pruned(&self) -> u32 {
         self.ai_insights_pruned
+    }
+
+    pub const fn has_more(&self) -> bool {
+        self.has_more
+    }
+}
+
+/// Path-free outcome of one bounded snapshot-retention decision. Removed
+/// snapshot identities remain private observations inside the repository.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SnapshotRetentionOutcome {
+    UnderCap,
+    DeferredUnstable,
+    DeferredNoEligibleSnapshot,
+    RemovedTombstonedResidual { bytes: u64 },
+    TombstonedAndRemoved { bytes: u64 },
+}
+
+/// Immutable outcome from one idle-only snapshot-retention batch. `has_more`
+/// asks the caller to retry at a later idle boundary; core never self-enqueues.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SnapshotRetentionResult {
+    observed_at: SystemTime,
+    outcome: SnapshotRetentionOutcome,
+    cap_bytes: u64,
+    charged_bytes_before: u64,
+    charged_bytes_after: u64,
+    has_more: bool,
+}
+
+impl SnapshotRetentionResult {
+    pub(super) const fn new(
+        observed_at: SystemTime,
+        outcome: SnapshotRetentionOutcome,
+        cap_bytes: u64,
+        charged_bytes_before: u64,
+        charged_bytes_after: u64,
+        has_more: bool,
+    ) -> Self {
+        Self {
+            observed_at,
+            outcome,
+            cap_bytes,
+            charged_bytes_before,
+            charged_bytes_after,
+            has_more,
+        }
+    }
+
+    pub const fn observed_at(&self) -> SystemTime {
+        self.observed_at
+    }
+
+    pub const fn outcome(&self) -> SnapshotRetentionOutcome {
+        self.outcome
+    }
+
+    pub const fn cap_bytes(&self) -> u64 {
+        self.cap_bytes
+    }
+
+    pub const fn charged_bytes_before(&self) -> u64 {
+        self.charged_bytes_before
+    }
+
+    pub const fn charged_bytes_after(&self) -> u64 {
+        self.charged_bytes_after
     }
 
     pub const fn has_more(&self) -> bool {
@@ -669,6 +762,13 @@ pub enum CancelOutcome {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HistoryMaintenanceStartOutcome {
+    Started(TaskId),
+    AlreadyActive(TaskId),
+    DeferredBusy,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SnapshotRetentionStartOutcome {
     Started(TaskId),
     AlreadyActive(TaskId),
     DeferredBusy,

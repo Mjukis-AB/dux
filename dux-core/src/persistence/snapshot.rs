@@ -177,6 +177,7 @@ pub(crate) struct SnapshotRepositoryError {
 /// durability operations.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SnapshotRetentionBatchResult {
+    pub(crate) observed_at: SystemTime,
     pub(crate) outcome: SnapshotRetentionBatchOutcome,
     pub(crate) cap_bytes: u64,
     pub(crate) charged_bytes_before: u64,
@@ -203,6 +204,19 @@ fn map_codec(error: SnapshotCodecError) -> SnapshotRepositoryError {
 
 fn map_storage(error: SnapshotStorageError) -> SnapshotRepositoryError {
     repository_error(SnapshotRepositoryErrorKind::Storage(error.kind()))
+}
+
+fn charged_bytes_after_removal(
+    charged_bytes_before: u64,
+    removed_bytes: u64,
+) -> Result<u64, SnapshotRepositoryError> {
+    charged_bytes_before
+        .checked_sub(removed_bytes)
+        .ok_or_else(|| {
+            repository_error(SnapshotRepositoryErrorKind::Storage(
+                SnapshotStorageErrorKind::InternalState,
+            ))
+        })
 }
 
 impl SnapshotRepositoryError {
@@ -470,13 +484,6 @@ impl SnapshotRepository {
     /// pinned. The database guard and snapshot writer lease remain held from
     /// that proof through append-only tombstone commit and retained-handle
     /// unlink.
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "idle engine scheduling consumes this bounded batch in a later slice"
-        )
-    )]
     pub(crate) fn enforce_retention_cap(
         &self,
         observed_at: SystemTime,
@@ -492,6 +499,11 @@ impl SnapshotRepository {
         if self.access != SnapshotStoreAccess::ReadWrite {
             return Err(repository_error(SnapshotRepositoryErrorKind::ReadOnly));
         }
+        let observed_at = unix_ms_to_system_time(
+            system_time_to_unix_ms(observed_at, HistoryErrorKind::InvalidInput)
+                .map_err(map_history)?,
+        )
+        .map_err(map_history)?;
         let mut database_guard = self
             .database
             .lock_current_history_connection()
@@ -512,6 +524,8 @@ impl SnapshotRepository {
             let scan_id = residual.scan_id.clone();
             let file_name = residual.reference.file_name().clone();
             let expected_usage = residual.usage;
+            let charged_bytes_after =
+                charged_bytes_after_removal(charged_bytes_before, expected_usage.charged_bytes())?;
             let has_more = inventory.has_additional_work_after(&scan_id);
             let retained = storage
                 .retain_observed_final(&file_name)
@@ -532,19 +546,21 @@ impl SnapshotRepository {
                 .map_err(map_history)?;
             let bytes = removed.charged_bytes();
             return Ok(SnapshotRetentionBatchResult {
+                observed_at,
                 outcome: SnapshotRetentionBatchOutcome::RemovedTombstonedResidual {
                     scan_id,
                     bytes,
                 },
                 cap_bytes,
                 charged_bytes_before,
-                charged_bytes_after: charged_bytes_before.saturating_sub(bytes),
+                charged_bytes_after,
                 has_more,
             });
         }
 
         if charged_bytes_before <= cap_bytes {
             return Ok(SnapshotRetentionBatchResult {
+                observed_at,
                 outcome: SnapshotRetentionBatchOutcome::UnderCap,
                 cap_bytes,
                 charged_bytes_before,
@@ -554,6 +570,7 @@ impl SnapshotRepository {
         }
         if inventory.accounting_unstable {
             return Ok(SnapshotRetentionBatchResult {
+                observed_at,
                 outcome: SnapshotRetentionBatchOutcome::DeferredUnstable,
                 cap_bytes,
                 charged_bytes_before,
@@ -563,6 +580,7 @@ impl SnapshotRepository {
         }
         let Some(candidate) = inventory.oldest_eviction_candidate() else {
             return Ok(SnapshotRetentionBatchResult {
+                observed_at,
                 outcome: SnapshotRetentionBatchOutcome::DeferredNoEligibleSnapshot,
                 cap_bytes,
                 charged_bytes_before,
@@ -579,6 +597,8 @@ impl SnapshotRepository {
         let scan_id = candidate.scan_id.clone();
         let file_name = candidate.reference.file_name().clone();
         let expected_usage = candidate.usage;
+        let charged_bytes_after =
+            charged_bytes_after_removal(charged_bytes_before, expected_usage.charged_bytes())?;
         let has_more = inventory.has_additional_work_after(&scan_id);
         let tombstone = PreparedSnapshotRetentionTombstone::prepare(
             &candidate.reference,
@@ -648,10 +668,11 @@ impl SnapshotRepository {
             .map_err(map_history)?;
         let bytes = removed.charged_bytes();
         Ok(SnapshotRetentionBatchResult {
+            observed_at,
             outcome: SnapshotRetentionBatchOutcome::TombstonedAndRemoved { scan_id, bytes },
             cap_bytes,
             charged_bytes_before,
-            charged_bytes_after: charged_bytes_before.saturating_sub(bytes),
+            charged_bytes_after,
             has_more,
         })
     }
@@ -1987,6 +2008,15 @@ mod tests {
         })
     }
 
+    #[test]
+    fn retention_removal_accounting_fails_closed_on_underflow() {
+        assert_eq!(charged_bytes_after_removal(10, 4).unwrap(), 6);
+        assert_eq!(
+            charged_bytes_after_removal(4, 10).unwrap_err().kind,
+            SnapshotRepositoryErrorKind::Storage(SnapshotStorageErrorKind::InternalState)
+        );
+    }
+
     fn install_future_schema(database: &Path) {
         let future = super::super::status::DATABASE_SCHEMA_VERSION + 1;
         let external = rusqlite::Connection::open(database).unwrap();
@@ -2871,7 +2901,8 @@ mod tests {
                 completed_at,
             ));
         }
-        let observed_at = base + Duration::from_secs(30);
+        let canonical_observed_at = base + Duration::from_secs(30);
+        let observed_at = canonical_observed_at + Duration::from_nanos(999_999);
         store
             .set_snapshot_retention_cap_at_for_test(0, observed_at)
             .unwrap();
@@ -2881,6 +2912,7 @@ mod tests {
                 Err(HistoryError::new(HistoryErrorKind::DatabaseUnavailable))
             })
             .unwrap();
+        assert_eq!(first.observed_at, canonical_observed_at);
         assert!(matches!(
             first.outcome,
             SnapshotRetentionBatchOutcome::TombstonedAndRemoved { ref scan_id, .. }
@@ -2899,6 +2931,10 @@ mod tests {
         let second = repository
             .enforce_retention_cap(observed_at + Duration::from_millis(1))
             .unwrap();
+        assert_eq!(
+            second.observed_at,
+            canonical_observed_at + Duration::from_millis(1)
+        );
         assert!(matches!(
             second.outcome,
             SnapshotRetentionBatchOutcome::TombstonedAndRemoved { ref scan_id, .. }
@@ -2917,6 +2953,28 @@ mod tests {
         assert_eq!(retention_tombstone_count(&store), 2);
         assert!(repository.load(&references[2]).is_ok());
         assert!(repository.load(&references[3]).is_ok());
+    }
+
+    #[test]
+    fn retention_cap_normalizes_every_observation_and_rejects_an_invalid_clock() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let (_store, repository) = open_repository(&database);
+        let canonical_observed_at = UNIX_EPOCH + Duration::from_millis(1_750_000_005_500);
+
+        let under_cap = repository
+            .enforce_retention_cap(canonical_observed_at + Duration::from_nanos(999_999))
+            .unwrap();
+        assert_eq!(under_cap.observed_at, canonical_observed_at);
+        assert_eq!(under_cap.outcome, SnapshotRetentionBatchOutcome::UnderCap);
+
+        let error = repository
+            .enforce_retention_cap(UNIX_EPOCH - Duration::from_millis(1))
+            .unwrap_err();
+        assert_eq!(
+            error.kind,
+            SnapshotRepositoryErrorKind::History(HistoryErrorKind::InvalidInput)
+        );
     }
 
     #[test]

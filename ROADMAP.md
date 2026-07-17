@@ -2650,10 +2650,10 @@ Tasks:
     exposing paths. Tests cover event order, explicit `has_more` rescheduling,
     two engine sessions sharing one store, corrupt-row rollback, schema races,
     cancellation on both sides of the commit, duplicate/idle admission, panic
-    cleanup, and exclusive-marker release. The broad item remains open for
-    app/FFI idle and periodic scheduling, latest-two/pinned/2-GiB snapshot
-    retention, orphan/temp/stage maintenance, and explicit user clear-data
-    actions.
+    cleanup, and exclusive-marker release. At that checkpoint the broad item
+    still awaited the snapshot-retention prerequisites and writer recorded
+    below, plus app/FFI periodic scheduling, orphan/temp/stage maintenance, and
+    explicit user clear-data actions.
   - Snapshot logical-availability prerequisite completed 2026-07-16: schema v5
     adds an append-only `snapshot_retention_tombstones` relation whose exact
     succeeded scan ID, completion time, snapshot version, losslessly encoded
@@ -2760,8 +2760,9 @@ Tasks:
     reconciliation. It never trusts a cached settings DTO. Focused default/no-
     write, unknown-key, canonical-boundary, exact-retry/reset, reopen,
     malformed/newer-value-schema, clock, engine-lifecycle, multi-session, and
-    inventory-integration regressions cover the slice. No FFI/Swift setting,
-    tombstone writer, unlink, or cap-enforcement task exists yet.
+    inventory-integration regressions cover the slice. This prerequisite itself
+    added no FFI/Swift setting, tombstone writer, unlink, or cap-enforcement
+    task; those boundaries are recorded by the later checkpoints below.
 
   - Durable snapshot-temp-lease prerequisite completed 2026-07-16: schema v8
     adds a bounded immutable `snapshot_temp_leases` relation for the exact
@@ -2852,10 +2853,46 @@ Tasks:
     covers its delete-capable retained handle; native Windows runtime remains
     outstanding.
 
+  - Engine snapshot-retention orchestration sub-checkpoint completed
+    2026-07-17: `EngineHandle::start_snapshot_retention` now admits one typed,
+    path-free `SnapshotRetention` task only at a session-local idle boundary.
+    Closed, duplicate, foreground-busy, and other-maintenance-busy states
+    already visible at initial preflight are resolved before storage access;
+    after the compatibility refresh, lifecycle, duplicate, and idle admission
+    are rechecked before the task record becomes active. Duplicate requests
+    return the exact active task ID. Each admitted task samples its clock on the
+    worker and calls the sealed repository cap batch exactly once; it accepts
+    no cap, inventory, victim identity, or path and never self-enqueues another
+    batch.
+
+    The repository canonicalizes the observation time, rereads the cap, and
+    rebuilds the complete inventory under the final database-to-snapshot lock
+    order. The public result deliberately discards the selected scan identity
+    and exposes only the aggregate cap, charged bytes before and after,
+    `has_more`, and one of `UnderCap`, `DeferredUnstable`,
+    `DeferredNoEligibleSnapshot`, `RemovedTombstonedResidual { bytes }`, or
+    `TombstonedAndRemoved { bytes }`. Checked accounting is established before
+    physical mutation. Stable path-free failures cover clock, schema,
+    contention, unsafe storage, resource limits, corruption, snapshot-version
+    incompatibility, unavailability, commit ambiguity, and internal state.
+
+    Cancellation and close are ordered against
+    `SnapshotRetentionBatchApplying` under the registry lock. If cancellation
+    wins, the repository is not called; if Applying wins, later cancellation
+    remains visible intent and cannot rewrite the exact repository success or
+    failure. A task removes at most one final, publishes one finished event and
+    immutable result, and leaves any later retry to an explicit future native
+    scheduler. Focused tests cover typed under-cap and one-victim results,
+    event order, exact rescheduling, idle/deduplicated and cross-maintenance
+    admission, cancellation on both sides of Applying, schema races, stable
+    failure mapping, exclusive-marker release, and independently opened engine
+    sessions sharing one store.
+
     Production retention still requires app/FFI review-lease ownership and
-    idle scheduling, physical-orphan reconciliation, bounded marker-owned
-    terminal/unleased-temp and provisioning-stage scavenging, explicit
-    clear-data actions, and native Windows mutation-path runtime verification.
+    native periodic idle scheduling, physical-orphan reconciliation, bounded
+    marker-owned terminal/unleased-temp and provisioning-stage scavenging,
+    explicit clear-data actions, and native Windows mutation-path runtime
+    verification.
 - [x] Add engine integration tests with temporary HOME and database. Completed
   2026-07-16: an actual `dux-core` engine scans a fixture into an isolated
   platform-correct application-support/cache layout, closes to full worker

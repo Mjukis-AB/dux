@@ -55,6 +55,20 @@ All notable changes to DUX will be documented in this file.
   over-budget preflight regressions cover the boundary. The DTO is observation
   only: it cannot reconstruct a candidate or cleanup plan, mutate review or
   planning state, or reach an effect. FFI/Swift/UI/CLI transport remains later.
+- Added typed engine orchestration for one bounded snapshot-cap decision.
+  `EngineHandle::start_snapshot_retention` is idle-only, deduplicated per
+  session, mutually exclusive with other session maintenance, and invokes the
+  sealed repository writer exactly once without accepting a cap, inventory,
+  victim, scan identity, or path. Its immutable result discards the selected
+  scan identity and exposes only canonical time, aggregate cap/accounting,
+  `has_more`, and a path-free outcome. Applying linearizes cancellation and
+  close before repository mutation; later cancellation remains intent and
+  cannot rewrite the exact success or failure. Canonical clock, checked
+  pre-mutation accounting, under-cap/one-victim, explicit rescheduling,
+  duplicate/busy/cross-maintenance, schema-race, cancellation, stable-error,
+  and shared-store multi-session regressions cover the boundary. The core does
+  not self-schedule; native app/FFI review-lease ownership and periodic idle
+  scheduling remain future work.
 - Added the core production snapshot-cap mutation boundary. One bounded batch
   holds the current-schema database lease before the snapshot writer lease,
   rebuilds the complete cap/latest-two/active-pin inventory, refuses new
@@ -70,7 +84,8 @@ All notable changes to DUX will be documented in this file.
   latest-two, active-pin, active/unleased-temp deferral, quiescent-temp
   continuation, one-victim, changed-content, post-validation replacement, Unix
   identity, and Windows compile regressions cover the boundary. This remains a
-  sealed core-only batch: app/FFI review-lease ownership, idle scheduling,
+  sealed repository batch whose only orchestrator is the typed core engine
+  task: app/FFI review-lease ownership, native periodic idle scheduling,
   orphan and
   unleased-temp/stage scavenging, clear-data actions, and native Windows runtime
   verification remain separate.

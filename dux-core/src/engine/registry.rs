@@ -33,9 +33,10 @@ use super::task::{
     DurableScanCounts, DurableScanCoverage, DurableScanStatus, DurableScanSummary, EngineLifecycle,
     EngineOpenError, FormatSizeBatchResult, FormattedSizeEntry, HistoryMaintenanceFailureKind,
     HistoryMaintenanceResult, HistoryMaintenanceStartOutcome, RecentScanHistory, ScanHistoryError,
-    ScanRootErrorKind, ScanTaskCounts, ScanTaskResult, ScanTaskStatus, StartTaskError,
-    TaskAccessError, TaskEvent, TaskEventBatch, TaskEventKind, TaskFailureKind, TaskId, TaskKind,
-    TaskPhase, TaskSnapshot,
+    ScanRootErrorKind, ScanTaskCounts, ScanTaskResult, ScanTaskStatus,
+    SnapshotRetentionFailureKind, SnapshotRetentionOutcome, SnapshotRetentionResult,
+    SnapshotRetentionStartOutcome, StartTaskError, TaskAccessError, TaskEvent, TaskEventBatch,
+    TaskEventKind, TaskFailureKind, TaskId, TaskKind, TaskPhase, TaskSnapshot,
 };
 use crate::domain::{
     CANDIDATE_CATALOG_SCHEMA_VERSION, CANDIDATE_CATALOG_SHA256, CANDIDATE_CONTEXT_FORMAT_VERSION,
@@ -45,7 +46,8 @@ use crate::domain::{
 };
 use crate::persistence::snapshot::from_scan::prepare_completed_scan;
 use crate::persistence::snapshot::{
-    HostValue, SnapshotRepository, SnapshotRepositoryErrorKind, SnapshotStoreAccess,
+    HostValue, SnapshotCodecErrorKind, SnapshotRepository, SnapshotRepositoryErrorKind,
+    SnapshotRetentionBatchOutcome, SnapshotStorageErrorKind, SnapshotStoreAccess,
 };
 use crate::persistence::{
     CandidateEvaluationCompletion, CandidateEvaluationFailureKind, CandidateEvaluationIdentity,
@@ -150,6 +152,7 @@ enum TaskResult {
     FormatSizeBatch(Arc<FormatSizeBatchResult>),
     Scan(Arc<ScanTaskResult>),
     HistoryMaintenance(Arc<HistoryMaintenanceResult>),
+    SnapshotRetention(Arc<SnapshotRetentionResult>),
     #[cfg(test)]
     TestOnly,
 }
@@ -249,6 +252,34 @@ impl TaskContext {
         let event_limit = self.shared.limits.events_per_task;
         if let Some(record) = registry.records.get_mut(&self.id)
             && record.kind == TaskKind::HistoryMaintenance
+            && !record.phase.is_terminal()
+        {
+            record.push_event(kind, event_limit);
+        }
+    }
+
+    /// Order cancellation against the first repository operation that may
+    /// durably tombstone or physically remove an exact DUX snapshot.
+    fn try_begin_snapshot_retention_batch(&self) -> bool {
+        let mut registry = self.shared.lock_registry_recover();
+        let event_limit = self.shared.limits.events_per_task;
+        if let Some(record) = registry.records.get_mut(&self.id)
+            && record.kind == TaskKind::SnapshotRetention
+            && record.phase == TaskPhase::Running
+            && !record.cancellation_requested
+        {
+            record.push_event(TaskEventKind::SnapshotRetentionBatchApplying, event_limit);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn report_snapshot_retention_finished(&self, kind: TaskEventKind) {
+        let mut registry = self.shared.lock_registry_recover();
+        let event_limit = self.shared.limits.events_per_task;
+        if let Some(record) = registry.records.get_mut(&self.id)
+            && record.kind == TaskKind::SnapshotRetention
             && !record.phase.is_terminal()
         {
             record.push_event(kind, event_limit);
@@ -355,6 +386,7 @@ struct Registry {
     live_workers: usize,
     active_scan_roots: HashMap<PathBuf, TaskId>,
     active_history_maintenance: Option<TaskId>,
+    active_snapshot_retention: Option<TaskId>,
 }
 
 impl Registry {
@@ -368,6 +400,7 @@ impl Registry {
             live_workers: 0,
             active_scan_roots: HashMap::new(),
             active_history_maintenance: None,
+            active_snapshot_retention: None,
         }
     }
 
@@ -388,6 +421,9 @@ impl Registry {
         }
         if kind == TaskKind::HistoryMaintenance && self.active_history_maintenance == Some(id) {
             self.active_history_maintenance = None;
+        }
+        if kind == TaskKind::SnapshotRetention && self.active_snapshot_retention == Some(id) {
+            self.active_snapshot_retention = None;
         }
     }
 }
@@ -1055,6 +1091,124 @@ impl EngineHandle {
         Ok(None)
     }
 
+    /// Start one bounded snapshot-cap enforcement decision. The repository
+    /// repeats settings, pin, temp, history, identity, and usage validation
+    /// under its final database-to-snapshot lock boundary and removes at most
+    /// one DUX-owned final. `has_more` is only a later idle-rescheduling hint.
+    pub fn start_snapshot_retention(
+        &self,
+    ) -> Result<SnapshotRetentionStartOutcome, StartTaskError> {
+        self.start_snapshot_retention_with_hooks(SystemTime::now, || {}, || {}, || {})
+    }
+
+    #[cfg(test)]
+    fn start_snapshot_retention_at(
+        &self,
+        observed_at: SystemTime,
+    ) -> Result<SnapshotRetentionStartOutcome, StartTaskError> {
+        self.start_snapshot_retention_with_hooks(move || observed_at, || {}, || {}, || {})
+    }
+
+    #[cfg(test)]
+    fn start_snapshot_retention_with_test_hooks(
+        &self,
+        observed_at: SystemTime,
+        before_batch: impl FnOnce() + Send + 'static,
+        after_applying: impl FnOnce() + Send + 'static,
+        after_batch: impl FnOnce() + Send + 'static,
+    ) -> Result<SnapshotRetentionStartOutcome, StartTaskError> {
+        self.start_snapshot_retention_with_hooks(
+            move || observed_at,
+            before_batch,
+            after_applying,
+            after_batch,
+        )
+    }
+
+    fn start_snapshot_retention_with_hooks(
+        &self,
+        clock: impl FnOnce() -> SystemTime + Send + 'static,
+        before_batch: impl FnOnce() + Send + 'static,
+        after_applying: impl FnOnce() + Send + 'static,
+        after_batch: impl FnOnce() + Send + 'static,
+    ) -> Result<SnapshotRetentionStartOutcome, StartTaskError> {
+        if let Some(outcome) = self.snapshot_retention_preflight()? {
+            return Ok(outcome);
+        }
+        let status = self
+            .inner
+            .store
+            .status()
+            .map_err(|_| StartTaskError::PersistenceUnavailable)?;
+        if !matches!(
+            status.access,
+            crate::persistence::DatabaseAccess::ReadWriteCurrent
+        ) {
+            return Err(StartTaskError::ReadOnlyStore);
+        }
+        let snapshots = Arc::clone(&self.inner.snapshots);
+        self.submit_snapshot_retention(Box::new(move |context| {
+            if context.is_cancellation_requested() {
+                return WorkOutcome::Cancelled(None);
+            }
+            let observed_at = clock();
+            before_batch();
+            if !context.try_begin_snapshot_retention_batch() {
+                return WorkOutcome::Cancelled(None);
+            }
+            // Applying is the point of no return. Cancellation after this
+            // point remains intent and cannot suppress or rewrite the exact
+            // repository outcome.
+            after_applying();
+            match snapshots.enforce_retention_cap(observed_at) {
+                Ok(result) => {
+                    let outcome = public_snapshot_retention_outcome(&result.outcome);
+                    let result = Arc::new(SnapshotRetentionResult::new(
+                        result.observed_at,
+                        outcome,
+                        result.cap_bytes,
+                        result.charged_bytes_before,
+                        result.charged_bytes_after,
+                        result.has_more,
+                    ));
+                    after_batch();
+                    context.report_snapshot_retention_finished(
+                        TaskEventKind::SnapshotRetentionBatchFinished {
+                            outcome: result.outcome(),
+                            cap_bytes: result.cap_bytes(),
+                            charged_bytes_before: result.charged_bytes_before(),
+                            charged_bytes_after: result.charged_bytes_after(),
+                            has_more: result.has_more(),
+                        },
+                    );
+                    WorkOutcome::Succeeded(TaskResult::SnapshotRetention(result))
+                }
+                Err(error) => WorkOutcome::Failed(map_snapshot_retention_failure(error.kind), None),
+            }
+        }))
+    }
+
+    fn snapshot_retention_preflight(
+        &self,
+    ) -> Result<Option<SnapshotRetentionStartOutcome>, StartTaskError> {
+        let registry = self
+            .inner
+            .shared
+            .registry
+            .lock()
+            .map_err(|_| StartTaskError::InternalState)?;
+        if registry.lifecycle != EngineLifecycle::Open {
+            return Err(StartTaskError::Closed);
+        }
+        if let Some(existing) = registry.active_snapshot_retention {
+            return Ok(Some(SnapshotRetentionStartOutcome::AlreadyActive(existing)));
+        }
+        if registry.running_tasks != 0 || !registry.queue.is_empty() {
+            return Ok(Some(SnapshotRetentionStartOutcome::DeferredBusy));
+        }
+        Ok(None)
+    }
+
     /// Start one full, no-follow, same-filesystem scan. Root validation and
     /// overlapping-scope admission are synchronous; the durable scan ID is
     /// generated only after a worker starts, so queued cancellation leaves no
@@ -1205,7 +1359,11 @@ impl EngineHandle {
         }
         Ok(match &record.result {
             Some(TaskResult::FormatSizeBatch(result)) => Some(Arc::clone(result)),
-            Some(TaskResult::Scan(_) | TaskResult::HistoryMaintenance(_)) => {
+            Some(
+                TaskResult::Scan(_)
+                | TaskResult::HistoryMaintenance(_)
+                | TaskResult::SnapshotRetention(_),
+            ) => {
                 return Err(TaskAccessError::WrongTaskKind);
             }
             #[cfg(test)]
@@ -1225,7 +1383,11 @@ impl EngineHandle {
         }
         Ok(match &record.result {
             Some(TaskResult::Scan(result)) => Some(Arc::clone(result)),
-            Some(TaskResult::FormatSizeBatch(_) | TaskResult::HistoryMaintenance(_)) => {
+            Some(
+                TaskResult::FormatSizeBatch(_)
+                | TaskResult::HistoryMaintenance(_)
+                | TaskResult::SnapshotRetention(_),
+            ) => {
                 return Err(TaskAccessError::WrongTaskKind);
             }
             #[cfg(test)]
@@ -1248,9 +1410,38 @@ impl EngineHandle {
         }
         Ok(match &record.result {
             Some(TaskResult::HistoryMaintenance(result)) => Some(Arc::clone(result)),
-            Some(TaskResult::FormatSizeBatch(_) | TaskResult::Scan(_)) => {
+            Some(
+                TaskResult::FormatSizeBatch(_)
+                | TaskResult::Scan(_)
+                | TaskResult::SnapshotRetention(_),
+            ) => {
                 return Err(TaskAccessError::WrongTaskKind);
             }
+            #[cfg(test)]
+            Some(TaskResult::TestOnly) => return Err(TaskAccessError::WrongTaskKind),
+            None => None,
+        })
+    }
+
+    pub fn snapshot_retention_result(
+        &self,
+        id: TaskId,
+    ) -> Result<Option<Arc<SnapshotRetentionResult>>, TaskAccessError> {
+        let registry = self.lock_open_registry()?;
+        let record = registry
+            .records
+            .get(&id)
+            .ok_or(TaskAccessError::UnknownTask)?;
+        if record.kind != TaskKind::SnapshotRetention {
+            return Err(TaskAccessError::WrongTaskKind);
+        }
+        Ok(match &record.result {
+            Some(TaskResult::SnapshotRetention(result)) => Some(Arc::clone(result)),
+            Some(
+                TaskResult::FormatSizeBatch(_)
+                | TaskResult::Scan(_)
+                | TaskResult::HistoryMaintenance(_),
+            ) => return Err(TaskAccessError::WrongTaskKind),
             #[cfg(test)]
             Some(TaskResult::TestOnly) => return Err(TaskAccessError::WrongTaskKind),
             None => None,
@@ -1413,6 +1604,42 @@ impl EngineHandle {
         registry.queue.push_back(Job { id, work });
         self.inner.shared.workers_ready.notify_one();
         Ok(HistoryMaintenanceStartOutcome::Started(id))
+    }
+
+    fn submit_snapshot_retention(
+        &self,
+        work: Work,
+    ) -> Result<SnapshotRetentionStartOutcome, StartTaskError> {
+        let mut registry = self
+            .inner
+            .shared
+            .registry
+            .lock()
+            .map_err(|_| StartTaskError::InternalState)?;
+        if registry.lifecycle != EngineLifecycle::Open {
+            return Err(StartTaskError::Closed);
+        }
+        if let Some(existing) = registry.active_snapshot_retention {
+            return Ok(SnapshotRetentionStartOutcome::AlreadyActive(existing));
+        }
+        // Snapshot retention shares the lowest-priority idle boundary with
+        // history maintenance. The queued/running check also prevents the two
+        // maintenance classes from being active in one engine session.
+        if registry.running_tasks != 0 || !registry.queue.is_empty() {
+            return Ok(SnapshotRetentionStartOutcome::DeferredBusy);
+        }
+        let id = TASK_IDS.allocate()?;
+        let record = TaskRecord::new(
+            id,
+            TaskKind::SnapshotRetention,
+            None,
+            self.inner.shared.limits.events_per_task,
+        );
+        registry.active_snapshot_retention = Some(id);
+        registry.records.insert(id, record);
+        registry.queue.push_back(Job { id, work });
+        self.inner.shared.workers_ready.notify_one();
+        Ok(SnapshotRetentionStartOutcome::Started(id))
     }
 
     fn lock_open_registry(&self) -> Result<std::sync::MutexGuard<'_, Registry>, TaskAccessError> {
@@ -2408,6 +2635,86 @@ const fn map_history_maintenance_failure(kind: HistoryErrorKind) -> TaskFailureK
         | HistoryErrorKind::InternalState => HistoryMaintenanceFailureKind::InternalState,
     };
     TaskFailureKind::HistoryMaintenance(kind)
+}
+
+const fn public_snapshot_retention_outcome(
+    outcome: &SnapshotRetentionBatchOutcome,
+) -> SnapshotRetentionOutcome {
+    match outcome {
+        SnapshotRetentionBatchOutcome::UnderCap => SnapshotRetentionOutcome::UnderCap,
+        SnapshotRetentionBatchOutcome::DeferredUnstable => {
+            SnapshotRetentionOutcome::DeferredUnstable
+        }
+        SnapshotRetentionBatchOutcome::DeferredNoEligibleSnapshot => {
+            SnapshotRetentionOutcome::DeferredNoEligibleSnapshot
+        }
+        SnapshotRetentionBatchOutcome::RemovedTombstonedResidual { bytes, .. } => {
+            SnapshotRetentionOutcome::RemovedTombstonedResidual { bytes: *bytes }
+        }
+        SnapshotRetentionBatchOutcome::TombstonedAndRemoved { bytes, .. } => {
+            SnapshotRetentionOutcome::TombstonedAndRemoved { bytes: *bytes }
+        }
+    }
+}
+
+const fn map_snapshot_retention_failure(kind: SnapshotRepositoryErrorKind) -> TaskFailureKind {
+    let kind = match kind {
+        SnapshotRepositoryErrorKind::ReadOnly
+        | SnapshotRepositoryErrorKind::MissingStore
+        | SnapshotRepositoryErrorKind::ReviewLeaseExpired => {
+            SnapshotRetentionFailureKind::InternalState
+        }
+        SnapshotRepositoryErrorKind::MissingSnapshot
+        | SnapshotRepositoryErrorKind::SnapshotUnavailable
+        | SnapshotRepositoryErrorKind::ReferenceMismatch => {
+            SnapshotRetentionFailureKind::CorruptData
+        }
+        SnapshotRepositoryErrorKind::IncompatibleVersion => {
+            SnapshotRetentionFailureKind::IncompatibleSnapshot
+        }
+        SnapshotRepositoryErrorKind::Codec(kind) => match kind {
+            SnapshotCodecErrorKind::InvalidInput => SnapshotRetentionFailureKind::InternalState,
+            SnapshotCodecErrorKind::Io => SnapshotRetentionFailureKind::Unavailable,
+            SnapshotCodecErrorKind::LimitExceeded => SnapshotRetentionFailureKind::BudgetExceeded,
+            SnapshotCodecErrorKind::IncompatibleVersion => {
+                SnapshotRetentionFailureKind::IncompatibleSnapshot
+            }
+            SnapshotCodecErrorKind::InvalidMagic
+            | SnapshotCodecErrorKind::InvalidLength
+            | SnapshotCodecErrorKind::ChecksumMismatch
+            | SnapshotCodecErrorKind::CorruptData => SnapshotRetentionFailureKind::CorruptData,
+        },
+        SnapshotRepositoryErrorKind::Storage(kind) => match kind {
+            SnapshotStorageErrorKind::InvalidConfiguration
+            | SnapshotStorageErrorKind::InternalState => {
+                SnapshotRetentionFailureKind::InternalState
+            }
+            SnapshotStorageErrorKind::UnsafeRoot
+            | SnapshotStorageErrorKind::UnsafeObject
+            | SnapshotStorageErrorKind::UnrecognizedStore => {
+                SnapshotRetentionFailureKind::UnsafeStorage
+            }
+            SnapshotStorageErrorKind::Unavailable => SnapshotRetentionFailureKind::Unavailable,
+            SnapshotStorageErrorKind::Busy => SnapshotRetentionFailureKind::Busy,
+        },
+        SnapshotRepositoryErrorKind::History(kind) => match kind {
+            HistoryErrorKind::InvalidInput => SnapshotRetentionFailureKind::InvalidClock,
+            HistoryErrorKind::IncompatibleSchema => {
+                SnapshotRetentionFailureKind::IncompatibleSchema
+            }
+            HistoryErrorKind::QueryLimitExceeded => SnapshotRetentionFailureKind::BudgetExceeded,
+            HistoryErrorKind::Busy => SnapshotRetentionFailureKind::Busy,
+            HistoryErrorKind::UnsafeStorage => SnapshotRetentionFailureKind::UnsafeStorage,
+            HistoryErrorKind::CorruptData => SnapshotRetentionFailureKind::CorruptData,
+            HistoryErrorKind::DatabaseUnavailable => SnapshotRetentionFailureKind::Unavailable,
+            HistoryErrorKind::OutcomeUnknown => SnapshotRetentionFailureKind::OutcomeUnknown,
+            HistoryErrorKind::AlreadyExists
+            | HistoryErrorKind::NotFound
+            | HistoryErrorKind::InvalidTransition
+            | HistoryErrorKind::InternalState => SnapshotRetentionFailureKind::InternalState,
+        },
+    };
+    TaskFailureKind::SnapshotRetention(kind)
 }
 
 const fn public_candidate_evaluation_failure(
