@@ -30,4 +30,14 @@ final class AppActivationTests: XCTestCase {
 
         XCTAssertEqual(identifiers, [DuxSceneID.explorer, DuxSceneID.explorer])
     }
+
+    func testStorageAccessGuidanceUsesTheInjectedSystemSettingsAction() {
+        var openCount = 0
+
+        AppActivation.openStorageAccessSettings {
+            openCount += 1
+        }
+
+        XCTAssertEqual(openCount, 1)
+    }
 }

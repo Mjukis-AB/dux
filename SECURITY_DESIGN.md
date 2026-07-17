@@ -1686,10 +1686,16 @@ observed access evidence and structured scan coverage, never a fabricated
 boolean or a claim of complete disk knowledge.
 
 The app MUST provide useful capacity and accessible-root analysis with limited
-coverage. It MUST offer System Settings guidance only after explaining a
-concrete gap and MUST re-probe when the app becomes active. It MUST never ask
-for administrator credentials, disable platform protections, or install a privileged helper to
-gain coverage.
+coverage. A first-run explanation may persist only its acknowledgement and MUST
+NOT scan, probe, sample capacity, invoke FFI, or request permission. The app MUST
+offer System Settings guidance only after a concrete scan-coverage gap and an
+explicit broader-analysis request. Any observed-access check MUST be bounded to
+opening a fixed reviewed set of directories without enumerating names or reading
+contents, and presentation receives only path-free aggregate counts. Returning
+active MUST re-probe exactly once only when opening that guidance armed the
+check; ordinary activation MUST do nothing. Re-probing MUST NOT start a scan or
+claim that coverage changed. It MUST never ask for administrator credentials,
+disable platform protections, or install a privileged helper to gain coverage.
 
 The public app MUST use Hardened Runtime, library validation, the smallest
 reviewed entitlement set, and signed bundled code. `SMAppService.mainApp`

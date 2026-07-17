@@ -25,6 +25,9 @@ final class AppModel: DuxCapacitySampling {
     private(set) var notificationAuthorizationState = NotificationAuthorizationState.idle
     private(set) var menuBarVisibilityPreference: MenuBarVisibilityPreference
     private(set) var isMenuBarItemInserted = true
+    private(set) var showsStorageAccessIntroduction: Bool
+    private(set) var broaderStorageAnalysisRequested = false
+    private(set) var storageAccessProbeState = StorageAccessProbeState.idle
 
     private let engineService: any EngineServing
     private let volumeMonitor: any VolumeMonitoring
@@ -35,6 +38,9 @@ final class AppModel: DuxCapacitySampling {
     private let loginItemService: any LoginItemServing
     private let notificationService: any NotificationServing
     private let menuBarVisibilityPreferenceStore: any MenuBarVisibilityPreferenceStoring
+    private let storageAccessIntroductionPreferenceStore:
+        any StorageAccessIntroductionPreferenceStoring
+    private let storageAccessProbe: any StorageAccessProbing
 
     @ObservationIgnored
     private var engineLoadTask: Task<Void, Never>?
@@ -72,6 +78,14 @@ final class AppModel: DuxCapacitySampling {
     private var notificationAuthorizationGeneration: UInt64 = 0
     @ObservationIgnored
     private var menuBarRevealOverride = false
+    @ObservationIgnored
+    private var storageAccessProbeTask: Task<Void, Never>?
+    @ObservationIgnored
+    private var storageAccessProbeGeneration: UInt64 = 0
+    @ObservationIgnored
+    private var storageAccessReturnProbeArmed = false
+    @ObservationIgnored
+    private var storageAccessProbeIsInvalidated = false
 
     init(
         engineService: any EngineServing = EngineService(),
@@ -85,7 +99,11 @@ final class AppModel: DuxCapacitySampling {
         loginItemService: any LoginItemServing = LoginItemService(),
         notificationService: any NotificationServing = NotificationService(),
         menuBarVisibilityPreferenceStore: any MenuBarVisibilityPreferenceStoring =
-            UserDefaultsMenuBarVisibilityPreferenceStore()
+            UserDefaultsMenuBarVisibilityPreferenceStore(),
+        storageAccessIntroductionPreferenceStore:
+            any StorageAccessIntroductionPreferenceStoring =
+            UserDefaultsStorageAccessIntroductionPreferenceStore(),
+        storageAccessProbe: any StorageAccessProbing = StorageAccessProbeService()
     ) {
         self.engineService = engineService
         self.volumeMonitor = volumeMonitor
@@ -99,8 +117,13 @@ final class AppModel: DuxCapacitySampling {
         self.loginItemService = loginItemService
         self.notificationService = notificationService
         self.menuBarVisibilityPreferenceStore = menuBarVisibilityPreferenceStore
+        self.storageAccessIntroductionPreferenceStore =
+            storageAccessIntroductionPreferenceStore
+        self.storageAccessProbe = storageAccessProbe
         menuBarLabelMode = menuBarLabelPreferenceStore.load()
         menuBarVisibilityPreference = menuBarVisibilityPreferenceStore.load()
+        showsStorageAccessIntroduction =
+            !storageAccessIntroductionPreferenceStore.loadAcknowledged()
         updateMenuBarVisibility()
     }
 
@@ -455,6 +478,85 @@ final class AppModel: DuxCapacitySampling {
     func revealMenuBarItemForSession() {
         menuBarRevealOverride = true
         isMenuBarItemInserted = true
+    }
+
+    func acknowledgeStorageAccessIntroduction() {
+        guard showsStorageAccessIntroduction else {
+            return
+        }
+        showsStorageAccessIntroduction = false
+        storageAccessIntroductionPreferenceStore.saveAcknowledged()
+    }
+
+    func requestBroaderStorageAnalysis() async {
+        guard !storageAccessProbeIsInvalidated else {
+            return
+        }
+        broaderStorageAnalysisRequested = true
+        await refreshStorageAccessEvidence()
+    }
+
+    func refreshStorageAccessEvidence() async {
+        guard broaderStorageAnalysisRequested, !storageAccessProbeIsInvalidated else {
+            return
+        }
+        if let storageAccessProbeTask {
+            await storageAccessProbeTask.value
+            return
+        }
+
+        storageAccessProbeGeneration &+= 1
+        let generation = storageAccessProbeGeneration
+        let previous = storageAccessProbeState.evidence
+        storageAccessProbeState = .checking(previous: previous)
+        let probe = storageAccessProbe
+        let task = Task { @MainActor [weak self] in
+            let result: Result<StorageAccessEvidence, Error>
+            do {
+                result = .success(try await probe.probe())
+            } catch {
+                result = .failure(error)
+            }
+            guard !Task.isCancelled, let self,
+                  generation == self.storageAccessProbeGeneration else {
+                return
+            }
+            switch result {
+            case let .success(evidence):
+                self.storageAccessProbeState = .observed(evidence)
+            case .failure:
+                self.storageAccessProbeState = .failed(previous: previous)
+            }
+            self.storageAccessProbeTask = nil
+        }
+        storageAccessProbeTask = task
+        await task.value
+    }
+
+    func armStorageAccessSettingsReturnProbe() {
+        guard broaderStorageAnalysisRequested, !storageAccessProbeIsInvalidated else {
+            return
+        }
+        storageAccessReturnProbeArmed = true
+    }
+
+    func refreshStorageAccessEvidenceAfterActivation() async {
+        guard storageAccessReturnProbeArmed else {
+            return
+        }
+        storageAccessReturnProbeArmed = false
+        await refreshStorageAccessEvidence()
+    }
+
+    func invalidateStorageAccessProbeOperations() {
+        storageAccessProbeIsInvalidated = true
+        storageAccessProbeGeneration &+= 1
+        storageAccessProbeTask?.cancel()
+        storageAccessProbeTask = nil
+        storageAccessReturnProbeArmed = false
+        storageAccessProbeState = storageAccessProbeState.evidence.map {
+            .observed($0)
+        } ?? .idle
     }
 
     func startHomeScan() async {

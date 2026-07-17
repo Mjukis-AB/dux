@@ -13,6 +13,11 @@ struct MenuBarContentView: View {
         )
 
         VStack(alignment: .leading, spacing: 14) {
+            if model.showsStorageAccessIntroduction {
+                storageAccessIntroduction
+                Divider()
+            }
+
             volumeSummary(presentation.volume, actions: presentation.actions)
 
             if let scan = presentation.scan {
@@ -77,6 +82,38 @@ struct MenuBarContentView: View {
         .task {
             await model.loadInitialState()
         }
+    }
+
+    private var storageAccessIntroduction: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("Understand your storage locally", systemImage: "hand.raised.fill")
+                .font(.headline)
+            Text(
+                String(
+                    localized:
+                        "Home scans run locally and never change your files. DUX starts with the access your account already has; Full Disk Access is optional."
+                )
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            Text(
+                String(
+                    localized:
+                        "When you scan, DUX reports limited coverage instead of pretending it saw everything."
+                )
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            Button("Continue") {
+                model.acknowledgeStorageAccessIntroduction()
+            }
+            .accessibilityIdentifier(StorageAccessAccessibility.introductionContinue)
+            .accessibilityHint("Dismisses this introduction without starting a scan")
+        }
+        .padding(10)
+        .background(.quaternary, in: RoundedRectangle(cornerRadius: 9))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier(StorageAccessAccessibility.introduction)
     }
 
     @ViewBuilder

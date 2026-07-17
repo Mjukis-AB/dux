@@ -3640,7 +3640,31 @@ Tasks:
   pass. XcodeGen is deterministic, Debug/Release Swift bindings are
   byte-identical, and unsigned universal arm64/x86_64 Debug and Release apps
   target macOS 14.
-- [ ] Implement permission/coverage onboarding.
+- [x] Implement permission/coverage onboarding. Completed 2026-07-17: the
+  menu-bar popover gives a truthful, one-time local-analysis introduction that
+  persists only the acknowledgement and starts no scan, probe, capacity sample,
+  FFI call, or permission prompt. Explorer continues to report the actual Home
+  scan's typed coverage. Only a measured incomplete or uncertain result offers
+  **Understand broader access…**; the app remains useful with the files it can
+  already read and never presents Full Disk Access as a first-run requirement.
+
+  Broader-access discovery is explicit and bounded to directory-open checks for
+  three fixed user-library locations. It never enumerates names, reads file
+  contents, returns paths to presentation state, or claims that Full Disk Access
+  is enabled. Because macOS exposes no authoritative public status query, the UI
+  reports only observed readable, unreadable, and unobserved counts. Optional
+  System Settings guidance uses a stable generic app-opening action rather than
+  an undocumented deep link. A return-to-app check runs exactly once only after
+  that action was used; updating scan coverage still requires an explicit new
+  Home scan.
+
+  Probe work is off-main, single-flight, survives caller cancellation, retains
+  the last evidence through refreshes and failures, and is generation-fenced at
+  shutdown. Eleven focused onboarding tests plus activation integration bring
+  the complete linked Swift suite to 183 tests. Full Rust and repository gates,
+  source-authority counts, deterministic project generation, binding parity,
+  and universal Debug/Release build results are recorded in the changelog for
+  this checkpoint.
 - [ ] Add signed/notarized local release script.
 
 Exit criteria:

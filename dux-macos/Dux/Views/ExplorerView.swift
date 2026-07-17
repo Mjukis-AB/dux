@@ -11,6 +11,11 @@ struct ExplorerView: View {
             volumeState: model.volumeState,
             scanState: model.scanState
         )
+        let storageAccess = StorageAccessOnboardingPresentation.make(
+            scanState: model.scanState,
+            broaderAnalysisRequested: model.broaderStorageAnalysisRequested,
+            probeState: model.storageAccessProbeState
+        )
 
         NavigationSplitView {
             List(selection: $selection) {
@@ -37,7 +42,11 @@ struct ExplorerView: View {
             .navigationSplitViewColumnWidth(min: 180, ideal: 210, max: 250)
             .accessibilityIdentifier(ExplorerAccessibility.sidebar)
         } detail: {
-            ExplorerOverviewView(presentation: presentation)
+            ExplorerOverviewView(
+                presentation: presentation,
+                storageAccess: storageAccess,
+                model: model
+            )
                 .navigationTitle("Overview")
         }
         .navigationSplitViewStyle(.balanced)
@@ -98,6 +107,8 @@ struct ExplorerView: View {
 
 private struct ExplorerOverviewView: View {
     let presentation: ExplorerPresentation
+    let storageAccess: StorageAccessOnboardingPresentation
+    let model: AppModel
 
     var body: some View {
         ScrollView {
@@ -114,10 +125,105 @@ private struct ExplorerOverviewView: View {
                     coverage: presentation.coverage,
                     scan: presentation.scan
                 )
+                storageAccessCard(storageAccess)
             }
             .padding(28)
             .frame(maxWidth: 860, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    @ViewBuilder
+    private func storageAccessCard(
+        _ access: StorageAccessOnboardingPresentation
+    ) -> some View {
+        if access.showsBroaderAnalysisAction || access.showsGuidance {
+            GroupBox {
+                VStack(alignment: .leading, spacing: 12) {
+                    if access.showsBroaderAnalysisAction {
+                        Text(
+                            String(
+                                localized:
+                                    "Your Home scan found incomplete or uncertain coverage. DUX remains useful with the files it could read."
+                            )
+                        )
+                        .foregroundStyle(.secondary)
+
+                        Button("Understand broader access…") {
+                            Task { await model.requestBroaderStorageAnalysis() }
+                        }
+                        .accessibilityIdentifier(
+                            StorageAccessAccessibility.broaderAnalysis
+                        )
+                        .accessibilityHint(
+                            "Checks bounded observed access before offering optional guidance"
+                        )
+                    }
+
+                    if access.showsGuidance {
+                        HStack(alignment: .top, spacing: 10) {
+                            if access.showsProgress {
+                                ProgressView()
+                                    .controlSize(.small)
+                            } else {
+                                Image(systemName: "exclamationmark.shield.fill")
+                                    .foregroundStyle(.orange)
+                            }
+                            VStack(alignment: .leading, spacing: 4) {
+                                if let title = access.statusTitle {
+                                    Text(verbatim: title)
+                                        .font(.headline)
+                                }
+                                if let detail = access.statusDetail {
+                                    Text(verbatim: detail)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                        .accessibilityElement(children: .combine)
+                        .accessibilityIdentifier(StorageAccessAccessibility.probeStatus)
+
+                        Text(
+                            String(
+                                localized:
+                                    "Full Disk Access is optional. To try broader coverage, open System Settings, choose Privacy & Security, then Full Disk Access. Return to DUX to recheck observed access. Run a new Home scan yourself to update its coverage result."
+                            )
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                        HStack {
+                            if access.showsSystemSettingsAction {
+                                Button("Open System Settings…") {
+                                    model.armStorageAccessSettingsReturnProbe()
+                                    AppActivation.openStorageAccessSettings()
+                                }
+                                .accessibilityIdentifier(
+                                    StorageAccessAccessibility.openSystemSettings
+                                )
+                                .accessibilityHint(
+                                    "Opens System Settings; choose Privacy and Security, then Full Disk Access"
+                                )
+                            }
+
+                            if access.showsRefreshAction {
+                                Button("Check observed access again") {
+                                    Task { await model.refreshStorageAccessEvidence() }
+                                }
+                                .accessibilityIdentifier(StorageAccessAccessibility.refresh)
+                                .accessibilityHint(
+                                    "Rechecks three fixed Library locations without scanning files"
+                                )
+                            }
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 8)
+            } label: {
+                Label("Storage access", systemImage: "lock.shield")
+            }
+            .accessibilityIdentifier(StorageAccessAccessibility.guidance)
         }
     }
 

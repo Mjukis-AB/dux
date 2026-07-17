@@ -53,6 +53,21 @@ enum AppActivation {
         open()
     }
 
+    static func openStorageAccessSettings() {
+        openStorageAccessSettings {
+            guard let url = NSWorkspace.shared.urlForApplication(
+                withBundleIdentifier: "com.apple.systempreferences"
+            ) else {
+                return
+            }
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    static func openStorageAccessSettings(open: () -> Void) {
+        open()
+    }
+
     static func quit() {
         NSApplication.shared.terminate(nil)
     }

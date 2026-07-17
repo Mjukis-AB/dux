@@ -5,6 +5,23 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Added truthful permission and coverage onboarding. A one-time menu-bar
+  introduction explains local, read-only Home analysis and persists only its
+  acknowledgement without starting a scan, capacity query, access probe, FFI
+  call, or permission prompt. Explorer uses the latest real Home-scan coverage;
+  only a measured incomplete or uncertain result offers explicit broader-access
+  discovery. That bounded off-main check opens three fixed user-library
+  directories without enumerating names or reading contents and publishes only
+  path-free readable, unreadable, and unobserved counts. It never claims an
+  authoritative Full Disk Access state. Optional generic System Settings
+  guidance arms exactly one observed-access recheck on return, while updating
+  coverage still requires an explicit new Home scan. Checks are single-flight,
+  cancellation-safe, retain prior evidence on failure, and reject late shutdown
+  results. Eleven focused onboarding tests plus activation integration bring the
+  complete linked Swift suite to 183 tests. Full Rust format/lint/workspace
+  tests, 20 destructive-boundary tests, and the 178-source authority scan pass.
+  XcodeGen is deterministic, Debug/Release Swift bindings are byte-identical,
+  and unsigned universal arm64/x86_64 Debug and Release apps target macOS 14.
 - Added opt-in conditional menu-bar visibility. DUX remains always visible by
   default; Settings can instead show it when cached effective startup-disk free
   space is at or below a validated whole percentage from 1 through 100. Entry

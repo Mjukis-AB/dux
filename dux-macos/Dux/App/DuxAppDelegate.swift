@@ -6,6 +6,7 @@ protocol DuxAppRuntimeServing: AnyObject {
     func signalMaintenance(_ trigger: DuxMaintenanceTrigger) async
     func signalCapacity(_ trigger: DuxCapacitySamplingTrigger) async
     func revealMenuBarItemForSession()
+    func refreshStorageAccessEvidenceAfterActivation() async
     func shutdown() async
 }
 
@@ -63,8 +64,13 @@ final class DuxAppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidBecomeActive(_ notification: Notification) {
         _ = notification
         Task {
-            await runtime.signalMaintenance(.applicationBecameActive)
+            await handleApplicationBecameActive()
         }
+    }
+
+    func handleApplicationBecameActive() async {
+        await runtime.signalMaintenance(.applicationBecameActive)
+        await runtime.refreshStorageAccessEvidenceAfterActivation()
     }
 
     func applicationShouldHandleReopen(

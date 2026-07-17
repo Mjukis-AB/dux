@@ -127,6 +127,10 @@ final class AppRuntime {
         model.revealMenuBarItemForSession()
     }
 
+    func refreshStorageAccessEvidenceAfterActivation() async {
+        await model.refreshStorageAccessEvidenceAfterActivation()
+    }
+
     func shutdown() async {
         if let shutdownTask {
             await shutdownTask.value
@@ -134,6 +138,7 @@ final class AppRuntime {
         }
         shuttingDown = true
         model.invalidatePressurePolicyOperations()
+        model.invalidateStorageAccessProbeOperations()
         let capacityScheduler = capacityScheduler
         let capacityResampleRouter = capacityResampleRouter
         let scheduler = scheduler

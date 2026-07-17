@@ -63,6 +63,15 @@ final class DuxAppDelegateTests: XCTestCase {
         XCTAssertEqual(runtime.revealCount, 1)
     }
 
+    func testApplicationActivationRunsMaintenanceThenArmedAccessReprobe() async {
+        let runtime = RuntimeSpy()
+        let delegate = DuxAppDelegate(runtime: runtime)
+
+        await delegate.handleApplicationBecameActive()
+
+        XCTAssertEqual(runtime.events(), ["maintenance:other", "access:activation"])
+    }
+
     func testRuntimeStartsBothSchedulersOnceAndStopsCapacityBeforeEngineClose() async throws {
         let recorder = RuntimeEventRecorder()
         let engine = RuntimeEngineSpy(recorder: recorder)
@@ -113,6 +122,9 @@ private final class RuntimeSpy: DuxAppRuntimeServing {
     func start() async {}
     func shutdown() async {}
     func revealMenuBarItemForSession() { revealCount += 1 }
+    func refreshStorageAccessEvidenceAfterActivation() async {
+        recorded.append("access:activation")
+    }
 
     func signalMaintenance(_ trigger: DuxMaintenanceTrigger) async {
         recorded.append("maintenance:\(trigger == .wake ? "wake" : "other")")
@@ -138,6 +150,7 @@ private final class DelayedMaintenanceRuntimeSpy: DuxAppRuntimeServing {
     func start() async {}
     func shutdown() async {}
     func revealMenuBarItemForSession() {}
+    func refreshStorageAccessEvidenceAfterActivation() async {}
 
     func signalMaintenance(_ trigger: DuxMaintenanceTrigger) async {
         _ = trigger

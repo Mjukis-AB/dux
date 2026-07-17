@@ -157,6 +157,24 @@ freshness, and Home coverage stays explicitly scoped. Snapshot history,
 review-lease-backed paths and drill-down, recommendations, reclaimable totals,
 cleanup, trends, and AI belong to later milestones rather than this Overview.
 
+First run adds a local-analysis introduction to the menu popover. Its versioned
+UserDefaults value records only that the user continued; initialization and
+dismissal perform no scan, capacity sample, access check, FFI call, or permission
+request. Explorer derives its coverage message from the latest actual Home-scan
+summary. A complete result needs no broader-access action, while measured
+incomplete or uncertain coverage can expose an explicit **Understand broader
+access…** action without making the rest of the app unusable.
+
+The resulting observed-access check runs off-main and attempts only to open
+`Library/Mail`, `Library/Messages`, and `Library/Safari` as directories. It does
+not enumerate entries or read contents, and only three path-free counts plus a
+timestamp enter model state. These observations are evidence, never an
+authoritative Full Disk Access boolean. Optional guidance opens the System
+Settings app without an undocumented pane URL. That action arms one recheck on
+the next activation; unrelated activations do nothing, and a new Home scan is
+always a separate explicit action. Duplicate checks coalesce, the last evidence
+survives refresh failure, and shutdown generation-fences late results.
+
 The shared model also owns the menu-bar label preference. Settings can select
 Icon only, Icon and free space (GiB), or Icon and free space (%); free GiB is the
 first-run default. The stable `menuBar.labelMode.v1` UserDefaults value is a
