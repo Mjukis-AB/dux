@@ -794,6 +794,38 @@ Support three user-selectable modes:
 
 The label must remain legible in light/dark menu bars and accessibility contrast modes. Do not rely only on red/amber/green; pair state with symbol shape or text.
 
+Menu bar visibility is a separate opt-in preference from the label mode:
+
+- default to **Always visible**;
+- offer **Only when free space is at or below** a configurable whole percentage
+  from 1–100, defaulting to 10%;
+- evaluate the same effective-available numerator and total-capacity denominator
+  used by the visible status: important-use availability first, with the
+  disclosed filesystem-availability fallback only when necessary;
+- do not start a scan or a separate capacity query merely to decide visibility;
+  consume the shared cached startup-volume sample;
+- keep the item visible while capacity is unknown, unavailable, or has no valid
+  cached sample, so uncertainty can never make DUX unreachable;
+- refreshing and stale states may use the last confirmed sample but must retain
+  their truthful stale/refreshing presentation when visible;
+- reveal immediately at or below the configured threshold, then hide only after
+  recovery above the threshold by at least one full percentage point. This
+  one-point exit hysteresis prevents boundary flicker without delaying a low-disk
+  warning;
+- keep this percentage-only visibility policy independent from the Rust-owned
+  Warning/Critical policy, whose byte-and-percentage `min(...)` semantics answer
+  a different question;
+- when a healthy-state policy has hidden the item, explicitly reopening the DUX
+  application from Finder, Spotlight, or `open` must reveal it for the remainder
+  of that process session so Explorer and Settings are reachable. Changing back
+  to Always visible must also reveal it immediately;
+- Launch at Login may legitimately start DUX with no visible item while storage
+  is healthy, but the relaunch/reopen escape hatch and unknown-state fail-open
+  behavior are mandatory before conditional visibility ships; and
+- persist only the validated user preference, never the derived inserted/hidden
+  state. Visibility evaluation is presentation-only and grants no scan,
+  notification, scheduling, AI, plan, or cleanup authority.
+
 ### 12.3 Menu bar popover
 
 Target width: approximately 340–400 points. Keep it glanceable.
@@ -3459,6 +3491,12 @@ Tasks:
   fallback, one-write AppModel propagation, and accessibility contracts. The
   full 82-test linked Swift suite passes, and unsigned universal Debug and
   Release apps contain both arm64 and x86_64 at the macOS 14 deployment target.
+- [ ] Implement conditional menu bar visibility. Keep Always visible as the
+  default and add the independent percentage-only policy specified in §12.2,
+  including exact cached-capacity evaluation, one-percentage-point exit
+  hysteresis, unknown-state fail-open behavior, a tested explicit-reopen escape
+  hatch, versioned validated preference storage, accessible Settings controls,
+  and proof that visibility changes start no scan or capacity query.
 - [x] Implement popover layout with cached status and scan progress. Completed
   2026-07-17: the menu-bar popover renders the cached startup-volume identity,
   Rust-owned pressure classification, effective available and total capacity,
