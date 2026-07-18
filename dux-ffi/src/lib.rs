@@ -1250,6 +1250,11 @@ impl SnapshotReviewSession {
         if self.engine_closed.load(Ordering::Acquire) {
             return Err(EngineError::Closed);
         }
+        // Candidate detail is keyed by the review lease as well as the scan
+        // identity. Validate the lease before every projection so expiry can
+        // never silently turn historical disclosure into an unbounded store
+        // query.
+        session.expires_at().map_err(map_review_error)?;
         operation(&mut session)
     }
 
@@ -4540,6 +4545,14 @@ mod tests {
         assert_eq!(ended.expires_at_unix_ms, 0);
         assert_eq!(review.root_node(), Err(EngineError::ReviewExpired));
         assert_eq!(review.treemap(0, 1), Err(EngineError::ReviewExpired));
+        assert_eq!(
+            review.candidate_paths("candidate:missing".into(), 0, 1),
+            Err(EngineError::ReviewExpired)
+        );
+        assert_eq!(
+            review.candidate_evidence("candidate:missing".into(), 0, 1),
+            Err(EngineError::ReviewExpired)
+        );
         assert_eq!(
             review.resolve_live_target(SnapshotLiveTargetRequest {
                 record_version: FFI_RECORD_VERSION,
