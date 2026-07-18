@@ -4472,6 +4472,15 @@ Tasks:
     `UnsupportedPlatform` until handle-relative reparse-tag validation exists.
     The witness is non-actionable and adds no plan, approval, journal, FFI,
     `FileManager.trashItem`, or mutation authority.
+  - [x] 2026-07-19 slice: add a separate core-owned Trash review witness from
+    an Explorer snapshot node. It resolves the historical chain, revalidates
+    the current scan root and every no-follow ancestor, accepts a final
+    symlink as the selected link object, and rejects roots, special entries,
+    missing/replaced identities, and symlinked intermediate ancestors. The
+    witness is non-Clone/non-serializable, never crosses the read-only live
+    target FFI record, and cannot approve, construct a plan, or invoke an
+    effect. The one-shot platform executor, journal integration, approval
+    binding, and macOS `FileManager.trashItem` adapter remain open.
 - [ ] Implement permanent-safe executor for approved rules.
 - [ ] Implement execution-time revalidation.
 - [ ] Implement cleanup session/item history.

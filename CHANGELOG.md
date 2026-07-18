@@ -11,6 +11,13 @@ All notable changes to DUX will be documented in this file.
   DUX when the popover is closed.
 
 ### Added
+- Continued Milestone 5 with a separate core-owned Trash review witness for
+  Explorer selections. A retained snapshot node is resolved to fresh no-follow
+  ancestry and target identity; final symlinks remain link objects while
+  symlinked roots/intermediate ancestors, special entries, missing targets, and
+  replacements fail closed. The witness never crosses the read-only live-target
+  FFI record and cannot approve, plan, journal, or invoke a platform effect;
+  the centralized executor and macOS Trash adapter remain open.
 - Continued Milestone 5 by binding code-owned protected-root policy into
   exact-path review. Requested and canonical target forms are both assessed;
   hard denies fail closed, specific-rule requirements remain explicit

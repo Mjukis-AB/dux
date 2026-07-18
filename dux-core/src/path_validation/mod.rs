@@ -67,6 +67,8 @@ pub use filesystem::{
     AncestorIdentity, CanonicalPathError, CanonicalPathSnapshot, CanonicalScanRoot,
     FilesystemEntryKind, FilesystemIdentity,
 };
+#[allow(unused_imports)]
+pub(crate) use filesystem::{TrashPathSnapshot, TrashTargetKind};
 #[cfg(windows)]
 #[allow(unused_imports)]
 pub(crate) use lexical::WindowsComponentError;

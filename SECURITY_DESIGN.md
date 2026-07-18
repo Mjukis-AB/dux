@@ -974,6 +974,15 @@ uses `FileManager.trashItem(at:)`; it MUST NOT manually move data into
 `~/.Trash`. A symlink selection trashes the link itself, never its target, and
 the review UI says so.
 
+The core now has a separate, crate-private Trash review witness that resolves a
+retained Explorer node to a fresh no-follow target snapshot. It keeps the
+selected final symlink as a link object while rejecting symlinked roots or
+intermediate ancestors, special entries, and identity changes. This witness is
+not the existing read-only live-target record, is not serializable or cloneable,
+and cannot approve, construct a plan, or invoke a platform effect. Approval,
+journal admission, the centralized executor, and the macOS adapter remain
+required before any mutation.
+
 Linux implements the XDG Trash specification with correct mount behavior or
 refuses Trash. Windows uses an independently reviewed recoverable shell API or
 refuses. No platform may silently substitute permanent deletion.

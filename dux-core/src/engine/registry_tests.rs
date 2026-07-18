@@ -13,6 +13,8 @@ use crate::engine::{
     SnapshotReviewCategory, SnapshotReviewLiveTargetKind, SnapshotReviewLiveTargetPurpose,
     SnapshotReviewNodeKind, SnapshotReviewNodeSort, SnapshotReviewTimestamp,
 };
+#[cfg(unix)]
+use crate::path_validation::TrashTargetKind;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(5);
 const CARGO_CACHE_TAG: &[u8] =
@@ -842,6 +844,43 @@ fn explorer_review_live_targets_are_purpose_bound_and_reject_stale_paths() {
             .unwrap_err(),
         SnapshotReviewError::LeaseExpired
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn explorer_review_trash_target_keeps_final_symlink_as_the_selected_object() {
+    use std::os::unix::fs::symlink;
+
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("trash-review-root");
+    std::fs::create_dir_all(root.join("nested")).unwrap();
+    std::fs::write(root.join("nested/payload.bin"), b"trash witness").unwrap();
+    symlink(root.join("nested/payload.bin"), root.join("selected-link")).unwrap();
+
+    let engine = EngineHandle::open(config(&temp)).unwrap();
+    let task = engine.start_scan(root.clone()).unwrap();
+    assert_eq!(wait_terminal(&engine, task).phase, TaskPhase::Succeeded);
+    let scan_id = engine.scan_result(task).unwrap().unwrap().scan_id().clone();
+    let mut review = engine.acquire_explorer_snapshot_review(&scan_id).unwrap();
+    let children = review
+        .child_nodes(0, SnapshotReviewNodeSort::NameAscending, 0, 20)
+        .unwrap();
+    let link_id = children
+        .nodes
+        .iter()
+        .find(|node| node.name.display.as_ref() == "selected-link")
+        .map(|node| node.id)
+        .unwrap();
+
+    let target = review.trash_target(link_id).unwrap();
+    assert_eq!(target.node_id, link_id);
+    assert_eq!(target.snapshot.target_kind(), TrashTargetKind::Symlink);
+    assert_eq!(
+        target.snapshot.object_path(),
+        &std::fs::canonicalize(&root).unwrap().join("selected-link")
+    );
+    assert!(root.join("selected-link").exists());
+    assert!(root.join("nested/payload.bin").exists());
 }
 
 #[cfg(unix)]

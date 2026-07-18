@@ -7,8 +7,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::domain::{CandidateCategory, ScanId};
 use crate::path_validation::{
-    CanonicalPathError, FilesystemEntryKind, FilesystemIdentity, capture_path_snapshot,
-    capture_scan_root, validate_cleanup_path, validate_scan_root,
+    CanonicalPathError, FilesystemEntryKind, FilesystemIdentity, TrashPathSnapshot,
+    TrashTargetKind, capture_path_snapshot, capture_scan_root, capture_trash_path_snapshot,
+    validate_cleanup_path, validate_scan_root,
 };
 use crate::persistence::HistoryErrorKind;
 use crate::persistence::snapshot::{
@@ -287,6 +288,15 @@ pub(super) struct SnapshotReviewOwner;
 pub(super) struct SnapshotReviewSubtreeTarget {
     pub(super) path: PathBuf,
     pub(super) identity: FilesystemIdentity,
+}
+
+/// Fresh no-follow evidence for a user-selected Explorer Trash request. The
+/// path and witness stay inside core; this value is deliberately not Clone,
+/// serializable, or exposed through the read-only live-target FFI record.
+#[allow(dead_code)]
+pub(super) struct SnapshotReviewTrashTarget {
+    pub(super) node_id: u64,
+    pub(super) snapshot: TrashPathSnapshot,
 }
 
 /// Stable, path-free failures from an Explorer snapshot-review session.
@@ -652,6 +662,107 @@ impl SnapshotReviewSession {
         // still be pinned when its match evidence crosses the API boundary.
         self.ensure_document(SystemTime::now())?;
         Ok(live_target)
+    }
+
+    /// Resolve one historical Explorer node to a fresh no-follow Trash
+    /// witness. A final symlink is accepted as the link object itself, while
+    /// a symlinked root or intermediate ancestor is rejected. This is
+    /// evidence only; it does not create an approval, plan, or effect token.
+    #[allow(dead_code)]
+    pub(super) fn trash_target(
+        &mut self,
+        node_id: u64,
+    ) -> Result<SnapshotReviewTrashTarget, SnapshotReviewError> {
+        self.ensure_document(SystemTime::now())?;
+        let document = self
+            .document
+            .as_deref()
+            .ok_or(SnapshotReviewError::InternalState)?;
+        let target_index =
+            usize::try_from(node_id).map_err(|_| SnapshotReviewError::NodeNotFound)?;
+        let target = document
+            .nodes
+            .get(target_index)
+            .filter(|node| node.id == node_id)
+            .ok_or(SnapshotReviewError::NodeNotFound)?;
+        let expected_kind = match target.kind {
+            SnapshotNodeKind::Directory => TrashTargetKind::Directory,
+            SnapshotNodeKind::File => TrashTargetKind::RegularFile,
+            SnapshotNodeKind::Symlink => TrashTargetKind::Symlink,
+            SnapshotNodeKind::Other | SnapshotNodeKind::Error => {
+                return Err(SnapshotReviewError::LiveTargetUnsupported);
+            }
+        };
+        if node_id == 0 {
+            return Err(SnapshotReviewError::LiveTargetUnsupported);
+        }
+
+        let mut chain = Vec::new();
+        chain
+            .try_reserve_exact(usize::try_from(target.depth).unwrap_or(0).saturating_add(1))
+            .map_err(|_| SnapshotReviewError::BudgetExceeded)?;
+        let mut current_id = Some(node_id);
+        while let Some(id) = current_id {
+            let index = usize::try_from(id).map_err(|_| SnapshotReviewError::CorruptData)?;
+            let node = document
+                .nodes
+                .get(index)
+                .filter(|node| node.id == id)
+                .ok_or(SnapshotReviewError::CorruptData)?;
+            chain.push(node);
+            current_id = node.parent;
+        }
+        chain.reverse();
+        if chain.first().is_none_or(|node| node.id != 0)
+            || chain.len()
+                != usize::try_from(target.depth)
+                    .unwrap_or(usize::MAX)
+                    .saturating_add(1)
+        {
+            return Err(SnapshotReviewError::CorruptData);
+        }
+
+        let root_path = document
+            .metadata
+            .root
+            .to_path_buf()
+            .map_err(|_| SnapshotReviewError::CorruptData)?;
+        let lexical_root =
+            validate_scan_root(&root_path).map_err(|_| SnapshotReviewError::LivePathUnavailable)?;
+        let live_root = capture_scan_root(lexical_root.clone()).map_err(map_live_path_error)?;
+        ensure_live_identity(chain[0], live_root.identity())?;
+
+        let mut requested_path = root_path;
+        for node in chain.iter().skip(1) {
+            let component = node
+                .name
+                .as_ref()
+                .ok_or(SnapshotReviewError::CorruptData)?
+                .to_path_buf()
+                .map_err(|_| SnapshotReviewError::CorruptData)?;
+            requested_path.push(component);
+        }
+        let lexical_target = validate_cleanup_path(&lexical_root, &requested_path)
+            .map_err(|_| SnapshotReviewError::LivePathUnavailable)?;
+        let live =
+            capture_trash_path_snapshot(&live_root, lexical_target).map_err(map_live_path_error)?;
+        if live.target_kind() != expected_kind {
+            return Err(SnapshotReviewError::LivePathChanged);
+        }
+        if live.ancestors().len() != chain.len() - 1 {
+            return Err(SnapshotReviewError::LivePathChanged);
+        }
+        for (snapshot_node, live_ancestor) in
+            chain.iter().take(chain.len() - 1).zip(live.ancestors())
+        {
+            ensure_live_identity(snapshot_node, live_ancestor.identity())?;
+        }
+        ensure_live_identity(target, live.target_identity())?;
+        self.ensure_document(SystemTime::now())?;
+        Ok(SnapshotReviewTrashTarget {
+            node_id,
+            snapshot: live,
+        })
     }
 
     fn renew_at(&mut self, observed_at: SystemTime) -> Result<SystemTime, SnapshotReviewError> {
