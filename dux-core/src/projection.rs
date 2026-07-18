@@ -22,6 +22,163 @@ pub enum ArtifactKind {
     NextNuxt,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ArtifactMarkerLocation {
+    Sibling,
+    Child,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ArtifactMarkerMatch {
+    Exact(&'static [&'static str]),
+    Extension(&'static str),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ArtifactMarkerRequirement {
+    pub(crate) location: ArtifactMarkerLocation,
+    pub(crate) matcher: ArtifactMarkerMatch,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ArtifactPattern {
+    pub(crate) component: &'static str,
+    pub(crate) kind: ArtifactKind,
+    pub(crate) markers: &'static [ArtifactMarkerRequirement],
+}
+
+const RUST_MARKERS: &[ArtifactMarkerRequirement] = &[
+    ArtifactMarkerRequirement {
+        location: ArtifactMarkerLocation::Sibling,
+        matcher: ArtifactMarkerMatch::Exact(&["Cargo.toml"]),
+    },
+    ArtifactMarkerRequirement {
+        location: ArtifactMarkerLocation::Child,
+        matcher: ArtifactMarkerMatch::Exact(&["CACHEDIR.TAG"]),
+    },
+];
+const NODE_MARKERS: &[ArtifactMarkerRequirement] = &[ArtifactMarkerRequirement {
+    location: ArtifactMarkerLocation::Sibling,
+    matcher: ArtifactMarkerMatch::Exact(&["package.json"]),
+}];
+const GRADLE_MARKERS: &[ArtifactMarkerRequirement] = &[ArtifactMarkerRequirement {
+    location: ArtifactMarkerLocation::Sibling,
+    matcher: ArtifactMarkerMatch::Exact(&[
+        "build.gradle",
+        "build.gradle.kts",
+        "settings.gradle",
+        "settings.gradle.kts",
+    ]),
+}];
+const PYTHON_CACHE_MARKERS: &[ArtifactMarkerRequirement] = &[ArtifactMarkerRequirement {
+    location: ArtifactMarkerLocation::Sibling,
+    matcher: ArtifactMarkerMatch::Extension("py"),
+}];
+const TOX_MARKERS: &[ArtifactMarkerRequirement] = &[ArtifactMarkerRequirement {
+    location: ArtifactMarkerLocation::Sibling,
+    matcher: ArtifactMarkerMatch::Exact(&["tox.ini"]),
+}];
+const VENV_MARKERS: &[ArtifactMarkerRequirement] = &[ArtifactMarkerRequirement {
+    location: ArtifactMarkerLocation::Child,
+    matcher: ArtifactMarkerMatch::Exact(&["pyvenv.cfg"]),
+}];
+const COCOAPODS_MARKERS: &[ArtifactMarkerRequirement] = &[
+    ArtifactMarkerRequirement {
+        location: ArtifactMarkerLocation::Sibling,
+        matcher: ArtifactMarkerMatch::Exact(&["Podfile"]),
+    },
+    ArtifactMarkerRequirement {
+        location: ArtifactMarkerLocation::Child,
+        matcher: ArtifactMarkerMatch::Exact(&["Manifest.lock"]),
+    },
+];
+const NEXT_MARKERS: &[ArtifactMarkerRequirement] = &[
+    ArtifactMarkerRequirement {
+        location: ArtifactMarkerLocation::Sibling,
+        matcher: ArtifactMarkerMatch::Exact(&["package.json"]),
+    },
+    ArtifactMarkerRequirement {
+        location: ArtifactMarkerLocation::Sibling,
+        matcher: ArtifactMarkerMatch::Exact(&[
+            "next.config.js",
+            "next.config.mjs",
+            "next.config.ts",
+        ]),
+    },
+];
+const NUXT_MARKERS: &[ArtifactMarkerRequirement] = &[
+    ArtifactMarkerRequirement {
+        location: ArtifactMarkerLocation::Sibling,
+        matcher: ArtifactMarkerMatch::Exact(&["package.json"]),
+    },
+    ArtifactMarkerRequirement {
+        location: ArtifactMarkerLocation::Sibling,
+        matcher: ArtifactMarkerMatch::Exact(&[
+            "nuxt.config.js",
+            "nuxt.config.mjs",
+            "nuxt.config.ts",
+        ]),
+    },
+];
+
+pub(crate) const ARTIFACT_PATTERNS: &[ArtifactPattern] = &[
+    ArtifactPattern {
+        component: "target",
+        kind: ArtifactKind::Rust,
+        markers: RUST_MARKERS,
+    },
+    ArtifactPattern {
+        component: "node_modules",
+        kind: ArtifactKind::Node,
+        markers: NODE_MARKERS,
+    },
+    ArtifactPattern {
+        component: "build",
+        kind: ArtifactKind::Gradle,
+        markers: GRADLE_MARKERS,
+    },
+    ArtifactPattern {
+        component: ".gradle",
+        kind: ArtifactKind::Gradle,
+        markers: GRADLE_MARKERS,
+    },
+    ArtifactPattern {
+        component: "__pycache__",
+        kind: ArtifactKind::Python,
+        markers: PYTHON_CACHE_MARKERS,
+    },
+    ArtifactPattern {
+        component: ".tox",
+        kind: ArtifactKind::Python,
+        markers: TOX_MARKERS,
+    },
+    ArtifactPattern {
+        component: ".venv",
+        kind: ArtifactKind::Python,
+        markers: VENV_MARKERS,
+    },
+    ArtifactPattern {
+        component: "venv",
+        kind: ArtifactKind::Python,
+        markers: VENV_MARKERS,
+    },
+    ArtifactPattern {
+        component: "Pods",
+        kind: ArtifactKind::CocoaPods,
+        markers: COCOAPODS_MARKERS,
+    },
+    ArtifactPattern {
+        component: ".next",
+        kind: ArtifactKind::NextNuxt,
+        markers: NEXT_MARKERS,
+    },
+    ArtifactPattern {
+        component: ".nuxt",
+        kind: ArtifactKind::NextNuxt,
+        markers: NUXT_MARKERS,
+    },
+];
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArtifactClassification {
     pub kind: ArtifactKind,
@@ -78,82 +235,26 @@ pub fn classify_artifact(tree: &DiskTree, node_id: NodeId) -> Option<ArtifactCla
     if !node.kind.is_directory() || has_symlink_component(tree, node_id) {
         return None;
     }
-    let parent = node.parent;
-
-    let (kind, evidence_node_ids) = match node.name.as_str() {
-        "target" => (
-            ArtifactKind::Rust,
-            vec![
-                regular_sibling_named(tree, parent?, &["Cargo.toml"])?,
-                regular_child_named(tree, node_id, &["CACHEDIR.TAG"])?,
-            ],
-        ),
-        "node_modules" => (
-            ArtifactKind::Node,
-            vec![regular_sibling_named(tree, parent?, &["package.json"])?],
-        ),
-        "build" | ".gradle" => (
-            ArtifactKind::Gradle,
-            vec![regular_sibling_named(
-                tree,
-                parent?,
-                &[
-                    "build.gradle",
-                    "build.gradle.kts",
-                    "settings.gradle",
-                    "settings.gradle.kts",
-                ],
-            )?],
-        ),
-        "__pycache__" => (
-            ArtifactKind::Python,
-            vec![regular_python_sibling(tree, parent?)?],
-        ),
-        ".tox" => (
-            ArtifactKind::Python,
-            vec![regular_sibling_named(tree, parent?, &["tox.ini"])?],
-        ),
-        ".venv" | "venv" => (
-            ArtifactKind::Python,
-            vec![regular_child_named(tree, node_id, &["pyvenv.cfg"])?],
-        ),
-        "Pods" => (
-            ArtifactKind::CocoaPods,
-            vec![
-                regular_sibling_named(tree, parent?, &["Podfile"])?,
-                regular_child_named(tree, node_id, &["Manifest.lock"])?,
-            ],
-        ),
-        ".next" => (
-            ArtifactKind::NextNuxt,
-            vec![
-                regular_sibling_named(tree, parent?, &["package.json"])?,
-                regular_sibling_named(
-                    tree,
-                    parent?,
-                    &["next.config.js", "next.config.mjs", "next.config.ts"],
-                )?,
-            ],
-        ),
-        ".nuxt" => (
-            ArtifactKind::NextNuxt,
-            vec![
-                regular_sibling_named(tree, parent?, &["package.json"])?,
-                regular_sibling_named(
-                    tree,
-                    parent?,
-                    &["nuxt.config.js", "nuxt.config.mjs", "nuxt.config.ts"],
-                )?,
-            ],
-        ),
-        // These names are too ambiguous to authorize a permanent-delete-backed
-        // artifact entry without stronger, tool-specific evidence.
-        "DerivedData" | "Build" | "dist" | "vendor" | ".cache" => return None,
-        _ => return None,
-    };
+    let pattern = ARTIFACT_PATTERNS
+        .iter()
+        .find(|pattern| pattern.component == node.name)?;
+    let mut evidence_node_ids = Vec::with_capacity(pattern.markers.len());
+    for requirement in pattern.markers {
+        let marker_parent = match requirement.location {
+            ArtifactMarkerLocation::Sibling => node.parent?,
+            ArtifactMarkerLocation::Child => node_id,
+        };
+        let marker = match requirement.matcher {
+            ArtifactMarkerMatch::Exact(names) => regular_child_named(tree, marker_parent, names)?,
+            ArtifactMarkerMatch::Extension(extension) => {
+                regular_child_with_extension(tree, marker_parent, extension)?
+            }
+        };
+        evidence_node_ids.push(marker);
+    }
 
     Some(ArtifactClassification {
-        kind,
+        kind: pattern.kind,
         evidence_node_ids,
     })
 }
@@ -301,10 +402,6 @@ fn has_symlink_component(tree: &DiskTree, mut node_id: NodeId) -> bool {
     }
 }
 
-fn regular_sibling_named(tree: &DiskTree, parent: NodeId, names: &[&str]) -> Option<NodeId> {
-    regular_child_named(tree, parent, names)
-}
-
 fn regular_child_named(tree: &DiskTree, parent: NodeId, names: &[&str]) -> Option<NodeId> {
     let children = &tree.get(parent)?.children;
     names.iter().find_map(|name| {
@@ -318,7 +415,11 @@ fn regular_child_named(tree: &DiskTree, parent: NodeId, names: &[&str]) -> Optio
     })
 }
 
-fn regular_python_sibling(tree: &DiskTree, parent: NodeId) -> Option<NodeId> {
+fn regular_child_with_extension(
+    tree: &DiskTree,
+    parent: NodeId,
+    expected_extension: &str,
+) -> Option<NodeId> {
     tree.get(parent)?
         .children
         .iter()
@@ -329,7 +430,7 @@ fn regular_python_sibling(tree: &DiskTree, parent: NodeId) -> Option<NodeId> {
                     && !child.path_is_symlink
                     && PathBuf::from(&child.name)
                         .extension()
-                        .is_some_and(|extension| extension == "py")
+                        .is_some_and(|extension| extension == expected_extension)
             })
         })
         .min_by(|left, right| {

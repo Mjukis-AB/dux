@@ -4,7 +4,7 @@
 //! Bundled rules may describe a proposed cleanup action, but every candidate
 //! remains blocked scan evidence until independent live authority exists.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::SystemTime;
 
@@ -23,6 +23,10 @@ use crate::projection::{
 };
 use crate::scanner::CompletedScanArtifact;
 use crate::tree::DiskTree;
+
+#[path = "candidate_evaluator_snapshot_replay.rs"]
+mod candidate_evaluator_snapshot_replay;
+pub(crate) use candidate_evaluator_snapshot_replay::verify_snapshot_candidate_evaluation;
 
 const BUNDLED_CATALOG: &[u8] = include_bytes!("../../catalogs/candidate-rules-v1.json");
 static VALIDATED_BUNDLED_CATALOG: OnceLock<Result<RuleRegistry, CandidateEvaluationError>> =
@@ -49,6 +53,15 @@ struct CatalogBinding {
     kind: ArtifactKind,
     component: &'static str,
     rule_id: &'static str,
+}
+
+pub(super) struct ObservedArtifact {
+    path: PathBuf,
+    component: &'static str,
+    kind: ArtifactKind,
+    size: u64,
+    newest_mtime: Option<SystemTime>,
+    evidence_paths: Vec<PathBuf>,
 }
 
 const CATALOG_BINDINGS: &[CatalogBinding] = &[
@@ -192,11 +205,7 @@ fn evaluate_artifact_candidates(
     tree: &DiskTree,
     coverage: &ScanCoverage,
 ) -> Result<CandidateBatch, CandidateEvaluationError> {
-    let catalog = load_and_validate_catalog()?;
-    let catalog_digest_sha256 = bundled_candidate_catalog_digest_sha256();
-    let context_digest_sha256 =
-        candidate_evaluation_context_digest_for_tree(source_scan_id, tree, coverage);
-    let mut entries = project_build_artifacts_bounded_at(
+    let entries = project_build_artifacts_bounded_at(
         tree,
         StaleThreshold::All,
         SystemTime::UNIX_EPOCH,
@@ -210,33 +219,59 @@ fn evaluate_artifact_candidates(
     )?
     .into_iter()
     .map(|entry| {
-        let path = tree
+        let node = tree
             .get(entry.node_id)
-            .ok_or(CandidateEvaluationError::InvalidArtifactProjection)?
-            .path
-            .clone();
+            .ok_or(CandidateEvaluationError::InvalidArtifactProjection)?;
         let binding = binding_for(tree, &entry)?;
-        Ok((native_path_bytes(&path), path, binding, entry))
+        Ok(ObservedArtifact {
+            path: node.path.clone(),
+            component: binding.component,
+            kind: entry.kind,
+            size: entry.size,
+            newest_mtime: entry.newest_mtime,
+            evidence_paths: entry.evidence_paths,
+        })
     })
     .collect::<Result<Vec<_>, CandidateEvaluationError>>()?;
+    evaluate_observed_artifacts(source_scan_id, tree.root_path(), coverage, entries)
+}
 
+pub(super) fn evaluate_observed_artifacts(
+    source_scan_id: &ScanId,
+    root: &Path,
+    coverage: &ScanCoverage,
+    entries: Vec<ObservedArtifact>,
+) -> Result<CandidateBatch, CandidateEvaluationError> {
+    let catalog = load_and_validate_catalog()?;
+    let catalog_digest_sha256 = bundled_candidate_catalog_digest_sha256();
+    let context_digest_sha256 =
+        candidate_evaluation_context_digest_for_observation(source_scan_id, root, coverage);
+    let mut entries = entries
+        .into_iter()
+        .map(|entry| {
+            let binding = binding_for_observation(entry.kind, entry.component)?;
+            Ok((native_path_bytes(&entry.path), binding, entry))
+        })
+        .collect::<Result<Vec<_>, CandidateEvaluationError>>()?;
     entries.sort_by(|left, right| {
         left.0
             .cmp(&right.0)
-            .then_with(|| left.2.rule_id.cmp(right.2.rule_id))
+            .then_with(|| left.1.rule_id.cmp(right.1.rule_id))
     });
     if entries.windows(2).any(|pair| pair[0].0 == pair[1].0) {
         return Err(CandidateEvaluationError::InvalidArtifactProjection);
     }
 
     let mut candidates = Vec::with_capacity(entries.len());
-    for (path_bytes, path, binding, mut entry) in entries {
+    for (path_bytes, binding, mut entry) in entries {
         let rule = rule_for(catalog, binding)?;
         entry
             .evidence_paths
             .sort_by_key(|evidence_path| native_path_bytes(evidence_path));
         let mut evidence = Vec::with_capacity(entry.evidence_paths.len() + 1);
-        evidence.push(Evidence::MatchedPath { path: path.clone() });
+        evidence.push(Evidence::MatchedPath {
+            path: entry.path.clone(),
+        });
         evidence.extend(
             entry
                 .evidence_paths
@@ -257,7 +292,7 @@ fn evaluate_artifact_candidates(
             rule,
             CandidateInput::new(
                 id,
-                vec![path],
+                vec![entry.path],
                 entry.size,
                 entry.newest_mtime,
                 evidence,
@@ -402,14 +437,6 @@ pub(crate) fn candidate_evaluation_context_digest_sha256(
     candidate_evaluation_context_digest_for_observation(source_scan_id, tree.root_path(), coverage)
 }
 
-fn candidate_evaluation_context_digest_for_tree(
-    source_scan_id: &ScanId,
-    tree: &DiskTree,
-    coverage: &ScanCoverage,
-) -> [u8; 32] {
-    candidate_evaluation_context_digest_for_observation(source_scan_id, tree.root_path(), coverage)
-}
-
 /// Recompute the current evaluator context from one durable scan observation.
 ///
 /// The immutable snapshot digest is bound separately by persistence. This
@@ -486,6 +513,16 @@ fn binding_for(
     CATALOG_BINDINGS
         .iter()
         .find(|binding| binding.kind == entry.kind && binding.component == node.name)
+        .ok_or(CandidateEvaluationError::InvalidArtifactProjection)
+}
+
+fn binding_for_observation(
+    kind: ArtifactKind,
+    component: &str,
+) -> Result<&'static CatalogBinding, CandidateEvaluationError> {
+    CATALOG_BINDINGS
+        .iter()
+        .find(|binding| binding.kind == kind && binding.component == component)
         .ok_or(CandidateEvaluationError::InvalidArtifactProjection)
 }
 

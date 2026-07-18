@@ -401,6 +401,10 @@ impl CandidateValidationSourceRecord {
     pub(crate) fn candidate(&self) -> &CompleteCandidateRecord {
         &self.candidate
     }
+
+    pub(crate) fn evaluation_candidates(&self) -> &[CompleteCandidateRecord] {
+        self.evaluation.candidates()
+    }
 }
 
 /// Exact, bounded candidate-evaluation history for one requested scan.

@@ -30,6 +30,7 @@ pub(crate) use candidate_evaluator::{
     candidate_evaluation_context_digest_for_observation,
     candidate_evaluation_context_digest_sha256, current_rust_target_candidate_id,
     evaluate_completed_scan_candidates, validate_bundled_candidate_catalog,
+    verify_snapshot_candidate_evaluation,
 };
 pub use cleanup_plan::{
     CLEANUP_PLAN_VALIDITY, CleanupMode, CleanupPlan, CleanupPlanItem, CleanupPlanValidationError,

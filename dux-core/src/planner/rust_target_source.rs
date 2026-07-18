@@ -6,6 +6,8 @@ use std::time::SystemTime;
 
 use thiserror::Error;
 
+#[cfg(unix)]
+use crate::domain::verify_snapshot_candidate_evaluation;
 use crate::domain::{CandidateId, ScanId};
 #[cfg(unix)]
 use crate::persistence::snapshot::{
@@ -94,6 +96,9 @@ pub(crate) enum RustTargetSourceError {
     #[cfg(unix)]
     #[error("the snapshot does not contain the exact Rust target observation")]
     SnapshotMismatch,
+    #[cfg(unix)]
+    #[error("the retained snapshot does not reproduce the durable candidate evaluation")]
+    EvaluatorReplayMismatch,
     #[error("durable discovery evidence changed during acquisition or use")]
     SourceChanged,
 }
@@ -154,6 +159,12 @@ fn acquire_rust_target_durable_source_with_clock_and_hook(
         .lease()
         .load_for_review(current_time())
         .map_err(map_snapshot)?;
+    verify_snapshot_candidate_evaluation(
+        &document,
+        before.scan().coverage(),
+        before.evaluation_candidates(),
+    )
+    .map_err(|_| RustTargetSourceError::EvaluatorReplayMismatch)?;
     let bindings = snapshot_bindings(&document, before.scan().root(), &paths)?;
     lease
         .lease()

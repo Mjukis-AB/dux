@@ -45,9 +45,26 @@ impl PersistedFixture {
         Self::with_evaluator_revision_and_forged_id(CANDIDATE_EVALUATOR_REVISION, false)
     }
 
+    fn with_additional_candidate() -> Self {
+        Self::build(CANDIDATE_EVALUATOR_REVISION, false, true, false)
+    }
+
+    fn with_every_catalog_pattern() -> Self {
+        Self::build(CANDIDATE_EVALUATOR_REVISION, false, false, true)
+    }
+
     fn with_evaluator_revision_and_forged_id(
         evaluator_revision: u32,
         forge_candidate_id: bool,
+    ) -> Self {
+        Self::build(evaluator_revision, forge_candidate_id, false, false)
+    }
+
+    fn build(
+        evaluator_revision: u32,
+        forge_candidate_id: bool,
+        add_node_candidate: bool,
+        add_every_catalog_pattern: bool,
     ) -> Self {
         let temp = TempDir::new().unwrap();
         let root = temp.path().join("scan-root");
@@ -59,6 +76,13 @@ impl PersistedFixture {
         )
         .unwrap();
         std::fs::write(target.join("CACHEDIR.TAG"), CARGO_CACHE_TAG_SIGNATURE).unwrap();
+        if add_node_candidate {
+            std::fs::create_dir_all(root.join("other/node_modules")).unwrap();
+            std::fs::write(root.join("other/package.json"), b"{}\n").unwrap();
+        }
+        if add_every_catalog_pattern {
+            add_catalog_pattern_fixtures(&root);
+        }
         let root = root.canonicalize().unwrap();
         let target = root.join("project/target");
         let manifest = root.join("project/Cargo.toml");
@@ -174,6 +198,48 @@ impl PersistedFixture {
     }
 }
 
+fn add_catalog_pattern_fixtures(root: &std::path::Path) {
+    for directory in [
+        "node/node_modules",
+        "node/node_modules/nested/target",
+        "gradle/build",
+        "gradle/.gradle",
+        "python/__pycache__",
+        "tox/.tox",
+        "venv/venv",
+        "venv-hidden/.venv",
+        "pods/Pods",
+        "next/.next",
+        "nuxt/.nuxt",
+    ] {
+        std::fs::create_dir_all(root.join(directory)).unwrap();
+    }
+    for (path, bytes) in [
+        ("node/package.json", b"{}\n".as_slice()),
+        (
+            "node/node_modules/nested/Cargo.toml",
+            b"[package]\nname = \"suppressed\"\nversion = \"0.1.0\"\n".as_slice(),
+        ),
+        (
+            "node/node_modules/nested/target/CACHEDIR.TAG",
+            CARGO_CACHE_TAG_SIGNATURE,
+        ),
+        ("gradle/build.gradle", b"plugins {}\n".as_slice()),
+        ("python/module.py", b"pass\n".as_slice()),
+        ("tox/tox.ini", b"[tox]\n".as_slice()),
+        ("venv/venv/pyvenv.cfg", b"home = /tmp\n".as_slice()),
+        ("venv-hidden/.venv/pyvenv.cfg", b"home = /tmp\n".as_slice()),
+        ("pods/Podfile", b"platform :osx\n".as_slice()),
+        ("pods/Pods/Manifest.lock", b"PODS:\n".as_slice()),
+        ("next/package.json", b"{}\n".as_slice()),
+        ("next/next.config.js", b"module.exports = {}\n".as_slice()),
+        ("nuxt/package.json", b"{}\n".as_slice()),
+        ("nuxt/nuxt.config.ts", b"export default {}\n".as_slice()),
+    ] {
+        std::fs::write(root.join(path), bytes).unwrap();
+    }
+}
+
 #[test]
 fn durable_source_can_be_reacquired_after_repository_reopen() {
     let fixture = PersistedFixture::new();
@@ -210,6 +276,14 @@ fn durable_source_can_be_reacquired_after_repository_reopen() {
 }
 
 #[test]
+fn snapshot_replay_matches_fresh_evaluation_for_every_catalog_pattern() {
+    PersistedFixture::with_every_catalog_pattern()
+        .acquire()
+        .release()
+        .unwrap();
+}
+
+#[test]
 fn stale_evaluator_identity_and_forged_candidate_id_fail_closed() {
     let stale = PersistedFixture::with_evaluator_revision_and_forged_id(
         CANDIDATE_EVALUATOR_REVISION + 1,
@@ -237,6 +311,228 @@ fn stale_evaluator_identity_and_forged_candidate_id_fail_closed() {
             &forged.candidate_id,
         ),
         Err(RustTargetSourceError::CandidateMismatch)
+    ));
+}
+
+#[test]
+fn snapshot_replay_rejects_forged_size_and_newest_time() {
+    let forged_size = PersistedFixture::new();
+    rusqlite::Connection::open(&forged_size.database)
+        .unwrap()
+        .execute(
+            "UPDATE candidates
+             SET estimated_bytes = estimated_bytes + 1
+             WHERE candidate_id = ?1",
+            [forged_size.candidate_id.as_str()],
+        )
+        .unwrap();
+    assert!(matches!(
+        acquire_rust_target_durable_source(
+            Arc::clone(&forged_size.store),
+            &forged_size.snapshots,
+            &forged_size.scan_id,
+            &forged_size.candidate_id,
+        ),
+        Err(RustTargetSourceError::EvaluatorReplayMismatch)
+    ));
+
+    let forged_time = PersistedFixture::new();
+    rusqlite::Connection::open(&forged_time.database)
+        .unwrap()
+        .execute(
+            "UPDATE candidates
+             SET newest_mtime_unix_seconds = NULL,
+                 newest_mtime_nanoseconds = NULL
+             WHERE candidate_id = ?1",
+            [forged_time.candidate_id.as_str()],
+        )
+        .unwrap();
+    assert!(matches!(
+        acquire_rust_target_durable_source(
+            Arc::clone(&forged_time.store),
+            &forged_time.snapshots,
+            &forged_time.scan_id,
+            &forged_time.candidate_id,
+        ),
+        Err(RustTargetSourceError::EvaluatorReplayMismatch)
+    ));
+}
+
+#[test]
+fn replay_failures_release_cleanup_review_pins() {
+    let fixture = PersistedFixture::new();
+    let connection = rusqlite::Connection::open(&fixture.database).unwrap();
+    connection
+        .execute(
+            "UPDATE candidates
+             SET estimated_bytes = estimated_bytes + 1
+             WHERE candidate_id = ?1",
+            [fixture.candidate_id.as_str()],
+        )
+        .unwrap();
+    for _ in 0..65 {
+        assert!(matches!(
+            acquire_rust_target_durable_source(
+                Arc::clone(&fixture.store),
+                &fixture.snapshots,
+                &fixture.scan_id,
+                &fixture.candidate_id,
+            ),
+            Err(RustTargetSourceError::EvaluatorReplayMismatch)
+        ));
+    }
+    connection
+        .execute(
+            "UPDATE candidates
+             SET estimated_bytes = estimated_bytes - 1
+             WHERE candidate_id = ?1",
+            [fixture.candidate_id.as_str()],
+        )
+        .unwrap();
+    fixture.acquire().release().unwrap();
+}
+
+#[test]
+fn snapshot_replay_rejects_reordered_evidence() {
+    let fixture = PersistedFixture::new();
+    let connection = rusqlite::Connection::open(&fixture.database).unwrap();
+    connection
+        .execute(
+            "UPDATE candidate_evidence
+             SET evidence_ordinal = 99
+             WHERE candidate_id = ?1 AND evidence_ordinal = 1",
+            [fixture.candidate_id.as_str()],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE candidate_evidence
+             SET evidence_ordinal = 1
+             WHERE candidate_id = ?1 AND evidence_ordinal = 2",
+            [fixture.candidate_id.as_str()],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE candidate_evidence
+             SET evidence_ordinal = 2
+             WHERE candidate_id = ?1 AND evidence_ordinal = 99",
+            [fixture.candidate_id.as_str()],
+        )
+        .unwrap();
+
+    assert!(matches!(
+        acquire_rust_target_durable_source(
+            Arc::clone(&fixture.store),
+            &fixture.snapshots,
+            &fixture.scan_id,
+            &fixture.candidate_id,
+        ),
+        Err(RustTargetSourceError::EvaluatorReplayMismatch)
+    ));
+}
+
+#[test]
+fn snapshot_replay_rejects_an_omitted_sibling_candidate() {
+    let fixture = PersistedFixture::with_additional_candidate();
+    let connection = rusqlite::Connection::open(&fixture.database).unwrap();
+    connection
+        .pragma_update(None, "foreign_keys", "ON")
+        .unwrap();
+    assert_eq!(
+        connection
+            .execute(
+                "DELETE FROM candidates
+                 WHERE scan_id = ?1 AND candidate_id <> ?2",
+                rusqlite::params![fixture.scan_id.as_str(), fixture.candidate_id.as_str()],
+            )
+            .unwrap(),
+        1
+    );
+    connection
+        .execute(
+            "UPDATE candidate_evaluations
+             SET candidate_count = 1
+             WHERE scan_id = ?1",
+            [fixture.scan_id.as_str()],
+        )
+        .unwrap();
+
+    assert!(matches!(
+        acquire_rust_target_durable_source(
+            Arc::clone(&fixture.store),
+            &fixture.snapshots,
+            &fixture.scan_id,
+            &fixture.candidate_id,
+        ),
+        Err(RustTargetSourceError::EvaluatorReplayMismatch)
+    ));
+}
+
+#[test]
+fn snapshot_replay_rejects_an_injected_candidate() {
+    let fixture = PersistedFixture::new();
+    let mut connection = rusqlite::Connection::open(&fixture.database).unwrap();
+    connection
+        .pragma_update(None, "foreign_keys", "ON")
+        .unwrap();
+    let transaction = connection.transaction().unwrap();
+    let injected = "candidate:injected-snapshot-replay-row";
+    transaction
+        .execute(
+            "INSERT INTO candidates (
+                 candidate_id, scan_id, rule_id, rule_revision, safety_tier,
+                 estimated_bytes, created_at_unix_ms, status, record_format_version,
+                 category, proposed_action, rule_schedule_eligible,
+                 newest_mtime_unix_seconds, newest_mtime_nanoseconds
+             )
+             SELECT ?1, scan_id, rule_id, rule_revision, safety_tier,
+                    estimated_bytes, created_at_unix_ms, status, record_format_version,
+                    category, proposed_action, rule_schedule_eligible,
+                    newest_mtime_unix_seconds, newest_mtime_nanoseconds
+             FROM candidates WHERE candidate_id = ?2",
+            rusqlite::params![injected, fixture.candidate_id.as_str()],
+        )
+        .unwrap();
+    for (table, columns) in [
+        (
+            "candidate_paths",
+            "path_ordinal, observed_path, observed_path_encoding",
+        ),
+        (
+            "candidate_evidence",
+            "evidence_ordinal, evidence_kind, path_value, path_value_encoding,
+             text_value, observed_unix_seconds, observed_nanoseconds,
+             duration_seconds, duration_nanoseconds, observed_bytes, minimum_bytes",
+        ),
+        ("candidate_blockers", "blocker_ordinal, blocker_kind"),
+    ] {
+        transaction
+            .execute(
+                &format!(
+                    "INSERT INTO {table} (candidate_id, {columns})
+                     SELECT ?1, {columns} FROM {table} WHERE candidate_id = ?2"
+                ),
+                rusqlite::params![injected, fixture.candidate_id.as_str()],
+            )
+            .unwrap();
+    }
+    transaction
+        .execute(
+            "UPDATE candidate_evaluations SET candidate_count = 2 WHERE scan_id = ?1",
+            [fixture.scan_id.as_str()],
+        )
+        .unwrap();
+    transaction.commit().unwrap();
+
+    assert!(matches!(
+        acquire_rust_target_durable_source(
+            Arc::clone(&fixture.store),
+            &fixture.snapshots,
+            &fixture.scan_id,
+            &fixture.candidate_id,
+        ),
+        Err(RustTargetSourceError::EvaluatorReplayMismatch)
     ));
 }
 

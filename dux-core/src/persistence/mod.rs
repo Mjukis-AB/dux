@@ -79,7 +79,8 @@ pub(crate) use candidate_evaluation_history::{
 #[cfg(test)]
 pub(crate) use candidate_history::StoredCandidateRecord;
 pub(crate) use candidate_history::{
-    CandidateHistoryStatus, CompleteCandidateRecord, NewCandidateRecord,
+    CandidateBatchMaterializationBudget, CandidateHistoryStatus, CompleteCandidateRecord,
+    NewCandidateRecord,
 };
 pub(crate) use capacity_history::{
     CapacityPressureBaseline, CapacityWriteOutcome, RawCapacityObservation,

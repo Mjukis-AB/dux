@@ -4019,13 +4019,33 @@ Tasks:
     remains a private locator/provenance witness: it exposes no public or FFI
     path surface and no plan, blocker-removal, scheduling, or effect capability.
     Device/inode reuse is still possible, so retained/generation evidence
-    remains required before authority; the source also does not yet replay the
-    evaluator independently from snapshot bytes.
+    remains required before authority.
+  - [x] Replay the complete deterministic candidate evaluation from the exact
+    retained snapshot before admitting the Rust-target source (2026-07-18).
+    The snapshot-native replay shares the evaluator's catalog pattern and
+    candidate-finishing policy, but independently enumerates the immutable
+    depth-first graph without reconstructing a second full-path DiskTree.
+    Per-directory marker summaries keep enumeration O(nodes + edges);
+    materializing the bounded result adds only its candidate/evidence path
+    bytes. O(depth + accepted candidate payload) working state is charged
+    incrementally against the same conservative 32 MiB durable-batch budget
+    before retention. The replay reproduces exact regular-marker selection,
+    native-byte evidence ordering,
+    any-classified-ancestor suppression across all eleven catalog bindings,
+    known allocated-byte estimates, directory/file descendant mtimes, partial-
+    coverage blockers, IDs, policies, and the global 4,096/4,097 fail-closed
+    boundary. Admission compares the ID-keyed full batch against every durable
+    immutable candidate field; missing, injected, or modified candidates and
+    reordered ordered fields fail before live validation. Replay runs inside
+    the charged CleanupReview lease and the existing source/lease revalidation
+    sandwich;
+    failure releases its decoded-memory slot and pin. It returns only unit or a
+    path-free error and still cannot expose candidates, remove ProtectedPath,
+    construct a plan, cross FFI, schedule, or execute.
   - [ ] Promote the bounded Cargo observation into trusted planning authority,
     then add authoritative volume and protected-root grants,
-    change/process/descendant guards, exact evaluator replay where required,
-    and executor-time revalidation before removing `ProtectedPath` or enabling
-    scheduling.
+    change/process/descendant guards, and executor-time revalidation before
+    removing `ProtectedPath` or enabling scheduling.
     Trusted settings enrollment/code-signature provenance, exact config-file
     identities, retained-cwd spawn, and swap/restore exclusion remain open.
 - [ ] Implement candidate groups and overlap resolution.

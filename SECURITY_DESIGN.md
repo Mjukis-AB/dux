@@ -225,8 +225,19 @@ Its production entry is bound to an exact complete durable source: one current-
 identity succeeded candidate evaluation, its exact succeeded complete-coverage
 scan and snapshot reference, a fully decoded checksummed retained snapshot,
 and a fresh bounded `CleanupReview` lease. Acquisition rereads the complete
-source after snapshot decode, recomputes the deterministic Rust candidate ID,
-and retains scan-time device/inode observations for the root, complete ancestor
+source after snapshot decode. Before that reread, a snapshot-native evaluator
+replays the complete current catalog result without allocating a second
+full-path tree. One bounded enumeration plus result-path materialization uses
+per-directory marker summaries to preserve exact marker preference and
+cross-rule ancestor suppression; bottom-up frames reproduce known allocation
+estimates and directory/file newest mtimes. Candidate payload is charged
+incrementally against the same 32 MiB durable-batch budget, and the global
+4,096/4,097 boundary fails rather than truncates. The ID-keyed replay must
+match every immutable field of every durable candidate, so missing, injected,
+or modified candidates and changed ordered fields fail closed. Replay returns
+no candidate or capability and releases decoded-memory and pin ownership on
+failure. Acquisition also recomputes the deterministic Rust candidate ID and
+retains scan-time device/inode observations for the root, complete ancestor
 chain, target, manifest, and tag. The live witness owns this non-cloneable
 source and rejects source-row drift, pin expiry, or different observed
 device/inode objects. Inode reuse remains possible, so this is not proof of
@@ -257,9 +268,9 @@ Every rule remains unschedulable, and every emitted candidate retains
 `ProtectedPath` because trusted Cargo metadata/config resolution,
 protected-root, authoritative volume/mount, process, descendant, approval, and
 executor-time authority is deliberately unresolved. These rows and all planner
-witnesses are observations, not cleanup authority. The durable binding does
-not independently replay evaluation from snapshot bytes and exposes no
-blocker-removal, planning, FFI, scheduling, or effect edge.
+witnesses are observations, not cleanup authority. The durable binding exposes
+no replayed candidate, blocker-removal, planning, FFI, scheduling, or effect
+edge.
 
 The existing CLI still offers permanent deletion, but its filesystem effect is
 now centralized in the temporary core-owned
@@ -2110,7 +2121,7 @@ coverage is labelled as Home-scoped and unknown coverage stays unknown.
 | Protected-root registry | Implemented text-only policy; production construction sealed | Trusted OS home/profile/mount discovery and stable rule grants |
 | Dangerous-path corpus and fuzzing | Implemented | Keep cross-platform and promote every crash regression |
 | Rule schema/loader | Strict schema plus a build-time digest/policy-gated and strict load-time-validated discovery catalog; ten rules remain selected-root RevealOnly observations, while independently researched `developer.rust.target` revision 2 requires snapshot `Cargo.toml` plus `CACHEDIR.TAG` evidence and proposes only SafeRegenerable/RemoveKnownRegenerableContents. Every rule is unschedulable and every result remains blocked by `ProtectedPath`. Sealed Unix-only live and Cargo-resolution witnesses now verify the exact tag, manifest digest, current default layout, and scrubbed-context Cargo workspace/target result without clearing that blocker | Developer ID signing must cover catalog bytes; before the Rust rule can lose its blocker, bind a trusted direct Cargo enrollment and exact config provenance, prove authoritative volume/protected-root grants, add process/descendant/change guards, and complete adversarial review |
-| Candidate and cleanup-plan records | Completed fresh scans create deterministic, snapshot-bound durable candidate batches; exact-scan summaries plus bounded lossless path/evidence pages and semantic review commands remain non-authoritative history. A crate-private planner module now seals an exact current-evaluator/current-catalog succeeded scan/evaluation/candidate join to a fully decoded retained snapshot and fresh cleanup-review lease, carries scan-time Unix identities into the ephemeral Rust-target live and bounded Cargo metadata witnesses, and exposes no plan conversion. Cleanup plans remain non-executable domain/history data | Add independent evaluator replay if final admission requires it, FFI/UI transport, and trusted Cargo/config/volume/protected-root/process/executor witnesses |
+| Candidate and cleanup-plan records | Completed fresh scans create deterministic, snapshot-bound durable candidate batches; exact-scan summaries plus bounded lossless path/evidence pages and semantic review commands remain non-authoritative history. A crate-private planner module now seals an exact current-evaluator/current-catalog succeeded scan/evaluation/candidate join to a fully decoded retained snapshot and fresh cleanup-review lease, replays the complete batch from that snapshot with bounded working state, rejects every immutable-field mismatch, carries scan-time Unix identities into the ephemeral Rust-target live and bounded Cargo metadata witnesses, and exposes no replayed candidate or plan conversion. Cleanup plans remain non-executable domain/history data | Keep full-batch replay exact through overlap planning; add FFI/UI transport and trusted Cargo/config/volume/protected-root/process/executor witnesses |
 | macOS app cleanup | Absent | Entire cleanup release gate in §17.3 |
 | Legacy CLI deletion | Active arbitrary-descendant permanent path routed through a temporary core adapter; strict-target/volume/identity rechecks only; scanned-byte estimates labeled in CLI | Replace adapter with reviewed plan/approval/executor chain without weakening current checks |
 | Centralized executor | Production executor absent; temporary legacy adapter is containment only | Typed admission, integration with the existing cross-process lease/journal, and live target revalidation required |

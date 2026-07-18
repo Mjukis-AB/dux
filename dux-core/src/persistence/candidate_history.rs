@@ -54,6 +54,52 @@ struct CandidateBatchUsage {
     blockers: u64,
 }
 
+#[derive(Default)]
+pub(crate) struct CandidateBatchMaterializationBudget {
+    usage: CandidateBatchUsage,
+}
+
+impl CandidateBatchMaterializationBudget {
+    pub(crate) fn charge_observed_candidate(
+        &mut self,
+        path: &Path,
+        evidence_paths: &[PathBuf],
+        blocker_count: usize,
+    ) -> Result<bool, HistoryError> {
+        let path_bytes = prepare_absolute_path(path)?;
+        let evidence_payload_bytes = evidence_paths.iter().try_fold(
+            u64::try_from(path_bytes.bytes.len()).map_err(|_| invalid())?,
+            |total, evidence| {
+                let encoded = prepare_absolute_path(evidence)?;
+                total
+                    .checked_add(u64::try_from(encoded.bytes.len()).map_err(|_| invalid())?)
+                    .ok_or_else(invalid)
+            },
+        )?;
+        let next = self.usage.checked_add(
+            CandidateBatchUsage {
+                candidates: 1,
+                paths: 1,
+                path_payload_bytes: u64::try_from(path_bytes.bytes.len()).map_err(|_| invalid())?,
+                evidence: u64::try_from(evidence_paths.len())
+                    .map_err(|_| invalid())?
+                    .checked_add(1)
+                    .ok_or_else(invalid)?,
+                evidence_payload_bytes,
+                blockers: u64::try_from(blocker_count).map_err(|_| invalid())?,
+            },
+            HistoryErrorKind::InvalidInput,
+        )?;
+        if next.materialized_bytes(HistoryErrorKind::InvalidInput)?
+            > MAX_CANDIDATE_BATCH_MATERIALIZED_BYTES
+        {
+            return Ok(false);
+        }
+        self.usage = next;
+        Ok(true)
+    }
+}
+
 impl CandidateBatchUsage {
     fn checked_add(self, other: Self, kind: HistoryErrorKind) -> Result<Self, HistoryError> {
         let add = |left: u64, right: u64| {

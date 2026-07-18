@@ -122,6 +122,54 @@ impl HostValue {
         }
     }
 
+    pub(crate) fn matches_ascii_component(&self, expected: &str) -> bool {
+        debug_assert!(expected.is_ascii());
+        match self.encoding {
+            HostEncoding::UnixBytes => self.bytes == expected.as_bytes(),
+            HostEncoding::WindowsUtf16Le => {
+                self.bytes.len() == expected.len().saturating_mul(2)
+                    && self
+                        .bytes
+                        .chunks_exact(2)
+                        .zip(expected.bytes())
+                        .all(|(actual, expected)| actual == [expected, 0])
+            }
+        }
+    }
+
+    pub(crate) fn has_ascii_extension(&self, expected: &str) -> bool {
+        debug_assert!(expected.is_ascii());
+        let Some(stem_bytes) = self
+            .bytes
+            .len()
+            .checked_sub(expected.len().saturating_add(1))
+        else {
+            return false;
+        };
+        match self.encoding {
+            HostEncoding::UnixBytes => {
+                stem_bytes > 0
+                    && self.bytes.get(stem_bytes) == Some(&b'.')
+                    && self.bytes.get(stem_bytes + 1..) == Some(expected.as_bytes())
+            }
+            HostEncoding::WindowsUtf16Le => {
+                let suffix_units = expected.len().saturating_add(1);
+                let Some(stem_bytes) = self.bytes.len().checked_sub(suffix_units.saturating_mul(2))
+                else {
+                    return false;
+                };
+                stem_bytes > 0
+                    && self.bytes.get(stem_bytes..stem_bytes + 2) == Some(&[b'.', 0])
+                    && self.bytes.get(stem_bytes + 2..).is_some_and(|suffix| {
+                        suffix
+                            .chunks_exact(2)
+                            .zip(expected.bytes())
+                            .all(|(actual, expected)| actual == [expected, 0])
+                    })
+            }
+        }
+    }
+
     /// Decode this lossless host-native observation back into a path value.
     /// Callers must still apply their own lexical and live-filesystem checks.
     pub(crate) fn to_path_buf(&self) -> Result<std::path::PathBuf, SnapshotCodecError> {

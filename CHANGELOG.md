@@ -5,6 +5,20 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Continued Milestone 5 with an exact full-batch evaluator replay inside the
+  retained Rust-target source boundary. A snapshot-native single pass shares
+  the catalog's marker declarations and final candidate policy without
+  reconstructing another full-path tree; bounded directory summaries and
+  bottom-up frames reproduce marker preference, cross-rule ancestor
+  suppression, known allocation estimates, newest directory/file times, and
+  the exact 4,096/4,097 failure boundary. Result paths are charged
+  incrementally against the existing 32 MiB durable-batch budget. Every
+  immutable field of every
+  durable candidate must match the ID-keyed replay, so forged size/time,
+  reordered evidence, omitted rows, and injected rows fail closed while the
+  charged cleanup-review lease is held. Replay returns no candidate or
+  capability, releases memory/pin ownership on failure, and still cannot clear
+  `ProtectedPath`, create a plan, cross FFI, schedule, or execute.
 - Continued Milestone 5 by sealing Rust-target validation to one exact durable
   discovery source. Production acquisition now requires a succeeded complete-
   coverage scan, its exact checksummed snapshot, the current evaluator/catalog/

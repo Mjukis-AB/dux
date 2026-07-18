@@ -182,12 +182,49 @@ all make a best-effort exact pin release; unresolved database failure remains
 safe and expires naturally.
 
 This binding proves exact persisted provenance and changed-since-scan identity,
-not cleanup authority. It does not independently replay rule evaluation from
-the decoded snapshot, prove current descendants, authenticate Cargo or its
-configuration inputs, grant protected-root or volume authority, establish
-process inactivity, remove `ProtectedPath`, or expose a plan/FFI/execution
-conversion. Final authority still needs retained-handle or generation evidence
-strong enough to address inode reuse.
+not cleanup authority. It does not prove current descendants, authenticate
+Cargo or its configuration inputs, grant protected-root or volume authority,
+establish process inactivity, remove `ProtectedPath`, or expose a
+plan/FFI/execution conversion. Final authority still needs retained-handle or
+generation evidence strong enough to address inode reuse.
+
+## Exact snapshot evaluator replay
+
+A fourth 2026-07-18 checkpoint now replays the complete current candidate batch
+from the decoded retained snapshot before the Rust-target source can be
+returned. It does not reconstruct a second full-path tree. Instead, one
+depth-first enumeration caches each open directory's bounded marker summary,
+aggregate known allocated bytes, directory/file newest modification time, and
+any-classified-ancestor state. Candidate and evidence paths are materialized
+only for the bounded output and charged incrementally against the same
+conservative 32 MiB durable-batch budget before retention. Working memory is
+therefore O(depth + accepted candidate payload); enumeration is O(nodes +
+edges), with additional work proportional to the materialized path bytes. A
+wide directory is never rescanned once per artifact-named child.
+
+The replay uses the same catalog pattern declarations and final candidate
+policy as fresh evaluation while independently enumerating snapshot nodes. It
+reproduces marker preference, native-byte evidence sorting, suppression by any
+classifiable outer artifact (including a different rule), known-byte estimates
+when allocation is partially unknown, and the exact global 4,096-success versus
+4,097-failure boundary. Symlink, other, and error-node mtimes remain excluded,
+matching the fresh tree.
+
+Every replayed candidate is compared by ID against the complete durable
+evaluation: source scan, rule/revision, category, ordered paths and evidence,
+estimated bytes, newest mtime, safety, action, schedule eligibility, and
+ordered blockers must all match. Missing, injected, or modified candidates and
+any change to ordered child fields fail closed. Mutable review status is not
+evaluator output; the existing source loader and acquisition sandwich continue
+to require the selected candidate to be `Discovered` and reject any source
+drift.
+
+Replay runs while the charged `CleanupReview` document and exact pin are held,
+before snapshot identity binding and the second complete source read. Its only
+result is success or a path-free error. Failure drops both decoded-memory
+accounting and the auto-releasing pin. No replayed candidate or capability can
+escape this boundary, and the checkpoint still cannot clear `ProtectedPath`,
+create a plan, cross FFI, schedule, or execute.
 
 ## Required before executable use
 
@@ -200,9 +237,9 @@ proves, at minimum:
   retained-cwd execution, and exact config/include identity provenance beyond
   the implemented bounded scrubbed-context metadata result;
 - current target kind, symlink, link-count, mount, and descendant policy;
-- independent evaluator replay if required by final planner admission, plus
-  inactive Cargo/rustc state and post-witness change revalidation;
-- overlap resolution, exclusions, current reviewed plan, expiry, and approval;
+- inactive Cargo/rustc state and post-witness change revalidation;
+- overlap resolution that consumes the still-exact replayed full batch,
+  exclusions, current reviewed plan, expiry, and approval;
 - handle-relative executor-time revalidation and durable journal fencing; and
 - exact-path UI disclosure, global permanent-cleanup disablement, capacity
   verification, history, and recovery.
