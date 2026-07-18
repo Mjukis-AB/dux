@@ -613,13 +613,46 @@ enum ExplorerSnapshotLivePathAdapter {
         }) else {
             throw ExplorerSnapshotLivePathError.invalidResponse
         }
+        let url = try url(
+            fromValidatedUnixPathBytes: bytes,
+            isDirectory: kind == .directory
+        )
+        return ExplorerResolvedLiveItem(
+            nodeID: raw.nodeId,
+            kind: kind,
+            url: url,
+            exactTextPath: exactText
+        )
+    }
+
+    /// Convert one core-issued, current Unix path to a Foundation URL without
+    /// allowing Foundation to normalize or substitute bytes. This is shared by
+    /// read-only presentation and the future one-shot Trash callback.
+    static func url(
+        fromValidatedUnixPathBytes bytes: [UInt8],
+        isDirectory: Bool
+    ) throws -> URL {
+        guard
+            !bytes.isEmpty,
+            bytes.count <= maximumPathBytes,
+            bytes.first == UInt8(ascii: "/"),
+            !bytes.contains(0),
+            !bytes.contains(where: { $0 < 0x20 || $0 == 0x7f }),
+            validAbsoluteUnixPath(bytes),
+            let exactText = String(data: Data(bytes), encoding: .utf8),
+            !exactText.unicodeScalars.contains(where: {
+                $0.properties.generalCategory == .control
+            })
+        else {
+            throw ExplorerSnapshotLivePathError.invalidResponse
+        }
         var terminated = bytes
         terminated.append(0)
         let url = terminated.withUnsafeBufferPointer { buffer in
             buffer.baseAddress!.withMemoryRebound(to: CChar.self, capacity: buffer.count) {
                 URL(
                     fileURLWithFileSystemRepresentation: $0,
-                    isDirectory: kind == .directory,
+                    isDirectory: isDirectory,
                     relativeTo: nil
                 )
             }
@@ -633,12 +666,7 @@ enum ExplorerSnapshotLivePathAdapter {
         guard url.isFileURL, roundTrippedBytes == Data(bytes) else {
             throw ExplorerSnapshotLivePathError.unsupportedItem
         }
-        return ExplorerResolvedLiveItem(
-            nodeID: raw.nodeId,
-            kind: kind,
-            url: url,
-            exactTextPath: exactText
-        )
+        return url
     }
 
     private static func validAbsoluteUnixPath(_ bytes: [UInt8]) -> Bool {

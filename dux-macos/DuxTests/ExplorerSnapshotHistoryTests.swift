@@ -322,6 +322,35 @@ private final class RecordingTrashFileManager: TrashFileManaging {
     }
 }
 
+private final class RecordingTrashEffectRequest: TrashEffectRequestReading, @unchecked Sendable {
+    let version: UInt32
+    let kind: TrashEffectTargetKind
+    let encoding: SnapshotNameEncoding
+    var bytes: Data?
+
+    init(
+        version: UInt32 = 1,
+        kind: TrashEffectTargetKind = .file,
+        encoding: SnapshotNameEncoding = .unixBytes,
+        bytes: Data = Data("/private/tmp/dux-reviewed-item".utf8)
+    ) {
+        self.version = version
+        self.kind = kind
+        self.encoding = encoding
+        self.bytes = bytes
+    }
+
+    func recordVersion() throws -> UInt32 { version }
+    func targetKind() throws -> TrashEffectTargetKind { kind }
+    func pathEncoding() throws -> SnapshotNameEncoding { encoding }
+
+    func takePathBytes() throws -> Data {
+        guard let bytes else { throw MacOSTrashAdapterError.invalidRequest }
+        self.bytes = nil
+        return bytes
+    }
+}
+
 final class MacOSTrashPlatformAdapterTests: XCTestCase {
     func testRecordingAdapterReceivesTheExactReviewedURLOnceWithoutMutation() {
         let fileManager = RecordingTrashFileManager()
@@ -346,6 +375,39 @@ final class MacOSTrashPlatformAdapterTests: XCTestCase {
             return XCTFail("Foundation failures must map to an unknown outcome")
         }
         XCTAssertEqual(fileManager.calls, 1)
+    }
+
+    func testCoreIssuedRequestIsStrictlyConvertedAndConsumedOnce() {
+        let fileManager = RecordingTrashFileManager()
+        let adapter = MacOSTrashPlatformAdapter(fileManager: fileManager)
+        let request = RecordingTrashEffectRequest()
+
+        XCTAssertEqual(adapter.trash(request: request), .completed)
+        XCTAssertEqual(fileManager.calls, 1)
+        XCTAssertEqual(
+            fileManager.requestedURL,
+            URL(fileURLWithPath: "/private/tmp/dux-reviewed-item", isDirectory: false)
+        )
+        XCTAssertEqual(adapter.trash(request: request), .failed)
+        XCTAssertEqual(fileManager.calls, 1, "a consumed callback request cannot retry")
+    }
+
+    func testCoreIssuedRequestRejectsMalformedPathBeforeFoundation() {
+        let fileManager = RecordingTrashFileManager()
+        let adapter = MacOSTrashPlatformAdapter(fileManager: fileManager)
+        let request = RecordingTrashEffectRequest(bytes: Data("relative/path".utf8))
+
+        XCTAssertEqual(adapter.trash(request: request), .failed)
+        XCTAssertEqual(fileManager.calls, 0)
+    }
+
+    func testCoreIssuedRequestRejectsWrongEncodingBeforeFoundation() {
+        let fileManager = RecordingTrashFileManager()
+        let adapter = MacOSTrashPlatformAdapter(fileManager: fileManager)
+        let request = RecordingTrashEffectRequest(encoding: .windowsUTF16LittleEndian)
+
+        XCTAssertEqual(adapter.trash(request: request), .failed)
+        XCTAssertEqual(fileManager.calls, 0)
     }
 }
 

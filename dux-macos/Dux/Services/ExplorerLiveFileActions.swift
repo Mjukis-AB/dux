@@ -119,7 +119,21 @@ enum MacOSTrashAdapterError: Error, Equatable {
     /// journal must conservatively recover instead of claiming a clean
     /// failure or retrying.
     case outcomeUnknown
+    case invalidRequest
 }
+
+/// The generated callback request is intentionally abstracted before it is
+/// handed to the Foundation adapter. Tests can exercise byte validation without
+/// constructing a Rust object, while production receives only core-issued
+/// requests.
+protocol TrashEffectRequestReading: Sendable {
+    func recordVersion() throws -> UInt32
+    func targetKind() throws -> TrashEffectTargetKind
+    func pathEncoding() throws -> SnapshotNameEncoding
+    func takePathBytes() throws -> Data
+}
+
+extension TrashEffectRequest: TrashEffectRequestReading {}
 
 struct MacOSTrashPlatformAdapter {
     private let fileManager: any TrashFileManaging
@@ -138,5 +152,50 @@ struct MacOSTrashPlatformAdapter {
         } catch {
             return .failure(.outcomeUnknown)
         }
+    }
+
+    /// Map one core-issued callback request to a URL and invoke the reviewed
+    /// synchronous Foundation seam. No caller-supplied path is accepted.
+    func trash(request: any TrashEffectRequestReading) -> TrashPlatformResult {
+        let url: URL
+        do {
+            let targetKind = try request.targetKind()
+            guard
+                try request.recordVersion() == 1,
+                try request.pathEncoding() == .unixBytes
+            else {
+                return .failed
+            }
+            let bytes = [UInt8](try request.takePathBytes())
+            let isDirectory = targetKind == .directory
+            url = try ExplorerSnapshotLivePathAdapter.url(
+                fromValidatedUnixPathBytes: bytes,
+                isDirectory: isDirectory
+            )
+        } catch {
+            return .failed
+        }
+        switch trash(url) {
+        case .success:
+            return .completed
+        case .failure(.outcomeUnknown):
+            return .outcomeUnknown
+        case .failure(.invalidRequest):
+            return .failed
+        }
+    }
+}
+
+/// Future UniFFI callback implementation. It is deliberately not registered
+/// with `DuxEngine` until reviewed-plan approval and journal admission exist.
+final class MacOSTrashPlatformDriver: TrashPlatformDriver, @unchecked Sendable {
+    private let adapter: MacOSTrashPlatformAdapter
+
+    init(adapter: MacOSTrashPlatformAdapter = MacOSTrashPlatformAdapter()) {
+        self.adapter = adapter
+    }
+
+    func trash(request: TrashEffectRequest) -> TrashPlatformResult {
+        adapter.trash(request: request)
     }
 }

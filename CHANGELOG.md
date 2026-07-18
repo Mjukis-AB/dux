@@ -5,6 +5,10 @@
   bytes and target kind to a future synchronous platform callback, and can be
   consumed once. No plan, approval, journal, callback registration, or
   filesystem mutation is exposed yet.
+- Added the inert Swift callback-side request adapter. It strictly validates
+  core-issued Unix path bytes before URL construction, maps malformed requests
+  to `Failed`, maps Foundation throws to `OutcomeUnknown`, and remains
+  unregistered until reviewed-plan approval exists.
 
 All notable changes to DUX will be documented in this file.
 

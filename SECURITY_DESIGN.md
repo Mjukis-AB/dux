@@ -777,6 +777,10 @@ bytes, never a plan ID, approval, journal receipt, or arbitrary caller path.
 `TrashPlatformDriver` is synchronous and returns a bounded result enum. Until a
 reviewed-plan/approval capability exists, no engine method registers a driver
 or creates a request, so generated callback types cannot authorize cleanup.
+The compiled Swift side validates that request before constructing a URL and
+consumes target metadata before the one-shot bytes; malformed or non-round-
+tripping bytes never reach Foundation. Its driver maps only the bounded result
+enum and remains unregistered until the core owns reviewed-plan approval.
 
 Any ambiguity returns a typed rejection, skip, or `ChangedSincePlan`. The
 executor MUST NOT silently refresh a target and proceed; changed evidence needs

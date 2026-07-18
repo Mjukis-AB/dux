@@ -4514,6 +4514,13 @@ Tasks:
     plan/approval capability must issue the request while the journal claim is
     held, and the Swift adapter must consume it immediately without retaining
     or retrying it.
+  - [x] 2026-07-19 slice: add the inert Swift callback-side request adapter.
+    The generated request is validated for record version, Unix encoding,
+    bounded absolute bytes, and target kind before Foundation URL creation;
+    byte-round-trip failure returns `Failed` without entering `FileManager`,
+    while a Foundation throw remains `OutcomeUnknown`. A fake request seam
+    verifies exact URL delivery, one-shot consumption, malformed-path refusal,
+    and no retry. `MacOSTrashPlatformDriver` is compiled but not registered.
 - [ ] Implement permanent-safe executor for approved rules.
 - [ ] Implement execution-time revalidation.
 - [ ] Implement cleanup session/item history.
