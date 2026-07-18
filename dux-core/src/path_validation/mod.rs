@@ -93,9 +93,10 @@ use windows as platform;
 pub(crate) use filesystem::{
     CanonicalFileContentsSnapshot, CanonicalFileDigestError, CanonicalFileDigestSnapshot,
     CanonicalFilePrefixError, CanonicalFilePrefixSnapshot, FilesystemBoundarySnapshot,
-    capture_filesystem_boundary, capture_path_snapshot, capture_regular_file_contents,
-    capture_regular_file_prefix, capture_regular_file_sha256, capture_scan_root,
-    capture_trash_path_snapshot,
+    TRUSTED_VOLUME_LOCATION_PROOF_REVISION, TrustedVolumeLocationError,
+    TrustedVolumeLocationWitness, capture_filesystem_boundary, capture_path_snapshot,
+    capture_regular_file_contents, capture_regular_file_prefix, capture_regular_file_sha256,
+    capture_scan_root, capture_trash_path_snapshot,
 };
 #[allow(unused_imports)]
 pub(crate) use lexical::{validate_cleanup_path, validate_scan_root};

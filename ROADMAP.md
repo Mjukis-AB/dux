@@ -4418,6 +4418,16 @@ Tasks:
       fails closed; this remains observational and does not mint a trusted
       volume/location grant, clear `ProtectedPath`, construct a plan, cross
       FFI, schedule, or mutate.
+    - [x] 2026-07-19 slice: add the crate-private
+      `TrustedVolumeLocationWitness` proof boundary. It can be constructed
+      only from the code-owned `CanonicalScanRoot`, retains repeated ancestry
+      plus kernel filesystem and mount-location evidence, and exposes only
+      proof revision, boundary matching, and revalidation. macOS rejects
+      requested/canonical alias or firmlink-like mismatches; Linux requires a
+      non-zero kernel mount ID rather than a device number alone; unsupported
+      platforms fail closed. This remains observation-only: it grants no
+      volume/location or protected-root rule, does not clear `ProtectedPath`,
+      and cannot construct a plan, cross FFI, schedule, or perform an effect.
     - [x] 2026-07-19 slice: retain Cargo's complete read-set and enrollment
       fences after metadata publication. The non-cloneable Cargo witness now
       owns configuration, ancestor-manifest, workspace-glob, workspace,

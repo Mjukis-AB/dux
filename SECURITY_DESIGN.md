@@ -698,6 +698,19 @@ observation only: it does not establish a trusted volume/location grant,
 remove `ProtectedPath`, or create planning, approval, FFI, scheduling, or
 effect authority.
 
+The next boundary is represented by a separate crate-private
+`TrustedVolumeLocationWitness`. It is minted only from a `CanonicalScanRoot`
+and validates repeated root ancestry plus non-zero kernel filesystem identity.
+macOS additionally requires an absolute kernel mount path and an exact
+requested/canonical spelling (a conservative refusal of alias/firmlink-like
+ambiguity); Linux requires the kernel mount ID so a device number alone cannot
+bless a bind mount. Windows and other unsupported platforms fail closed. The
+witness is non-cloneable, path-private, revisioned, and limited to
+revalidation or comparison with the already-captured boundary. It is not yet
+the trusted grant that can change a protected-root disposition; rule scope,
+account/known-folder provenance, process/descendant guards, and executor-time
+revalidation remain separate gates.
+
 The bounded Cargo metadata witness now retains its complete read-set fences
 after publication: configuration, ancestor-manifest probes, workspace globs,
 workspace manifests, package metadata, target/source/build namespace, the

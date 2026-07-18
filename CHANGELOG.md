@@ -13,6 +13,12 @@
   its scan root and revalidates ancestry and mount identity before publishing
   review evidence. Boundary drift fails closed; this remains observational and
   does not grant volume/location or cleanup authority.
+- Added the crate-private, non-cloneable `TrustedVolumeLocationWitness`
+  boundary. It is minted only from a canonical scan-root witness, retains
+  repeated ancestry and kernel mount identity, rejects macOS alias/firmlink-like
+  spelling ambiguity and Linux device-only mount evidence, and fails closed on
+  unsupported platforms. It remains observation-only and cannot clear
+  `ProtectedPath` or authorize planning or effects.
 - Cargo metadata witnesses now retain every read-set guard, the descriptor-
   retained project directory, exact executable/version observation, optional
   enrollment guard, and filesystem boundary after publication. Private

@@ -382,6 +382,13 @@ pub(crate) struct FilesystemBoundarySnapshot {
 
 pub(crate) const MAX_BOUNDARY_ANCESTORS: usize = 64;
 
+/// Revision of the platform proof used by the future trusted planner scope.
+///
+/// This is deliberately separate from the observational boundary revision:
+/// changing the platform proof or its acceptance rules must invalidate any
+/// retained scope evidence rather than silently widening it.
+pub(crate) const TRUSTED_VOLUME_LOCATION_PROOF_REVISION: u32 = 1;
+
 impl FilesystemBoundarySnapshot {
     pub(crate) fn scan_root(&self) -> &Path {
         &self.scan_root
@@ -407,6 +414,13 @@ impl FilesystemBoundarySnapshot {
         self.mount.filesystem_type
     }
 
+    /// The kernel-reported filesystem identity, retained only for the
+    /// planner's internal volume/location proof. Callers still cannot derive
+    /// a cleanup capability from this observation alone.
+    pub(crate) fn mount_filesystem_id(&self) -> [u64; 2] {
+        self.mount.filesystem_id
+    }
+
     /// Re-capture the same lexical boundary and compare every retained
     /// no-follow ancestor and mount identity. This is still observational;
     /// callers must not treat success as a grant or effect capability.
@@ -421,6 +435,124 @@ impl FilesystemBoundarySnapshot {
             });
         }
         Ok(())
+    }
+}
+
+/// A crate-private, non-cloneable proof that one canonical scan root remains
+/// on one exact platform volume/location boundary.
+///
+/// Construction is intentionally limited to a code-owned
+/// [`CanonicalScanRoot`]; no caller path, volume label, or boolean can mint
+/// this value. It is still only a scope witness: it has no path getter, plan,
+/// approval, FFI, schedule, or filesystem-effect operation. Protected-root
+/// rule grants and executor-time revalidation remain separate gates.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct TrustedVolumeLocationWitness {
+    boundary: FilesystemBoundarySnapshot,
+    proof_revision: u32,
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum TrustedVolumeLocationError {
+    #[error("trusted volume/location proof is unsupported on this platform")]
+    UnsupportedPlatform,
+    #[error("trusted volume/location proof received mismatched scan-root evidence")]
+    MismatchedScanRoot,
+    #[error("trusted volume/location proof has invalid root ancestry")]
+    InvalidRootAncestry,
+    #[error("trusted volume/location proof has invalid mount identity")]
+    InvalidMountIdentity,
+    #[error("trusted volume/location proof has invalid mount location")]
+    InvalidMountLocation,
+    #[error("trusted volume/location proof revision is unsupported")]
+    UnsupportedRevision,
+    #[error("trusted volume/location boundary changed")]
+    Changed,
+    #[error("trusted volume/location boundary could not be observed: {0}")]
+    Boundary(#[source] CanonicalPathError),
+}
+
+impl TrustedVolumeLocationWitness {
+    /// Capture a platform proof from the exact canonical scan-root witness.
+    pub(crate) fn capture(root: &CanonicalScanRoot) -> Result<Self, TrustedVolumeLocationError> {
+        let boundary =
+            capture_filesystem_boundary(root).map_err(TrustedVolumeLocationError::Boundary)?;
+        Self::from_boundary(root, boundary)
+    }
+
+    fn from_boundary(
+        root: &CanonicalScanRoot,
+        boundary: FilesystemBoundarySnapshot,
+    ) -> Result<Self, TrustedVolumeLocationError> {
+        if boundary.scan_root != root.canonical_path() || boundary.root_identity != root.identity()
+        {
+            return Err(TrustedVolumeLocationError::MismatchedScanRoot);
+        }
+        if boundary.root_ancestors.is_empty()
+            || boundary
+                .root_ancestors
+                .last()
+                .map(AncestorIdentity::identity)
+                != Some(root.identity())
+        {
+            return Err(TrustedVolumeLocationError::InvalidRootAncestry);
+        }
+        if boundary.mount.filesystem_id == [0, 0] || boundary.mount.filesystem_type == 0 {
+            return Err(TrustedVolumeLocationError::InvalidMountIdentity);
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            let Some(mount_path) = boundary.mount.mount_path.as_deref() else {
+                return Err(TrustedVolumeLocationError::InvalidMountLocation);
+            };
+            if !mount_path.is_absolute() || root.canonical_path() != root.requested_path() {
+                // A requested/canonical spelling mismatch is the conservative
+                // firmlink/alias refusal. A future platform-specific proof may
+                // replace this check once those semantics are fully covered.
+                return Err(TrustedVolumeLocationError::InvalidMountLocation);
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            if boundary.mount.mount_id == 0 {
+                // Linux mount IDs are the kernel's exact mount boundary. A
+                // device number alone would incorrectly accept bind mounts.
+                return Err(TrustedVolumeLocationError::InvalidMountLocation);
+            }
+        }
+
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            return Err(TrustedVolumeLocationError::UnsupportedPlatform);
+        }
+
+        Ok(Self {
+            boundary,
+            proof_revision: TRUSTED_VOLUME_LOCATION_PROOF_REVISION,
+        })
+    }
+
+    pub(crate) const fn proof_revision(&self) -> u32 {
+        self.proof_revision
+    }
+
+    pub(crate) fn revalidate(&self) -> Result<(), TrustedVolumeLocationError> {
+        if self.proof_revision != TRUSTED_VOLUME_LOCATION_PROOF_REVISION {
+            return Err(TrustedVolumeLocationError::UnsupportedRevision);
+        }
+        match self.boundary.revalidate() {
+            Ok(()) => Ok(()),
+            Err(CanonicalPathError::ChangedDuringValidation { .. }) => {
+                Err(TrustedVolumeLocationError::Changed)
+            }
+            Err(error) => Err(TrustedVolumeLocationError::Boundary(error)),
+        }
+    }
+
+    pub(crate) fn matches_boundary(&self, boundary: &FilesystemBoundarySnapshot) -> bool {
+        self.proof_revision == TRUSTED_VOLUME_LOCATION_PROOF_REVISION && &self.boundary == boundary
     }
 }
 
@@ -856,6 +988,21 @@ mod tests {
         #[cfg(target_os = "linux")]
         assert!(first.mount_id().is_some());
         assert_ne!(first.filesystem_type(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn trusted_volume_location_witness_is_stable_and_boundary_bound() {
+        let fixture = Fixture::new();
+        let witness = TrustedVolumeLocationWitness::capture(&fixture.canonical_root).unwrap();
+        let boundary = fixture.capture_boundary().unwrap();
+
+        assert_eq!(
+            witness.proof_revision(),
+            TRUSTED_VOLUME_LOCATION_PROOF_REVISION
+        );
+        witness.revalidate().unwrap();
+        assert!(witness.matches_boundary(&boundary));
     }
 
     #[cfg(unix)]
