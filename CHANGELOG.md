@@ -5,6 +5,14 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Began Milestone 5 with an independently researched, fail-closed Rust Cargo
+  `target` rule. Revision 2 requires snapshot evidence of a direct regular
+  `Cargo.toml` sibling and `CACHEDIR.TAG` child before proposing a
+  safe-regenerable known-contents cleanup. The exact policy is build/load-time
+  allowlisted and adversarially tested, but remains unschedulable and every
+  candidate retains `ProtectedPath`; selection and plan construction therefore
+  still reject it until live Cargo, volume, protected-root, change, and executor
+  witnesses exist.
 - Completed Milestone 4's million-node performance-fixture slice. Generated
   balanced and worst-case wide snapshots now exercise real durable immutable
   publication and Explorer review without creating millions of filesystem

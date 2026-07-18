@@ -83,7 +83,10 @@ pub fn classify_artifact(tree: &DiskTree, node_id: NodeId) -> Option<ArtifactCla
     let (kind, evidence_node_ids) = match node.name.as_str() {
         "target" => (
             ArtifactKind::Rust,
-            vec![regular_sibling_named(tree, parent?, &["Cargo.toml"])?],
+            vec![
+                regular_sibling_named(tree, parent?, &["Cargo.toml"])?,
+                regular_child_named(tree, node_id, &["CACHEDIR.TAG"])?,
+            ],
         ),
         "node_modules" => (
             ArtifactKind::Node,

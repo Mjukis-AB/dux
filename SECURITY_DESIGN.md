@@ -213,11 +213,16 @@ the crate build and again before engine storage or workers are published.
 Production evaluation accepts only the same completed-scan type-state witness
 used to create the immutable snapshot. The current catalog contains only
 selected-scan-root developer-artifact observations backed by the independently
-implemented M0 marker projection. Every rule is Informational, RevealOnly, and
-unschedulable, and every emitted candidate retains `ProtectedPath` because
-trusted protected-root and volume authority is deliberately unresolved. These
-rows are durable discovery history, not current filesystem evidence or cleanup
-authority.
+implemented M0 marker projection. Ten rules remain Informational/RevealOnly.
+The independently researched `developer.rust.target` revision 2 rule may
+propose `SafeRegenerable`/`RemoveKnownRegenerableContents` only when a direct
+regular `Cargo.toml` sibling and direct regular `CACHEDIR.TAG` child were both
+present in the completed snapshot. The cache-tag filename is supporting
+snapshot evidence, not proof of its standard signature or a live Cargo target.
+Every rule remains unschedulable, and every emitted candidate retains
+`ProtectedPath` because trusted protected-root, volume, workspace-target, and
+live cache-tag authority is deliberately unresolved. These rows are durable
+discovery history, not current filesystem evidence or cleanup authority.
 
 The existing CLI still offers permanent deletion, but its filesystem effect is
 now centralized in the temporary core-owned
@@ -373,9 +378,10 @@ fails at the first match beyond 4,096 without truncation or unbounded result
 materialization. The production entry point is crate-private and requires a
 fresh `CompletedScanArtifact`; public/cached trees cannot mint persisted
 results. Because authoritative volume identity, canonical ancestry, and a
-protected-root grant are not yet present, the current findings remain
-Informational/RevealOnly with `ProtectedPath` even when scan coverage is
-complete. They cannot enter the current cleanup planner.
+protected-root grant are not yet present, every current finding retains
+`ProtectedPath` even when scan coverage is complete. The Rust target rule may
+carry a safe-regenerable proposed policy, but it remains unscheduled,
+unselectable, and unable to enter the current cleanup planner.
 
 ### 6.3 Protected-root and sensitive-category policy
 
@@ -2066,7 +2072,7 @@ coverage is labelled as Home-scoped and unknown coverage stays unknown.
 | Strict lexical/live path evidence | Implemented, crate-private and non-authoritative | Bind trusted scan/volume/rule witnesses and executor revalidation |
 | Protected-root registry | Implemented text-only policy; production construction sealed | Trusted OS home/profile/mount discovery and stable rule grants |
 | Dangerous-path corpus and fuzzing | Implemented | Keep cross-platform and promote every crash regression |
-| Rule schema/loader | Strict schema plus a build-time digest/policy-gated and strict load-time-validated informational discovery catalog; initial rules are independently sourced, selected-root, RevealOnly, blocked, and unschedulable | Developer ID signing must cover catalog bytes; safe-regenerable rules require separate provenance, live-guard, protected-root, and adversarial review |
+| Rule schema/loader | Strict schema plus a build-time digest/policy-gated and strict load-time-validated discovery catalog; ten rules remain selected-root RevealOnly observations, while independently researched `developer.rust.target` revision 2 requires snapshot `Cargo.toml` plus `CACHEDIR.TAG` evidence and proposes only SafeRegenerable/RemoveKnownRegenerableContents. Every rule is unschedulable and every result remains blocked by `ProtectedPath` | Developer ID signing must cover catalog bytes; before the Rust rule can lose its blocker, validate the exact standard cache-tag signature, prove a live Cargo workspace/target relationship and authoritative volume/protected-root grant, add process/change guards, and complete adversarial review |
 | Candidate and cleanup-plan records | Completed fresh scans create deterministic, snapshot-bound durable candidate batches; exact-scan summaries plus bounded lossless path/evidence pages and semantic review commands remain non-authoritative history, while cleanup plans remain non-executable domain/history data | Add FFI/UI transport, trusted volume/protected-root witnesses, and connect planning only through planner-owned current-validation types |
 | macOS app cleanup | Absent | Entire cleanup release gate in §17.3 |
 | Legacy CLI deletion | Active arbitrary-descendant permanent path routed through a temporary core adapter; strict-target/volume/identity rechecks only; scanned-byte estimates labeled in CLI | Replace adapter with reviewed plan/approval/executor chain without weakening current checks |

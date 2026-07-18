@@ -1,5 +1,5 @@
 use std::ffi::OsStr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime};
@@ -15,6 +15,12 @@ use crate::engine::{
 };
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(5);
+const CARGO_CACHE_TAG: &[u8] =
+    b"Signature: 8a477f597d28d172789f06886806bc55\n# Cargo-generated cache directory\n";
+
+fn write_cargo_cache_tag(target: &Path) {
+    std::fs::write(target.join("CACHEDIR.TAG"), CARGO_CACHE_TAG).unwrap();
+}
 
 fn config(temp: &TempDir) -> EngineConfig {
     EngineConfig::new(
@@ -175,6 +181,7 @@ fn explorer_review_joins_immutable_candidate_categories_without_coloring_sibling
     let root = temp.path().join("category-review-root");
     std::fs::create_dir_all(root.join("project/target/nested")).unwrap();
     std::fs::write(root.join("project/Cargo.toml"), b"[package]").unwrap();
+    write_cargo_cache_tag(&root.join("project/target"));
     std::fs::write(root.join("project/target/nested/artifact"), b"artifact").unwrap();
     std::fs::write(root.join("sibling"), b"ordinary").unwrap();
     let engine = EngineHandle::open(config(&temp)).unwrap();
@@ -222,10 +229,12 @@ fn explorer_review_joins_immutable_candidate_categories_without_coloring_sibling
     let target_page = review
         .child_nodes(target.id, SnapshotReviewNodeSort::NameAscending, 0, 10)
         .unwrap();
-    assert_eq!(target_page.nodes.len(), 1);
-    assert_eq!(
-        target_page.nodes[0].category,
-        SnapshotReviewCategory::DeveloperArtifact
+    assert_eq!(target_page.nodes.len(), 2);
+    assert!(
+        target_page
+            .nodes
+            .iter()
+            .all(|node| node.category == SnapshotReviewCategory::DeveloperArtifact)
     );
     review.release().unwrap();
     assert_eq!(review.category_root_count_for_test(), 0);
@@ -1174,6 +1183,7 @@ fn completed_marker_candidate() -> (
     let target = project.join("target");
     std::fs::create_dir_all(&target).unwrap();
     std::fs::write(project.join("Cargo.toml"), b"[package]\nname='fixture'\n").unwrap();
+    write_cargo_cache_tag(&target);
     std::fs::write(target.join("object"), vec![7_u8; 8 * 1024]).unwrap();
     let expected_target = target.canonicalize().unwrap();
     let engine =
@@ -6960,6 +6970,7 @@ fn completed_scan_persists_marker_verified_discovery_batch_across_reopen() {
     let target = project.join("target");
     std::fs::create_dir_all(&target).unwrap();
     std::fs::write(project.join("Cargo.toml"), b"[package]\nname='fixture'\n").unwrap();
+    write_cargo_cache_tag(&target);
     std::fs::write(target.join("object"), vec![7_u8; 8 * 1024]).unwrap();
     let engine =
         EngineHandle::open_with_limits(config.clone(), RegistryLimits::testing(1, 4, 8, 16))
@@ -6988,16 +6999,20 @@ fn completed_scan_persists_marker_verified_discovery_batch_across_reopen() {
         public_candidate.rule().id().as_str(),
         "developer.rust.target"
     );
+    assert_eq!(public_candidate.rule().revision().get(), 2);
     assert_eq!(
         public_candidate.category(),
         crate::CandidateCategory::DeveloperArtifact
     );
     assert!(public_candidate.estimated_bytes() > 0);
     assert_eq!(public_candidate.path_count(), 1);
-    assert_eq!(public_candidate.safety(), crate::SafetyTier::Informational);
+    assert_eq!(
+        public_candidate.safety(),
+        crate::SafetyTier::SafeRegenerable
+    );
     assert_eq!(
         public_candidate.action(),
-        crate::CandidateAction::RevealOnly
+        crate::CandidateAction::RemoveKnownRegenerableContents
     );
     assert!(!public_candidate.rule_schedule_eligible());
     assert_eq!(
@@ -7026,17 +7041,36 @@ fn completed_scan_persists_marker_verified_discovery_batch_across_reopen() {
     let candidate = &evaluation.candidates()[0];
     assert_eq!(candidate.source_scan_id, scan_id);
     assert_eq!(candidate.rule.id().as_str(), "developer.rust.target");
+    assert_eq!(candidate.rule.revision().get(), 2);
     assert_eq!(candidate.paths, [target.canonicalize().unwrap()]);
     assert!(candidate.estimated_bytes > 0);
-    assert_eq!(candidate.safety, crate::SafetyTier::Informational);
-    assert_eq!(candidate.action, crate::CandidateAction::RevealOnly);
+    assert_eq!(candidate.safety, crate::SafetyTier::SafeRegenerable);
+    assert_eq!(
+        candidate.action,
+        crate::CandidateAction::RemoveKnownRegenerableContents
+    );
     assert!(!candidate.rule_schedule_eligible);
     assert_eq!(candidate.blockers, [crate::BlockReason::ProtectedPath]);
-    assert!(candidate.evidence.iter().any(|evidence| matches!(
-        evidence,
-        crate::Evidence::RequiredMarker { path }
-            if path.file_name().is_some_and(|name| name == "Cargo.toml")
-    )));
+    let marker_names = candidate
+        .evidence
+        .iter()
+        .filter_map(|evidence| match evidence {
+            crate::Evidence::RequiredMarker { path } => path.file_name(),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        marker_names,
+        [OsStr::new("Cargo.toml"), OsStr::new("CACHEDIR.TAG")]
+    );
+    assert_eq!(
+        engine.review_candidate(
+            &scan_id,
+            public_candidate.id(),
+            CandidateReviewCommand::Select,
+        ),
+        Err(CandidateReviewError::NotReviewable)
+    );
 
     engine.close();
     assert!(engine.wait_until_closed(TEST_TIMEOUT));
@@ -8046,6 +8080,7 @@ fn candidate_history_rejects_corrupt_child_rows_without_partial_results() {
     let target = project.join("target");
     std::fs::create_dir_all(&target).unwrap();
     std::fs::write(project.join("Cargo.toml"), b"[package]\nname='fixture'\n").unwrap();
+    write_cargo_cache_tag(&target);
     std::fs::write(target.join("object"), vec![7_u8; 8 * 1024]).unwrap();
     let engine =
         EngineHandle::open_with_limits(config(&temp), RegistryLimits::testing(1, 4, 8, 16))
@@ -8098,6 +8133,7 @@ fn candidate_history_rejects_over_budget_graph_before_payload_decode() {
     let target = project.join("target");
     std::fs::create_dir_all(&target).unwrap();
     std::fs::write(project.join("Cargo.toml"), b"[package]\nname='fixture'\n").unwrap();
+    write_cargo_cache_tag(&target);
     std::fs::write(target.join("object"), vec![7_u8; 8 * 1024]).unwrap();
     let engine =
         EngineHandle::open_with_limits(config(&temp), RegistryLimits::testing(1, 4, 8, 16))
@@ -8219,6 +8255,7 @@ fn candidate_history_preflight_rejects_oversized_payloads() {
     let target = project.join("target");
     std::fs::create_dir_all(&target).unwrap();
     std::fs::write(project.join("Cargo.toml"), b"[package]\nname='fixture'\n").unwrap();
+    write_cargo_cache_tag(&target);
     std::fs::write(target.join("object"), vec![7_u8; 8 * 1024]).unwrap();
     let engine =
         EngineHandle::open_with_limits(config(&temp), RegistryLimits::testing(1, 4, 8, 16))

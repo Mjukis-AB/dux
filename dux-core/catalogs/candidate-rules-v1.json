@@ -233,13 +233,13 @@
     },
     {
       "id": "developer.rust.target",
-      "revision": 1,
+      "revision": 2,
       "title_key": "rule.developer.rust.target.title",
       "category": "developer_artifact",
       "scope": "selected_scan_root",
       "path_component": "target",
       "required_ancestor_markers_any": ["Cargo.toml"],
-      "required_markers_all": [],
+      "required_markers_all": ["CACHEDIR.TAG"],
       "forbidden_markers_any": [],
       "exact_bundle_identifiers": [],
       "excluded_descendants": [],
@@ -248,11 +248,14 @@
       "minimum_bytes": 0,
       "inactive_processes": [],
       "requires_cloud_upload_complete": false,
-      "safety": "informational",
-      "action": "reveal_only",
+      "safety": "safe_regenerable",
+      "action": "remove_known_regenerable_contents",
       "schedule_eligible": false,
       "explanation_key": "rule.developer.rust.target.explanation",
-      "provenance": ["https://doc.rust-lang.org/cargo/reference/build-cache.html"]
+      "provenance": [
+        "https://doc.rust-lang.org/cargo/reference/build-cache.html",
+        "https://doc.rust-lang.org/cargo/commands/cargo-clean.html"
+      ]
     }
   ]
 }

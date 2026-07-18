@@ -2410,8 +2410,9 @@ Tasks:
   - Deterministic candidate-evaluation lifecycle sub-checkpoint completed
     2026-07-16: a build-time and engine-open-validated SHA-256-bound catalog
     now maps the existing marker-verified M0 developer-artifact projection into
-    stable, scan-bound candidates. All eleven initial rules explicitly use the
-    selected scan root scope, are Informational/RevealOnly, are never
+    stable, scan-bound candidates. At this completed checkpoint, all eleven
+    initial rules explicitly used the selected scan root scope, were
+    Informational/RevealOnly, were never
     schedule-eligible, and every result carries unresolved `ProtectedPath`;
     incomplete traversal adds a separate coverage blocker. The catalog's exact
     matcher arrays, policy, scope, revision, provenance-bearing rule documents,
@@ -2524,8 +2525,10 @@ Tasks:
     selected dismissal inside the same immediate transaction, then preserves
     the existing writer lease, compare-and-set, exact retry, and ambiguous-
     commit reconciliation. Selection still requires a blocker-free cleanup
-    policy; current shipped Informational/RevealOnly candidates therefore
-    reject selection but may be dismissed and restored. Planned, evaluator-
+    policy. Every currently emitted candidate still has `ProtectedPath` and
+    therefore rejects selection, including the later M5 Rust target rule that
+    may propose a safe-regenerable cleanup policy; candidates may be dismissed
+    and restored. Planned, evaluator-
     owned, and journal-owned states cannot enter review. Dismissal creates no
     exclusion, does not revoke an existing plan claim, and no command creates
     a plan or effect.
@@ -3957,6 +3960,21 @@ Goal: provide trustworthy recovery actions.
 Tasks:
 
 - [ ] Ship the first independently researched safe-regenerable rules.
+  - [x] Stage the independently researched Rust Cargo `target` rule as revision
+    2 (2026-07-18). Discovery now requires a direct regular `Cargo.toml`
+    sibling and direct regular `CACHEDIR.TAG` child before proposing
+    SafeRegenerable/RemoveKnownRegenerableContents. The exact catalog policy is
+    build-time and load-time allowlisted, adversarial fixtures cover missing,
+    misplaced, wrong-kind, case-mismatched, nested, and symlink evidence, and
+    the rule stays unschedulable. Every result still carries `ProtectedPath`,
+    so selection and even test-only plan construction fail closed. The tag
+    filename is supporting immutable-snapshot evidence only, not proof of its
+    contents or current Cargo ownership. See
+    `docs/rules/developer-rust-target.md`.
+  - [ ] Prove the live Cargo workspace/target relationship, exact standard
+    `CACHEDIR.TAG` signature, authoritative volume and protected-root grant,
+    change/process guards, planner-owned current validation, and executor-time
+    revalidation before removing `ProtectedPath` or enabling scheduling.
 - [ ] Implement candidate groups and overlap resolution.
 - [ ] Implement exact-path plan review.
 - [ ] Implement Trash executor for Explorer selections.

@@ -1,7 +1,9 @@
 use std::path::{Path, PathBuf};
 
 use super::*;
-use crate::domain::{ScanIssue, ScanIssueKind};
+use crate::domain::{
+    CleanupMode, CleanupPlan, CleanupPlanId, CleanupPlanValidationError, ScanIssue, ScanIssueKind,
+};
 use crate::tree::{NodeId, NodeKind};
 
 fn complete_coverage() -> ScanCoverage {
@@ -28,6 +30,12 @@ fn add_rust_project(tree: &mut DiskTree, project_name: &str, bytes: u64) -> Path
         target_path.clone(),
         project,
     );
+    add_file(
+        tree,
+        target,
+        "CACHEDIR.TAG",
+        target_path.join("CACHEDIR.TAG"),
+    );
     tree.set_size(target, bytes);
     target_path
 }
@@ -53,6 +61,13 @@ fn marker_verified_artifact_preserves_paths_size_evidence_and_scan_binding() {
     assert_eq!(candidate.estimated_bytes(), 4096);
     assert_eq!(candidate.source_scan_id().as_str(), "scan:fixture");
     assert_eq!(candidate.rule().id().as_str(), "developer.rust.target");
+    assert_eq!(candidate.rule().revision().get(), 2);
+    assert_eq!(candidate.safety(), SafetyTier::SafeRegenerable);
+    assert_eq!(
+        candidate.action(),
+        CandidateAction::RemoveKnownRegenerableContents
+    );
+    assert!(!candidate.rule_marks_schedule_eligible());
     assert_eq!(
         candidate.evidence(),
         &[
@@ -61,6 +76,9 @@ fn marker_verified_artifact_preserves_paths_size_evidence_and_scan_binding() {
             },
             Evidence::RequiredMarker {
                 path: PathBuf::from("/fixture/project/Cargo.toml"),
+            },
+            Evidence::RequiredMarker {
+                path: PathBuf::from("/fixture/project/target/CACHEDIR.TAG"),
             },
         ]
     );
@@ -84,6 +102,40 @@ fn ambiguous_name_without_required_marker_produces_an_empty_batch() {
 }
 
 #[test]
+fn rust_target_requires_a_regular_non_symlink_cargo_cache_tag() {
+    let mut tree = DiskTree::new(PathBuf::from("/fixture"));
+    let project_path = tree.root_path().join("project");
+    let project = tree.add_node(
+        "project".to_owned(),
+        NodeKind::Directory,
+        project_path.clone(),
+        NodeId::ROOT,
+    );
+    add_file(
+        &mut tree,
+        project,
+        "Cargo.toml",
+        project_path.join("Cargo.toml"),
+    );
+    let target_path = project_path.join("target");
+    let target = tree.add_node(
+        "target".to_owned(),
+        NodeKind::Directory,
+        target_path.clone(),
+        project,
+    );
+    let tag = add_file(
+        &mut tree,
+        target,
+        "CACHEDIR.TAG",
+        target_path.join("CACHEDIR.TAG"),
+    );
+    tree.get_mut(tag).unwrap().path_is_symlink = true;
+
+    assert!(evaluate(&tree).candidates().is_empty());
+}
+
+#[test]
 fn nested_classified_artifacts_emit_only_the_outer_candidate() {
     let mut tree = DiskTree::new(PathBuf::from("/fixture"));
     let project = tree.add_node(
@@ -104,6 +156,12 @@ fn nested_classified_artifacts_emit_only_the_outer_candidate() {
         PathBuf::from("/fixture/project/target"),
         project,
     );
+    add_file(
+        &mut tree,
+        outer,
+        "CACHEDIR.TAG",
+        PathBuf::from("/fixture/project/target/CACHEDIR.TAG"),
+    );
     let nested_project = tree.add_node(
         "nested".to_owned(),
         NodeKind::Directory,
@@ -116,11 +174,17 @@ fn nested_classified_artifacts_emit_only_the_outer_candidate() {
         "Cargo.toml",
         PathBuf::from("/fixture/project/target/nested/Cargo.toml"),
     );
-    tree.add_node(
+    let nested_target = tree.add_node(
         "target".to_owned(),
         NodeKind::Directory,
         PathBuf::from("/fixture/project/target/nested/target"),
         nested_project,
+    );
+    add_file(
+        &mut tree,
+        nested_target,
+        "CACHEDIR.TAG",
+        PathBuf::from("/fixture/project/target/nested/target/CACHEDIR.TAG"),
     );
 
     let batch = evaluate(&tree);
@@ -232,6 +296,11 @@ fn evidence_selection_is_deterministic_when_multiple_markers_match() {
     assert!(marker_paths.contains(&PathBuf::from("/fixture/next/next.config.js")));
     assert!(marker_paths.contains(&PathBuf::from("/fixture/nuxt/nuxt.config.mjs")));
     assert!(marker_paths.contains(&PathBuf::from("/fixture/python/a.py")));
+    assert!(forward.candidates().iter().all(|candidate| {
+        candidate.safety() == SafetyTier::Informational
+            && candidate.action() == CandidateAction::RevealOnly
+            && !candidate.rule_marks_schedule_eligible()
+    }));
 }
 
 #[cfg(unix)]
@@ -289,14 +358,22 @@ fn exact_catalog_digest_is_stable() {
     push_lower_hex(&mut actual, &bundled_candidate_catalog_digest_sha256());
     assert_eq!(
         actual,
-        "63669eace629b010d78e8d4cd9fc72bf76dbf05a3c8edb64ec146b6b37f87c60"
+        "4d9ba55965a033cf50ef947ae30ff01ecc53ebc8e5310e843faf7e5bfda2235c"
     );
+    let catalog = load_and_validate_catalog().unwrap();
     assert!(
-        load_and_validate_catalog()
-            .unwrap()
+        catalog
             .iter()
             .all(|rule| rule.scope() == RuleScope::SelectedScanRoot)
     );
+    let safe_rules = catalog
+        .iter()
+        .filter(|rule| rule.safety() == SafetyTier::SafeRegenerable)
+        .collect::<Vec<_>>();
+    assert_eq!(safe_rules.len(), 1);
+    assert_eq!(safe_rules[0].reference().id().as_str(), SAFE_RUST_RULE_ID);
+    assert_eq!(safe_rules[0].reference().revision().get(), 2);
+    assert!(!safe_rules[0].schedule_eligible());
     assert_eq!(
         evaluate(&DiskTree::new(PathBuf::from("/fixture"))).catalog_digest_sha256(),
         bundled_candidate_catalog_digest_sha256()
@@ -398,11 +475,17 @@ fn native_non_utf8_parent_bytes_are_preserved_in_path_and_candidate_id() {
         project_path.join("Cargo.toml"),
     );
     let target_path = project_path.join("target");
-    tree.add_node(
+    let target = tree.add_node(
         "target".to_owned(),
         NodeKind::Directory,
         target_path.clone(),
         project,
+    );
+    add_file(
+        &mut tree,
+        target,
+        "CACHEDIR.TAG",
+        target_path.join("CACHEDIR.TAG"),
     );
 
     let first = evaluate(&tree);
@@ -412,17 +495,29 @@ fn native_non_utf8_parent_bytes_are_preserved_in_path_and_candidate_id() {
 }
 
 #[test]
-fn bundled_findings_never_expose_cleanup_or_scheduling_authority() {
+fn safe_rust_policy_remains_blocked_unschedulable_and_unplannable() {
     let mut tree = DiskTree::new(PathBuf::from("/fixture"));
     add_rust_project(&mut tree, "project", 10);
 
-    for candidate in evaluate(&tree).candidates() {
-        assert_eq!(candidate.safety(), SafetyTier::Informational);
-        assert_eq!(candidate.action(), CandidateAction::RevealOnly);
-        assert!(!candidate.has_cleanup_operation());
-        assert!(!candidate.rule_marks_schedule_eligible());
-        assert!(!candidate.has_no_known_blockers());
-    }
+    let batch = evaluate(&tree);
+    let candidate = &batch.candidates()[0];
+    assert_eq!(candidate.safety(), SafetyTier::SafeRegenerable);
+    assert_eq!(
+        candidate.action(),
+        CandidateAction::RemoveKnownRegenerableContents
+    );
+    assert!(candidate.has_cleanup_operation());
+    assert!(!candidate.rule_marks_schedule_eligible());
+    assert_eq!(candidate.blockers(), &[BlockReason::ProtectedPath]);
+    assert_eq!(
+        CleanupPlan::try_from_candidates_for_persistence_test(
+            CleanupPlanId::new("plan:blocked-rust-target").unwrap(),
+            SystemTime::UNIX_EPOCH,
+            CleanupMode::PermanentSafe,
+            std::slice::from_ref(candidate),
+        ),
+        Err(CleanupPlanValidationError::BlockedCandidate { candidate_index: 0 })
+    );
 }
 
 #[test]

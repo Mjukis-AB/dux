@@ -1,8 +1,8 @@
 //! Pure, deterministic conversion of marker-verified scan artifacts into findings.
 //!
 //! This module has no filesystem, persistence, planning, or execution access.
-//! Its bundled rules deliberately grant no cleanup action; candidates remain
-//! scan observations for presentation and later, independent validation.
+//! Bundled rules may describe a proposed cleanup action, but every candidate
+//! remains blocked scan evidence until independent live authority exists.
 
 use std::path::Path;
 use std::sync::OnceLock;
@@ -36,9 +36,10 @@ pub(crate) const CANDIDATE_EVALUATOR_REVISION: u32 = 1;
 pub(crate) const CANDIDATE_CATALOG_SCHEMA_VERSION: u32 = 1;
 pub(crate) const CANDIDATE_CONTEXT_FORMAT_VERSION: u32 = 1;
 pub(crate) const CANDIDATE_CATALOG_SHA256: [u8; 32] = [
-    0x63, 0x66, 0x9e, 0xac, 0xe6, 0x29, 0xb0, 0x10, 0xd7, 0x8e, 0x8d, 0x4c, 0xd9, 0xfc, 0x72, 0xbf,
-    0x76, 0xdb, 0xf0, 0x5a, 0x3c, 0x8e, 0xdb, 0x64, 0xec, 0x14, 0x6b, 0x6b, 0x37, 0xf8, 0x7c, 0x60,
+    0x4d, 0x9b, 0xa5, 0x59, 0x65, 0xa0, 0x33, 0xcf, 0x50, 0xef, 0x94, 0x7a, 0xe3, 0x0f, 0xf0, 0x1e,
+    0xcc, 0x53, 0xeb, 0xc8, 0xe5, 0x31, 0x0e, 0x84, 0x3f, 0xaf, 0x7e, 0x5b, 0xfd, 0xa2, 0x23, 0x5c,
 ];
+const SAFE_RUST_RULE_ID: &str = "developer.rust.target";
 
 /// Maximum findings returned by one evaluator invocation.
 pub(crate) const MAX_EVALUATED_CANDIDATES: usize = 4_096;
@@ -306,8 +307,18 @@ fn validate_catalog_bytes() -> Result<RuleRegistry, CandidateEvaluationError> {
         };
         let (required_ancestor_markers_any, required_markers_all) =
             expected_catalog_markers(binding.rule_id)?;
+        let (expected_revision, expected_safety, expected_action) =
+            if binding.rule_id == SAFE_RUST_RULE_ID {
+                (
+                    2,
+                    SafetyTier::SafeRegenerable,
+                    CandidateAction::RemoveKnownRegenerableContents,
+                )
+            } else {
+                (1, SafetyTier::Informational, CandidateAction::RevealOnly)
+            };
         if rule.category() != CandidateCategory::DeveloperArtifact
-            || rule.reference().revision().get() != 1
+            || rule.reference().revision().get() != expected_revision
             || rule.scope() != RuleScope::SelectedScanRoot
             || rule.matcher().path_component() != Some(binding.component)
             || !matches_exact_strings(
@@ -323,14 +334,31 @@ fn validate_catalog_bytes() -> Result<RuleRegistry, CandidateEvaluationError> {
             || rule.guards().minimum_bytes() != 0
             || !rule.guards().inactive_processes().is_empty()
             || rule.guards().requires_cloud_upload_complete()
-            || rule.safety() != SafetyTier::Informational
-            || rule.action() != CandidateAction::RevealOnly
+            || rule.safety() != expected_safety
+            || rule.action() != expected_action
             || rule.schedule_eligible()
+            || !has_expected_provenance(rule, binding.rule_id)
         {
             return Err(CandidateEvaluationError::InvalidBundledCatalog);
         }
     }
     Ok(catalog)
+}
+
+fn has_expected_provenance(rule: &Rule, rule_id: &str) -> bool {
+    if rule_id != SAFE_RUST_RULE_ID {
+        return true;
+    }
+    const EXPECTED: &[&str] = &[
+        "https://doc.rust-lang.org/cargo/reference/build-cache.html",
+        "https://doc.rust-lang.org/cargo/commands/cargo-clean.html",
+    ];
+    rule.provenance().len() == EXPECTED.len()
+        && rule
+            .provenance()
+            .iter()
+            .zip(EXPECTED)
+            .all(|(actual, expected)| actual.as_str() == *expected)
 }
 
 fn expected_catalog_markers(
@@ -351,7 +379,7 @@ fn expected_catalog_markers(
         "developer.python.pycache" => Ok((&[], &[])),
         "developer.python.tox" => Ok((&["tox.ini"], &[])),
         "developer.python.venv" | "developer.python.venv_hidden" => Ok((&[], &["pyvenv.cfg"])),
-        "developer.rust.target" => Ok((&["Cargo.toml"], &[])),
+        "developer.rust.target" => Ok((&["Cargo.toml"], &["CACHEDIR.TAG"])),
         _ => Err(CandidateEvaluationError::InvalidBundledCatalog),
     }
 }

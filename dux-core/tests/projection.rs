@@ -82,6 +82,7 @@ fn classifies_only_supported_artifacts_with_exact_markers() {
     let rust = add_dir(&mut tree, NodeId::ROOT, "rust-project");
     add_file(&mut tree, rust, "Cargo.toml");
     let rust_target = add_dir(&mut tree, rust, "target");
+    add_file(&mut tree, rust_target, "CACHEDIR.TAG");
 
     let node = add_dir(&mut tree, NodeId::ROOT, "node-project");
     add_file(&mut tree, node, "package.json");
@@ -129,7 +130,12 @@ fn classifies_only_supported_artifacts_with_exact_markers() {
     let entries = artifact_entries(&tree);
 
     assert_eq!(entries.len(), 11);
-    assert_entry(&entries, rust_target, ArtifactKind::Rust, &["Cargo.toml"]);
+    assert_entry(
+        &entries,
+        rust_target,
+        ArtifactKind::Rust,
+        &["CACHEDIR.TAG", "Cargo.toml"],
+    );
     assert_entry(
         &entries,
         node_modules,
@@ -176,6 +182,14 @@ fn classifies_only_supported_artifacts_with_exact_markers() {
 fn partial_or_ambiguous_evidence_is_rejected() {
     let mut tree = DiskTree::new(PathBuf::from("/scan"));
 
+    let rust_without_tag = add_dir(&mut tree, NodeId::ROOT, "rust-without-tag");
+    add_file(&mut tree, rust_without_tag, "Cargo.toml");
+    add_dir(&mut tree, rust_without_tag, "target");
+
+    let rust_without_manifest = add_dir(&mut tree, NodeId::ROOT, "rust-without-manifest");
+    let target = add_dir(&mut tree, rust_without_manifest, "target");
+    add_file(&mut tree, target, "CACHEDIR.TAG");
+
     let pods = add_dir(&mut tree, NodeId::ROOT, "pods-without-lock");
     add_file(&mut tree, pods, "Podfile");
     add_dir(&mut tree, pods, "Pods");
@@ -212,20 +226,30 @@ fn wrong_kind_case_location_and_symlink_markers_are_rejected() {
 
     let wrong_kind = add_dir(&mut tree, NodeId::ROOT, "wrong-kind");
     add_dir(&mut tree, wrong_kind, "Cargo.toml");
-    add_dir(&mut tree, wrong_kind, "target");
+    let target = add_dir(&mut tree, wrong_kind, "target");
+    add_file(&mut tree, target, "CACHEDIR.TAG");
 
     let wrong_case = add_dir(&mut tree, NodeId::ROOT, "wrong-case");
     add_file(&mut tree, wrong_case, "cargo.toml");
-    add_dir(&mut tree, wrong_case, "target");
+    let target = add_dir(&mut tree, wrong_case, "target");
+    add_file(&mut tree, target, "CACHEDIR.TAG");
 
     let wrong_location = add_dir(&mut tree, NodeId::ROOT, "wrong-location");
     let target = add_dir(&mut tree, wrong_location, "target");
     add_file(&mut tree, target, "Cargo.toml");
+    add_file(&mut tree, target, "CACHEDIR.TAG");
 
     let symlink_marker = add_dir(&mut tree, NodeId::ROOT, "symlink-marker");
     let marker = add_file(&mut tree, symlink_marker, "Cargo.toml");
     tree.get_mut(marker).unwrap().path_is_symlink = true;
-    add_dir(&mut tree, symlink_marker, "target");
+    let target = add_dir(&mut tree, symlink_marker, "target");
+    add_file(&mut tree, target, "CACHEDIR.TAG");
+
+    let symlink_tag = add_dir(&mut tree, NodeId::ROOT, "symlink-tag");
+    add_file(&mut tree, symlink_tag, "Cargo.toml");
+    let target = add_dir(&mut tree, symlink_tag, "target");
+    let tag = add_file(&mut tree, target, "CACHEDIR.TAG");
+    tree.get_mut(tag).unwrap().path_is_symlink = true;
 
     assert!(artifact_entries(&tree).is_empty());
 }
@@ -237,13 +261,15 @@ fn symlinked_artifact_or_ancestor_is_rejected() {
     let direct = add_dir(&mut tree, NodeId::ROOT, "direct");
     add_file(&mut tree, direct, "Cargo.toml");
     let direct_target = add_dir(&mut tree, direct, "target");
+    add_file(&mut tree, direct_target, "CACHEDIR.TAG");
     tree.get_mut(direct_target).unwrap().path_is_symlink = true;
 
     let linked_parent = add_dir(&mut tree, NodeId::ROOT, "linked-parent");
     tree.get_mut(linked_parent).unwrap().path_is_symlink = true;
     let nested = add_dir(&mut tree, linked_parent, "nested");
     add_file(&mut tree, nested, "Cargo.toml");
-    add_dir(&mut tree, nested, "target");
+    let target = add_dir(&mut tree, nested, "target");
+    add_file(&mut tree, target, "CACHEDIR.TAG");
 
     assert!(artifact_entries(&tree).is_empty());
 }
@@ -255,6 +281,7 @@ fn unverified_artifact_name_does_not_suppress_verified_descendant() {
     let project = add_dir(&mut tree, unverified_build, "project");
     add_file(&mut tree, project, "Cargo.toml");
     let target = add_dir(&mut tree, project, "target");
+    add_file(&mut tree, target, "CACHEDIR.TAG");
 
     let entries = artifact_entries(&tree);
 
@@ -269,7 +296,8 @@ fn verified_artifact_ancestor_suppresses_verified_descendant() {
     let modules = add_dir(&mut tree, NodeId::ROOT, "node_modules");
     let package = add_dir(&mut tree, modules, "package");
     add_file(&mut tree, package, "Cargo.toml");
-    add_dir(&mut tree, package, "target");
+    let target = add_dir(&mut tree, package, "target");
+    add_file(&mut tree, target, "CACHEDIR.TAG");
 
     let entries = artifact_entries(&tree);
 
@@ -281,7 +309,8 @@ fn verified_artifact_ancestor_suppresses_verified_descendant() {
 fn removing_marker_removes_candidate_on_rebuild() {
     let mut tree = DiskTree::new(PathBuf::from("/scan"));
     let marker = add_file(&mut tree, NodeId::ROOT, "Cargo.toml");
-    add_dir(&mut tree, NodeId::ROOT, "target");
+    let target = add_dir(&mut tree, NodeId::ROOT, "target");
+    add_file(&mut tree, target, "CACHEDIR.TAG");
     assert_eq!(artifact_entries(&tree).len(), 1);
 
     tree.remove_node(marker);
@@ -368,6 +397,7 @@ fn artifact_projection_uses_newest_subtree_mtime_and_refreshes_in_place() {
     let mut tree = DiskTree::new(PathBuf::from("/scan"));
     add_file(&mut tree, NodeId::ROOT, "Cargo.toml");
     let target = add_dir(&mut tree, NodeId::ROOT, "target");
+    add_file(&mut tree, target, "CACHEDIR.TAG");
     let descendant = add_dir(&mut tree, target, "debug");
     let output = add_file(&mut tree, descendant, "output");
     tree.get_mut(target).unwrap().mtime = Some(now - Duration::from_secs(20 * 86_400));

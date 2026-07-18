@@ -1972,8 +1972,10 @@ mod tests {
         let manifest = temp.path().join("Cargo.toml");
         let original_manifest = temp.path().join("original-Cargo.toml");
         let target = temp.path().join("target");
+        let cache_tag = target.join("CACHEDIR.TAG");
         std::fs::write(&manifest, b"[package]").unwrap();
         std::fs::create_dir(&target).unwrap();
+        std::fs::write(&cache_tag, b"Signature: 8a477f597d28d172789f06886806bc55\n").unwrap();
         std::fs::write(target.join("output"), b"build output").unwrap();
 
         let mut tree = DiskTree::new(temp.path().to_path_buf());
@@ -1988,6 +1990,12 @@ mod tests {
             NodeKind::Directory,
             target.clone(),
             NodeId::ROOT,
+        );
+        tree.add_node(
+            "CACHEDIR.TAG".to_string(),
+            NodeKind::File,
+            cache_tag,
+            target_id,
         );
         let mut state = AppState::new(temp.path().to_path_buf());
         state.set_tree(tree);

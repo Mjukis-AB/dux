@@ -5,7 +5,8 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 const CATALOG_PATH: &str = "catalogs/candidate-rules-v1.json";
-const EXPECTED_SHA256: &str = "63669eace629b010d78e8d4cd9fc72bf76dbf05a3c8edb64ec146b6b37f87c60";
+const EXPECTED_SHA256: &str = "4d9ba55965a033cf50ef947ae30ff01ecc53ebc8e5310e843faf7e5bfda2235c";
+const SAFE_RUST_RULE_ID: &str = "developer.rust.target";
 
 fn main() {
     println!("cargo:rerun-if-changed={CATALOG_PATH}");
@@ -47,21 +48,57 @@ fn main() {
             Some("selected_scan_root"),
             "discovery catalog rules must bind the selected scan root"
         );
+        let (expected_revision, expected_safety, expected_action) = if id == SAFE_RUST_RULE_ID {
+            (2, "safe_regenerable", "remove_known_regenerable_contents")
+        } else {
+            (1, "informational", "reveal_only")
+        };
+        assert_eq!(
+            rule.get("revision").and_then(Value::as_u64),
+            Some(expected_revision),
+            "candidate rule revision changed outside the exact allowlist"
+        );
         assert_eq!(
             rule.get("safety").and_then(Value::as_str),
-            Some("informational"),
-            "the discovery catalog must not grant cleanup safety"
+            Some(expected_safety),
+            "candidate rule safety changed outside the exact allowlist"
         );
         assert_eq!(
             rule.get("action").and_then(Value::as_str),
-            Some("reveal_only"),
-            "the discovery catalog must remain reveal-only"
+            Some(expected_action),
+            "candidate rule action changed outside the exact allowlist"
         );
         assert_eq!(
             rule.get("schedule_eligible").and_then(Value::as_bool),
             Some(false),
             "the discovery catalog must never be schedulable"
         );
+        if id == SAFE_RUST_RULE_ID {
+            assert_eq!(
+                rule.get("required_ancestor_markers_any"),
+                Some(&Value::Array(vec![Value::String("Cargo.toml".to_owned())])),
+                "the Rust rule must retain its direct manifest evidence"
+            );
+            assert_eq!(
+                rule.get("required_markers_all"),
+                Some(&Value::Array(vec![Value::String(
+                    "CACHEDIR.TAG".to_owned()
+                )])),
+                "the Rust rule must retain its Cargo cache-tag evidence"
+            );
+            assert_eq!(
+                rule.get("provenance"),
+                Some(&Value::Array(vec![
+                    Value::String(
+                        "https://doc.rust-lang.org/cargo/reference/build-cache.html".to_owned()
+                    ),
+                    Value::String(
+                        "https://doc.rust-lang.org/cargo/commands/cargo-clean.html".to_owned()
+                    ),
+                ])),
+                "the Rust rule must retain both reviewed Cargo sources"
+            );
+        }
     }
 }
 
