@@ -294,9 +294,9 @@ pub(super) struct SnapshotReviewSubtreeTarget {
 /// path and witness stay inside core; this value is deliberately not Clone,
 /// serializable, or exposed through the read-only live-target FFI record.
 #[allow(dead_code)]
-pub(super) struct SnapshotReviewTrashTarget {
-    pub(super) node_id: u64,
-    pub(super) snapshot: TrashPathSnapshot,
+pub(crate) struct SnapshotReviewTrashTarget {
+    pub(crate) node_id: u64,
+    pub(crate) snapshot: TrashPathSnapshot,
 }
 
 /// Stable, path-free failures from an Explorer snapshot-review session.
@@ -669,7 +669,7 @@ impl SnapshotReviewSession {
     /// a symlinked root or intermediate ancestor is rejected. This is
     /// evidence only; it does not create an approval, plan, or effect token.
     #[allow(dead_code)]
-    pub(super) fn trash_target(
+    pub(crate) fn trash_target(
         &mut self,
         node_id: u64,
     ) -> Result<SnapshotReviewTrashTarget, SnapshotReviewError> {

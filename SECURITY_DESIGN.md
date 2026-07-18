@@ -749,6 +749,17 @@ session. For every item it revalidates, in order:
    cloud-upload, and other live guards; and
 8. cancellation state immediately before the operating-system effect.
 
+The first staged Explorer Trash boundary implements only the admission half of
+this protocol. A non-cloneable core capability claims the store journal, checks
+that the reviewed lexical path equals the frozen journal row, repeats the
+no-follow root/ancestor/object witness, records a fenced `effect_started`
+receipt, and revalidates that receipt immediately before a future adapter call.
+Missing, changed, unsupported, or unbound evidence is recorded as a typed
+rejection/changed/unavailable result. The capability has a consuming
+pre-effect-cancellation path and carries no FFI path or platform primitive;
+`FileManager.trashItem`, approval binding, and the actual mutation remain later
+gates.
+
 Any ambiguity returns a typed rejection, skip, or `ChangedSincePlan`. The
 executor MUST NOT silently refresh a target and proceed; changed evidence needs
 a new plan and approval.

@@ -36,7 +36,7 @@ use crate::persistence::store::StoreCoordinator;
 /// The lease is deliberately non-cloneable and dropping it performs no journal
 /// write. A crashed or abandoned active owner remains recoverable only through
 /// the conservative process-liveness protocol.
-pub(in crate::persistence) struct CleanupJournalLease {
+pub(crate) struct CleanupJournalLease {
     guard: CleanupLockGuard,
     store: Arc<StoreCoordinator>,
     owner: ProcessInstanceId,
@@ -46,7 +46,7 @@ pub(in crate::persistence) struct CleanupJournalLease {
 }
 
 /// One exact active owner generation bound to the held cleanup lock.
-pub(in crate::persistence) struct CleanupJournalClaim {
+pub(crate) struct CleanupJournalClaim {
     lease: CleanupJournalLease,
     fence: ExecutionFence,
     phase: ActivePhase,
@@ -72,13 +72,13 @@ enum RecoveryDecision {
 /// A failed owner-claim attempt retains the cleanup lease so an ambiguous
 /// commit can be reconciled without abandoning a live owner in the database.
 #[must_use = "retain the lease and reconcile or deliberately release it"]
-pub(in crate::persistence) struct JournalLeaseFailure {
+pub(crate) struct JournalLeaseFailure {
     lease: CleanupJournalLease,
     error: HistoryError,
 }
 
 impl JournalLeaseFailure {
-    pub(super) fn kind(&self) -> HistoryErrorKind {
+    pub(crate) fn kind(&self) -> HistoryErrorKind {
         self.error.kind
     }
 
@@ -99,7 +99,7 @@ impl fmt::Debug for JournalLeaseFailure {
 /// Durable pre-effect journal receipt. It is evidence of ordering only and is
 /// not target identity, validation, approval, or effect authority.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(in crate::persistence) struct EffectStartReceipt {
+pub(crate) struct EffectStartReceipt {
     fence: ExecutionFence,
     item_ordinal: usize,
     path_ordinal: usize,
@@ -133,7 +133,7 @@ thread_local! {
 }
 
 impl StoreCoordinator {
-    pub(super) fn acquire_cleanup_journal_lease(
+    pub(crate) fn acquire_cleanup_journal_lease(
         self: &Arc<Self>,
         timeout: Duration,
     ) -> Result<CleanupJournalLease, HistoryError> {
@@ -178,7 +178,7 @@ impl CleanupJournalLease {
         load_cleanup_journal(&connection.connection, session_id)
     }
 
-    pub(super) fn claim_planned(
+    pub(crate) fn claim_planned(
         self,
         session_id: &CleanupSessionId,
         claimed_at: SystemTime,
@@ -427,6 +427,32 @@ impl CleanupJournalClaim {
             .ok_or_else(|| HistoryError::new(HistoryErrorKind::NotFound))
     }
 
+    /// Bind an opaque reviewed target to the exact frozen path row before any
+    /// validation transition. This prevents pairing a journal fence for one
+    /// planned item with filesystem evidence for another.
+    pub(crate) fn validate_planned_path(
+        &self,
+        item_ordinal: usize,
+        path_ordinal: usize,
+        expected_path: &std::path::Path,
+    ) -> Result<(), HistoryError> {
+        self.require_phase(ActivePhase::Running)?;
+        let journal = self.snapshot()?;
+        ensure_active(&journal, &self.fence, self.phase)?;
+        let item = journal
+            .items
+            .get(item_ordinal)
+            .ok_or_else(|| HistoryError::new(HistoryErrorKind::InvalidTransition))?;
+        let path = item
+            .paths
+            .get(path_ordinal)
+            .ok_or_else(|| HistoryError::new(HistoryErrorKind::InvalidTransition))?;
+        if path.status != PathStatus::Planned || path.target != expected_path {
+            return Err(HistoryError::new(HistoryErrorKind::InvalidTransition));
+        }
+        Ok(())
+    }
+
     pub(super) fn heartbeat(&self, heartbeat_at: SystemTime) -> Result<(), HistoryError> {
         let heartbeat_at = canonical_input_time(heartbeat_at)?;
         match self
@@ -458,7 +484,7 @@ impl CleanupJournalClaim {
         }
     }
 
-    pub(super) fn begin_validation(
+    pub(crate) fn begin_validation(
         &self,
         item_ordinal: usize,
         path_ordinal: usize,
@@ -482,7 +508,7 @@ impl CleanupJournalClaim {
         )
     }
 
-    pub(super) fn finish_validation(
+    pub(crate) fn finish_validation(
         &self,
         item_ordinal: usize,
         path_ordinal: usize,
@@ -518,7 +544,7 @@ impl CleanupJournalClaim {
         )
     }
 
-    pub(super) fn mark_effect_started(
+    pub(crate) fn mark_effect_started(
         &self,
         item_ordinal: usize,
         path_ordinal: usize,
@@ -608,7 +634,7 @@ impl CleanupJournalClaim {
 
     /// Revalidate the exact durable receipt and cleanup control immediately
     /// before a future centralized executor performs the operating-system call.
-    pub(super) fn revalidate_effect_receipt(
+    pub(crate) fn revalidate_effect_receipt(
         &self,
         receipt: &EffectStartReceipt,
     ) -> Result<(), HistoryError> {
@@ -639,7 +665,7 @@ impl CleanupJournalClaim {
 
     /// Settle a durable effect intent after cancellation wins final
     /// revalidation and before the caller invokes the OS primitive.
-    pub(super) fn cancel_effect_before_call(
+    pub(crate) fn cancel_effect_before_call(
         &self,
         receipt: &EffectStartReceipt,
         completed_at: SystemTime,

@@ -4481,6 +4481,16 @@ Tasks:
     target FFI record, and cannot approve, construct a plan, or invoke an
     effect. The one-shot platform executor, journal integration, approval
     binding, and macOS `FileManager.trashItem` adapter remain open.
+  - [x] 2026-07-19 slice: add journal-fenced one-shot Trash admission before
+    any platform effect. Admission claims the store cleanup lease, binds the
+    opaque review witness to the exact frozen journal path, revalidates the
+    no-follow root/ancestor/target identities, records `effect_started`, and
+    rechecks the owner/generation receipt immediately before a future adapter
+    call. Changed, missing, unsupported, and unbound targets become typed
+    rejected/changed/unavailable outcomes; a pre-effect cancellation path
+    settles the receipt without touching the filesystem. The capability is
+    non-Clone and path-free at its error boundary. No macOS `FileManager`,
+    Swift/FFI surface, approval binding, or real Trash mutation exists yet.
 - [ ] Implement permanent-safe executor for approved rules.
 - [ ] Implement execution-time revalidation.
 - [ ] Implement cleanup session/item history.

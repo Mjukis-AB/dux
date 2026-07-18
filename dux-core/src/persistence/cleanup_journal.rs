@@ -7,6 +7,8 @@
 
 mod lease;
 
+pub(crate) use lease::{CleanupJournalClaim, EffectStartReceipt};
+
 #[cfg(test)]
 mod tests;
 
@@ -231,7 +233,7 @@ pub(super) struct CleanupJournal {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum ValidationOutcome {
+pub(crate) enum ValidationOutcome {
     DryRun,
     Skipped,
     Rejected,

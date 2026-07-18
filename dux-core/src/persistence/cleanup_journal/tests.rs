@@ -5,6 +5,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use rusqlite::{params, types::Value};
 use tempfile::TempDir;
 
+use crate::cleanup::executor::TrashExecutionAdmission;
+
 use super::lease::*;
 use super::*;
 use crate::domain::{
@@ -855,6 +857,28 @@ fn dry_run_validates_every_path_and_terminalizes_without_an_effect() {
             ..
         }
     ));
+}
+
+#[test]
+fn trash_admission_binds_the_review_to_the_frozen_journal_path() {
+    let fixture =
+        Fixture::new_with_selected(CleanupMode::Trash, CandidateAction::MoveToTrash, 1, &[0]);
+    let expected = fixture._temp.path().join("root/cleanup-fixture-0");
+    let claim = fixture.claim();
+
+    claim.validate_planned_path(0, 0, &expected).unwrap();
+    assert_eq!(
+        claim
+            .validate_planned_path(0, 0, &expected.with_file_name("other"))
+            .unwrap_err()
+            .kind,
+        HistoryErrorKind::InvalidTransition
+    );
+    drop(claim);
+
+    // Keep the executor symbol exercised in this journal-focused test module;
+    // the platform adapter is intentionally not called by this slice.
+    let _ = std::mem::size_of::<TrashExecutionAdmission>();
 }
 
 #[test]

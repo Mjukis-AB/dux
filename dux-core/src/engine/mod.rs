@@ -12,6 +12,8 @@ mod registry;
 mod scan_coverage_details;
 mod settings;
 mod snapshot_review;
+
+pub(crate) use snapshot_review::SnapshotReviewTrashTarget;
 mod task;
 mod volume_status;
 

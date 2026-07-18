@@ -11,6 +11,13 @@ All notable changes to DUX will be documented in this file.
   DUX when the popover is closed.
 
 ### Added
+- Continued Milestone 5 with journal-fenced, one-shot core Trash admission.
+  The opaque Explorer witness must match the exact frozen journal path, then
+  repeats no-follow identity checks, records and immediately revalidates an
+  owner/generation `effect_started` receipt, and can be cancelled before any
+  platform call. Errors are typed and path-free. This slice performs no
+  filesystem mutation and does not add approval, FFI, Swift, or
+  `FileManager.trashItem` authority.
 - Continued Milestone 5 with a separate core-owned Trash review witness for
   Explorer selections. A retained snapshot node is resolved to fresh no-follow
   ancestry and target identity; final symlinks remain link objects while
