@@ -669,6 +669,16 @@ code-owned rule scope and grant revision for that boundary. Caller booleans,
 rule data, AI output, a user-selected scan root, or execution mode cannot mint a
 grant.
 
+The path-validation layer now also retains a crate-private, repeated filesystem
+boundary observation for a canonical scan root. It captures the complete
+no-follow root-to-scan ancestry and platform mount identity (descriptor-bound
+`fstatfs` on macOS and descriptor-relative `statx` mount identity on Linux;
+Windows remains unsupported). The bounded witness can be revalidated, but it is
+still observation only: it does not issue a trusted volume/location grant,
+change a `ProtectedPath` disposition, or cross the planner, FFI, journal, or
+executor boundary. APFS firmlink semantics and trusted account/home discovery
+remain separate gates.
+
 Sensitive categories are a separate deny layer. Credentials, keychains,
 tokens, browser profiles, messages, mail, notes, password managers,
 security/management software, active VM/container disks, unknown cloud state,
@@ -848,14 +858,16 @@ point. Ad hoc Trash uses a separate no-follow final-link witness that identifies
 and trashes the link object itself while still rejecting a symlinked base or
 intermediate ancestor.
 
-On Windows, the current validator reopens cumulative full paths and is
-non-actionable until handle-relative or equivalent executor revalidation closes
-ancestor reparse races. On Linux, equal device identity does not distinguish a
-bind mount; authoritative mount-location evidence remains required. On macOS,
-firmlink and APFS volume/location behavior requires explicit integration tests.
-No current rule or plan may authorize a volume crossing. Selecting an external
-volume as its own validated scan root is a distinct operation, not an exception
-to this rule.
+The new boundary observation is not a grant: it must still be joined to trusted
+account/profile policy and rule scope before planning. On Windows, both the
+boundary witness and current validator remain non-actionable until
+handle-relative reparse and mount evidence exists. On Linux, descriptor-relative
+`statx` mount identity supplements (but does not replace) authoritative mount
+location review; equal device identity alone never distinguishes a bind mount.
+On macOS, `fstatfs` identity and mount location remain insufficient to settle
+APFS firmlink semantics without dedicated integration tests. No current rule or
+plan may authorize a volume crossing. Selecting an external volume as its own
+validated scan root is a distinct operation, not an exception to this rule.
 
 ### 7.3 Protected roots
 
@@ -2337,7 +2349,7 @@ coverage is labelled as Home-scoped and unknown coverage stays unknown.
 
 | Control | Current state | Gate before app cleanup |
 |---|---|---|
-| Strict lexical/live path evidence | Implemented, crate-private and non-authoritative, including retained-descriptor bounded regular-file prefix and full-file SHA-256 reads on Unix. A separate Unix/macOS Trash witness now preserves a final symlink as the link object without canonicalization or target inspection, while rejecting symlinked roots/intermediate ancestors and special entries | Bind trusted scan/volume/rule witnesses and executor revalidation; Windows planner use requires retained handle-relative ancestry and Windows Trash reparse-tag evidence |
+| Strict lexical/live path evidence | Implemented, crate-private and non-authoritative, including retained-descriptor bounded regular-file prefix and full-file SHA-256 reads on Unix. A separate Unix/macOS Trash witness preserves a final symlink as the link object without canonicalization or target inspection, while rejecting symlinked roots/intermediate ancestors and special entries. A repeated filesystem-boundary witness now retains bounded no-follow root-to-scan ancestry plus descriptor-bound platform mount identity | Bind trusted account/home, volume/location, and rule witnesses and executor revalidation; APFS firmlink semantics and Windows handle-relative/reparse evidence remain open |
 | Protected-root registry | Implemented text-only policy; production construction sealed | Trusted OS home/profile/mount discovery and stable rule grants |
 | Dangerous-path corpus and fuzzing | Implemented | Keep cross-platform and promote every crash regression |
 | Rule schema/loader | Strict schema plus a build-time digest/policy-gated and strict load-time-validated discovery catalog; nine rules remain selected-root RevealOnly observations, while independently researched `developer.rust.target` and `developer.python.pycache` revision 2 require exact snapshot marker evidence and propose only SafeRegenerable/RemoveKnownRegenerableContents. Every rule is unschedulable and every result remains blocked by `ProtectedPath`. Sealed Unix-only live and Cargo-resolution witnesses verify the exact Rust tag, manifest digest, current default layout, and scrubbed-context Cargo workspace/target result; Python live-writer and relocation authority remains open. macOS additionally has explicit revisioned same-store direct-Cargo enrollment, bounded policy-3 positive config/include byte closure and ordered Cargo trace intent, descriptor-retained metadata cwd, static-code evidence, suspended selected-running-code attestation, complete executable/config/manifest ancestry APFS fences, a guarded two-pass reported root/member-manifest closure, a policy-1 closed accepted path-dependency graph, stale-preview rejection, and revocation tombstones, still without clearing that blocker | Developer ID signing must cover catalog bytes; before either safe rule can lose its blocker, complete its marker/read-set and namespace provenance, review the documented conservative path-dependency compatibility and path-intent/path-based/same-UID launch limits, prove authoritative volume/protected-root grants, add process/descendant/change guards, and complete adversarial review |

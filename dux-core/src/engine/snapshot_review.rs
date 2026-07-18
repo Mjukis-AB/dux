@@ -855,7 +855,8 @@ fn map_live_path_error(error: CanonicalPathError) -> SnapshotReviewError {
             _ => SnapshotReviewError::LivePathUnavailable,
         },
         CanonicalPathError::IdentityUnavailable { .. }
-        | CanonicalPathError::UnsupportedPlatform => SnapshotReviewError::LivePathUnavailable,
+        | CanonicalPathError::UnsupportedPlatform
+        | CanonicalPathError::BoundaryTooDeep { .. } => SnapshotReviewError::LivePathUnavailable,
     }
 }
 

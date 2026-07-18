@@ -244,6 +244,8 @@ pub enum CanonicalPathError {
     CanonicalPathMismatch { target_label: &'static str },
     #[error("path component {component_index} changed during validation")]
     ChangedDuringValidation { component_index: usize },
+    #[error("filesystem boundary ancestry exceeds the supported bound of {maximum}")]
+    BoundaryTooDeep { maximum: usize },
 }
 
 #[derive(Debug, Error)]
@@ -346,6 +348,80 @@ pub(super) struct PlatformEntrySnapshot {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct PlatformRootSnapshot {
     pub(super) identity: FilesystemIdentity,
+    pub(super) ancestors: Vec<AncestorIdentity>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct PlatformBoundarySnapshot {
+    pub(super) root: PlatformRootSnapshot,
+    pub(super) mount: FilesystemMountIdentity,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct FilesystemMountIdentity {
+    pub(super) filesystem_id: [u64; 2],
+    pub(super) mount_id: u64,
+    pub(super) mount_path: Option<PathBuf>,
+    pub(super) filesystem_type: u64,
+}
+
+/// A repeated, path-free-to-callers observation of the filesystem boundary
+/// around one canonical scan root.
+///
+/// The complete no-follow root-to-scan ancestry and platform mount identity
+/// are retained only inside core. This is evidence for a future protected
+/// volume grant; it is deliberately non-Clone and has no planning or effect
+/// conversion.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct FilesystemBoundarySnapshot {
+    scan_root: PathBuf,
+    root_identity: FilesystemIdentity,
+    root_ancestors: Vec<AncestorIdentity>,
+    mount: FilesystemMountIdentity,
+}
+
+pub(crate) const MAX_BOUNDARY_ANCESTORS: usize = 64;
+
+impl FilesystemBoundarySnapshot {
+    pub(crate) fn scan_root(&self) -> &Path {
+        &self.scan_root
+    }
+
+    pub(crate) fn root_identity(&self) -> FilesystemIdentity {
+        self.root_identity
+    }
+
+    pub(crate) fn root_ancestors(&self) -> &[AncestorIdentity] {
+        &self.root_ancestors
+    }
+
+    pub(crate) fn mount_id(&self) -> Option<u64> {
+        (self.mount.mount_id != 0).then_some(self.mount.mount_id)
+    }
+
+    pub(crate) fn mount_path(&self) -> Option<&Path> {
+        self.mount.mount_path.as_deref()
+    }
+
+    pub(crate) fn filesystem_type(&self) -> u64 {
+        self.mount.filesystem_type
+    }
+
+    /// Re-capture the same lexical boundary and compare every retained
+    /// no-follow ancestor and mount identity. This is still observational;
+    /// callers must not treat success as a grant or effect capability.
+    pub(crate) fn revalidate(&self) -> Result<(), CanonicalPathError> {
+        let current = platform::capture_boundary(&self.scan_root)?;
+        if current.root.identity != self.root_identity
+            || current.root.ancestors != self.root_ancestors
+            || current.mount != self.mount
+        {
+            return Err(CanonicalPathError::ChangedDuringValidation {
+                component_index: current.root.ancestors.len(),
+            });
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -393,6 +469,25 @@ pub(crate) fn capture_scan_root(
         requested_path: root.as_path().to_path_buf(),
         canonical_path,
         identity: first.identity,
+    })
+}
+
+pub(crate) fn capture_filesystem_boundary(
+    root: &CanonicalScanRoot,
+) -> Result<FilesystemBoundarySnapshot, CanonicalPathError> {
+    let first = platform::capture_boundary(root.canonical_path())?;
+    let second = platform::capture_boundary(root.canonical_path())?;
+    if first != second || first.root.identity != root.identity {
+        return Err(CanonicalPathError::ChangedDuringValidation {
+            component_index: first.root.ancestors.len(),
+        });
+    }
+
+    Ok(FilesystemBoundarySnapshot {
+        scan_root: root.canonical_path().to_path_buf(),
+        root_identity: first.root.identity,
+        root_ancestors: first.root.ancestors,
+        mount: first.mount,
     })
 }
 
@@ -730,6 +825,56 @@ mod tests {
             let target = validate_cleanup_path(&self.lexical_root, &path).unwrap();
             capture_trash_path_snapshot(&self.canonical_root, target)
         }
+
+        fn capture_boundary(&self) -> Result<FilesystemBoundarySnapshot, CanonicalPathError> {
+            capture_filesystem_boundary(&self.canonical_root)
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn filesystem_boundary_captures_complete_ancestry_and_repeats_stably() {
+        let fixture = Fixture::new();
+        let first = fixture.capture_boundary().unwrap();
+        let second = fixture.capture_boundary().unwrap();
+
+        assert_eq!(&first, &second);
+        first.revalidate().unwrap();
+        assert_eq!(first.scan_root(), fixture.canonical_root.canonical_path());
+        assert_eq!(first.root_identity(), fixture.canonical_root.identity());
+        assert!(!first.root_ancestors().is_empty());
+        assert_eq!(
+            first.root_ancestors().last().unwrap().identity(),
+            fixture.canonical_root.identity()
+        );
+        #[cfg(target_os = "macos")]
+        assert!(first.mount_path().is_some_and(Path::is_absolute));
+        #[cfg(target_os = "linux")]
+        assert!(first.mount_path().is_none());
+        #[cfg(target_os = "macos")]
+        assert!(first.mount_id().is_none());
+        #[cfg(target_os = "linux")]
+        assert!(first.mount_id().is_some());
+        assert_ne!(first.filesystem_type(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn filesystem_boundary_rejects_excessive_ancestry() {
+        let temp = TempDir::new().unwrap();
+        let mut path = temp.path().to_path_buf();
+        for index in 0..MAX_BOUNDARY_ANCESTORS {
+            path.push(format!("d{index}"));
+            std::fs::create_dir(&path).unwrap();
+        }
+        let path = std::fs::canonicalize(path).unwrap();
+        let lexical = validate_scan_root(&path).unwrap();
+
+        assert!(matches!(
+            capture_scan_root(lexical),
+            Err(CanonicalPathError::BoundaryTooDeep { maximum })
+                if maximum == MAX_BOUNDARY_ANCESTORS
+        ));
     }
 
     #[test]
@@ -910,7 +1055,12 @@ mod tests {
 
         let fixture = Fixture::new();
         let socket_path = fixture.root_path.join("socket");
-        let _listener = UnixListener::bind(&socket_path).unwrap();
+        let Ok(_listener) = UnixListener::bind(&socket_path) else {
+            // Some hermetic runners prohibit AF_UNIX sockets even inside a
+            // writable temporary directory; the special-entry assertion is
+            // covered where the fixture can be created.
+            return;
+        };
 
         assert!(matches!(
             fixture.capture("socket"),

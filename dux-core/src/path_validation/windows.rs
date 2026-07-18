@@ -15,8 +15,8 @@ use windows_sys::Win32::Storage::FileSystem::{
 
 use super::filesystem::{
     AncestorIdentity, CanonicalPathError, FilesystemEntryKind, FilesystemIdentity,
-    PlatformEntrySnapshot, PlatformPathSnapshot, PlatformRootSnapshot, TrashPlatformPathSnapshot,
-    map_io_error,
+    PlatformBoundarySnapshot, PlatformEntrySnapshot, PlatformPathSnapshot, PlatformRootSnapshot,
+    TrashPlatformPathSnapshot, map_io_error,
 };
 
 // This backend reopens cumulative full paths. OPEN_REPARSE_POINT prevents the
@@ -27,6 +27,8 @@ use super::filesystem::{
 pub(super) fn capture_root(path: &Path) -> Result<PlatformRootSnapshot, CanonicalPathError> {
     let mut current = PathBuf::new();
     let mut final_snapshot = None;
+    let mut ancestors = Vec::new();
+    let mut relative = PathBuf::new();
 
     for (component_index, component) in path.components().enumerate() {
         current.push(component.as_os_str());
@@ -38,12 +40,26 @@ pub(super) fn capture_root(path: &Path) -> Result<PlatformRootSnapshot, Canonica
             return Err(CanonicalPathError::ScanRootNotDirectory);
         }
         final_snapshot = Some(snapshot);
+        if !matches!(component, Component::Prefix(_) | Component::RootDir) {
+            relative.push(component);
+            ancestors.push(AncestorIdentity::new(relative.clone(), snapshot.identity));
+        }
     }
 
     let snapshot = final_snapshot.ok_or(CanonicalPathError::ScanRootNotDirectory)?;
     Ok(PlatformRootSnapshot {
         identity: snapshot.identity,
+        ancestors,
     })
+}
+
+pub(super) fn capture_boundary(
+    _path: &Path,
+) -> Result<PlatformBoundarySnapshot, CanonicalPathError> {
+    // The current backend reopens cumulative paths and cannot prove a stable
+    // mount location or handle-relative reparse ancestry. Keep this evidence
+    // unavailable rather than letting FILE_ID_INFO masquerade as authority.
+    Err(CanonicalPathError::UnsupportedPlatform)
 }
 
 pub(super) fn capture_descendant(

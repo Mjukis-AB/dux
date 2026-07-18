@@ -1,6 +1,6 @@
 use std::ffi::OsStr;
 use std::fs::File;
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::{Component, Path, PathBuf};
 
 use nix::fcntl::{AtFlags, OFlag, open, openat};
@@ -8,8 +8,9 @@ use nix::sys::stat::{Mode, SFlag, fstat, fstatat};
 
 use super::filesystem::{
     AncestorIdentity, CanonicalPathError, FilesystemEntryKind, FilesystemIdentity,
-    PlatformEntrySnapshot, PlatformPathSnapshot, PlatformRootSnapshot, TrashPlatformEntrySnapshot,
-    TrashPlatformPathSnapshot, TrashTargetKind, map_io_error,
+    FilesystemMountIdentity, PlatformBoundarySnapshot, PlatformEntrySnapshot, PlatformPathSnapshot,
+    PlatformRootSnapshot, TrashPlatformEntrySnapshot, TrashPlatformPathSnapshot, TrashTargetKind,
+    map_io_error,
 };
 
 const DIRECTORY_FLAGS: OFlag = OFlag::O_RDONLY
@@ -28,6 +29,8 @@ pub(super) fn capture_root(path: &Path) -> Result<PlatformRootSnapshot, Canonica
     let mut directory = open(Path::new("/"), DIRECTORY_FLAGS, Mode::empty())
         .map_err(|error| map_nix_error(0, error))?;
     let mut final_stat = fstat(&directory).map_err(|error| map_nix_error(0, error))?;
+    let mut ancestors = vec![AncestorIdentity::new(PathBuf::new(), identity(&final_stat))];
+    let mut relative = PathBuf::new();
 
     let components: Vec<&OsStr> = normal_components(path)?.collect();
     for (component_index, component) in components.iter().enumerate() {
@@ -44,6 +47,13 @@ pub(super) fn capture_root(path: &Path) -> Result<PlatformRootSnapshot, Canonica
         if identity(&final_stat) != snapshot.identity {
             return Err(CanonicalPathError::ChangedDuringValidation { component_index });
         }
+        relative.push(component);
+        if ancestors.len() >= super::filesystem::MAX_BOUNDARY_ANCESTORS {
+            return Err(CanonicalPathError::BoundaryTooDeep {
+                maximum: super::filesystem::MAX_BOUNDARY_ANCESTORS,
+            });
+        }
+        ancestors.push(AncestorIdentity::new(relative.clone(), snapshot.identity));
         directory = next;
     }
 
@@ -53,7 +63,127 @@ pub(super) fn capture_root(path: &Path) -> Result<PlatformRootSnapshot, Canonica
 
     Ok(PlatformRootSnapshot {
         identity: identity(&final_stat),
+        ancestors,
     })
+}
+
+pub(super) fn capture_boundary(
+    path: &Path,
+) -> Result<PlatformBoundarySnapshot, CanonicalPathError> {
+    let root = capture_root(path)?;
+    let mount = capture_mount(path)?;
+    Ok(PlatformBoundarySnapshot { root, mount })
+}
+
+#[cfg(target_os = "macos")]
+fn capture_mount(path: &Path) -> Result<FilesystemMountIdentity, CanonicalPathError> {
+    let directory =
+        open(path, DIRECTORY_FLAGS, Mode::empty()).map_err(|error| map_nix_error(0, error))?;
+    let mut stats = std::mem::MaybeUninit::<nix::libc::statfs>::uninit();
+    // SAFETY: `directory` is a retained no-follow directory descriptor and
+    // `stats` points to writable storage for the OS call.
+    let result = unsafe { nix::libc::fstatfs(directory.as_raw_fd(), stats.as_mut_ptr()) };
+    if result != 0 {
+        return Err(map_io_error(0, std::io::Error::last_os_error()));
+    }
+    // SAFETY: statfs returned success above.
+    let stats = unsafe { stats.assume_init() };
+    let mount_bytes = unsafe {
+        std::slice::from_raw_parts(
+            stats.f_mntonname.as_ptr().cast::<u8>(),
+            stats.f_mntonname.len(),
+        )
+    };
+    let mount_end = mount_bytes
+        .iter()
+        .position(|byte| *byte == 0)
+        .ok_or(CanonicalPathError::UnsupportedPlatform)?;
+    let mount_path = std::str::from_utf8(&mount_bytes[..mount_end])
+        .map(PathBuf::from)
+        .map_err(|_| CanonicalPathError::UnsupportedPlatform)?;
+    if !mount_path.is_absolute() {
+        return Err(CanonicalPathError::UnsupportedPlatform);
+    }
+    Ok(FilesystemMountIdentity {
+        filesystem_id: macos_fsid_values(stats.f_fsid)?,
+        // Darwin does not expose a Linux-style mount ID. The fsid is the
+        // stable mount identity, and the path is retained to distinguish
+        // firmlink/APFS location changes.
+        mount_id: 0,
+        mount_path: Some(mount_path),
+        filesystem_type: stats.f_type as u64,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn macos_fsid_values(value: nix::libc::fsid_t) -> Result<[u64; 2], CanonicalPathError> {
+    // libc keeps Darwin's two-word fsid fields private in the Rust type. The
+    // kernel ABI is two native-endian 32-bit words; copy the bytes without
+    // relying on the private field name.
+    let bytes = unsafe {
+        std::slice::from_raw_parts(
+            (&value as *const nix::libc::fsid_t).cast::<u8>(),
+            std::mem::size_of::<nix::libc::fsid_t>(),
+        )
+    };
+    if bytes.len() < 8 {
+        return Err(CanonicalPathError::UnsupportedPlatform);
+    }
+    Ok([
+        u32::from_ne_bytes(bytes[0..4].try_into().unwrap()) as u64,
+        u32::from_ne_bytes(bytes[4..8].try_into().unwrap()) as u64,
+    ])
+}
+
+#[cfg(target_os = "linux")]
+fn capture_mount(path: &Path) -> Result<FilesystemMountIdentity, CanonicalPathError> {
+    let directory =
+        open(path, DIRECTORY_FLAGS, Mode::empty()).map_err(|error| map_nix_error(0, error))?;
+    let stats = nix::sys::statfs::fstatfs(&directory).map_err(|error| map_nix_error(0, error))?;
+    let mount_id = capture_linux_mount_id(&directory)?;
+    let filesystem_id = stats.filesystem_id();
+    Ok(FilesystemMountIdentity {
+        filesystem_id: [filesystem_id[0] as u64, filesystem_id[1] as u64],
+        mount_id,
+        mount_path: None,
+        filesystem_type: stats.filesystem_type().0 as u64,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn capture_linux_mount_id(directory: &OwnedFd) -> Result<u64, CanonicalPathError> {
+    const AT_EMPTY_PATH: nix::libc::c_int = 0x1000;
+    const AT_NO_AUTOMOUNT: nix::libc::c_int = 0x800;
+    const STATX_BASIC_STATS: nix::libc::c_uint = 0x07ff;
+    const STATX_MNT_ID: nix::libc::c_uint = 0x1000;
+
+    let empty = [0_u8];
+    let mut stats = std::mem::MaybeUninit::<nix::libc::statx>::zeroed();
+    // SAFETY: the empty pathname is paired with AT_EMPTY_PATH, `stats` is
+    // writable, and the Linux statx ABI initializes it on success.
+    let result = unsafe {
+        nix::libc::statx(
+            directory.as_raw_fd(),
+            empty.as_ptr().cast(),
+            AT_EMPTY_PATH | AT_NO_AUTOMOUNT,
+            STATX_BASIC_STATS | STATX_MNT_ID,
+            stats.as_mut_ptr(),
+        )
+    };
+    if result != 0 {
+        return Err(CanonicalPathError::UnsupportedPlatform);
+    }
+    // SAFETY: statx returned success above.
+    let stats = unsafe { stats.assume_init() };
+    if stats.stx_mask & STATX_MNT_ID == 0 || stats.stx_mnt_id == 0 {
+        return Err(CanonicalPathError::UnsupportedPlatform);
+    }
+    Ok(stats.stx_mnt_id)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn capture_mount(_path: &Path) -> Result<FilesystemMountIdentity, CanonicalPathError> {
+    Err(CanonicalPathError::UnsupportedPlatform)
 }
 
 pub(super) fn capture_descendant(

@@ -11,6 +11,13 @@ All notable changes to DUX will be documented in this file.
   DUX when the popover is closed.
 
 ### Added
+- Continued Milestone 5 with a private repeated filesystem-boundary witness
+  for future protected-volume planning. Unix captures the complete no-follow
+  root-to-scan ancestry; macOS records descriptor-bound `fstatfs` identity and
+  mount location; Linux requires descriptor-relative `statx` mount identity
+  plus filesystem statistics; unsupported Windows remains fail-closed. The
+  bounded evidence can be revalidated but does not issue a trusted grant,
+  clear `ProtectedPath`, cross FFI, construct a plan, or authorize cleanup.
 - Continued Milestone 5 with a crate-private no-follow final-link witness for
   future Trash review. Unix/macOS captures preserve the selected symlink's own
   identity and lexical object path, including dangling and loop links, without

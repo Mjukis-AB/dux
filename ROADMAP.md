@@ -4433,6 +4433,17 @@ Tasks:
     FFI, schedule, or mutation path was added. Full protected-root grants,
     approval binding, executor revalidation, and plan/journal integration remain
     open.
+  - [x] 2026-07-18 slice: add a private repeated filesystem-boundary
+    observation for the canonical scan root. Unix captures the complete
+    no-follow root-to-scan ancestor identity chain, while macOS retains the
+    `fstatfs` filesystem identity and mount location and Linux requires
+    descriptor-relative `statx` mount identity plus filesystem statistics.
+    The bounded ancestry (64 entries) is captured twice and can be explicitly
+    revalidated; mismatches, malformed mount evidence, and unsupported Windows
+    platforms fail closed. This remains observation only: it does not issue a
+    trusted volume/location grant, change `ProtectedPath`, construct a plan,
+    cross FFI, or authorize an effect. APFS firmlink semantics, trusted home
+    discovery, and rule-boundary grants remain open.
 - [ ] Implement Trash executor for Explorer selections.
   - [x] 2026-07-18 slice: add a crate-private Unix/macOS no-follow final-link
     witness for future Trash admission. It keeps the requested and validated
