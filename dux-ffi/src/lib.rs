@@ -4447,6 +4447,10 @@ mod tests {
         assert!(!initial.released);
         assert!(initial.expires_at_unix_ms > 0);
         assert_eq!(
+            review.candidate_summaries(0, 0),
+            Err(EngineError::InvalidCandidateDetailRequest)
+        );
+        assert_eq!(
             review.candidate_paths("candidate:missing".into(), 0, 0),
             Err(EngineError::InvalidCandidateDetailRequest)
         );
@@ -4622,6 +4626,10 @@ mod tests {
         assert_eq!(ended.expires_at_unix_ms, 0);
         assert_eq!(review.root_node(), Err(EngineError::ReviewExpired));
         assert_eq!(review.treemap(0, 1), Err(EngineError::ReviewExpired));
+        assert_eq!(
+            review.candidate_summaries(0, 1),
+            Err(EngineError::ReviewExpired)
+        );
         assert_eq!(
             review.candidate_paths("candidate:missing".into(), 0, 1),
             Err(EngineError::ReviewExpired)
