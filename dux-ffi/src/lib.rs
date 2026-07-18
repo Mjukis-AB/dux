@@ -60,7 +60,7 @@ use dux_core::{
     VolumeId,
 };
 
-const FFI_CONTRACT_VERSION: u32 = 18;
+const FFI_CONTRACT_VERSION: u32 = 19;
 const FFI_RECORD_VERSION: u32 = 1;
 const SNAPSHOT_NODE_RECORD_VERSION: u32 = 2;
 const SCAN_EVENT_PAGE_LIMIT: u16 = 64;
@@ -1127,6 +1127,121 @@ pub struct SnapshotLiveTarget {
     pub absolute_path_bytes: Vec<u8>,
     pub display_path: String,
     pub exact_text_path: Option<String>,
+}
+
+/// The only target payload a future core-owned Trash callback may receive.
+///
+/// There is intentionally no UniFFI constructor. Rust creates this object
+/// only after a reviewed-plan admission has revalidated the target and fenced
+/// the journal receipt. The request is ephemeral and its path bytes can be
+/// consumed once by the synchronous platform adapter; it is not a plan,
+/// approval, or reusable filesystem capability.
+#[derive(uniffi::Object)]
+pub struct TrashEffectRequest {
+    state: Mutex<Option<TrashEffectRequestState>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TrashEffectRequestState {
+    record_version: u32,
+    target_kind: TrashEffectTargetKind,
+    path_encoding: SnapshotNameEncoding,
+    absolute_path_bytes: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum TrashEffectTargetKind {
+    Directory,
+    File,
+    Symlink,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error, uniffi::Error)]
+pub enum TrashEffectRequestError {
+    #[error("the Trash request is no longer available")]
+    Consumed,
+    #[error("the Trash request contains an invalid path")]
+    InvalidPath,
+    #[error("the Trash request state is unavailable")]
+    InternalState,
+}
+
+#[uniffi::export]
+impl TrashEffectRequest {
+    /// Return the stable record version for this one-shot request.
+    pub fn record_version(&self) -> Result<u32, TrashEffectRequestError> {
+        self.with_state(|state| state.record_version)
+    }
+
+    /// Return the no-follow kind captured by core before the callback began.
+    pub fn target_kind(&self) -> Result<TrashEffectTargetKind, TrashEffectRequestError> {
+        self.with_state(|state| state.target_kind)
+    }
+
+    /// Return the encoding of the exact path bytes captured by core.
+    pub fn path_encoding(&self) -> Result<SnapshotNameEncoding, TrashEffectRequestError> {
+        self.with_state(|state| state.path_encoding)
+    }
+
+    /// Consume the exact path bytes once. A callback must not retain or retry
+    /// this value after returning to Rust.
+    pub fn take_path_bytes(&self) -> Result<Vec<u8>, TrashEffectRequestError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| TrashEffectRequestError::InternalState)?;
+        let state = state.take().ok_or(TrashEffectRequestError::Consumed)?;
+        if state.absolute_path_bytes.is_empty() {
+            return Err(TrashEffectRequestError::InvalidPath);
+        }
+        Ok(state.absolute_path_bytes)
+    }
+}
+
+impl TrashEffectRequest {
+    fn with_state<T>(
+        &self,
+        operation: impl FnOnce(&TrashEffectRequestState) -> T,
+    ) -> Result<T, TrashEffectRequestError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| TrashEffectRequestError::InternalState)?;
+        let state = state.as_ref().ok_or(TrashEffectRequestError::Consumed)?;
+        Ok(operation(state))
+    }
+
+    #[cfg(test)]
+    fn for_test(
+        target_kind: TrashEffectTargetKind,
+        path_encoding: SnapshotNameEncoding,
+        absolute_path_bytes: Vec<u8>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(Some(TrashEffectRequestState {
+                record_version: FFI_RECORD_VERSION,
+                target_kind,
+                path_encoding,
+                absolute_path_bytes,
+            })),
+        })
+    }
+}
+
+/// Synchronous platform callback contract for the future reviewed Trash
+/// executor. The callback returns only a bounded outcome; it cannot approve,
+/// journal, retry, or choose a path.
+#[uniffi::export(callback_interface)]
+pub trait TrashPlatformDriver: Send + Sync {
+    fn trash(&self, request: Arc<TrashEffectRequest>) -> TrashPlatformResult;
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum TrashPlatformResult {
+    Completed,
+    Unsupported,
+    Failed,
+    OutcomeUnknown,
 }
 
 #[derive(uniffi::Object)]
@@ -3641,10 +3756,10 @@ mod tests {
     }
 
     #[test]
-    fn reports_contract_eighteen_and_preserves_legacy_formatting() {
+    fn reports_contract_nineteen_and_preserves_legacy_formatting() {
         let _guard = ENGINE_TEST_LOCK.lock().unwrap();
         let (_temp, engine) = engine();
-        assert_eq!(library_version().ffi_contract_version, 18);
+        assert_eq!(library_version().ffi_contract_version, 19);
         assert_eq!(engine.library_version().unwrap(), library_version());
         assert_eq!(engine.format_size(1536).unwrap().display, "1.5 KB");
         assert!(engine.close());
@@ -3656,6 +3771,77 @@ mod tests {
             record_version: FFI_RECORD_VERSION,
             root: root.to_string_lossy().into_owned(),
         }
+    }
+
+    #[test]
+    fn trash_effect_request_is_core_issued_and_one_shot() {
+        let request = TrashEffectRequest::for_test(
+            TrashEffectTargetKind::Symlink,
+            SnapshotNameEncoding::UnixBytes,
+            b"/private/tmp/dux-reviewed-link".to_vec(),
+        );
+        assert_eq!(request.record_version().unwrap(), FFI_RECORD_VERSION);
+        assert_eq!(
+            request.target_kind().unwrap(),
+            TrashEffectTargetKind::Symlink
+        );
+        assert_eq!(
+            request.path_encoding().unwrap(),
+            SnapshotNameEncoding::UnixBytes
+        );
+        assert_eq!(
+            request.take_path_bytes().unwrap(),
+            b"/private/tmp/dux-reviewed-link"
+        );
+        assert_eq!(
+            request.take_path_bytes().unwrap_err(),
+            TrashEffectRequestError::Consumed
+        );
+        assert_eq!(
+            request.record_version().unwrap_err(),
+            TrashEffectRequestError::Consumed
+        );
+    }
+
+    struct RecordingTrashDriver {
+        calls: Mutex<Vec<Vec<u8>>>,
+    }
+
+    impl TrashPlatformDriver for RecordingTrashDriver {
+        fn trash(&self, request: Arc<TrashEffectRequest>) -> TrashPlatformResult {
+            match request.take_path_bytes() {
+                Ok(path) => {
+                    self.calls.lock().unwrap().push(path);
+                    TrashPlatformResult::Completed
+                }
+                Err(_) => TrashPlatformResult::OutcomeUnknown,
+            }
+        }
+    }
+
+    #[test]
+    fn trash_platform_callback_is_synchronous_and_cannot_retry_a_request() {
+        let driver = RecordingTrashDriver {
+            calls: Mutex::new(Vec::new()),
+        };
+        let request = TrashEffectRequest::for_test(
+            TrashEffectTargetKind::File,
+            SnapshotNameEncoding::UnixBytes,
+            b"/private/tmp/dux-reviewed-file".to_vec(),
+        );
+        assert_eq!(
+            driver.trash(Arc::clone(&request)),
+            TrashPlatformResult::Completed
+        );
+        assert_eq!(
+            driver.trash(request),
+            TrashPlatformResult::OutcomeUnknown,
+            "a callback retry must not obtain the target bytes"
+        );
+        assert_eq!(
+            driver.calls.lock().unwrap().as_slice(),
+            [b"/private/tmp/dux-reviewed-file".to_vec()]
+        );
     }
 
     fn wait_for_scan(task: &ScanTask) -> ScanPoll {

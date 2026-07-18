@@ -4505,6 +4505,15 @@ Tasks:
     thrown Foundation result to path-free `OutcomeUnknown`. Injected fake tests
     verify exact URL delivery, no mutation, one call, and no retry. The adapter
     is not wired to UI or FFI; only the future core-owned callback may invoke it.
+  - [x] 2026-07-19 slice: stage the UniFFI v19 core-issued callback contract.
+    `TrashEffectRequest` has no public constructor, carries only bounded
+    target-kind/encoding metadata plus the exact ephemeral path bytes, and
+    consumes those bytes once. `TrashPlatformDriver` is synchronous and returns
+    only `Completed`, `Unsupported`, `Failed`, or `OutcomeUnknown`. There is
+    still no callback registration or mutation entry point: a future reviewed
+    plan/approval capability must issue the request while the journal claim is
+    held, and the Swift adapter must consume it immediately without retaining
+    or retrying it.
 - [ ] Implement permanent-safe executor for approved rules.
 - [ ] Implement execution-time revalidation.
 - [ ] Implement cleanup session/item history.

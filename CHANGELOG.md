@@ -1,5 +1,11 @@
 # Changelog
 
+- Staged UniFFI contract v19's core-issued, one-shot Trash callback request.
+  The request has no public constructor, exposes only the exact ephemeral path
+  bytes and target kind to a future synchronous platform callback, and can be
+  consumed once. No plan, approval, journal, callback registration, or
+  filesystem mutation is exposed yet.
+
 All notable changes to DUX will be documented in this file.
 
 ## [Unreleased]

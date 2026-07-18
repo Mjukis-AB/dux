@@ -112,7 +112,7 @@ extension DuxSnapshotReviewLease {
 struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewServing,
     DuxSnapshotHistoryServing, DuxScanCoverageServing, HomeScanServing, Sendable
 {
-    fileprivate static let expectedFFIContractVersion: UInt32 = 18
+    fileprivate static let expectedFFIContractVersion: UInt32 = 19
     fileprivate static let expectedRecordVersion: UInt32 = 1
 
     private let state: EngineServiceState

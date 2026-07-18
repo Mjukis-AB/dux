@@ -770,6 +770,14 @@ that a Foundation throw becomes `OutcomeUnknown` without a retry. A future
 core-owned synchronous callback must supply the exact already-revalidated
 one-shot target while the journal claim remains held.
 
+The UniFFI v19 callback contract is staged but deliberately inert. Its
+core-issued `TrashEffectRequest` has no public constructor and is consumed only
+once; it carries a bounded target kind, encoding, and exact ephemeral path
+bytes, never a plan ID, approval, journal receipt, or arbitrary caller path.
+`TrashPlatformDriver` is synchronous and returns a bounded result enum. Until a
+reviewed-plan/approval capability exists, no engine method registers a driver
+or creates a request, so generated callback types cannot authorize cleanup.
+
 Any ambiguity returns a typed rejection, skip, or `ChangedSincePlan`. The
 executor MUST NOT silently refresh a target and proceed; changed evidence needs
 a new plan and approval.
