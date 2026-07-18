@@ -333,7 +333,7 @@ path, identity, length, and SHA-256. Exact local-APFS manifest and complete
 ancestry-through-root vnode fences remain polled while an identical second
 command runs; a current-open-descriptor plus 128-slot reserve preflight rejects
 insufficient process limits instead of reducing coverage. Only that
-independently parsed second output is accepted. Resolution policy 7 retains
+independently parsed second output is accepted. Resolution policy 8 retains
 manifest policy 1, member/manifest counts, closure digest, launch evidence, and
 accepted-output digest together with configuration-policy-3 file/edge/byte and
 read-intent evidence. Before discovery, a separate policy-1 closure reproduces
@@ -358,10 +358,25 @@ some standalone or excluded targets that DUX still rejects. Cargo 1.96's exact
 does not load or create `Cargo.lock`; an executable malformed-lock regression
 pins that reviewed version-specific behavior. This remains path-based stability
 evidence for reported and potential ancestor manifests, not proof of Cargo's
-complete reads or workspace-glob namespace generation. Transient absent
-ancestor create/remove, attestation and discovery stability for unreported
-path dependencies, target/glob namespaces, source/build files, and post-witness
-mutations remain outside the proof.
+complete reads or workspace-glob namespace generation.
+
+Target-namespace policy 1 additionally requires every package's bounded
+serialized `targets` array and every reported source path to be a normalized,
+canonical, single-link regular descendant. Across at most 256 packages and
+4,096 targets, it binds Cargo 1.96's conventional `src/lib.rs`, `src/main.rs`,
+`src/bench.rs`, implicit `build.rs`, `src/bin`, `examples`, `tests`, and
+`benches` probes, complete direct directory entries, child `main.rs` probes,
+and edition-2015 `src/<target-name>.rs` fallbacks. The closure is limited to
+16,384 records, 2 MiB of native paths, and 512 KiB of target text. Local-APFS
+vnode fences make discovery-directory writes terminal, so transient
+create/remove cannot restore accepted state unnoticed; exact observation
+replay brackets the accepted pass. Resolution policy 8 binds its package,
+target, namespace, and digest evidence without adding authority.
+
+Transient absent ancestor create/remove, attestation and discovery stability
+for unreported path dependencies, workspace globs, package README/license
+metadata probes, kernel actual-read identity, and post-witness mutations remain
+outside the proof.
 Those limits and the remaining authority grants keep `ProtectedPath` intact.
 Every rule remains unschedulable, and every emitted candidate retains
 `ProtectedPath` because kernel-level actual-read identity and complete Cargo

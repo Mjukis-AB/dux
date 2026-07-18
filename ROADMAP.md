@@ -4215,6 +4215,28 @@ Tasks:
       build namespaces, kernel-level read identity, and post-witness changes
       remain open. No blocker, plan, FFI, scheduling, or effect authority was
       added.
+    - [x] 2026-07-18 slice: close Cargo 1.96's finite reported-package
+      target/source/build discovery namespace. The strict metadata document
+      now requires every package's complete `targets` array and policy 1 binds
+      at most 256 packages, 4,096 targets, 16 kind labels per target, 512 KiB
+      of target text, 2 MiB of native paths, and 16,384 namespace records.
+      Every reported `src_path` must be an absolute normalized canonical
+      single-link regular descendant. DUX independently snapshots each package
+      root's `src`, `src/lib.rs`, `src/main.rs`, edition-2015
+      `src/<target-name>.rs` and `src/bench.rs` fallbacks, implicit `build.rs`,
+      complete direct `src/bin`, `examples`, `tests`, and `benches` entries,
+      and `main.rs` below their direct child directories. On macOS all present
+      entries and required ancestry must be local APFS. Directory writes are
+      terminal under vnode fences, including create/remove restoration; exact
+      file identity/link/rename/delete/revoke changes also reject, and complete
+      observation replay brackets the accepted pass. Resolution policy 8
+      retains package/target/namespace counts and the closure digest. Unit and
+      exact-Cargo regressions cover inferred library/build targets, transient
+      directory writes, source replacement, external/missing/symlink sources,
+      and bounded evidence. Workspace globs, README/license metadata probes,
+      transient absent ancestor create/remove, kernel-level read identity, and
+      post-witness changes remain open. No blocker, plan, FFI, scheduling, or
+      effect authority was added.
     Kernel-level Cargo read identity, complete remaining Cargo manifest and
     namespace provenance, and all remaining
     protected-root, volume, process, descendant, plan, and executor grants are

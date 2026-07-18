@@ -32,6 +32,10 @@ use super::cargo_manifest_probes::{
 use super::cargo_spawn_macos::{
     CargoSpawnError, CargoSpawnRequest, ExecutableMutationFence, SuspendedCargoChild,
 };
+use super::cargo_target_namespace::{
+    CargoTargetDeclaration, CargoTargetNamespaceDeclaration, CargoTargetNamespaceError,
+    CargoTargetNamespaceEvidence, CargoTargetNamespaceGuard,
+};
 use super::cargo_workspace::{
     CargoWorkspaceManifestDeclaration, CargoWorkspaceManifestError, CargoWorkspaceManifestEvidence,
     CargoWorkspaceManifestGuard, MAX_WORKSPACE_MEMBERS,
@@ -56,7 +60,7 @@ const VERSION_TIMEOUT: Duration = Duration::from_secs(5);
 const METADATA_TIMEOUT: Duration = Duration::from_secs(10);
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(2);
 const MAX_CARGO_EXECUTABLE_BYTES: usize = 256 * 1024 * 1024;
-const CARGO_RESOLUTION_POLICY_REVISION: u32 = 7;
+const CARGO_RESOLUTION_POLICY_REVISION: u32 = 8;
 const MAX_PACKAGE_ID_BYTES: usize = 4 * 1024;
 const MAX_PACKAGE_DEPENDENCY_DECLARATIONS: usize = 4 * 1024;
 const MAX_LOCAL_DEPENDENCY_PATH_BYTES: usize = 256 * 1024;
@@ -132,6 +136,7 @@ struct CargoInputGuards<'a> {
     configuration: Option<&'a CargoConfigurationGuard>,
     manifest_probes: Option<&'a CargoManifestProbeGuard>,
     workspace: Option<&'a CargoWorkspaceManifestGuard>,
+    target_namespace: Option<&'a CargoTargetNamespaceGuard>,
 }
 
 impl CargoInputGuards<'_> {
@@ -145,6 +150,9 @@ impl CargoInputGuards<'_> {
         if let Some(workspace) = self.workspace {
             workspace.poll()?;
         }
+        if let Some(target_namespace) = self.target_namespace {
+            target_namespace.poll()?;
+        }
         Ok(())
     }
 
@@ -157,6 +165,9 @@ impl CargoInputGuards<'_> {
         }
         if let Some(workspace) = self.workspace {
             workspace.revalidate()?;
+        }
+        if let Some(target_namespace) = self.target_namespace {
+            target_namespace.revalidate()?;
         }
         Ok(())
     }
@@ -191,6 +202,7 @@ pub(crate) struct RustTargetCargoMetadataWitness {
     manifest_probes: CargoManifestProbeEvidence,
     workspace: CargoWorkspaceManifestEvidence,
     path_dependencies: CargoPathDependencyEvidence,
+    target_namespace: CargoTargetNamespaceEvidence,
     launch_policy_revision: u32,
     running_code_directory_hash_sha256: [u8; 32],
     resolution_policy_revision: u32,
@@ -268,6 +280,14 @@ pub(crate) enum CargoMetadataValidationError {
     WorkspaceManifestUnavailable,
     #[error("Cargo workspace manifests changed during metadata resolution")]
     WorkspaceManifestChanged,
+    #[error(
+        "Cargo package target/source/build namespace is outside the bounded provenance profile"
+    )]
+    CargoTargetNamespaceUnsupported,
+    #[error("Cargo package target/source/build namespace changed during metadata resolution")]
+    CargoTargetNamespaceChanged,
+    #[error("Cargo package target/source/build namespace could not be bounded")]
+    CargoTargetNamespaceUnavailable,
     #[error("Cargo ancestor manifest namespace is outside the bounded provenance profile")]
     CargoManifestProbesUnsupported,
     #[error("Cargo ancestor manifest namespace changed during metadata resolution")]
@@ -320,6 +340,16 @@ impl From<CargoWorkspaceManifestError> for CargoMetadataValidationError {
             CargoWorkspaceManifestError::Invalid => Self::InvalidWorkspaceMembers,
             CargoWorkspaceManifestError::Changed => Self::WorkspaceManifestChanged,
             CargoWorkspaceManifestError::Unavailable => Self::WorkspaceManifestUnavailable,
+        }
+    }
+}
+
+impl From<CargoTargetNamespaceError> for CargoMetadataValidationError {
+    fn from(error: CargoTargetNamespaceError) -> Self {
+        match error {
+            CargoTargetNamespaceError::Invalid => Self::CargoTargetNamespaceUnsupported,
+            CargoTargetNamespaceError::Changed => Self::CargoTargetNamespaceChanged,
+            CargoTargetNamespaceError::Unavailable => Self::CargoTargetNamespaceUnavailable,
         }
     }
 }
@@ -706,12 +736,17 @@ fn validate_cargo_metadata_with_limits(
             configuration: Some(&configuration),
             manifest_probes: Some(&manifest_probes),
             workspace: None,
+            target_namespace: None,
         },
     )?;
     require_success(&discovery_output)?;
     configuration.verify_read_intent(&discovery_output.stderr)?;
-    let (discovery_metadata, discovery_workspace, discovery_path_dependencies) =
-        parse_metadata_document(&discovery_output.stdout, &live)?;
+    let (
+        discovery_metadata,
+        discovery_workspace,
+        discovery_path_dependencies,
+        discovery_target_namespace,
+    ) = parse_metadata_document(&discovery_output.stdout, &live)?;
     let workspace = match configuration_fence {
         ConfigurationFenceMode::Armed => {
             CargoWorkspaceManifestGuard::capture(project_directory.root(), &discovery_workspace)?
@@ -721,6 +756,19 @@ fn validate_cargo_metadata_with_limits(
             CargoWorkspaceManifestGuard::capture_unfenced_for_test(
                 project_directory.root(),
                 &discovery_workspace,
+            )?
+        }
+    };
+    let target_namespace = match configuration_fence {
+        ConfigurationFenceMode::Armed => CargoTargetNamespaceGuard::capture(
+            project_directory.root(),
+            &discovery_target_namespace,
+        )?,
+        #[cfg(test)]
+        ConfigurationFenceMode::UnarmedForParallelTest => {
+            CargoTargetNamespaceGuard::capture_unfenced_for_test(
+                project_directory.root(),
+                &discovery_target_namespace,
             )?
         }
     };
@@ -735,12 +783,16 @@ fn validate_cargo_metadata_with_limits(
             configuration: Some(&configuration),
             manifest_probes: Some(&manifest_probes),
             workspace: Some(&workspace),
+            target_namespace: Some(&target_namespace),
         },
     )?;
     require_success(&output)?;
     configuration.verify_read_intent(&output.stderr)?;
-    let (metadata, accepted_workspace, path_dependencies) =
+    let (metadata, accepted_workspace, path_dependencies, accepted_target_namespace) =
         parse_metadata_document(&output.stdout, &live)?;
+    if accepted_target_namespace != discovery_target_namespace {
+        return Err(CargoMetadataValidationError::CargoTargetNamespaceChanged);
+    }
     if output.stdout != discovery_output.stdout
         || metadata != discovery_metadata
         || accepted_workspace != discovery_workspace
@@ -753,6 +805,7 @@ fn validate_cargo_metadata_with_limits(
     let configuration_evidence = configuration.evidence()?;
     let manifest_probe_evidence = manifest_probes.evidence()?;
     let workspace_evidence = workspace.evidence()?;
+    let target_namespace_evidence = target_namespace.evidence()?;
 
     let after_version = cargo.read_version(limits.version)?;
     if before_version != after_version {
@@ -766,6 +819,7 @@ fn validate_cargo_metadata_with_limits(
     configuration.revalidate()?;
     manifest_probes.revalidate()?;
     workspace.revalidate()?;
+    target_namespace.revalidate()?;
     live.revalidate_current()?;
 
     Ok(RustTargetCargoMetadataWitness {
@@ -780,6 +834,7 @@ fn validate_cargo_metadata_with_limits(
         manifest_probes: manifest_probe_evidence,
         workspace: workspace_evidence,
         path_dependencies,
+        target_namespace: target_namespace_evidence,
         launch_policy_revision: output.launch_policy_revision,
         running_code_directory_hash_sha256: output.running_code_directory_hash_sha256,
         resolution_policy_revision: CARGO_RESOLUTION_POLICY_REVISION,
@@ -1057,12 +1112,20 @@ struct CargoMetadataPackageDocument {
     manifest_path: String,
     source: serde_json::Value,
     dependencies: Vec<CargoMetadataDependencyDocument>,
+    targets: Vec<CargoMetadataTargetDocument>,
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
 struct CargoMetadataDependencyDocument {
     source: serde_json::Value,
     path: Option<String>,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+struct CargoMetadataTargetDocument {
+    name: String,
+    kind: Vec<String>,
+    src_path: String,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1082,6 +1145,7 @@ fn parse_metadata_document(
         CargoMetadataDocument,
         Vec<CargoWorkspaceManifestDeclaration>,
         CargoPathDependencyEvidence,
+        Vec<CargoTargetNamespaceDeclaration>,
     ),
     CargoMetadataValidationError,
 > {
@@ -1173,7 +1237,24 @@ fn parse_metadata_document(
             .as_bytes()
             .cmp(right.path.as_os_str().as_bytes())
     });
-    Ok((metadata, declarations, path_dependencies))
+    let target_namespace = metadata
+        .packages
+        .iter()
+        .map(|package| CargoTargetNamespaceDeclaration {
+            package_id: package.id.clone(),
+            manifest_path: PathBuf::from(&package.manifest_path),
+            targets: package
+                .targets
+                .iter()
+                .map(|target| CargoTargetDeclaration {
+                    name: target.name.clone(),
+                    kinds: target.kind.clone(),
+                    src_path: PathBuf::from(&target.src_path),
+                })
+                .collect(),
+        })
+        .collect();
+    Ok((metadata, declarations, path_dependencies, target_namespace))
 }
 
 fn validate_path_dependencies(
@@ -1986,6 +2067,26 @@ impl RustTargetCargoMetadataWitness {
 
     pub(super) fn path_dependency_closure_sha256(&self) -> [u8; 32] {
         self.path_dependencies.closure_sha256
+    }
+
+    pub(super) fn target_namespace_policy_revision(&self) -> u32 {
+        self.target_namespace.policy_revision
+    }
+
+    pub(super) fn target_namespace_package_count(&self) -> u32 {
+        self.target_namespace.package_count
+    }
+
+    pub(super) fn target_namespace_target_count(&self) -> u32 {
+        self.target_namespace.target_count
+    }
+
+    pub(super) fn target_namespace_count(&self) -> u32 {
+        self.target_namespace.namespace_count
+    }
+
+    pub(super) fn target_namespace_closure_sha256(&self) -> [u8; 32] {
+        self.target_namespace.closure_sha256
     }
 
     pub(super) fn launch_policy_revision(&self) -> u32 {

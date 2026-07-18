@@ -107,6 +107,19 @@ fn cargo_config_trace_lines(paths: &[&Path]) -> String {
         .collect()
 }
 
+fn target_json(src_path: &Path) -> serde_json::Value {
+    json!({
+        "name": "fixture",
+        "kind": ["lib"],
+        "crate_types": ["lib"],
+        "src_path": src_path,
+        "edition": "2024",
+        "doc": true,
+        "doctest": true,
+        "test": true
+    })
+}
+
 fn metadata_json(workspace_root: &Path, target_directory: &Path) -> String {
     let package_id = "fixture 0.1.0 (path+file:///fixture)";
     serde_json::to_string(&json!({
@@ -114,7 +127,17 @@ fn metadata_json(workspace_root: &Path, target_directory: &Path) -> String {
             "id": package_id,
             "manifest_path": workspace_root.join("Cargo.toml"),
             "source": null,
-            "dependencies": []
+            "dependencies": [],
+            "targets": [{
+                "name": "fixture",
+                "kind": ["lib"],
+                "crate_types": ["lib"],
+                "src_path": workspace_root.join("Cargo.toml"),
+                "edition": "2024",
+                "doc": true,
+                "doctest": true,
+                "test": true
+            }]
         }],
         "workspace_members": [package_id],
         "workspace_default_members": [package_id],
@@ -130,9 +153,24 @@ fn metadata_json(workspace_root: &Path, target_directory: &Path) -> String {
 
 fn package_metadata_json(
     fixture: &Fixture,
-    packages: Vec<serde_json::Value>,
+    mut packages: Vec<serde_json::Value>,
     workspace_members: Vec<&str>,
 ) -> String {
+    for package in &mut packages {
+        if package.get("targets").is_none() {
+            let manifest = package["manifest_path"].clone();
+            package["targets"] = json!([{
+                "name": "fixture",
+                "kind": ["lib"],
+                "crate_types": ["lib"],
+                "src_path": manifest,
+                "edition": "2024",
+                "doc": true,
+                "doctest": true,
+                "test": true
+            }]);
+        }
+    }
     serde_json::to_string(&json!({
         "packages": packages,
         "workspace_default_members": workspace_members,
@@ -210,6 +248,11 @@ fn fixed_command_environment_and_exact_metadata_create_only_observational_witnes
     assert_eq!(witness.local_path_dependency_count(), 0);
     assert_eq!(witness.unique_local_dependency_manifest_count(), 0);
     assert_ne!(witness.path_dependency_closure_sha256(), [0; 32]);
+    assert_eq!(witness.target_namespace_policy_revision(), 1);
+    assert_eq!(witness.target_namespace_package_count(), 1);
+    assert_eq!(witness.target_namespace_target_count(), 1);
+    assert!(witness.target_namespace_count() >= 1);
+    assert_ne!(witness.target_namespace_closure_sha256(), [0; 32]);
     assert_eq!(witness.manifest_probe_policy_revision(), 1);
     assert!(witness.manifest_probe_count() >= 1);
     assert_eq!(witness.present_ancestor_manifest_count(), 0);
@@ -217,7 +260,7 @@ fn fixed_command_environment_and_exact_metadata_create_only_observational_witnes
     assert_ne!(witness.manifest_probe_closure_sha256(), [0; 32]);
     assert_eq!(witness.launch_policy_revision(), 0);
     assert_eq!(witness.running_code_directory_hash_sha256(), [0; 32]);
-    assert_eq!(witness.resolution_policy_revision(), 7);
+    assert_eq!(witness.resolution_policy_revision(), 8);
     assert!(witness.live().protected_path_is_still_unresolved());
     assert_eq!(candidate.blockers(), [BlockReason::ProtectedPath]);
     assert!(!candidate.rule_marks_schedule_eligible());
@@ -288,7 +331,8 @@ fn malformed_or_ambiguous_workspace_members_fail_closed() {
         "id": "member-a",
         "manifest_path": fixture.manifest,
         "source": null,
-        "dependencies": []
+        "dependencies": [],
+        "targets": [target_json(&fixture.manifest)]
     });
     let cases = [
         json!({
@@ -316,7 +360,8 @@ fn malformed_or_ambiguous_workspace_members_fail_closed() {
                     "id": "member-b",
                     "manifest_path": fixture.manifest,
                     "source": null,
-                    "dependencies": []
+                    "dependencies": [],
+                    "targets": [target_json(&fixture.manifest)]
                 }
             ],
             "workspace_members": ["member-a", "member-b"],
@@ -340,7 +385,8 @@ fn malformed_or_ambiguous_workspace_members_fail_closed() {
                 "id": "member-a",
                 "manifest_path": fixture.manifest,
                 "source": "registry+https://example.invalid/index",
-                "dependencies": []
+                "dependencies": [],
+                "targets": [target_json(&fixture.manifest)]
             }],
             "workspace_members": ["member-a"],
             "workspace_default_members": ["member-a"],
@@ -415,7 +461,7 @@ fn reported_path_dependency_graph_is_bounded_and_observational() {
     assert_eq!(witness.local_path_dependency_count(), 2);
     assert_eq!(witness.unique_local_dependency_manifest_count(), 1);
     assert_ne!(witness.path_dependency_closure_sha256(), [0; 32]);
-    assert_eq!(witness.resolution_policy_revision(), 7);
+    assert_eq!(witness.resolution_policy_revision(), 8);
     witness.release().unwrap();
 }
 
@@ -555,6 +601,27 @@ fn metadata_member_declaration_must_be_identical_across_both_passes() {
     assert!(matches!(
         validate_cargo_metadata(live(&fixture), &fake.observe()),
         Err(CargoMetadataValidationError::WorkspaceManifestChanged)
+    ));
+}
+
+#[test]
+fn target_declaration_drift_has_a_target_specific_failure() {
+    let fixture = Fixture::new(CARGO_CACHE_TAG_SIGNATURE);
+    let first = metadata_json(fixture.manifest.parent().unwrap(), &fixture.target);
+    let alternate = fixture.manifest.parent().unwrap().join("alternate.rs");
+    fs::write(&alternate, "pub fn alternate() {}\n").unwrap();
+    let mut second: serde_json::Value = serde_json::from_str(&first).unwrap();
+    second["packages"][0]["targets"][0]["src_path"] = json!(alternate);
+    let first_action = format!("    printf %s {}\n    exit 0", shell_quote(&first));
+    let second_action = format!(
+        "    printf %s {}\n    exit 0",
+        shell_quote(&second.to_string())
+    );
+    let fake = FakeCargo::with_metadata_sequence(&first_action, &second_action);
+
+    assert!(matches!(
+        validate_cargo_metadata(live(&fixture), &fake.observe()),
+        Err(CargoMetadataValidationError::CargoTargetNamespaceChanged)
     ));
 }
 
@@ -741,13 +808,15 @@ fn member_manifest_write_and_restore_during_accepted_pass_is_terminal() {
                 "id": "root",
                 "manifest_path": fixture.manifest,
                 "source": null,
-                "dependencies": []
+                "dependencies": [],
+                "targets": [target_json(&fixture.manifest)]
             },
             {
                 "id": "member",
                 "manifest_path": member_manifest,
                 "source": null,
-                "dependencies": []
+                "dependencies": [],
+                "targets": [target_json(&member_manifest)]
             }
         ],
         "workspace_members": ["root", "member"],
@@ -881,6 +950,11 @@ fn real_cargo_attests_project_config_intent_and_no_deps_does_not_create_lockfile
     }
     let witness =
         validate_cargo_metadata_with_input_fences_for_test(live(&fixture), &observation).unwrap();
+    assert_eq!(witness.target_namespace_policy_revision(), 1);
+    assert_eq!(witness.target_namespace_package_count(), 1);
+    assert_eq!(witness.target_namespace_target_count(), 2);
+    assert!(witness.target_namespace_count() >= 3);
+    assert_ne!(witness.target_namespace_closure_sha256(), [0; 32]);
     #[cfg(target_os = "macos")]
     {
         assert_eq!(witness.launch_policy_revision(), 1);
@@ -971,6 +1045,38 @@ fn real_cargo_attests_project_config_intent_and_no_deps_does_not_create_lockfile
 }
 
 #[test]
+fn real_cargo_attests_mixed_inferred_target_and_build_namespaces() {
+    let Some(cargo) = direct_test_cargo() else {
+        return;
+    };
+    let fixture = Fixture::new(CARGO_CACHE_TAG_SIGNATURE);
+    let project = fixture.manifest.parent().unwrap();
+    let build_sentinel = prepare_real_package(&fixture, true);
+    for (relative, contents) in [
+        ("src/bin/tool/main.rs", "fn main() {}\n"),
+        ("examples/demo.rs", "fn main() {}\n"),
+        ("tests/integration.rs", "#[test] fn integration() {}\n"),
+        ("benches/throughput.rs", "fn main() {}\n"),
+    ] {
+        let path = project.join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, contents).unwrap();
+    }
+
+    let observation = observe_cargo_executable(&cargo).unwrap();
+    let witness =
+        validate_cargo_metadata_with_input_fences_for_test(live(&fixture), &observation).unwrap();
+    assert_eq!(witness.target_namespace_policy_revision(), 1);
+    assert_eq!(witness.target_namespace_package_count(), 1);
+    assert_eq!(witness.target_namespace_target_count(), 6);
+    assert!(witness.target_namespace_count() >= 20);
+    assert_ne!(witness.target_namespace_closure_sha256(), [0; 32]);
+    assert_eq!(witness.resolution_policy_revision(), 8);
+    witness.release().unwrap();
+    assert!(!build_sentinel.exists());
+}
+
+#[test]
 fn real_cargo_attests_virtual_root_and_every_workspace_member_manifest() {
     let Some(cargo) = direct_test_cargo() else {
         return;
@@ -1004,7 +1110,7 @@ fn real_cargo_attests_virtual_root_and_every_workspace_member_manifest() {
     assert_eq!(witness.workspace_member_count(), 2);
     assert_eq!(witness.workspace_manifest_count(), 3);
     assert_ne!(witness.workspace_manifest_closure_sha256(), [0; 32]);
-    assert_eq!(witness.resolution_policy_revision(), 7);
+    assert_eq!(witness.resolution_policy_revision(), 8);
     witness.release().unwrap();
 }
 
@@ -1040,7 +1146,7 @@ fn real_cargo_accepts_only_reported_internal_path_dependencies() {
     assert_eq!(witness.local_path_dependency_count(), 1);
     assert_eq!(witness.unique_local_dependency_manifest_count(), 1);
     assert_ne!(witness.path_dependency_closure_sha256(), [0; 32]);
-    assert_eq!(witness.resolution_policy_revision(), 7);
+    assert_eq!(witness.resolution_policy_revision(), 8);
     witness.release().unwrap();
 }
 
@@ -1157,7 +1263,7 @@ fn real_cargo_attests_excluding_ancestor_manifest_probe() {
         fs::metadata(ancestor).unwrap().len()
     );
     assert_ne!(witness.manifest_probe_closure_sha256(), [0; 32]);
-    assert_eq!(witness.resolution_policy_revision(), 7);
+    assert_eq!(witness.resolution_policy_revision(), 8);
     witness.release().unwrap();
 }
 

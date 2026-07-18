@@ -15,6 +15,8 @@ mod cargo_manifest_probes;
 #[cfg(target_os = "macos")]
 mod cargo_spawn_macos;
 #[cfg(unix)]
+mod cargo_target_namespace;
+#[cfg(unix)]
 mod cargo_workspace;
 mod rust_target;
 #[cfg(unix)]

@@ -246,7 +246,7 @@ delete/rename/revoke events are terminal, while directory entry writes trigger
 exact observation replay. Persistent entry changes and file write/restore
 reject; unchanged relevant state after unrelated high-ancestor directory
 activity may continue. Counts, present bytes, and the
-domain-separated ordered closure digest are retained in resolution policy 7.
+domain-separated ordered closure digest are retained in resolution policy 8.
 
 The strict document also requires every package's serialized dependency list.
 Across at most 4,096 declarations and 256 KiB of aggregate local-path text,
@@ -261,6 +261,33 @@ Because every admitted target is a reported package, its manifest is already
 covered by the workspace guard throughout the accepted second pass. Malformed
 graphs and unreported targets reject before that pass can produce a witness.
 
+The strict document now also requires every package's complete serialized
+`targets` array. Target-namespace policy 1 admits at most 256 packages and
+4,096 targets, with at most 16 kind labels per target, 512 KiB of target text,
+2 MiB of native path material, and 16,384 namespace records. Every reported
+`src_path` must be an absolute normalized canonical single-link regular file
+inside the witnessed project. Symlink, hard-link, missing, special-file, and
+external source aliases reject.
+
+For every reported package root, DUX independently captures Cargo 1.96's
+finite target auto-discovery namespace: `src`, `src/lib.rs`, `src/main.rs`,
+`src/bench.rs`, implicit `build.rs`, the complete direct entries of `src/bin`,
+`examples`, `tests`, and `benches`, and `main.rs` below every direct child
+directory. It also captures the edition-2015 `src/<target-name>.rs` fallback
+for every reported target. Package roots, present entries, absence, entry kind,
+filesystem identity, single-link file shape, target declarations, and ordered
+native names are bound into one domain-separated digest.
+
+On macOS, every present object and the complete ancestry of reported source
+paths must be on local APFS and fit the descriptor budget. Vnode fences make
+writes to every discovery directory terminal, including a create/remove that
+restores the prior entry set; exact file replacement, link, attribute,
+rename, delete, and revoke events are also terminal. DUX replays the entire
+observation before evidence extraction. The target guard is polled with the
+configuration, ancestor-manifest, and workspace-manifest guards throughout
+the accepted second Cargo pass. Resolution policy 8 retains package, target,
+namespace-record, and closure evidence beside the earlier provenance rows.
+
 This proves the exact reported root/member manifest bytes remained stable
 under the reviewed path-based inference model and excludes unreported local
 dependency declarations from accepted witnesses. It does not attest those
@@ -271,9 +298,10 @@ target manifest. Cargo 1.96's exact
 `metadata --no-deps` code path deliberately does not load or create
 `Cargo.lock`; real-Cargo tests include a malformed lockfile to pin that
 version-specific behavior. DUX still does not prove Cargo's full read set,
-workspace-glob/target namespace generations, transient absent ancestor
-create/remove, attestation of safe unreported path dependencies, external
-discovery-manifest stability, or source/build files. It is not fd-based Cargo reads;
+workspace-glob generations, package README/license metadata probes, transient
+absent ancestor create/remove, attestation of safe unreported path
+dependencies, external discovery-manifest stability, or kernel-level read
+identity. It is not fd-based Cargo reads;
 kqueue remains event inference and same-UID/post-witness changes still require
 later guards. `ProtectedPath` and every authority edge remain unchanged.
 

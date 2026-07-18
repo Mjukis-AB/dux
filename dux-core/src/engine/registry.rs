@@ -4497,6 +4497,7 @@ fn map_direct_cargo_validation_error(
         | Error::CargoEnrollmentChanged
         | Error::CargoWorkingDirectoryChanged
         | Error::WorkspaceManifestChanged
+        | Error::CargoTargetNamespaceChanged
         | Error::CargoManifestProbesChanged
         | Error::CargoConfigurationChanged
         | Error::LiveEvidenceChanged
@@ -4512,6 +4513,8 @@ fn map_direct_cargo_validation_error(
         | Error::OutputRead { .. }
         | Error::CargoManifestProbesUnsupported
         | Error::CargoManifestProbesUnavailable
+        | Error::CargoTargetNamespaceUnsupported
+        | Error::CargoTargetNamespaceUnavailable
         | Error::CargoConfigurationUnsupported
         | Error::CargoConfigurationUnavailable
         | Error::ProcessFailed => DirectCargoEnrollmentError::InspectionUnavailable,
