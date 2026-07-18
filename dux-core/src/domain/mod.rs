@@ -6,6 +6,14 @@
 
 mod candidate;
 mod candidate_evaluator;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "candidate grouping remains sealed until trusted planner authority exists"
+    )
+)]
+mod candidate_groups;
 mod cleanup_plan;
 mod id;
 mod policy;

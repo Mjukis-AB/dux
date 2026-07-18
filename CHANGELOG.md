@@ -5,6 +5,14 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Continued Milestone 5 with a sealed core candidate-grouping and overlap
+  result. Deterministic groups use category, safety tier, and proposed action;
+  equivalent same-rule observations coalesce by stable candidate ID, and a
+  same-rule parent owns a child only when it covers every child path. Blocked,
+  mixed-rule/policy, conflicting-fact, and internally overlapping observations
+  remain unresolved with zero actionable bytes. The result is non-persistent,
+  non-FFI, non-approving, and non-executable; exact-path plan review remains
+  the next boundary.
 - Continued Milestone 5 with the independently researched Python
   `developer.python.pycache` rule at revision 2. A direct regular, non-symlink
   `.py` sibling and symlink-free ancestry are required before the immutable

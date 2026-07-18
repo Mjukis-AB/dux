@@ -3992,7 +3992,10 @@ Goal: provide trustworthy recovery actions.
 
 Tasks:
 
-- [ ] Ship the first independently researched safe-regenerable rules.
+- [x] Ship the first independently researched safe-regenerable rules. The
+  revisioned Rust `target` and Python `__pycache__` catalog entries are bundled
+  and independently documented; they remain unschedulable until the trusted
+  planning and executor gates below are complete.
   - [x] Stage the independently researched Rust Cargo `target` rule as revision
     2 (2026-07-18). Discovery now requires a direct regular `Cargo.toml`
     sibling and direct regular `CACHEDIR.TAG` child before proposing
@@ -4402,6 +4405,18 @@ Tasks:
     protected-root, volume, process, descendant, plan, and executor grants are
     still open.
 - [ ] Implement candidate groups and overlap resolution.
+  - [x] 2026-07-18 slice: add the sealed, non-authoritative core grouping
+    result. Candidates are grouped deterministically by category, safety, and
+    proposed action. Exact duplicate observations coalesce only when every
+    immutable fact and rule revision matches; same-rule parent/child findings
+    coalesce only when the parent owns every child path. Candidate IDs provide
+    the stable equivalent-duplicate tie-break, never input order. Blocked,
+    mixed-rule, mixed-policy, conflicting-fact, and internally overlapping
+    candidates remain explicit unresolved decisions with zero actionable bytes;
+    component-aware sibling prefixes remain disjoint. Relative, traversal,
+    duplicate-ID, and mixed-scan inputs fail closed. The result retains member
+    and selected indices for a future planner but cannot construct a plan,
+    persist state, cross FFI, approve, schedule, or mutate anything.
 - [ ] Implement exact-path plan review.
 - [ ] Implement Trash executor for Explorer selections.
 - [ ] Implement permanent-safe executor for approved rules.

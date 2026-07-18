@@ -621,6 +621,21 @@ protected-root grant are not yet present, every current finding retains
 remain unscheduled, unselectable, and unable to enter the current cleanup
 planner.
 
+The sealed core candidate-grouping boundary now computes deterministic,
+presentation-only overlap facts over one scan's complete candidates. Groups
+are keyed by category, safety tier, and proposed action. Exact duplicate
+observations coalesce only when their rule revision and every other immutable
+fact match, with the lexical candidate ID as the input-order-independent
+tie-break. A same-rule parent may own a child only when it covers every child
+path; blocked candidates, mixed rules or policies, conflicting facts, and
+internal candidate overlaps remain unresolved and produce zero actionable
+bytes. Relative/traversal paths, duplicate IDs, and mixed scans fail closed.
+The result retains indices into the original observations and cannot construct,
+persist, approve, schedule, cross FFI, or execute a plan. The existing private
+`CleanupPlan` constructor therefore continues to reject unresolved overlap;
+trusted volume, protected-root, process, descendant, and executor witnesses
+remain required before any blocker can be removed.
+
 ### 6.3 Protected-root and sensitive-category policy
 
 Denies override every allow or rule match. Protection evaluation covers the
@@ -2311,7 +2326,7 @@ coverage is labelled as Home-scoped and unknown coverage stays unknown.
 | Protected-root registry | Implemented text-only policy; production construction sealed | Trusted OS home/profile/mount discovery and stable rule grants |
 | Dangerous-path corpus and fuzzing | Implemented | Keep cross-platform and promote every crash regression |
 | Rule schema/loader | Strict schema plus a build-time digest/policy-gated and strict load-time-validated discovery catalog; nine rules remain selected-root RevealOnly observations, while independently researched `developer.rust.target` and `developer.python.pycache` revision 2 require exact snapshot marker evidence and propose only SafeRegenerable/RemoveKnownRegenerableContents. Every rule is unschedulable and every result remains blocked by `ProtectedPath`. Sealed Unix-only live and Cargo-resolution witnesses verify the exact Rust tag, manifest digest, current default layout, and scrubbed-context Cargo workspace/target result; Python live-writer and relocation authority remains open. macOS additionally has explicit revisioned same-store direct-Cargo enrollment, bounded policy-3 positive config/include byte closure and ordered Cargo trace intent, descriptor-retained metadata cwd, static-code evidence, suspended selected-running-code attestation, complete executable/config/manifest ancestry APFS fences, a guarded two-pass reported root/member-manifest closure, a policy-1 closed accepted path-dependency graph, stale-preview rejection, and revocation tombstones, still without clearing that blocker | Developer ID signing must cover catalog bytes; before either safe rule can lose its blocker, complete its marker/read-set and namespace provenance, review the documented conservative path-dependency compatibility and path-intent/path-based/same-UID launch limits, prove authoritative volume/protected-root grants, add process/descendant/change guards, and complete adversarial review |
-| Candidate and cleanup-plan records | Completed fresh scans create deterministic, snapshot-bound durable candidate batches; exact-scan summaries plus bounded lossless path/evidence pages and semantic review commands remain non-authoritative history. A crate-private planner module now seals an exact current-evaluator/current-catalog succeeded scan/evaluation/candidate join to a fully decoded retained snapshot and fresh cleanup-review lease, replays the complete batch from that snapshot with bounded working state, rejects every immutable-field mismatch, carries scan-time Unix identities into the ephemeral Rust-target live and bounded Cargo metadata witnesses, and exposes no replayed candidate or plan conversion. Cleanup plans remain non-executable domain/history data | Keep full-batch replay exact through overlap planning; add FFI/UI transport and trusted Cargo/config/volume/protected-root/process/executor witnesses |
+| Candidate and cleanup-plan records | Completed fresh scans create deterministic, snapshot-bound durable candidate batches; exact-scan summaries plus bounded lossless path/evidence pages and semantic review commands remain non-authoritative history. A crate-private planner module now seals an exact current-evaluator/current-catalog succeeded scan/evaluation/candidate join to a fully decoded retained snapshot and fresh cleanup-review lease, replays the complete batch from that snapshot with bounded working state, rejects every immutable-field mismatch, carries scan-time Unix identities into the ephemeral Rust-target live and bounded Cargo metadata witnesses, and exposes no replayed candidate or plan conversion. A separate sealed candidate-grouping result now records deterministic category/safety/action groups and conservative exact/parent-child overlap decisions without becoming a plan. Cleanup plans remain non-executable domain/history data | Keep full-batch replay exact through overlap planning and integrate the sealed result only after trusted Cargo/config/volume/protected-root/process/executor witnesses; add FFI/UI transport |
 | macOS app cleanup | Absent | Entire cleanup release gate in §17.3 |
 | Legacy CLI deletion | Active arbitrary-descendant permanent path routed through a temporary core adapter; strict-target/volume/identity rechecks only; scanned-byte estimates labeled in CLI | Replace adapter with reviewed plan/approval/executor chain without weakening current checks |
 | Centralized executor | Production executor absent; temporary legacy adapter is containment only | Typed admission, integration with the existing cross-process lease/journal, and live target revalidation required |
