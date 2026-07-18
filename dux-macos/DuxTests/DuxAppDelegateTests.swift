@@ -63,6 +63,16 @@ final class DuxAppDelegateTests: XCTestCase {
         XCTAssertEqual(runtime.revealCount, 1)
     }
 
+    func testClosingLastWindowNeverTerminatesMenuBarApp() {
+        let delegate = DuxAppDelegate(runtime: RuntimeSpy())
+
+        XCTAssertFalse(
+            delegate.applicationShouldTerminateAfterLastWindowClosed(
+                NSApplication.shared
+            )
+        )
+    }
+
     func testApplicationActivationRunsMaintenanceThenArmedAccessReprobe() async {
         let runtime = RuntimeSpy()
         let delegate = DuxAppDelegate(runtime: runtime)
