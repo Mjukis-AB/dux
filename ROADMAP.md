@@ -4070,15 +4070,19 @@ Tasks:
       only: no FFI/Swift surface, blocker removal, plan, schedule, or effect was
       added.
     - [x] 2026-07-18 slice: close Cargo 1.96 file-based configuration to one
-      exactly bounded negative case and retain the metadata working directory.
+      bounded negative case and retain the metadata working directory.
       Production now accepts metadata only when both `config` and
       `config.toml` are absent from every manifest-parent ancestor's `.cargo`
-      directory and from the exact Cargo home, so the recursive include closure
-      is necessarily empty. Canonical directory identities, a revisioned
-      closure digest, 64-ancestor/132-watch/64-KiB bounds, and macOS vnode
-      fences bracket the fixed metadata process; any observed directory event,
-      including create-remove, is terminal. Configured projects fail closed
-      before metadata execution. The child enters the exact retained project
+      directory and from the exact Cargo home at every validation checkpoint.
+      Canonical directory identities, a revisioned
+      policy-2 closure digest (including watch semantics) and
+      64-ancestor/132-watch/64-KiB bounds bracket the fixed
+      metadata process. macOS vnode fences make entry changes terminal in the
+      project root and existing non-Cargo-home `.cargo` lookups; exact
+      before/after absence checks cover higher absent lookups and Cargo home,
+      where broad directory-write events include unrelated system/cache work.
+      Configured projects fail closed before metadata execution. The child
+      enters the exact retained project
       directory with `fchdir`, all retained/watch descriptors are close-on-exec,
       and path plus descriptor identities are rechecked around launch and
       output collection. The witness remains non-authoritative and still
@@ -4110,9 +4114,37 @@ Tasks:
       confinement. A same-UID external actor can signal the stopped child, and
       kqueue remains event inference. The witness remains private,
       non-authoritative, and blocked by `ProtectedPath`.
-    Direct positive Cargo config/include read attestation, workspace-member
-    manifest provenance, and all remaining protected-root, volume,
-    process, descendant, plan, and executor grants are still open.
+    - [x] 2026-07-18 slice: bind the exact Cargo workspace-member manifest
+      closure with a guarded two-pass protocol. The first bounded, fixed
+      `cargo metadata --no-deps --locked --offline` result is discovery only.
+      DUX requires a non-empty one-to-one relation between at most 256 opaque
+      workspace-member IDs and local packages, rejects duplicate/unknown
+      members and defaults, non-null package sources, manifest aliases, and
+      malformed root/target data, and always includes the virtual or package
+      root `Cargo.toml`. It then captures at most 257 canonical descendant,
+      single-link regular manifests with 4-MiB/file, 64-MiB aggregate, and
+      256-KiB native-path bounds. A domain-separated closure binds root/member
+      role, opaque ID, native path, identity, length, and full SHA-256. On
+      macOS, exact retained local-APFS manifest and deduplicated
+      ancestry-through-root vnode watches bracket an identical second metadata
+      pass. A preflight
+      counts currently open descriptors and reserves 128 launch/app slots;
+      insufficient process limits fail closed instead of reducing coverage.
+      The combined config/workspace guard is checked before spawn/resume,
+      throughout bounded
+      output, after reaping, and before witness extraction. Resolution policy 4
+      records manifest policy 1, member/manifest counts, and the closure digest.
+      Tests cover a real virtual two-member workspace, malformed relations,
+      symlink/hard-link aliases, the 256/257 bound, second-pass drift, and
+      same-inode write/restore. This attests reported root/member manifests, not
+      Cargo's complete read set, workspace glob namespace generations,
+      lockfiles, excluded/path-dependency manifests, or source/build files;
+      kqueue remains event inference and post-witness mutation still requires
+      executor-time revalidation. No blocker, plan, FFI, schedule, or effect
+      authority was added.
+    Direct positive Cargo config/include read attestation and all remaining
+    protected-root, volume, process, descendant, plan, and executor grants are
+    still open.
 - [ ] Implement candidate groups and overlap resolution.
 - [ ] Implement exact-path plan review.
 - [ ] Implement Trash executor for Explorer selections.

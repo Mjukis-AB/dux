@@ -281,6 +281,11 @@ EXCEPTIONS = {
         "rust-filesystem-effect",
         "test:higher_executable_ancestor_rename_is_terminal",
     ),
+    "test-cargo-workspace-ancestor-rename": ExceptionSpec(
+        "dux-core/src/planner/cargo_workspace.rs",
+        "rust-filesystem-effect",
+        "test:higher_workspace_ancestor_rename_is_terminal",
+    ),
     "test-cargo-closed-stdio-helper-spawn": ExceptionSpec(
         "dux-core/src/planner/cargo_spawn_macos.rs",
         "rust-process-spawn",
@@ -619,6 +624,7 @@ EXCEPTION_PRIMITIVES = {
     "cargo-metadata-observer-spawn": "Command::new",
     "cargo-suspended-observer-spawn": "posix_spawn",
     "test-cargo-executable-ancestor-rename": "rename",
+    "test-cargo-workspace-ancestor-rename": "rename",
     "test-cargo-closed-stdio-helper-spawn": "Command::new",
     "test-cargo-config-reset": "remove_file",
     "test-cargo-config-transient-remove": "remove_file",
@@ -703,6 +709,7 @@ CLIPPY_SUPPRESSION_COUNTS = {
     "dux-core/src/path_validation/protected.rs": 1,
     "dux-core/src/planner/rust_target_cargo.rs": 1,
     "dux-core/src/planner/cargo_spawn_macos.rs": 2,
+    "dux-core/src/planner/cargo_workspace.rs": 1,
     "dux-core/src/planner/cargo_config.rs": 2,
     "dux-core/src/planner/rust_target_cargo_tests.rs": 1,
     "dux-core/src/planner/rust_target_source_tests.rs": 2,

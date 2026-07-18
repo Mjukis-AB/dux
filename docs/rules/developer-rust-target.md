@@ -148,16 +148,22 @@ unsigned fake Cargo to exercise bounded subprocess failures, but it cannot be
 called by production planning authority. The sealed enrolled production entry
 described below requires exact durable trust and macOS static-code evidence.
 
-The production metadata entry now admits only an exactly negative Cargo 1.96
-file-configuration closure. It checks both the legacy extensionless `config`
+The production metadata entry now admits only a bounded negative Cargo 1.96
+file-configuration observation. It checks both the legacy extensionless `config`
 and `config.toml` at every `.cargo` directory Cargo would discover from the
 process cwd through its ancestors, followed by the exact Cargo home. Any
-present file rejects before metadata execution, which makes recursive
-`include` resolution empty without reimplementing Cargo's TOML semantics. The
+present file rejects before metadata execution, so the observed configuration
+has no recursive `include` without reimplementing Cargo's TOML semantics. The
 observation is bounded to 64 cwd ancestors, 132 unique watched directories,
-and 64 KiB of native path material and records a revisioned SHA-256 closure
-digest. Canonical identities are revalidated around a macOS kqueue vnode fence;
-any event is terminal even when a created config is immediately removed.
+and 64 KiB of native path material. Policy revision 2 records a SHA-256 closure
+digest that also binds which directories treat entry changes as terminal.
+Canonical identities and absence are revalidated around the process.
+On macOS, entry events are terminal for the project root and existing
+non-Cargo-home `.cargo` lookup directories. Higher ancestors whose `.cargo`
+entry is absent, and Cargo home where Cargo legitimately updates cache/lock
+entries, use exact before/after absence instead of treating every unrelated
+directory write as a configuration change. A transient create-remove in those
+locations is therefore an explicit remaining inference limit.
 
 The project cwd is also opened no-follow and retained. On macOS the production
 runner installs it with `posix_spawn_file_actions_addfchdir_np`; the descriptor
@@ -166,10 +172,44 @@ Descriptor and pathname identities are revalidated around launch. This removes
 pathname resolution from child cwd selection. Every config lookup directory
 must be local APFS; other, remote, virtual, and unprobeable filesystems reject.
 Kqueue is strong reviewed-filesystem change inference, not direct evidence of
-the exact config inode Cargo read. Positive configs and included files, and
-every workspace-member manifest, therefore remain unattested. Either witness
-is still supporting evidence only: neither can clear `ProtectedPath`,
-construct a plan, cross FFI, schedule, or execute.
+the exact config inode Cargo read. Positive configs and included files remain
+unattested. Either witness is still supporting evidence only: neither can
+clear `ProtectedPath`, construct a plan, cross FFI, schedule, or execute.
+
+## Workspace-member manifest closure
+
+Cargo reports member manifests only after parsing the workspace, so DUX does
+not treat the first metadata document as authority. It validates that
+discovery document, requires a non-empty one-to-one relation between at most
+256 opaque `workspace_members` IDs and local `packages`, and rejects duplicate
+or unknown member/default IDs, extra packages, non-null package sources, and
+manifest aliases. The root `Cargo.toml` is always included, including for a
+virtual workspace where it is not a package.
+
+DUX then captures the declared root/member manifests as canonical descendants
+of the witnessed workspace. Every manifest must be an exact single-link
+regular file named `Cargo.toml`. The closure is bounded to 257 manifests,
+4 MiB per file, 64 MiB total contents, 256 KiB of native paths, and 512 unique
+watched directories. Its revision-1 digest binds root/member role, opaque
+package ID, native path bytes, filesystem identity, byte length, and full-file
+SHA-256. On macOS, exact manifest descriptors plus deduplicated ancestry from
+each member through the filesystem root must be local APFS and remain behind
+vnode fences while DUX runs the identical command again. A descriptor-budget
+preflight includes currently open descriptors and reserves 128 more for the
+app and launch; insufficient `RLIMIT_NOFILE` rejects rather than silently
+dropping coverage. Configuration and workspace guards are rechecked before
+spawn and resume, throughout bounded output, after exact-child reaping, and
+before evidence extraction. Only a byte-identical, independently parsed second
+result is accepted. Resolution-policy revision 4 records the manifest policy,
+member and retained-manifest counts, closure digest, and accepted output
+digest.
+
+This proves the exact reported root/member manifest bytes remained stable
+under the reviewed path-based inference model. It does not prove Cargo's full
+read set, workspace-glob namespace generations, the lockfile, excluded or path
+dependency manifests, or source/build files. It is not fd-based Cargo reads;
+kqueue remains event inference and same-UID/post-witness changes still require
+later guards. `ProtectedPath` and every authority edge remain unchanged.
 
 ## Suspended macOS launch and selected-running-code continuity
 
@@ -349,11 +389,12 @@ statically previewed binary for bounded version validation. More importantly,
 enrollment establishes only local executable
 provenance for discovery. Positive `.cargo/config`, legacy extensionless
 config, and recursive `include` inputs are not directly attested; projects
-containing them now reject. The exact negative lookup closure, retained cwd,
-and suspended selected-code checkpoint cover the currently admitted direct-
-executable case, but the launch is still path-based and workspace-member
-manifests are not yet attested. Direct-read or generation evidence is still
-required before promotion. `ProtectedPath` therefore remains untouched.
+containing them now reject. The bounded negative lookup observation, retained cwd,
+suspended selected-code checkpoint, and guarded two-pass root/member manifest
+closure cover the currently admitted direct-executable case, but launch and
+manifest reads remain path-based and the complete Cargo read/namespace set is
+not attested. Direct-read or generation evidence is still required before
+promotion. `ProtectedPath` therefore remains untouched.
 
 ## Required before executable use
 
@@ -365,7 +406,7 @@ proves, at minimum:
 - reviewed acceptance or mitigation of the suspended selected-code
   checkpoint's path-based and same-UID signaling limitations, direct positive
   Cargo config/include identity provenance if configured projects are ever
-  admitted, and every workspace-member manifest;
+  admitted, and the documented manifest read-set/namespace limitations;
 - current target kind, symlink, link-count, mount, and descendant policy;
 - inactive Cargo/rustc state and post-witness change revalidation;
 - overlap resolution that consumes the still-exact replayed full batch,

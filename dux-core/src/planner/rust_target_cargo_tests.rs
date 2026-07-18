@@ -20,7 +20,7 @@ use super::rust_target_cargo::{
     CargoMetadataValidationError, CargoOutputStream, observe_cargo_executable,
     observe_cargo_executable_for_test, revalidate_retained_cargo_directory_after_hook_for_test,
     validate_cargo_metadata, validate_cargo_metadata_for_test,
-    validate_cargo_metadata_with_configuration_fence_for_test,
+    validate_cargo_metadata_with_input_fences_for_test,
 };
 #[cfg(target_os = "macos")]
 use super::rust_target_cargo::{
@@ -62,6 +62,29 @@ impl FakeCargo {
         }
     }
 
+    fn with_metadata_sequence(first_action: &str, second_action: &str) -> Self {
+        let temp = TempDir::new().unwrap();
+        let executable = temp.path().join("cargo");
+        let marker = temp.path().join("metadata-discovered");
+        let script = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ] && [ \"$2\" = \"--verbose\" ] && [ \"$#\" -eq 2 ]; then\n  printf %s {}\n  exit 0\nfi\nif [ \"$1\" = \"metadata\" ]; then\n  if [ -e {} ]; then\n{}\n  else\n    : > {}\n{}\n  fi\nfi\nexit 64\n",
+            shell_quote(VALID_VERSION),
+            shell_quote(marker.to_str().unwrap()),
+            second_action,
+            shell_quote(marker.to_str().unwrap()),
+            first_action,
+        );
+        fs::write(&executable, script).unwrap();
+        let mut permissions = fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(&executable, permissions).unwrap();
+        let executable = fs::canonicalize(executable).unwrap();
+        Self {
+            _temp: temp,
+            executable,
+        }
+    }
+
     fn observe(&self) -> super::rust_target_cargo::CargoExecutableObservation {
         observe_cargo_executable_for_test(&self.executable).unwrap()
     }
@@ -72,10 +95,15 @@ fn shell_quote(value: &str) -> String {
 }
 
 fn metadata_json(workspace_root: &Path, target_directory: &Path) -> String {
+    let package_id = "fixture 0.1.0 (path+file:///fixture)";
     serde_json::to_string(&json!({
-        "packages": [],
-        "workspace_members": [],
-        "workspace_default_members": [],
+        "packages": [{
+            "id": package_id,
+            "manifest_path": workspace_root.join("Cargo.toml"),
+            "source": null
+        }],
+        "workspace_members": [package_id],
+        "workspace_default_members": [package_id],
         "resolve": null,
         "target_directory": target_directory,
         "version": 1,
@@ -134,12 +162,16 @@ fn fixed_command_environment_and_exact_metadata_create_only_observational_witnes
     );
     assert_ne!(witness.cargo_executable_parent_identity().object(), 0);
     assert_ne!(witness.metadata_sha256(), [0; 32]);
-    assert_eq!(witness.configuration_policy_revision(), 1);
+    assert_eq!(witness.configuration_policy_revision(), 2);
     assert!(witness.configuration_lookup_count() >= 2);
     assert_ne!(witness.configuration_closure_sha256(), [0; 32]);
+    assert_eq!(witness.workspace_manifest_policy_revision(), 1);
+    assert_eq!(witness.workspace_member_count(), 1);
+    assert_eq!(witness.workspace_manifest_count(), 1);
+    assert_ne!(witness.workspace_manifest_closure_sha256(), [0; 32]);
     assert_eq!(witness.launch_policy_revision(), 0);
     assert_eq!(witness.running_code_directory_hash_sha256(), [0; 32]);
-    assert_eq!(witness.resolution_policy_revision(), 3);
+    assert_eq!(witness.resolution_policy_revision(), 4);
     assert!(witness.live().protected_path_is_still_unresolved());
     assert_eq!(candidate.blockers(), [BlockReason::ProtectedPath]);
     assert!(!candidate.rule_marks_schedule_eligible());
@@ -200,6 +232,113 @@ fn workspace_target_resolve_and_document_shape_fail_closed() {
             )),
         }
     }
+}
+
+#[test]
+fn malformed_or_ambiguous_workspace_members_fail_closed() {
+    let fixture = Fixture::new(CARGO_CACHE_TAG_SIGNATURE);
+    let root = fixture.manifest.parent().unwrap();
+    let package = json!({
+        "id": "member-a",
+        "manifest_path": fixture.manifest,
+        "source": null
+    });
+    let cases = [
+        json!({
+            "packages": [package.clone(), package.clone()],
+            "workspace_members": ["member-a", "member-a"],
+            "workspace_default_members": ["member-a"],
+            "resolve": null,
+            "target_directory": fixture.target,
+            "version": 1,
+            "workspace_root": root
+        }),
+        json!({
+            "packages": [package.clone()],
+            "workspace_members": ["missing"],
+            "workspace_default_members": [],
+            "resolve": null,
+            "target_directory": fixture.target,
+            "version": 1,
+            "workspace_root": root
+        }),
+        json!({
+            "packages": [
+                package.clone(),
+                {
+                    "id": "member-b",
+                    "manifest_path": fixture.manifest,
+                    "source": null
+                }
+            ],
+            "workspace_members": ["member-a", "member-b"],
+            "workspace_default_members": ["member-a", "member-b"],
+            "resolve": null,
+            "target_directory": fixture.target,
+            "version": 1,
+            "workspace_root": root
+        }),
+        json!({
+            "packages": [package.clone()],
+            "workspace_members": ["member-a"],
+            "workspace_default_members": ["unknown"],
+            "resolve": null,
+            "target_directory": fixture.target,
+            "version": 1,
+            "workspace_root": root
+        }),
+        json!({
+            "packages": [{
+                "id": "member-a",
+                "manifest_path": fixture.manifest,
+                "source": "registry+https://example.invalid/index"
+            }],
+            "workspace_members": ["member-a"],
+            "workspace_default_members": ["member-a"],
+            "resolve": null,
+            "target_directory": fixture.target,
+            "version": 1,
+            "workspace_root": root
+        }),
+        json!({
+            "packages": [],
+            "workspace_members": [],
+            "workspace_default_members": [],
+            "resolve": null,
+            "target_directory": fixture.target,
+            "version": 1,
+            "workspace_root": root
+        }),
+    ];
+
+    for document in cases {
+        let action = format!(
+            "  printf %s {}\n  exit 0",
+            shell_quote(&document.to_string())
+        );
+        let fake = FakeCargo::new(&action);
+        assert!(matches!(
+            validate_cargo_metadata(live(&fixture), &fake.observe()),
+            Err(CargoMetadataValidationError::InvalidWorkspaceMembers)
+        ));
+    }
+}
+
+#[test]
+fn metadata_member_declaration_must_be_identical_across_both_passes() {
+    let fixture = Fixture::new(CARGO_CACHE_TAG_SIGNATURE);
+    let first = metadata_json(fixture.manifest.parent().unwrap(), &fixture.target);
+    let mut second: serde_json::Value = serde_json::from_str(&first).unwrap();
+    second["future_additive_field"] = json!({"accepted": false});
+    let first_action = format!("    printf %s {}\n    exit 0", shell_quote(&first));
+    let second_text = second.to_string();
+    let second_action = format!("    printf %s {}\n    exit 0", shell_quote(&second_text));
+    let fake = FakeCargo::with_metadata_sequence(&first_action, &second_action);
+
+    assert!(matches!(
+        validate_cargo_metadata(live(&fixture), &fake.observe()),
+        Err(CargoMetadataValidationError::WorkspaceManifestChanged)
+    ));
 }
 
 #[test]
@@ -312,7 +451,7 @@ fn nonzero_exit_invalid_version_symlink_and_executable_rewrite_are_rejected() {
 }
 
 #[test]
-fn same_inode_manifest_rewrite_during_metadata_is_detected_by_full_digest() {
+fn same_inode_manifest_rewrite_during_metadata_is_detected_by_workspace_guard() {
     let fixture = Fixture::new(CARGO_CACHE_TAG_SIGNATURE);
     let document = metadata_json(fixture.manifest.parent().unwrap(), &fixture.target);
     let action = format!(
@@ -324,7 +463,7 @@ fn same_inode_manifest_rewrite_during_metadata_is_detected_by_full_digest() {
 
     assert!(matches!(
         validate_cargo_metadata(live(&fixture), &fake.observe()),
-        Err(CargoMetadataValidationError::LiveEvidenceChanged)
+        Err(CargoMetadataValidationError::WorkspaceManifestChanged)
     ));
 }
 
@@ -360,12 +499,62 @@ fn create_then_remove_config_during_metadata_is_terminal_and_kills_cargo() {
     );
     let started = Instant::now();
     let result =
-        validate_cargo_metadata_with_configuration_fence_for_test(live(&fixture), &fake.observe());
+        validate_cargo_metadata_with_input_fences_for_test(live(&fixture), &fake.observe());
     assert!(matches!(
         result,
         Err(CargoMetadataValidationError::CargoConfigurationChanged)
     ));
     assert!(started.elapsed() < Duration::from_secs(2));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn member_manifest_write_and_restore_during_accepted_pass_is_terminal() {
+    let fixture = Fixture::new(CARGO_CACHE_TAG_SIGNATURE);
+    let project = fixture.manifest.parent().unwrap();
+    let member_directory = project.join("member");
+    let member_manifest = member_directory.join("Cargo.toml");
+    fs::create_dir(&member_directory).unwrap();
+    let member_contents = "[package]\nname = \"member\"\nversion = \"0.1.0\"\n";
+    fs::write(&member_manifest, member_contents).unwrap();
+    let document = json!({
+        "packages": [
+            {
+                "id": "root",
+                "manifest_path": fixture.manifest,
+                "source": null
+            },
+            {
+                "id": "member",
+                "manifest_path": member_manifest,
+                "source": null
+            }
+        ],
+        "workspace_members": ["root", "member"],
+        "workspace_default_members": ["root", "member"],
+        "resolve": null,
+        "target_directory": fixture.target,
+        "version": 1,
+        "workspace_root": project,
+        "metadata": {}
+    })
+    .to_string();
+    let first_action = format!("    printf %s {}\n    exit 0", shell_quote(&document));
+    let second_action = format!(
+        "    printf %s {} > {}\n    printf %s {}\n    exit 0",
+        shell_quote(member_contents),
+        shell_quote(member_manifest.to_str().unwrap()),
+        shell_quote(&document),
+    );
+    let fake = FakeCargo::with_metadata_sequence(&first_action, &second_action);
+
+    let result =
+        validate_cargo_metadata_with_input_fences_for_test(live(&fixture), &fake.observe());
+    match result {
+        Err(CargoMetadataValidationError::WorkspaceManifestChanged) => {}
+        Err(error) => panic!("unexpected mutation error: {error:?}"),
+        Ok(_) => panic!("member manifest write-and-restore unexpectedly validated"),
+    }
 }
 
 #[test]
@@ -406,7 +595,8 @@ fn real_cargo_rejects_project_config_and_no_deps_does_not_create_lockfile() {
             })
         ));
     }
-    let witness = validate_cargo_metadata(live(&fixture), &observation).unwrap();
+    let witness =
+        validate_cargo_metadata_with_input_fences_for_test(live(&fixture), &observation).unwrap();
     #[cfg(target_os = "macos")]
     {
         assert_eq!(witness.launch_policy_revision(), 1);
@@ -452,6 +642,44 @@ fn real_cargo_rejects_project_config_and_no_deps_does_not_create_lockfile() {
     let _witness = validate_cargo_metadata(live(&unlocked), &observation).unwrap();
     assert!(!lockfile.exists());
     assert!(!unlocked_sentinel.exists());
+}
+
+#[test]
+fn real_cargo_attests_virtual_root_and_every_workspace_member_manifest() {
+    let Some(cargo) = direct_test_cargo() else {
+        return;
+    };
+    let fixture = Fixture::new(CARGO_CACHE_TAG_SIGNATURE);
+    let project = fixture.manifest.parent().unwrap();
+    fs::write(
+        &fixture.manifest,
+        "[workspace]\nmembers = [\"alpha\", \"beta\"]\nresolver = \"3\"\n",
+    )
+    .unwrap();
+    for member in ["alpha", "beta"] {
+        let directory = project.join(member);
+        fs::create_dir_all(directory.join("src")).unwrap();
+        fs::write(
+            directory.join("Cargo.toml"),
+            format!("[package]\nname = \"{member}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n"),
+        )
+        .unwrap();
+        fs::write(directory.join("src/lib.rs"), "pub fn member() {}\n").unwrap();
+    }
+    fs::write(
+        project.join("Cargo.lock"),
+        "# This file is automatically @generated by Cargo.\n# It is not intended for manual editing.\nversion = 4\n\n[[package]]\nname = \"alpha\"\nversion = \"0.1.0\"\n\n[[package]]\nname = \"beta\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    let observation = observe_cargo_executable(&cargo).unwrap();
+    let witness =
+        validate_cargo_metadata_with_input_fences_for_test(live(&fixture), &observation).unwrap();
+
+    assert_eq!(witness.workspace_member_count(), 2);
+    assert_eq!(witness.workspace_manifest_count(), 3);
+    assert_ne!(witness.workspace_manifest_closure_sha256(), [0; 32]);
+    assert_eq!(witness.resolution_policy_revision(), 4);
+    witness.release().unwrap();
 }
 
 #[cfg(target_os = "macos")]

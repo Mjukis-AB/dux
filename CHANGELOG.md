@@ -5,6 +5,18 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Continued Milestone 5 with guarded two-pass Cargo workspace-manifest
+  provenance. DUX strictly validates a bounded non-empty one-to-one local
+  package/member declaration, includes virtual roots, captures every exact
+  single-link descendant `Cargo.toml`, and binds role, opaque member ID, native
+  path, identity, length, and full SHA-256 in manifest policy 1. An identical
+  second metadata command runs behind local-APFS file/complete-ancestry vnode
+  fences integrated with launch/config polling and a reserved descriptor-budget
+  preflight. Resolution policy 4 records counts,
+  closure and accepted-output digests. Real virtual-workspace and adversarial
+  coverage exercises malformed relations, aliases, bounds, second-pass drift,
+  and write/restore. This attests reported manifests rather than Cargo's full
+  read set or glob namespace and adds no cleanup authority.
 - Continued Milestone 5 with macOS selected-running-code continuity for the
   enrolled Cargo executable. Production arms local-APFS vnode fences on the
   exact file and every canonical ancestor, uses direct `posix_spawn` with the
@@ -20,18 +32,20 @@ All notable changes to DUX will be documented in this file.
   This remains path-based event-backed continuity rather than fd-based exec or
   confinement; same-UID signaling is an explicit limitation and no cleanup
   authority or `ProtectedPath` change was added.
-- Continued Milestone 5 with an exact negative Cargo 1.96 configuration
+- Continued Milestone 5 with a bounded negative Cargo 1.96 configuration
   closure and descriptor-retained metadata cwd. Production rejects any
   `config` or `config.toml` in Cargo's cwd-ancestor and Cargo-home lookup set,
-  bounding and digesting the necessarily empty include closure. Identity-bound
-  close-on-exec macOS vnode watches make create-remove and other directory
-  events terminal while Cargo runs. The child enters a retained no-follow
-  project directory through `fchdir`, and path/descriptor continuity is
-  rechecked around launch. Configured projects fail before metadata execution.
-  Non-local, non-APFS, and unprobeable lookup directories reject. This remains
-  reviewed-filesystem inference and discovery evidence only. Positive config
-  reads and workspace-member manifests remain open, and `ProtectedPath` is
-  unchanged.
+  bounding and digesting the lookup state observed empty at each checkpoint.
+  Configuration policy 2 binds the corrected watch semantics. Identity-bound
+  close-on-exec macOS vnode watches make project-root and existing
+  non-Cargo-home `.cargo` entry changes terminal while Cargo runs; exact
+  before/after absence covers higher missing lookups and Cargo home without
+  false failures from unrelated ancestor/cache writes. The child enters a
+  retained no-follow project directory through `fchdir`, and path/descriptor
+  continuity is rechecked around launch. Configured projects fail before
+  metadata execution. Non-local, non-APFS, and unprobeable lookup directories
+  reject. This remains reviewed-filesystem inference and discovery evidence
+  only. Positive config reads remain open, and `ProtectedPath` is unchanged.
 - Continued Milestone 5 with explicit revisioned trust enrollment for one
   direct macOS Cargo 1.96.0 executable. A read-only, non-cloneable preview
   executes no selected bytes and binds the canonical single-link file, full

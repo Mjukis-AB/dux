@@ -4496,6 +4496,7 @@ fn map_direct_cargo_validation_error(
         | Error::CargoVersionChanged
         | Error::CargoEnrollmentChanged
         | Error::CargoWorkingDirectoryChanged
+        | Error::WorkspaceManifestChanged
         | Error::LiveEvidenceChanged
         | Error::Filesystem(_)
         | Error::FileDigest(_) => DirectCargoEnrollmentError::ChangedDuringInspection,
@@ -4516,6 +4517,8 @@ fn map_direct_cargo_validation_error(
         | Error::CargoConfigurationChanged
         | Error::CargoConfigurationUnavailable
         | Error::InvalidMetadata
+        | Error::InvalidWorkspaceMembers
+        | Error::WorkspaceManifestUnavailable
         | Error::WorkspaceMismatch
         | Error::TargetDirectoryMismatch => DirectCargoEnrollmentError::InternalState,
         Error::CargoEnrollmentStore { kind } => map_direct_cargo_history_error(kind),

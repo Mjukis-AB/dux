@@ -1,7 +1,9 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::io::{self, Read};
 use std::mem::MaybeUninit;
 use std::os::fd::{AsFd, AsRawFd, OwnedFd};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -27,6 +29,10 @@ use super::cargo_config::{
 use super::cargo_spawn_macos::{
     CargoSpawnError, CargoSpawnRequest, ExecutableMutationFence, SuspendedCargoChild,
 };
+use super::cargo_workspace::{
+    CargoWorkspaceManifestDeclaration, CargoWorkspaceManifestError, CargoWorkspaceManifestEvidence,
+    CargoWorkspaceManifestGuard, MAX_WORKSPACE_MEMBERS,
+};
 use super::rust_target::{RustTargetLiveValidationError, RustTargetLiveWitness};
 use super::rust_target_source::RustTargetSourceError;
 use crate::path_validation::{
@@ -47,7 +53,8 @@ const VERSION_TIMEOUT: Duration = Duration::from_secs(5);
 const METADATA_TIMEOUT: Duration = Duration::from_secs(10);
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(2);
 const MAX_CARGO_EXECUTABLE_BYTES: usize = 256 * 1024 * 1024;
-const CARGO_RESOLUTION_POLICY_REVISION: u32 = 3;
+const CARGO_RESOLUTION_POLICY_REVISION: u32 = 4;
+const MAX_PACKAGE_ID_BYTES: usize = 4 * 1024;
 
 /// Static executable evidence captured without executing untrusted bytes.
 struct CargoExecutableStaticObservation {
@@ -113,6 +120,34 @@ struct CargoLaunchTarget<'a> {
     code_signature: Option<&'a crate::persistence::CargoCodeSignatureRecord>,
 }
 
+#[derive(Clone, Copy, Default)]
+struct CargoInputGuards<'a> {
+    configuration: Option<&'a CargoConfigurationGuard>,
+    workspace: Option<&'a CargoWorkspaceManifestGuard>,
+}
+
+impl CargoInputGuards<'_> {
+    fn poll(self) -> Result<(), CargoMetadataValidationError> {
+        if let Some(configuration) = self.configuration {
+            configuration.poll()?;
+        }
+        if let Some(workspace) = self.workspace {
+            workspace.poll()?;
+        }
+        Ok(())
+    }
+
+    fn revalidate(self) -> Result<(), CargoMetadataValidationError> {
+        if let Some(configuration) = self.configuration {
+            configuration.revalidate()?;
+        }
+        if let Some(workspace) = self.workspace {
+            workspace.revalidate()?;
+        }
+        Ok(())
+    }
+}
+
 /// Exact executable and environment evidence used for one metadata result.
 ///
 /// This intentionally has no clone or serialization implementation. It is a
@@ -139,6 +174,7 @@ pub(crate) struct RustTargetCargoMetadataWitness {
     cargo: CargoExecutableEvidence,
     metadata_sha256: [u8; 32],
     configuration: CargoConfigurationEvidence,
+    workspace: CargoWorkspaceManifestEvidence,
     launch_policy_revision: u32,
     running_code_directory_hash_sha256: [u8; 32],
     resolution_policy_revision: u32,
@@ -206,6 +242,12 @@ pub(crate) enum CargoMetadataValidationError {
     WorkspaceMismatch,
     #[error("Cargo metadata does not resolve the candidate as its target directory")]
     TargetDirectoryMismatch,
+    #[error("Cargo metadata has an invalid or ambiguous workspace-member declaration")]
+    InvalidWorkspaceMembers,
+    #[error("Cargo workspace manifests could not be captured within the reviewed bounds")]
+    WorkspaceManifestUnavailable,
+    #[error("Cargo workspace manifests changed during metadata resolution")]
+    WorkspaceManifestChanged,
     #[error("Cargo configuration is present and cannot yet be directly attested")]
     CargoConfigurationPresent,
     #[error("Cargo configuration discovery state changed during resolution")]
@@ -242,6 +284,16 @@ impl From<CargoConfigurationError> for CargoMetadataValidationError {
             CargoConfigurationError::Present => Self::CargoConfigurationPresent,
             CargoConfigurationError::Changed => Self::CargoConfigurationChanged,
             CargoConfigurationError::Unavailable => Self::CargoConfigurationUnavailable,
+        }
+    }
+}
+
+impl From<CargoWorkspaceManifestError> for CargoMetadataValidationError {
+    fn from(error: CargoWorkspaceManifestError) -> Self {
+        match error {
+            CargoWorkspaceManifestError::Invalid => Self::InvalidWorkspaceMembers,
+            CargoWorkspaceManifestError::Changed => Self::WorkspaceManifestChanged,
+            CargoWorkspaceManifestError::Unavailable => Self::WorkspaceManifestUnavailable,
         }
     }
 }
@@ -583,46 +635,68 @@ fn validate_cargo_metadata_with_limits(
         }
     };
 
+    let metadata_arguments = [
+        OsStr::new("metadata"),
+        OsStr::new("--format-version"),
+        OsStr::new("1"),
+        OsStr::new("--no-deps"),
+        OsStr::new("--locked"),
+        OsStr::new("--offline"),
+        OsStr::new("--quiet"),
+        OsStr::new("--color=never"),
+        OsStr::new("--manifest-path"),
+        live.manifest_path().as_os_str(),
+    ];
+    let discovery_output = run_cargo(
+        cargo.launch_target(),
+        &project_directory,
+        &metadata_arguments,
+        limits.metadata,
+        &cargo.environment,
+        CargoInputGuards {
+            configuration: Some(&configuration),
+            workspace: None,
+        },
+    )?;
+    require_success(&discovery_output)?;
+    let (discovery_metadata, discovery_workspace) =
+        parse_metadata_document(&discovery_output.stdout, &live)?;
+    let workspace = match configuration_fence {
+        ConfigurationFenceMode::Armed => {
+            CargoWorkspaceManifestGuard::capture(project_directory.root(), &discovery_workspace)?
+        }
+        #[cfg(test)]
+        ConfigurationFenceMode::UnarmedForParallelTest => {
+            CargoWorkspaceManifestGuard::capture_unfenced_for_test(
+                project_directory.root(),
+                &discovery_workspace,
+            )?
+        }
+    };
+
     let output = run_cargo(
         cargo.launch_target(),
         &project_directory,
-        &[
-            OsStr::new("metadata"),
-            OsStr::new("--format-version"),
-            OsStr::new("1"),
-            OsStr::new("--no-deps"),
-            OsStr::new("--locked"),
-            OsStr::new("--offline"),
-            OsStr::new("--quiet"),
-            OsStr::new("--color=never"),
-            OsStr::new("--manifest-path"),
-            live.manifest_path().as_os_str(),
-        ],
+        &metadata_arguments,
         limits.metadata,
         &cargo.environment,
-        Some(&configuration),
+        CargoInputGuards {
+            configuration: Some(&configuration),
+            workspace: Some(&workspace),
+        },
     )?;
     require_success(&output)?;
+    let (metadata, accepted_workspace) = parse_metadata_document(&output.stdout, &live)?;
+    if output.stdout != discovery_output.stdout
+        || metadata != discovery_metadata
+        || accepted_workspace != discovery_workspace
+    {
+        return Err(CargoMetadataValidationError::WorkspaceManifestChanged);
+    }
     after_metadata();
     project_directory.revalidate()?;
     let configuration_evidence = configuration.evidence()?;
-    let metadata: CargoMetadataDocument = serde_json::from_slice(&output.stdout)
-        .map_err(|_| CargoMetadataValidationError::InvalidMetadata)?;
-    if metadata.version != 1 {
-        return Err(CargoMetadataValidationError::InvalidMetadata);
-    }
-    if !metadata.resolve.is_null() {
-        return Err(CargoMetadataValidationError::InvalidMetadata);
-    }
-    let metadata_root = validate_scan_root(Path::new(&metadata.workspace_root))?;
-    let _metadata_target =
-        validate_cleanup_path(&metadata_root, Path::new(&metadata.target_directory))?;
-    if Path::new(&metadata.workspace_root) != live.project_root() {
-        return Err(CargoMetadataValidationError::WorkspaceMismatch);
-    }
-    if Path::new(&metadata.target_directory) != live.target_path() {
-        return Err(CargoMetadataValidationError::TargetDirectoryMismatch);
-    }
+    let workspace_evidence = workspace.evidence()?;
 
     let after_version = cargo.read_version(limits.version)?;
     if before_version != after_version {
@@ -634,6 +708,7 @@ fn validate_cargo_metadata_with_limits(
     }
     project_directory.revalidate()?;
     configuration.revalidate()?;
+    workspace.revalidate()?;
     live.revalidate_current()?;
 
     Ok(RustTargetCargoMetadataWitness {
@@ -645,6 +720,7 @@ fn validate_cargo_metadata_with_limits(
         ),
         metadata_sha256: sha256(&output.stdout),
         configuration: configuration_evidence,
+        workspace: workspace_evidence,
         launch_policy_revision: output.launch_policy_revision,
         running_code_directory_hash_sha256: output.running_code_directory_hash_sha256,
         resolution_policy_revision: CARGO_RESOLUTION_POLICY_REVISION,
@@ -674,7 +750,7 @@ impl CargoExecutableStaticObservation {
             &[OsStr::new("--version"), OsStr::new("--verbose")],
             ProcessLimits::version(),
             &self.environment,
-            None,
+            CargoInputGuards::default(),
         )?;
         require_success(&output)?;
         let release = parse_cargo_release(&output.stdout)?;
@@ -784,7 +860,7 @@ impl CargoExecutableObservation {
             &[OsStr::new("--version"), OsStr::new("--verbose")],
             limits,
             &self.environment,
-            None,
+            CargoInputGuards::default(),
         )?;
         require_success(&output)?;
         let release = parse_cargo_release(&output.stdout)?;
@@ -905,12 +981,122 @@ fn capture_exact_directory(path: &Path) -> Result<CanonicalScanRoot, CargoMetada
     capture_scan_root(lexical).map_err(CargoMetadataValidationError::from)
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize, PartialEq, Eq)]
 struct CargoMetadataDocument {
+    packages: Vec<CargoMetadataPackageDocument>,
+    workspace_members: Vec<String>,
+    workspace_default_members: Vec<String>,
     version: u32,
     workspace_root: String,
     target_directory: String,
     resolve: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+struct CargoMetadataPackageDocument {
+    id: String,
+    manifest_path: String,
+    source: serde_json::Value,
+}
+
+fn parse_metadata_document(
+    bytes: &[u8],
+    live: &RustTargetLiveWitness,
+) -> Result<
+    (
+        CargoMetadataDocument,
+        Vec<CargoWorkspaceManifestDeclaration>,
+    ),
+    CargoMetadataValidationError,
+> {
+    let metadata: CargoMetadataDocument =
+        serde_json::from_slice(bytes).map_err(|_| CargoMetadataValidationError::InvalidMetadata)?;
+    if metadata.version != 1 || !metadata.resolve.is_null() {
+        return Err(CargoMetadataValidationError::InvalidMetadata);
+    }
+    let metadata_root = validate_scan_root(Path::new(&metadata.workspace_root))?;
+    let _metadata_target =
+        validate_cleanup_path(&metadata_root, Path::new(&metadata.target_directory))?;
+    if Path::new(&metadata.workspace_root) != live.project_root() {
+        return Err(CargoMetadataValidationError::WorkspaceMismatch);
+    }
+    if Path::new(&metadata.target_directory) != live.target_path() {
+        return Err(CargoMetadataValidationError::TargetDirectoryMismatch);
+    }
+
+    if metadata.workspace_members.is_empty()
+        || metadata.workspace_members.len() > MAX_WORKSPACE_MEMBERS
+        || metadata.packages.len() != metadata.workspace_members.len()
+        || metadata.workspace_default_members.len() > metadata.workspace_members.len()
+    {
+        return Err(CargoMetadataValidationError::InvalidWorkspaceMembers);
+    }
+    let mut packages = BTreeMap::new();
+    let mut manifest_paths = BTreeSet::new();
+    for package in &metadata.packages {
+        if package.id.is_empty()
+            || package.id.len() > MAX_PACKAGE_ID_BYTES
+            || package.manifest_path.is_empty()
+            || !package.source.is_null()
+            || packages.insert(package.id.as_str(), package).is_some()
+            || !manifest_paths.insert(package.manifest_path.as_bytes().to_vec())
+        {
+            return Err(CargoMetadataValidationError::InvalidWorkspaceMembers);
+        }
+    }
+    let mut members = BTreeSet::new();
+    for member in &metadata.workspace_members {
+        if member.is_empty()
+            || member.len() > MAX_PACKAGE_ID_BYTES
+            || !members.insert(member.as_str())
+            || !packages.contains_key(member.as_str())
+        {
+            return Err(CargoMetadataValidationError::InvalidWorkspaceMembers);
+        }
+    }
+    if members.len() != packages.len() {
+        return Err(CargoMetadataValidationError::InvalidWorkspaceMembers);
+    }
+    let mut default_members = BTreeSet::new();
+    for member in &metadata.workspace_default_members {
+        if member.is_empty()
+            || member.len() > MAX_PACKAGE_ID_BYTES
+            || !default_members.insert(member.as_str())
+            || !members.contains(member.as_str())
+        {
+            return Err(CargoMetadataValidationError::InvalidWorkspaceMembers);
+        }
+    }
+
+    let mut declarations = Vec::with_capacity(metadata.workspace_members.len() + 1);
+    let mut root_is_member = false;
+    for member in &metadata.workspace_members {
+        let package = packages
+            .get(member.as_str())
+            .ok_or(CargoMetadataValidationError::InvalidWorkspaceMembers)?;
+        let path = PathBuf::from(&package.manifest_path);
+        let is_workspace_root = path == live.manifest_path();
+        root_is_member |= is_workspace_root;
+        declarations.push(CargoWorkspaceManifestDeclaration {
+            member_id: Some(member.clone()),
+            path,
+            is_workspace_root,
+        });
+    }
+    if !root_is_member {
+        declarations.push(CargoWorkspaceManifestDeclaration {
+            member_id: None,
+            path: live.manifest_path().to_path_buf(),
+            is_workspace_root: true,
+        });
+    }
+    declarations.sort_by(|left, right| {
+        left.path
+            .as_os_str()
+            .as_bytes()
+            .cmp(right.path.as_os_str().as_bytes())
+    });
+    Ok((metadata, declarations))
 }
 
 fn parse_cargo_release(bytes: &[u8]) -> Result<CargoRelease, CargoMetadataValidationError> {
@@ -1051,7 +1237,7 @@ fn run_cargo(
     arguments: &[&OsStr],
     limits: ProcessLimits,
     environment: &CargoResolutionEnvironment,
-    configuration: Option<&CargoConfigurationGuard>,
+    guards: CargoInputGuards<'_>,
 ) -> Result<BoundedOutput, CargoMetadataValidationError> {
     #[cfg(target_os = "macos")]
     if let Some(signature) = launch.code_signature {
@@ -1062,7 +1248,7 @@ fn run_cargo(
             arguments,
             limits,
             environment,
-            configuration,
+            guards,
         );
     }
     run_cargo_portable(
@@ -1071,7 +1257,7 @@ fn run_cargo(
         arguments,
         limits,
         environment,
-        configuration,
+        guards,
     )
 }
 
@@ -1085,7 +1271,7 @@ fn run_cargo_portable(
     arguments: &[&OsStr],
     limits: ProcessLimits,
     environment: &CargoResolutionEnvironment,
-    configuration: Option<&CargoConfigurationGuard>,
+    guards: CargoInputGuards<'_>,
 ) -> Result<BoundedOutput, CargoMetadataValidationError> {
     // DUX-DESTRUCTIVE: allow=cargo-metadata-observer-spawn -- launch only the exactly observed canonical executable with fixed observer-owned arguments, bounded nonblocking pipes, offline mode, and process-group termination; this observation does not authenticate Cargo or grant cleanup authority
     let mut command = Command::new(executable);
@@ -1121,9 +1307,7 @@ fn run_cargo_portable(
         });
     }
     current_directory.revalidate()?;
-    if let Some(configuration) = configuration {
-        configuration.revalidate()?;
-    }
+    guards.revalidate()?;
     let mut child = command
         .spawn()
         .map_err(|source| CargoMetadataValidationError::Spawn {
@@ -1134,19 +1318,17 @@ fn run_cargo_portable(
         terminate_process_group(&mut child);
         return Err(error);
     }
-    if let Some(configuration) = configuration
-        && let Err(error) = configuration.revalidate()
-    {
+    if let Err(error) = guards.revalidate() {
         terminate_process_group(&mut child);
-        return Err(error.into());
+        return Err(error);
     }
-    collect_bounded_output(&mut child, limits, configuration)
+    collect_bounded_output(&mut child, limits, guards)
 }
 
 fn collect_bounded_output(
     child: &mut Child,
     limits: ProcessLimits,
-    configuration: Option<&CargoConfigurationGuard>,
+    guards: CargoInputGuards<'_>,
 ) -> Result<BoundedOutput, CargoMetadataValidationError> {
     let Some(mut stdout) = child.stdout.take() else {
         terminate_process_group(child);
@@ -1172,11 +1354,9 @@ fn collect_bounded_output(
     let mut child_exited = false;
 
     loop {
-        if let Some(configuration) = configuration
-            && let Err(error) = configuration.poll()
-        {
+        if let Err(error) = guards.poll() {
             terminate_process_group(child);
-            return Err(error.into());
+            return Err(error);
         }
         let stdout_result = drain_pipe(
             &mut stdout,
@@ -1214,11 +1394,9 @@ fn collect_bounded_output(
             };
         }
         if child_exited && stdout_eof && stderr_eof {
-            if let Some(configuration) = configuration
-                && let Err(error) = configuration.revalidate()
-            {
+            if let Err(error) = guards.revalidate() {
                 terminate_process_group(child);
-                return Err(error.into());
+                return Err(error);
             }
             let status = finish_process_group(child)?;
             return Ok(BoundedOutput {
@@ -1245,16 +1423,14 @@ fn run_cargo_suspended_macos(
     arguments: &[&OsStr],
     limits: ProcessLimits,
     environment: &CargoResolutionEnvironment,
-    configuration: Option<&CargoConfigurationGuard>,
+    guards: CargoInputGuards<'_>,
 ) -> Result<BoundedOutput, CargoMetadataValidationError> {
     let fence = ExecutableMutationFence::capture(launch.parent, launch.executable, launch.file)
         .map_err(map_cargo_spawn_error)?;
     revalidate_launch_target(launch)?;
     fence.poll().map_err(map_cargo_spawn_error)?;
     current_directory.revalidate()?;
-    if let Some(configuration) = configuration {
-        configuration.revalidate()?;
-    }
+    guards.revalidate()?;
 
     let mut child = SuspendedCargoChild::spawn(CargoSpawnRequest {
         executable: launch.executable,
@@ -1271,9 +1447,7 @@ fn run_cargo_suspended_macos(
         fence.poll().map_err(map_cargo_spawn_error)?;
         revalidate_launch_target(launch)?;
         current_directory.revalidate()?;
-        if let Some(configuration) = configuration {
-            configuration.revalidate()?;
-        }
+        guards.revalidate()?;
         fence.poll().map_err(map_cargo_spawn_error)?;
         child.resume().map_err(map_cargo_spawn_error)
     })();
@@ -1281,13 +1455,11 @@ fn run_cargo_suspended_macos(
         child.terminate();
         return Err(error);
     }
-    let output = collect_bounded_output_suspended_macos(&mut child, limits, configuration, &fence)?;
+    let output = collect_bounded_output_suspended_macos(&mut child, limits, guards, &fence)?;
     fence.poll().map_err(map_cargo_spawn_error)?;
     revalidate_launch_target(launch)?;
     current_directory.revalidate()?;
-    if let Some(configuration) = configuration {
-        configuration.revalidate()?;
-    }
+    guards.revalidate()?;
     fence.poll().map_err(map_cargo_spawn_error)?;
     Ok(output)
 }
@@ -1296,7 +1468,7 @@ fn run_cargo_suspended_macos(
 fn collect_bounded_output_suspended_macos(
     child: &mut SuspendedCargoChild,
     limits: ProcessLimits,
-    configuration: Option<&CargoConfigurationGuard>,
+    guards: CargoInputGuards<'_>,
     fence: &ExecutableMutationFence,
 ) -> Result<BoundedOutput, CargoMetadataValidationError> {
     let Some(mut stdout) = child.take_stdout() else {
@@ -1325,11 +1497,9 @@ fn collect_bounded_output_suspended_macos(
             child.terminate();
             return Err(map_cargo_spawn_error(error));
         }
-        if let Some(configuration) = configuration
-            && let Err(error) = configuration.poll()
-        {
+        if let Err(error) = guards.poll() {
             child.terminate();
-            return Err(error.into());
+            return Err(error);
         }
         let stdout_result = drain_pipe(
             &mut stdout,
@@ -1367,11 +1537,9 @@ fn collect_bounded_output_suspended_macos(
             };
         }
         if child_exited && stdout_eof && stderr_eof {
-            if let Some(configuration) = configuration
-                && let Err(error) = configuration.revalidate()
-            {
+            if let Err(error) = guards.revalidate() {
                 child.terminate();
-                return Err(error.into());
+                return Err(error);
             }
             fence.poll().map_err(map_cargo_spawn_error)?;
             let launch = child.evidence().clone();
@@ -1580,6 +1748,22 @@ impl RustTargetCargoMetadataWitness {
         self.configuration.closure_sha256
     }
 
+    pub(super) fn workspace_manifest_policy_revision(&self) -> u32 {
+        self.workspace.policy_revision
+    }
+
+    pub(super) fn workspace_member_count(&self) -> u32 {
+        self.workspace.workspace_member_count
+    }
+
+    pub(super) fn workspace_manifest_count(&self) -> u32 {
+        self.workspace.manifest_count
+    }
+
+    pub(super) fn workspace_manifest_closure_sha256(&self) -> [u8; 32] {
+        self.workspace.closure_sha256
+    }
+
     pub(super) fn launch_policy_revision(&self) -> u32 {
         self.launch_policy_revision
     }
@@ -1659,13 +1843,13 @@ pub(super) fn signed_cargo_output_limit_for_test(
             stderr_bytes: VERSION_STDERR_LIMIT,
         },
         &environment,
-        None,
+        CargoInputGuards::default(),
     )
     .map(|_| ())
 }
 
 #[cfg(test)]
-pub(super) fn validate_cargo_metadata_with_configuration_fence_for_test(
+pub(super) fn validate_cargo_metadata_with_input_fences_for_test(
     live: RustTargetLiveWitness,
     cargo: &CargoExecutableObservation,
 ) -> Result<RustTargetCargoMetadataWitness, CargoMetadataValidationError> {

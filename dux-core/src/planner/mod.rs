@@ -10,6 +10,8 @@ mod cargo_code_signature_macos;
 mod cargo_config;
 #[cfg(target_os = "macos")]
 mod cargo_spawn_macos;
+#[cfg(unix)]
+mod cargo_workspace;
 mod rust_target;
 #[cfg(unix)]
 mod rust_target_cargo;
