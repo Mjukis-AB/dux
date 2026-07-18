@@ -161,6 +161,30 @@ actor DuxSnapshotReviewController {
         return node
     }
 
+    func candidateSummaries(
+        scanID: String,
+        cursor: UInt16,
+        limit: UInt16
+    ) async throws -> ExplorerCandidateSummaryPage {
+        guard !isShuttingDown else {
+            throw EngineServiceError.closed
+        }
+        guard let entry = leases[scanID] else {
+            throw ExplorerCandidateDetailError.reviewNotAcquired
+        }
+        let page: ExplorerCandidateSummaryPage
+        do {
+            page = try await entry.lease.candidateSummaries(cursor: cursor, limit: limit)
+        } catch {
+            await discardExpiredLeaseIfCurrent(error, scanID: scanID, entry: entry)
+            throw error
+        }
+        guard leases[scanID]?.generation == entry.generation else {
+            throw CancellationError()
+        }
+        return page
+    }
+
     func childNodes(
         scanID: String,
         parentID: UInt64,

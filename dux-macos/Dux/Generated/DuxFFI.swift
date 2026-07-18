@@ -1143,6 +1143,13 @@ public protocol SnapshotReviewSessionProtocol: AnyObject, Sendable {
      */
     func candidatePaths(candidateId: String, cursor: UInt16, limit: UInt16) throws  -> CandidatePathPage
 
+    /**
+     * Return one bounded page of historical candidate paths while this exact
+     * snapshot review remains retained. These observations are for display
+     * only and do not carry planning or cleanup authority.
+     */
+    func candidateSummaries(cursor: UInt16, limit: UInt16) throws  -> CandidateSummaryPage
+
     func childNodes(parentId: UInt64, sort: SnapshotNodeSort, offset: UInt64, limit: UInt16) throws  -> SnapshotNodePage
 
     func info() throws  -> SnapshotReviewInfo
@@ -1238,6 +1245,21 @@ open func candidatePaths(candidateId: String, cursor: UInt16, limit: UInt16)thro
     uniffi_dux_ffi_fn_method_snapshotreviewsession_candidate_paths(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(candidateId),
+        FfiConverterUInt16.lower(cursor),
+        FfiConverterUInt16.lower(limit),$0
+    )
+})
+}
+
+    /**
+     * Return one bounded page of historical candidate paths while this exact
+     * snapshot review remains retained. These observations are for display
+     * only and do not carry planning or cleanup authority.
+     */
+open func candidateSummaries(cursor: UInt16, limit: UInt16)throws  -> CandidateSummaryPage  {
+    return try  FfiConverterTypeCandidateSummaryPage_lift(try rustCallWithError(FfiConverterTypeEngineError_lift) {
+    uniffi_dux_ffi_fn_method_snapshotreviewsession_candidate_summaries(
+            self.uniffiCloneHandle(),
         FfiConverterUInt16.lower(cursor),
         FfiConverterUInt16.lower(limit),$0
     )
@@ -1768,6 +1790,76 @@ public func FfiConverterTypeCandidateSummary_lift(_ buf: RustBuffer) throws -> C
 #endif
 public func FfiConverterTypeCandidateSummary_lower(_ value: CandidateSummary) -> RustBuffer {
     return FfiConverterTypeCandidateSummary.lower(value)
+}
+
+
+public struct CandidateSummaryPage: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let scanId: String
+    public let cursor: UInt16
+    public let nextCursor: UInt16?
+    public let totalCandidates: UInt16
+    public let candidates: [CandidateSummary]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, scanId: String, cursor: UInt16, nextCursor: UInt16?, totalCandidates: UInt16, candidates: [CandidateSummary]) {
+        self.recordVersion = recordVersion
+        self.scanId = scanId
+        self.cursor = cursor
+        self.nextCursor = nextCursor
+        self.totalCandidates = totalCandidates
+        self.candidates = candidates
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension CandidateSummaryPage: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCandidateSummaryPage: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CandidateSummaryPage {
+        return
+            try CandidateSummaryPage(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                scanId: FfiConverterString.read(from: &buf),
+                cursor: FfiConverterUInt16.read(from: &buf),
+                nextCursor: FfiConverterOptionUInt16.read(from: &buf),
+                totalCandidates: FfiConverterUInt16.read(from: &buf),
+                candidates: FfiConverterSequenceTypeCandidateSummary.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: CandidateSummaryPage, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterString.write(value.scanId, into: &buf)
+        FfiConverterUInt16.write(value.cursor, into: &buf)
+        FfiConverterOptionUInt16.write(value.nextCursor, into: &buf)
+        FfiConverterUInt16.write(value.totalCandidates, into: &buf)
+        FfiConverterSequenceTypeCandidateSummary.write(value.candidates, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCandidateSummaryPage_lift(_ buf: RustBuffer) throws -> CandidateSummaryPage {
+    return try FfiConverterTypeCandidateSummaryPage.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCandidateSummaryPage_lower(_ value: CandidateSummaryPage) -> RustBuffer {
+    return FfiConverterTypeCandidateSummaryPage.lower(value)
 }
 
 
@@ -8937,6 +9029,31 @@ fileprivate struct FfiConverterSequenceTypeCandidateObservedPath: FfiConverterRu
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeCandidateSummary: FfiConverterRustBuffer {
+    typealias SwiftType = [CandidateSummary]
+
+    public static func write(_ value: [CandidateSummary], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeCandidateSummary.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [CandidateSummary] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [CandidateSummary]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeCandidateSummary.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeHistoricalScanIssue: FfiConverterRustBuffer {
     typealias SwiftType = [HistoricalScanIssue]
 
@@ -9225,6 +9342,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_snapshotreviewsession_candidate_paths() != 37800) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_snapshotreviewsession_candidate_summaries() != 34057) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_snapshotreviewsession_child_nodes() != 11906) {

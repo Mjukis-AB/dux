@@ -9,10 +9,12 @@ use dux_core::engine::{
     CancelOutcome as CoreCancelOutcome, CandidateDetailError as CoreCandidateDetailError,
     CandidateEvaluationTaskFailureKind as CoreCandidateEvaluationFailure,
     CandidateEvaluationTaskStatus as CoreCandidateEvaluationStatus,
+    CandidateHistoryError as CoreCandidateHistoryError,
     CapacityHistoryDisposition as CoreHistoryDisposition, DiskPressurePolicy as CorePressurePolicy,
     DiskPressurePolicyError as CorePressurePolicyError,
     DiskPressurePolicySource as CorePressurePolicySource,
     DiskPressurePolicyUpdate as CorePressurePolicyUpdate,
+    DurableCandidateEvaluationStatus as CoreDurableCandidateEvaluationStatus,
     DurableCandidateEvidence as CoreCandidateEvidence,
     DurableCandidateEvidencePage as CoreCandidateEvidencePage,
     DurableCandidatePathPage as CoreCandidatePathPage,
@@ -606,6 +608,16 @@ pub struct CandidateSummary {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct CandidateSummaryPage {
+    pub record_version: u32,
+    pub scan_id: String,
+    pub cursor: u16,
+    pub next_cursor: Option<u16>,
+    pub total_candidates: u16,
+    pub candidates: Vec<CandidateSummary>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct CandidatePathPage {
     pub record_version: u32,
     pub scan_id: String,
@@ -1191,6 +1203,56 @@ impl SnapshotReviewSession {
                 )
                 .map_err(map_review_error)?;
             project_snapshot_live_target(target)
+        })
+    }
+
+    /// Return one bounded page of historical candidate paths while this exact
+    /// snapshot review remains retained. These observations are for display
+    /// only and do not carry planning or cleanup authority.
+    pub fn candidate_summaries(
+        &self,
+        cursor: u16,
+        limit: u16,
+    ) -> Result<CandidateSummaryPage, EngineError> {
+        if !(1..=CANDIDATE_DETAIL_PAGE_LIMIT).contains(&limit) {
+            return Err(EngineError::InvalidCandidateDetailRequest);
+        }
+        self.with_open_session(|session| {
+            let evaluation = self
+                .engine
+                .candidate_history_for_scan(session.scan_id())
+                .map_err(map_candidate_history_error)?;
+            if !matches!(
+                evaluation.status(),
+                CoreDurableCandidateEvaluationStatus::Succeeded { .. }
+            ) {
+                return Err(EngineError::CandidateEvaluationNotSucceeded);
+            }
+            let total_candidates = u16::try_from(evaluation.candidates().len())
+                .map_err(|_| EngineError::InternalState)?;
+            if cursor > total_candidates {
+                return Err(EngineError::CandidateCursorOutOfRange);
+            }
+            let start = usize::from(cursor);
+            let end = start
+                .checked_add(usize::from(limit))
+                .ok_or(EngineError::InternalState)?
+                .min(usize::from(total_candidates));
+            let next_cursor = (end < usize::from(total_candidates))
+                .then(|| u16::try_from(end).map_err(|_| EngineError::InternalState))
+                .transpose()?;
+            let candidates = evaluation.candidates()[start..end]
+                .iter()
+                .map(project_candidate_summary)
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(CandidateSummaryPage {
+                record_version: FFI_RECORD_VERSION,
+                scan_id: session.scan_id().as_str().to_owned(),
+                cursor,
+                next_cursor,
+                total_candidates,
+                candidates,
+            })
         })
     }
 
@@ -2668,6 +2730,21 @@ fn map_candidate_detail_error(error: CoreCandidateDetailError) -> EngineError {
         CoreCandidateDetailError::CorruptData => EngineError::CorruptData,
         CoreCandidateDetailError::Unavailable => EngineError::StorageUnavailable,
         CoreCandidateDetailError::InternalState => EngineError::InternalState,
+        _ => EngineError::InternalState,
+    }
+}
+
+fn map_candidate_history_error(error: CoreCandidateHistoryError) -> EngineError {
+    match error {
+        CoreCandidateHistoryError::Closed => EngineError::Closed,
+        CoreCandidateHistoryError::ScanNotFound => EngineError::ScanNotFound,
+        CoreCandidateHistoryError::IncompatibleSchema => EngineError::IncompatibleSchema,
+        CoreCandidateHistoryError::Busy => EngineError::Busy,
+        CoreCandidateHistoryError::UnsafeStorage => EngineError::UnsafeStorage,
+        CoreCandidateHistoryError::QueryLimitExceeded => EngineError::BudgetExceeded,
+        CoreCandidateHistoryError::CorruptData => EngineError::CorruptData,
+        CoreCandidateHistoryError::Unavailable => EngineError::StorageUnavailable,
+        CoreCandidateHistoryError::InternalState => EngineError::InternalState,
         _ => EngineError::InternalState,
     }
 }

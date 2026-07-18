@@ -36,6 +36,10 @@ protocol DuxSnapshotReviewLease: AnyObject, Sendable {
     var scanID: String { get }
     func renew() async throws -> Int64
     func rootNode() async throws -> ExplorerSnapshotNode
+    func candidateSummaries(
+        cursor: UInt16,
+        limit: UInt16
+    ) async throws -> ExplorerCandidateSummaryPage
     func childNodes(
         parentID: UInt64,
         sort: ExplorerSnapshotNodeSort,
@@ -70,6 +74,13 @@ protocol DuxSnapshotReviewLease: AnyObject, Sendable {
 }
 
 extension DuxSnapshotReviewLease {
+    func candidateSummaries(
+        cursor _: UInt16,
+        limit _: UInt16
+    ) async throws -> ExplorerCandidateSummaryPage {
+        throw ExplorerCandidateDetailError.unavailable
+    }
+
     func candidatePaths(
         candidateID _: String,
         cursor _: UInt16,
@@ -1426,6 +1437,28 @@ private final class FFIDuxSnapshotReviewLease: DuxSnapshotReviewLease, @unchecke
                     raw,
                     expectedScanID: self.scanID,
                     expectedCandidateID: candidateID,
+                    expectedCursor: cursor,
+                    requestedLimit: limit
+                )
+            } catch let error as EngineError {
+                throw Self.candidateDetailError(error)
+            }
+        }
+    }
+
+    func candidateSummaries(
+        cursor: UInt16,
+        limit: UInt16
+    ) async throws -> ExplorerCandidateSummaryPage {
+        guard (1 ... ExplorerCandidateDetailAdapter.maximumPageLimit).contains(limit) else {
+            throw ExplorerCandidateDetailError.invalidLimit
+        }
+        return try await state.perform { _ in
+            do {
+                let raw = try self.lease.candidateSummaries(cursor: cursor, limit: limit)
+                return try ExplorerCandidateDetailAdapter.mapSummaries(
+                    raw,
+                    expectedScanID: self.scanID,
                     expectedCursor: cursor,
                     requestedLimit: limit
                 )

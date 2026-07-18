@@ -47,6 +47,23 @@ final class ExplorerCandidateDetailTests: XCTestCase {
         XCTAssertEqual(mapped.candidate.category, .developerArtifact)
         XCTAssertEqual(mapped.paths.first?.encodedBytes, path.encodedBytes)
         XCTAssertEqual(mapped.candidate.blockers, [.protectedPath])
+
+        let summaries = CandidateSummaryPage(
+            recordVersion: 1,
+            scanId: "scan:example",
+            cursor: 0,
+            nextCursor: nil,
+            totalCandidates: 1,
+            candidates: [summary]
+        )
+        let mappedSummaries = try ExplorerCandidateDetailAdapter.mapSummaries(
+            summaries,
+            expectedScanID: "scan:example",
+            expectedCursor: 0,
+            requestedLimit: 64
+        )
+        XCTAssertEqual(mappedSummaries.totalCandidates, 1)
+        XCTAssertEqual(mappedSummaries.candidates.map(\.candidateID), ["candidate:example"])
     }
 
     func testEvidencePageRejectsContradictoryOptionalFields() {

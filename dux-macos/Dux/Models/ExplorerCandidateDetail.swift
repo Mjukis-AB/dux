@@ -100,6 +100,14 @@ struct ExplorerCandidateSummary: Equatable, Identifiable, Sendable {
     let status: ExplorerCandidateStatus
 }
 
+struct ExplorerCandidateSummaryPage: Equatable, Sendable {
+    let scanID: String
+    let cursor: UInt16
+    let nextCursor: UInt16?
+    let totalCandidates: UInt16
+    let candidates: [ExplorerCandidateSummary]
+}
+
 struct ExplorerCandidatePathPage: Equatable, Sendable {
     let scanID: String
     let candidate: ExplorerCandidateSummary
@@ -168,7 +176,7 @@ enum ExplorerCandidateDetailAdapter {
             (1 ... maximumPageLimit).contains(requestedLimit),
             raw.totalPaths >= raw.cursor,
             raw.totalPaths <= maximumCandidateCount,
-            raw.paths.count <= Int(UInt16.max),
+            raw.paths.count <= Int(requestedLimit),
             UInt16(raw.paths.count) == min(requestedLimit, raw.totalPaths - raw.cursor),
             validNext(raw.nextCursor, cursor: raw.cursor, count: raw.paths.count, total: raw.totalPaths)
         else {
@@ -189,6 +197,39 @@ enum ExplorerCandidateDetailAdapter {
         )
     }
 
+    static func mapSummaries(
+        _ raw: CandidateSummaryPage,
+        expectedScanID: String,
+        expectedCursor: UInt16,
+        requestedLimit: UInt16
+    ) throws -> ExplorerCandidateSummaryPage {
+        guard
+            raw.recordVersion == recordVersion,
+            validScanID(raw.scanId),
+            raw.scanId == expectedScanID,
+            raw.cursor == expectedCursor,
+            (1 ... maximumPageLimit).contains(requestedLimit),
+            raw.totalCandidates >= raw.cursor,
+            raw.totalCandidates <= maximumCandidateCount,
+            raw.candidates.count <= Int(requestedLimit),
+            UInt16(raw.candidates.count) == min(requestedLimit, raw.totalCandidates - raw.cursor),
+            validNext(raw.nextCursor, cursor: raw.cursor, count: raw.candidates.count, total: raw.totalCandidates)
+        else {
+            throw ExplorerCandidateDetailError.invalidResponse
+        }
+        let candidates = try raw.candidates.map(mapSummary)
+        guard Set(candidates.map(\.candidateID)).count == candidates.count else {
+            throw ExplorerCandidateDetailError.invalidResponse
+        }
+        return ExplorerCandidateSummaryPage(
+            scanID: raw.scanId,
+            cursor: raw.cursor,
+            nextCursor: raw.nextCursor,
+            totalCandidates: raw.totalCandidates,
+            candidates: candidates
+        )
+    }
+
     static func mapEvidence(
         _ raw: CandidateEvidencePage,
         expectedScanID: String,
@@ -205,7 +246,7 @@ enum ExplorerCandidateDetailAdapter {
             (1 ... maximumPageLimit).contains(requestedLimit),
             raw.totalEvidence >= raw.cursor,
             raw.totalEvidence <= maximumCandidateCount,
-            raw.evidence.count <= Int(UInt16.max),
+            raw.evidence.count <= Int(requestedLimit),
             UInt16(raw.evidence.count) == min(requestedLimit, raw.totalEvidence - raw.cursor),
             validNext(raw.nextCursor, cursor: raw.cursor, count: raw.evidence.count, total: raw.totalEvidence)
         else {

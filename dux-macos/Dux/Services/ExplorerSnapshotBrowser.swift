@@ -6,6 +6,11 @@ protocol DuxSnapshotReviewBrowsing: Sendable {
     func acquireLatest() async throws -> String
     func release(scanID: String) async
     func rootNode(scanID: String) async throws -> ExplorerSnapshotNode
+    func candidateSummaries(
+        scanID: String,
+        cursor: UInt16,
+        limit: UInt16
+    ) async throws -> ExplorerCandidateSummaryPage
     func childNodes(
         scanID: String,
         parentID: UInt64,
@@ -161,6 +166,14 @@ struct UnavailableDuxSnapshotReviewBrowser: DuxSnapshotReviewBrowsing {
 
     func rootNode(scanID _: String) async throws -> ExplorerSnapshotNode {
         throw ExplorerSnapshotNodeError.reviewNotAcquired
+    }
+
+    func candidateSummaries(
+        scanID _: String,
+        cursor _: UInt16,
+        limit _: UInt16
+    ) async throws -> ExplorerCandidateSummaryPage {
+        throw ExplorerCandidateDetailError.reviewNotAcquired
     }
 
     func childNodes(
