@@ -33,9 +33,14 @@ final class DuxAppDelegateTests: XCTestCase {
         XCTAssertTrue(controller.events.isEmpty)
 
         lease.acquire()
+        controller.automaticTerminationSupportEnabled = false
         lease.reassert()
 
-        XCTAssertEqual(controller.events, ["support:true", "disable", "disable"])
+        XCTAssertEqual(
+            controller.events,
+            ["support:true", "disable", "support:false", "support:true", "disable"]
+        )
+        XCTAssertTrue(controller.automaticTerminationSupportEnabled)
         XCTAssertEqual(controller.disabledReasons.count, 2)
     }
 
@@ -113,7 +118,10 @@ final class DuxAppDelegateTests: XCTestCase {
                 NSApplication.shared
             )
         )
-        XCTAssertEqual(controller.events, ["support:true", "disable", "disable"])
+        XCTAssertEqual(
+            controller.events,
+            ["support:true", "disable", "support:true", "disable"]
+        )
     }
 
     func testIncidentalTerminationRequestFromTransientMenuWindowIsCancelled() {
@@ -129,7 +137,10 @@ final class DuxAppDelegateTests: XCTestCase {
             delegate.applicationShouldTerminate(NSApplication.shared),
             .terminateCancel
         )
-        XCTAssertEqual(controller.events, ["support:true", "disable", "disable"])
+        XCTAssertEqual(
+            controller.events,
+            ["support:true", "disable", "support:true", "disable"]
+        )
     }
 
     func testExplicitQuitIntentIsOneShot() {

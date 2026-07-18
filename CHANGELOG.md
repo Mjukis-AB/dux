@@ -4,6 +4,12 @@ All notable changes to DUX will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- Hardened the menu-bar app lifetime lease to restore
+  `automaticTerminationSupportEnabled` before reasserting the disable lease.
+  This prevents AppKit's transient `MenuBarExtra` teardown from terminating
+  DUX when the popover is closed.
+
 ### Added
 - Continued Milestone 5 with a sealed planner-owned exact-path review
   evidence boundary. A code-owned canonical scan-root observation is required;

@@ -30,6 +30,10 @@ final class DuxAutomaticTerminationLease {
         guard isHeld else {
             return
         }
+        // AppKit can reset the support flag while it tears down and restores
+        // MenuBarExtra's transient window. Re-enable support before renewing
+        // the disable lease so closing the popover cannot terminate DUX.
+        controller.automaticTerminationSupportEnabled = true
         controller.disableAutomaticTermination(Self.reason)
     }
 
