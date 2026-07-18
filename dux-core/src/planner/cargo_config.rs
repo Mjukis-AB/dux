@@ -1,38 +1,41 @@
-//! Bounded negative Cargo-configuration observation for one retained tree.
+//! Bounded Cargo 1.96 configuration provenance for one retained tree.
 //!
-//! Cargo 1.96 does not report the configuration files it opened. Until DUX has
-//! a directly attested positive-config transport, production accepts only the
-//! state observed absent at every file-based lookup before and after metadata.
-//! Project and existing non-Cargo-home lookup mutations are fenced; broader
-//! transient create-remove remains an explicit non-authoritative limitation.
+//! The pinned executable emits one fixed tracing record immediately before
+//! every configuration-file read. DUX independently captures the same bounded
+//! discovery/include closure, fences its exact bytes, and requires the ordered
+//! intent records to agree. This remains path-intent inference, not kernel
+//! proof of which inode Cargo opened.
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
+use super::cargo_config_closure::{CargoConfigurationFileClosure, ObservedCargoConfigurationFile};
 use crate::path_validation::{
     CanonicalScanRoot, FilesystemIdentity, capture_scan_root, validate_scan_root,
 };
 
-const CONFIG_POLICY_REVISION: u32 = 2;
+const CONFIG_POLICY_REVISION: u32 = 3;
 const MAX_CWD_ANCESTORS: usize = 64;
-const MAX_WATCHED_DIRECTORIES: usize = 132;
-const MAX_NATIVE_PATH_BYTES: usize = 64 * 1024;
+const MAX_WATCHED_DIRECTORIES: usize = 512;
+const MAX_NATIVE_PATH_BYTES: usize = 128 * 1024;
 const CONFIG_NAMES: [&str; 2] = ["config", "config.toml"];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct LookupDirectory {
     parent: CanonicalScanRoot,
     cargo_directory: Option<CanonicalScanRoot>,
+    selected_config: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct ConfigAbsenceObservation {
+struct ConfigObservation {
     lookups: Vec<LookupDirectory>,
     separate_cargo_home: Option<CanonicalScanRoot>,
+    file_closure: CargoConfigurationFileClosure,
     closure_sha256: [u8; 32],
     watched_directories: Vec<WatchedDirectory>,
 }
@@ -43,12 +46,13 @@ struct WatchedDirectory {
     entry_changes_terminal: bool,
 }
 
-/// Sealed evidence for one bounded negative config observation. It is
-/// deliberately non-cloneable and cannot prove Cargo's exact read set.
+/// Sealed evidence for bounded positive configuration path intent and exact
+/// file bytes. It is deliberately non-cloneable and cannot prove Cargo's exact
+/// kernel read set.
 pub(super) struct CargoConfigurationGuard {
     project_root: CanonicalScanRoot,
     cargo_home: CanonicalScanRoot,
-    observation: ConfigAbsenceObservation,
+    observation: ConfigObservation,
     fence: platform::DirectoryMutationFence,
 }
 
@@ -56,12 +60,17 @@ pub(super) struct CargoConfigurationGuard {
 pub(super) struct CargoConfigurationEvidence {
     pub(super) policy_revision: u32,
     pub(super) lookup_count: u32,
+    pub(super) root_config_count: u32,
+    pub(super) config_file_count: u32,
+    pub(super) include_edge_count: u32,
+    pub(super) config_byte_count: u64,
     pub(super) closure_sha256: [u8; 32],
+    pub(super) read_intent_sha256: [u8; 32],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum CargoConfigurationError {
-    Present,
+    Unsupported,
     Changed,
     Unavailable,
 }
@@ -71,8 +80,11 @@ impl CargoConfigurationGuard {
         project_root: &CanonicalScanRoot,
         cargo_home: &CanonicalScanRoot,
     ) -> Result<Self, CargoConfigurationError> {
-        let observation = capture_absence(project_root, cargo_home)?;
-        let fence = platform::DirectoryMutationFence::new(&observation.watched_directories)?;
+        let observation = capture_observation(project_root, cargo_home)?;
+        let fence = platform::DirectoryMutationFence::new(
+            &observation.watched_directories,
+            observation.file_closure.files(),
+        )?;
         let guard = Self {
             project_root: project_root.clone(),
             cargo_home: cargo_home.clone(),
@@ -91,7 +103,7 @@ impl CargoConfigurationGuard {
         project_root: &CanonicalScanRoot,
         cargo_home: &CanonicalScanRoot,
     ) -> Result<Self, CargoConfigurationError> {
-        let observation = capture_absence(project_root, cargo_home)?;
+        let observation = capture_observation(project_root, cargo_home)?;
         Ok(Self {
             project_root: project_root.clone(),
             cargo_home: cargo_home.clone(),
@@ -106,9 +118,9 @@ impl CargoConfigurationGuard {
 
     pub(super) fn revalidate(&self) -> Result<(), CargoConfigurationError> {
         self.poll()?;
-        let current = match capture_absence(&self.project_root, &self.cargo_home) {
+        let current = match capture_observation(&self.project_root, &self.cargo_home) {
             Ok(current) => current,
-            Err(CargoConfigurationError::Present | CargoConfigurationError::Changed) => {
+            Err(CargoConfigurationError::Unsupported | CargoConfigurationError::Changed) => {
                 return Err(CargoConfigurationError::Changed);
             }
             Err(CargoConfigurationError::Unavailable) => {
@@ -131,15 +143,30 @@ impl CargoConfigurationGuard {
         Ok(CargoConfigurationEvidence {
             policy_revision: CONFIG_POLICY_REVISION,
             lookup_count,
+            root_config_count: u32::try_from(self.observation.file_closure.root_count())
+                .map_err(|_| CargoConfigurationError::Unavailable)?,
+            config_file_count: u32::try_from(self.observation.file_closure.file_count())
+                .map_err(|_| CargoConfigurationError::Unavailable)?,
+            include_edge_count: u32::try_from(self.observation.file_closure.include_edge_count())
+                .map_err(|_| CargoConfigurationError::Unavailable)?,
+            config_byte_count: u64::try_from(self.observation.file_closure.total_bytes())
+                .map_err(|_| CargoConfigurationError::Unavailable)?,
             closure_sha256: self.observation.closure_sha256,
+            read_intent_sha256: self.observation.file_closure.read_intent_sha256(),
         })
+    }
+
+    pub(super) fn verify_read_intent(&self, stderr: &[u8]) -> Result<(), CargoConfigurationError> {
+        self.poll()?;
+        self.observation.file_closure.verify_read_intent(stderr)?;
+        self.poll()
     }
 }
 
-fn capture_absence(
+fn capture_observation(
     project_root: &CanonicalScanRoot,
     cargo_home: &CanonicalScanRoot,
-) -> Result<ConfigAbsenceObservation, CargoConfigurationError> {
+) -> Result<ConfigObservation, CargoConfigurationError> {
     let current_project = capture_exact_directory(project_root.canonical_path())?;
     let current_cargo_home = capture_exact_directory(cargo_home.canonical_path())?;
     if &current_project != project_root || &current_cargo_home != cargo_home {
@@ -152,6 +179,7 @@ fn capture_absence(
     platform::review_directory(&current_cargo_home)?;
 
     let mut lookups = Vec::new();
+    let mut root_configs = Vec::new();
     let mut native_path_bytes = 0_usize;
     for ancestor_path in project_root.canonical_path().ancestors() {
         if lookups.len() == MAX_CWD_ANCESTORS {
@@ -163,13 +191,23 @@ fn capture_absence(
         let cargo_path = ancestor_path.join(".cargo");
         charge_path(&mut native_path_bytes, &cargo_path)?;
         let cargo_directory = capture_optional_exact_directory(&cargo_path)?;
-        if let Some(directory) = cargo_directory.as_ref() {
+        let selected_config = if let Some(directory) = cargo_directory.as_ref() {
             platform::review_directory(directory)?;
-            require_config_absent(directory.canonical_path(), &mut native_path_bytes)?;
+            let selected = select_config_file(directory.canonical_path(), &mut native_path_bytes)?;
+            if selected.is_some() && directory.identity() == cargo_home.identity() {
+                return Err(CargoConfigurationError::Unsupported);
+            }
+            selected
+        } else {
+            None
+        };
+        if let Some(path) = selected_config.as_ref() {
+            root_configs.push(path.clone());
         }
         lookups.push(LookupDirectory {
             parent,
             cargo_directory,
+            selected_config,
         });
     }
 
@@ -183,16 +221,29 @@ fn capture_absence(
         None
     } else {
         charge_path(&mut native_path_bytes, cargo_home.canonical_path())?;
-        require_config_absent(cargo_home.canonical_path(), &mut native_path_bytes)?;
+        if select_config_file(cargo_home.canonical_path(), &mut native_path_bytes)?.is_some() {
+            return Err(CargoConfigurationError::Unsupported);
+        }
         Some(cargo_home.clone())
     };
 
-    let watched_directories = watched_directories(&lookups, &current_cargo_home)?;
-    let closure_sha256 =
-        digest_observation(&lookups, separate_cargo_home.as_ref(), &watched_directories);
-    Ok(ConfigAbsenceObservation {
+    let file_closure = if root_configs.is_empty() {
+        CargoConfigurationFileClosure::empty()
+    } else {
+        CargoConfigurationFileClosure::capture(&root_configs)?
+    };
+    let watched_directories =
+        watched_directories(&lookups, &current_cargo_home, file_closure.files())?;
+    let closure_sha256 = digest_observation(
+        &lookups,
+        separate_cargo_home.as_ref(),
+        &file_closure,
+        &watched_directories,
+    );
+    Ok(ConfigObservation {
         lookups,
         separate_cargo_home,
+        file_closure,
         closure_sha256,
         watched_directories,
     })
@@ -223,20 +274,30 @@ fn capture_exact_directory(path: &Path) -> Result<CanonicalScanRoot, CargoConfig
     capture_scan_root(lexical).map_err(|_| CargoConfigurationError::Unavailable)
 }
 
-fn require_config_absent(
+fn select_config_file(
     directory: &Path,
     native_path_bytes: &mut usize,
-) -> Result<(), CargoConfigurationError> {
+) -> Result<Option<PathBuf>, CargoConfigurationError> {
+    let mut present = Vec::new();
     for name in CONFIG_NAMES {
         let config = directory.join(name);
         charge_path(native_path_bytes, &config)?;
-        match fs::symlink_metadata(config) {
-            Ok(_) => return Err(CargoConfigurationError::Present),
+        match fs::symlink_metadata(&config) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() || !metadata.is_file() {
+                    return Err(CargoConfigurationError::Unsupported);
+                }
+                present.push(config);
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(_) => return Err(CargoConfigurationError::Unavailable),
         }
     }
-    Ok(())
+    match present.as_slice() {
+        [] => Ok(None),
+        [path] => Ok(Some(path.clone())),
+        _ => Err(CargoConfigurationError::Unsupported),
+    }
 }
 
 fn charge_path(total: &mut usize, path: &Path) -> Result<(), CargoConfigurationError> {
@@ -252,6 +313,7 @@ fn charge_path(total: &mut usize, path: &Path) -> Result<(), CargoConfigurationE
 fn watched_directories(
     lookups: &[LookupDirectory],
     cargo_home: &CanonicalScanRoot,
+    config_files: &[ObservedCargoConfigurationFile],
 ) -> Result<Vec<WatchedDirectory>, CargoConfigurationError> {
     let mut by_identity = BTreeMap::<(u64, u128), WatchedDirectory>::new();
     let project_root = lookups
@@ -259,9 +321,8 @@ fn watched_directories(
         .ok_or(CargoConfigurationError::Unavailable)?
         .parent
         .clone();
-    let project_identity = project_root.identity();
-    by_identity.insert(
-        (project_identity.volume(), project_identity.object()),
+    insert_watched_directory(
+        &mut by_identity,
         WatchedDirectory {
             directory: project_root,
             entry_changes_terminal: true,
@@ -272,21 +333,41 @@ fn watched_directories(
         .filter_map(|lookup| lookup.cargo_directory.as_ref())
     {
         let identity = directory.identity();
-        by_identity
-            .entry((identity.volume(), identity.object()))
-            .or_insert_with(|| WatchedDirectory {
+        insert_watched_directory(
+            &mut by_identity,
+            WatchedDirectory {
                 directory: directory.clone(),
                 entry_changes_terminal: identity != cargo_home.identity(),
-            });
+            },
+        );
     }
-    let cargo_home_identity = cargo_home.identity();
-    by_identity.insert(
-        (cargo_home_identity.volume(), cargo_home_identity.object()),
+    for file in config_files {
+        for (index, ancestor_path) in file.parent().canonical_path().ancestors().enumerate() {
+            let directory = if index == 0 {
+                file.parent().clone()
+            } else {
+                capture_exact_directory(ancestor_path)?
+            };
+            platform::review_directory(&directory)?;
+            insert_watched_directory(
+                &mut by_identity,
+                WatchedDirectory {
+                    directory,
+                    // Only the direct parent can replace this exact file.
+                    // Higher ancestors need rename/delete continuity without
+                    // treating unrelated sibling writes as terminal.
+                    entry_changes_terminal: index == 0,
+                },
+            );
+        }
+    }
+    insert_watched_directory(
+        &mut by_identity,
         WatchedDirectory {
             directory: cargo_home.clone(),
             // Cargo legitimately updates locks and caches in its home during
-            // metadata. Persistent config appearance is still caught by the
-            // full before/after absence observation.
+            // metadata. A directly included file in Cargo home upgrades this
+            // directory to strict entry-change handling above.
             entry_changes_terminal: false,
         },
     );
@@ -296,17 +377,40 @@ fn watched_directories(
     Ok(by_identity.into_values().collect())
 }
 
+fn insert_watched_directory(
+    by_identity: &mut BTreeMap<(u64, u128), WatchedDirectory>,
+    watched: WatchedDirectory,
+) {
+    let identity = watched.directory.identity();
+    by_identity
+        .entry((identity.volume(), identity.object()))
+        .and_modify(|existing| {
+            existing.entry_changes_terminal |= watched.entry_changes_terminal;
+        })
+        .or_insert(watched);
+}
+
 fn digest_observation(
     lookups: &[LookupDirectory],
     cargo_home: Option<&CanonicalScanRoot>,
+    file_closure: &CargoConfigurationFileClosure,
     watched_directories: &[WatchedDirectory],
 ) -> [u8; 32] {
     let mut digest = Sha256::new();
-    digest.update(b"dux-cargo-config-absence-v2\0");
+    digest.update(b"dux-cargo-config-closure-v3\0");
     for lookup in lookups {
         digest_directory(&mut digest, 1, &lookup.parent);
         match lookup.cargo_directory.as_ref() {
             Some(directory) => digest_directory(&mut digest, 2, directory),
+            None => digest.update([0]),
+        }
+        match lookup.selected_config.as_ref() {
+            Some(path) => {
+                digest.update([1]);
+                let bytes = path.as_os_str().as_bytes();
+                digest.update((bytes.len() as u64).to_le_bytes());
+                digest.update(bytes);
+            }
             None => digest.update([0]),
         }
     }
@@ -314,6 +418,8 @@ fn digest_observation(
         Some(directory) => digest_directory(&mut digest, 3, directory),
         None => digest.update([0xff]),
     }
+    digest.update(file_closure.digest_sha256());
+    digest.update(file_closure.read_intent_sha256());
     digest.update((watched_directories.len() as u64).to_le_bytes());
     for watched in watched_directories {
         digest_directory(&mut digest, 4, &watched.directory);
@@ -337,6 +443,8 @@ fn digest_identity(digest: &mut Sha256, identity: FilesystemIdentity) {
 
 #[cfg(target_os = "macos")]
 mod platform {
+    use std::fs;
+    use std::mem::MaybeUninit;
     use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 
     use nix::fcntl::{FcntlArg, FdFlag, OFlag, fcntl, open};
@@ -346,11 +454,15 @@ mod platform {
     use nix::sys::stat::{Mode, fstat};
     use nix::sys::statfs::fstatfs;
 
-    use super::{CanonicalScanRoot, CargoConfigurationError, WatchedDirectory};
+    use super::{
+        CanonicalScanRoot, CargoConfigurationError, ObservedCargoConfigurationFile,
+        WatchedDirectory,
+    };
 
     pub(super) struct DirectoryMutationFence {
         queue: Kqueue,
         _directories: Vec<OwnedFd>,
+        _files: Vec<OwnedFd>,
     }
 
     pub(super) fn review_directory(
@@ -369,12 +481,21 @@ mod platform {
             Self {
                 queue,
                 _directories: Vec::new(),
+                _files: Vec::new(),
             }
         }
 
         pub(super) fn new(
             expected_directories: &[WatchedDirectory],
+            expected_files: &[ObservedCargoConfigurationFile],
         ) -> Result<Self, CargoConfigurationError> {
+            require_descriptor_budget(
+                expected_directories
+                    .len()
+                    .checked_add(expected_files.len())
+                    .and_then(|count| count.checked_add(1))
+                    .ok_or(CargoConfigurationError::Unavailable)?,
+            )?;
             let queue = Kqueue::new().map_err(|_| CargoConfigurationError::Unavailable)?;
             fcntl(&queue, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC))
                 .map_err(|_| CargoConfigurationError::Unavailable)?;
@@ -382,7 +503,11 @@ mod platform {
             for expected in expected_directories {
                 directories.push(open_watch_directory(&expected.directory)?);
             }
-            let changes: Vec<KEvent> = directories
+            let mut files = Vec::with_capacity(expected_files.len());
+            for expected in expected_files {
+                files.push(open_watch_file(expected)?);
+            }
+            let mut changes: Vec<KEvent> = directories
                 .iter()
                 .zip(expected_directories)
                 .map(|(directory, expected)| {
@@ -401,6 +526,22 @@ mod platform {
                     )
                 })
                 .collect();
+            changes.extend(files.iter().map(|file| {
+                KEvent::new(
+                    file.as_raw_fd() as usize,
+                    EventFilter::EVFILT_VNODE,
+                    EvFlags::EV_ADD | EvFlags::EV_ENABLE | EvFlags::EV_CLEAR,
+                    FilterFlag::NOTE_DELETE
+                        | FilterFlag::NOTE_WRITE
+                        | FilterFlag::NOTE_EXTEND
+                        | FilterFlag::NOTE_ATTRIB
+                        | FilterFlag::NOTE_LINK
+                        | FilterFlag::NOTE_RENAME
+                        | FilterFlag::NOTE_REVOKE,
+                    0,
+                    0,
+                )
+            }));
             let mut events = vec![empty_event(); changes.len().max(1)];
             let count = queue
                 .kevent(&changes, &mut events, Some(zero_timeout()))
@@ -417,6 +558,7 @@ mod platform {
             Ok(Self {
                 queue,
                 _directories: directories,
+                _files: files,
             })
         }
 
@@ -453,6 +595,64 @@ mod platform {
         Ok(directory)
     }
 
+    fn open_watch_file(
+        expected: &ObservedCargoConfigurationFile,
+    ) -> Result<OwnedFd, CargoConfigurationError> {
+        let file = open(
+            expected.path(),
+            OFlag::from_bits_retain(libc::O_EVTONLY) | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW,
+            Mode::empty(),
+        )
+        .map_err(|_| CargoConfigurationError::Unavailable)?;
+        require_reviewed_filesystem(&file)?;
+        let status = fstat(&file).map_err(|_| CargoConfigurationError::Unavailable)?;
+        let identity = expected.file().path().target_identity();
+        if status.st_dev as u64 != identity.volume()
+            || u128::from(status.st_ino) != identity.object()
+            || status.st_nlink != 1
+        {
+            return Err(CargoConfigurationError::Changed);
+        }
+        Ok(file)
+    }
+
+    fn require_descriptor_budget(retained: usize) -> Result<(), CargoConfigurationError> {
+        const RESERVE_FOR_PROCESS_AND_LAUNCH: u64 = 128;
+
+        let mut limit = MaybeUninit::<libc::rlimit>::zeroed();
+        if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, limit.as_mut_ptr()) } == -1 {
+            return Err(CargoConfigurationError::Unavailable);
+        }
+        let soft_limit = unsafe { limit.assume_init() }.rlim_cur;
+        if soft_limit == libc::RLIM_INFINITY {
+            return Ok(());
+        }
+        let open_descriptors = fs::read_dir("/dev/fd")
+            .map_err(|_| CargoConfigurationError::Unavailable)?
+            .try_fold(0_u64, |count, entry| {
+                entry
+                    .map(|_| count.saturating_add(1))
+                    .map_err(|_| CargoConfigurationError::Unavailable)
+            })?;
+        let retained = u64::try_from(retained).map_err(|_| CargoConfigurationError::Unavailable)?;
+        if descriptor_budget_fits(
+            open_descriptors,
+            retained,
+            RESERVE_FOR_PROCESS_AND_LAUNCH,
+            soft_limit,
+        ) {
+            Ok(())
+        } else {
+            Err(CargoConfigurationError::Unavailable)
+        }
+    }
+
+    fn descriptor_budget_fits(open: u64, retained: u64, reserve: u64, soft_limit: u64) -> bool {
+        open.checked_add(retained)
+            .and_then(|count| count.checked_add(reserve))
+            .is_some_and(|required| required <= soft_limit)
+    }
+
     fn require_reviewed_filesystem(descriptor: &impl AsFd) -> Result<(), CargoConfigurationError> {
         let status = fstatfs(descriptor).map_err(|_| CargoConfigurationError::Unavailable)?;
         if !status.filesystem_type_name().eq_ignore_ascii_case("apfs")
@@ -480,11 +680,27 @@ mod platform {
             tv_nsec: 0,
         }
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::descriptor_budget_fits;
+
+        #[test]
+        fn descriptor_budget_rejects_shortfall_and_overflow() {
+            assert!(descriptor_budget_fits(10, 20, 128, 158));
+            assert!(!descriptor_budget_fits(10, 20, 128, 157));
+            assert!(!descriptor_budget_fits(u64::MAX, 1, 0, u64::MAX));
+            assert!(!descriptor_budget_fits(u64::MAX - 1, 1, 1, u64::MAX));
+        }
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
 mod platform {
-    use super::{CanonicalScanRoot, CargoConfigurationError, WatchedDirectory};
+    use super::{
+        CanonicalScanRoot, CargoConfigurationError, ObservedCargoConfigurationFile,
+        WatchedDirectory,
+    };
 
     pub(super) struct DirectoryMutationFence;
 
@@ -502,6 +718,7 @@ mod platform {
 
         pub(super) fn new(
             _expected_directories: &[WatchedDirectory],
+            _expected_files: &[ObservedCargoConfigurationFile],
         ) -> Result<Self, CargoConfigurationError> {
             Ok(Self)
         }
@@ -533,7 +750,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_closure_is_stable_and_config_presence_is_typed() {
+    fn empty_closure_is_stable_and_cargo_home_config_is_unsupported() {
         let temp = TempDir::new().unwrap();
         let (project, cargo_home) = roots(&temp);
         let guard =
@@ -541,40 +758,46 @@ mod tests {
         let evidence = guard.evidence().unwrap();
         assert_eq!(evidence.policy_revision, CONFIG_POLICY_REVISION);
         assert!(evidence.lookup_count >= 2);
+        assert_eq!(evidence.root_config_count, 0);
+        assert_eq!(evidence.config_file_count, 0);
         assert_ne!(evidence.closure_sha256, [0; 32]);
 
         fs::write(cargo_home.canonical_path().join("config.toml"), "").unwrap();
         assert_eq!(guard.revalidate(), Err(CargoConfigurationError::Changed));
         assert_eq!(
             CargoConfigurationGuard::capture(&project, &cargo_home).err(),
-            Some(CargoConfigurationError::Present)
+            Some(CargoConfigurationError::Unsupported)
         );
     }
 
     #[test]
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "test removes only a TempDir-owned config fixture before checking the ancestor lookup"
-    )]
-    fn extensionless_project_and_outer_configs_are_rejected() {
+    fn extensionless_project_and_outer_configs_are_captured_but_dual_names_reject() {
         let temp = TempDir::new().unwrap();
         let (project, cargo_home) = roots(&temp);
         let cargo = project.canonical_path().join(".cargo");
         fs::create_dir(&cargo).unwrap();
-        fs::write(cargo.join("config"), "[build]").unwrap();
-        assert_eq!(
-            CargoConfigurationGuard::capture(&project, &cargo_home).err(),
-            Some(CargoConfigurationError::Present)
-        );
+        fs::write(cargo.join("config"), "[build]\ntarget-dir = \"target\"\n").unwrap();
+        let guard =
+            CargoConfigurationGuard::capture_unfenced_for_test(&project, &cargo_home).unwrap();
+        let evidence = guard.evidence().unwrap();
+        assert_eq!(evidence.root_config_count, 1);
+        assert_eq!(evidence.config_file_count, 1);
+        assert!(evidence.config_byte_count > 0);
 
-        // DUX-DESTRUCTIVE: allow=test-cargo-config-reset -- remove only the TempDir-owned project config so the same fixture can exercise the outer-ancestor lookup
-        fs::remove_file(cargo.join("config")).unwrap();
-        let outer = temp.path().join(".cargo");
+        let outer_temp = TempDir::new().unwrap();
+        let (outer_project, outer_cargo_home) = roots(&outer_temp);
+        let outer = outer_temp.path().join(".cargo");
         fs::create_dir(&outer).unwrap();
         fs::write(outer.join("config.toml"), "").unwrap();
+        let outer_guard =
+            CargoConfigurationGuard::capture_unfenced_for_test(&outer_project, &outer_cargo_home)
+                .unwrap();
+        assert_eq!(outer_guard.evidence().unwrap().root_config_count, 1);
+
+        fs::write(cargo.join("config.toml"), "").unwrap();
         assert_eq!(
             CargoConfigurationGuard::capture(&project, &cargo_home).err(),
-            Some(CargoConfigurationError::Present)
+            Some(CargoConfigurationError::Unsupported)
         );
     }
 
@@ -591,7 +814,8 @@ mod tests {
             directory: cargo_home.clone(),
             entry_changes_terminal: true,
         };
-        let fence = platform::DirectoryMutationFence::new(std::slice::from_ref(&watched)).unwrap();
+        let fence =
+            platform::DirectoryMutationFence::new(std::slice::from_ref(&watched), &[]).unwrap();
         let config = cargo_home.canonical_path().join("config.toml");
         fs::write(&config, "").unwrap();
         // DUX-DESTRUCTIVE: allow=test-cargo-config-transient-remove -- remove only the just-created TempDir-owned config to prove the vnode event remains terminal after restoration

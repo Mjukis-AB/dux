@@ -148,22 +148,44 @@ unsigned fake Cargo to exercise bounded subprocess failures, but it cannot be
 called by production planning authority. The sealed enrolled production entry
 described below requires exact durable trust and macOS static-code evidence.
 
-The production metadata entry now admits only a bounded negative Cargo 1.96
-file-configuration observation. It checks both the legacy extensionless `config`
-and `config.toml` at every `.cargo` directory Cargo would discover from the
-process cwd through its ancestors, followed by the exact Cargo home. Any
-present file rejects before metadata execution, so the observed configuration
-has no recursive `include` without reimplementing Cargo's TOML semantics. The
-observation is bounded to 64 cwd ancestors, 132 unique watched directories,
-and 64 KiB of native path material. Policy revision 2 records a SHA-256 closure
-digest that also binds which directories treat entry changes as terminal.
-Canonical identities and absence are revalidated around the process.
-On macOS, entry events are terminal for the project root and existing
-non-Cargo-home `.cargo` lookup directories. Higher ancestors whose `.cargo`
-entry is absent, and Cargo home where Cargo legitimately updates cache/lock
-entries, use exact before/after absence instead of treating every unrelated
-directory write as a configuration change. A transient create-remove in those
-locations is therefore an explicit remaining inference limit.
+The production metadata entry now admits a bounded positive Cargo 1.96
+file-configuration observation. It reproduces cwd-ancestor `.cargo` discovery
+in Cargo's order and accepts at most one of the legacy extensionless `config`
+or `config.toml` at each non-Cargo-home lookup. Dual names deliberately reject
+instead of relying on Cargo's legacy-name preference. Cargo-home configuration
+also remains unsupported. DUX parses only top-level `include` declarations
+with exact `toml` 1.1.2 and leaves all other values to Cargo. Required and
+present optional includes are followed in declaration-order depth-first;
+missing optional includes reject because their absence namespace is not yet
+fenced.
+
+Every root and include must be a canonical UTF-8, control-free, single-link
+regular file with no symlink or hard-link alias. Full bytes and SHA-256 come
+from one retained no-follow descriptor with before/open/after identity checks.
+The closure is bounded to 64 unique files, 128 include edges, 16 include
+levels, 1 MiB per file, 16 MiB total bytes, and 128 KiB of path material.
+Policy revision 3 binds lookup choice, root/read order, file identity/length/
+digest, include declarations, and exact directory-watch semantics.
+
+DUX requires exact reviewed commit
+`30a34c6821b57de0aaec83a901aca39f88f6778c`, whose source has a fixed trace
+event immediately before its
+[configuration-file read](https://github.com/rust-lang/cargo/blob/30a34c6821b57de0aaec83a901aca39f88f6778c/src/cargo/util/context/mod.rs#L1370-L1404).
+Both metadata passes set the fixed
+`CARGO_LOG=cargo::util::context=debug`; stderr is already bounded. DUX accepts
+only the pinned DEBUG record grammar and compares the complete ordered path
+sequence and domain-separated digest with its independently captured closure.
+Missing, reordered, extra, malformed, duplicated, or newline-spoofed records
+reject. This is positive path-intent evidence, not kernel proof that Cargo read
+the captured inode.
+
+On macOS, close-on-exec vnode watches retain every exact configuration file
+plus deduplicated ancestry through the filesystem root. Exact files and direct
+parents treat write/replace events as terminal; higher ancestors retain
+rename/delete continuity without failing on unrelated sibling writes. Higher
+ancestors whose `.cargo` entry is absent and Cargo home use exact before/after
+absence so unrelated directory/cache writes do not reject. A transient
+create-remove in those absent locations remains an explicit inference limit.
 
 The project cwd is also opened no-follow and retained. On macOS the production
 runner installs it with `posix_spawn_file_actions_addfchdir_np`; the descriptor
@@ -172,8 +194,8 @@ Descriptor and pathname identities are revalidated around launch. This removes
 pathname resolution from child cwd selection. Every config lookup directory
 must be local APFS; other, remote, virtual, and unprobeable filesystems reject.
 Kqueue is strong reviewed-filesystem change inference, not direct evidence of
-the exact config inode Cargo read. Positive configs and included files remain
-unattested. Either witness is still supporting evidence only: neither can
+the exact config inode Cargo read. Either witness is still supporting evidence
+only: neither can
 clear `ProtectedPath`, construct a plan, cross FFI, schedule, or execute.
 
 ## Workspace-member manifest closure
@@ -200,14 +222,17 @@ app and launch; insufficient `RLIMIT_NOFILE` rejects rather than silently
 dropping coverage. Configuration and workspace guards are rechecked before
 spawn and resume, throughout bounded output, after exact-child reaping, and
 before evidence extraction. Only a byte-identical, independently parsed second
-result is accepted. Resolution-policy revision 4 records the manifest policy,
-member and retained-manifest counts, closure digest, and accepted output
-digest.
+result is accepted. Resolution-policy revision 5 records the manifest policy,
+member and retained-manifest counts, closure digest, accepted-output digest,
+and configuration root/file/edge/byte plus read-intent evidence.
 
 This proves the exact reported root/member manifest bytes remained stable
-under the reviewed path-based inference model. It does not prove Cargo's full
-read set, workspace-glob namespace generations, the lockfile, excluded or path
-dependency manifests, or source/build files. It is not fd-based Cargo reads;
+under the reviewed path-based inference model. Cargo 1.96's exact
+`metadata --no-deps` code path deliberately does not load or create
+`Cargo.lock`; real-Cargo tests include a malformed lockfile to pin that
+version-specific behavior. DUX still does not prove Cargo's full read set,
+workspace-glob/target namespace generations, excluded ancestor workspace or
+external path-dependency manifests, or source/build files. It is not fd-based Cargo reads;
 kqueue remains event inference and same-UID/post-witness changes still require
 later guards. `ProtectedPath` and every authority edge remain unchanged.
 
@@ -218,7 +243,7 @@ without claiming an fd-based exec primitive that Darwin does not provide. DUX
 first opens vnode-event descriptors for the exact enrolled executable and each
 canonical ancestor through the filesystem root. Every watched object must be
 on local APFS. It then revalidates the full executable SHA-256, identity,
-single-link shape, cwd, and negative config closure before directly calling
+single-link shape, cwd, and config closure before directly calling
 the exact path with `posix_spawn`; it never uses `posix_spawnp` or `PATH`.
 
 The spawn attributes require `START_SUSPENDED`, a new process group,

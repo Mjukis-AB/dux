@@ -5,6 +5,26 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Continued Milestone 5 with positive, bounded Cargo 1.96 configuration and
+  include provenance. DUX discovers accepted project/ancestor config roots,
+  parses only their top-level include declarations with Cargo's exact TOML
+  1.1.2 parser generation, and captures every admitted single-link regular
+  file from one retained descriptor with strict file, graph, depth, aggregate,
+  and path bounds. Configuration policy 3 binds identities, full bytes,
+  include edges, root/read order, and exact lookup/watch semantics. Both fixed
+  metadata passes require the exact reviewed `30a34c6821b57de0aaec83a901aca39f88f6778c`
+  Cargo commit, enable its pinned `cargo::util::context` trace, and require
+  its complete ordered load intent to equal the independent closure; missing,
+  reordered, extra, malformed, and spoofed records reject. Exact local-APFS
+  file and ancestry vnode fences remain live throughout both passes, and
+  resolution policy 5 records the closure and intent evidence. Cargo-home
+  configs, ambiguous dual filenames, missing optional includes, aliases,
+  cycles, and unsupported paths fail closed. This is path-intent and
+  reviewed-filesystem stability evidence, not kernel proof of Cargo's exact
+  open file descriptors or its complete manifest/namespace read set. The
+  pinned `metadata --no-deps` path deliberately does not read or create
+  `Cargo.lock`; real-Cargo tests lock that version-specific assumption. No
+  cleanup authority or `ProtectedPath` change was added.
 - Continued Milestone 5 with guarded two-pass Cargo workspace-manifest
   provenance. DUX strictly validates a bounded non-empty one-to-one local
   package/member declaration, includes virtual roots, captures every exact

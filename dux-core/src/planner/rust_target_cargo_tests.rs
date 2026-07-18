@@ -94,6 +94,19 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
+fn cargo_config_trace_lines(paths: &[&Path]) -> String {
+    paths
+        .iter()
+        .enumerate()
+        .map(|(index, path)| {
+            let line = format!(
+                "   0.{index:09}s DEBUG cargo::util::context: load config from file path={path:?} why_load=FileDiscovery includes=true"
+            );
+            format!("    printf '%s\\n' {} >&2\n", shell_quote(&line))
+        })
+        .collect()
+}
+
 fn metadata_json(workspace_root: &Path, target_directory: &Path) -> String {
     let package_id = "fixture 0.1.0 (path+file:///fixture)";
     serde_json::to_string(&json!({
@@ -117,7 +130,7 @@ fn metadata_json(workspace_root: &Path, target_directory: &Path) -> String {
 fn valid_metadata_action(fixture: &Fixture) -> String {
     let document = metadata_json(fixture.manifest.parent().unwrap(), &fixture.target);
     format!(
-        "  [ \"$#\" -eq 10 ] || exit 70\n  [ \"$2\" = \"--format-version\" ] || exit 71\n  [ \"$3\" = \"1\" ] || exit 72\n  [ \"$4\" = \"--no-deps\" ] || exit 73\n  [ \"$5\" = \"--locked\" ] || exit 74\n  [ \"$6\" = \"--offline\" ] || exit 75\n  [ \"$7\" = \"--quiet\" ] || exit 76\n  [ \"$8\" = \"--color=never\" ] || exit 77\n  [ \"$9\" = \"--manifest-path\" ] || exit 78\n  [ \"${{10}}\" = {} ] || exit 79\n  [ \"$PWD\" = {} ] || exit 80\n  [ -n \"$HOME\" ] && [ -n \"$CARGO_HOME\" ] && [ -n \"$TMPDIR\" ] || exit 81\n  [ \"$PATH\" = \"/dev/null\" ] || exit 82\n  [ -z \"${{RUSTUP_TOOLCHAIN+x}}\" ] && [ -z \"${{CARGO_TARGET_DIR+x}}\" ] || exit 83\n  project-helper >/dev/null 2>&1 && exit 84\n  printf %s {}\n  exit 0",
+        "  [ \"$#\" -eq 10 ] || exit 70\n  [ \"$2\" = \"--format-version\" ] || exit 71\n  [ \"$3\" = \"1\" ] || exit 72\n  [ \"$4\" = \"--no-deps\" ] || exit 73\n  [ \"$5\" = \"--locked\" ] || exit 74\n  [ \"$6\" = \"--offline\" ] || exit 75\n  [ \"$7\" = \"--quiet\" ] || exit 76\n  [ \"$8\" = \"--color=never\" ] || exit 77\n  [ \"$9\" = \"--manifest-path\" ] || exit 78\n  [ \"${{10}}\" = {} ] || exit 79\n  [ \"$PWD\" = {} ] || exit 80\n  [ -n \"$HOME\" ] && [ -n \"$CARGO_HOME\" ] && [ -n \"$TMPDIR\" ] || exit 81\n  [ \"$PATH\" = \"/dev/null\" ] || exit 82\n  [ -z \"${{RUSTUP_TOOLCHAIN+x}}\" ] && [ -z \"${{CARGO_TARGET_DIR+x}}\" ] || exit 83\n  [ \"$CARGO_LOG\" = \"cargo::util::context=debug\" ] || exit 84\n  project-helper >/dev/null 2>&1 && exit 85\n  printf %s {}\n  exit 0",
         shell_quote(fixture.manifest.to_str().unwrap()),
         shell_quote(fixture.manifest.parent().unwrap().to_str().unwrap()),
         shell_quote(&document),
@@ -162,16 +175,21 @@ fn fixed_command_environment_and_exact_metadata_create_only_observational_witnes
     );
     assert_ne!(witness.cargo_executable_parent_identity().object(), 0);
     assert_ne!(witness.metadata_sha256(), [0; 32]);
-    assert_eq!(witness.configuration_policy_revision(), 2);
+    assert_eq!(witness.configuration_policy_revision(), 3);
     assert!(witness.configuration_lookup_count() >= 2);
+    assert_eq!(witness.configuration_root_count(), 0);
+    assert_eq!(witness.configuration_file_count(), 0);
+    assert_eq!(witness.configuration_include_edge_count(), 0);
+    assert_eq!(witness.configuration_byte_count(), 0);
     assert_ne!(witness.configuration_closure_sha256(), [0; 32]);
+    assert_ne!(witness.configuration_read_intent_sha256(), [0; 32]);
     assert_eq!(witness.workspace_manifest_policy_revision(), 1);
     assert_eq!(witness.workspace_member_count(), 1);
     assert_eq!(witness.workspace_manifest_count(), 1);
     assert_ne!(witness.workspace_manifest_closure_sha256(), [0; 32]);
     assert_eq!(witness.launch_policy_revision(), 0);
     assert_eq!(witness.running_code_directory_hash_sha256(), [0; 32]);
-    assert_eq!(witness.resolution_policy_revision(), 4);
+    assert_eq!(witness.resolution_policy_revision(), 5);
     assert!(witness.live().protected_path_is_still_unresolved());
     assert_eq!(candidate.blockers(), [BlockReason::ProtectedPath]);
     assert!(!candidate.rule_marks_schedule_eligible());
@@ -424,6 +442,7 @@ fn nonzero_exit_invalid_version_symlink_and_executable_rewrite_are_rejected() {
         "cargo 1.96.1 (30a34c682 2026-05-25)\nrelease: 1.96.1\ncommit-hash: 30a34c6821b57de0aaec83a901aca39f88f6778c\nhost: aarch64-apple-darwin\n",
         "cargo 1.97.0 (30a34c682 2026-05-25)\nrelease: 1.97.0\ncommit-hash: 30a34c6821b57de0aaec83a901aca39f88f6778c\nhost: aarch64-apple-darwin\n",
         "cargo 1.96.0-nightly (30a34c682 2026-05-25)\nrelease: 1.96.0-nightly\ncommit-hash: 30a34c6821b57de0aaec83a901aca39f88f6778c\nhost: aarch64-apple-darwin\n",
+        "cargo 1.96.0 (000000000 2026-05-25)\nrelease: 1.96.0\ncommit-hash: 0000000000000000000000000000000000000000\nhost: aarch64-apple-darwin\n",
         "cargo 2.0.0\nrelease: 2.0.0\n",
     ] {
         let invalid_version = FakeCargo::with_version("  exit 9", version);
@@ -557,8 +576,45 @@ fn member_manifest_write_and_restore_during_accepted_pass_is_terminal() {
     }
 }
 
+#[cfg(target_os = "macos")]
 #[test]
-fn present_config_rejects_before_metadata_subprocess_execution() {
+fn included_config_write_and_restore_during_accepted_pass_is_terminal() {
+    let fixture = Fixture::new(CARGO_CACHE_TAG_SIGNATURE);
+    let project = fixture.manifest.parent().unwrap();
+    let config_directory = project.join(".cargo");
+    let root_config = config_directory.join("config.toml");
+    let included_config = config_directory.join("included.toml");
+    fs::create_dir(&config_directory).unwrap();
+    fs::write(&root_config, "include = [\"included.toml\"]\n").unwrap();
+    let original = "[term]\ncolor = \"never\"\n";
+    fs::write(&included_config, original).unwrap();
+
+    let document = metadata_json(project, &fixture.target);
+    let trace = cargo_config_trace_lines(&[&root_config, &included_config]);
+    let first_action = format!(
+        "{trace}    printf %s {}\n    exit 0",
+        shell_quote(&document)
+    );
+    let second_action = format!(
+        "    printf %s {} > {}\n    printf %s {} > {}\n{trace}    printf %s {}\n    exit 0",
+        shell_quote("[term]\ncolor = \"always\"\n"),
+        shell_quote(included_config.to_str().unwrap()),
+        shell_quote(original),
+        shell_quote(included_config.to_str().unwrap()),
+        shell_quote(&document),
+    );
+    let fake = FakeCargo::with_metadata_sequence(&first_action, &second_action);
+
+    let result =
+        validate_cargo_metadata_with_input_fences_for_test(live(&fixture), &fake.observe());
+    assert!(matches!(
+        result,
+        Err(CargoMetadataValidationError::CargoConfigurationChanged)
+    ));
+}
+
+#[test]
+fn ambiguous_dual_config_names_reject_before_metadata_subprocess_execution() {
     let fixture = Fixture::new(CARGO_CACHE_TAG_SIGNATURE);
     let sentinel = fixture.manifest.parent().unwrap().join("spawned");
     let fake = FakeCargo::new(&format!(
@@ -568,16 +624,17 @@ fn present_config_rejects_before_metadata_subprocess_execution() {
     let config = fixture.manifest.parent().unwrap().join(".cargo");
     fs::create_dir(&config).unwrap();
     fs::write(config.join("config"), "[build]\n").unwrap();
+    fs::write(config.join("config.toml"), "").unwrap();
 
     assert!(matches!(
         validate_cargo_metadata(live(&fixture), &fake.observe()),
-        Err(CargoMetadataValidationError::CargoConfigurationPresent)
+        Err(CargoMetadataValidationError::CargoConfigurationUnsupported)
     ));
     assert!(!sentinel.exists());
 }
 
 #[test]
-fn real_cargo_rejects_project_config_and_no_deps_does_not_create_lockfile() {
+fn real_cargo_attests_project_config_intent_and_no_deps_does_not_create_lockfile() {
     let Some(cargo) = direct_test_cargo() else {
         return;
     };
@@ -632,9 +689,35 @@ fn real_cargo_rejects_project_config_and_no_deps_does_not_create_lockfile() {
     .unwrap();
     assert!(matches!(
         validate_cargo_metadata(live(&configured), &observation),
-        Err(CargoMetadataValidationError::CargoConfigurationPresent)
+        Err(CargoMetadataValidationError::TargetDirectoryMismatch)
     ));
     assert!(!configured_sentinel.exists());
+
+    let included = Fixture::new(CARGO_CACHE_TAG_SIGNATURE);
+    let included_sentinel = prepare_real_package(&included, true);
+    let included_config = included.manifest.parent().unwrap().join(".cargo");
+    fs::create_dir(&included_config).unwrap();
+    fs::write(
+        included_config.join("config.toml"),
+        "include = [\"shared.toml\"]\n\n[build]\ntarget-dir = \"target\"\n",
+    )
+    .unwrap();
+    fs::write(
+        included_config.join("shared.toml"),
+        "[term]\ncolor = \"never\"\n",
+    )
+    .unwrap();
+    let included_witness =
+        validate_cargo_metadata_with_input_fences_for_test(live(&included), &observation).unwrap();
+    assert_eq!(included_witness.configuration_policy_revision(), 3);
+    assert_eq!(included_witness.configuration_root_count(), 1);
+    assert_eq!(included_witness.configuration_file_count(), 2);
+    assert_eq!(included_witness.configuration_include_edge_count(), 1);
+    assert!(included_witness.configuration_byte_count() > 0);
+    assert_ne!(included_witness.configuration_closure_sha256(), [0; 32]);
+    assert_ne!(included_witness.configuration_read_intent_sha256(), [0; 32]);
+    included_witness.release().unwrap();
+    assert!(!included_sentinel.exists());
 
     let unlocked = Fixture::new(CARGO_CACHE_TAG_SIGNATURE);
     let unlocked_sentinel = prepare_real_package(&unlocked, false);
@@ -642,6 +725,22 @@ fn real_cargo_rejects_project_config_and_no_deps_does_not_create_lockfile() {
     let _witness = validate_cargo_metadata(live(&unlocked), &observation).unwrap();
     assert!(!lockfile.exists());
     assert!(!unlocked_sentinel.exists());
+
+    // The exact enrolled Cargo 1.96 metadata --no-deps path does not load the
+    // lockfile. Keep that version-specific assumption executable: a malformed
+    // lockfile is deliberately outside this slice's claimed input closure.
+    let malformed_lock = Fixture::new(CARGO_CACHE_TAG_SIGNATURE);
+    let malformed_sentinel = prepare_real_package(&malformed_lock, false);
+    fs::write(
+        malformed_lock.manifest.parent().unwrap().join("Cargo.lock"),
+        "this is not a Cargo lockfile\n",
+    )
+    .unwrap();
+    let malformed_witness =
+        validate_cargo_metadata_with_input_fences_for_test(live(&malformed_lock), &observation)
+            .unwrap();
+    malformed_witness.release().unwrap();
+    assert!(!malformed_sentinel.exists());
 }
 
 #[test]
@@ -678,7 +777,7 @@ fn real_cargo_attests_virtual_root_and_every_workspace_member_manifest() {
     assert_eq!(witness.workspace_member_count(), 2);
     assert_eq!(witness.workspace_manifest_count(), 3);
     assert_ne!(witness.workspace_manifest_closure_sha256(), [0; 32]);
-    assert_eq!(witness.resolution_policy_revision(), 4);
+    assert_eq!(witness.resolution_policy_revision(), 5);
     witness.release().unwrap();
 }
 

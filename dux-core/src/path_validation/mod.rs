@@ -75,9 +75,10 @@ use windows as platform;
 
 #[allow(unused_imports)]
 pub(crate) use filesystem::{
-    CanonicalFileDigestError, CanonicalFileDigestSnapshot, CanonicalFilePrefixError,
-    CanonicalFilePrefixSnapshot, capture_path_snapshot, capture_regular_file_prefix,
-    capture_regular_file_sha256, capture_scan_root,
+    CanonicalFileContentsSnapshot, CanonicalFileDigestError, CanonicalFileDigestSnapshot,
+    CanonicalFilePrefixError, CanonicalFilePrefixSnapshot, capture_path_snapshot,
+    capture_regular_file_contents, capture_regular_file_prefix, capture_regular_file_sha256,
+    capture_scan_root,
 };
 #[allow(unused_imports)]
 pub(crate) use lexical::{validate_cleanup_path, validate_scan_root};

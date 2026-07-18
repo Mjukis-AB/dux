@@ -4142,7 +4142,33 @@ Tasks:
       kqueue remains event inference and post-witness mutation still requires
       executor-time revalidation. No blocker, plan, FFI, schedule, or effect
       authority was added.
-    Direct positive Cargo config/include read attestation and all remaining
+    - [x] 2026-07-18 slice: attest a bounded positive Cargo 1.96
+      configuration/include closure and exact ordered path intent. DUX now
+      accepts unambiguous project/ancestor config roots, independently parses
+      only their top-level includes with Cargo's exact TOML 1.1.2 generation,
+      and reads each canonical UTF-8, single-link regular file from one retained
+      descriptor. Policy 3 binds full bytes, identities, root/read order,
+      include edges, lookup selection, and watch semantics under 64-file,
+      128-edge, 16-depth, 1-MiB/file, 16-MiB aggregate, and path bounds. Both
+      fixed metadata passes require exact reviewed commit `30a34c6821b57de0aaec83a901aca39f88f6778c`,
+      enable only its pinned Cargo context trace, and
+      require every exact pre-read path record to equal the independent closure
+      in count and order; missing, extra, reordered, malformed, duplicated, and
+      newline-spoofed records fail closed. Exact config-file and complete-
+      ancestry local-APFS vnode fences bracket both passes and detect
+      write/restore; resolution policy 5 records file/edge/byte, closure, and
+      intent evidence. Cargo-home config, dual names, aliases, cycles, missing
+      optional includes, and unsupported paths reject. Real Cargo tests cover
+      an included config and pin the reviewed fact that 1.96
+      `metadata --no-deps` neither reads malformed `Cargo.lock` nor creates a
+      missing one. This is path-intent plus reviewed-filesystem stability, not
+      kernel proof of the descriptor Cargo opened. Higher absent lookup
+      create/remove, excluded ancestor workspace and external path-dependency
+      manifests, workspace/target/glob namespaces, source/build inputs, and
+      post-witness changes remain outside the proof. No blocker, plan, FFI,
+      scheduling, or effect authority was added.
+    Kernel-level Cargo read identity, complete remaining Cargo manifest and
+    namespace provenance, and all remaining
     protected-root, volume, process, descendant, plan, and executor grants are
     still open.
 - [ ] Implement candidate groups and overlap resolution.

@@ -4497,6 +4497,7 @@ fn map_direct_cargo_validation_error(
         | Error::CargoEnrollmentChanged
         | Error::CargoWorkingDirectoryChanged
         | Error::WorkspaceManifestChanged
+        | Error::CargoConfigurationChanged
         | Error::LiveEvidenceChanged
         | Error::Filesystem(_)
         | Error::FileDigest(_) => DirectCargoEnrollmentError::ChangedDuringInspection,
@@ -4508,14 +4509,13 @@ fn map_direct_cargo_validation_error(
         Error::Spawn { .. }
         | Error::PipeConfiguration
         | Error::OutputRead { .. }
+        | Error::CargoConfigurationUnsupported
+        | Error::CargoConfigurationUnavailable
         | Error::ProcessFailed => DirectCargoEnrollmentError::InspectionUnavailable,
         Error::Timeout | Error::OutputLimit { .. } => {
             DirectCargoEnrollmentError::InspectionLimitExceeded
         }
         Error::CargoNotEnrolled
-        | Error::CargoConfigurationPresent
-        | Error::CargoConfigurationChanged
-        | Error::CargoConfigurationUnavailable
         | Error::InvalidMetadata
         | Error::InvalidWorkspaceMembers
         | Error::WorkspaceManifestUnavailable

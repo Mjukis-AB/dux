@@ -229,6 +229,14 @@ pub(crate) struct CanonicalFileDigestSnapshot {
     sha256: [u8; 32],
 }
 
+/// Bounded full bytes read from the same exact regular-file descriptor as the
+/// accompanying identity and digest snapshot.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CanonicalFileContentsSnapshot {
+    file: CanonicalFileDigestSnapshot,
+    contents: Vec<u8>,
+}
+
 impl CanonicalFileDigestSnapshot {
     pub(crate) fn path(&self) -> &CanonicalPathSnapshot {
         &self.path
@@ -240,6 +248,16 @@ impl CanonicalFileDigestSnapshot {
 
     pub(crate) fn sha256(&self) -> [u8; 32] {
         self.sha256
+    }
+}
+
+impl CanonicalFileContentsSnapshot {
+    pub(crate) fn file(&self) -> &CanonicalFileDigestSnapshot {
+        &self.file
+    }
+
+    pub(crate) fn contents(&self) -> &[u8] {
+        &self.contents
     }
 }
 
@@ -471,6 +489,72 @@ pub(crate) fn capture_regular_file_sha256(
         path: after,
         byte_length: byte_length as u64,
         sha256: digest.finalize().into(),
+    })
+}
+
+pub(crate) fn capture_regular_file_contents(
+    root: &CanonicalScanRoot,
+    target: LexicalCleanupPath,
+    maximum_bytes: usize,
+) -> Result<CanonicalFileContentsSnapshot, CanonicalFileDigestError> {
+    if maximum_bytes == 0 {
+        return Err(CanonicalFileDigestError::InvalidLength);
+    }
+
+    let before = capture_path_snapshot(root, target.clone())?;
+    if before.target_kind != FilesystemEntryKind::RegularFile {
+        return Err(CanonicalPathError::UnsupportedTargetKind.into());
+    }
+    let (mut file, opened) =
+        platform::open_regular_descendant(root.canonical_path(), target.relative_to_scan_root())?;
+    if opened.identity != before.target_identity
+        || opened.kind != before.target_kind
+        || opened.hard_link_count != before.hard_link_count
+    {
+        return Err(CanonicalPathError::ChangedDuringValidation {
+            component_index: before.ancestors.len(),
+        }
+        .into());
+    }
+
+    let mut contents = Vec::new();
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 16 * 1024];
+    loop {
+        let count = file
+            .read(&mut buffer)
+            .map_err(|source| CanonicalFileDigestError::Read {
+                kind: source.kind(),
+                source,
+            })?;
+        if count == 0 {
+            break;
+        }
+        let byte_length = contents
+            .len()
+            .checked_add(count)
+            .ok_or(CanonicalFileDigestError::TooLarge)?;
+        if byte_length > maximum_bytes {
+            return Err(CanonicalFileDigestError::TooLarge);
+        }
+        contents.extend_from_slice(&buffer[..count]);
+        digest.update(&buffer[..count]);
+    }
+
+    let after = capture_path_snapshot(root, target)?;
+    if before != after {
+        return Err(CanonicalPathError::ChangedDuringValidation {
+            component_index: before.ancestors.len(),
+        }
+        .into());
+    }
+    Ok(CanonicalFileContentsSnapshot {
+        file: CanonicalFileDigestSnapshot {
+            path: after,
+            byte_length: contents.len() as u64,
+            sha256: digest.finalize().into(),
+        },
+        contents,
     })
 }
 

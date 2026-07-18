@@ -48,13 +48,14 @@ use crate::persistence::{
 const VERSION_STDOUT_LIMIT: usize = 16 * 1024;
 const VERSION_STDERR_LIMIT: usize = 16 * 1024;
 const METADATA_STDOUT_LIMIT: usize = 8 * 1024 * 1024;
-const METADATA_STDERR_LIMIT: usize = 64 * 1024;
+const METADATA_STDERR_LIMIT: usize = 512 * 1024;
 const VERSION_TIMEOUT: Duration = Duration::from_secs(5);
 const METADATA_TIMEOUT: Duration = Duration::from_secs(10);
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(2);
 const MAX_CARGO_EXECUTABLE_BYTES: usize = 256 * 1024 * 1024;
-const CARGO_RESOLUTION_POLICY_REVISION: u32 = 4;
+const CARGO_RESOLUTION_POLICY_REVISION: u32 = 5;
 const MAX_PACKAGE_ID_BYTES: usize = 4 * 1024;
+const CARGO_ENROLLMENT_SUPPORTED_COMMIT: &str = "30a34c6821b57de0aaec83a901aca39f88f6778c";
 
 /// Static executable evidence captured without executing untrusted bytes.
 struct CargoExecutableStaticObservation {
@@ -248,8 +249,8 @@ pub(crate) enum CargoMetadataValidationError {
     WorkspaceManifestUnavailable,
     #[error("Cargo workspace manifests changed during metadata resolution")]
     WorkspaceManifestChanged,
-    #[error("Cargo configuration is present and cannot yet be directly attested")]
-    CargoConfigurationPresent,
+    #[error("Cargo configuration is outside the bounded positive provenance profile")]
+    CargoConfigurationUnsupported,
     #[error("Cargo configuration discovery state changed during resolution")]
     CargoConfigurationChanged,
     #[error("Cargo configuration discovery state could not be bounded")]
@@ -281,7 +282,7 @@ impl From<RustTargetLiveValidationError> for CargoMetadataValidationError {
 impl From<CargoConfigurationError> for CargoMetadataValidationError {
     fn from(error: CargoConfigurationError) -> Self {
         match error {
-            CargoConfigurationError::Present => Self::CargoConfigurationPresent,
+            CargoConfigurationError::Unsupported => Self::CargoConfigurationUnsupported,
             CargoConfigurationError::Changed => Self::CargoConfigurationChanged,
             CargoConfigurationError::Unavailable => Self::CargoConfigurationUnavailable,
         }
@@ -659,6 +660,7 @@ fn validate_cargo_metadata_with_limits(
         },
     )?;
     require_success(&discovery_output)?;
+    configuration.verify_read_intent(&discovery_output.stderr)?;
     let (discovery_metadata, discovery_workspace) =
         parse_metadata_document(&discovery_output.stdout, &live)?;
     let workspace = match configuration_fence {
@@ -686,6 +688,7 @@ fn validate_cargo_metadata_with_limits(
         },
     )?;
     require_success(&output)?;
+    configuration.verify_read_intent(&output.stderr)?;
     let (metadata, accepted_workspace) = parse_metadata_document(&output.stdout, &live)?;
     if output.stdout != discovery_output.stdout
         || metadata != discovery_metadata
@@ -1129,8 +1132,7 @@ fn parse_cargo_release(bytes: &[u8]) -> Result<CargoRelease, CargoMetadataValida
             first_release.minor,
             first_release.patch,
         ] != CARGO_ENROLLMENT_SUPPORTED_RELEASE
-        || commit_hash.len() != 40
-        || !commit_hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || commit_hash != CARGO_ENROLLMENT_SUPPORTED_COMMIT
         || !supported_cargo_host(host)
     {
         return Err(CargoMetadataValidationError::InvalidCargoVersion);
@@ -1292,6 +1294,7 @@ fn run_cargo_portable(
         .env("LANG", "C")
         .env("CARGO_NET_OFFLINE", "true")
         .env("CARGO_TERM_COLOR", "never")
+        .env("CARGO_LOG", "cargo::util::context=debug")
         .process_group(0);
     let directory_fd = current_directory.raw_fd();
     // SAFETY: `fchdir` is async-signal-safe and the descriptor remains owned
@@ -1744,8 +1747,28 @@ impl RustTargetCargoMetadataWitness {
         self.configuration.lookup_count
     }
 
+    pub(super) fn configuration_root_count(&self) -> u32 {
+        self.configuration.root_config_count
+    }
+
+    pub(super) fn configuration_file_count(&self) -> u32 {
+        self.configuration.config_file_count
+    }
+
+    pub(super) fn configuration_include_edge_count(&self) -> u32 {
+        self.configuration.include_edge_count
+    }
+
+    pub(super) fn configuration_byte_count(&self) -> u64 {
+        self.configuration.config_byte_count
+    }
+
     pub(super) fn configuration_closure_sha256(&self) -> [u8; 32] {
         self.configuration.closure_sha256
+    }
+
+    pub(super) fn configuration_read_intent_sha256(&self) -> [u8; 32] {
+        self.configuration.read_intent_sha256
     }
 
     pub(super) fn workspace_manifest_policy_revision(&self) -> u32 {

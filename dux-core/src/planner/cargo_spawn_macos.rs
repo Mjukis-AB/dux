@@ -566,6 +566,7 @@ fn environment_vector(
         b"LANG=C",
         b"CARGO_NET_OFFLINE=true",
         b"CARGO_TERM_COLOR=never",
+        b"CARGO_LOG=cargo::util::context=debug",
     ] {
         result.push(CString::new(value).expect("fixed Cargo environment contains no NUL"));
     }

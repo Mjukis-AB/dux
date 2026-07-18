@@ -291,11 +291,6 @@ EXCEPTIONS = {
         "rust-process-spawn",
         "test:closed_standard_descriptors_cannot_alias_the_retained_cwd",
     ),
-    "test-cargo-config-reset": ExceptionSpec(
-        "dux-core/src/planner/cargo_config.rs",
-        "rust-filesystem-effect",
-        "test:extensionless_project_and_outer_configs_are_rejected",
-    ),
     "test-cargo-config-transient-remove": ExceptionSpec(
         "dux-core/src/planner/cargo_config.rs",
         "rust-filesystem-effect",
@@ -626,7 +621,6 @@ EXCEPTION_PRIMITIVES = {
     "test-cargo-executable-ancestor-rename": "rename",
     "test-cargo-workspace-ancestor-rename": "rename",
     "test-cargo-closed-stdio-helper-spawn": "Command::new",
-    "test-cargo-config-reset": "remove_file",
     "test-cargo-config-transient-remove": "remove_file",
     "test-cargo-cwd-replace": "rename",
     "test-cli-inspection-spawn": "Command::new",
@@ -710,7 +704,7 @@ CLIPPY_SUPPRESSION_COUNTS = {
     "dux-core/src/planner/rust_target_cargo.rs": 1,
     "dux-core/src/planner/cargo_spawn_macos.rs": 2,
     "dux-core/src/planner/cargo_workspace.rs": 1,
-    "dux-core/src/planner/cargo_config.rs": 2,
+    "dux-core/src/planner/cargo_config.rs": 1,
     "dux-core/src/planner/rust_target_cargo_tests.rs": 1,
     "dux-core/src/planner/rust_target_source_tests.rs": 2,
     "dux-core/src/engine/registry_tests.rs": 5,
