@@ -5,9 +5,10 @@
 //! complete reported manifest set, and accepts only an identical second result
 //! while this guard remains armed.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
 use std::os::unix::ffi::OsStrExt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
@@ -23,6 +24,9 @@ const MAX_MANIFEST_BYTES: usize = 4 * 1024 * 1024;
 const MAX_MANIFEST_CLOSURE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_NATIVE_PATH_BYTES: usize = 256 * 1024;
 const MAX_WATCHED_DIRECTORIES: usize = 512;
+const MAX_DEPENDENCY_DECLARATIONS: usize = 4 * 1024;
+const MAX_DEPENDENCY_PATH_BYTES: usize = 256 * 1024;
+const DEPENDENCY_MANIFEST_POLICY_REVISION: u32 = 1;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct WorkspaceManifestObservation {
@@ -34,6 +38,7 @@ struct WorkspaceManifestObservation {
 struct ObservedWorkspaceManifest {
     declaration: CargoWorkspaceManifestDeclaration,
     file: CanonicalFileDigestSnapshot,
+    bytes: Vec<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -41,6 +46,20 @@ pub(super) struct CargoWorkspaceManifestDeclaration {
     pub(super) member_id: Option<String>,
     pub(super) path: PathBuf,
     pub(super) is_workspace_root: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) struct CargoReportedPathDependency {
+    pub(super) owner_manifest: PathBuf,
+    pub(super) dependency_manifest: PathBuf,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct CargoDependencyManifestEvidence {
+    pub(super) policy_revision: u32,
+    pub(super) local_dependency_count: u32,
+    pub(super) unique_local_manifest_count: u32,
+    pub(super) closure_sha256: [u8; 32],
 }
 
 /// Non-cloneable exact manifest bytes and mutation fence for one workspace.
@@ -135,6 +154,16 @@ impl CargoWorkspaceManifestGuard {
             closure_sha256: self.observation.closure_sha256,
         })
     }
+
+    pub(super) fn dependency_evidence(
+        &self,
+        reported: &[CargoReportedPathDependency],
+    ) -> Result<CargoDependencyManifestEvidence, CargoWorkspaceManifestError> {
+        self.revalidate()?;
+        let evidence = independently_validate_path_dependencies(&self.observation, reported)?;
+        self.revalidate()?;
+        Ok(evidence)
+    }
 }
 
 fn capture_observation(
@@ -220,9 +249,15 @@ fn capture_observation(
         if total_bytes > MAX_MANIFEST_CLOSURE_BYTES {
             return Err(CargoWorkspaceManifestError::Unavailable);
         }
+        let bytes = fs::read(path).map_err(|_| CargoWorkspaceManifestError::Unavailable)?;
+        let bytes_sha256: [u8; 32] = Sha256::digest(&bytes).into();
+        if bytes.len() != byte_length || bytes_sha256 != manifest.sha256() {
+            return Err(CargoWorkspaceManifestError::Changed);
+        }
         manifests.push(ObservedWorkspaceManifest {
             declaration,
             file: manifest,
+            bytes,
         });
     }
 
@@ -231,6 +266,284 @@ fn capture_observation(
         manifests,
         closure_sha256,
     })
+}
+
+fn independently_validate_path_dependencies(
+    observation: &WorkspaceManifestObservation,
+    reported: &[CargoReportedPathDependency],
+) -> Result<CargoDependencyManifestEvidence, CargoWorkspaceManifestError> {
+    if reported.len() > MAX_DEPENDENCY_DECLARATIONS {
+        return Err(CargoWorkspaceManifestError::Invalid);
+    }
+    let manifests = observation
+        .manifests
+        .iter()
+        .map(|manifest| {
+            (
+                manifest.file.path().canonical_path().to_path_buf(),
+                manifest,
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let root = observation
+        .manifests
+        .iter()
+        .find(|manifest| manifest.declaration.is_workspace_root)
+        .ok_or(CargoWorkspaceManifestError::Invalid)?;
+    let root_document = parse_manifest(&root.bytes)?;
+    let workspace_dependencies_value = root_document
+        .get("workspace")
+        .and_then(toml::Value::as_table)
+        .and_then(|workspace| workspace.get("dependencies"));
+    let workspace_dependencies = workspace_dependencies_value
+        .map(|value| value.as_table().ok_or(CargoWorkspaceManifestError::Invalid))
+        .transpose()?;
+
+    let mut independent = Vec::new();
+    let mut path_bytes = 0_usize;
+    for manifest in &observation.manifests {
+        let document = parse_manifest(&manifest.bytes)?;
+        collect_manifest_dependencies(
+            &document,
+            manifest.file.path().canonical_path(),
+            root.file.path().canonical_path(),
+            workspace_dependencies,
+            &manifests,
+            &mut independent,
+            &mut path_bytes,
+        )?;
+    }
+    independent.sort();
+    let mut expected = reported.to_vec();
+    expected.sort();
+    if independent != expected {
+        return Err(CargoWorkspaceManifestError::Invalid);
+    }
+
+    let unique = independent
+        .iter()
+        .map(|edge| edge.dependency_manifest.as_os_str().as_bytes().to_vec())
+        .collect::<BTreeSet<_>>();
+    let mut digest = Sha256::new();
+    digest.update(b"dux-cargo-independent-path-dependencies-v1\0");
+    digest.update((independent.len() as u64).to_le_bytes());
+    digest.update((unique.len() as u64).to_le_bytes());
+    for (ordinal, edge) in independent.iter().enumerate() {
+        digest.update((ordinal as u64).to_le_bytes());
+        digest_path(&mut digest, &edge.owner_manifest);
+        digest_path(&mut digest, &edge.dependency_manifest);
+    }
+    Ok(CargoDependencyManifestEvidence {
+        policy_revision: DEPENDENCY_MANIFEST_POLICY_REVISION,
+        local_dependency_count: independent.len() as u32,
+        unique_local_manifest_count: unique.len() as u32,
+        closure_sha256: digest.finalize().into(),
+    })
+}
+
+fn parse_manifest(bytes: &[u8]) -> Result<toml::Value, CargoWorkspaceManifestError> {
+    let text = std::str::from_utf8(bytes).map_err(|_| CargoWorkspaceManifestError::Invalid)?;
+    let value =
+        toml::from_str::<toml::Value>(text).map_err(|_| CargoWorkspaceManifestError::Invalid)?;
+    if !value.is_table() {
+        return Err(CargoWorkspaceManifestError::Invalid);
+    }
+    Ok(value)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_manifest_dependencies(
+    document: &toml::Value,
+    owner_manifest: &Path,
+    root_manifest: &Path,
+    workspace_dependencies: Option<&toml::map::Map<String, toml::Value>>,
+    manifests: &BTreeMap<PathBuf, &ObservedWorkspaceManifest>,
+    edges: &mut Vec<CargoReportedPathDependency>,
+    path_bytes: &mut usize,
+) -> Result<(), CargoWorkspaceManifestError> {
+    let table = document
+        .as_table()
+        .ok_or(CargoWorkspaceManifestError::Invalid)?;
+    for name in dependency_table_names() {
+        if let Some(dependencies) = table.get(name) {
+            collect_dependency_table(
+                dependencies,
+                owner_manifest,
+                root_manifest,
+                workspace_dependencies,
+                manifests,
+                edges,
+                path_bytes,
+            )?;
+        }
+    }
+    if let Some(targets) = table.get("target") {
+        let targets = targets
+            .as_table()
+            .ok_or(CargoWorkspaceManifestError::Invalid)?;
+        for target in targets.values() {
+            let target = target
+                .as_table()
+                .ok_or(CargoWorkspaceManifestError::Invalid)?;
+            for name in dependency_table_names() {
+                if let Some(dependencies) = target.get(name) {
+                    collect_dependency_table(
+                        dependencies,
+                        owner_manifest,
+                        root_manifest,
+                        workspace_dependencies,
+                        manifests,
+                        edges,
+                        path_bytes,
+                    )?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn dependency_table_names() -> [&'static str; 5] {
+    [
+        "dependencies",
+        "dev-dependencies",
+        "dev_dependencies",
+        "build-dependencies",
+        "build_dependencies",
+    ]
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_dependency_table(
+    dependencies: &toml::Value,
+    owner_manifest: &Path,
+    root_manifest: &Path,
+    workspace_dependencies: Option<&toml::map::Map<String, toml::Value>>,
+    manifests: &BTreeMap<PathBuf, &ObservedWorkspaceManifest>,
+    edges: &mut Vec<CargoReportedPathDependency>,
+    path_bytes: &mut usize,
+) -> Result<(), CargoWorkspaceManifestError> {
+    let dependencies = dependencies
+        .as_table()
+        .ok_or(CargoWorkspaceManifestError::Invalid)?;
+    for (name, dependency) in dependencies {
+        let Some((path, relative_to)) = dependency_path(
+            name,
+            dependency,
+            workspace_dependencies,
+            owner_manifest,
+            root_manifest,
+        )?
+        else {
+            continue;
+        };
+        *path_bytes = path_bytes
+            .checked_add(path.len())
+            .ok_or(CargoWorkspaceManifestError::Unavailable)?;
+        if *path_bytes > MAX_DEPENDENCY_PATH_BYTES || edges.len() >= MAX_DEPENDENCY_DECLARATIONS {
+            return Err(CargoWorkspaceManifestError::Unavailable);
+        }
+        let parent = relative_to
+            .parent()
+            .ok_or(CargoWorkspaceManifestError::Invalid)?;
+        let dependency_root = normalize_path(parent, Path::new(path))?;
+        let dependency_manifest = dependency_root.join("Cargo.toml");
+        if !manifests.contains_key(&dependency_manifest) {
+            return Err(CargoWorkspaceManifestError::Invalid);
+        }
+        edges.push(CargoReportedPathDependency {
+            owner_manifest: owner_manifest.to_path_buf(),
+            dependency_manifest,
+        });
+    }
+    Ok(())
+}
+
+fn dependency_path<'a>(
+    name: &str,
+    dependency: &'a toml::Value,
+    workspace_dependencies: Option<&'a toml::map::Map<String, toml::Value>>,
+    owner_manifest: &'a Path,
+    root_manifest: &'a Path,
+) -> Result<Option<(&'a str, &'a Path)>, CargoWorkspaceManifestError> {
+    if dependency.is_str() {
+        return Ok(None);
+    }
+    let table = dependency
+        .as_table()
+        .ok_or(CargoWorkspaceManifestError::Invalid)?;
+    let workspace = match table.get("workspace") {
+        Some(value) => Some(
+            value
+                .as_bool()
+                .ok_or(CargoWorkspaceManifestError::Invalid)?,
+        ),
+        None => None,
+    };
+    if workspace == Some(true) {
+        if table.contains_key("path") {
+            return Err(CargoWorkspaceManifestError::Invalid);
+        }
+        let inherited = workspace_dependencies
+            .and_then(|dependencies| dependencies.get(name))
+            .ok_or(CargoWorkspaceManifestError::Invalid)?;
+        return direct_dependency_path(inherited, root_manifest);
+    }
+    direct_dependency_path(dependency, owner_manifest)
+}
+
+fn direct_dependency_path<'a>(
+    dependency: &'a toml::Value,
+    relative_to: &'a Path,
+) -> Result<Option<(&'a str, &'a Path)>, CargoWorkspaceManifestError> {
+    if dependency.is_str() {
+        return Ok(None);
+    }
+    let table = dependency
+        .as_table()
+        .ok_or(CargoWorkspaceManifestError::Invalid)?;
+    match table.get("path") {
+        Some(value) => {
+            let path = value
+                .as_str()
+                .filter(|path| !path.is_empty() && !path.chars().any(char::is_control))
+                .ok_or(CargoWorkspaceManifestError::Invalid)?;
+            Ok(Some((path, relative_to)))
+        }
+        None => Ok(None),
+    }
+}
+
+fn normalize_path(base: &Path, path: &Path) -> Result<PathBuf, CargoWorkspaceManifestError> {
+    let joined = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base.join(path)
+    };
+    let mut normalized = PathBuf::new();
+    for component in joined.components() {
+        match component {
+            Component::RootDir => normalized.push(Component::RootDir.as_os_str()),
+            Component::Normal(value) => normalized.push(value),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    return Err(CargoWorkspaceManifestError::Invalid);
+                }
+            }
+            Component::Prefix(_) => return Err(CargoWorkspaceManifestError::Invalid),
+        }
+    }
+    if !normalized.is_absolute() {
+        return Err(CargoWorkspaceManifestError::Invalid);
+    }
+    Ok(normalized)
+}
+
+fn digest_path(digest: &mut Sha256, path: &Path) {
+    let bytes = path.as_os_str().as_bytes();
+    digest.update((bytes.len() as u64).to_le_bytes());
+    digest.update(bytes);
 }
 
 fn capture_exact_directory(path: &Path) -> Result<CanonicalScanRoot, CargoWorkspaceManifestError> {

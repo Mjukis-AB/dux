@@ -5,6 +5,20 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Continued Milestone 5 with independent local path-dependency provenance from
+  the exact fenced workspace manifests. Dependency-manifest policy 1 parses
+  Cargo TOML with the pinned 1.1.2 generation, derives direct and
+  workspace-inherited `path` entries across normal, development, build, and
+  target-specific tables, preserves duplicate owner-to-target edges, and
+  requires an exact match with Cargo's reported local dependency multiset.
+  Every derived target must be one of the canonical single-link manifests
+  already retained by the workspace guard. The profile is capped at 4,096
+  local declarations and 256 KiB of path text; malformed, escaping,
+  unreported, invented, omitted, or unsupported inheritance fails closed.
+  Resolution policy 10 binds the independent counts and domain-separated
+  closure beside the existing reported-edge evidence. Remote dependency
+  semantics, README/license probes, kernel read identity, and all cleanup
+  authority remain outside this slice; `ProtectedPath` is unchanged.
 - Continued Milestone 5 with pre-discovery Cargo 1.96 workspace-glob
   provenance. DUX now parses the exact root manifest, reproduces bounded glob
   0.3.3 member/default-member expansion while retaining Cargo's literal

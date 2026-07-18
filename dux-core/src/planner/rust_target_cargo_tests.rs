@@ -280,7 +280,11 @@ fn fixed_command_environment_and_exact_metadata_create_only_observational_witnes
     assert_ne!(witness.manifest_probe_closure_sha256(), [0; 32]);
     assert_eq!(witness.launch_policy_revision(), 0);
     assert_eq!(witness.running_code_directory_hash_sha256(), [0; 32]);
-    assert_eq!(witness.resolution_policy_revision(), 9);
+    assert_eq!(witness.dependency_manifest_policy_revision(), 1);
+    assert_eq!(witness.independently_declared_local_dependency_count(), 0);
+    assert_eq!(witness.independent_dependency_manifest_count(), 0);
+    assert_ne!(witness.dependency_manifest_closure_sha256(), [0; 32]);
+    assert_eq!(witness.resolution_policy_revision(), 10);
     assert!(witness.live().protected_path_is_still_unresolved());
     assert_eq!(candidate.blockers(), [BlockReason::ProtectedPath]);
     assert!(!candidate.rule_marks_schedule_eligible());
@@ -529,12 +533,11 @@ fn reported_path_dependency_graph_is_bounded_and_observational() {
     let root_manifest = fs::read_to_string(&fixture.manifest).unwrap();
     fs::write(
         &fixture.manifest,
-        format!("{root_manifest}\n[workspace]\nresolver = \"3\"\n"),
+        format!(
+            "{root_manifest}\n[dependencies]\nmember = {{ path = \"member\" }}\n\n[dev-dependencies]\nmember_dev = {{ path = \"member\" }}\n\n[workspace]\nresolver = \"3\"\n"
+        ),
     )
     .unwrap();
-    // This fixture deliberately does not declare the dependency in manifest
-    // bytes. The current policy binds Cargo's serialized graph consistency;
-    // independent dependency-declaration provenance remains a later grant.
     let member = project.join("member");
     fs::create_dir(&member).unwrap();
     fs::write(
@@ -581,8 +584,108 @@ fn reported_path_dependency_graph_is_bounded_and_observational() {
     assert_eq!(witness.local_path_dependency_count(), 2);
     assert_eq!(witness.unique_local_dependency_manifest_count(), 1);
     assert_ne!(witness.path_dependency_closure_sha256(), [0; 32]);
-    assert_eq!(witness.resolution_policy_revision(), 9);
+    assert_eq!(witness.dependency_manifest_policy_revision(), 1);
+    assert_eq!(witness.independently_declared_local_dependency_count(), 2);
+    assert_eq!(witness.independent_dependency_manifest_count(), 1);
+    assert_ne!(witness.dependency_manifest_closure_sha256(), [0; 32]);
+    assert_eq!(witness.resolution_policy_revision(), 10);
     witness.release().unwrap();
+}
+
+#[test]
+fn cargo_reported_path_edge_without_manifest_declaration_fails_closed() {
+    let fixture = Fixture::new(CARGO_CACHE_TAG_SIGNATURE);
+    let project = fixture.manifest.parent().unwrap();
+    let root_manifest = fs::read_to_string(&fixture.manifest).unwrap();
+    fs::write(
+        &fixture.manifest,
+        format!("{root_manifest}\n[workspace]\nresolver = \"3\"\n"),
+    )
+    .unwrap();
+    let member = project.join("member");
+    fs::create_dir(&member).unwrap();
+    fs::write(
+        member.join("Cargo.toml"),
+        "[package]\nname = \"member\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    let document = package_metadata_json(
+        &fixture,
+        vec![
+            json!({
+                "id": "root",
+                "manifest_path": fixture.manifest,
+                "source": null,
+                "dependencies": [{"source": null, "path": member}]
+            }),
+            json!({
+                "id": "member",
+                "manifest_path": member.join("Cargo.toml"),
+                "source": null,
+                "dependencies": []
+            }),
+        ],
+        vec!["root", "member"],
+    );
+    let mut document_value: serde_json::Value = serde_json::from_str(&document).unwrap();
+    document_value["workspace_default_members"] = json!(["root"]);
+    let document = document_value.to_string();
+    let fake = FakeCargo::new(&format!("  printf %s {}\n  exit 0", shell_quote(&document)));
+
+    match validate_cargo_metadata(live(&fixture), &fake.observe()) {
+        Err(CargoMetadataValidationError::CargoDependencyManifestUnsupported) => {}
+        Err(error) => panic!("unexpected dependency provenance error: {error:?}"),
+        Ok(_) => panic!("invented Cargo dependency unexpectedly validated"),
+    }
+}
+
+#[test]
+fn cargo_omitted_path_edge_declared_by_manifest_fails_closed() {
+    let fixture = Fixture::new(CARGO_CACHE_TAG_SIGNATURE);
+    let project = fixture.manifest.parent().unwrap();
+    let root_manifest = fs::read_to_string(&fixture.manifest).unwrap();
+    fs::write(
+        &fixture.manifest,
+        format!(
+            "{root_manifest}\n[dependencies]\nmember = {{ path = \"member\" }}\n\n[workspace]\nmembers = [\"member\"]\nresolver = \"3\"\n"
+        ),
+    )
+    .unwrap();
+    let member = project.join("member");
+    fs::create_dir(&member).unwrap();
+    fs::write(
+        member.join("Cargo.toml"),
+        "[package]\nname = \"member\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    let document = package_metadata_json(
+        &fixture,
+        vec![
+            json!({
+                "id": "root",
+                "manifest_path": fixture.manifest,
+                "source": null,
+                "dependencies": []
+            }),
+            json!({
+                "id": "member",
+                "manifest_path": member.join("Cargo.toml"),
+                "source": null,
+                "dependencies": []
+            }),
+        ],
+        vec!["root", "member"],
+    );
+    let mut document_value: serde_json::Value = serde_json::from_str(&document).unwrap();
+    document_value["workspace_default_members"] = json!(["root"]);
+    let document = document_value.to_string();
+    let fake = FakeCargo::new(&format!("  printf %s {}\n  exit 0", shell_quote(&document)));
+
+    match validate_cargo_metadata(live(&fixture), &fake.observe()) {
+        Err(CargoMetadataValidationError::CargoDependencyManifestUnsupported) => {}
+        Err(error) => panic!("unexpected dependency provenance error: {error:?}"),
+        Ok(_) => panic!("omitted Cargo dependency unexpectedly validated"),
+    }
 }
 
 #[test]
@@ -1196,7 +1299,7 @@ fn real_cargo_attests_mixed_inferred_target_and_build_namespaces() {
     assert_eq!(witness.target_namespace_target_count(), 6);
     assert!(witness.target_namespace_count() >= 20);
     assert_ne!(witness.target_namespace_closure_sha256(), [0; 32]);
-    assert_eq!(witness.resolution_policy_revision(), 9);
+    assert_eq!(witness.resolution_policy_revision(), 10);
     witness.release().unwrap();
     assert!(!build_sentinel.exists());
 }
@@ -1235,7 +1338,7 @@ fn real_cargo_attests_virtual_root_and_every_workspace_member_manifest() {
     assert_eq!(witness.workspace_member_count(), 2);
     assert_eq!(witness.workspace_manifest_count(), 3);
     assert_ne!(witness.workspace_manifest_closure_sha256(), [0; 32]);
-    assert_eq!(witness.resolution_policy_revision(), 9);
+    assert_eq!(witness.resolution_policy_revision(), 10);
     witness.release().unwrap();
 }
 
@@ -1292,7 +1395,7 @@ fn real_cargo_attests_workspace_globs_excludes_and_default_members() {
     );
     assert_eq!(witness.workspace_member_count(), 2);
     assert_eq!(witness.workspace_manifest_count(), 3);
-    assert_eq!(witness.resolution_policy_revision(), 9);
+    assert_eq!(witness.resolution_policy_revision(), 10);
     witness.release().unwrap();
 }
 
@@ -1398,7 +1501,52 @@ fn real_cargo_accepts_only_reported_internal_path_dependencies() {
     assert_eq!(witness.local_path_dependency_count(), 1);
     assert_eq!(witness.unique_local_dependency_manifest_count(), 1);
     assert_ne!(witness.path_dependency_closure_sha256(), [0; 32]);
-    assert_eq!(witness.resolution_policy_revision(), 9);
+    assert_eq!(witness.dependency_manifest_policy_revision(), 1);
+    assert_eq!(witness.independently_declared_local_dependency_count(), 1);
+    assert_eq!(witness.independent_dependency_manifest_count(), 1);
+    assert_ne!(witness.dependency_manifest_closure_sha256(), [0; 32]);
+    assert_eq!(witness.resolution_policy_revision(), 10);
+    witness.release().unwrap();
+}
+
+#[test]
+fn real_cargo_matches_workspace_inherited_path_dependencies_to_manifest_bytes() {
+    let Some(cargo) = direct_test_cargo() else {
+        return;
+    };
+    let fixture = Fixture::new(CARGO_CACHE_TAG_SIGNATURE);
+    let project = fixture.manifest.parent().unwrap();
+    fs::write(
+        &fixture.manifest,
+        "[workspace]\nmembers = [\"member\", \"shared\"]\nresolver = \"3\"\n\n[workspace.dependencies]\nshared = { path = \"shared\" }\n",
+    )
+    .unwrap();
+    let member = project.join("member");
+    fs::create_dir_all(member.join("src")).unwrap();
+    fs::write(
+        member.join("Cargo.toml"),
+        "[package]\nname = \"member\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\nshared.workspace = true\n",
+    )
+    .unwrap();
+    fs::write(member.join("src/lib.rs"), "pub fn member() {}\n").unwrap();
+    let shared = project.join("shared");
+    fs::create_dir_all(shared.join("src")).unwrap();
+    fs::write(
+        shared.join("Cargo.toml"),
+        "[package]\nname = \"shared\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .unwrap();
+    fs::write(shared.join("src/lib.rs"), "pub fn shared() {}\n").unwrap();
+
+    let observation = observe_cargo_executable(&cargo).unwrap();
+    let witness =
+        validate_cargo_metadata_with_input_fences_for_test(live(&fixture), &observation).unwrap();
+
+    assert_eq!(witness.local_path_dependency_count(), 1);
+    assert_eq!(witness.independently_declared_local_dependency_count(), 1);
+    assert_eq!(witness.independent_dependency_manifest_count(), 1);
+    assert_ne!(witness.dependency_manifest_closure_sha256(), [0; 32]);
+    assert_eq!(witness.resolution_policy_revision(), 10);
     witness.release().unwrap();
 }
 
@@ -1515,7 +1663,7 @@ fn real_cargo_attests_excluding_ancestor_manifest_probe() {
         fs::metadata(ancestor).unwrap().len()
     );
     assert_ne!(witness.manifest_probe_closure_sha256(), [0; 32]);
-    assert_eq!(witness.resolution_policy_revision(), 9);
+    assert_eq!(witness.resolution_policy_revision(), 10);
     witness.release().unwrap();
 }
 

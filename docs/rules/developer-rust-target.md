@@ -231,7 +231,7 @@ app and launch; insufficient `RLIMIT_NOFILE` rejects rather than silently
 dropping coverage. Configuration and workspace guards are rechecked before
 spawn and resume, throughout bounded output, after exact-child reaping, and
 before evidence extraction. Only a byte-identical, independently parsed second
-result is accepted. Current resolution-policy revision 9 records the manifest policy,
+result is accepted. Current resolution-policy revision 10 records the manifest policy,
 member and retained-manifest counts, closure digest, accepted-output digest,
 and configuration root/file/edge/byte plus read-intent evidence.
 
@@ -246,7 +246,7 @@ delete/rename/revoke events are terminal, while directory entry writes trigger
 exact observation replay. Persistent entry changes and file write/restore
 reject; unchanged relevant state after unrelated high-ancestor directory
 activity may continue. Counts, present bytes, and the
-domain-separated ordered closure digest are retained in resolution policy 9.
+domain-separated ordered closure digest are retained in resolution policy 10.
 
 The strict document also requires every package's serialized dependency list.
 Across at most 4,096 declarations and 256 KiB of aggregate local-path text,
@@ -285,7 +285,7 @@ restores the prior entry set; exact file replacement, link, attribute,
 rename, delete, and revoke events are also terminal. DUX replays the entire
 observation before evidence extraction. The target guard is polled with the
 configuration, ancestor-manifest, and workspace-manifest guards throughout
-the accepted second Cargo pass. Resolution policy 9 retains package, target,
+the accepted second Cargo pass. Resolution policy 10 retains package, target,
 namespace-record, and closure evidence beside the earlier provenance rows.
 
 Before either metadata pass, workspace-glob policy 1 separately captures the
@@ -319,10 +319,23 @@ commands. Reported-membership-consistency policy 1 requires non-excluded
 expansion and an eligible root package to seed the reported packages, verifies
 reachability through Cargo's validated serialized dependency edges, and
 reproduces explicit defaults or Cargo's virtual-all/package-root fallback
-exactly. It does not independently parse those dependency declarations from
-manifest bytes. Resolution policy 9 binds the namespace and consistency counts
-and both domain-separated closures. These are still observations and cannot
-clear `ProtectedPath`.
+exactly.
+
+Dependency-manifest policy 1 then independently parses the exact retained
+manifest bytes with TOML 1.1.2. It enumerates local `path` entries from normal,
+development, build, and target-specific tables, including values inherited
+from `[workspace.dependencies]`. Direct paths are relative to the declaring
+manifest and inherited paths to the workspace root. Normalization must produce
+one of the canonical single-link manifests already owned by the workspace
+guard. Duplicates across tables remain distinct, and the complete sorted
+owner-to-target multiset must equal Cargo's reported local edge multiset.
+The profile shares the 4,096-declaration and 256-KiB path-text limits;
+malformed values, escapes, unsupported inheritance, invented or omitted rows,
+and unreported targets reject. The guard revalidates around parsing and policy
+1 binds counts, unique targets, and a domain-separated closure. Resolution
+policy 10 binds the workspace namespace, reported graph, and independent
+manifest graph together. These remain observations and cannot clear
+`ProtectedPath`.
 
 This proves the exact reported root/member manifest bytes remained stable
 under the reviewed path-based inference model and excludes unreported local
@@ -334,7 +347,7 @@ target manifest. Cargo 1.96's exact
 `metadata --no-deps` code path deliberately does not load or create
 `Cargo.lock`; real-Cargo tests include a malformed lockfile to pin that
 version-specific behavior. DUX still does not prove Cargo's full read set,
-independent dependency declarations, package README/license metadata probes,
+remote dependency attributes, package README/license metadata probes,
 transient
 absent ancestor create/remove, attestation of safe unreported path
 dependencies, external discovery-manifest stability, or kernel-level read

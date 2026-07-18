@@ -37,6 +37,7 @@ use super::cargo_target_namespace::{
     CargoTargetNamespaceEvidence, CargoTargetNamespaceGuard,
 };
 use super::cargo_workspace::{
+    CargoDependencyManifestEvidence, CargoReportedPathDependency,
     CargoWorkspaceManifestDeclaration, CargoWorkspaceManifestError, CargoWorkspaceManifestEvidence,
     CargoWorkspaceManifestGuard, MAX_WORKSPACE_MEMBERS,
 };
@@ -64,7 +65,7 @@ const VERSION_TIMEOUT: Duration = Duration::from_secs(5);
 const METADATA_TIMEOUT: Duration = Duration::from_secs(10);
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(2);
 const MAX_CARGO_EXECUTABLE_BYTES: usize = 256 * 1024 * 1024;
-const CARGO_RESOLUTION_POLICY_REVISION: u32 = 9;
+const CARGO_RESOLUTION_POLICY_REVISION: u32 = 10;
 const MAX_PACKAGE_ID_BYTES: usize = 4 * 1024;
 const MAX_WORKSPACE_DEFAULT_MEMBER_ROWS: usize = MAX_WORKSPACE_MEMBERS * MAX_WORKSPACE_MEMBERS;
 const MAX_PACKAGE_DEPENDENCY_DECLARATIONS: usize = 4 * 1024;
@@ -217,6 +218,7 @@ pub(crate) struct RustTargetCargoMetadataWitness {
     workspace_membership_consistency: CargoWorkspaceMembershipConsistencyEvidence,
     workspace: CargoWorkspaceManifestEvidence,
     path_dependencies: CargoPathDependencyEvidence,
+    dependency_manifests: CargoDependencyManifestEvidence,
     target_namespace: CargoTargetNamespaceEvidence,
     launch_policy_revision: u32,
     running_code_directory_hash_sha256: [u8; 32],
@@ -297,6 +299,8 @@ pub(crate) enum CargoMetadataValidationError {
     InvalidPathDependencies,
     #[error("Cargo metadata references a local dependency not reported as a workspace package")]
     CargoPathDependenciesUnsupported,
+    #[error("Cargo local path declarations do not match the exact workspace manifests")]
+    CargoDependencyManifestUnsupported,
     #[error("Cargo workspace manifests could not be captured within the reviewed bounds")]
     WorkspaceManifestUnavailable,
     #[error("Cargo workspace manifests changed during metadata resolution")]
@@ -806,6 +810,9 @@ fn validate_cargo_metadata_with_limits(
             )?
         }
     };
+    let discovery_dependency_manifests = workspace
+        .dependency_evidence(&discovery_path_dependencies.reported_edges)
+        .map_err(map_dependency_manifest_error)?;
     let target_namespace = match configuration_fence {
         ConfigurationFenceMode::Armed => CargoTargetNamespaceGuard::capture(
             project_directory.root(),
@@ -857,6 +864,12 @@ fn validate_cargo_metadata_with_limits(
     let manifest_probe_evidence = manifest_probes.evidence()?;
     let workspace_glob_evidence = workspace_glob.evidence()?;
     let workspace_evidence = workspace.evidence()?;
+    let dependency_manifest_evidence = workspace
+        .dependency_evidence(&path_dependencies.reported_edges)
+        .map_err(map_dependency_manifest_error)?;
+    if dependency_manifest_evidence != discovery_dependency_manifests {
+        return Err(CargoMetadataValidationError::WorkspaceManifestChanged);
+    }
     let target_namespace_evidence = target_namespace.evidence()?;
 
     let after_version = cargo.read_version(limits.version)?;
@@ -889,6 +902,7 @@ fn validate_cargo_metadata_with_limits(
         workspace_membership_consistency,
         workspace: workspace_evidence,
         path_dependencies,
+        dependency_manifests: dependency_manifest_evidence,
         target_namespace: target_namespace_evidence,
         launch_policy_revision: output.launch_policy_revision,
         running_code_directory_hash_sha256: output.running_code_directory_hash_sha256,
@@ -897,6 +911,22 @@ fn validate_cargo_metadata_with_limits(
             .as_ref()
             .map_or(0, EnrollmentGuard::revision),
     })
+}
+
+fn map_dependency_manifest_error(
+    error: CargoWorkspaceManifestError,
+) -> CargoMetadataValidationError {
+    match error {
+        CargoWorkspaceManifestError::Invalid => {
+            CargoMetadataValidationError::CargoDependencyManifestUnsupported
+        }
+        CargoWorkspaceManifestError::Changed => {
+            CargoMetadataValidationError::WorkspaceManifestChanged
+        }
+        CargoWorkspaceManifestError::Unavailable => {
+            CargoMetadataValidationError::WorkspaceManifestUnavailable
+        }
+    }
 }
 
 impl CargoExecutableStaticObservation {
@@ -1190,6 +1220,7 @@ struct CargoPathDependencyEvidence {
     local_path_dependency_count: u32,
     unique_local_manifest_count: u32,
     closure_sha256: [u8; 32],
+    reported_edges: Vec<CargoReportedPathDependency>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1329,6 +1360,7 @@ fn validate_path_dependencies(
     let mut local_path_bytes = 0_usize;
     let mut unique_manifests = BTreeSet::new();
     let mut edges = Vec::new();
+    let mut reported_edges = Vec::new();
 
     for package in &metadata.packages {
         declaration_count = declaration_count
@@ -1381,6 +1413,10 @@ fn validate_path_dependencies(
             }
             unique_manifests.insert(manifest_bytes.clone());
             edges.push((package.id.as_bytes().to_vec(), manifest_bytes));
+            reported_edges.push(CargoReportedPathDependency {
+                owner_manifest: PathBuf::from(&package.manifest_path),
+                dependency_manifest: manifest,
+            });
         }
     }
 
@@ -1404,13 +1440,14 @@ fn validate_path_dependencies(
         local_path_dependency_count: local_path_count as u32,
         unique_local_manifest_count: unique_manifests.len() as u32,
         closure_sha256: digest.finalize().into(),
+        reported_edges,
     })
 }
 
 // This proves that the final document is internally reachable from the
-// independently expanded workspace seeds. Dependency edges are still Cargo's
-// reported rows; independently parsing every manifest declaration is a later
-// provenance grant and is not claimed here.
+// independently expanded workspace seeds. This function consumes Cargo's
+// reported rows; the separate dependency-manifest policy requires those local
+// rows to match the retained manifest bytes before a witness can escape.
 fn validate_workspace_membership_consistency(
     expansion: &CargoWorkspaceGlobExpansion,
     metadata: &CargoMetadataDocument,
@@ -2450,6 +2487,22 @@ impl RustTargetCargoMetadataWitness {
 
     pub(super) fn path_dependency_closure_sha256(&self) -> [u8; 32] {
         self.path_dependencies.closure_sha256
+    }
+
+    pub(super) fn dependency_manifest_policy_revision(&self) -> u32 {
+        self.dependency_manifests.policy_revision
+    }
+
+    pub(super) fn independently_declared_local_dependency_count(&self) -> u32 {
+        self.dependency_manifests.local_dependency_count
+    }
+
+    pub(super) fn independent_dependency_manifest_count(&self) -> u32 {
+        self.dependency_manifests.unique_local_manifest_count
+    }
+
+    pub(super) fn dependency_manifest_closure_sha256(&self) -> [u8; 32] {
+        self.dependency_manifests.closure_sha256
     }
 
     pub(super) fn target_namespace_policy_revision(&self) -> u32 {

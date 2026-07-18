@@ -4286,6 +4286,27 @@ Tasks:
       manifest create/remove, safe unreported dependency manifests,
       kernel-level read identity, and post-witness changes remain open. No
       blocker, plan, FFI, scheduling, or effect authority was added.
+    - [x] 2026-07-18 slice: independently authenticate the admitted local
+      path-dependency edges from the exact retained workspace-manifest bytes.
+      Dependency-manifest policy 1 uses the pinned TOML 1.1.2 generation to
+      enumerate direct and workspace-inherited `path` values in normal,
+      development, build, and target-specific dependency tables. Relative
+      paths are normalized against the declaring package or workspace root,
+      every result must equal one of the canonical single-link manifests
+      already retained by the workspace guard, and the duplicate-preserving
+      owner-to-target multiset must exactly equal Cargo's bounded reported
+      local edges. Invented, omitted, escaping, malformed, unreported, and
+      unsupported inherited declarations fail closed under the existing
+      4,096-declaration and 256-KiB local-path limits. The guard revalidates
+      before and after independent parsing and retains policy/count/unique-
+      target/domain-separated closure evidence in resolution policy 10. Tests
+      cover duplicate direct/dev declarations, fabricated and omitted reported
+      edges, and pinned real-Cargo workspace inheritance. This authenticates
+      only local path relations, not remote dependency attributes or Cargo's
+      kernel-level reads. Package README/license probes, transient absent ancestor-manifest
+      create/remove, safe unreported dependency manifests, kernel-level read
+      identity, and post-witness changes remain open. No blocker, plan, FFI,
+      scheduling, or effect authority was added.
     Kernel-level Cargo read identity, complete remaining Cargo manifest and
     namespace provenance, and all remaining
     protected-root, volume, process, descendant, plan, and executor grants are

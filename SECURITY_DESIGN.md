@@ -408,15 +408,27 @@ either metadata pass. Reported-membership-consistency policy 1 rejects a
 disconnected final document: non-excluded expanded members and an eligible
 root package seed the reported set, every other package must be reachable
 through Cargo's validated serialized local path-dependency graph, and explicit
-or implicit defaults must reproduce the reported IDs exactly. Those dependency
-edges are not independently parsed from manifest bytes, so this is internal
-reported-graph consistency rather than proof against fabricated Cargo output.
-Resolution policy 9
-binds root, pattern, namespace, match, seed, excluded, reachable, default, and
-domain-separated closure evidence. No authority edge is added.
+or implicit defaults must reproduce the reported IDs exactly.
 
-Independent dependency-declaration provenance, transient absent ancestor
-create/remove, attestation and discovery stability for unreported path
+Dependency-manifest policy 1 independently derives the admitted local path
+graph from the exact retained workspace-manifest bytes. The pinned TOML 1.1.2
+parser enumerates direct and workspace-inherited `path` values from normal,
+development, build, and target-specific dependency tables. Paths are
+normalized relative to the declaring package or workspace root, must resolve
+lexically to one of the already captured canonical single-link manifests, and
+retain duplicate owner-to-target rows. The independently derived multiset must
+exactly equal Cargo's reported local multiset under 4,096-declaration and
+256-KiB path-text bounds. The workspace guard is revalidated before and after
+parsing. This closes fabricated, omitted, and redirected local edges for the
+admitted profile; it does not independently reproduce remote dependency
+attributes or prove which descriptors Cargo read.
+
+Resolution policy 10
+binds root, pattern, namespace, match, seed, excluded, reachable, default, and
+both reported and independent dependency closure evidence. No authority edge
+is added.
+
+Transient absent ancestor create/remove, attestation and discovery stability for unreported path
 dependencies, package README/license
 metadata probes, kernel actual-read identity, and post-witness mutations remain
 outside the proof.
