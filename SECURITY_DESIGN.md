@@ -438,14 +438,13 @@ cannot survive the accepted pass. Pinned Cargo does not require or read the
 file named by an explicit README or license declaration during metadata; those
 values therefore prove path derivation only, never file existence or content.
 
-Resolution policy 11
+Resolution policy 12
 binds root, pattern, namespace, match, seed, excluded, reachable, default, and
-reported/independent dependency plus package-metadata closure evidence. No
-authority edge is added.
+reported/independent dependency plus package-metadata and ancestor-replay
+closure evidence. No authority edge is added.
 
-Transient absent ancestor create/remove, attestation and discovery stability for unreported path
-dependencies, kernel actual-read identity, and post-witness mutations remain
-outside the proof.
+Attestation and discovery stability for unreported path dependencies, kernel
+actual-read identity, and post-witness mutations remain outside the proof.
 Those limits and the remaining authority grants keep `ProtectedPath` intact.
 Every rule remains unschedulable, and every emitted candidate retains
 `ProtectedPath` because kernel-level actual-read identity and complete Cargo

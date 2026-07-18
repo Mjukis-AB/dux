@@ -281,9 +281,13 @@ fn fixed_command_environment_and_exact_metadata_create_only_observational_witnes
     assert_eq!(witness.target_namespace_target_count(), 1);
     assert!(witness.target_namespace_count() >= 1);
     assert_ne!(witness.target_namespace_closure_sha256(), [0; 32]);
-    assert_eq!(witness.manifest_probe_policy_revision(), 1);
+    assert_eq!(witness.manifest_probe_policy_revision(), 2);
     assert!(witness.manifest_probe_count() >= 1);
     assert_eq!(witness.present_ancestor_manifest_count(), 0);
+    assert_eq!(
+        witness.absent_ancestor_manifest_count(),
+        witness.manifest_probe_count()
+    );
     assert_eq!(witness.ancestor_manifest_byte_count(), 0);
     assert_ne!(witness.manifest_probe_closure_sha256(), [0; 32]);
     assert_eq!(witness.launch_policy_revision(), 0);
@@ -299,7 +303,7 @@ fn fixed_command_environment_and_exact_metadata_create_only_observational_witnes
     assert_eq!(witness.declared_readme_count(), 0);
     assert_eq!(witness.license_file_count(), 0);
     assert_ne!(witness.package_metadata_closure_sha256(), [0; 32]);
-    assert_eq!(witness.resolution_policy_revision(), 11);
+    assert_eq!(witness.resolution_policy_revision(), 12);
     assert!(witness.live().protected_path_is_still_unresolved());
     assert_eq!(candidate.blockers(), [BlockReason::ProtectedPath]);
     assert!(!candidate.rule_marks_schedule_eligible());
@@ -676,7 +680,7 @@ fn reported_path_dependency_graph_is_bounded_and_observational() {
     assert_eq!(witness.independently_declared_local_dependency_count(), 2);
     assert_eq!(witness.independent_dependency_manifest_count(), 1);
     assert_ne!(witness.dependency_manifest_closure_sha256(), [0; 32]);
-    assert_eq!(witness.resolution_policy_revision(), 11);
+    assert_eq!(witness.resolution_policy_revision(), 12);
     witness.release().unwrap();
 }
 
@@ -1194,6 +1198,52 @@ fn ancestor_manifest_write_and_restore_during_discovery_is_terminal() {
 
 #[cfg(target_os = "macos")]
 #[test]
+fn absent_ancestor_manifest_create_and_remove_during_discovery_is_terminal() {
+    let fixture = Fixture::new(CARGO_CACHE_TAG_SIGNATURE);
+    let ancestor_manifest = fixture.root.join("Cargo.toml");
+    let document = metadata_json(fixture.manifest.parent().unwrap(), &fixture.target);
+    let action = format!(
+        "  printf %s {} > {}\n  /bin/rm {}\n  printf %s {}\n  /bin/sleep 30",
+        shell_quote("[workspace]\n"),
+        shell_quote(ancestor_manifest.to_str().unwrap()),
+        shell_quote(ancestor_manifest.to_str().unwrap()),
+        shell_quote(&document),
+    );
+    let fake = FakeCargo::new(&action);
+    let started = Instant::now();
+    let result =
+        validate_cargo_metadata_with_input_fences_for_test(live(&fixture), &fake.observe());
+    assert!(matches!(
+        result,
+        Err(CargoMetadataValidationError::CargoManifestProbesChanged)
+    ));
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert!(!ancestor_manifest.exists());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn unrelated_ancestor_sibling_create_and_remove_during_discovery_is_accepted() {
+    let fixture = Fixture::new(CARGO_CACHE_TAG_SIGNATURE);
+    let unrelated = fixture.root.join("unrelated-during-discovery.tmp");
+    let document = metadata_json(fixture.manifest.parent().unwrap(), &fixture.target);
+    let action = format!(
+        "  printf %s {} > {}\n  /bin/rm {}\n  printf %s {}\n  exit 0",
+        shell_quote("temporary\n"),
+        shell_quote(unrelated.to_str().unwrap()),
+        shell_quote(unrelated.to_str().unwrap()),
+        shell_quote(&document),
+    );
+    let fake = FakeCargo::new(&action);
+    let witness =
+        validate_cargo_metadata_with_input_fences_for_test(live(&fixture), &fake.observe())
+            .unwrap();
+    assert!(!unrelated.exists());
+    witness.release().unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn included_config_write_and_restore_during_accepted_pass_is_terminal() {
     let fixture = Fixture::new(CARGO_CACHE_TAG_SIGNATURE);
     let project = fixture.manifest.parent().unwrap();
@@ -1391,7 +1441,7 @@ fn real_cargo_attests_mixed_inferred_target_and_build_namespaces() {
     assert_eq!(witness.target_namespace_target_count(), 6);
     assert!(witness.target_namespace_count() >= 20);
     assert_ne!(witness.target_namespace_closure_sha256(), [0; 32]);
-    assert_eq!(witness.resolution_policy_revision(), 11);
+    assert_eq!(witness.resolution_policy_revision(), 12);
     witness.release().unwrap();
     assert!(!build_sentinel.exists());
 }
@@ -1430,7 +1480,7 @@ fn real_cargo_attests_virtual_root_and_every_workspace_member_manifest() {
     assert_eq!(witness.workspace_member_count(), 2);
     assert_eq!(witness.workspace_manifest_count(), 3);
     assert_ne!(witness.workspace_manifest_closure_sha256(), [0; 32]);
-    assert_eq!(witness.resolution_policy_revision(), 11);
+    assert_eq!(witness.resolution_policy_revision(), 12);
     witness.release().unwrap();
 }
 
@@ -1487,7 +1537,7 @@ fn real_cargo_attests_workspace_globs_excludes_and_default_members() {
     );
     assert_eq!(witness.workspace_member_count(), 2);
     assert_eq!(witness.workspace_manifest_count(), 3);
-    assert_eq!(witness.resolution_policy_revision(), 11);
+    assert_eq!(witness.resolution_policy_revision(), 12);
     witness.release().unwrap();
 }
 
@@ -1597,7 +1647,7 @@ fn real_cargo_accepts_only_reported_internal_path_dependencies() {
     assert_eq!(witness.independently_declared_local_dependency_count(), 1);
     assert_eq!(witness.independent_dependency_manifest_count(), 1);
     assert_ne!(witness.dependency_manifest_closure_sha256(), [0; 32]);
-    assert_eq!(witness.resolution_policy_revision(), 11);
+    assert_eq!(witness.resolution_policy_revision(), 12);
     witness.release().unwrap();
 }
 
@@ -1647,7 +1697,7 @@ fn real_cargo_matches_workspace_inherited_path_dependencies_to_manifest_bytes() 
     assert_eq!(witness.declared_readme_count(), 1);
     assert_eq!(witness.license_file_count(), 1);
     assert_ne!(witness.package_metadata_closure_sha256(), [0; 32]);
-    assert_eq!(witness.resolution_policy_revision(), 11);
+    assert_eq!(witness.resolution_policy_revision(), 12);
     witness.release().unwrap();
 }
 
@@ -1756,15 +1806,19 @@ fn real_cargo_attests_excluding_ancestor_manifest_probe() {
     let observation = observe_cargo_executable(&cargo).unwrap();
     let witness =
         validate_cargo_metadata_with_input_fences_for_test(live(&fixture), &observation).unwrap();
-    assert_eq!(witness.manifest_probe_policy_revision(), 1);
+    assert_eq!(witness.manifest_probe_policy_revision(), 2);
     assert!(witness.manifest_probe_count() >= 1);
     assert_eq!(witness.present_ancestor_manifest_count(), 1);
+    assert_eq!(
+        witness.absent_ancestor_manifest_count(),
+        witness.manifest_probe_count() - 1
+    );
     assert_eq!(
         witness.ancestor_manifest_byte_count(),
         fs::metadata(ancestor).unwrap().len()
     );
     assert_ne!(witness.manifest_probe_closure_sha256(), [0; 32]);
-    assert_eq!(witness.resolution_policy_revision(), 11);
+    assert_eq!(witness.resolution_policy_revision(), 12);
     witness.release().unwrap();
 }
 

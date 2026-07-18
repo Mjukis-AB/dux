@@ -16,7 +16,7 @@ use crate::path_validation::{
     capture_regular_file_sha256, capture_scan_root, validate_cleanup_path, validate_scan_root,
 };
 
-const PROBE_POLICY_REVISION: u32 = 1;
+const PROBE_POLICY_REVISION: u32 = 2;
 const MAX_ANCESTOR_PROBES: usize = 64;
 const MAX_MANIFEST_BYTES: usize = 4 * 1024 * 1024;
 const MAX_MANIFEST_CLOSURE_BYTES: usize = 64 * 1024 * 1024;
@@ -50,6 +50,7 @@ pub(super) struct CargoManifestProbeEvidence {
     pub(super) policy_revision: u32,
     pub(super) probe_count: u32,
     pub(super) manifest_count: u32,
+    pub(super) absent_probe_count: u32,
     pub(super) manifest_bytes: u64,
     pub(super) closure_sha256: [u8; 32],
 }
@@ -66,8 +67,10 @@ impl CargoManifestProbeGuard {
         project_root: &CanonicalScanRoot,
         cargo_home: &CanonicalScanRoot,
     ) -> Result<Self, CargoManifestProbeError> {
+        let fence_cursor =
+            platform::ManifestProbeFenceCursor::capture(project_root.identity().volume())?;
         let observation = capture_observation(project_root, cargo_home)?;
-        let fence = platform::ManifestProbeFence::new(&observation.probes)?;
+        let fence = platform::ManifestProbeFence::new(&observation.probes, fence_cursor)?;
         let guard = Self {
             project_root: project_root.clone(),
             cargo_home: cargo_home.clone(),
@@ -98,6 +101,7 @@ impl CargoManifestProbeGuard {
                 Err(CargoManifestProbeError::Changed)
             }
             platform::ManifestProbeFencePoll::NamespaceChanged => {
+                self.fence.flush_exact_events()?;
                 let current = capture_observation(&self.project_root, &self.cargo_home)?;
                 if current == self.observation {
                     Ok(())
@@ -109,6 +113,7 @@ impl CargoManifestProbeGuard {
     }
 
     pub(super) fn revalidate(&self) -> Result<(), CargoManifestProbeError> {
+        self.fence.flush_exact_events()?;
         self.poll()?;
         let current = capture_observation(&self.project_root, &self.cargo_home).map_err(
             |error| match error {
@@ -121,6 +126,7 @@ impl CargoManifestProbeGuard {
         if current != self.observation {
             return Err(CargoManifestProbeError::Changed);
         }
+        self.fence.flush_exact_events()?;
         self.poll()
     }
 
@@ -132,6 +138,13 @@ impl CargoManifestProbeGuard {
                 .map_err(|_| CargoManifestProbeError::Unavailable)?,
             manifest_count: u32::try_from(self.observation.manifest_count)
                 .map_err(|_| CargoManifestProbeError::Unavailable)?,
+            absent_probe_count: u32::try_from(
+                self.observation
+                    .probes
+                    .len()
+                    .saturating_sub(self.observation.manifest_count),
+            )
+            .map_err(|_| CargoManifestProbeError::Unavailable)?,
             manifest_bytes: u64::try_from(self.observation.manifest_bytes)
                 .map_err(|_| CargoManifestProbeError::Unavailable)?,
             closure_sha256: self.observation.closure_sha256,
@@ -261,7 +274,7 @@ fn digest_observation(
     manifest_bytes: usize,
 ) -> [u8; 32] {
     let mut digest = Sha256::new();
-    digest.update(b"dux-cargo-ancestor-manifest-probes-v1\0");
+    digest.update(b"dux-cargo-ancestor-manifest-probes-v2\0");
     digest.update((probes.len() as u64).to_le_bytes());
     digest.update((manifest_count as u64).to_le_bytes());
     digest.update((manifest_bytes as u64).to_le_bytes());
@@ -289,10 +302,15 @@ fn digest_observation(
 }
 
 #[cfg(target_os = "macos")]
+#[path = "cargo_manifest_probes/fsevents_macos.rs"]
+mod fsevents_macos;
+
+#[cfg(target_os = "macos")]
 mod platform {
     use std::fs;
     use std::mem::MaybeUninit;
     use std::os::fd::{AsFd, AsRawFd, OwnedFd};
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use nix::fcntl::{FcntlArg, FdFlag, OFlag, fcntl, open};
     use nix::libc;
@@ -301,12 +319,29 @@ mod platform {
     use nix::sys::stat::{Mode, fstat};
     use nix::sys::statfs::fstatfs;
 
-    use super::{AncestorManifestProbe, CanonicalScanRoot, CargoManifestProbeError};
+    use super::{
+        AncestorManifestProbe, CanonicalScanRoot, CargoManifestProbeError,
+        fsevents_macos::{ExactManifestEventCursor, ExactManifestEventFence},
+    };
+
+    pub(super) struct ManifestProbeFenceCursor {
+        exact: ExactManifestEventCursor,
+    }
+
+    impl ManifestProbeFenceCursor {
+        pub(super) fn capture(volume: u64) -> Result<Self, CargoManifestProbeError> {
+            Ok(Self {
+                exact: ExactManifestEventCursor::capture(volume)?,
+            })
+        }
+    }
 
     pub(super) struct ManifestProbeFence {
         queue: Kqueue,
         _directories: Vec<OwnedFd>,
         _files: Vec<OwnedFd>,
+        exact_events: ExactManifestEventFence,
+        pending_namespace_change: AtomicBool,
     }
 
     pub(super) enum ManifestProbeFencePoll {
@@ -332,11 +367,14 @@ mod platform {
                 queue,
                 _directories: Vec::new(),
                 _files: Vec::new(),
+                exact_events: ExactManifestEventFence::disabled(),
+                pending_namespace_change: AtomicBool::new(false),
             }
         }
 
         pub(super) fn new(
             probes: &[AncestorManifestProbe],
+            cursor: ManifestProbeFenceCursor,
         ) -> Result<Self, CargoManifestProbeError> {
             let retained = probes
                 .len()
@@ -391,18 +429,43 @@ mod platform {
             {
                 return Err(CargoManifestProbeError::Unavailable);
             }
-            if count != 0 {
-                return Err(CargoManifestProbeError::Changed);
+            let mut pending_namespace_change = false;
+            for event in &events[..count] {
+                match event.udata() {
+                    1 if event.fflags().intersects(
+                        FilterFlag::NOTE_DELETE | FilterFlag::NOTE_RENAME | FilterFlag::NOTE_REVOKE,
+                    ) =>
+                    {
+                        return Err(CargoManifestProbeError::Changed);
+                    }
+                    1 if event.fflags().contains(FilterFlag::NOTE_WRITE) => {
+                        pending_namespace_change = true;
+                    }
+                    2 => return Err(CargoManifestProbeError::Changed),
+                    _ => return Err(CargoManifestProbeError::Unavailable),
+                }
             }
+            let exact_events = ExactManifestEventFence::new(probes, cursor.exact)?;
             Ok(Self {
                 queue,
                 _directories: directories,
                 _files: files,
+                exact_events,
+                pending_namespace_change: AtomicBool::new(pending_namespace_change),
             })
         }
 
+        pub(super) fn flush_exact_events(&self) -> Result<(), CargoManifestProbeError> {
+            self.exact_events.flush()
+        }
+
         pub(super) fn poll(&self) -> Result<ManifestProbeFencePoll, CargoManifestProbeError> {
-            let mut outcome = ManifestProbeFencePoll::Unchanged;
+            self.exact_events.poll()?;
+            let mut outcome = if self.pending_namespace_change.swap(false, Ordering::AcqRel) {
+                ManifestProbeFencePoll::NamespaceChanged
+            } else {
+                ManifestProbeFencePoll::Unchanged
+            };
             loop {
                 let mut event = [empty_event()];
                 let count = self
@@ -549,6 +612,13 @@ mod platform {
     use super::{AncestorManifestProbe, CanonicalScanRoot, CargoManifestProbeError};
 
     pub(super) struct ManifestProbeFence;
+    pub(super) struct ManifestProbeFenceCursor;
+
+    impl ManifestProbeFenceCursor {
+        pub(super) fn capture(_volume: u64) -> Result<Self, CargoManifestProbeError> {
+            Ok(Self)
+        }
+    }
 
     pub(super) enum ManifestProbeFencePoll {
         Unchanged,
@@ -571,9 +641,14 @@ mod platform {
             Ok(ManifestProbeFencePoll::Unchanged)
         }
 
+        pub(super) fn flush_exact_events(&self) -> Result<(), CargoManifestProbeError> {
+            Ok(())
+        }
+
         #[allow(dead_code)]
         pub(super) fn new(
             _probes: &[AncestorManifestProbe],
+            _cursor: ManifestProbeFenceCursor,
         ) -> Result<Self, CargoManifestProbeError> {
             Err(CargoManifestProbeError::Unavailable)
         }
@@ -759,6 +834,30 @@ mod tests {
         fs::write(&path, b"[workspace]\nmembers=[]\n").unwrap();
         fs::write(&path, original).unwrap();
         assert_eq!(present.poll(), Err(CargoManifestProbeError::Changed));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test removes only TempDir-owned names to distinguish exact FSEvents evidence"
+    )]
+    fn absent_create_remove_is_terminal_but_unrelated_restoration_replays() {
+        let temp = TempDir::new().unwrap();
+        let (project, cargo_home, parent, _) = roots(&temp);
+        let guard = CargoManifestProbeGuard::capture(&project, &cargo_home).unwrap();
+
+        let unrelated = parent.join("unrelated.tmp");
+        fs::write(&unrelated, b"temporary\n").unwrap();
+        // DUX-DESTRUCTIVE: allow=test-manifest-probe-unrelated-remove -- remove only a TempDir-owned unrelated sibling to prove exact-name filtering
+        fs::remove_file(&unrelated).unwrap();
+        assert_eq!(guard.revalidate(), Ok(()));
+
+        let manifest = parent.join("Cargo.toml");
+        fs::write(&manifest, b"[workspace]\n").unwrap();
+        // DUX-DESTRUCTIVE: allow=test-manifest-probe-absent-remove -- remove only a TempDir-owned transient Cargo manifest to prove event persistence
+        fs::remove_file(&manifest).unwrap();
+        assert_eq!(guard.revalidate(), Err(CargoManifestProbeError::Changed));
     }
 
     #[cfg(target_os = "macos")]

@@ -69,7 +69,7 @@ const VERSION_TIMEOUT: Duration = Duration::from_secs(5);
 const METADATA_TIMEOUT: Duration = Duration::from_secs(10);
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(2);
 const MAX_CARGO_EXECUTABLE_BYTES: usize = 256 * 1024 * 1024;
-const CARGO_RESOLUTION_POLICY_REVISION: u32 = 11;
+const CARGO_RESOLUTION_POLICY_REVISION: u32 = 12;
 const MAX_PACKAGE_ID_BYTES: usize = 4 * 1024;
 const MAX_WORKSPACE_DEFAULT_MEMBER_ROWS: usize = MAX_WORKSPACE_MEMBERS * MAX_WORKSPACE_MEMBERS;
 const MAX_PACKAGE_DEPENDENCY_DECLARATIONS: usize = 4 * 1024;
@@ -2534,6 +2534,10 @@ impl RustTargetCargoMetadataWitness {
 
     pub(super) fn present_ancestor_manifest_count(&self) -> u32 {
         self.manifest_probes.manifest_count
+    }
+
+    pub(super) fn absent_ancestor_manifest_count(&self) -> u32 {
+        self.manifest_probes.absent_probe_count
     }
 
     pub(super) fn ancestor_manifest_byte_count(&self) -> u64 {

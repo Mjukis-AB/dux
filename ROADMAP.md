@@ -4339,6 +4339,27 @@ Tasks:
       unreported dependency manifests, kernel-level read identity, and
       post-witness changes remain open. No blocker, plan, FFI, scheduling, or
       effect authority was added.
+    - [x] 2026-07-18 slice: close the transient absent-ancestor manifest
+      namespace race on macOS with exact, bounded FSEvents replay. Policy 2
+      captures the event cursor before observation, arms the farthest
+      absent-candidate directory, and replays a short-lived file-events
+      history stream after the kqueue fence is ready. DUX requires
+      history-done, monotonic event IDs, and volume-UUID continuity before
+      advancing the cursor; dropped/coalesced, wrapped, unknown, or incomplete
+      coverage fails closed. Exact `Cargo.toml` candidates use the mounted
+      volume's case-sensitivity semantics. Candidate-file writes and
+      directory delete/rename/revoke events are terminal; directory writes
+      request replay, absent-candidate create/remove is terminal, and
+      unrelated sibling activity is ignored. kqueue `NOTE_WRITE` is therefore
+      a replay hint rather than proof of a complete observation. Resolution
+      policy 12 binds the revision, cursor/fence result, counts, bytes, and
+      ordered closure. Unit tests cover event classification, case variants,
+      dropped/unknown coverage, and history completion; macOS high-level
+      regressions cover create/remove during discovery and unrelated sibling
+      activity. This remains path-based stability evidence rather than
+      kernel-level read identity and adds no cleanup or `ProtectedPath`
+      authority. Safe unreported dependency manifests, kernel-level read
+      identity, and post-witness changes remain open.
     Kernel-level Cargo read identity, complete remaining Cargo manifest and
     namespace provenance, and all remaining
     protected-root, volume, process, descendant, plan, and executor grants are

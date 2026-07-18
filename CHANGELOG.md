@@ -5,6 +5,21 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Continued Milestone 5 with policy-2 exact replay for Cargo's potential
+  ancestor-manifest namespace. On macOS DUX captures an event cursor before
+  discovery, arms one bounded ephemeral FSEvents history replay for the
+  farthest absent-candidate directory, and requires history completion,
+  monotonic event IDs, and volume-UUID continuity before advancing the cursor.
+  Exact `Cargo.toml` candidates are matched with the mounted volume's
+  case-sensitivity semantics; candidate-file writes and directory
+  delete/rename/revoke events remain terminal, while unrelated sibling
+  activity is ignored. Dropped/coalesced, wrapped, unknown, or incomplete
+  event coverage fails closed, and kqueue `NOTE_WRITE` is treated as a
+  namespace replay request rather than trusted as a complete observation.
+  Absent ancestor create/remove during discovery is now terminal under
+  resolution policy 12. This remains path-based stability evidence rather
+  than kernel-level proof of Cargo's actual reads, and adds no cleanup or
+  `ProtectedPath` authority.
 - Continued Milestone 5 with independent Cargo 1.96 package README and
   `license-file` provenance. Package-metadata policy 1 derives direct,
   suppressed, `true`, and workspace-inherited declarations from the exact

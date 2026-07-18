@@ -237,16 +237,21 @@ and configuration root/file/edge/byte plus read-intent evidence.
 
 Before the discovery pass, DUX also captures Cargo 1.96's complete potential
 ancestor-manifest candidate list in nearest-to-farthest order, with the pinned
-`target/package` and Cargo-home stop behavior. Policy 1 admits at most 64
+`target/package` and Cargo-home stop behavior. Policy 2 admits at most 64
 canonical UTF-8 candidates and binds every directory identity plus each
 present direct `Cargo.toml`; present manifests must be single-link regular
 files and are fully hashed under 4 MiB per file, 64 MiB aggregate, and native-
-path bounds. On macOS, present manifest file events and candidate-directory
-delete/rename/revoke events are terminal, while directory entry writes trigger
-exact observation replay. Persistent entry changes and file write/restore
-reject; unchanged relevant state after unrelated high-ancestor directory
-activity may continue. Counts, present bytes, and the
-domain-separated ordered closure digest are retained in resolution policy 11.
+path bounds. On macOS, the guard captures an FSEvents cursor before
+observation and replays a short-lived, bounded history stream after arming the
+farthest absent-candidate directory. Replay must reach history-done with
+monotonic event IDs and the same volume UUID; dropped/coalesced, wrapped,
+unknown, or incomplete coverage fails closed. Exact `Cargo.toml` matching
+honors the mounted volume's case-sensitivity semantics. Present manifest file
+events and candidate-directory delete/rename/revoke events are terminal;
+directory entry writes request exact replay, and a create/remove of an absent
+candidate is terminal while unrelated sibling activity is ignored. Counts,
+present bytes, and the domain-separated ordered closure digest are retained in
+resolution policy 12.
 
 The strict document also requires every package's serialized dependency list.
 Across at most 4,096 declarations and 256 KiB of aggregate local-path text,
@@ -285,7 +290,7 @@ restores the prior entry set; exact file replacement, link, attribute,
 rename, delete, and revoke events are also terminal. DUX replays the entire
 observation before evidence extraction. The target guard is polled with the
 configuration, ancestor-manifest, and workspace-manifest guards throughout
-the accepted second Cargo pass. Resolution policy 11 retains package, target,
+the accepted second Cargo pass. Resolution policy 12 retains package, target,
 namespace-record, and closure evidence beside the earlier provenance rows.
 
 Before either metadata pass, workspace-glob policy 1 separately captures the
@@ -350,7 +355,7 @@ namespace records, 64 components, and 4,096 watched objects. Exact manifests
 and package roots are local-APFS fenced, and root directory writes are terminal
 across the accepted pass. Explicit README/license targets are not opened by
 the pinned metadata command, so this policy deliberately attests only their
-declaration-derived path, not existence or contents. Resolution policy 11
+declaration-derived path, not existence or contents. Resolution policy 12
 binds its package/declaration/probe/selection counts and domain-separated
 closure without adding authority.
 
