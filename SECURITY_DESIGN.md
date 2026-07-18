@@ -358,7 +358,7 @@ some standalone or excluded targets that DUX still rejects. Cargo 1.96's exact
 does not load or create `Cargo.lock`; an executable malformed-lock regression
 pins that reviewed version-specific behavior. This remains path-based stability
 evidence for reported and potential ancestor manifests, not proof of Cargo's
-complete reads or workspace-glob namespace generation.
+complete reads. Workspace-glob generation is addressed separately below.
 
 Target-namespace policy 1 additionally requires every package's bounded
 serialized `targets` array and every reported source path to be a normalized,
@@ -373,8 +373,51 @@ create/remove cannot restore accepted state unnoticed; exact observation
 replay brackets the accepted pass. Resolution policy 8 binds its package,
 target, namespace, and digest evidence without adding authority.
 
-Transient absent ancestor create/remove, attestation and discovery stability
-for unreported path dependencies, workspace globs, package README/license
+Workspace-glob policy 1 now closes the workspace-member generation that
+precedes those reported-package observations. Before the first metadata pass,
+DUX reads the exact canonical single-link root `Cargo.toml` under a 4 MiB bound,
+parses it with the pinned TOML 1.1.2 generation, and preserves root-package,
+workspace, absent-versus-empty member/default-member, and literal exclude
+facts. Member and default-member patterns use pinned glob 0.3.3 behavior,
+including leading-dot matches, `*`, `?`, classes, recursive `**`, raw-file
+filtering, and the zero-raw-match literal fallback. `exclude` remains Cargo's
+literal normalized prefix test rather than another glob expansion, including
+the raw-member-prefix override.
+
+The positive profile admits at most 256 declarations per array and 768 total,
+4 KiB per declaration, 256 KiB aggregate declaration text, 64 components and
+traversal depth, 4,096 consulted directories, 65,536 namespace entries and raw
+matches, 8 MiB across retained native-path copies, 262,144 traversal states,
+and 2,097,152 entry comparisons. Directory enumeration applies its N/N+1 check
+before storage. Metacharacter components observe complete frontiers. Literal
+components instead use Cargo's targeted native lookup, retain the selected
+present/missing state, and watch the parent generation without enumerating
+unrelated siblings; ordered duplicate default-member rows and distinct
+recursive derivations are preserved.
+Escapes, malformed patterns, selected symlinks or special entries, unreadable
+consulted namespaces remain outside the conservative profile. Canonical root
+components with glob metacharacters are rejected only when a non-empty member
+or default-member declaration invokes Cargo's absolute glob expansion.
+
+On macOS the exact root manifest and every retained directory must be on local
+APFS and fit the current-descriptor plus 128-slot reserve. All watches are
+armed and the complete observation is replayed before Cargo starts. Root-file
+mutation and directory write/delete/attribute/link/rename/revoke events are
+terminal, so a create/remove that restores the same glob result cannot survive
+either metadata pass. Reported-membership-consistency policy 1 rejects a
+disconnected final document: non-excluded expanded members and an eligible
+root package seed the reported set, every other package must be reachable
+through Cargo's validated serialized local path-dependency graph, and explicit
+or implicit defaults must reproduce the reported IDs exactly. Those dependency
+edges are not independently parsed from manifest bytes, so this is internal
+reported-graph consistency rather than proof against fabricated Cargo output.
+Resolution policy 9
+binds root, pattern, namespace, match, seed, excluded, reachable, default, and
+domain-separated closure evidence. No authority edge is added.
+
+Independent dependency-declaration provenance, transient absent ancestor
+create/remove, attestation and discovery stability for unreported path
+dependencies, package README/license
 metadata probes, kernel actual-read identity, and post-witness mutations remain
 outside the proof.
 Those limits and the remaining authority grants keep `ProtectedPath` intact.

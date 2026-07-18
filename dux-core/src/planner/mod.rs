@@ -18,6 +18,8 @@ mod cargo_spawn_macos;
 mod cargo_target_namespace;
 #[cfg(unix)]
 mod cargo_workspace;
+#[cfg(unix)]
+mod cargo_workspace_glob;
 mod rust_target;
 #[cfg(unix)]
 mod rust_target_cargo;

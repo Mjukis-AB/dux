@@ -5,6 +5,31 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Continued Milestone 5 with pre-discovery Cargo 1.96 workspace-glob
+  provenance. DUX now parses the exact root manifest, reproduces bounded glob
+  0.3.3 member/default-member expansion while retaining Cargo's literal
+  exclude behavior and raw-file fallback distinction, and fences every
+  conservatively consulted local-APFS directory through both metadata passes.
+  Literal components use native targeted lookup and parent-generation watches,
+  duplicate default-member rows and recursive derivations retain Cargo's
+  order/multiplicity, and workspace roots with glob metacharacters fail closed
+  when a declaration actually invokes glob expansion.
+  Streaming directory, pattern, path, recursion, match, and comparison bounds
+  fail closed; symlinks, special entries, escapes, and malformed patterns are
+  unsupported. A reported-graph consistency check requires expanded/root
+  seeds to reach every package through Cargo's serialized local path graph and
+  reproduces default-member IDs exactly. It rejects disconnected output but
+  does not independently authenticate dependency declarations from manifest
+  bytes. Resolution policy 9 binds policy-1 namespace and consistency
+  evidence. No cleanup authority or `ProtectedPath` change was added.
+- Continued Milestone 5 with bounded Cargo 1.96 reported-package
+  target/source/build discovery provenance. Every package must expose its
+  complete target array; DUX binds reported sources and the conventional lib,
+  bin, example, test, bench, build-script, nested `main.rs`, and edition-2015
+  fallback namespaces under explicit package, target, kind, text, path, record,
+  and descriptor limits. Local-APFS directory writes and source identity
+  changes are terminal across the accepted pass. Resolution policy 8 records
+  target-namespace policy 1 evidence without granting cleanup authority.
 - Continued Milestone 5 with a closed, bounded Cargo 1.96 path-dependency
   graph for accepted metadata. Every package must expose its dependency list;
   local-source declarations require an absolute, normalized, control-free

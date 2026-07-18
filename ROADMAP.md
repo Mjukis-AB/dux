@@ -4237,6 +4237,55 @@ Tasks:
       transient absent ancestor create/remove, kernel-level read identity, and
       post-witness changes remain open. No blocker, plan, FFI, scheduling, or
       effect authority was added.
+    - [x] 2026-07-18 slice: close Cargo 1.96's workspace-member glob
+      generation before metadata discovery. Workspace-glob policy 1 parses the
+      exact single-link root manifest with the pinned TOML 1.1.2 generation,
+      preserves absent-versus-empty `members` and `default-members`, and uses
+      Cargo's pinned glob 0.3.3 component semantics for `*`, `?`, classes, and
+      recursive `**`. Cargo's non-glob `exclude` declarations remain literal
+      normalized prefixes, raw file matches are filtered without triggering
+      the no-match fallback, and leading-dot names retain Cargo's ordinary
+      match behavior. The positive profile admits at most 256 declarations in
+      each array and 768 total, 4 KiB per declaration, 256 KiB aggregate text,
+      64 components/depth, 4,096 observed directories, 65,536 namespace
+      entries and raw matches, 8 MiB across retained native-path copies,
+      262,144 traversal states, and 2,097,152 entry comparisons. Enumeration
+      is streaming and fails before storing the first over-bound entry;
+      symlinks, special or
+      unreadable selected entries, escapes, workspace-root metacharacters, and
+      malformed patterns reject whenever a non-empty declaration invokes the
+      glob engine; no-pattern packages remain supported. Literal components
+      use Cargo's targeted native lookup (including case-insensitive APFS
+      resolution), observe the
+      selected present/missing state, and fence the parent generation without
+      enumerating or rejecting unrelated siblings. Explicit default-member
+      rows preserve ordered duplicates exactly, including multiple derivations
+      from one recursive pattern.
+      The guard is armed before the first metadata pass, owns the exact root
+      manifest fence, and retains every conservatively consulted local-APFS
+      directory behind terminal write/delete/attribute/link/rename/revoke
+      events. Capture-arm-replay closes construction races, and directory
+      `NOTE_WRITE` makes create/remove restoration terminal through both
+      passes. Reported-membership-consistency policy 1 requires non-excluded
+      expanded members plus an eligible root package to reach every reported
+      package through Cargo's already validated serialized local path graph;
+      it also reproduces Cargo's raw-member override of literal excludes and
+      exact explicit/implicit default-member result. This rejects disconnected
+      output but does not independently authenticate dependency declarations
+      from manifest bytes. Resolution policy 9 records
+      declaration, namespace, match, seed, excluded, reachability, default,
+      root-manifest, and domain-separated closure evidence. Tests cover exact
+      Cargo glob/exclude/default output, disconnected fake packages,
+      fallback-versus-file behavior, duplicate defaults, literal sibling and
+      native-case behavior, aggregate retained-path exhaustion, recursive
+      multiplicity/collapse and bounds, selected symlinks, active versus
+      inactive root metacharacters, persistent
+      namespace changes, and an APFS create/remove during the discovery pass.
+      Independent dependency-declaration provenance,
+      package README/license metadata probes, transient absent ancestor-
+      manifest create/remove, safe unreported dependency manifests,
+      kernel-level read identity, and post-witness changes remain open. No
+      blocker, plan, FFI, scheduling, or effect authority was added.
     Kernel-level Cargo read identity, complete remaining Cargo manifest and
     namespace provenance, and all remaining
     protected-root, volume, process, descendant, plan, and executor grants are

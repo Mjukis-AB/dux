@@ -4496,6 +4496,7 @@ fn map_direct_cargo_validation_error(
         | Error::CargoVersionChanged
         | Error::CargoEnrollmentChanged
         | Error::CargoWorkingDirectoryChanged
+        | Error::CargoWorkspaceGlobChanged
         | Error::WorkspaceManifestChanged
         | Error::CargoTargetNamespaceChanged
         | Error::CargoManifestProbesChanged
@@ -4511,6 +4512,8 @@ fn map_direct_cargo_validation_error(
         Error::Spawn { .. }
         | Error::PipeConfiguration
         | Error::OutputRead { .. }
+        | Error::CargoWorkspaceGlobUnsupported
+        | Error::CargoWorkspaceGlobUnavailable
         | Error::CargoManifestProbesUnsupported
         | Error::CargoManifestProbesUnavailable
         | Error::CargoTargetNamespaceUnsupported

@@ -40,6 +40,10 @@ use super::cargo_workspace::{
     CargoWorkspaceManifestDeclaration, CargoWorkspaceManifestError, CargoWorkspaceManifestEvidence,
     CargoWorkspaceManifestGuard, MAX_WORKSPACE_MEMBERS,
 };
+use super::cargo_workspace_glob::{
+    CargoWorkspaceGlobError, CargoWorkspaceGlobEvidence, CargoWorkspaceGlobExpansion,
+    CargoWorkspaceGlobGuard,
+};
 use super::rust_target::{RustTargetLiveValidationError, RustTargetLiveWitness};
 use super::rust_target_source::RustTargetSourceError;
 use crate::path_validation::{
@@ -60,11 +64,13 @@ const VERSION_TIMEOUT: Duration = Duration::from_secs(5);
 const METADATA_TIMEOUT: Duration = Duration::from_secs(10);
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(2);
 const MAX_CARGO_EXECUTABLE_BYTES: usize = 256 * 1024 * 1024;
-const CARGO_RESOLUTION_POLICY_REVISION: u32 = 8;
+const CARGO_RESOLUTION_POLICY_REVISION: u32 = 9;
 const MAX_PACKAGE_ID_BYTES: usize = 4 * 1024;
+const MAX_WORKSPACE_DEFAULT_MEMBER_ROWS: usize = MAX_WORKSPACE_MEMBERS * MAX_WORKSPACE_MEMBERS;
 const MAX_PACKAGE_DEPENDENCY_DECLARATIONS: usize = 4 * 1024;
 const MAX_LOCAL_DEPENDENCY_PATH_BYTES: usize = 256 * 1024;
 const CARGO_PATH_DEPENDENCY_POLICY_REVISION: u32 = 1;
+const CARGO_WORKSPACE_MEMBERSHIP_CONSISTENCY_POLICY_REVISION: u32 = 1;
 const CARGO_ENROLLMENT_SUPPORTED_COMMIT: &str = "30a34c6821b57de0aaec83a901aca39f88f6778c";
 
 /// Static executable evidence captured without executing untrusted bytes.
@@ -135,6 +141,7 @@ struct CargoLaunchTarget<'a> {
 struct CargoInputGuards<'a> {
     configuration: Option<&'a CargoConfigurationGuard>,
     manifest_probes: Option<&'a CargoManifestProbeGuard>,
+    workspace_glob: Option<&'a CargoWorkspaceGlobGuard>,
     workspace: Option<&'a CargoWorkspaceManifestGuard>,
     target_namespace: Option<&'a CargoTargetNamespaceGuard>,
 }
@@ -146,6 +153,9 @@ impl CargoInputGuards<'_> {
         }
         if let Some(manifest_probes) = self.manifest_probes {
             manifest_probes.poll()?;
+        }
+        if let Some(workspace_glob) = self.workspace_glob {
+            workspace_glob.poll()?;
         }
         if let Some(workspace) = self.workspace {
             workspace.poll()?;
@@ -162,6 +172,9 @@ impl CargoInputGuards<'_> {
         }
         if let Some(manifest_probes) = self.manifest_probes {
             manifest_probes.revalidate()?;
+        }
+        if let Some(workspace_glob) = self.workspace_glob {
+            workspace_glob.revalidate()?;
         }
         if let Some(workspace) = self.workspace {
             workspace.revalidate()?;
@@ -200,6 +213,8 @@ pub(crate) struct RustTargetCargoMetadataWitness {
     metadata_sha256: [u8; 32],
     configuration: CargoConfigurationEvidence,
     manifest_probes: CargoManifestProbeEvidence,
+    workspace_glob: CargoWorkspaceGlobEvidence,
+    workspace_membership_consistency: CargoWorkspaceMembershipConsistencyEvidence,
     workspace: CargoWorkspaceManifestEvidence,
     path_dependencies: CargoPathDependencyEvidence,
     target_namespace: CargoTargetNamespaceEvidence,
@@ -272,6 +287,12 @@ pub(crate) enum CargoMetadataValidationError {
     TargetDirectoryMismatch,
     #[error("Cargo metadata has an invalid or ambiguous workspace-member declaration")]
     InvalidWorkspaceMembers,
+    #[error("Cargo workspace glob namespace is outside the bounded provenance profile")]
+    CargoWorkspaceGlobUnsupported,
+    #[error("Cargo workspace glob namespace changed during metadata resolution")]
+    CargoWorkspaceGlobChanged,
+    #[error("Cargo workspace glob namespace could not be bounded")]
+    CargoWorkspaceGlobUnavailable,
     #[error("Cargo metadata has malformed or out-of-bounds dependency declarations")]
     InvalidPathDependencies,
     #[error("Cargo metadata references a local dependency not reported as a workspace package")]
@@ -340,6 +361,16 @@ impl From<CargoWorkspaceManifestError> for CargoMetadataValidationError {
             CargoWorkspaceManifestError::Invalid => Self::InvalidWorkspaceMembers,
             CargoWorkspaceManifestError::Changed => Self::WorkspaceManifestChanged,
             CargoWorkspaceManifestError::Unavailable => Self::WorkspaceManifestUnavailable,
+        }
+    }
+}
+
+impl From<CargoWorkspaceGlobError> for CargoMetadataValidationError {
+    fn from(error: CargoWorkspaceGlobError) -> Self {
+        match error {
+            CargoWorkspaceGlobError::Invalid => Self::CargoWorkspaceGlobUnsupported,
+            CargoWorkspaceGlobError::Changed => Self::CargoWorkspaceGlobChanged,
+            CargoWorkspaceGlobError::Unavailable => Self::CargoWorkspaceGlobUnavailable,
         }
     }
 }
@@ -713,6 +744,19 @@ fn validate_cargo_metadata_with_limits(
             )?
         }
     };
+    let workspace_glob = match configuration_fence {
+        ConfigurationFenceMode::Armed => {
+            CargoWorkspaceGlobGuard::capture(project_directory.root(), live.manifest_path())?
+        }
+        #[cfg(test)]
+        ConfigurationFenceMode::UnarmedForParallelTest => {
+            CargoWorkspaceGlobGuard::capture_unfenced_for_test(
+                project_directory.root(),
+                live.manifest_path(),
+            )?
+        }
+    };
+    let workspace_glob_expansion = workspace_glob.expansion()?;
 
     let metadata_arguments = [
         OsStr::new("metadata"),
@@ -735,6 +779,7 @@ fn validate_cargo_metadata_with_limits(
         CargoInputGuards {
             configuration: Some(&configuration),
             manifest_probes: Some(&manifest_probes),
+            workspace_glob: Some(&workspace_glob),
             workspace: None,
             target_namespace: None,
         },
@@ -747,6 +792,8 @@ fn validate_cargo_metadata_with_limits(
         discovery_path_dependencies,
         discovery_target_namespace,
     ) = parse_metadata_document(&discovery_output.stdout, &live)?;
+    let discovery_workspace_membership_consistency =
+        validate_workspace_membership_consistency(&workspace_glob_expansion, &discovery_metadata)?;
     let workspace = match configuration_fence {
         ConfigurationFenceMode::Armed => {
             CargoWorkspaceManifestGuard::capture(project_directory.root(), &discovery_workspace)?
@@ -782,6 +829,7 @@ fn validate_cargo_metadata_with_limits(
         CargoInputGuards {
             configuration: Some(&configuration),
             manifest_probes: Some(&manifest_probes),
+            workspace_glob: Some(&workspace_glob),
             workspace: Some(&workspace),
             target_namespace: Some(&target_namespace),
         },
@@ -790,6 +838,8 @@ fn validate_cargo_metadata_with_limits(
     configuration.verify_read_intent(&output.stderr)?;
     let (metadata, accepted_workspace, path_dependencies, accepted_target_namespace) =
         parse_metadata_document(&output.stdout, &live)?;
+    let workspace_membership_consistency =
+        validate_workspace_membership_consistency(&workspace_glob_expansion, &metadata)?;
     if accepted_target_namespace != discovery_target_namespace {
         return Err(CargoMetadataValidationError::CargoTargetNamespaceChanged);
     }
@@ -797,6 +847,7 @@ fn validate_cargo_metadata_with_limits(
         || metadata != discovery_metadata
         || accepted_workspace != discovery_workspace
         || path_dependencies != discovery_path_dependencies
+        || workspace_membership_consistency != discovery_workspace_membership_consistency
     {
         return Err(CargoMetadataValidationError::WorkspaceManifestChanged);
     }
@@ -804,6 +855,7 @@ fn validate_cargo_metadata_with_limits(
     project_directory.revalidate()?;
     let configuration_evidence = configuration.evidence()?;
     let manifest_probe_evidence = manifest_probes.evidence()?;
+    let workspace_glob_evidence = workspace_glob.evidence()?;
     let workspace_evidence = workspace.evidence()?;
     let target_namespace_evidence = target_namespace.evidence()?;
 
@@ -818,6 +870,7 @@ fn validate_cargo_metadata_with_limits(
     project_directory.revalidate()?;
     configuration.revalidate()?;
     manifest_probes.revalidate()?;
+    workspace_glob.revalidate()?;
     workspace.revalidate()?;
     target_namespace.revalidate()?;
     live.revalidate_current()?;
@@ -832,6 +885,8 @@ fn validate_cargo_metadata_with_limits(
         metadata_sha256: sha256(&output.stdout),
         configuration: configuration_evidence,
         manifest_probes: manifest_probe_evidence,
+        workspace_glob: workspace_glob_evidence,
+        workspace_membership_consistency,
         workspace: workspace_evidence,
         path_dependencies,
         target_namespace: target_namespace_evidence,
@@ -1137,6 +1192,16 @@ struct CargoPathDependencyEvidence {
     closure_sha256: [u8; 32],
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct CargoWorkspaceMembershipConsistencyEvidence {
+    policy_revision: u32,
+    seed_package_count: u32,
+    excluded_member_count: u32,
+    reachable_package_count: u32,
+    default_member_count: u32,
+    closure_sha256: [u8; 32],
+}
+
 fn parse_metadata_document(
     bytes: &[u8],
     live: &RustTargetLiveWitness,
@@ -1167,7 +1232,7 @@ fn parse_metadata_document(
     if metadata.workspace_members.is_empty()
         || metadata.workspace_members.len() > MAX_WORKSPACE_MEMBERS
         || metadata.packages.len() != metadata.workspace_members.len()
-        || metadata.workspace_default_members.len() > metadata.workspace_members.len()
+        || metadata.workspace_default_members.len() > MAX_WORKSPACE_DEFAULT_MEMBER_ROWS
     {
         return Err(CargoMetadataValidationError::InvalidWorkspaceMembers);
     }
@@ -1197,11 +1262,9 @@ fn parse_metadata_document(
     if members.len() != packages.len() {
         return Err(CargoMetadataValidationError::InvalidWorkspaceMembers);
     }
-    let mut default_members = BTreeSet::new();
     for member in &metadata.workspace_default_members {
         if member.is_empty()
             || member.len() > MAX_PACKAGE_ID_BYTES
-            || !default_members.insert(member.as_str())
             || !members.contains(member.as_str())
         {
             return Err(CargoMetadataValidationError::InvalidWorkspaceMembers);
@@ -1342,6 +1405,269 @@ fn validate_path_dependencies(
         unique_local_manifest_count: unique_manifests.len() as u32,
         closure_sha256: digest.finalize().into(),
     })
+}
+
+// This proves that the final document is internally reachable from the
+// independently expanded workspace seeds. Dependency edges are still Cargo's
+// reported rows; independently parsing every manifest declaration is a later
+// provenance grant and is not claimed here.
+fn validate_workspace_membership_consistency(
+    expansion: &CargoWorkspaceGlobExpansion,
+    metadata: &CargoMetadataDocument,
+) -> Result<CargoWorkspaceMembershipConsistencyEvidence, CargoMetadataValidationError> {
+    let workspace_root = Path::new(&metadata.workspace_root);
+    let root_manifest = workspace_root.join("Cargo.toml");
+    if expansion.root_manifest != root_manifest {
+        return Err(CargoMetadataValidationError::CargoWorkspaceGlobUnsupported);
+    }
+
+    let mut packages_by_manifest = BTreeMap::<Vec<u8>, &CargoMetadataPackageDocument>::new();
+    let mut packages_by_id = BTreeMap::<&str, &CargoMetadataPackageDocument>::new();
+    for package in &metadata.packages {
+        let manifest = Path::new(&package.manifest_path);
+        if packages_by_manifest
+            .insert(manifest.as_os_str().as_bytes().to_vec(), package)
+            .is_some()
+            || packages_by_id
+                .insert(package.id.as_str(), package)
+                .is_some()
+        {
+            return Err(CargoMetadataValidationError::InvalidWorkspaceMembers);
+        }
+    }
+
+    let root_key = root_manifest.as_os_str().as_bytes().to_vec();
+    let root_package = packages_by_manifest.get(&root_key).copied();
+    if root_package.is_some() != expansion.root_package_present {
+        return Err(CargoMetadataValidationError::CargoWorkspaceGlobUnsupported);
+    }
+    if !expansion.workspace_present
+        && (!expansion.root_package_present || packages_by_manifest.len() != 1)
+    {
+        return Err(CargoMetadataValidationError::CargoWorkspaceGlobUnsupported);
+    }
+
+    let mut declared_member_paths = BTreeSet::<Vec<u8>>::new();
+    let mut seeds = BTreeSet::<Vec<u8>>::new();
+    let mut excluded_members = BTreeSet::<Vec<u8>>::new();
+    for pattern in &expansion.members {
+        if pattern.used_literal_fallback {
+            let fallback = workspace_declaration_path(&pattern.pattern);
+            validate_declared_member_path(
+                workspace_root,
+                &fallback,
+                expansion,
+                &packages_by_manifest,
+                &mut declared_member_paths,
+                &mut seeds,
+                &mut excluded_members,
+            )?;
+        } else {
+            for relative in &pattern.directory_matches {
+                validate_declared_member_path(
+                    workspace_root,
+                    relative,
+                    expansion,
+                    &packages_by_manifest,
+                    &mut declared_member_paths,
+                    &mut seeds,
+                    &mut excluded_members,
+                )?;
+            }
+        }
+    }
+
+    if expansion.root_package_present {
+        let relative_root_manifest = Path::new("Cargo.toml");
+        if workspace_path_is_excluded(relative_root_manifest, expansion) {
+            return Err(CargoMetadataValidationError::CargoWorkspaceGlobUnsupported);
+        }
+        seeds.insert(root_key.clone());
+    }
+    if seeds.is_empty() {
+        return Err(CargoMetadataValidationError::CargoWorkspaceGlobUnsupported);
+    }
+
+    let mut reachable = BTreeSet::<Vec<u8>>::new();
+    let mut pending = seeds.iter().cloned().collect::<Vec<_>>();
+    while let Some(manifest_key) = pending.pop() {
+        if !reachable.insert(manifest_key.clone()) {
+            continue;
+        }
+        let package = packages_by_manifest
+            .get(&manifest_key)
+            .copied()
+            .ok_or(CargoMetadataValidationError::CargoWorkspaceGlobUnsupported)?;
+        for dependency in &package.dependencies {
+            let Some(path) = dependency.path.as_deref() else {
+                continue;
+            };
+            let dependency_manifest = Path::new(path).join("Cargo.toml");
+            let relative = dependency_manifest
+                .strip_prefix(workspace_root)
+                .map_err(|_| CargoMetadataValidationError::CargoWorkspaceGlobUnsupported)?;
+            if workspace_path_is_excluded(relative, expansion) {
+                return Err(CargoMetadataValidationError::CargoWorkspaceGlobUnsupported);
+            }
+            let dependency_key = dependency_manifest.as_os_str().as_bytes().to_vec();
+            if !packages_by_manifest.contains_key(&dependency_key) {
+                return Err(CargoMetadataValidationError::CargoWorkspaceGlobUnsupported);
+            }
+            if !reachable.contains(&dependency_key) {
+                pending.push(dependency_key);
+            }
+        }
+    }
+    if reachable.len() != packages_by_manifest.len() {
+        return Err(CargoMetadataValidationError::CargoWorkspaceGlobUnsupported);
+    }
+
+    let expected_defaults = if expansion.default_members_declared {
+        let mut defaults = Vec::new();
+        for pattern in &expansion.default_members {
+            if pattern.used_literal_fallback {
+                validate_default_member_path(
+                    workspace_root,
+                    &workspace_declaration_path(&pattern.pattern),
+                    expansion,
+                    &declared_member_paths,
+                    &packages_by_manifest,
+                    &mut defaults,
+                )?;
+            } else {
+                for relative in &pattern.directory_matches {
+                    validate_default_member_path(
+                        workspace_root,
+                        relative,
+                        expansion,
+                        &declared_member_paths,
+                        &packages_by_manifest,
+                        &mut defaults,
+                    )?;
+                }
+            }
+        }
+        defaults
+    } else if expansion.root_package_present {
+        vec![
+            root_package
+                .ok_or(CargoMetadataValidationError::CargoWorkspaceGlobUnsupported)?
+                .id
+                .clone(),
+        ]
+    } else {
+        metadata.workspace_members.clone()
+    };
+    if expected_defaults != metadata.workspace_default_members {
+        return Err(CargoMetadataValidationError::CargoWorkspaceGlobUnsupported);
+    }
+
+    let mut digest = Sha256::new();
+    digest.update(b"dux-cargo-workspace-membership-consistency-v1\0");
+    digest.update([u8::from(expansion.workspace_present)]);
+    digest.update([u8::from(expansion.root_package_present)]);
+    digest_workspace_rows(&mut digest, &seeds);
+    digest_workspace_rows(&mut digest, &excluded_members);
+    digest_workspace_rows(&mut digest, &reachable);
+    digest.update((expected_defaults.len() as u64).to_le_bytes());
+    for member in &expected_defaults {
+        digest.update((member.len() as u64).to_le_bytes());
+        digest.update(member.as_bytes());
+    }
+    for member in &metadata.workspace_members {
+        if !packages_by_id.contains_key(member.as_str()) {
+            return Err(CargoMetadataValidationError::InvalidWorkspaceMembers);
+        }
+    }
+    Ok(CargoWorkspaceMembershipConsistencyEvidence {
+        policy_revision: CARGO_WORKSPACE_MEMBERSHIP_CONSISTENCY_POLICY_REVISION,
+        seed_package_count: u32::try_from(seeds.len())
+            .map_err(|_| CargoMetadataValidationError::CargoWorkspaceGlobUnavailable)?,
+        excluded_member_count: u32::try_from(excluded_members.len())
+            .map_err(|_| CargoMetadataValidationError::CargoWorkspaceGlobUnavailable)?,
+        reachable_package_count: u32::try_from(reachable.len())
+            .map_err(|_| CargoMetadataValidationError::CargoWorkspaceGlobUnavailable)?,
+        default_member_count: u32::try_from(expected_defaults.len())
+            .map_err(|_| CargoMetadataValidationError::CargoWorkspaceGlobUnavailable)?,
+        closure_sha256: digest.finalize().into(),
+    })
+}
+
+fn validate_declared_member_path(
+    workspace_root: &Path,
+    relative: &Path,
+    expansion: &CargoWorkspaceGlobExpansion,
+    packages_by_manifest: &BTreeMap<Vec<u8>, &CargoMetadataPackageDocument>,
+    declared_member_paths: &mut BTreeSet<Vec<u8>>,
+    seeds: &mut BTreeSet<Vec<u8>>,
+    excluded_members: &mut BTreeSet<Vec<u8>>,
+) -> Result<(), CargoMetadataValidationError> {
+    let manifest_relative = relative.join("Cargo.toml");
+    declared_member_paths.insert(relative.as_os_str().as_bytes().to_vec());
+    let manifest = workspace_root.join(&manifest_relative);
+    let key = manifest.as_os_str().as_bytes().to_vec();
+    if workspace_path_is_excluded(&manifest_relative, expansion) {
+        excluded_members.insert(key);
+        return Ok(());
+    }
+    if !packages_by_manifest.contains_key(&key) {
+        return Err(CargoMetadataValidationError::CargoWorkspaceGlobUnsupported);
+    }
+    seeds.insert(key);
+    Ok(())
+}
+
+fn validate_default_member_path(
+    workspace_root: &Path,
+    relative: &Path,
+    expansion: &CargoWorkspaceGlobExpansion,
+    declared_member_paths: &BTreeSet<Vec<u8>>,
+    packages_by_manifest: &BTreeMap<Vec<u8>, &CargoMetadataPackageDocument>,
+    defaults: &mut Vec<String>,
+) -> Result<(), CargoMetadataValidationError> {
+    let manifest = workspace_root.join(relative).join("Cargo.toml");
+    let key = manifest.as_os_str().as_bytes().to_vec();
+    if let Some(package) = packages_by_manifest.get(&key) {
+        defaults.push(package.id.clone());
+        return Ok(());
+    }
+    let relative_key = relative.as_os_str().as_bytes().to_vec();
+    if declared_member_paths.contains(&relative_key)
+        && workspace_path_is_excluded(&relative.join("Cargo.toml"), expansion)
+    {
+        return Ok(());
+    }
+    Err(CargoMetadataValidationError::CargoWorkspaceGlobUnsupported)
+}
+
+fn workspace_path_is_excluded(relative: &Path, expansion: &CargoWorkspaceGlobExpansion) -> bool {
+    let excluded = expansion
+        .excludes
+        .iter()
+        .map(|declaration| workspace_declaration_path(declaration))
+        .any(|declaration| relative.starts_with(declaration));
+    let explicitly_listed = expansion
+        .members
+        .iter()
+        .map(|declaration| workspace_declaration_path(&declaration.pattern))
+        .any(|declaration| relative.starts_with(declaration));
+    excluded && !explicitly_listed
+}
+
+fn workspace_declaration_path(declaration: &str) -> PathBuf {
+    if declaration == "." {
+        PathBuf::new()
+    } else {
+        PathBuf::from(declaration)
+    }
+}
+
+fn digest_workspace_rows(digest: &mut Sha256, rows: &BTreeSet<Vec<u8>>) {
+    digest.update((rows.len() as u64).to_le_bytes());
+    for row in rows {
+        digest.update((row.len() as u64).to_le_bytes());
+        digest.update(row);
+    }
 }
 
 fn parse_cargo_release(bytes: &[u8]) -> Result<CargoRelease, CargoMetadataValidationError> {
@@ -2015,6 +2341,63 @@ impl RustTargetCargoMetadataWitness {
 
     pub(super) fn workspace_manifest_policy_revision(&self) -> u32 {
         self.workspace.policy_revision
+    }
+
+    pub(super) fn workspace_glob_policy_revision(&self) -> u32 {
+        self.workspace_glob.policy_revision
+    }
+
+    pub(super) fn workspace_glob_pattern_count(&self) -> u32 {
+        self.workspace_glob.pattern_count
+    }
+
+    pub(super) fn workspace_glob_directory_count(&self) -> u32 {
+        self.workspace_glob.observed_directory_count
+    }
+
+    pub(super) fn workspace_glob_entry_count(&self) -> u32 {
+        self.workspace_glob.namespace_entry_count
+    }
+
+    pub(super) fn workspace_glob_raw_match_count(&self) -> u32 {
+        self.workspace_glob.raw_match_count
+    }
+
+    pub(super) fn workspace_glob_directory_match_count(&self) -> u32 {
+        self.workspace_glob.directory_match_count
+    }
+
+    pub(super) fn workspace_glob_closure_sha256(&self) -> [u8; 32] {
+        self.workspace_glob.closure_sha256
+    }
+
+    pub(super) fn workspace_glob_root_manifest_sha256(&self) -> [u8; 32] {
+        self.workspace_glob.root_manifest_sha256
+    }
+
+    pub(super) fn workspace_membership_consistency_policy_revision(&self) -> u32 {
+        self.workspace_membership_consistency.policy_revision
+    }
+
+    pub(super) fn workspace_seed_package_count(&self) -> u32 {
+        self.workspace_membership_consistency.seed_package_count
+    }
+
+    pub(super) fn workspace_excluded_member_count(&self) -> u32 {
+        self.workspace_membership_consistency.excluded_member_count
+    }
+
+    pub(super) fn workspace_reachable_package_count(&self) -> u32 {
+        self.workspace_membership_consistency
+            .reachable_package_count
+    }
+
+    pub(super) fn workspace_default_member_count(&self) -> u32 {
+        self.workspace_membership_consistency.default_member_count
+    }
+
+    pub(super) fn workspace_membership_consistency_closure_sha256(&self) -> [u8; 32] {
+        self.workspace_membership_consistency.closure_sha256
     }
 
     pub(super) fn manifest_probe_policy_revision(&self) -> u32 {

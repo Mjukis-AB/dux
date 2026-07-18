@@ -231,7 +231,7 @@ app and launch; insufficient `RLIMIT_NOFILE` rejects rather than silently
 dropping coverage. Configuration and workspace guards are rechecked before
 spawn and resume, throughout bounded output, after exact-child reaping, and
 before evidence extraction. Only a byte-identical, independently parsed second
-result is accepted. Resolution-policy revision 7 records the manifest policy,
+result is accepted. Current resolution-policy revision 9 records the manifest policy,
 member and retained-manifest counts, closure digest, accepted-output digest,
 and configuration root/file/edge/byte plus read-intent evidence.
 
@@ -246,7 +246,7 @@ delete/rename/revoke events are terminal, while directory entry writes trigger
 exact observation replay. Persistent entry changes and file write/restore
 reject; unchanged relevant state after unrelated high-ancestor directory
 activity may continue. Counts, present bytes, and the
-domain-separated ordered closure digest are retained in resolution policy 8.
+domain-separated ordered closure digest are retained in resolution policy 9.
 
 The strict document also requires every package's serialized dependency list.
 Across at most 4,096 declarations and 256 KiB of aggregate local-path text,
@@ -285,8 +285,44 @@ restores the prior entry set; exact file replacement, link, attribute,
 rename, delete, and revoke events are also terminal. DUX replays the entire
 observation before evidence extraction. The target guard is polled with the
 configuration, ancestor-manifest, and workspace-manifest guards throughout
-the accepted second Cargo pass. Resolution policy 8 retains package, target,
+the accepted second Cargo pass. Resolution policy 9 retains package, target,
 namespace-record, and closure evidence beside the earlier provenance rows.
+
+Before either metadata pass, workspace-glob policy 1 separately captures the
+generation that produces those reported members. It parses the exact
+single-link root manifest with TOML 1.1.2, distinguishes absent and empty
+member/default-member declarations, applies pinned glob 0.3.3 component
+semantics to `members` and `default-members`, and preserves Cargo's literal
+prefix handling for `exclude`. Raw files match before Cargo's final directory
+filter and therefore do not trigger its zero-match fallback; recursive `**`,
+leading-dot names, `*`, `?`, and classes use the reviewed Cargo behavior.
+Literal components use native targeted lookup (including case-insensitive APFS
+resolution), retain the selected present/missing state, and fence the parent
+generation without enumerating unrelated siblings. Ordered duplicate explicit
+default-member rows and distinct recursive derivations are preserved.
+Canonical workspace-root components with glob metacharacters are outside the
+confined profile only when a non-empty declaration invokes glob expansion,
+because Cargo then interprets those components as part of its absolute glob.
+
+The admitted profile permits at most 256 strings per array and 768 total, 4
+KiB per string, 256 KiB total text, 64 components/depth, 4,096 directories,
+65,536 namespace entries and raw matches, 8 MiB across retained native-path
+copies, 262,144 traversal states, and 2,097,152 comparisons. Direct entries are
+charged before storage. The conservative observation rejects selected
+symlinks, special or unreadable entries, escapes, invalid patterns, and every
+over-bound case.
+
+The root manifest and every consulted local-APFS directory are armed before
+the discovery pass and replayed after arming. Root-file changes and directory
+writes, including create/remove restoration, are terminal throughout both
+commands. Reported-membership-consistency policy 1 requires non-excluded
+expansion and an eligible root package to seed the reported packages, verifies
+reachability through Cargo's validated serialized dependency edges, and
+reproduces explicit defaults or Cargo's virtual-all/package-root fallback
+exactly. It does not independently parse those dependency declarations from
+manifest bytes. Resolution policy 9 binds the namespace and consistency counts
+and both domain-separated closures. These are still observations and cannot
+clear `ProtectedPath`.
 
 This proves the exact reported root/member manifest bytes remained stable
 under the reviewed path-based inference model and excludes unreported local
@@ -298,7 +334,8 @@ target manifest. Cargo 1.96's exact
 `metadata --no-deps` code path deliberately does not load or create
 `Cargo.lock`; real-Cargo tests include a malformed lockfile to pin that
 version-specific behavior. DUX still does not prove Cargo's full read set,
-workspace-glob generations, package README/license metadata probes, transient
+independent dependency declarations, package README/license metadata probes,
+transient
 absent ancestor create/remove, attestation of safe unreported path
 dependencies, external discovery-manifest stability, or kernel-level read
 identity. It is not fd-based Cargo reads;
