@@ -22,6 +22,7 @@ mod cargo_target_namespace;
 mod cargo_workspace;
 #[cfg(unix)]
 mod cargo_workspace_glob;
+mod exact_path_review;
 mod rust_target;
 #[cfg(unix)]
 mod rust_target_cargo;

@@ -4418,6 +4418,21 @@ Tasks:
     and selected indices for a future planner but cannot construct a plan,
     persist state, cross FFI, approve, schedule, or mutate anything.
 - [ ] Implement exact-path plan review.
+  - [x] 2026-07-18 slice: add a sealed planner-owned evidence boundary that
+    requires a code-owned canonical scan-root witness and runs every selected
+    target through lossless lexical validation plus no-follow live identity
+    capture. The bounded result retains requested/canonical/relative paths,
+    target kind, volume/object identity, ordered ancestor identities, hard-link
+    count, rule/category/action facts, evidence, estimates, and warnings. It
+    deterministically consumes candidate-group selections, rejects blockers,
+    non-cleanup candidates, incompatible modes, unresolved overlap, invalid or
+    out-of-scope paths, missing/symlink/special targets, multiply-linked
+    permanent files, and byte overflow. The result is intentionally
+    non-Clone/non-serializable and always non-actionable while trusted
+    protected-root and volume grants are absent; no plan, approval, persistence,
+    FFI, schedule, or mutation path was added. Full protected-root grants,
+    approval binding, executor revalidation, and plan/journal integration remain
+    open.
 - [ ] Implement Trash executor for Explorer selections.
 - [ ] Implement permanent-safe executor for approved rules.
 - [ ] Implement execution-time revalidation.

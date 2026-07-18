@@ -5,6 +5,18 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Continued Milestone 5 with a sealed planner-owned exact-path review
+  evidence boundary. A code-owned canonical scan-root observation is required;
+  selected candidates are grouped and coalesced deterministically, then each
+  strict descendant is checked with lossless lexical validation and no-follow
+  live identity snapshots. The review retains requested/canonical/relative
+  paths, target kind, volume/object identity, ancestor identities, hard-link
+  count, rule facts, estimates, and warnings. Blockers, incompatible modes,
+  unresolved overlap, invalid scope, missing/symlink/special targets,
+  multiply-linked permanent files, and arithmetic overflow fail closed. The
+  result is deliberately non-Clone, non-serializable, non-actionable evidence:
+  trusted protected-root/volume grants, approval, plan construction,
+  persistence, FFI, and mutation remain unavailable.
 - Continued Milestone 5 with a sealed core candidate-grouping and overlap
   result. Deterministic groups use category, safety tier, and proposed action;
   equivalent same-rule observations coalesce by stable candidate ID, and a
