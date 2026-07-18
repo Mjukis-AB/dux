@@ -25,6 +25,20 @@ final class DuxAppDelegateTests: XCTestCase {
         XCTAssertEqual(controller.enabledReasons, controller.disabledReasons)
     }
 
+    func testAutomaticTerminationLeaseCanBeReassertedAfterSceneRestoration() {
+        let controller = AutomaticTerminationControllerSpy()
+        let lease = DuxAutomaticTerminationLease(controller: controller)
+
+        lease.reassert()
+        XCTAssertTrue(controller.events.isEmpty)
+
+        lease.acquire()
+        lease.reassert()
+
+        XCTAssertEqual(controller.events, ["support:true", "disable", "disable"])
+        XCTAssertEqual(controller.disabledReasons.count, 2)
+    }
+
     func testTerminationGateStartsExactlyOneShutdown() {
         let gate = DuxTerminationGate()
 
@@ -86,22 +100,36 @@ final class DuxAppDelegateTests: XCTestCase {
     }
 
     func testClosingLastWindowNeverTerminatesMenuBarApp() {
-        let delegate = DuxAppDelegate(runtime: RuntimeSpy())
+        let controller = AutomaticTerminationControllerSpy()
+        let lease = DuxAutomaticTerminationLease(controller: controller)
+        lease.acquire()
+        let delegate = DuxAppDelegate(
+            runtime: RuntimeSpy(),
+            automaticTerminationLease: lease
+        )
 
         XCTAssertFalse(
             delegate.applicationShouldTerminateAfterLastWindowClosed(
                 NSApplication.shared
             )
         )
+        XCTAssertEqual(controller.events, ["support:true", "disable", "disable"])
     }
 
     func testIncidentalTerminationRequestFromTransientMenuWindowIsCancelled() {
-        let delegate = DuxAppDelegate(runtime: RuntimeSpy())
+        let controller = AutomaticTerminationControllerSpy()
+        let lease = DuxAutomaticTerminationLease(controller: controller)
+        lease.acquire()
+        let delegate = DuxAppDelegate(
+            runtime: RuntimeSpy(),
+            automaticTerminationLease: lease
+        )
 
         XCTAssertEqual(
             delegate.applicationShouldTerminate(NSApplication.shared),
             .terminateCancel
         )
+        XCTAssertEqual(controller.events, ["support:true", "disable", "disable"])
     }
 
     func testExplicitQuitIntentIsOneShot() {

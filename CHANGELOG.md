@@ -1266,6 +1266,13 @@ All notable changes to DUX will be documented in this file.
 - The application lockfile is now committed. Crossbeam was advanced past RUSTSEC-2026-0204, Postcard's unused heapless defaults were disabled, and Ratatui/Crossterm were upgraded to remove unmaintained and yanked transitive crates. The declared minimum Rust version is now 1.88.
 - The scanner diagnostics example now lives in `dux-core/examples/debug_scan.rs`, so Cargo discovers it normally and includes it in the published `dux-core` package.
 
+### Fixed
+- Hardened the menu-bar lifetime guard against SwiftUI scene restoration.
+  `MenuBarExtra` can re-enable AppKit automatic termination after the launch
+  delegate returns, so DUX now reasserts its lease after restoration and at
+  both last-window and termination callbacks before cancelling incidental
+  dismissal requests. Explicit Quit still follows the ordered shutdown path.
+
 ## [0.5.0]
 
 ### Added

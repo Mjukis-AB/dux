@@ -21,12 +21,16 @@ final class DuxAutomaticTerminationLease {
     }
 
     func acquire() {
-        guard !isHeld else {
-            return
-        }
         controller.automaticTerminationSupportEnabled = true
         controller.disableAutomaticTermination(Self.reason)
         isHeld = true
+    }
+
+    func reassert() {
+        guard isHeld else {
+            return
+        }
+        controller.disableAutomaticTermination(Self.reason)
     }
 
     func release() {
@@ -103,10 +107,19 @@ final class DuxAppDelegate: NSObject, NSApplicationDelegate {
         Task {
             await runtime.start()
         }
+        // SwiftUI restores MenuBarExtra's transient scene after the delegate
+        // callback and AppKit may re-enable automatic termination while doing
+        // so. Reassert the lease after that restoration turn has settled.
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(250)) { [weak self] in
+            Task { @MainActor in
+                self?.automaticTerminationLease.reassert()
+            }
+        }
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
         _ = notification
+        automaticTerminationLease.reassert()
         Task {
             await handleApplicationBecameActive()
         }
@@ -131,6 +144,7 @@ final class DuxAppDelegate: NSObject, NSApplicationDelegate {
         _ sender: NSApplication
     ) -> Bool {
         _ = sender
+        automaticTerminationLease.reassert()
         return false
     }
 
@@ -138,6 +152,7 @@ final class DuxAppDelegate: NSObject, NSApplicationDelegate {
         guard DuxTerminationIntent.consumeExplicitQuitRequest() else {
             // MenuBarExtra owns a transient window. AppKit may ask to terminate
             // an agent app when that window closes; that is not a user Quit.
+            automaticTerminationLease.reassert()
             return .terminateCancel
         }
         switch terminationGate.begin() {
