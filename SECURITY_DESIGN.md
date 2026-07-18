@@ -213,12 +213,18 @@ the crate build and again before engine storage or workers are published.
 Production evaluation accepts only the same completed-scan type-state witness
 used to create the immutable snapshot. The current catalog contains only
 selected-scan-root developer-artifact observations backed by the independently
-implemented M0 marker projection. Ten rules remain Informational/RevealOnly.
+implemented M0 marker projection. Nine rules remain Informational/RevealOnly.
 The independently researched `developer.rust.target` revision 2 rule may
 propose `SafeRegenerable`/`RemoveKnownRegenerableContents` only when a direct
 regular `Cargo.toml` sibling and direct regular `CACHEDIR.TAG` child were both
 present in the completed snapshot. The cache-tag filename is supporting
 snapshot evidence, not proof of its standard signature or a live Cargo target.
+A second independently researched `developer.python.pycache` revision 2 rule
+may propose the same SafeRegenerable/RemoveKnownRegenerableContents pair only
+when a direct regular, non-symlink `.py` sibling and symlink-free candidate
+ancestry were present in the completed snapshot. Python cache relocation,
+active writers, descendant contents, and protected-root authority remain
+unresolved.
 A separate sealed, crate-private planner checkpoint can now accept only that
 exact candidate shape while it still carries only the `ProtectedPath` blocker.
 Its production entry is bound to an exact complete durable source: one current-
@@ -599,7 +605,7 @@ Each rule candidate binds at least:
 
 Candidates are observations. A “no known blockers” state is not approval.
 
-Current implementation checkpoint: evaluator revision 1 binds the exact
+Current implementation checkpoint: evaluator revision 2 binds the exact
 catalog bytes, selected scan root, source scan, lossless path bytes, and
 structured coverage into deterministic IDs and a versioned context digest.
 It validates every declared catalog matcher array and policy field, then relies
@@ -610,9 +616,10 @@ materialization. The production entry point is crate-private and requires a
 fresh `CompletedScanArtifact`; public/cached trees cannot mint persisted
 results. Because authoritative volume identity, canonical ancestry, and a
 protected-root grant are not yet present, every current finding retains
-`ProtectedPath` even when scan coverage is complete. The Rust target rule may
-carry a safe-regenerable proposed policy, but it remains unscheduled,
-unselectable, and unable to enter the current cleanup planner.
+`ProtectedPath` even when scan coverage is complete. The Rust target and Python
+`__pycache__` rules may carry a safe-regenerable proposed policy, but both
+remain unscheduled, unselectable, and unable to enter the current cleanup
+planner.
 
 ### 6.3 Protected-root and sensitive-category policy
 
@@ -2303,7 +2310,7 @@ coverage is labelled as Home-scoped and unknown coverage stays unknown.
 | Strict lexical/live path evidence | Implemented, crate-private and non-authoritative, including retained-descriptor bounded regular-file prefix and full-file SHA-256 reads on Unix | Bind trusted scan/volume/rule witnesses and executor revalidation; Windows planner use requires retained handle-relative ancestry |
 | Protected-root registry | Implemented text-only policy; production construction sealed | Trusted OS home/profile/mount discovery and stable rule grants |
 | Dangerous-path corpus and fuzzing | Implemented | Keep cross-platform and promote every crash regression |
-| Rule schema/loader | Strict schema plus a build-time digest/policy-gated and strict load-time-validated discovery catalog; ten rules remain selected-root RevealOnly observations, while independently researched `developer.rust.target` revision 2 requires snapshot `Cargo.toml` plus `CACHEDIR.TAG` evidence and proposes only SafeRegenerable/RemoveKnownRegenerableContents. Every rule is unschedulable and every result remains blocked by `ProtectedPath`. Sealed Unix-only live and Cargo-resolution witnesses verify the exact tag, manifest digest, current default layout, and scrubbed-context Cargo workspace/target result. macOS additionally has explicit revisioned same-store direct-Cargo enrollment, bounded policy-3 positive config/include byte closure and ordered Cargo trace intent, descriptor-retained metadata cwd, static-code evidence, suspended selected-running-code attestation, complete executable/config/manifest ancestry APFS fences, a guarded two-pass reported root/member-manifest closure, a policy-1 closed accepted path-dependency graph, stale-preview rejection, and revocation tombstones, still without clearing that blocker | Developer ID signing must cover catalog bytes; before the Rust rule can lose its blocker, complete Cargo manifest/read-set and namespace provenance, review the documented conservative path-dependency compatibility and path-intent/path-based/same-UID launch limits, prove authoritative volume/protected-root grants, add process/descendant/change guards, and complete adversarial review |
+| Rule schema/loader | Strict schema plus a build-time digest/policy-gated and strict load-time-validated discovery catalog; nine rules remain selected-root RevealOnly observations, while independently researched `developer.rust.target` and `developer.python.pycache` revision 2 require exact snapshot marker evidence and propose only SafeRegenerable/RemoveKnownRegenerableContents. Every rule is unschedulable and every result remains blocked by `ProtectedPath`. Sealed Unix-only live and Cargo-resolution witnesses verify the exact Rust tag, manifest digest, current default layout, and scrubbed-context Cargo workspace/target result; Python live-writer and relocation authority remains open. macOS additionally has explicit revisioned same-store direct-Cargo enrollment, bounded policy-3 positive config/include byte closure and ordered Cargo trace intent, descriptor-retained metadata cwd, static-code evidence, suspended selected-running-code attestation, complete executable/config/manifest ancestry APFS fences, a guarded two-pass reported root/member-manifest closure, a policy-1 closed accepted path-dependency graph, stale-preview rejection, and revocation tombstones, still without clearing that blocker | Developer ID signing must cover catalog bytes; before either safe rule can lose its blocker, complete its marker/read-set and namespace provenance, review the documented conservative path-dependency compatibility and path-intent/path-based/same-UID launch limits, prove authoritative volume/protected-root grants, add process/descendant/change guards, and complete adversarial review |
 | Candidate and cleanup-plan records | Completed fresh scans create deterministic, snapshot-bound durable candidate batches; exact-scan summaries plus bounded lossless path/evidence pages and semantic review commands remain non-authoritative history. A crate-private planner module now seals an exact current-evaluator/current-catalog succeeded scan/evaluation/candidate join to a fully decoded retained snapshot and fresh cleanup-review lease, replays the complete batch from that snapshot with bounded working state, rejects every immutable-field mismatch, carries scan-time Unix identities into the ephemeral Rust-target live and bounded Cargo metadata witnesses, and exposes no replayed candidate or plan conversion. Cleanup plans remain non-executable domain/history data | Keep full-batch replay exact through overlap planning; add FFI/UI transport and trusted Cargo/config/volume/protected-root/process/executor witnesses |
 | macOS app cleanup | Absent | Entire cleanup release gate in §17.3 |
 | Legacy CLI deletion | Active arbitrary-descendant permanent path routed through a temporary core adapter; strict-target/volume/identity rechecks only; scanned-byte estimates labeled in CLI | Replace adapter with reviewed plan/approval/executor chain without weakening current checks |

@@ -40,6 +40,32 @@ fn add_rust_project(tree: &mut DiskTree, project_name: &str, bytes: u64) -> Path
     target_path
 }
 
+fn add_python_pycache_project(tree: &mut DiskTree, project_name: &str, bytes: u64) -> PathBuf {
+    let project_path = tree.root_path().join(project_name);
+    let project = tree.add_node(
+        project_name.to_owned(),
+        NodeKind::Directory,
+        project_path.clone(),
+        NodeId::ROOT,
+    );
+    add_file(tree, project, "module.py", project_path.join("module.py"));
+    let cache_path = project_path.join("__pycache__");
+    let cache = tree.add_node(
+        "__pycache__".to_owned(),
+        NodeKind::Directory,
+        cache_path.clone(),
+        project,
+    );
+    add_file(
+        tree,
+        cache,
+        "module.cpython-314.pyc",
+        cache_path.join("module.cpython-314.pyc"),
+    );
+    tree.set_size(cache, bytes);
+    cache_path
+}
+
 fn evaluate(tree: &DiskTree) -> CandidateBatch {
     evaluate_artifact_candidates(
         &ScanId::new("scan:fixture").unwrap(),
@@ -297,10 +323,90 @@ fn evidence_selection_is_deterministic_when_multiple_markers_match() {
     assert!(marker_paths.contains(&PathBuf::from("/fixture/nuxt/nuxt.config.mjs")));
     assert!(marker_paths.contains(&PathBuf::from("/fixture/python/a.py")));
     assert!(forward.candidates().iter().all(|candidate| {
-        candidate.safety() == SafetyTier::Informational
-            && candidate.action() == CandidateAction::RevealOnly
-            && !candidate.rule_marks_schedule_eligible()
+        (if candidate.rule().id().as_str() == SAFE_PYTHON_PYCACHE_RULE_ID {
+            candidate.safety() == SafetyTier::SafeRegenerable
+                && candidate.action() == CandidateAction::RemoveKnownRegenerableContents
+        } else {
+            candidate.safety() == SafetyTier::Informational
+                && candidate.action() == CandidateAction::RevealOnly
+        }) && !candidate.rule_marks_schedule_eligible()
     }));
+}
+
+#[test]
+fn python_pycache_policy_is_safe_but_remains_blocked_and_unschedulable() {
+    let mut tree = DiskTree::new(PathBuf::from("/fixture"));
+    let cache_path = add_python_pycache_project(&mut tree, "project", 4096);
+
+    let batch = evaluate(&tree);
+    assert_eq!(batch.candidates().len(), 1);
+    let candidate = &batch.candidates()[0];
+    assert_eq!(candidate.rule().id().as_str(), SAFE_PYTHON_PYCACHE_RULE_ID);
+    assert_eq!(candidate.rule().revision().get(), 2);
+    assert_eq!(candidate.paths(), &[cache_path]);
+    assert_eq!(candidate.estimated_bytes(), 4096);
+    assert_eq!(candidate.safety(), SafetyTier::SafeRegenerable);
+    assert_eq!(
+        candidate.action(),
+        CandidateAction::RemoveKnownRegenerableContents
+    );
+    assert!(!candidate.rule_marks_schedule_eligible());
+    assert_eq!(candidate.blockers(), &[BlockReason::ProtectedPath]);
+    assert_eq!(
+        CleanupPlan::try_from_candidates_for_persistence_test(
+            CleanupPlanId::new("plan:blocked-python-pycache").unwrap(),
+            SystemTime::UNIX_EPOCH,
+            CleanupMode::PermanentSafe,
+            std::slice::from_ref(candidate),
+        ),
+        Err(CleanupPlanValidationError::BlockedCandidate { candidate_index: 0 })
+    );
+}
+
+#[test]
+fn python_pycache_requires_a_case_sensitive_regular_python_source_marker() {
+    let mut wrong_case = DiskTree::new(PathBuf::from("/fixture"));
+    let project = wrong_case.add_node(
+        "project".to_owned(),
+        NodeKind::Directory,
+        PathBuf::from("/fixture/project"),
+        NodeId::ROOT,
+    );
+    add_file(
+        &mut wrong_case,
+        project,
+        "module.PY",
+        PathBuf::from("/fixture/project/module.PY"),
+    );
+    wrong_case.add_node(
+        "__pycache__".to_owned(),
+        NodeKind::Directory,
+        PathBuf::from("/fixture/project/__pycache__"),
+        project,
+    );
+    assert!(evaluate(&wrong_case).candidates().is_empty());
+
+    let mut symlink_marker = DiskTree::new(PathBuf::from("/fixture"));
+    let project = symlink_marker.add_node(
+        "project".to_owned(),
+        NodeKind::Directory,
+        PathBuf::from("/fixture/project"),
+        NodeId::ROOT,
+    );
+    let marker = add_file(
+        &mut symlink_marker,
+        project,
+        "module.py",
+        PathBuf::from("/fixture/project/module.py"),
+    );
+    symlink_marker.get_mut(marker).unwrap().path_is_symlink = true;
+    symlink_marker.add_node(
+        "__pycache__".to_owned(),
+        NodeKind::Directory,
+        PathBuf::from("/fixture/project/__pycache__"),
+        project,
+    );
+    assert!(evaluate(&symlink_marker).candidates().is_empty());
 }
 
 #[cfg(unix)]
@@ -358,7 +464,7 @@ fn exact_catalog_digest_is_stable() {
     push_lower_hex(&mut actual, &bundled_candidate_catalog_digest_sha256());
     assert_eq!(
         actual,
-        "4d9ba55965a033cf50ef947ae30ff01ecc53ebc8e5310e843faf7e5bfda2235c"
+        "dd9155d39998592244c94c55fbc817b716d0ebfd40c38213e14466244a0a0c91"
     );
     let catalog = load_and_validate_catalog().unwrap();
     assert!(
@@ -370,10 +476,23 @@ fn exact_catalog_digest_is_stable() {
         .iter()
         .filter(|rule| rule.safety() == SafetyTier::SafeRegenerable)
         .collect::<Vec<_>>();
-    assert_eq!(safe_rules.len(), 1);
-    assert_eq!(safe_rules[0].reference().id().as_str(), SAFE_RUST_RULE_ID);
-    assert_eq!(safe_rules[0].reference().revision().get(), 2);
-    assert!(!safe_rules[0].schedule_eligible());
+    assert_eq!(safe_rules.len(), 2);
+    assert!(
+        safe_rules
+            .iter()
+            .all(|rule| rule.reference().revision().get() == 2)
+    );
+    assert!(safe_rules.iter().all(|rule| !rule.schedule_eligible()));
+    assert!(
+        safe_rules
+            .iter()
+            .any(|rule| { rule.reference().id().as_str() == SAFE_RUST_RULE_ID })
+    );
+    assert!(
+        safe_rules
+            .iter()
+            .any(|rule| { rule.reference().id().as_str() == SAFE_PYTHON_PYCACHE_RULE_ID })
+    );
     assert_eq!(
         evaluate(&DiskTree::new(PathBuf::from("/fixture"))).catalog_digest_sha256(),
         bundled_candidate_catalog_digest_sha256()

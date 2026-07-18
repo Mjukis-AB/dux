@@ -5,8 +5,9 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 const CATALOG_PATH: &str = "catalogs/candidate-rules-v1.json";
-const EXPECTED_SHA256: &str = "4d9ba55965a033cf50ef947ae30ff01ecc53ebc8e5310e843faf7e5bfda2235c";
+const EXPECTED_SHA256: &str = "dd9155d39998592244c94c55fbc817b716d0ebfd40c38213e14466244a0a0c91";
 const SAFE_RUST_RULE_ID: &str = "developer.rust.target";
+const SAFE_PYTHON_PYCACHE_RULE_ID: &str = "developer.python.pycache";
 
 fn main() {
     println!("cargo:rerun-if-changed={CATALOG_PATH}");
@@ -48,11 +49,12 @@ fn main() {
             Some("selected_scan_root"),
             "discovery catalog rules must bind the selected scan root"
         );
-        let (expected_revision, expected_safety, expected_action) = if id == SAFE_RUST_RULE_ID {
-            (2, "safe_regenerable", "remove_known_regenerable_contents")
-        } else {
-            (1, "informational", "reveal_only")
-        };
+        let (expected_revision, expected_safety, expected_action) =
+            if matches!(id, SAFE_RUST_RULE_ID | SAFE_PYTHON_PYCACHE_RULE_ID) {
+                (2, "safe_regenerable", "remove_known_regenerable_contents")
+            } else {
+                (1, "informational", "reveal_only")
+            };
         assert_eq!(
             rule.get("revision").and_then(Value::as_u64),
             Some(expected_revision),
@@ -97,6 +99,32 @@ fn main() {
                     ),
                 ])),
                 "the Rust rule must retain both reviewed Cargo sources"
+            );
+        } else if id == SAFE_PYTHON_PYCACHE_RULE_ID {
+            assert_eq!(
+                rule.get("required_ancestor_markers_any"),
+                Some(&Value::Array(Vec::new())),
+                "the Python rule must leave extension evidence to the classifier"
+            );
+            assert_eq!(
+                rule.get("required_markers_all"),
+                Some(&Value::Array(Vec::new())),
+                "the Python rule must leave extension evidence to the classifier"
+            );
+            assert_eq!(
+                rule.get("provenance"),
+                Some(&Value::Array(vec![
+                    Value::String(
+                        "https://docs.python.org/3/reference/import.html#cached-bytecode-invalidation"
+                            .to_owned(),
+                    ),
+                    Value::String(
+                        "https://docs.python.org/3/faq/programming.html#how-do-i-create-a-pyc-file"
+                            .to_owned(),
+                    ),
+                    Value::String("https://peps.python.org/pep-3147/".to_owned()),
+                ])),
+                "the Python rule must retain all reviewed sources"
             );
         }
     }

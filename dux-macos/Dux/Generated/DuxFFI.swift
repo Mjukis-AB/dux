@@ -3114,9 +3114,11 @@ public func FfiConverterTypeScanEvent_lower(_ value: ScanEvent) -> RustBuffer {
 
 
 /**
- * One path-free aggregate observation. The task retains its event cursor
- * privately; `events_truncated` records whether any aggregate events were
- * already gone from the bounded core ring before this object observed them.
+ * One path-free aggregate observation plus the next bounded page of typed
+ * task events. `next_event_sequence` is the last delivered event sequence
+ * (the cursor to pass on the next poll), not a one-past count. The
+ * `events_truncated` bit is sticky when the requested cursor predates the
+ * bounded core ring.
  */
 public struct ScanPoll: Equatable, Hashable {
     public let recordVersion: UInt32

@@ -76,9 +76,11 @@ Core projection and evaluator tests cover:
 - durable publication, reopen, and path-free summary policy; and
 - rejection by candidate selection and the sealed test-only plan constructor.
 
-The catalog digest is checked during build and load. Only this exact rule ID and
-revision may carry the safe-regenerable action pair; the other bundled rules
-remain informational and reveal-only.
+The catalog digest is checked during build and load. This exact rule ID and
+revision, together with the independently reviewed Python `__pycache__`
+revision 2 rule, may carry the safe-regenerable action pair; the other bundled
+rules remain informational and reveal-only. Both proposed safe rules remain
+blocked by `ProtectedPath` and unschedulable.
 
 ## Live default-layout witness
 

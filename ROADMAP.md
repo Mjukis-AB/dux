@@ -4072,6 +4072,16 @@ Tasks:
     failure releases its decoded-memory slot and pin. It returns only unit or a
     path-free error and still cannot expose candidates, remove ProtectedPath,
     construct a plan, cross FFI, schedule, or execute.
+  - [x] 2026-07-18 slice: independently research and stage the Python
+    `__pycache__` rule as revision 2. The immutable classifier now requires a
+    direct regular, non-symlink `.py` sibling and a symlink-free candidate
+    ancestry before proposing `SafeRegenerable` /
+    `RemoveKnownRegenerableContents`; wrong-case, missing, and symlink markers
+    fail closed. The catalog digest/build gate allowlists exactly two safe
+    rules, both remain unschedulable, and every result retains the unresolved
+    `ProtectedPath` blocker. Python's import reference, FAQ, and PEP 3147 are
+    recorded in `docs/rules/developer-python-pycache.md`; no plan, executor,
+    AI, FFI cleanup authority, or live Python-writer witness was added.
   - [ ] Promote the bounded Cargo observation into trusted planning authority,
     then add authoritative volume and protected-root grants,
     change/process/descendant guards, and executor-time revalidation before

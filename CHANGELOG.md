@@ -5,6 +5,15 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Continued Milestone 5 with the independently researched Python
+  `developer.python.pycache` rule at revision 2. A direct regular, non-symlink
+  `.py` sibling and symlink-free ancestry are required before the immutable
+  classifier proposes SafeRegenerable/RemoveKnownRegenerableContents. The
+  catalog/build digest now allowlists two safe rules, but both remain
+  unschedulable and every candidate remains blocked by ProtectedPath. Python's
+  import reference, FAQ, and PEP 3147 are recorded in
+  `docs/rules/developer-python-pycache.md`; no live writer witness, plan,
+  executor, AI, or FFI cleanup authority was added.
 - Continued Milestone 4 with FFI contract v18 progressive scan events. The
   existing bounded task-event ring is now transported with each scan poll as
   typed, sequenced, path-free observations plus an explicit last-delivered

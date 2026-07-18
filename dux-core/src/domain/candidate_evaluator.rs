@@ -36,14 +36,15 @@ const EVALUATION_CONTEXT_DOMAIN: &[u8] = b"dux-candidate-evaluation-context-v1\0
 const SELECTED_SCAN_ROOT_SCOPE: &[u8] = b"scope:selected_scan_root";
 const UNRESOLVED_PROTECTION: &[u8] = b"protected_path_authority:unresolved";
 
-pub(crate) const CANDIDATE_EVALUATOR_REVISION: u32 = 1;
+pub(crate) const CANDIDATE_EVALUATOR_REVISION: u32 = 2;
 pub(crate) const CANDIDATE_CATALOG_SCHEMA_VERSION: u32 = 1;
 pub(crate) const CANDIDATE_CONTEXT_FORMAT_VERSION: u32 = 1;
 pub(crate) const CANDIDATE_CATALOG_SHA256: [u8; 32] = [
-    0x4d, 0x9b, 0xa5, 0x59, 0x65, 0xa0, 0x33, 0xcf, 0x50, 0xef, 0x94, 0x7a, 0xe3, 0x0f, 0xf0, 0x1e,
-    0xcc, 0x53, 0xeb, 0xc8, 0xe5, 0x31, 0x0e, 0x84, 0x3f, 0xaf, 0x7e, 0x5b, 0xfd, 0xa2, 0x23, 0x5c,
+    0xdd, 0x91, 0x55, 0xd3, 0x99, 0x98, 0x59, 0x22, 0x44, 0xc9, 0x4c, 0x55, 0xfb, 0xc8, 0x17, 0xb7,
+    0x16, 0xd0, 0xeb, 0xfd, 0x40, 0xc3, 0x82, 0x13, 0xe1, 0x44, 0x66, 0x24, 0x4a, 0x0a, 0x0c, 0x91,
 ];
 const SAFE_RUST_RULE_ID: &str = "developer.rust.target";
+const SAFE_PYTHON_PYCACHE_RULE_ID: &str = "developer.python.pycache";
 
 /// Maximum findings returned by one evaluator invocation.
 pub(crate) const MAX_EVALUATED_CANDIDATES: usize = 4_096;
@@ -343,15 +344,7 @@ fn validate_catalog_bytes() -> Result<RuleRegistry, CandidateEvaluationError> {
         let (required_ancestor_markers_any, required_markers_all) =
             expected_catalog_markers(binding.rule_id)?;
         let (expected_revision, expected_safety, expected_action) =
-            if binding.rule_id == SAFE_RUST_RULE_ID {
-                (
-                    2,
-                    SafetyTier::SafeRegenerable,
-                    CandidateAction::RemoveKnownRegenerableContents,
-                )
-            } else {
-                (1, SafetyTier::Informational, CandidateAction::RevealOnly)
-            };
+            expected_catalog_policy(binding.rule_id)?;
         if rule.category() != CandidateCategory::DeveloperArtifact
             || rule.reference().revision().get() != expected_revision
             || rule.scope() != RuleScope::SelectedScanRoot
@@ -381,19 +374,37 @@ fn validate_catalog_bytes() -> Result<RuleRegistry, CandidateEvaluationError> {
 }
 
 fn has_expected_provenance(rule: &Rule, rule_id: &str) -> bool {
-    if rule_id != SAFE_RUST_RULE_ID {
-        return true;
-    }
-    const EXPECTED: &[&str] = &[
-        "https://doc.rust-lang.org/cargo/reference/build-cache.html",
-        "https://doc.rust-lang.org/cargo/commands/cargo-clean.html",
-    ];
-    rule.provenance().len() == EXPECTED.len()
+    let expected: &[&str] = match rule_id {
+        SAFE_RUST_RULE_ID => &[
+            "https://doc.rust-lang.org/cargo/reference/build-cache.html",
+            "https://doc.rust-lang.org/cargo/commands/cargo-clean.html",
+        ],
+        SAFE_PYTHON_PYCACHE_RULE_ID => &[
+            "https://docs.python.org/3/reference/import.html#cached-bytecode-invalidation",
+            "https://docs.python.org/3/faq/programming.html#how-do-i-create-a-pyc-file",
+            "https://peps.python.org/pep-3147/",
+        ],
+        _ => return true,
+    };
+    rule.provenance().len() == expected.len()
         && rule
             .provenance()
             .iter()
-            .zip(EXPECTED)
+            .zip(expected)
             .all(|(actual, expected)| actual.as_str() == *expected)
+}
+
+fn expected_catalog_policy(
+    rule_id: &str,
+) -> Result<(u32, SafetyTier, CandidateAction), CandidateEvaluationError> {
+    match rule_id {
+        SAFE_RUST_RULE_ID | SAFE_PYTHON_PYCACHE_RULE_ID => Ok((
+            2,
+            SafetyTier::SafeRegenerable,
+            CandidateAction::RemoveKnownRegenerableContents,
+        )),
+        _ => Ok((1, SafetyTier::Informational, CandidateAction::RevealOnly)),
+    }
 }
 
 fn expected_catalog_markers(
