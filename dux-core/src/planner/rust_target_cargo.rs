@@ -1,7 +1,7 @@
 use std::ffi::OsStr;
 use std::io::{self, Read};
 use std::mem::MaybeUninit;
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -23,6 +23,10 @@ use super::cargo_code_signature_macos::inspect_cargo_code_signature;
 use super::cargo_config::{
     CargoConfigurationError, CargoConfigurationEvidence, CargoConfigurationGuard,
 };
+#[cfg(target_os = "macos")]
+use super::cargo_spawn_macos::{
+    CargoSpawnError, CargoSpawnRequest, ExecutableMutationFence, SuspendedCargoChild,
+};
 use super::rust_target::{RustTargetLiveValidationError, RustTargetLiveWitness};
 use super::rust_target_source::RustTargetSourceError;
 use crate::path_validation::{
@@ -43,7 +47,7 @@ const VERSION_TIMEOUT: Duration = Duration::from_secs(5);
 const METADATA_TIMEOUT: Duration = Duration::from_secs(10);
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(2);
 const MAX_CARGO_EXECUTABLE_BYTES: usize = 256 * 1024 * 1024;
-const CARGO_RESOLUTION_POLICY_REVISION: u32 = 2;
+const CARGO_RESOLUTION_POLICY_REVISION: u32 = 3;
 
 /// Static executable evidence captured without executing untrusted bytes.
 struct CargoExecutableStaticObservation {
@@ -101,6 +105,14 @@ struct RetainedCargoDirectory {
     directory: OwnedFd,
 }
 
+struct CargoLaunchTarget<'a> {
+    executable: &'a Path,
+    parent: &'a CanonicalScanRoot,
+    file: &'a CanonicalFileDigestSnapshot,
+    #[cfg(target_os = "macos")]
+    code_signature: Option<&'a crate::persistence::CargoCodeSignatureRecord>,
+}
+
 /// Exact executable and environment evidence used for one metadata result.
 ///
 /// This intentionally has no clone or serialization implementation. It is a
@@ -127,6 +139,8 @@ pub(crate) struct RustTargetCargoMetadataWitness {
     cargo: CargoExecutableEvidence,
     metadata_sha256: [u8; 32],
     configuration: CargoConfigurationEvidence,
+    launch_policy_revision: u32,
+    running_code_directory_hash_sha256: [u8; 32],
     resolution_policy_revision: u32,
     enrollment_revision: u64,
 }
@@ -570,7 +584,7 @@ fn validate_cargo_metadata_with_limits(
     };
 
     let output = run_cargo(
-        &cargo.executable,
+        cargo.launch_target(),
         &project_directory,
         &[
             OsStr::new("metadata"),
@@ -631,6 +645,8 @@ fn validate_cargo_metadata_with_limits(
         ),
         metadata_sha256: sha256(&output.stdout),
         configuration: configuration_evidence,
+        launch_policy_revision: output.launch_policy_revision,
+        running_code_directory_hash_sha256: output.running_code_directory_hash_sha256,
         resolution_policy_revision: CARGO_RESOLUTION_POLICY_REVISION,
         enrollment_revision: enrollment_guard
             .as_ref()
@@ -639,11 +655,21 @@ fn validate_cargo_metadata_with_limits(
 }
 
 impl CargoExecutableStaticObservation {
+    fn launch_target(&self) -> CargoLaunchTarget<'_> {
+        CargoLaunchTarget {
+            executable: &self.executable,
+            parent: &self.parent,
+            file: &self.file,
+            #[cfg(target_os = "macos")]
+            code_signature: self.code_signature.as_ref(),
+        }
+    }
+
     fn execute_version(self) -> Result<CargoExecutableObservation, CargoMetadataValidationError> {
         self.revalidate()?;
         let current_directory = RetainedCargoDirectory::capture(self.parent.canonical_path())?;
         let output = run_cargo(
-            &self.executable,
+            self.launch_target(),
             &current_directory,
             &[OsStr::new("--version"), OsStr::new("--verbose")],
             ProcessLimits::version(),
@@ -687,6 +713,16 @@ impl CargoExecutableStaticObservation {
 }
 
 impl CargoExecutableObservation {
+    fn launch_target(&self) -> CargoLaunchTarget<'_> {
+        CargoLaunchTarget {
+            executable: &self.executable,
+            parent: &self.parent,
+            file: &self.file,
+            #[cfg(target_os = "macos")]
+            code_signature: self.code_signature.as_ref(),
+        }
+    }
+
     #[cfg(target_os = "macos")]
     fn enrollment_identity(
         &self,
@@ -743,7 +779,7 @@ impl CargoExecutableObservation {
     ) -> Result<[u8; 32], CargoMetadataValidationError> {
         let current_directory = RetainedCargoDirectory::capture(self.parent.canonical_path())?;
         let output = run_cargo(
-            &self.executable,
+            self.launch_target(),
             &current_directory,
             &[OsStr::new("--version"), OsStr::new("--verbose")],
             limits,
@@ -1005,13 +1041,45 @@ struct BoundedOutput {
     status: ExitStatus,
     stdout: Vec<u8>,
     stderr: Vec<u8>,
+    launch_policy_revision: u32,
+    running_code_directory_hash_sha256: [u8; 32],
+}
+
+fn run_cargo(
+    launch: CargoLaunchTarget<'_>,
+    current_directory: &RetainedCargoDirectory,
+    arguments: &[&OsStr],
+    limits: ProcessLimits,
+    environment: &CargoResolutionEnvironment,
+    configuration: Option<&CargoConfigurationGuard>,
+) -> Result<BoundedOutput, CargoMetadataValidationError> {
+    #[cfg(target_os = "macos")]
+    if let Some(signature) = launch.code_signature {
+        return run_cargo_suspended_macos(
+            &launch,
+            signature,
+            current_directory,
+            arguments,
+            limits,
+            environment,
+            configuration,
+        );
+    }
+    run_cargo_portable(
+        launch.executable,
+        current_directory,
+        arguments,
+        limits,
+        environment,
+        configuration,
+    )
 }
 
 #[expect(
     clippy::disallowed_methods,
-    reason = "the sealed Cargo observer launches one exactly observed executable with fixed arguments, bounded pipes, a timeout, and process-group termination"
+    reason = "test-only fake Cargo and non-macOS observation use one exact executable with fixed arguments, bounded pipes, a timeout, and process-group termination"
 )]
-fn run_cargo(
+fn run_cargo_portable(
     executable: &Path,
     current_directory: &RetainedCargoDirectory,
     arguments: &[&OsStr],
@@ -1157,6 +1225,8 @@ fn collect_bounded_output(
                 status,
                 stdout: stdout_bytes,
                 stderr: stderr_bytes,
+                launch_policy_revision: 0,
+                running_code_directory_hash_sha256: [0; 32],
             });
         }
         if Instant::now() >= deadline {
@@ -1164,6 +1234,202 @@ fn collect_bounded_output(
             return Err(CargoMetadataValidationError::Timeout);
         }
         thread::sleep(PROCESS_POLL_INTERVAL);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn run_cargo_suspended_macos(
+    launch: &CargoLaunchTarget<'_>,
+    signature: &crate::persistence::CargoCodeSignatureRecord,
+    current_directory: &RetainedCargoDirectory,
+    arguments: &[&OsStr],
+    limits: ProcessLimits,
+    environment: &CargoResolutionEnvironment,
+    configuration: Option<&CargoConfigurationGuard>,
+) -> Result<BoundedOutput, CargoMetadataValidationError> {
+    let fence = ExecutableMutationFence::capture(launch.parent, launch.executable, launch.file)
+        .map_err(map_cargo_spawn_error)?;
+    revalidate_launch_target(launch)?;
+    fence.poll().map_err(map_cargo_spawn_error)?;
+    current_directory.revalidate()?;
+    if let Some(configuration) = configuration {
+        configuration.revalidate()?;
+    }
+
+    let mut child = SuspendedCargoChild::spawn(CargoSpawnRequest {
+        executable: launch.executable,
+        arguments,
+        current_directory: current_directory.directory.as_fd(),
+        expected_current_directory: current_directory.root(),
+        home: environment.home.canonical_path(),
+        cargo_home: environment.cargo_home.canonical_path(),
+        temporary_directory: environment.temporary_directory.canonical_path(),
+        expected_signature: signature,
+    })
+    .map_err(map_cargo_spawn_error)?;
+    let pre_resume = (|| {
+        fence.poll().map_err(map_cargo_spawn_error)?;
+        revalidate_launch_target(launch)?;
+        current_directory.revalidate()?;
+        if let Some(configuration) = configuration {
+            configuration.revalidate()?;
+        }
+        fence.poll().map_err(map_cargo_spawn_error)?;
+        child.resume().map_err(map_cargo_spawn_error)
+    })();
+    if let Err(error) = pre_resume {
+        child.terminate();
+        return Err(error);
+    }
+    let output = collect_bounded_output_suspended_macos(&mut child, limits, configuration, &fence)?;
+    fence.poll().map_err(map_cargo_spawn_error)?;
+    revalidate_launch_target(launch)?;
+    current_directory.revalidate()?;
+    if let Some(configuration) = configuration {
+        configuration.revalidate()?;
+    }
+    fence.poll().map_err(map_cargo_spawn_error)?;
+    Ok(output)
+}
+
+#[cfg(target_os = "macos")]
+fn collect_bounded_output_suspended_macos(
+    child: &mut SuspendedCargoChild,
+    limits: ProcessLimits,
+    configuration: Option<&CargoConfigurationGuard>,
+    fence: &ExecutableMutationFence,
+) -> Result<BoundedOutput, CargoMetadataValidationError> {
+    let Some(mut stdout) = child.take_stdout() else {
+        child.terminate();
+        return Err(CargoMetadataValidationError::PipeConfiguration);
+    };
+    let Some(mut stderr) = child.take_stderr() else {
+        child.terminate();
+        return Err(CargoMetadataValidationError::PipeConfiguration);
+    };
+    if set_nonblocking(&stdout).is_err() || set_nonblocking(&stderr).is_err() {
+        child.terminate();
+        return Err(CargoMetadataValidationError::PipeConfiguration);
+    }
+    let Some(deadline) = Instant::now().checked_add(limits.timeout) else {
+        child.terminate();
+        return Err(CargoMetadataValidationError::Timeout);
+    };
+    let mut stdout_bytes = Vec::new();
+    let mut stderr_bytes = Vec::new();
+    let mut stdout_eof = false;
+    let mut stderr_eof = false;
+    let mut child_exited = false;
+    loop {
+        if let Err(error) = fence.poll() {
+            child.terminate();
+            return Err(map_cargo_spawn_error(error));
+        }
+        if let Some(configuration) = configuration
+            && let Err(error) = configuration.poll()
+        {
+            child.terminate();
+            return Err(error.into());
+        }
+        let stdout_result = drain_pipe(
+            &mut stdout,
+            &mut stdout_bytes,
+            limits.stdout_bytes,
+            CargoOutputStream::Stdout,
+        );
+        let stderr_result = drain_pipe(
+            &mut stderr,
+            &mut stderr_bytes,
+            limits.stderr_bytes,
+            CargoOutputStream::Stderr,
+        );
+        match (stdout_result, stderr_result) {
+            (Ok(stdout_done), Ok(stderr_done)) => {
+                stdout_eof |= stdout_done;
+                stderr_eof |= stderr_done;
+            }
+            (Err(error), _) | (_, Err(error)) => {
+                child.terminate();
+                return Err(error);
+            }
+        }
+        if !child_exited {
+            child_exited = match child.exited_without_reaping() {
+                Ok(exited) => exited,
+                Err(source) => {
+                    let error = CargoMetadataValidationError::OutputRead {
+                        kind: source.kind(),
+                        source,
+                    };
+                    child.terminate();
+                    return Err(error);
+                }
+            };
+        }
+        if child_exited && stdout_eof && stderr_eof {
+            if let Some(configuration) = configuration
+                && let Err(error) = configuration.revalidate()
+            {
+                child.terminate();
+                return Err(error.into());
+            }
+            fence.poll().map_err(map_cargo_spawn_error)?;
+            let launch = child.evidence().clone();
+            let status =
+                child
+                    .finish()
+                    .map_err(|source| CargoMetadataValidationError::OutputRead {
+                        kind: source.kind(),
+                        source,
+                    })?;
+            return Ok(BoundedOutput {
+                status,
+                stdout: stdout_bytes,
+                stderr: stderr_bytes,
+                launch_policy_revision: launch.policy_revision,
+                running_code_directory_hash_sha256: sha256(&launch.running_code_directory_hash),
+            });
+        }
+        if Instant::now() >= deadline {
+            child.terminate();
+            return Err(CargoMetadataValidationError::Timeout);
+        }
+        thread::sleep(PROCESS_POLL_INTERVAL);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn revalidate_launch_target(
+    launch: &CargoLaunchTarget<'_>,
+) -> Result<(), CargoMetadataValidationError> {
+    let (parent, file) = capture_exact_cargo_executable(launch.executable)?;
+    if &parent != launch.parent || &file != launch.file {
+        return Err(CargoMetadataValidationError::ExecutableChanged);
+    }
+    let _ = launch
+        .code_signature
+        .ok_or(CargoMetadataValidationError::InvalidCodeSignature)?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn map_cargo_spawn_error(error: CargoSpawnError) -> CargoMetadataValidationError {
+    match error {
+        CargoSpawnError::ExecutableChanged | CargoSpawnError::RunningImageChanged => {
+            CargoMetadataValidationError::ExecutableChanged
+        }
+        CargoSpawnError::WorkingDirectoryChanged => {
+            CargoMetadataValidationError::CargoWorkingDirectoryChanged
+        }
+        CargoSpawnError::PipeConfiguration => CargoMetadataValidationError::PipeConfiguration,
+        CargoSpawnError::Spawn(source) => CargoMetadataValidationError::Spawn {
+            kind: source.kind(),
+            source,
+        },
+        CargoSpawnError::Process(source) => CargoMetadataValidationError::OutputRead {
+            kind: source.kind(),
+            source,
+        },
     }
 }
 
@@ -1314,6 +1580,14 @@ impl RustTargetCargoMetadataWitness {
         self.configuration.closure_sha256
     }
 
+    pub(super) fn launch_policy_revision(&self) -> u32 {
+        self.launch_policy_revision
+    }
+
+    pub(super) fn running_code_directory_hash_sha256(&self) -> [u8; 32] {
+        self.running_code_directory_hash_sha256
+    }
+
     pub(super) fn resolution_policy_revision(&self) -> u32 {
         self.resolution_policy_revision
     }
@@ -1366,6 +1640,28 @@ pub(super) fn validate_cargo_metadata_for_test(
         ConfigurationFenceMode::UnarmedForParallelTest,
         || {},
     )
+}
+
+#[cfg(all(test, target_os = "macos"))]
+pub(super) fn signed_cargo_output_limit_for_test(
+    cargo: &CargoExecutableObservation,
+    current_directory: &Path,
+) -> Result<(), CargoMetadataValidationError> {
+    let directory = RetainedCargoDirectory::capture(current_directory)?;
+    let environment = capture_resolution_environment()?;
+    run_cargo(
+        cargo.launch_target(),
+        &directory,
+        &[OsStr::new("--version"), OsStr::new("--verbose")],
+        ProcessLimits {
+            timeout: Duration::from_secs(5),
+            stdout_bytes: 1,
+            stderr_bytes: VERSION_STDERR_LIMIT,
+        },
+        &environment,
+        None,
+    )
+    .map(|_| ())
 }
 
 #[cfg(test)]

@@ -4087,8 +4087,31 @@ Tasks:
       which inode Cargo opened. Positive configuration,
       workspace-member manifest provenance, and a pathname-independent Cargo
       executable launch remain open.
-    Direct positive Cargo config/include read attestation, path-based executable
-    swap-and-restore exclusion, and all remaining protected-root, volume,
+    - [x] 2026-07-18 slice: close the admitted macOS Cargo executable
+      swap/restore race with selected-running-code continuity. Production now
+      arms local-APFS vnode fences on the exact enrolled executable and every
+      canonical ancestor, then calls the exact path with direct
+      `posix_spawn`, `START_SUSPENDED`, a new process group, fixed signal state,
+      and `CLOEXEC_DEFAULT`. The retained cwd is installed by descriptor file
+      action. Before `SIGCONT`, DUX requires the direct child to remain stopped
+      with its expected PID/parent/process-group, credentials, start instant,
+      and cwd identity, asks Security.framework to validate that kernel guest,
+      and requires its selected Code Directory hash to belong to the enrolled
+      all-architecture static record. Full executable digest/identity is
+      rechecked before resume and after exit, while the vnode fence is polled
+      throughout bounded output. Resolution policy 3 records launch-policy
+      revision 1 and a SHA-256 of the running Code Directory hash. Adversarial
+      coverage proves that, absent external signaling, no helper user-space
+      runs before DUX's own resume, plus wrong-image rejection,
+      retained cwd, descriptor non-leakage, exact-child termination/reaping,
+      in-place executable writes, and higher-ancestor renames. macOS still has
+      no supported fd-based exec: this is swap/restore-resistant selected-code
+      continuity on reviewed local APFS, not pathname-independent execution or
+      confinement. A same-UID external actor can signal the stopped child, and
+      kqueue remains event inference. The witness remains private,
+      non-authoritative, and blocked by `ProtectedPath`.
+    Direct positive Cargo config/include read attestation, workspace-member
+    manifest provenance, and all remaining protected-root, volume,
     process, descendant, plan, and executor grants are still open.
 - [ ] Implement candidate groups and overlap resolution.
 - [ ] Implement exact-path plan review.

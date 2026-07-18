@@ -159,19 +159,53 @@ and 64 KiB of native path material and records a revisioned SHA-256 closure
 digest. Canonical identities are revalidated around a macOS kqueue vnode fence;
 any event is terminal even when a created config is immediately removed.
 
-The project cwd is also opened no-follow and retained. DUX's custom pre-exec
-hook calls only async-signal-safe `fchdir` on that close-on-exec descriptor, and
-the descriptor plus pathname identity are revalidated before and after spawn.
-This removes pathname resolution from child cwd selection. It does not remove
-the executable pathname race: macOS has no supported `fexecve`/`execveat`, so
-that requires the later suspended direct-`posix_spawn` checkpoint. Every lookup
-directory must be local APFS; other, remote, virtual, and unprobeable
-filesystems reject. Kqueue is strong reviewed-filesystem change inference, not
-direct evidence of the exact config inode Cargo read.
-Positive configs and included files, every workspace-member manifest, and the
-executable launch therefore remain unattested. Either witness is still
-supporting evidence only: neither can clear `ProtectedPath`, construct a plan,
-cross FFI, schedule, or execute.
+The project cwd is also opened no-follow and retained. On macOS the production
+runner installs it with `posix_spawn_file_actions_addfchdir_np`; the descriptor
+is explicitly inherited only for that file action and closed before exec.
+Descriptor and pathname identities are revalidated around launch. This removes
+pathname resolution from child cwd selection. Every config lookup directory
+must be local APFS; other, remote, virtual, and unprobeable filesystems reject.
+Kqueue is strong reviewed-filesystem change inference, not direct evidence of
+the exact config inode Cargo read. Positive configs and included files, and
+every workspace-member manifest, therefore remain unattested. Either witness
+is still supporting evidence only: neither can clear `ProtectedPath`,
+construct a plan, cross FFI, schedule, or execute.
+
+## Suspended macOS launch and selected-running-code continuity
+
+The admitted macOS production path now closes the executable swap/restore race
+without claiming an fd-based exec primitive that Darwin does not provide. DUX
+first opens vnode-event descriptors for the exact enrolled executable and each
+canonical ancestor through the filesystem root. Every watched object must be
+on local APFS. It then revalidates the full executable SHA-256, identity,
+single-link shape, cwd, and negative config closure before directly calling
+the exact path with `posix_spawn`; it never uses `posix_spawnp` or `PATH`.
+
+The spawn attributes require `START_SUSPENDED`, a new process group,
+`CLOEXEC_DEFAULT`, an empty signal mask, and default dispositions for all
+catchable signals. Standard input is `/dev/null`; bounded stdout and stderr are
+the only pipe descriptors. Before DUX sends `SIGCONT`, it proves through
+kernel process records that this is still its direct stopped child, with the
+expected process group, credentials, process start instant, and retained cwd.
+Security.framework then validates the dynamic kernel guest and returns its
+selected Code Directory hash. That hash must be one member of the exact sorted
+all-architecture Code Directory set stored by enrollment. The process record,
+executable digest/identity, cwd/config guards, and all vnode fences are checked
+again before resume. Executable and config fences remain polled during bounded
+output collection and are revalidated after the exact child is reaped.
+
+Resolution-policy revision 3 records launch-policy revision 1 and a SHA-256 of
+the raw running Code Directory hash in the sealed witness. The raw process
+output and raw hash are not persisted or exposed as authority. The selected
+hash proves the architecture that actually ran; the enrollment's strict static
+record and the full-file digest bind the complete universal executable.
+
+This is swap/restore-resistant selected-code continuity on the reviewed local
+filesystem, not pathname-independent execution or sandbox confinement. A
+same-UID external process may send `SIGCONT` to the stopped child, and kqueue
+events are inference rather than a formal proof of the kernel's exact pathname
+open. Scripts are not admitted as Cargo executables. These limitations keep
+the result non-authoritative and `ProtectedPath` remains unchanged.
 
 ## Durable discovery-source binding
 
@@ -315,11 +349,11 @@ statically previewed binary for bounded version validation. More importantly,
 enrollment establishes only local executable
 provenance for discovery. Positive `.cargo/config`, legacy extensionless
 config, and recursive `include` inputs are not directly attested; projects
-containing them now reject. The exact negative lookup closure and retained cwd
-cover the currently admitted case, but Cargo's executable launch remains
-path-based and workspace-member manifests are not yet attested. Direct-read or
-generation evidence is still required before promotion. `ProtectedPath`
-therefore remains untouched.
+containing them now reject. The exact negative lookup closure, retained cwd,
+and suspended selected-code checkpoint cover the currently admitted direct-
+executable case, but the launch is still path-based and workspace-member
+manifests are not yet attested. Direct-read or generation evidence is still
+required before promotion. `ProtectedPath` therefore remains untouched.
 
 ## Required before executable use
 
@@ -328,10 +362,10 @@ proves, at minimum:
 
 - trusted home, selected-volume, canonical ancestry, and mount identity;
 - a stable code-owned protected-root boundary grant;
-- the now-enrolled direct Cargo executable plus pathname-independent launch,
-  direct positive Cargo config/include identity provenance if configured
-  projects are ever admitted, and swap/restore exclusion beyond the
-  implemented retained-cwd/negative-closure result;
+- reviewed acceptance or mitigation of the suspended selected-code
+  checkpoint's path-based and same-UID signaling limitations, direct positive
+  Cargo config/include identity provenance if configured projects are ever
+  admitted, and every workspace-member manifest;
 - current target kind, symlink, link-count, mount, and descendant policy;
 - inactive Cargo/rustc state and post-witness change revalidation;
 - overlap resolution that consumes the still-exact replayed full batch,

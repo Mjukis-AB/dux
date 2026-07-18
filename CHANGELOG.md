@@ -5,6 +5,21 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Continued Milestone 5 with macOS selected-running-code continuity for the
+  enrolled Cargo executable. Production arms local-APFS vnode fences on the
+  exact file and every canonical ancestor, uses direct `posix_spawn` with the
+  child stopped before user-space, installs the retained cwd by file action,
+  and verifies the stopped process identity, generation, group, credentials,
+  cwd, dynamic Security.framework validity, and selected enrolled Code
+  Directory hash before `SIGCONT`. Full executable digest/identity and all
+  launch/config fences bracket resume, bounded output, exact process-group
+  termination, and reaping. Resolution policy 3 records launch-policy revision
+  1 and a digest of the running hash. Tests cover wrong images, descriptor
+  leakage, closed standard descriptors, in-place writes, ancestor renames, and
+  no execution before DUX's own resume absent external signaling.
+  This remains path-based event-backed continuity rather than fd-based exec or
+  confinement; same-UID signaling is an explicit limitation and no cleanup
+  authority or `ProtectedPath` change was added.
 - Continued Milestone 5 with an exact negative Cargo 1.96 configuration
   closure and descriptor-retained metadata cwd. Production rejects any
   `config` or `config.toml` in Cargo's cwd-ancestor and Cargo-home lookup set,
@@ -14,9 +29,9 @@ All notable changes to DUX will be documented in this file.
   project directory through `fchdir`, and path/descriptor continuity is
   rechecked around launch. Configured projects fail before metadata execution.
   Non-local, non-APFS, and unprobeable lookup directories reject. This remains
-  reviewed-filesystem inference and discovery evidence only:
-  positive config reads, workspace-member manifests, and Cargo's path-based
-  executable launch remain open, and `ProtectedPath` is unchanged.
+  reviewed-filesystem inference and discovery evidence only. Positive config
+  reads and workspace-member manifests remain open, and `ProtectedPath` is
+  unchanged.
 - Continued Milestone 5 with explicit revisioned trust enrollment for one
   direct macOS Cargo 1.96.0 executable. A read-only, non-cloneable preview
   executes no selected bytes and binds the canonical single-link file, full

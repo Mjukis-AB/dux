@@ -207,11 +207,16 @@ fn static_enrollment_inspection_never_executes_selected_signed_bytes() {
         engine.direct_cargo_enrollment_status().unwrap().state,
         DirectCargoEnrollmentState::NotEnrolled
     );
-    assert!(matches!(
-        engine.commit_direct_cargo_enrollment(preview),
-        Err(DirectCargoEnrollmentError::InvalidCargoVersion)
-            | Err(DirectCargoEnrollmentError::InspectionUnavailable)
-    ));
+    let result = engine.commit_direct_cargo_enrollment(preview);
+    assert!(
+        matches!(
+            result,
+            Err(DirectCargoEnrollmentError::InvalidCargoVersion)
+                | Err(DirectCargoEnrollmentError::InspectionUnavailable)
+                | Err(DirectCargoEnrollmentError::ChangedDuringInspection)
+        ),
+        "unexpected signed non-Cargo rejection: {result:?}"
+    );
     assert_eq!(
         engine.direct_cargo_enrollment_status().unwrap().state,
         DirectCargoEnrollmentState::NotEnrolled

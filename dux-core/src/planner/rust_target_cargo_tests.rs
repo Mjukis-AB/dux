@@ -25,7 +25,7 @@ use super::rust_target_cargo::{
 #[cfg(target_os = "macos")]
 use super::rust_target_cargo::{
     commit_direct_cargo_enrollment, inspect_direct_cargo_enrollment,
-    observe_enrolled_cargo_executable_for_test,
+    observe_enrolled_cargo_executable_for_test, signed_cargo_output_limit_for_test,
     validate_cargo_metadata_with_enrollment_hook_for_test,
 };
 use super::rust_target_tests::{CARGO_CACHE_TAG_SIGNATURE, Fixture};
@@ -137,7 +137,9 @@ fn fixed_command_environment_and_exact_metadata_create_only_observational_witnes
     assert_eq!(witness.configuration_policy_revision(), 1);
     assert!(witness.configuration_lookup_count() >= 2);
     assert_ne!(witness.configuration_closure_sha256(), [0; 32]);
-    assert_eq!(witness.resolution_policy_revision(), 2);
+    assert_eq!(witness.launch_policy_revision(), 0);
+    assert_eq!(witness.running_code_directory_hash_sha256(), [0; 32]);
+    assert_eq!(witness.resolution_policy_revision(), 3);
     assert!(witness.live().protected_path_is_still_unresolved());
     assert_eq!(candidate.blockers(), [BlockReason::ProtectedPath]);
     assert!(!candidate.rule_marks_schedule_eligible());
@@ -393,7 +395,24 @@ fn real_cargo_rejects_project_config_and_no_deps_does_not_create_lockfile() {
     let fixture = Fixture::new(CARGO_CACHE_TAG_SIGNATURE);
     let build_sentinel = prepare_real_package(&fixture, true);
     let observation = observe_cargo_executable(&cargo).unwrap();
-    let _witness = validate_cargo_metadata(live(&fixture), &observation).unwrap();
+    #[cfg(target_os = "macos")]
+    {
+        let overflow =
+            signed_cargo_output_limit_for_test(&observation, fixture.manifest.parent().unwrap());
+        assert!(matches!(
+            overflow,
+            Err(CargoMetadataValidationError::OutputLimit {
+                stream: CargoOutputStream::Stdout
+            })
+        ));
+    }
+    let witness = validate_cargo_metadata(live(&fixture), &observation).unwrap();
+    #[cfg(target_os = "macos")]
+    {
+        assert_eq!(witness.launch_policy_revision(), 1);
+        assert_ne!(witness.running_code_directory_hash_sha256(), [0; 32]);
+    }
+    witness.release().unwrap();
     assert!(!build_sentinel.exists());
 
     let configured = Fixture::new(CARGO_CACHE_TAG_SIGNATURE);
