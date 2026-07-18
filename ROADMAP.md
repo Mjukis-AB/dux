@@ -4412,6 +4412,17 @@ Tasks:
       fails closed; this remains observational and does not mint a trusted
       volume/location grant, clear `ProtectedPath`, construct a plan, cross
       FFI, schedule, or mutate.
+    - [x] 2026-07-19 slice: retain Cargo's complete read-set and enrollment
+      fences after metadata publication. The non-cloneable Cargo witness now
+      owns configuration, ancestor-manifest, workspace-glob, workspace,
+      package-metadata, and target-namespace guards, the retained metadata
+      working directory, the exact executable/version observation, the
+      optional direct-Cargo enrollment guard, and the filesystem boundary.
+      Its private revalidation repeats all fences, the enrolled Cargo version,
+      live Rust-target evidence, and boundary identity. A post-publication
+      manifest mutation regression fails closed. This is still provenance-only:
+      no trusted volume/protected-root/rule grant, blocker removal, plan,
+      approval, FFI, schedule, or effect was added.
 - [ ] Implement candidate groups and overlap resolution.
   - [x] 2026-07-18 slice: add the sealed, non-authoritative core grouping
     result. Candidates are grouped deterministically by category, safety, and

@@ -307,6 +307,27 @@ fn fixed_command_environment_and_exact_metadata_create_only_observational_witnes
     assert!(witness.live().protected_path_is_still_unresolved());
     assert_eq!(candidate.blockers(), [BlockReason::ProtectedPath]);
     assert!(!candidate.rule_marks_schedule_eligible());
+    assert!(witness.revalidate().is_ok());
+    witness.release().unwrap();
+}
+
+#[test]
+fn retained_cargo_read_set_revalidation_rejects_manifest_change() {
+    let fixture = Fixture::new(CARGO_CACHE_TAG_SIGNATURE);
+    let fake = FakeCargo::new(&valid_metadata_action(&fixture));
+    let witness = validate_cargo_metadata(
+        validate_live_rust_target_for_test(fixture.source(), &fixture.candidate()).unwrap(),
+        &fake.observe(),
+    )
+    .unwrap();
+
+    assert!(witness.revalidate().is_ok());
+    fs::write(
+        &fixture.manifest,
+        "[package]\nname = \"changed-after-review\"\nversion = \"1.0.0\"\nedition = \"2024\"\n",
+    )
+    .unwrap();
+    assert!(witness.revalidate().is_err());
     witness.release().unwrap();
 }
 

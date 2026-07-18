@@ -13,6 +13,12 @@
   its scan root and revalidates ancestry and mount identity before publishing
   review evidence. Boundary drift fails closed; this remains observational and
   does not grant volume/location or cleanup authority.
+- Cargo metadata witnesses now retain every read-set guard, the descriptor-
+  retained project directory, exact executable/version observation, optional
+  enrollment guard, and filesystem boundary after publication. Private
+  revalidation rejects post-publication manifest, configuration, Cargo, live
+  target, or boundary changes. This closes stale-evidence risk without adding
+  planning, approval, FFI, or cleanup authority.
 
 All notable changes to DUX will be documented in this file.
 

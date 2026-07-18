@@ -53,8 +53,8 @@ use super::rust_target::{RustTargetLiveValidationError, RustTargetLiveWitness};
 use super::rust_target_source::RustTargetSourceError;
 use crate::path_validation::{
     CanonicalFileDigestError, CanonicalFileDigestSnapshot, CanonicalPathError, CanonicalScanRoot,
-    FilesystemEntryKind, LexicalPathError, capture_regular_file_sha256, capture_scan_root,
-    validate_cleanup_path, validate_scan_root,
+    FilesystemBoundarySnapshot, FilesystemEntryKind, LexicalPathError, capture_filesystem_boundary,
+    capture_regular_file_sha256, capture_scan_root, validate_cleanup_path, validate_scan_root,
 };
 use crate::persistence::{
     CARGO_ENROLLMENT_SUPPORTED_RELEASE, CargoEnrollmentSetting, CargoEnrollmentSettingUpdate,
@@ -198,6 +198,39 @@ impl CargoInputGuards<'_> {
     }
 }
 
+/// Owned read-set fences retained after Cargo metadata publication.
+///
+/// The metadata parser emits evidence for presentation, but that evidence is
+/// not enough to support a future planning boundary once the kqueue/FSEvents
+/// guards are dropped. This capsule owns every guard and exposes only a
+/// private revalidation operation; it cannot be cloned, serialized, or
+/// converted into cleanup authority.
+struct CargoInputGuardsOwned {
+    configuration: CargoConfigurationGuard,
+    manifest_probes: CargoManifestProbeGuard,
+    workspace_glob: CargoWorkspaceGlobGuard,
+    workspace: CargoWorkspaceManifestGuard,
+    package_metadata: CargoPackageMetadataGuard,
+    target_namespace: CargoTargetNamespaceGuard,
+}
+
+impl CargoInputGuardsOwned {
+    fn borrowed(&self) -> CargoInputGuards<'_> {
+        CargoInputGuards {
+            configuration: Some(&self.configuration),
+            manifest_probes: Some(&self.manifest_probes),
+            workspace_glob: Some(&self.workspace_glob),
+            workspace: Some(&self.workspace),
+            package_metadata: Some(&self.package_metadata),
+            target_namespace: Some(&self.target_namespace),
+        }
+    }
+
+    fn revalidate(&self) -> Result<(), CargoMetadataValidationError> {
+        self.borrowed().revalidate()
+    }
+}
+
 /// Exact executable and environment evidence used for one metadata result.
 ///
 /// This intentionally has no clone or serialization implementation. It is a
@@ -222,6 +255,11 @@ struct CargoExecutableEvidence {
 pub(crate) struct RustTargetCargoMetadataWitness {
     live: RustTargetLiveWitness,
     cargo: CargoExecutableEvidence,
+    cargo_observation: CargoExecutableObservation,
+    enrollment_guard: Option<EnrollmentGuard>,
+    project_directory: RetainedCargoDirectory,
+    input_guards: CargoInputGuardsOwned,
+    boundary: FilesystemBoundarySnapshot,
     metadata_sha256: [u8; 32],
     configuration: CargoConfigurationEvidence,
     manifest_probes: CargoManifestProbeEvidence,
@@ -239,6 +277,35 @@ pub(crate) struct RustTargetCargoMetadataWitness {
 }
 
 impl RustTargetCargoMetadataWitness {
+    /// Revalidate every retained Cargo input fence and the live Rust-target
+    /// evidence. This remains an internal provenance check: it exposes no
+    /// paths, plan, approval, blocker-removal, FFI, scheduling, or effect
+    /// capability.
+    pub(crate) fn revalidate(&self) -> Result<(), CargoMetadataValidationError> {
+        self.input_guards.revalidate()?;
+        self.project_directory.revalidate()?;
+        self.boundary
+            .revalidate()
+            .map_err(CargoMetadataValidationError::from)?;
+        self.live.revalidate_current()?;
+        self.cargo_observation.revalidate()?;
+        if let Some(enrollment) = self.enrollment_guard.as_ref() {
+            enrollment.revalidate(&self.cargo_observation)?;
+        }
+        self.cargo_observation
+            .read_version(ProcessLimits::version())?;
+        if let Some(enrollment) = self.enrollment_guard.as_ref() {
+            enrollment.revalidate(&self.cargo_observation)?;
+        }
+        self.input_guards.revalidate()?;
+        self.project_directory.revalidate()?;
+        self.boundary
+            .revalidate()
+            .map_err(CargoMetadataValidationError::from)?;
+        self.live.revalidate_current()?;
+        Ok(())
+    }
+
     pub(crate) fn release(self) -> Result<(), RustTargetSourceError> {
         self.live.release()
     }
@@ -750,6 +817,7 @@ fn validate_cargo_metadata_with_limits(
 
     let project_directory = RetainedCargoDirectory::capture(live.project_root())?;
     live.revalidate_current()?;
+    let boundary = capture_filesystem_boundary(live.scan_root())?;
     let configuration = match configuration_fence {
         ConfigurationFenceMode::Armed => CargoConfigurationGuard::capture(
             project_directory.root(),
@@ -944,13 +1012,32 @@ fn validate_cargo_metadata_with_limits(
     target_namespace.revalidate()?;
     live.revalidate_current()?;
 
+    boundary
+        .revalidate()
+        .map_err(CargoMetadataValidationError::from)?;
+
+    let enrollment_revision = enrollment_guard
+        .as_ref()
+        .map_or(0, EnrollmentGuard::revision);
+    let cargo_observation = cargo.retained();
+    let cargo_evidence = cargo.evidence(enrollment_revision);
+    let input_guards = CargoInputGuardsOwned {
+        configuration,
+        manifest_probes,
+        workspace_glob,
+        workspace,
+        package_metadata,
+        target_namespace,
+    };
+
     Ok(RustTargetCargoMetadataWitness {
         live,
-        cargo: cargo.evidence(
-            enrollment_guard
-                .as_ref()
-                .map_or(0, EnrollmentGuard::revision),
-        ),
+        cargo: cargo_evidence,
+        cargo_observation,
+        enrollment_guard,
+        project_directory,
+        input_guards,
+        boundary,
         metadata_sha256: sha256(&output.stdout),
         configuration: configuration_evidence,
         manifest_probes: manifest_probe_evidence,
@@ -964,9 +1051,7 @@ fn validate_cargo_metadata_with_limits(
         launch_policy_revision: output.launch_policy_revision,
         running_code_directory_hash_sha256: output.running_code_directory_hash_sha256,
         resolution_policy_revision: CARGO_RESOLUTION_POLICY_REVISION,
-        enrollment_revision: enrollment_guard
-            .as_ref()
-            .map_or(0, EnrollmentGuard::revision),
+        enrollment_revision,
     })
 }
 
@@ -1085,6 +1170,19 @@ impl CargoExecutableObservation {
         }
     }
 
+    fn retained(&self) -> Self {
+        Self {
+            executable: self.executable.clone(),
+            parent: self.parent.clone(),
+            file: self.file.clone(),
+            release: self.release,
+            version_sha256: self.version_sha256,
+            environment: self.environment.evidence(),
+            #[cfg(target_os = "macos")]
+            code_signature: self.code_signature.clone(),
+        }
+    }
+
     fn revalidate(&self) -> Result<(), CargoMetadataValidationError> {
         let (parent, file) = capture_exact_cargo_executable(&self.executable)?;
         if parent != self.parent || file != self.file {
@@ -1124,6 +1222,7 @@ impl CargoExecutableObservation {
         if release != self.release || digest != self.version_sha256 {
             return Err(CargoMetadataValidationError::CargoVersionChanged);
         }
+        self.revalidate()?;
         Ok(digest)
     }
 }

@@ -324,6 +324,10 @@ impl RustTargetLiveWitness {
             .expect("validated Cargo.toml always has a parent")
     }
 
+    pub(super) fn scan_root(&self) -> &CanonicalScanRoot {
+        &self.scan_root
+    }
+
     pub(super) fn manifest_path(&self) -> &Path {
         self.manifest.path().canonical_path()
     }
@@ -476,10 +480,6 @@ impl RustTargetLiveWitness {
 
     pub(super) fn candidate_id(&self) -> &CandidateId {
         &self.candidate_id
-    }
-
-    pub(super) fn scan_root(&self) -> &CanonicalScanRoot {
-        &self.scan_root
     }
 
     pub(super) fn target(&self) -> &CanonicalPathSnapshot {
