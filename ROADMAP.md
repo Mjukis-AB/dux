@@ -3606,6 +3606,12 @@ Tasks:
   and lint gates (including 735 core tests), the 20-test destructive-boundary
   checker suite, and unsigned universal arm64/x86_64 Debug and Release builds at
   the macOS 14 deployment target pass.
+
+  Corrected 2026-07-18: the application now holds an explicit AppKit automatic-
+  termination lease from launch through ordered shutdown. Closing the popover
+  therefore cannot make this `LSUIElement` menu-bar process eligible for
+  retirement merely because it has no visible ordinary windows; explicit Quit
+  remains the only normal termination path.
 - [x] Implement Explorer window shell and Overview. Completed 2026-07-17: one
   reusable `Window(id: "explorer")` opens after the menu-bar scene, shares the
   process-wide `AppModel`, activates only after the open request, and does not

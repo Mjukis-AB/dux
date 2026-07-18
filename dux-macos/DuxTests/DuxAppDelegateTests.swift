@@ -3,6 +3,26 @@ import XCTest
 
 @MainActor
 final class DuxAppDelegateTests: XCTestCase {
+    func testApplicationLifetimeDisablesAutomaticTerminationUntilShutdown() {
+        let controller = AutomaticTerminationControllerSpy()
+        let lease = DuxAutomaticTerminationLease(controller: controller)
+        let delegate = DuxAppDelegate(
+            runtime: RuntimeSpy(),
+            automaticTerminationLease: lease
+        )
+
+        delegate.applicationDidFinishLaunching(
+            Notification(name: NSApplication.didFinishLaunchingNotification)
+        )
+        XCTAssertEqual(controller.disabledReasons.count, 1)
+        XCTAssertTrue(controller.enabledReasons.isEmpty)
+
+        delegate.applicationWillTerminate(
+            Notification(name: NSApplication.willTerminateNotification)
+        )
+        XCTAssertEqual(controller.enabledReasons, controller.disabledReasons)
+    }
+
     func testTerminationGateStartsExactlyOneShutdown() {
         let gate = DuxTerminationGate()
 
@@ -121,6 +141,20 @@ final class DuxAppDelegateTests: XCTestCase {
         XCTAssertLessThan(capacityStop, maintenanceStop)
         XCTAssertLessThan(maintenanceStop, reviewsShutdown)
         XCTAssertLessThan(reviewsShutdown, engineClose)
+    }
+}
+
+@MainActor
+private final class AutomaticTerminationControllerSpy: DuxAutomaticTerminationControlling {
+    private(set) var disabledReasons: [String] = []
+    private(set) var enabledReasons: [String] = []
+
+    func disableAutomaticTermination(_ reason: String) {
+        disabledReasons.append(reason)
+    }
+
+    func enableAutomaticTermination(_ reason: String) {
+        enabledReasons.append(reason)
     }
 }
 

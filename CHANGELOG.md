@@ -1169,6 +1169,11 @@ All notable changes to DUX will be documented in this file.
 - Added off-main startup-volume capacity sampling for the macOS shell. The menu bar and Explorer prefer Foundation's important-usage capacity, explicitly fall back to ordinary filesystem availability, and render an accessible capacity summary without requiring a directory scan.
 
 ### Fixed
+- Kept the macOS menu-bar process ineligible for AppKit automatic termination
+  for its full launched lifetime. Dismissing the `MenuBarExtra` popover can no
+  longer let macOS retire DUX merely because no ordinary windows are open;
+  explicit Quit still follows the existing ordered shutdown path and releases
+  the lifetime lease at termination.
 - Corrected snapshot-store provisioning so every new
   `.dux-snapshot-stage-<32 lowercase hex>` is created inside its retained,
   marker-owned database root and atomically published to the sibling

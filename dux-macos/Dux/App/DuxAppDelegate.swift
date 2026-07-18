@@ -1,6 +1,42 @@
 import AppKit
 
 @MainActor
+protocol DuxAutomaticTerminationControlling: AnyObject {
+    func disableAutomaticTermination(_ reason: String)
+    func enableAutomaticTermination(_ reason: String)
+}
+
+extension ProcessInfo: DuxAutomaticTerminationControlling {}
+
+@MainActor
+final class DuxAutomaticTerminationLease {
+    private static let reason = "DUX must remain available as a menu-bar application"
+
+    private let controller: any DuxAutomaticTerminationControlling
+    private var isHeld = false
+
+    init(controller: any DuxAutomaticTerminationControlling = ProcessInfo.processInfo) {
+        self.controller = controller
+    }
+
+    func acquire() {
+        guard !isHeld else {
+            return
+        }
+        controller.disableAutomaticTermination(Self.reason)
+        isHeld = true
+    }
+
+    func release() {
+        guard isHeld else {
+            return
+        }
+        controller.enableAutomaticTermination(Self.reason)
+        isHeld = false
+    }
+}
+
+@MainActor
 protocol DuxAppRuntimeServing: AnyObject {
     func start() async
     func signalMaintenance(_ trigger: DuxMaintenanceTrigger) async
@@ -42,19 +78,25 @@ final class DuxTerminationGate {
 final class DuxAppDelegate: NSObject, NSApplicationDelegate {
     private var observers: [NSObjectProtocol] = []
     private let terminationGate = DuxTerminationGate()
+    private let automaticTerminationLease: DuxAutomaticTerminationLease
     private let runtime: any DuxAppRuntimeServing
 
     override convenience init() {
         self.init(runtime: AppRuntime.shared)
     }
 
-    init(runtime: any DuxAppRuntimeServing) {
+    init(
+        runtime: any DuxAppRuntimeServing,
+        automaticTerminationLease: DuxAutomaticTerminationLease = DuxAutomaticTerminationLease()
+    ) {
         self.runtime = runtime
+        self.automaticTerminationLease = automaticTerminationLease
         super.init()
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         _ = notification
+        automaticTerminationLease.acquire()
         installObservers()
         Task {
             await runtime.start()
@@ -109,6 +151,7 @@ final class DuxAppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         _ = notification
         removeObservers()
+        automaticTerminationLease.release()
     }
 
     private func installObservers() {
