@@ -2,6 +2,7 @@ import AppKit
 
 @MainActor
 protocol DuxAutomaticTerminationControlling: AnyObject {
+    var automaticTerminationSupportEnabled: Bool { get set }
     func disableAutomaticTermination(_ reason: String)
     func enableAutomaticTermination(_ reason: String)
 }
@@ -23,6 +24,7 @@ final class DuxAutomaticTerminationLease {
         guard !isHeld else {
             return
         }
+        controller.automaticTerminationSupportEnabled = true
         controller.disableAutomaticTermination(Self.reason)
         isHeld = true
     }

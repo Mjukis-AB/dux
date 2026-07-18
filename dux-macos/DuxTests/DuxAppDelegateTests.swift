@@ -14,6 +14,8 @@ final class DuxAppDelegateTests: XCTestCase {
         delegate.applicationDidFinishLaunching(
             Notification(name: NSApplication.didFinishLaunchingNotification)
         )
+        XCTAssertTrue(controller.automaticTerminationSupportEnabled)
+        XCTAssertEqual(controller.events, ["support:true", "disable"])
         XCTAssertEqual(controller.disabledReasons.count, 1)
         XCTAssertTrue(controller.enabledReasons.isEmpty)
 
@@ -146,10 +148,17 @@ final class DuxAppDelegateTests: XCTestCase {
 
 @MainActor
 private final class AutomaticTerminationControllerSpy: DuxAutomaticTerminationControlling {
+    var automaticTerminationSupportEnabled = false {
+        didSet {
+            events.append("support:\(automaticTerminationSupportEnabled)")
+        }
+    }
+    private(set) var events: [String] = []
     private(set) var disabledReasons: [String] = []
     private(set) var enabledReasons: [String] = []
 
     func disableAutomaticTermination(_ reason: String) {
+        events.append("disable")
         disabledReasons.append(reason)
     }
 
