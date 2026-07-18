@@ -51,6 +51,16 @@ protocol DuxSnapshotReviewLease: AnyObject, Sendable {
         modifiedBefore: ExplorerSnapshotTimestamp?,
         maxResults: UInt16
     ) async throws -> ExplorerSnapshotLargeFilesPage
+    func candidatePaths(
+        candidateID: String,
+        cursor: UInt16,
+        limit: UInt16
+    ) async throws -> ExplorerCandidatePathPage
+    func candidateEvidence(
+        candidateID: String,
+        cursor: UInt16,
+        limit: UInt16
+    ) async throws -> ExplorerCandidateEvidencePage
     func resolveLiveItem(
         nodeID: UInt64,
         purpose: ExplorerSnapshotLivePathPurpose
@@ -60,6 +70,22 @@ protocol DuxSnapshotReviewLease: AnyObject, Sendable {
 }
 
 extension DuxSnapshotReviewLease {
+    func candidatePaths(
+        candidateID _: String,
+        cursor _: UInt16,
+        limit _: UInt16
+    ) async throws -> ExplorerCandidatePathPage {
+        throw ExplorerCandidateDetailError.unavailable
+    }
+
+    func candidateEvidence(
+        candidateID _: String,
+        cursor _: UInt16,
+        limit _: UInt16
+    ) async throws -> ExplorerCandidateEvidencePage {
+        throw ExplorerCandidateDetailError.unavailable
+    }
+
     func resolveLiveItem(
         nodeID _: UInt64,
         purpose _: ExplorerSnapshotLivePathPurpose
@@ -75,7 +101,7 @@ extension DuxSnapshotReviewLease {
 struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewServing,
     DuxSnapshotHistoryServing, DuxScanCoverageServing, HomeScanServing, Sendable
 {
-    fileprivate static let expectedFFIContractVersion: UInt32 = 16
+    fileprivate static let expectedFFIContractVersion: UInt32 = 17
     fileprivate static let expectedRecordVersion: UInt32 = 1
 
     private let state: EngineServiceState
@@ -731,7 +757,9 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
              .SnapshotLivePathUnavailable, .SnapshotLivePathMissing,
              .SnapshotLivePathSymlink, .SnapshotLivePathCrossVolume,
              .SnapshotLivePathChanged, .SnapshotLivePathAccessDenied,
-             .InvalidScanCoverageDetailsRequest, .ReadOnlyStore,
+             .InvalidScanCoverageDetailsRequest, .InvalidCandidateDetailRequest,
+             .CandidateEvaluationNotSucceeded, .CandidateNotFound,
+             .CandidateCursorOutOfRange, .ReadOnlyStore,
              .IncompatibleSchema, .UnsafeStorage, .CorruptData,
              .IncompatibleSnapshot, .OutcomeUnknown, .InternalState:
             .blockedUntilRestart
@@ -1379,6 +1407,60 @@ private final class FFIDuxSnapshotReviewLease: DuxSnapshotReviewLease, @unchecke
         }
     }
 
+    func candidatePaths(
+        candidateID: String,
+        cursor: UInt16,
+        limit: UInt16
+    ) async throws -> ExplorerCandidatePathPage {
+        guard (1 ... ExplorerCandidateDetailAdapter.maximumPageLimit).contains(limit) else {
+            throw ExplorerCandidateDetailError.invalidLimit
+        }
+        return try await state.perform { _ in
+            do {
+                let raw = try self.lease.candidatePaths(
+                    candidateId: candidateID,
+                    cursor: cursor,
+                    limit: limit
+                )
+                return try ExplorerCandidateDetailAdapter.mapPaths(
+                    raw,
+                    expectedCandidateID: candidateID,
+                    expectedCursor: cursor,
+                    requestedLimit: limit
+                )
+            } catch let error as EngineError {
+                throw Self.candidateDetailError(error)
+            }
+        }
+    }
+
+    func candidateEvidence(
+        candidateID: String,
+        cursor: UInt16,
+        limit: UInt16
+    ) async throws -> ExplorerCandidateEvidencePage {
+        guard (1 ... ExplorerCandidateDetailAdapter.maximumPageLimit).contains(limit) else {
+            throw ExplorerCandidateDetailError.invalidLimit
+        }
+        return try await state.perform { _ in
+            do {
+                let raw = try self.lease.candidateEvidence(
+                    candidateId: candidateID,
+                    cursor: cursor,
+                    limit: limit
+                )
+                return try ExplorerCandidateDetailAdapter.mapEvidence(
+                    raw,
+                    expectedCandidateID: candidateID,
+                    expectedCursor: cursor,
+                    requestedLimit: limit
+                )
+            } catch let error as EngineError {
+                throw Self.candidateDetailError(error)
+            }
+        }
+    }
+
     func resolveLiveItem(
         nodeID: UInt64,
         purpose: ExplorerSnapshotLivePathPurpose
@@ -1461,6 +1543,17 @@ private final class FFIDuxSnapshotReviewLease: DuxSnapshotReviewLease, @unchecke
         case .ReviewExpired: ExplorerSnapshotLargeFilesError.reviewExpired
         case .InvalidSnapshotLargeFileRequest: ExplorerSnapshotLargeFilesError.invalidRequest
         case .BudgetExceeded: ExplorerSnapshotLargeFilesError.budgetExceeded
+        default: EngineService.serviceError(error)
+        }
+    }
+
+    private static func candidateDetailError(_ error: EngineError) -> Error {
+        switch error {
+        case .ReviewExpired: ExplorerCandidateDetailError.reviewExpired
+        case .InvalidCandidateDetailRequest: ExplorerCandidateDetailError.invalidRequest
+        case .CandidateEvaluationNotSucceeded: ExplorerCandidateDetailError.evaluationUnavailable
+        case .CandidateNotFound: ExplorerCandidateDetailError.candidateNotFound
+        case .BudgetExceeded: ExplorerCandidateDetailError.budgetExceeded
         default: EngineService.serviceError(error)
         }
     }

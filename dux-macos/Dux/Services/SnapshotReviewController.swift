@@ -245,6 +245,64 @@ actor DuxSnapshotReviewController {
         return page
     }
 
+    func candidatePaths(
+        scanID: String,
+        candidateID: String,
+        cursor: UInt16,
+        limit: UInt16
+    ) async throws -> ExplorerCandidatePathPage {
+        guard !isShuttingDown else {
+            throw EngineServiceError.closed
+        }
+        guard let entry = leases[scanID] else {
+            throw ExplorerCandidateDetailError.reviewNotAcquired
+        }
+        let page: ExplorerCandidatePathPage
+        do {
+            page = try await entry.lease.candidatePaths(
+                candidateID: candidateID,
+                cursor: cursor,
+                limit: limit
+            )
+        } catch {
+            await discardExpiredLeaseIfCurrent(error, scanID: scanID, entry: entry)
+            throw error
+        }
+        guard leases[scanID]?.generation == entry.generation else {
+            throw CancellationError()
+        }
+        return page
+    }
+
+    func candidateEvidence(
+        scanID: String,
+        candidateID: String,
+        cursor: UInt16,
+        limit: UInt16
+    ) async throws -> ExplorerCandidateEvidencePage {
+        guard !isShuttingDown else {
+            throw EngineServiceError.closed
+        }
+        guard let entry = leases[scanID] else {
+            throw ExplorerCandidateDetailError.reviewNotAcquired
+        }
+        let page: ExplorerCandidateEvidencePage
+        do {
+            page = try await entry.lease.candidateEvidence(
+                candidateID: candidateID,
+                cursor: cursor,
+                limit: limit
+            )
+        } catch {
+            await discardExpiredLeaseIfCurrent(error, scanID: scanID, entry: entry)
+            throw error
+        }
+        guard leases[scanID]?.generation == entry.generation else {
+            throw CancellationError()
+        }
+        return page
+    }
+
     func resolveLiveItem(
         scanID: String,
         nodeID: UInt64,

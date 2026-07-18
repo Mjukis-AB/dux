@@ -269,6 +269,13 @@ All notable changes to DUX will be documented in this file.
   navigation/reload/close race, preserves Home coverage as a separate baseline,
   and exposes Rescan This Folder, Load Latest Snapshot, and accessible
   progress/cancellation UI. No live path or cleanup authority crosses FFI.
+- Completed Milestone 4's candidate-detail transport slice with FFI contract
+  v17. A retained snapshot review can now return bounded historical candidate
+  path pages and typed evidence pages. Rust keeps the observations tied to the
+  exact review lease; Swift rejects hostile versions, identities, cursors,
+  counts, timestamps, optional-field shapes, and oversized path payloads.
+  Candidate detail remains discovery-only historical display data and cannot
+  become planner, executor, AI, or cleanup authority.
 - Completed Milestone 4's storage-category visualization slice with FFI
   contract v15. Snapshot review nodes now carry a display-only category joined
   from the exact scan's immutable, validated candidate evaluation. Exact

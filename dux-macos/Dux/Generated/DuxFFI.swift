@@ -1130,6 +1130,19 @@ public func FfiConverterTypeScanTask_lower(_ value: ScanTask) -> UInt64 {
 
 public protocol SnapshotReviewSessionProtocol: AnyObject, Sendable {
 
+    /**
+     * Return one bounded page of typed historical candidate evidence while
+     * this exact snapshot review remains retained.
+     */
+    func candidateEvidence(candidateId: String, cursor: UInt16, limit: UInt16) throws  -> CandidateEvidencePage
+
+    /**
+     * Return one bounded page of historical candidate paths while this exact
+     * snapshot review remains retained. These observations are for display
+     * only and do not carry planning or cleanup authority.
+     */
+    func candidatePaths(candidateId: String, cursor: UInt16, limit: UInt16) throws  -> CandidatePathPage
+
     func childNodes(parentId: UInt64, sort: SnapshotNodeSort, offset: UInt64, limit: UInt16) throws  -> SnapshotNodePage
 
     func info() throws  -> SnapshotReviewInfo
@@ -1199,6 +1212,37 @@ open class SnapshotReviewSession: SnapshotReviewSessionProtocol, @unchecked Send
 
 
 
+
+    /**
+     * Return one bounded page of typed historical candidate evidence while
+     * this exact snapshot review remains retained.
+     */
+open func candidateEvidence(candidateId: String, cursor: UInt16, limit: UInt16)throws  -> CandidateEvidencePage  {
+    return try  FfiConverterTypeCandidateEvidencePage_lift(try rustCallWithError(FfiConverterTypeEngineError_lift) {
+    uniffi_dux_ffi_fn_method_snapshotreviewsession_candidate_evidence(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(candidateId),
+        FfiConverterUInt16.lower(cursor),
+        FfiConverterUInt16.lower(limit),$0
+    )
+})
+}
+
+    /**
+     * Return one bounded page of historical candidate paths while this exact
+     * snapshot review remains retained. These observations are for display
+     * only and do not carry planning or cleanup authority.
+     */
+open func candidatePaths(candidateId: String, cursor: UInt16, limit: UInt16)throws  -> CandidatePathPage  {
+    return try  FfiConverterTypeCandidatePathPage_lift(try rustCallWithError(FfiConverterTypeEngineError_lift) {
+    uniffi_dux_ffi_fn_method_snapshotreviewsession_candidate_paths(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(candidateId),
+        FfiConverterUInt16.lower(cursor),
+        FfiConverterUInt16.lower(limit),$0
+    )
+})
+}
 
 open func childNodes(parentId: UInt64, sort: SnapshotNodeSort, offset: UInt64, limit: UInt16)throws  -> SnapshotNodePage  {
     return try  FfiConverterTypeSnapshotNodePage_lift(try rustCallWithError(FfiConverterTypeEngineError_lift) {
@@ -1318,6 +1362,413 @@ public func FfiConverterTypeSnapshotReviewSession_lower(_ value: SnapshotReviewS
 }
 
 
+
+
+public struct CandidateEvidencePage: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let scanId: String
+    public let candidate: CandidateSummary
+    public let cursor: UInt16
+    public let nextCursor: UInt16?
+    public let totalEvidence: UInt16
+    public let evidence: [CandidateEvidenceRecord]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, scanId: String, candidate: CandidateSummary, cursor: UInt16, nextCursor: UInt16?, totalEvidence: UInt16, evidence: [CandidateEvidenceRecord]) {
+        self.recordVersion = recordVersion
+        self.scanId = scanId
+        self.candidate = candidate
+        self.cursor = cursor
+        self.nextCursor = nextCursor
+        self.totalEvidence = totalEvidence
+        self.evidence = evidence
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension CandidateEvidencePage: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCandidateEvidencePage: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CandidateEvidencePage {
+        return
+            try CandidateEvidencePage(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                scanId: FfiConverterString.read(from: &buf),
+                candidate: FfiConverterTypeCandidateSummary.read(from: &buf),
+                cursor: FfiConverterUInt16.read(from: &buf),
+                nextCursor: FfiConverterOptionUInt16.read(from: &buf),
+                totalEvidence: FfiConverterUInt16.read(from: &buf),
+                evidence: FfiConverterSequenceTypeCandidateEvidenceRecord.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: CandidateEvidencePage, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterString.write(value.scanId, into: &buf)
+        FfiConverterTypeCandidateSummary.write(value.candidate, into: &buf)
+        FfiConverterUInt16.write(value.cursor, into: &buf)
+        FfiConverterOptionUInt16.write(value.nextCursor, into: &buf)
+        FfiConverterUInt16.write(value.totalEvidence, into: &buf)
+        FfiConverterSequenceTypeCandidateEvidenceRecord.write(value.evidence, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCandidateEvidencePage_lift(_ buf: RustBuffer) throws -> CandidateEvidencePage {
+    return try FfiConverterTypeCandidateEvidencePage.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCandidateEvidencePage_lower(_ value: CandidateEvidencePage) -> RustBuffer {
+    return FfiConverterTypeCandidateEvidencePage.lower(value)
+}
+
+
+/**
+ * Typed historical evidence. Optional fields are populated only for the
+ * corresponding `kind`; Swift must reject contradictory shapes.
+ */
+public struct CandidateEvidenceRecord: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let ordinal: UInt16
+    public let kind: CandidateEvidenceKind
+    public let path: CandidateObservedPath?
+    public let identifier: String?
+    public let newestMtime: SnapshotNodeTimestamp?
+    public let minimumAgeSeconds: UInt64?
+    public let minimumAgeNanoseconds: UInt32?
+    public let observedBytes: UInt64?
+    public let minimumBytes: UInt64?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, ordinal: UInt16, kind: CandidateEvidenceKind, path: CandidateObservedPath?, identifier: String?, newestMtime: SnapshotNodeTimestamp?, minimumAgeSeconds: UInt64?, minimumAgeNanoseconds: UInt32?, observedBytes: UInt64?, minimumBytes: UInt64?) {
+        self.recordVersion = recordVersion
+        self.ordinal = ordinal
+        self.kind = kind
+        self.path = path
+        self.identifier = identifier
+        self.newestMtime = newestMtime
+        self.minimumAgeSeconds = minimumAgeSeconds
+        self.minimumAgeNanoseconds = minimumAgeNanoseconds
+        self.observedBytes = observedBytes
+        self.minimumBytes = minimumBytes
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension CandidateEvidenceRecord: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCandidateEvidenceRecord: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CandidateEvidenceRecord {
+        return
+            try CandidateEvidenceRecord(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                ordinal: FfiConverterUInt16.read(from: &buf),
+                kind: FfiConverterTypeCandidateEvidenceKind.read(from: &buf),
+                path: FfiConverterOptionTypeCandidateObservedPath.read(from: &buf),
+                identifier: FfiConverterOptionString.read(from: &buf),
+                newestMtime: FfiConverterOptionTypeSnapshotNodeTimestamp.read(from: &buf),
+                minimumAgeSeconds: FfiConverterOptionUInt64.read(from: &buf),
+                minimumAgeNanoseconds: FfiConverterOptionUInt32.read(from: &buf),
+                observedBytes: FfiConverterOptionUInt64.read(from: &buf),
+                minimumBytes: FfiConverterOptionUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: CandidateEvidenceRecord, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterUInt16.write(value.ordinal, into: &buf)
+        FfiConverterTypeCandidateEvidenceKind.write(value.kind, into: &buf)
+        FfiConverterOptionTypeCandidateObservedPath.write(value.path, into: &buf)
+        FfiConverterOptionString.write(value.identifier, into: &buf)
+        FfiConverterOptionTypeSnapshotNodeTimestamp.write(value.newestMtime, into: &buf)
+        FfiConverterOptionUInt64.write(value.minimumAgeSeconds, into: &buf)
+        FfiConverterOptionUInt32.write(value.minimumAgeNanoseconds, into: &buf)
+        FfiConverterOptionUInt64.write(value.observedBytes, into: &buf)
+        FfiConverterOptionUInt64.write(value.minimumBytes, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCandidateEvidenceRecord_lift(_ buf: RustBuffer) throws -> CandidateEvidenceRecord {
+    return try FfiConverterTypeCandidateEvidenceRecord.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCandidateEvidenceRecord_lower(_ value: CandidateEvidenceRecord) -> RustBuffer {
+    return FfiConverterTypeCandidateEvidenceRecord.lower(value)
+}
+
+
+/**
+ * A historical candidate path/evidence observation. It is intentionally
+ * scoped to a retained review and can never be passed back as an execution
+ * or planning input.
+ */
+public struct CandidateObservedPath: Equatable, Hashable {
+    public let encoding: CandidatePathEncoding
+    public let encodedBytes: Data
+    public let display: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(encoding: CandidatePathEncoding, encodedBytes: Data, display: String) {
+        self.encoding = encoding
+        self.encodedBytes = encodedBytes
+        self.display = display
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension CandidateObservedPath: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCandidateObservedPath: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CandidateObservedPath {
+        return
+            try CandidateObservedPath(
+                encoding: FfiConverterTypeCandidatePathEncoding.read(from: &buf),
+                encodedBytes: FfiConverterData.read(from: &buf),
+                display: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: CandidateObservedPath, into buf: inout [UInt8]) {
+        FfiConverterTypeCandidatePathEncoding.write(value.encoding, into: &buf)
+        FfiConverterData.write(value.encodedBytes, into: &buf)
+        FfiConverterString.write(value.display, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCandidateObservedPath_lift(_ buf: RustBuffer) throws -> CandidateObservedPath {
+    return try FfiConverterTypeCandidateObservedPath.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCandidateObservedPath_lower(_ value: CandidateObservedPath) -> RustBuffer {
+    return FfiConverterTypeCandidateObservedPath.lower(value)
+}
+
+
+public struct CandidatePathPage: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let scanId: String
+    public let candidate: CandidateSummary
+    public let cursor: UInt16
+    public let nextCursor: UInt16?
+    public let totalPaths: UInt16
+    public let paths: [CandidateObservedPath]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, scanId: String, candidate: CandidateSummary, cursor: UInt16, nextCursor: UInt16?, totalPaths: UInt16, paths: [CandidateObservedPath]) {
+        self.recordVersion = recordVersion
+        self.scanId = scanId
+        self.candidate = candidate
+        self.cursor = cursor
+        self.nextCursor = nextCursor
+        self.totalPaths = totalPaths
+        self.paths = paths
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension CandidatePathPage: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCandidatePathPage: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CandidatePathPage {
+        return
+            try CandidatePathPage(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                scanId: FfiConverterString.read(from: &buf),
+                candidate: FfiConverterTypeCandidateSummary.read(from: &buf),
+                cursor: FfiConverterUInt16.read(from: &buf),
+                nextCursor: FfiConverterOptionUInt16.read(from: &buf),
+                totalPaths: FfiConverterUInt16.read(from: &buf),
+                paths: FfiConverterSequenceTypeCandidateObservedPath.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: CandidatePathPage, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterString.write(value.scanId, into: &buf)
+        FfiConverterTypeCandidateSummary.write(value.candidate, into: &buf)
+        FfiConverterUInt16.write(value.cursor, into: &buf)
+        FfiConverterOptionUInt16.write(value.nextCursor, into: &buf)
+        FfiConverterUInt16.write(value.totalPaths, into: &buf)
+        FfiConverterSequenceTypeCandidateObservedPath.write(value.paths, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCandidatePathPage_lift(_ buf: RustBuffer) throws -> CandidatePathPage {
+    return try FfiConverterTypeCandidatePathPage.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCandidatePathPage_lower(_ value: CandidatePathPage) -> RustBuffer {
+    return FfiConverterTypeCandidatePathPage.lower(value)
+}
+
+
+public struct CandidateSummary: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let candidateId: String
+    public let ruleId: String
+    public let ruleRevision: UInt32
+    public let category: CandidateCategory
+    public let estimatedBytes: UInt64
+    public let newestMtime: SnapshotNodeTimestamp?
+    public let safety: CandidateSafety
+    public let action: CandidateAction
+    public let ruleScheduleEligible: Bool
+    public let pathCount: UInt16
+    public let evidenceKinds: [CandidateEvidenceKind]
+    public let blockers: [CandidateBlockReason]
+    public let createdAt: SnapshotNodeTimestamp
+    public let status: CandidateStatus
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, candidateId: String, ruleId: String, ruleRevision: UInt32, category: CandidateCategory, estimatedBytes: UInt64, newestMtime: SnapshotNodeTimestamp?, safety: CandidateSafety, action: CandidateAction, ruleScheduleEligible: Bool, pathCount: UInt16, evidenceKinds: [CandidateEvidenceKind], blockers: [CandidateBlockReason], createdAt: SnapshotNodeTimestamp, status: CandidateStatus) {
+        self.recordVersion = recordVersion
+        self.candidateId = candidateId
+        self.ruleId = ruleId
+        self.ruleRevision = ruleRevision
+        self.category = category
+        self.estimatedBytes = estimatedBytes
+        self.newestMtime = newestMtime
+        self.safety = safety
+        self.action = action
+        self.ruleScheduleEligible = ruleScheduleEligible
+        self.pathCount = pathCount
+        self.evidenceKinds = evidenceKinds
+        self.blockers = blockers
+        self.createdAt = createdAt
+        self.status = status
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension CandidateSummary: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCandidateSummary: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CandidateSummary {
+        return
+            try CandidateSummary(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                candidateId: FfiConverterString.read(from: &buf),
+                ruleId: FfiConverterString.read(from: &buf),
+                ruleRevision: FfiConverterUInt32.read(from: &buf),
+                category: FfiConverterTypeCandidateCategory.read(from: &buf),
+                estimatedBytes: FfiConverterUInt64.read(from: &buf),
+                newestMtime: FfiConverterOptionTypeSnapshotNodeTimestamp.read(from: &buf),
+                safety: FfiConverterTypeCandidateSafety.read(from: &buf),
+                action: FfiConverterTypeCandidateAction.read(from: &buf),
+                ruleScheduleEligible: FfiConverterBool.read(from: &buf),
+                pathCount: FfiConverterUInt16.read(from: &buf),
+                evidenceKinds: FfiConverterSequenceTypeCandidateEvidenceKind.read(from: &buf),
+                blockers: FfiConverterSequenceTypeCandidateBlockReason.read(from: &buf),
+                createdAt: FfiConverterTypeSnapshotNodeTimestamp.read(from: &buf),
+                status: FfiConverterTypeCandidateStatus.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: CandidateSummary, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterString.write(value.candidateId, into: &buf)
+        FfiConverterString.write(value.ruleId, into: &buf)
+        FfiConverterUInt32.write(value.ruleRevision, into: &buf)
+        FfiConverterTypeCandidateCategory.write(value.category, into: &buf)
+        FfiConverterUInt64.write(value.estimatedBytes, into: &buf)
+        FfiConverterOptionTypeSnapshotNodeTimestamp.write(value.newestMtime, into: &buf)
+        FfiConverterTypeCandidateSafety.write(value.safety, into: &buf)
+        FfiConverterTypeCandidateAction.write(value.action, into: &buf)
+        FfiConverterBool.write(value.ruleScheduleEligible, into: &buf)
+        FfiConverterUInt16.write(value.pathCount, into: &buf)
+        FfiConverterSequenceTypeCandidateEvidenceKind.write(value.evidenceKinds, into: &buf)
+        FfiConverterSequenceTypeCandidateBlockReason.write(value.blockers, into: &buf)
+        FfiConverterTypeSnapshotNodeTimestamp.write(value.createdAt, into: &buf)
+        FfiConverterTypeCandidateStatus.write(value.status, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCandidateSummary_lift(_ buf: RustBuffer) throws -> CandidateSummary {
+    return try FfiConverterTypeCandidateSummary.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCandidateSummary_lower(_ value: CandidateSummary) -> RustBuffer {
+    return FfiConverterTypeCandidateSummary.lower(value)
+}
 
 
 /**
@@ -4023,6 +4474,741 @@ public func FfiConverterTypeSubtreeScanRequest_lower(_ value: SubtreeScanRequest
     return FfiConverterTypeSubtreeScanRequest.lower(value)
 }
 
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum CandidateAction: Equatable, Hashable {
+
+    case removeKnownRegenerableContents
+    case evictLocalCopy
+    case moveToTrash
+    case revealOnly
+    case noAction
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension CandidateAction: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCandidateAction: FfiConverterRustBuffer {
+    typealias SwiftType = CandidateAction
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CandidateAction {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .removeKnownRegenerableContents
+
+        case 2: return .evictLocalCopy
+
+        case 3: return .moveToTrash
+
+        case 4: return .revealOnly
+
+        case 5: return .noAction
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: CandidateAction, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .removeKnownRegenerableContents:
+            writeInt(&buf, Int32(1))
+
+
+        case .evictLocalCopy:
+            writeInt(&buf, Int32(2))
+
+
+        case .moveToTrash:
+            writeInt(&buf, Int32(3))
+
+
+        case .revealOnly:
+            writeInt(&buf, Int32(4))
+
+
+        case .noAction:
+            writeInt(&buf, Int32(5))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCandidateAction_lift(_ buf: RustBuffer) throws -> CandidateAction {
+    return try FfiConverterTypeCandidateAction.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCandidateAction_lower(_ value: CandidateAction) -> RustBuffer {
+    return FfiConverterTypeCandidateAction.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum CandidateBlockReason: Equatable, Hashable {
+
+    case missingOrIncompleteEvidence
+    case missingModificationTime
+    case partialScanCoverage
+    case recentActivity
+    case belowMinimumBytes
+    case activeUse
+    case accessDenied
+    case protectedPath
+    case protectedDescendant
+    case symlinkBoundary
+    case volumeBoundary
+    case changedSinceScan
+    case unsupportedPlatform
+    case cloudUploadUnconfirmed
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension CandidateBlockReason: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCandidateBlockReason: FfiConverterRustBuffer {
+    typealias SwiftType = CandidateBlockReason
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CandidateBlockReason {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .missingOrIncompleteEvidence
+
+        case 2: return .missingModificationTime
+
+        case 3: return .partialScanCoverage
+
+        case 4: return .recentActivity
+
+        case 5: return .belowMinimumBytes
+
+        case 6: return .activeUse
+
+        case 7: return .accessDenied
+
+        case 8: return .protectedPath
+
+        case 9: return .protectedDescendant
+
+        case 10: return .symlinkBoundary
+
+        case 11: return .volumeBoundary
+
+        case 12: return .changedSinceScan
+
+        case 13: return .unsupportedPlatform
+
+        case 14: return .cloudUploadUnconfirmed
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: CandidateBlockReason, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .missingOrIncompleteEvidence:
+            writeInt(&buf, Int32(1))
+
+
+        case .missingModificationTime:
+            writeInt(&buf, Int32(2))
+
+
+        case .partialScanCoverage:
+            writeInt(&buf, Int32(3))
+
+
+        case .recentActivity:
+            writeInt(&buf, Int32(4))
+
+
+        case .belowMinimumBytes:
+            writeInt(&buf, Int32(5))
+
+
+        case .activeUse:
+            writeInt(&buf, Int32(6))
+
+
+        case .accessDenied:
+            writeInt(&buf, Int32(7))
+
+
+        case .protectedPath:
+            writeInt(&buf, Int32(8))
+
+
+        case .protectedDescendant:
+            writeInt(&buf, Int32(9))
+
+
+        case .symlinkBoundary:
+            writeInt(&buf, Int32(10))
+
+
+        case .volumeBoundary:
+            writeInt(&buf, Int32(11))
+
+
+        case .changedSinceScan:
+            writeInt(&buf, Int32(12))
+
+
+        case .unsupportedPlatform:
+            writeInt(&buf, Int32(13))
+
+
+        case .cloudUploadUnconfirmed:
+            writeInt(&buf, Int32(14))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCandidateBlockReason_lift(_ buf: RustBuffer) throws -> CandidateBlockReason {
+    return try FfiConverterTypeCandidateBlockReason.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCandidateBlockReason_lower(_ value: CandidateBlockReason) -> RustBuffer {
+    return FfiConverterTypeCandidateBlockReason.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum CandidateCategory: Equatable, Hashable {
+
+    case developerArtifact
+    case applicationCache
+    case browserCache
+    case logAndDiagnostic
+    case installerAndDownload
+    case deviceAndSimulatorData
+    case cloudFile
+    case largeReviewItem
+    case protectedSystemData
+    case unknownStorage
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension CandidateCategory: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCandidateCategory: FfiConverterRustBuffer {
+    typealias SwiftType = CandidateCategory
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CandidateCategory {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .developerArtifact
+
+        case 2: return .applicationCache
+
+        case 3: return .browserCache
+
+        case 4: return .logAndDiagnostic
+
+        case 5: return .installerAndDownload
+
+        case 6: return .deviceAndSimulatorData
+
+        case 7: return .cloudFile
+
+        case 8: return .largeReviewItem
+
+        case 9: return .protectedSystemData
+
+        case 10: return .unknownStorage
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: CandidateCategory, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .developerArtifact:
+            writeInt(&buf, Int32(1))
+
+
+        case .applicationCache:
+            writeInt(&buf, Int32(2))
+
+
+        case .browserCache:
+            writeInt(&buf, Int32(3))
+
+
+        case .logAndDiagnostic:
+            writeInt(&buf, Int32(4))
+
+
+        case .installerAndDownload:
+            writeInt(&buf, Int32(5))
+
+
+        case .deviceAndSimulatorData:
+            writeInt(&buf, Int32(6))
+
+
+        case .cloudFile:
+            writeInt(&buf, Int32(7))
+
+
+        case .largeReviewItem:
+            writeInt(&buf, Int32(8))
+
+
+        case .protectedSystemData:
+            writeInt(&buf, Int32(9))
+
+
+        case .unknownStorage:
+            writeInt(&buf, Int32(10))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCandidateCategory_lift(_ buf: RustBuffer) throws -> CandidateCategory {
+    return try FfiConverterTypeCandidateCategory.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCandidateCategory_lower(_ value: CandidateCategory) -> RustBuffer {
+    return FfiConverterTypeCandidateCategory.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum CandidateEvidenceKind: Equatable, Hashable {
+
+    case matchedPath
+    case requiredMarker
+    case forbiddenMarkerAbsent
+    case bundleIdentifier
+    case minimumAge
+    case minimumSize
+    case inactiveProcess
+    case cloudUploadComplete
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension CandidateEvidenceKind: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCandidateEvidenceKind: FfiConverterRustBuffer {
+    typealias SwiftType = CandidateEvidenceKind
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CandidateEvidenceKind {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .matchedPath
+
+        case 2: return .requiredMarker
+
+        case 3: return .forbiddenMarkerAbsent
+
+        case 4: return .bundleIdentifier
+
+        case 5: return .minimumAge
+
+        case 6: return .minimumSize
+
+        case 7: return .inactiveProcess
+
+        case 8: return .cloudUploadComplete
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: CandidateEvidenceKind, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .matchedPath:
+            writeInt(&buf, Int32(1))
+
+
+        case .requiredMarker:
+            writeInt(&buf, Int32(2))
+
+
+        case .forbiddenMarkerAbsent:
+            writeInt(&buf, Int32(3))
+
+
+        case .bundleIdentifier:
+            writeInt(&buf, Int32(4))
+
+
+        case .minimumAge:
+            writeInt(&buf, Int32(5))
+
+
+        case .minimumSize:
+            writeInt(&buf, Int32(6))
+
+
+        case .inactiveProcess:
+            writeInt(&buf, Int32(7))
+
+
+        case .cloudUploadComplete:
+            writeInt(&buf, Int32(8))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCandidateEvidenceKind_lift(_ buf: RustBuffer) throws -> CandidateEvidenceKind {
+    return try FfiConverterTypeCandidateEvidenceKind.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCandidateEvidenceKind_lower(_ value: CandidateEvidenceKind) -> RustBuffer {
+    return FfiConverterTypeCandidateEvidenceKind.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum CandidatePathEncoding: Equatable, Hashable {
+
+    case utf8
+    case utf16LittleEndian
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension CandidatePathEncoding: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCandidatePathEncoding: FfiConverterRustBuffer {
+    typealias SwiftType = CandidatePathEncoding
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CandidatePathEncoding {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .utf8
+
+        case 2: return .utf16LittleEndian
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: CandidatePathEncoding, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .utf8:
+            writeInt(&buf, Int32(1))
+
+
+        case .utf16LittleEndian:
+            writeInt(&buf, Int32(2))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCandidatePathEncoding_lift(_ buf: RustBuffer) throws -> CandidatePathEncoding {
+    return try FfiConverterTypeCandidatePathEncoding.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCandidatePathEncoding_lower(_ value: CandidatePathEncoding) -> RustBuffer {
+    return FfiConverterTypeCandidatePathEncoding.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum CandidateSafety: Equatable, Hashable {
+
+    case safeRegenerable
+    case safeEvictable
+    case reviewRequired
+    case informational
+    case protected
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension CandidateSafety: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCandidateSafety: FfiConverterRustBuffer {
+    typealias SwiftType = CandidateSafety
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CandidateSafety {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .safeRegenerable
+
+        case 2: return .safeEvictable
+
+        case 3: return .reviewRequired
+
+        case 4: return .informational
+
+        case 5: return .protected
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: CandidateSafety, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .safeRegenerable:
+            writeInt(&buf, Int32(1))
+
+
+        case .safeEvictable:
+            writeInt(&buf, Int32(2))
+
+
+        case .reviewRequired:
+            writeInt(&buf, Int32(3))
+
+
+        case .informational:
+            writeInt(&buf, Int32(4))
+
+
+        case .protected:
+            writeInt(&buf, Int32(5))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCandidateSafety_lift(_ buf: RustBuffer) throws -> CandidateSafety {
+    return try FfiConverterTypeCandidateSafety.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCandidateSafety_lower(_ value: CandidateSafety) -> RustBuffer {
+    return FfiConverterTypeCandidateSafety.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum CandidateStatus: Equatable, Hashable {
+
+    case discovered
+    case selected
+    case dismissed
+    case stale
+    case planned
+    case completed
+    case failed
+    case unavailable
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension CandidateStatus: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCandidateStatus: FfiConverterRustBuffer {
+    typealias SwiftType = CandidateStatus
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CandidateStatus {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .discovered
+
+        case 2: return .selected
+
+        case 3: return .dismissed
+
+        case 4: return .stale
+
+        case 5: return .planned
+
+        case 6: return .completed
+
+        case 7: return .failed
+
+        case 8: return .unavailable
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: CandidateStatus, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .discovered:
+            writeInt(&buf, Int32(1))
+
+
+        case .selected:
+            writeInt(&buf, Int32(2))
+
+
+        case .dismissed:
+            writeInt(&buf, Int32(3))
+
+
+        case .stale:
+            writeInt(&buf, Int32(4))
+
+
+        case .planned:
+            writeInt(&buf, Int32(5))
+
+
+        case .completed:
+            writeInt(&buf, Int32(6))
+
+
+        case .failed:
+            writeInt(&buf, Int32(7))
+
+
+        case .unavailable:
+            writeInt(&buf, Int32(8))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCandidateStatus_lift(_ buf: RustBuffer) throws -> CandidateStatus {
+    return try FfiConverterTypeCandidateStatus.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCandidateStatus_lower(_ value: CandidateStatus) -> RustBuffer {
+    return FfiConverterTypeCandidateStatus.lower(value)
+}
+
+
 
 public enum EngineError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
 
@@ -4053,6 +5239,10 @@ public enum EngineError: Swift.Error, Equatable, Hashable, Foundation.LocalizedE
     case SnapshotLivePathChanged
     case SnapshotLivePathAccessDenied
     case InvalidScanCoverageDetailsRequest
+    case InvalidCandidateDetailRequest
+    case CandidateEvaluationNotSucceeded
+    case CandidateNotFound
+    case CandidateCursorOutOfRange
     case ReadOnlyStore
     case IncompatibleSchema
     case Busy
@@ -4116,15 +5306,19 @@ public struct FfiConverterTypeEngineError: FfiConverterRustBuffer {
         case 23: return .SnapshotLivePathChanged
         case 24: return .SnapshotLivePathAccessDenied
         case 25: return .InvalidScanCoverageDetailsRequest
-        case 26: return .ReadOnlyStore
-        case 27: return .IncompatibleSchema
-        case 28: return .Busy
-        case 29: return .UnsafeStorage
-        case 30: return .BudgetExceeded
-        case 31: return .CorruptData
-        case 32: return .IncompatibleSnapshot
-        case 33: return .OutcomeUnknown
-        case 34: return .InternalState
+        case 26: return .InvalidCandidateDetailRequest
+        case 27: return .CandidateEvaluationNotSucceeded
+        case 28: return .CandidateNotFound
+        case 29: return .CandidateCursorOutOfRange
+        case 30: return .ReadOnlyStore
+        case 31: return .IncompatibleSchema
+        case 32: return .Busy
+        case 33: return .UnsafeStorage
+        case 34: return .BudgetExceeded
+        case 35: return .CorruptData
+        case 36: return .IncompatibleSnapshot
+        case 37: return .OutcomeUnknown
+        case 38: return .InternalState
 
          default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -4237,40 +5431,56 @@ public struct FfiConverterTypeEngineError: FfiConverterRustBuffer {
             writeInt(&buf, Int32(25))
 
 
-        case .ReadOnlyStore:
+        case .InvalidCandidateDetailRequest:
             writeInt(&buf, Int32(26))
 
 
-        case .IncompatibleSchema:
+        case .CandidateEvaluationNotSucceeded:
             writeInt(&buf, Int32(27))
 
 
-        case .Busy:
+        case .CandidateNotFound:
             writeInt(&buf, Int32(28))
 
 
-        case .UnsafeStorage:
+        case .CandidateCursorOutOfRange:
             writeInt(&buf, Int32(29))
 
 
-        case .BudgetExceeded:
+        case .ReadOnlyStore:
             writeInt(&buf, Int32(30))
 
 
-        case .CorruptData:
+        case .IncompatibleSchema:
             writeInt(&buf, Int32(31))
 
 
-        case .IncompatibleSnapshot:
+        case .Busy:
             writeInt(&buf, Int32(32))
 
 
-        case .OutcomeUnknown:
+        case .UnsafeStorage:
             writeInt(&buf, Int32(33))
 
 
-        case .InternalState:
+        case .BudgetExceeded:
             writeInt(&buf, Int32(34))
+
+
+        case .CorruptData:
+            writeInt(&buf, Int32(35))
+
+
+        case .IncompatibleSnapshot:
+            writeInt(&buf, Int32(36))
+
+
+        case .OutcomeUnknown:
+            writeInt(&buf, Int32(37))
+
+
+        case .InternalState:
+            writeInt(&buf, Int32(38))
 
         }
     }
@@ -7268,6 +8478,30 @@ fileprivate struct FfiConverterOptionUInt16: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionUInt32: FfiConverterRustBuffer {
+    typealias SwiftType = UInt32?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterUInt32.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterUInt32.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionUInt64: FfiConverterRustBuffer {
     typealias SwiftType = UInt64?
 
@@ -7380,6 +8614,30 @@ fileprivate struct FfiConverterOptionTypeMaintenanceTask: FfiConverterRustBuffer
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeMaintenanceTask.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeCandidateObservedPath: FfiConverterRustBuffer {
+    typealias SwiftType = CandidateObservedPath?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeCandidateObservedPath.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeCandidateObservedPath.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -7629,6 +8887,56 @@ fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeCandidateEvidenceRecord: FfiConverterRustBuffer {
+    typealias SwiftType = [CandidateEvidenceRecord]
+
+    public static func write(_ value: [CandidateEvidenceRecord], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeCandidateEvidenceRecord.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [CandidateEvidenceRecord] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [CandidateEvidenceRecord]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeCandidateEvidenceRecord.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeCandidateObservedPath: FfiConverterRustBuffer {
+    typealias SwiftType = [CandidateObservedPath]
+
+    public static func write(_ value: [CandidateObservedPath], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeCandidateObservedPath.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [CandidateObservedPath] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [CandidateObservedPath]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeCandidateObservedPath.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeHistoricalScanIssue: FfiConverterRustBuffer {
     typealias SwiftType = [HistoricalScanIssue]
 
@@ -7775,6 +9083,56 @@ fileprivate struct FfiConverterSequenceTypeSnapshotTreemapCell: FfiConverterRust
         return seq
     }
 }
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeCandidateBlockReason: FfiConverterRustBuffer {
+    typealias SwiftType = [CandidateBlockReason]
+
+    public static func write(_ value: [CandidateBlockReason], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeCandidateBlockReason.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [CandidateBlockReason] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [CandidateBlockReason]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeCandidateBlockReason.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeCandidateEvidenceKind: FfiConverterRustBuffer {
+    typealias SwiftType = [CandidateEvidenceKind]
+
+    public static func write(_ value: [CandidateEvidenceKind], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeCandidateEvidenceKind.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [CandidateEvidenceKind] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [CandidateEvidenceKind]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeCandidateEvidenceKind.read(from: &buf))
+        }
+        return seq
+    }
+}
 public func libraryVersion() -> LibraryVersion  {
     return try!  FfiConverterTypeLibraryVersion_lift(try! rustCall() {
     uniffi_dux_ffi_fn_func_library_version($0
@@ -7861,6 +9219,12 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_scantask_poll() != 54370) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_snapshotreviewsession_candidate_evidence() != 16596) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_snapshotreviewsession_candidate_paths() != 37800) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_snapshotreviewsession_child_nodes() != 11906) {

@@ -6,16 +6,20 @@ use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use dux_core::engine::{
-    CancelOutcome as CoreCancelOutcome,
+    CancelOutcome as CoreCancelOutcome, CandidateDetailError as CoreCandidateDetailError,
     CandidateEvaluationTaskFailureKind as CoreCandidateEvaluationFailure,
     CandidateEvaluationTaskStatus as CoreCandidateEvaluationStatus,
     CapacityHistoryDisposition as CoreHistoryDisposition, DiskPressurePolicy as CorePressurePolicy,
     DiskPressurePolicyError as CorePressurePolicyError,
     DiskPressurePolicySource as CorePressurePolicySource,
     DiskPressurePolicyUpdate as CorePressurePolicyUpdate,
-    DurableScanIssueKind as CoreDurableScanIssueKind, DurableScanStatus as CoreDurableScanStatus,
-    EngineConfig, EngineHandle, EngineOpenError, HistoryMaintenanceStartOutcome,
-    ScanCoverageDetailsError as CoreScanCoverageDetailsError,
+    DurableCandidateEvidence as CoreCandidateEvidence,
+    DurableCandidateEvidencePage as CoreCandidateEvidencePage,
+    DurableCandidatePathPage as CoreCandidatePathPage,
+    DurableCandidateStatus as CoreCandidateStatus, DurableCandidateSummary as CoreCandidateSummary,
+    DurableObservedPath as CoreObservedPath, DurableScanIssueKind as CoreDurableScanIssueKind,
+    DurableScanStatus as CoreDurableScanStatus, EngineConfig, EngineHandle, EngineOpenError,
+    HistoryMaintenanceStartOutcome, ScanCoverageDetailsError as CoreScanCoverageDetailsError,
     ScanHistoryError as CoreScanHistoryError,
     ScanRecoveryMaintenanceOutcome as CoreScanRecoveryOutcome, ScanRecoveryMaintenanceStartOutcome,
     ScanRootErrorKind, ScanTaskResult as CoreScanTaskResult, ScanTaskStatus as CoreScanTaskStatus,
@@ -45,18 +49,22 @@ use dux_core::engine::{
     VolumeCapacityStatusError as CoreVolumeStatusError,
 };
 use dux_core::{
-    AvailableCapacitySource as CoreCapacitySource, DatabaseOpenErrorKind,
-    DiskPressure as CoreDiskPressure, DiskPressureConfig, DiskPressureConfigError,
-    DiskPressureRecoveryMargin, DiskPressureThreshold, ScanCoverageStatus as CoreCoverageStatus,
-    ScanId, SnapshotOpenErrorKind, VolumeCapacity, VolumeId,
+    AvailableCapacitySource as CoreCapacitySource, BlockReason as CoreBlockReason,
+    CandidateAction as CoreCandidateAction, CandidateCategory as CoreCandidateCategory,
+    CandidateId, DatabaseOpenErrorKind, DiskPressure as CoreDiskPressure, DiskPressureConfig,
+    DiskPressureConfigError, DiskPressureRecoveryMargin, DiskPressureThreshold,
+    EvidenceKind as CoreEvidenceKind, SafetyTier as CoreSafetyTier,
+    ScanCoverageStatus as CoreCoverageStatus, ScanId, SnapshotOpenErrorKind, VolumeCapacity,
+    VolumeId,
 };
 
-const FFI_CONTRACT_VERSION: u32 = 16;
+const FFI_CONTRACT_VERSION: u32 = 17;
 const FFI_RECORD_VERSION: u32 = 1;
 const SNAPSHOT_NODE_RECORD_VERSION: u32 = 2;
 const SCAN_EVENT_PAGE_LIMIT: u16 = 64;
 const RECENT_SCAN_HISTORY_PAGE_LIMIT: u16 = 200;
 const SCAN_COVERAGE_DETAIL_PAGE_LIMIT: u16 = 64;
+const CANDIDATE_DETAIL_PAGE_LIMIT: u16 = 64;
 const MAX_SCAN_ROOT_UTF8_BYTES: usize = 32 * 1_024;
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 static LIVE_ENGINE_INSTANCE_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -274,6 +282,14 @@ pub enum EngineError {
     SnapshotLivePathAccessDenied,
     #[error("scan coverage detail request is invalid")]
     InvalidScanCoverageDetailsRequest,
+    #[error("candidate detail request is invalid")]
+    InvalidCandidateDetailRequest,
+    #[error("the scan has no successful candidate evaluation")]
+    CandidateEvaluationNotSucceeded,
+    #[error("the requested candidate does not belong to this scan")]
+    CandidateNotFound,
+    #[error("the candidate detail cursor is outside the immutable observation")]
+    CandidateCursorOutOfRange,
     #[error("durable store is read-only")]
     ReadOnlyStore,
     #[error("durable schema is incompatible")]
@@ -478,6 +494,153 @@ pub struct ScanCandidateEvaluationSummary {
     pub status: ScanCandidateEvaluationStatus,
     pub candidate_count: u32,
     pub failure: Option<ScanCandidateEvaluationFailure>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum CandidatePathEncoding {
+    Utf8,
+    Utf16LittleEndian,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum CandidateCategory {
+    DeveloperArtifact,
+    ApplicationCache,
+    BrowserCache,
+    LogAndDiagnostic,
+    InstallerAndDownload,
+    DeviceAndSimulatorData,
+    CloudFile,
+    LargeReviewItem,
+    ProtectedSystemData,
+    UnknownStorage,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum CandidateSafety {
+    SafeRegenerable,
+    SafeEvictable,
+    ReviewRequired,
+    Informational,
+    Protected,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum CandidateAction {
+    RemoveKnownRegenerableContents,
+    EvictLocalCopy,
+    MoveToTrash,
+    RevealOnly,
+    NoAction,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum CandidateStatus {
+    Discovered,
+    Selected,
+    Dismissed,
+    Stale,
+    Planned,
+    Completed,
+    Failed,
+    Unavailable,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum CandidateEvidenceKind {
+    MatchedPath,
+    RequiredMarker,
+    ForbiddenMarkerAbsent,
+    BundleIdentifier,
+    MinimumAge,
+    MinimumSize,
+    InactiveProcess,
+    CloudUploadComplete,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum CandidateBlockReason {
+    MissingOrIncompleteEvidence,
+    MissingModificationTime,
+    PartialScanCoverage,
+    RecentActivity,
+    BelowMinimumBytes,
+    ActiveUse,
+    AccessDenied,
+    ProtectedPath,
+    ProtectedDescendant,
+    SymlinkBoundary,
+    VolumeBoundary,
+    ChangedSinceScan,
+    UnsupportedPlatform,
+    CloudUploadUnconfirmed,
+}
+
+/// A historical candidate path/evidence observation. It is intentionally
+/// scoped to a retained review and can never be passed back as an execution
+/// or planning input.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct CandidateObservedPath {
+    pub encoding: CandidatePathEncoding,
+    pub encoded_bytes: Vec<u8>,
+    pub display: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct CandidateSummary {
+    pub record_version: u32,
+    pub candidate_id: String,
+    pub rule_id: String,
+    pub rule_revision: u32,
+    pub category: CandidateCategory,
+    pub estimated_bytes: u64,
+    pub newest_mtime: Option<SnapshotNodeTimestamp>,
+    pub safety: CandidateSafety,
+    pub action: CandidateAction,
+    pub rule_schedule_eligible: bool,
+    pub path_count: u16,
+    pub evidence_kinds: Vec<CandidateEvidenceKind>,
+    pub blockers: Vec<CandidateBlockReason>,
+    pub created_at: SnapshotNodeTimestamp,
+    pub status: CandidateStatus,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct CandidatePathPage {
+    pub record_version: u32,
+    pub scan_id: String,
+    pub candidate: CandidateSummary,
+    pub cursor: u16,
+    pub next_cursor: Option<u16>,
+    pub total_paths: u16,
+    pub paths: Vec<CandidateObservedPath>,
+}
+
+/// Typed historical evidence. Optional fields are populated only for the
+/// corresponding `kind`; Swift must reject contradictory shapes.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct CandidateEvidenceRecord {
+    pub record_version: u32,
+    pub ordinal: u16,
+    pub kind: CandidateEvidenceKind,
+    pub path: Option<CandidateObservedPath>,
+    pub identifier: Option<String>,
+    pub newest_mtime: Option<SnapshotNodeTimestamp>,
+    pub minimum_age_seconds: Option<u64>,
+    pub minimum_age_nanoseconds: Option<u32>,
+    pub observed_bytes: Option<u64>,
+    pub minimum_bytes: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct CandidateEvidencePage {
+    pub record_version: u32,
+    pub scan_id: String,
+    pub candidate: CandidateSummary,
+    pub cursor: u16,
+    pub next_cursor: Option<u16>,
+    pub total_evidence: u16,
+    pub evidence: Vec<CandidateEvidenceRecord>,
 }
 
 /// Frozen, path-free terminal summary. It is discovery history only and does
@@ -914,6 +1077,7 @@ pub struct SnapshotLiveTarget {
 #[derive(uniffi::Object)]
 pub struct SnapshotReviewSession {
     inner: Mutex<CoreReviewSession>,
+    engine: EngineHandle,
     engine_closed: Arc<AtomicBool>,
 }
 
@@ -1027,6 +1191,49 @@ impl SnapshotReviewSession {
                 )
                 .map_err(map_review_error)?;
             project_snapshot_live_target(target)
+        })
+    }
+
+    /// Return one bounded page of historical candidate paths while this exact
+    /// snapshot review remains retained. These observations are for display
+    /// only and do not carry planning or cleanup authority.
+    pub fn candidate_paths(
+        &self,
+        candidate_id: String,
+        cursor: u16,
+        limit: u16,
+    ) -> Result<CandidatePathPage, EngineError> {
+        if !(1..=CANDIDATE_DETAIL_PAGE_LIMIT).contains(&limit) {
+            return Err(EngineError::InvalidCandidateDetailRequest);
+        }
+        let candidate_id = CandidateId::new(candidate_id)
+            .map_err(|_| EngineError::InvalidCandidateDetailRequest)?;
+        self.with_open_session(|session| {
+            self.engine
+                .candidate_path_page(session.scan_id(), &candidate_id, cursor, limit)
+                .map_err(map_candidate_detail_error)
+                .and_then(project_candidate_path_page)
+        })
+    }
+
+    /// Return one bounded page of typed historical candidate evidence while
+    /// this exact snapshot review remains retained.
+    pub fn candidate_evidence(
+        &self,
+        candidate_id: String,
+        cursor: u16,
+        limit: u16,
+    ) -> Result<CandidateEvidencePage, EngineError> {
+        if !(1..=CANDIDATE_DETAIL_PAGE_LIMIT).contains(&limit) {
+            return Err(EngineError::InvalidCandidateDetailRequest);
+        }
+        let candidate_id = CandidateId::new(candidate_id)
+            .map_err(|_| EngineError::InvalidCandidateDetailRequest)?;
+        self.with_open_session(|session| {
+            self.engine
+                .candidate_evidence_page(session.scan_id(), &candidate_id, cursor, limit)
+                .map_err(map_candidate_detail_error)
+                .and_then(project_candidate_evidence_page)
         })
     }
 }
@@ -1522,7 +1729,7 @@ impl DuxEngine {
         let session = engine
             .acquire_explorer_snapshot_review(&scan_id)
             .map_err(map_review_error)?;
-        self.register_snapshot_review(session)
+        self.register_snapshot_review(engine, session)
     }
 
     pub fn acquire_latest_explorer_snapshot_review(
@@ -1535,7 +1742,7 @@ impl DuxEngine {
         let session = engine
             .acquire_latest_explorer_snapshot_review()
             .map_err(map_review_error)?;
-        self.register_snapshot_review(session)
+        self.register_snapshot_review(engine, session)
     }
 
     pub fn start_maintenance(
@@ -1592,10 +1799,12 @@ impl DuxEngine {
 impl DuxEngine {
     fn register_snapshot_review(
         &self,
+        engine: &EngineHandle,
         session: CoreReviewSession,
     ) -> Result<Arc<SnapshotReviewSession>, EngineError> {
         let review = Arc::new(SnapshotReviewSession {
             inner: Mutex::new(session),
+            engine: engine.clone(),
             engine_closed: Arc::clone(&self.closed),
         });
         if self.closed.load(Ordering::Acquire) {
@@ -2437,6 +2646,276 @@ fn map_review_error(error: CoreReviewError) -> EngineError {
     }
 }
 
+fn map_candidate_detail_error(error: CoreCandidateDetailError) -> EngineError {
+    match error {
+        CoreCandidateDetailError::Closed => EngineError::Closed,
+        CoreCandidateDetailError::InvalidLimit { .. }
+        | CoreCandidateDetailError::CursorOutOfRange => EngineError::InvalidCandidateDetailRequest,
+        CoreCandidateDetailError::ScanNotFound => EngineError::ScanNotFound,
+        CoreCandidateDetailError::EvaluationNotSucceeded => {
+            EngineError::CandidateEvaluationNotSucceeded
+        }
+        CoreCandidateDetailError::CandidateNotFound => EngineError::CandidateNotFound,
+        CoreCandidateDetailError::IncompatibleSchema => EngineError::IncompatibleSchema,
+        CoreCandidateDetailError::Busy => EngineError::Busy,
+        CoreCandidateDetailError::UnsafeStorage => EngineError::UnsafeStorage,
+        CoreCandidateDetailError::QueryLimitExceeded => EngineError::BudgetExceeded,
+        CoreCandidateDetailError::CorruptData => EngineError::CorruptData,
+        CoreCandidateDetailError::Unavailable => EngineError::StorageUnavailable,
+        CoreCandidateDetailError::InternalState => EngineError::InternalState,
+        _ => EngineError::InternalState,
+    }
+}
+
+fn project_candidate_path_page(
+    page: CoreCandidatePathPage,
+) -> Result<CandidatePathPage, EngineError> {
+    Ok(CandidatePathPage {
+        record_version: FFI_RECORD_VERSION,
+        scan_id: page.scan_id().as_str().to_owned(),
+        candidate: project_candidate_summary(page.candidate())?,
+        cursor: page.cursor(),
+        next_cursor: page.next_cursor(),
+        total_paths: page.total_paths(),
+        paths: page
+            .paths()
+            .iter()
+            .map(|item| project_candidate_path(item.path()))
+            .collect::<Result<Vec<_>, _>>()?,
+    })
+}
+
+fn project_candidate_evidence_page(
+    page: CoreCandidateEvidencePage,
+) -> Result<CandidateEvidencePage, EngineError> {
+    Ok(CandidateEvidencePage {
+        record_version: FFI_RECORD_VERSION,
+        scan_id: page.scan_id().as_str().to_owned(),
+        candidate: project_candidate_summary(page.candidate())?,
+        cursor: page.cursor(),
+        next_cursor: page.next_cursor(),
+        total_evidence: page.total_evidence(),
+        evidence: page
+            .evidence()
+            .iter()
+            .map(|item| project_candidate_evidence(item.ordinal(), item.evidence()))
+            .collect::<Result<Vec<_>, _>>()?,
+    })
+}
+
+fn project_candidate_path(path: &CoreObservedPath) -> Result<CandidateObservedPath, EngineError> {
+    let encoding = match path.encoding() {
+        dux_core::engine::DurablePathEncoding::Utf8 => CandidatePathEncoding::Utf8,
+        dux_core::engine::DurablePathEncoding::Utf16LittleEndian => {
+            CandidatePathEncoding::Utf16LittleEndian
+        }
+        _ => return Err(EngineError::InternalState),
+    };
+    if path.encoded_bytes().len() > 16 * 1_024 * 1_024 || path.display().len() > 16 * 1_024 * 1_024
+    {
+        return Err(EngineError::BudgetExceeded);
+    }
+    Ok(CandidateObservedPath {
+        encoding,
+        encoded_bytes: path.encoded_bytes().to_vec(),
+        display: path.display().to_owned(),
+    })
+}
+
+fn project_candidate_summary(
+    summary: &CoreCandidateSummary,
+) -> Result<CandidateSummary, EngineError> {
+    Ok(CandidateSummary {
+        record_version: FFI_RECORD_VERSION,
+        candidate_id: summary.id().as_str().to_owned(),
+        rule_id: summary.rule().id().as_str().to_owned(),
+        rule_revision: summary.rule().revision().get(),
+        category: map_candidate_category(summary.category()),
+        estimated_bytes: summary.estimated_bytes(),
+        newest_mtime: summary
+            .newest_mtime()
+            .map(project_system_time_timestamp)
+            .transpose()?,
+        safety: map_candidate_safety(summary.safety()),
+        action: map_candidate_action(summary.action()),
+        rule_schedule_eligible: summary.rule_schedule_eligible(),
+        path_count: summary.path_count(),
+        evidence_kinds: summary
+            .evidence_kinds()
+            .iter()
+            .copied()
+            .map(map_candidate_evidence_kind)
+            .collect(),
+        blockers: summary
+            .blockers()
+            .iter()
+            .map(|reason| map_candidate_block_reason(reason.clone()))
+            .collect(),
+        created_at: project_system_time_timestamp(summary.created_at())?,
+        status: map_candidate_status(summary.status()),
+    })
+}
+
+fn project_candidate_evidence(
+    ordinal: u16,
+    evidence: &CoreCandidateEvidence,
+) -> Result<CandidateEvidenceRecord, EngineError> {
+    let empty = || CandidateEvidenceRecord {
+        record_version: FFI_RECORD_VERSION,
+        ordinal,
+        kind: CandidateEvidenceKind::MatchedPath,
+        path: None,
+        identifier: None,
+        newest_mtime: None,
+        minimum_age_seconds: None,
+        minimum_age_nanoseconds: None,
+        observed_bytes: None,
+        minimum_bytes: None,
+    };
+    let mut output = empty();
+    match evidence {
+        CoreCandidateEvidence::MatchedPath { path } => {
+            output.kind = CandidateEvidenceKind::MatchedPath;
+            output.path = Some(project_candidate_path(path)?);
+        }
+        CoreCandidateEvidence::RequiredMarker { path } => {
+            output.kind = CandidateEvidenceKind::RequiredMarker;
+            output.path = Some(project_candidate_path(path)?);
+        }
+        CoreCandidateEvidence::ForbiddenMarkerAbsent { path } => {
+            output.kind = CandidateEvidenceKind::ForbiddenMarkerAbsent;
+            output.path = Some(project_candidate_path(path)?);
+        }
+        CoreCandidateEvidence::BundleIdentifier { path, identifier } => {
+            output.kind = CandidateEvidenceKind::BundleIdentifier;
+            output.path = Some(project_candidate_path(path)?);
+            output.identifier = Some(identifier.to_string());
+        }
+        CoreCandidateEvidence::MinimumAge {
+            newest_mtime,
+            minimum_age,
+        } => {
+            output.kind = CandidateEvidenceKind::MinimumAge;
+            output.newest_mtime = Some(project_system_time_timestamp(*newest_mtime)?);
+            output.minimum_age_seconds = Some(minimum_age.as_secs());
+            output.minimum_age_nanoseconds = Some(minimum_age.subsec_nanos());
+        }
+        CoreCandidateEvidence::MinimumSize {
+            observed_bytes,
+            minimum_bytes,
+        } => {
+            output.kind = CandidateEvidenceKind::MinimumSize;
+            output.observed_bytes = Some(*observed_bytes);
+            output.minimum_bytes = Some(*minimum_bytes);
+        }
+        CoreCandidateEvidence::InactiveProcess { identifier } => {
+            output.kind = CandidateEvidenceKind::InactiveProcess;
+            output.identifier = Some(identifier.to_string());
+        }
+        CoreCandidateEvidence::CloudUploadComplete { path } => {
+            output.kind = CandidateEvidenceKind::CloudUploadComplete;
+            output.path = Some(project_candidate_path(path)?);
+        }
+        _ => return Err(EngineError::InternalState),
+    }
+    Ok(output)
+}
+
+fn project_system_time_timestamp(value: SystemTime) -> Result<SnapshotNodeTimestamp, EngineError> {
+    let duration = value
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| EngineError::InternalState)?;
+    Ok(SnapshotNodeTimestamp {
+        seconds_since_unix_epoch: duration.as_secs(),
+        nanoseconds: duration.subsec_nanos(),
+    })
+}
+
+const fn map_candidate_category(category: CoreCandidateCategory) -> CandidateCategory {
+    match category {
+        CoreCandidateCategory::DeveloperArtifact => CandidateCategory::DeveloperArtifact,
+        CoreCandidateCategory::ApplicationCache => CandidateCategory::ApplicationCache,
+        CoreCandidateCategory::BrowserCache => CandidateCategory::BrowserCache,
+        CoreCandidateCategory::LogAndDiagnostic => CandidateCategory::LogAndDiagnostic,
+        CoreCandidateCategory::InstallerAndDownload => CandidateCategory::InstallerAndDownload,
+        CoreCandidateCategory::DeviceAndSimulatorData => CandidateCategory::DeviceAndSimulatorData,
+        CoreCandidateCategory::CloudFile => CandidateCategory::CloudFile,
+        CoreCandidateCategory::LargeReviewItem => CandidateCategory::LargeReviewItem,
+        CoreCandidateCategory::ProtectedSystemData => CandidateCategory::ProtectedSystemData,
+        CoreCandidateCategory::UnknownStorage => CandidateCategory::UnknownStorage,
+    }
+}
+
+const fn map_candidate_safety(safety: CoreSafetyTier) -> CandidateSafety {
+    match safety {
+        CoreSafetyTier::SafeRegenerable => CandidateSafety::SafeRegenerable,
+        CoreSafetyTier::SafeEvictable => CandidateSafety::SafeEvictable,
+        CoreSafetyTier::ReviewRequired => CandidateSafety::ReviewRequired,
+        CoreSafetyTier::Informational => CandidateSafety::Informational,
+        CoreSafetyTier::Protected => CandidateSafety::Protected,
+    }
+}
+
+const fn map_candidate_action(action: CoreCandidateAction) -> CandidateAction {
+    match action {
+        CoreCandidateAction::RemoveKnownRegenerableContents => {
+            CandidateAction::RemoveKnownRegenerableContents
+        }
+        CoreCandidateAction::EvictLocalCopy => CandidateAction::EvictLocalCopy,
+        CoreCandidateAction::MoveToTrash => CandidateAction::MoveToTrash,
+        CoreCandidateAction::RevealOnly => CandidateAction::RevealOnly,
+        CoreCandidateAction::NoAction => CandidateAction::NoAction,
+    }
+}
+
+const fn map_candidate_evidence_kind(kind: CoreEvidenceKind) -> CandidateEvidenceKind {
+    match kind {
+        CoreEvidenceKind::MatchedPath => CandidateEvidenceKind::MatchedPath,
+        CoreEvidenceKind::RequiredMarker => CandidateEvidenceKind::RequiredMarker,
+        CoreEvidenceKind::ForbiddenMarkerAbsent => CandidateEvidenceKind::ForbiddenMarkerAbsent,
+        CoreEvidenceKind::BundleIdentifier => CandidateEvidenceKind::BundleIdentifier,
+        CoreEvidenceKind::MinimumAge => CandidateEvidenceKind::MinimumAge,
+        CoreEvidenceKind::MinimumSize => CandidateEvidenceKind::MinimumSize,
+        CoreEvidenceKind::InactiveProcess => CandidateEvidenceKind::InactiveProcess,
+        CoreEvidenceKind::CloudUploadComplete => CandidateEvidenceKind::CloudUploadComplete,
+    }
+}
+
+fn map_candidate_block_reason(reason: CoreBlockReason) -> CandidateBlockReason {
+    match reason {
+        CoreBlockReason::MissingOrIncompleteEvidence => {
+            CandidateBlockReason::MissingOrIncompleteEvidence
+        }
+        CoreBlockReason::MissingModificationTime => CandidateBlockReason::MissingModificationTime,
+        CoreBlockReason::PartialScanCoverage => CandidateBlockReason::PartialScanCoverage,
+        CoreBlockReason::RecentActivity => CandidateBlockReason::RecentActivity,
+        CoreBlockReason::BelowMinimumBytes => CandidateBlockReason::BelowMinimumBytes,
+        CoreBlockReason::ActiveUse => CandidateBlockReason::ActiveUse,
+        CoreBlockReason::AccessDenied => CandidateBlockReason::AccessDenied,
+        CoreBlockReason::ProtectedPath => CandidateBlockReason::ProtectedPath,
+        CoreBlockReason::ProtectedDescendant => CandidateBlockReason::ProtectedDescendant,
+        CoreBlockReason::SymlinkBoundary => CandidateBlockReason::SymlinkBoundary,
+        CoreBlockReason::VolumeBoundary => CandidateBlockReason::VolumeBoundary,
+        CoreBlockReason::ChangedSinceScan => CandidateBlockReason::ChangedSinceScan,
+        CoreBlockReason::UnsupportedPlatform => CandidateBlockReason::UnsupportedPlatform,
+        CoreBlockReason::CloudUploadUnconfirmed => CandidateBlockReason::CloudUploadUnconfirmed,
+    }
+}
+
+const fn map_candidate_status(status: CoreCandidateStatus) -> CandidateStatus {
+    match status {
+        CoreCandidateStatus::Discovered => CandidateStatus::Discovered,
+        CoreCandidateStatus::Selected => CandidateStatus::Selected,
+        CoreCandidateStatus::Dismissed => CandidateStatus::Dismissed,
+        CoreCandidateStatus::Stale => CandidateStatus::Stale,
+        CoreCandidateStatus::Planned => CandidateStatus::Planned,
+        CoreCandidateStatus::Completed => CandidateStatus::Completed,
+        CoreCandidateStatus::Failed => CandidateStatus::Failed,
+        CoreCandidateStatus::Unavailable => CandidateStatus::Unavailable,
+        _ => CandidateStatus::Unavailable,
+    }
+}
+
 const fn map_snapshot_live_target_purpose(
     purpose: SnapshotLiveTargetPurpose,
 ) -> CoreReviewLiveTargetPurpose {
@@ -2946,10 +3425,10 @@ mod tests {
     }
 
     #[test]
-    fn reports_contract_sixteen_and_preserves_legacy_formatting() {
+    fn reports_contract_seventeen_and_preserves_legacy_formatting() {
         let _guard = ENGINE_TEST_LOCK.lock().unwrap();
         let (_temp, engine) = engine();
-        assert_eq!(library_version().ffi_contract_version, 16);
+        assert_eq!(library_version().ffi_contract_version, 17);
         assert_eq!(engine.library_version().unwrap(), library_version());
         assert_eq!(engine.format_size(1536).unwrap().display, "1.5 KB");
         assert!(engine.close());
@@ -2995,6 +3474,14 @@ mod tests {
         let review = engine
             .acquire_explorer_snapshot_review(source_scan)
             .unwrap();
+        assert!(matches!(
+            review.candidate_paths("candidate:missing".to_owned(), 0, 0),
+            Err(EngineError::InvalidCandidateDetailRequest)
+        ));
+        assert!(matches!(
+            review.candidate_evidence("candidate:missing".to_owned(), 0, 65),
+            Err(EngineError::InvalidCandidateDetailRequest)
+        ));
         let children = review
             .child_nodes(0, SnapshotNodeSort::NameAscending, 0, 10)
             .unwrap();
@@ -3877,6 +4364,18 @@ mod tests {
         assert_eq!(initial.scan_id, scan_id);
         assert!(!initial.released);
         assert!(initial.expires_at_unix_ms > 0);
+        assert_eq!(
+            review.candidate_paths("candidate:missing".into(), 0, 0),
+            Err(EngineError::InvalidCandidateDetailRequest)
+        );
+        assert_eq!(
+            review.candidate_evidence("candidate:missing".into(), 0, 0),
+            Err(EngineError::InvalidCandidateDetailRequest)
+        );
+        assert_eq!(
+            review.candidate_paths("bad candidate".into(), 0, 1),
+            Err(EngineError::InvalidCandidateDetailRequest)
+        );
         let root_node = review.root_node().unwrap();
         assert_eq!(root_node.record_version, SNAPSHOT_NODE_RECORD_VERSION);
         assert_eq!(root_node.id, 0);

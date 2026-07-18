@@ -1278,7 +1278,7 @@ get_history(query) -> HistoryPageDto
 record_ai_insight(input_digest, insight)
 ```
 
-Current native realization (FFI contract v16):
+Current native realization (FFI contract v17):
 `observe_startup_volume(versioned Foundation facts) -> versioned path-free
 status` is the first production volume endpoint. It returns Rust-owned pressure,
 headline source/boundaries, prior durable pressure, and history disposition.
@@ -3809,6 +3809,16 @@ Tasks:
     versions, ranks, identities, counts, and overflow before publishing an
     app-owned projection. No live path, category, candidate, plan, AI input, or
     cleanup capability crosses.
+  - [x] 2026-07-18 slice: expose bounded candidate path and typed evidence
+    pages through FFI contract v17 on the exact retained snapshot review.
+    Rust maps durable candidate observations without granting planning or
+    cleanup authority; Swift validates record versions, candidate identity,
+    paging cursors, counts, optional-field shapes, timestamps, path-byte
+    bounds, and hostile enum values before publishing display-only models.
+    Expiry, invalid limits, missing evaluations, missing candidates, query
+    budgets, and closed engines remain typed failures. Candidate detail is
+    historical disclosure only and is never accepted as a planner or executor
+    input.
 - [ ] Add progressive scan events.
 - [ ] Implement treemap, synchronized list, breadcrumbs, local snapshot/history
   drill-down, history navigation, and inspector.

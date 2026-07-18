@@ -24,6 +24,18 @@ protocol DuxSnapshotReviewBrowsing: Sendable {
         modifiedBefore: ExplorerSnapshotTimestamp?,
         maxResults: UInt16
     ) async throws -> ExplorerSnapshotLargeFilesPage
+    func candidatePaths(
+        scanID: String,
+        candidateID: String,
+        cursor: UInt16,
+        limit: UInt16
+    ) async throws -> ExplorerCandidatePathPage
+    func candidateEvidence(
+        scanID: String,
+        candidateID: String,
+        cursor: UInt16,
+        limit: UInt16
+    ) async throws -> ExplorerCandidateEvidencePage
     func resolveLiveItem(
         scanID: String,
         nodeID: UInt64,
@@ -176,6 +188,24 @@ struct UnavailableDuxSnapshotReviewBrowser: DuxSnapshotReviewBrowsing {
         maxResults _: UInt16
     ) async throws -> ExplorerSnapshotLargeFilesPage {
         throw ExplorerSnapshotLargeFilesError.reviewNotAcquired
+    }
+
+    func candidatePaths(
+        scanID _: String,
+        candidateID _: String,
+        cursor _: UInt16,
+        limit _: UInt16
+    ) async throws -> ExplorerCandidatePathPage {
+        throw ExplorerCandidateDetailError.reviewNotAcquired
+    }
+
+    func candidateEvidence(
+        scanID _: String,
+        candidateID _: String,
+        cursor _: UInt16,
+        limit _: UInt16
+    ) async throws -> ExplorerCandidateEvidencePage {
+        throw ExplorerCandidateDetailError.reviewNotAcquired
     }
 
     func resolveLiveItem(
@@ -1581,6 +1611,16 @@ final class ExplorerSnapshotBrowserModel {
             case .reviewExpired, .reviewNotAcquired: .expired
             case .budgetExceeded: .budgetExceeded
             case .invalidRequest, .invalidResponse: .invalidResponse
+            }
+        }
+        if let error = error as? ExplorerCandidateDetailError {
+            return switch error {
+            case .reviewExpired, .reviewNotAcquired: .expired
+            case .budgetExceeded: .budgetExceeded
+            case .invalidLimit, .invalidRequest, .evaluationUnavailable,
+                 .candidateNotFound, .invalidResponse:
+                .invalidResponse
+            case .unavailable: .unavailable
             }
         }
         if let error = error as? ExplorerScanCoverageError {
