@@ -4423,6 +4423,14 @@ Tasks:
       manifest mutation regression fails closed. This is still provenance-only:
       no trusted volume/protected-root/rule grant, blocker removal, plan,
       approval, FFI, schedule, or effect was added.
+    - [x] 2026-07-19 slice: add a consumed, path-private Cargo planning-
+      provenance token. Construction revalidates the retained witness and
+      binds the exact source-scan ID, candidate ID, witness revision,
+      resolution-policy revision, and unresolved `ProtectedPath` marker.
+      Retained-token revalidation repeats those bindings and every owned
+      filesystem/Cargo fence. The token has no path getter, plan conversion,
+      approval, FFI, schedule, or effect method; it only supports further
+      revalidation and explicit lease release.
 - [ ] Implement candidate groups and overlap resolution.
   - [x] 2026-07-18 slice: add the sealed, non-authoritative core grouping
     result. Candidates are grouped deterministically by category, safety, and

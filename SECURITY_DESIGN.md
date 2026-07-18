@@ -709,6 +709,15 @@ evidence gap without making Cargo output authoritative: the witness remains
 path-private, non-cloneable, blocked by `ProtectedPath`, and unable to create
 a plan, approval, FFI transport, schedule, or effect.
 
+The next boundary consumes that fenced witness into a path-private planning-
+provenance token. Creation binds the exact source-scan and candidate IDs,
+witness and resolution-policy revisions, and the unresolved protected-path
+marker. Token revalidation repeats those bindings and delegates to every
+retained Cargo/filesystem fence; explicit release consumes its snapshot lease.
+The token exposes no path, candidate detail, plan, approval, FFI, scheduling,
+or platform-effect operation, and therefore cannot make a rule actionable by
+itself.
+
 Sensitive categories are a separate deny layer. Credentials, keychains,
 tokens, browser profiles, messages, mail, notes, password managers,
 security/management software, active VM/container disks, unknown cloud state,

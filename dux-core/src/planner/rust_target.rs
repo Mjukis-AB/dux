@@ -21,7 +21,7 @@ use super::rust_target_source::{
 
 const RUST_TARGET_RULE_ID: &str = "developer.rust.target";
 const RUST_TARGET_RULE_REVISION: u32 = 2;
-const RUST_TARGET_WITNESS_REVISION: u32 = 1;
+pub(super) const RUST_TARGET_WITNESS_REVISION: u32 = 1;
 const CARGO_CACHE_TAG_SIGNATURE: &[u8; 43] = b"Signature: 8a477f597d28d172789f06886806bc55";
 const MAX_CARGO_MANIFEST_BYTES: usize = 4 * 1024 * 1024;
 
@@ -270,6 +270,23 @@ fn validate_live_rust_target_inner(
 
 #[cfg(unix)]
 impl RustTargetLiveWitness {
+    pub(super) fn witness_revision(&self) -> u32 {
+        self.witness_revision
+    }
+
+    pub(super) fn source_scan_id(&self) -> &ScanId {
+        &self.source_scan_id
+    }
+
+    pub(super) fn candidate_id(&self) -> &CandidateId {
+        &self.candidate_id
+    }
+
+    pub(super) fn protected_path_is_still_unresolved(&self) -> bool {
+        let _ = &self.protected_path_still_unresolved;
+        true
+    }
+
     pub(super) fn store(&self) -> Option<&std::sync::Arc<crate::persistence::StoreCoordinator>> {
         self.durable_source
             .as_ref()
@@ -470,18 +487,6 @@ fn matches_snapshot_ancestors(
 
 #[cfg(test)]
 impl RustTargetLiveWitness {
-    pub(super) fn witness_revision(&self) -> u32 {
-        self.witness_revision
-    }
-
-    pub(super) fn source_scan_id(&self) -> &ScanId {
-        &self.source_scan_id
-    }
-
-    pub(super) fn candidate_id(&self) -> &CandidateId {
-        &self.candidate_id
-    }
-
     pub(super) fn target(&self) -> &CanonicalPathSnapshot {
         &self.target
     }
@@ -492,10 +497,5 @@ impl RustTargetLiveWitness {
 
     pub(super) fn cache_tag(&self) -> &CanonicalFilePrefixSnapshot {
         &self.cache_tag
-    }
-
-    pub(super) fn protected_path_is_still_unresolved(&self) -> bool {
-        let _ = &self.protected_path_still_unresolved;
-        true
     }
 }

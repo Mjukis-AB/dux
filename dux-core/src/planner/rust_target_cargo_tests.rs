@@ -332,6 +332,21 @@ fn retained_cargo_read_set_revalidation_rejects_manifest_change() {
 }
 
 #[test]
+fn consumed_cargo_provenance_revalidates_without_exposing_cleanup_authority() {
+    let fixture = Fixture::new(CARGO_CACHE_TAG_SIGNATURE);
+    let fake = FakeCargo::new(&valid_metadata_action(&fixture));
+    let witness = validate_cargo_metadata(
+        validate_live_rust_target_for_test(fixture.source(), &fixture.candidate()).unwrap(),
+        &fake.observe(),
+    )
+    .unwrap();
+
+    let provenance = witness.into_planning_provenance().unwrap();
+    assert!(provenance.revalidate().is_ok());
+    provenance.release().unwrap();
+}
+
+#[test]
 fn workspace_target_resolve_and_document_shape_fail_closed() {
     let fixture = Fixture::new(CARGO_CACHE_TAG_SIGNATURE);
     let project_root = fixture.manifest.parent().unwrap();

@@ -49,8 +49,11 @@ use super::cargo_workspace_glob::{
     CargoWorkspaceGlobError, CargoWorkspaceGlobEvidence, CargoWorkspaceGlobExpansion,
     CargoWorkspaceGlobGuard,
 };
-use super::rust_target::{RustTargetLiveValidationError, RustTargetLiveWitness};
+use super::rust_target::{
+    RUST_TARGET_WITNESS_REVISION, RustTargetLiveValidationError, RustTargetLiveWitness,
+};
 use super::rust_target_source::RustTargetSourceError;
+use crate::domain::{CandidateId, ScanId};
 use crate::path_validation::{
     CanonicalFileDigestError, CanonicalFileDigestSnapshot, CanonicalPathError, CanonicalScanRoot,
     FilesystemBoundarySnapshot, FilesystemEntryKind, LexicalPathError, capture_filesystem_boundary,
@@ -276,6 +279,38 @@ pub(crate) struct RustTargetCargoMetadataWitness {
     enrollment_revision: u64,
 }
 
+/// Consumed, path-private provenance for a future trusted planner boundary.
+///
+/// The token owns the fully fenced metadata witness, but intentionally has no
+/// candidate paths, plan conversion, blocker-removal, approval, FFI, schedule,
+/// or platform-effect operation. It exists to make the next authority join
+/// consume and revalidate the exact observation rather than copy its digests.
+#[must_use = "planning provenance must be consumed by a reviewed planner boundary"]
+pub(crate) struct RustTargetCargoPlanningProvenance {
+    witness: RustTargetCargoMetadataWitness,
+    source_scan_id: ScanId,
+    candidate_id: CandidateId,
+    witness_revision: u32,
+    resolution_policy_revision: u32,
+    protected_path_still_unresolved: CargoProtectedPathStillUnresolved,
+}
+
+struct CargoProtectedPathStillUnresolved;
+
+#[derive(Debug, Error)]
+pub(crate) enum RustTargetCargoPlanningProvenanceError {
+    #[error("Cargo metadata provenance could not be revalidated: {0}")]
+    Revalidation(#[from] CargoMetadataValidationError),
+    #[error("the Rust-target live witness revision is unsupported")]
+    UnsupportedWitnessRevision,
+    #[error("the Cargo resolution policy revision is unsupported")]
+    UnsupportedResolutionPolicy,
+    #[error("the protected-path blocker is not retained by the provenance witness")]
+    ProtectedPathBlockerMissing,
+    #[error("the provenance binding changed while the token was retained")]
+    BindingChanged,
+}
+
 impl RustTargetCargoMetadataWitness {
     /// Revalidate every retained Cargo input fence and the live Rust-target
     /// evidence. This remains an internal provenance check: it exposes no
@@ -306,8 +341,59 @@ impl RustTargetCargoMetadataWitness {
         Ok(())
     }
 
+    /// Consume this witness into path-private provenance after a complete
+    /// revalidation. The unresolved protected-path marker is deliberately
+    /// carried forward; this operation cannot make the result actionable.
+    pub(crate) fn into_planning_provenance(
+        self,
+    ) -> Result<RustTargetCargoPlanningProvenance, RustTargetCargoPlanningProvenanceError> {
+        self.revalidate()?;
+        if self.live.witness_revision() != RUST_TARGET_WITNESS_REVISION {
+            return Err(RustTargetCargoPlanningProvenanceError::UnsupportedWitnessRevision);
+        }
+        if self.resolution_policy_revision != CARGO_RESOLUTION_POLICY_REVISION {
+            return Err(RustTargetCargoPlanningProvenanceError::UnsupportedResolutionPolicy);
+        }
+        if !self.live.protected_path_is_still_unresolved() {
+            return Err(RustTargetCargoPlanningProvenanceError::ProtectedPathBlockerMissing);
+        }
+        Ok(RustTargetCargoPlanningProvenance {
+            source_scan_id: self.live.source_scan_id().clone(),
+            candidate_id: self.live.candidate_id().clone(),
+            witness_revision: self.live.witness_revision(),
+            resolution_policy_revision: self.resolution_policy_revision,
+            protected_path_still_unresolved: CargoProtectedPathStillUnresolved,
+            witness: self,
+        })
+    }
+
     pub(crate) fn release(self) -> Result<(), RustTargetSourceError> {
         self.live.release()
+    }
+}
+
+impl RustTargetCargoPlanningProvenance {
+    /// Repeat every retained source, Cargo, and filesystem fence. No path or
+    /// cleanup capability is returned.
+    pub(crate) fn revalidate(&self) -> Result<(), RustTargetCargoPlanningProvenanceError> {
+        self.witness
+            .revalidate()
+            .map_err(RustTargetCargoPlanningProvenanceError::Revalidation)?;
+        if self.witness.live.source_scan_id() != &self.source_scan_id
+            || self.witness.live.candidate_id() != &self.candidate_id
+            || self.witness.live.witness_revision() != self.witness_revision
+            || self.witness_revision != RUST_TARGET_WITNESS_REVISION
+            || self.resolution_policy_revision != CARGO_RESOLUTION_POLICY_REVISION
+            || !self.witness.live.protected_path_is_still_unresolved()
+        {
+            return Err(RustTargetCargoPlanningProvenanceError::BindingChanged);
+        }
+        let _ = &self.protected_path_still_unresolved;
+        Ok(())
+    }
+
+    pub(crate) fn release(self) -> Result<(), RustTargetSourceError> {
+        self.witness.release()
     }
 }
 

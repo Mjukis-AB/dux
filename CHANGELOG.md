@@ -19,6 +19,11 @@
   revalidation rejects post-publication manifest, configuration, Cargo, live
   target, or boundary changes. This closes stale-evidence risk without adding
   planning, approval, FFI, or cleanup authority.
+- Added a consumed, path-private Cargo planning-provenance token. It binds
+  source-scan/candidate identity, witness and resolution revisions, and the
+  unresolved protected-path marker, while retaining only revalidation and
+  explicit lease release operations. It cannot create plans, approvals, FFI,
+  schedules, or cleanup effects.
 
 All notable changes to DUX will be documented in this file.
 
