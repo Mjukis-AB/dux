@@ -127,6 +127,8 @@ fn metadata_json(workspace_root: &Path, target_directory: &Path) -> String {
             "id": package_id,
             "manifest_path": workspace_root.join("Cargo.toml"),
             "source": null,
+            "readme": null,
+            "license_file": null,
             "dependencies": [],
             "targets": [{
                 "name": "fixture",
@@ -157,6 +159,12 @@ fn package_metadata_json(
     workspace_members: Vec<&str>,
 ) -> String {
     for package in &mut packages {
+        if package.get("readme").is_none() {
+            package["readme"] = serde_json::Value::Null;
+        }
+        if package.get("license_file").is_none() {
+            package["license_file"] = serde_json::Value::Null;
+        }
         if package.get("targets").is_none() {
             let manifest = package["manifest_path"].clone();
             package["targets"] = json!([{
@@ -284,7 +292,14 @@ fn fixed_command_environment_and_exact_metadata_create_only_observational_witnes
     assert_eq!(witness.independently_declared_local_dependency_count(), 0);
     assert_eq!(witness.independent_dependency_manifest_count(), 0);
     assert_ne!(witness.dependency_manifest_closure_sha256(), [0; 32]);
-    assert_eq!(witness.resolution_policy_revision(), 10);
+    assert_eq!(witness.package_metadata_policy_revision(), 1);
+    assert_eq!(witness.package_metadata_package_count(), 1);
+    assert_eq!(witness.implicit_readme_probe_count(), 3);
+    assert_eq!(witness.implicit_readme_selection_count(), 0);
+    assert_eq!(witness.declared_readme_count(), 0);
+    assert_eq!(witness.license_file_count(), 0);
+    assert_ne!(witness.package_metadata_closure_sha256(), [0; 32]);
+    assert_eq!(witness.resolution_policy_revision(), 11);
     assert!(witness.live().protected_path_is_still_unresolved());
     assert_eq!(candidate.blockers(), [BlockReason::ProtectedPath]);
     assert!(!candidate.rule_marks_schedule_eligible());
@@ -355,6 +370,8 @@ fn malformed_or_ambiguous_workspace_members_fail_closed() {
         "id": "member-a",
         "manifest_path": fixture.manifest,
         "source": null,
+        "readme": null,
+        "license_file": null,
         "dependencies": [],
         "targets": [target_json(&fixture.manifest)]
     });
@@ -384,6 +401,8 @@ fn malformed_or_ambiguous_workspace_members_fail_closed() {
                     "id": "member-b",
                     "manifest_path": fixture.manifest,
                     "source": null,
+                    "readme": null,
+                    "license_file": null,
                     "dependencies": [],
                     "targets": [target_json(&fixture.manifest)]
                 }
@@ -409,6 +428,8 @@ fn malformed_or_ambiguous_workspace_members_fail_closed() {
                 "id": "member-a",
                 "manifest_path": fixture.manifest,
                 "source": "registry+https://example.invalid/index",
+                "readme": null,
+                "license_file": null,
                 "dependencies": [],
                 "targets": [target_json(&fixture.manifest)]
             }],
@@ -527,6 +548,79 @@ fn workspace_glob_create_remove_during_discovery_is_terminal() {
 }
 
 #[test]
+fn fabricated_and_omitted_package_readme_metadata_fail_closed() {
+    let fixture = Fixture::new(CARGO_CACHE_TAG_SIGNATURE);
+    let mut fabricated: serde_json::Value = serde_json::from_str(&metadata_json(
+        fixture.manifest.parent().unwrap(),
+        &fixture.target,
+    ))
+    .unwrap();
+    fabricated["packages"][0]["readme"] = json!("README.md");
+    let fake = FakeCargo::new(&format!(
+        "  printf %s {}\n  exit 0",
+        shell_quote(&fabricated.to_string())
+    ));
+    assert!(matches!(
+        validate_cargo_metadata(live(&fixture), &fake.observe()),
+        Err(CargoMetadataValidationError::CargoPackageMetadataUnsupported)
+    ));
+
+    fs::write(
+        &fixture.manifest,
+        "[package]\nname = \"fixture\"\nreadme = true\n",
+    )
+    .unwrap();
+    let omitted = metadata_json(fixture.manifest.parent().unwrap(), &fixture.target);
+    let fake = FakeCargo::new(&format!("  printf %s {}\n  exit 0", shell_quote(&omitted)));
+    assert!(matches!(
+        validate_cargo_metadata(live(&fixture), &fake.observe()),
+        Err(CargoMetadataValidationError::CargoPackageMetadataUnsupported)
+    ));
+
+    for field in ["readme", "license_file"] {
+        let mut omitted: serde_json::Value = serde_json::from_str(&metadata_json(
+            fixture.manifest.parent().unwrap(),
+            &fixture.target,
+        ))
+        .unwrap();
+        omitted["packages"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove(field);
+        let fake = FakeCargo::new(&format!(
+            "  printf %s {}\n  exit 0",
+            shell_quote(&omitted.to_string())
+        ));
+        assert!(matches!(
+            validate_cargo_metadata(live(&fixture), &fake.observe()),
+            Err(CargoMetadataValidationError::InvalidMetadata)
+        ));
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn implicit_readme_create_remove_during_accepted_pass_is_terminal() {
+    let fixture = Fixture::new(CARGO_CACHE_TAG_SIGNATURE);
+    let document = metadata_json(fixture.manifest.parent().unwrap(), &fixture.target);
+    let first_action = format!("    printf %s {}\n    exit 0", shell_quote(&document));
+    let transient = fixture.manifest.parent().unwrap().join("README.md");
+    let second_action = format!(
+        "    : > {}\n    /bin/rm {}\n    printf %s {}\n    exit 0",
+        shell_quote(transient.to_str().unwrap()),
+        shell_quote(transient.to_str().unwrap()),
+        shell_quote(&document),
+    );
+    let fake = FakeCargo::with_metadata_sequence(&first_action, &second_action);
+
+    match validate_cargo_metadata_with_input_fences_for_test(live(&fixture), &fake.observe()) {
+        Err(CargoMetadataValidationError::CargoPackageMetadataChanged) => {}
+        Err(error) => panic!("unexpected implicit README mutation error: {error:?}"),
+        Ok(_) => panic!("implicit README create/remove unexpectedly validated"),
+    }
+}
+
+#[test]
 fn reported_path_dependency_graph_is_bounded_and_observational() {
     let fixture = Fixture::new(CARGO_CACHE_TAG_SIGNATURE);
     let project = fixture.manifest.parent().unwrap();
@@ -565,16 +659,10 @@ fn reported_path_dependency_graph_is_bounded_and_observational() {
             "dependencies": []
         }),
     ];
-    let document = serde_json::to_string(&json!({
-        "packages": packages,
-        "workspace_default_members": ["root"],
-        "workspace_members": ["root", "member"],
-        "resolve": null,
-        "target_directory": fixture.target,
-        "version": 1,
-        "workspace_root": project
-    }))
-    .unwrap();
+    let document = package_metadata_json(&fixture, packages, vec!["root", "member"]);
+    let mut document_value: serde_json::Value = serde_json::from_str(&document).unwrap();
+    document_value["workspace_default_members"] = json!(["root"]);
+    let document = document_value.to_string();
     let action = format!("  printf %s {}\n  exit 0", shell_quote(&document));
     let fake = FakeCargo::new(&action);
     let witness = validate_cargo_metadata(live(&fixture), &fake.observe()).unwrap();
@@ -588,7 +676,7 @@ fn reported_path_dependency_graph_is_bounded_and_observational() {
     assert_eq!(witness.independently_declared_local_dependency_count(), 2);
     assert_eq!(witness.independent_dependency_manifest_count(), 1);
     assert_ne!(witness.dependency_manifest_closure_sha256(), [0; 32]);
-    assert_eq!(witness.resolution_policy_revision(), 10);
+    assert_eq!(witness.resolution_policy_revision(), 11);
     witness.release().unwrap();
 }
 
@@ -1036,6 +1124,8 @@ fn member_manifest_write_and_restore_during_accepted_pass_is_terminal() {
                 "id": "root",
                 "manifest_path": fixture.manifest,
                 "source": null,
+                "readme": null,
+                "license_file": null,
                 "dependencies": [],
                 "targets": [target_json(&fixture.manifest)]
             },
@@ -1043,6 +1133,8 @@ fn member_manifest_write_and_restore_during_accepted_pass_is_terminal() {
                 "id": "member",
                 "manifest_path": member_manifest,
                 "source": null,
+                "readme": null,
+                "license_file": null,
                 "dependencies": [],
                 "targets": [target_json(&member_manifest)]
             }
@@ -1299,7 +1391,7 @@ fn real_cargo_attests_mixed_inferred_target_and_build_namespaces() {
     assert_eq!(witness.target_namespace_target_count(), 6);
     assert!(witness.target_namespace_count() >= 20);
     assert_ne!(witness.target_namespace_closure_sha256(), [0; 32]);
-    assert_eq!(witness.resolution_policy_revision(), 10);
+    assert_eq!(witness.resolution_policy_revision(), 11);
     witness.release().unwrap();
     assert!(!build_sentinel.exists());
 }
@@ -1338,7 +1430,7 @@ fn real_cargo_attests_virtual_root_and_every_workspace_member_manifest() {
     assert_eq!(witness.workspace_member_count(), 2);
     assert_eq!(witness.workspace_manifest_count(), 3);
     assert_ne!(witness.workspace_manifest_closure_sha256(), [0; 32]);
-    assert_eq!(witness.resolution_policy_revision(), 10);
+    assert_eq!(witness.resolution_policy_revision(), 11);
     witness.release().unwrap();
 }
 
@@ -1395,7 +1487,7 @@ fn real_cargo_attests_workspace_globs_excludes_and_default_members() {
     );
     assert_eq!(witness.workspace_member_count(), 2);
     assert_eq!(witness.workspace_manifest_count(), 3);
-    assert_eq!(witness.resolution_policy_revision(), 10);
+    assert_eq!(witness.resolution_policy_revision(), 11);
     witness.release().unwrap();
 }
 
@@ -1505,7 +1597,7 @@ fn real_cargo_accepts_only_reported_internal_path_dependencies() {
     assert_eq!(witness.independently_declared_local_dependency_count(), 1);
     assert_eq!(witness.independent_dependency_manifest_count(), 1);
     assert_ne!(witness.dependency_manifest_closure_sha256(), [0; 32]);
-    assert_eq!(witness.resolution_policy_revision(), 10);
+    assert_eq!(witness.resolution_policy_revision(), 11);
     witness.release().unwrap();
 }
 
@@ -1518,14 +1610,16 @@ fn real_cargo_matches_workspace_inherited_path_dependencies_to_manifest_bytes() 
     let project = fixture.manifest.parent().unwrap();
     fs::write(
         &fixture.manifest,
-        "[workspace]\nmembers = [\"member\", \"shared\"]\nresolver = \"3\"\n\n[workspace.dependencies]\nshared = { path = \"shared\" }\n",
+        "[workspace]\nmembers = [\"member\", \"shared\"]\nresolver = \"3\"\n\n[workspace.package]\nreadme = \"README.workspace.md\"\nlicense-file = \"LICENSE.workspace\"\n\n[workspace.dependencies]\nshared = { path = \"shared\" }\n",
     )
     .unwrap();
+    fs::write(project.join("README.workspace.md"), "workspace readme\n").unwrap();
+    fs::write(project.join("LICENSE.workspace"), "workspace license\n").unwrap();
     let member = project.join("member");
     fs::create_dir_all(member.join("src")).unwrap();
     fs::write(
         member.join("Cargo.toml"),
-        "[package]\nname = \"member\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\nshared.workspace = true\n",
+        "[package]\nname = \"member\"\nversion = \"0.1.0\"\nedition = \"2024\"\nreadme.workspace = true\nlicense-file.workspace = true\n\n[dependencies]\nshared.workspace = true\n",
     )
     .unwrap();
     fs::write(member.join("src/lib.rs"), "pub fn member() {}\n").unwrap();
@@ -1537,6 +1631,7 @@ fn real_cargo_matches_workspace_inherited_path_dependencies_to_manifest_bytes() 
     )
     .unwrap();
     fs::write(shared.join("src/lib.rs"), "pub fn shared() {}\n").unwrap();
+    fs::write(shared.join("README.txt"), "shared readme\n").unwrap();
 
     let observation = observe_cargo_executable(&cargo).unwrap();
     let witness =
@@ -1546,7 +1641,13 @@ fn real_cargo_matches_workspace_inherited_path_dependencies_to_manifest_bytes() 
     assert_eq!(witness.independently_declared_local_dependency_count(), 1);
     assert_eq!(witness.independent_dependency_manifest_count(), 1);
     assert_ne!(witness.dependency_manifest_closure_sha256(), [0; 32]);
-    assert_eq!(witness.resolution_policy_revision(), 10);
+    assert_eq!(witness.package_metadata_package_count(), 2);
+    assert_eq!(witness.implicit_readme_probe_count(), 3);
+    assert_eq!(witness.implicit_readme_selection_count(), 1);
+    assert_eq!(witness.declared_readme_count(), 1);
+    assert_eq!(witness.license_file_count(), 1);
+    assert_ne!(witness.package_metadata_closure_sha256(), [0; 32]);
+    assert_eq!(witness.resolution_policy_revision(), 11);
     witness.release().unwrap();
 }
 
@@ -1663,7 +1764,7 @@ fn real_cargo_attests_excluding_ancestor_manifest_probe() {
         fs::metadata(ancestor).unwrap().len()
     );
     assert_ne!(witness.manifest_probe_closure_sha256(), [0; 32]);
-    assert_eq!(witness.resolution_policy_revision(), 10);
+    assert_eq!(witness.resolution_policy_revision(), 11);
     witness.release().unwrap();
 }
 

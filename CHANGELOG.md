@@ -5,6 +5,20 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Continued Milestone 5 with independent Cargo 1.96 package README and
+  `license-file` provenance. Package-metadata policy 1 derives direct,
+  suppressed, `true`, and workspace-inherited declarations from the exact
+  retained TOML 1.1.2 manifest bytes and requires Cargo's reported relative
+  strings to match exactly. For an absent `readme`, DUX binds Cargo's ordered
+  `README.md`, `README.txt`, and `README` lookup, including directory-versus-
+  regular-file state; symlinks, hard links, special entries, escapes, and
+  out-of-workspace paths fail closed. Local-APFS package-root generation
+  watches make even create/remove restoration terminal across the accepted
+  pass. Explicit README/license targets are declaration evidence only because
+  `cargo metadata` does not require or read those files. Resolution policy 11
+  binds package, manifest, declaration, probe, selection, identity, and
+  closure evidence. No planning, scheduling, execution, or `ProtectedPath`
+  authority was added.
 - Continued Milestone 5 with independent local path-dependency provenance from
   the exact fenced workspace manifests. Dependency-manifest policy 1 parses
   Cargo TOML with the pinned 1.1.2 generation, derives direct and

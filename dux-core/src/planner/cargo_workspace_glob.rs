@@ -1664,6 +1664,7 @@ mod tests {
         );
 
         let before_remove = unfenced(&root, &manifest).unwrap();
+        // DUX-DESTRUCTIVE: allow=test-workspace-glob-member-remove -- TempDir-owned member is removed to test namespace revalidation
         fs::remove_dir(root.canonical_path().join("crates/new")).unwrap();
         assert_eq!(
             before_remove.revalidate(),
@@ -1811,6 +1812,7 @@ mod tests {
         let guard = CargoWorkspaceGlobGuard::capture(&root, &manifest).unwrap();
         let transient = crates.join("transient");
         fs::create_dir(&transient).unwrap();
+        // DUX-DESTRUCTIVE: allow=test-workspace-glob-transient-remove -- TempDir-owned transient member is removed to test NOTE_WRITE persistence
         fs::remove_dir(&transient).unwrap();
         assert_eq!(guard.poll(), Err(CargoWorkspaceGlobError::Changed));
     }

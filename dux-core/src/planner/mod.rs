@@ -12,6 +12,8 @@ mod cargo_config;
 mod cargo_config_closure;
 #[cfg(unix)]
 mod cargo_manifest_probes;
+#[cfg(unix)]
+mod cargo_package_metadata;
 #[cfg(target_os = "macos")]
 mod cargo_spawn_macos;
 #[cfg(unix)]

@@ -231,7 +231,7 @@ app and launch; insufficient `RLIMIT_NOFILE` rejects rather than silently
 dropping coverage. Configuration and workspace guards are rechecked before
 spawn and resume, throughout bounded output, after exact-child reaping, and
 before evidence extraction. Only a byte-identical, independently parsed second
-result is accepted. Current resolution-policy revision 10 records the manifest policy,
+result is accepted. Current resolution-policy revision 11 records the manifest policy,
 member and retained-manifest counts, closure digest, accepted-output digest,
 and configuration root/file/edge/byte plus read-intent evidence.
 
@@ -246,7 +246,7 @@ delete/rename/revoke events are terminal, while directory entry writes trigger
 exact observation replay. Persistent entry changes and file write/restore
 reject; unchanged relevant state after unrelated high-ancestor directory
 activity may continue. Counts, present bytes, and the
-domain-separated ordered closure digest are retained in resolution policy 10.
+domain-separated ordered closure digest are retained in resolution policy 11.
 
 The strict document also requires every package's serialized dependency list.
 Across at most 4,096 declarations and 256 KiB of aggregate local-path text,
@@ -285,7 +285,7 @@ restores the prior entry set; exact file replacement, link, attribute,
 rename, delete, and revoke events are also terminal. DUX replays the entire
 observation before evidence extraction. The target guard is polled with the
 configuration, ancestor-manifest, and workspace-manifest guards throughout
-the accepted second Cargo pass. Resolution policy 10 retains package, target,
+the accepted second Cargo pass. Resolution policy 11 retains package, target,
 namespace-record, and closure evidence beside the earlier provenance rows.
 
 Before either metadata pass, workspace-glob policy 1 separately captures the
@@ -333,9 +333,26 @@ The profile shares the 4,096-declaration and 256-KiB path-text limits;
 malformed values, escapes, unsupported inheritance, invented or omitted rows,
 and unreported targets reject. The guard revalidates around parsing and policy
 1 binds counts, unique targets, and a domain-separated closure. Resolution
-policy 10 binds the workspace namespace, reported graph, and independent
+policy 11 binds the workspace namespace, reported graph, and independent
 manifest graph together. These remain observations and cannot clear
 `ProtectedPath`.
+
+Package-metadata policy 1 also derives every package's `readme` and
+`license_file` output from those exact bytes. Direct strings, `readme = true`
+and `false`, and values inherited from `[workspace.package]` are reproduced,
+including Cargo's member-relative rebasing. If direct `readme` is absent, DUX
+captures all three ordered implicit candidates—`README.md`, `README.txt`, and
+`README`—and selects the first single-link regular file while retaining every
+missing/directory observation. Symlinks, hard links, special entries, absolute
+paths, escapes, malformed values, and out-of-workspace targets reject. Limits
+are 256 packages, 4 KiB/value, 256 KiB total text, 2 MiB native paths, 2,048
+namespace records, 64 components, and 4,096 watched objects. Exact manifests
+and package roots are local-APFS fenced, and root directory writes are terminal
+across the accepted pass. Explicit README/license targets are not opened by
+the pinned metadata command, so this policy deliberately attests only their
+declaration-derived path, not existence or contents. Resolution policy 11
+binds its package/declaration/probe/selection counts and domain-separated
+closure without adding authority.
 
 This proves the exact reported root/member manifest bytes remained stable
 under the reviewed path-based inference model and excludes unreported local
@@ -346,8 +363,8 @@ declarations can be conservatively rejected even when Cargo did not read the
 target manifest. Cargo 1.96's exact
 `metadata --no-deps` code path deliberately does not load or create
 `Cargo.lock`; real-Cargo tests include a malformed lockfile to pin that
-version-specific behavior. DUX still does not prove Cargo's full read set,
-remote dependency attributes, package README/license metadata probes,
+version-specific behavior. DUX still does not prove Cargo's full read set or
+remote dependency attributes,
 transient
 absent ancestor create/remove, attestation of safe unreported path
 dependencies, external discovery-manifest stability, or kernel-level read

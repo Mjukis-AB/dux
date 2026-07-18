@@ -4498,6 +4498,7 @@ fn map_direct_cargo_validation_error(
         | Error::CargoWorkingDirectoryChanged
         | Error::CargoWorkspaceGlobChanged
         | Error::WorkspaceManifestChanged
+        | Error::CargoPackageMetadataChanged
         | Error::CargoTargetNamespaceChanged
         | Error::CargoManifestProbesChanged
         | Error::CargoConfigurationChanged
@@ -4516,6 +4517,8 @@ fn map_direct_cargo_validation_error(
         | Error::CargoWorkspaceGlobUnavailable
         | Error::CargoManifestProbesUnsupported
         | Error::CargoManifestProbesUnavailable
+        | Error::CargoPackageMetadataUnsupported
+        | Error::CargoPackageMetadataUnavailable
         | Error::CargoTargetNamespaceUnsupported
         | Error::CargoTargetNamespaceUnavailable
         | Error::CargoConfigurationUnsupported

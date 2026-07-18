@@ -951,6 +951,7 @@ mod tests {
         let ghost = root.canonical_path().join("src/bin/ghost.rs");
         fs::write(&ghost, "fn main() {}\n").unwrap();
         assert_eq!(guard.revalidate(), Err(CargoTargetNamespaceError::Changed));
+        // DUX-DESTRUCTIVE: allow=test-target-namespace-ghost-remove -- TempDir-owned ghost target is removed to test namespace restoration
         fs::remove_file(ghost).unwrap();
 
         let guard =
@@ -958,11 +959,13 @@ mod tests {
         let legacy = root.canonical_path().join("src/fixture.rs");
         fs::write(&legacy, "pub fn legacy() {}\n").unwrap();
         assert_eq!(guard.revalidate(), Err(CargoTargetNamespaceError::Changed));
+        // DUX-DESTRUCTIVE: allow=test-target-namespace-legacy-remove -- TempDir-owned legacy target is removed before the next observation
         fs::remove_file(legacy).unwrap();
 
         let guard =
             CargoTargetNamespaceGuard::capture_unfenced_for_test(&root, &declarations).unwrap();
         let source = root.canonical_path().join("src/lib.rs");
+        // DUX-DESTRUCTIVE: allow=test-target-namespace-source-remove -- TempDir-owned source is removed to test replacement detection
         fs::remove_file(&source).unwrap();
         fs::write(source, "pub fn replacement() {}\n").unwrap();
         assert_eq!(guard.revalidate(), Err(CargoTargetNamespaceError::Changed));
@@ -1009,6 +1012,7 @@ mod tests {
         let guard = CargoTargetNamespaceGuard::capture(&root, &declarations).unwrap();
         let ghost = root.canonical_path().join("src/bin/ghost.rs");
         fs::write(&ghost, "fn main() {}\n").unwrap();
+        // DUX-DESTRUCTIVE: allow=test-target-namespace-transient-remove -- TempDir-owned transient target is removed to test vnode persistence
         fs::remove_file(ghost).unwrap();
         assert_eq!(guard.poll(), Err(CargoTargetNamespaceError::Changed));
     }

@@ -423,14 +423,28 @@ parsing. This closes fabricated, omitted, and redirected local edges for the
 admitted profile; it does not independently reproduce remote dependency
 attributes or prove which descriptors Cargo read.
 
-Resolution policy 10
+Package-metadata policy 1 independently derives each reported package's
+README and `license_file` values from the same exact manifest generation.
+Direct strings, `readme = true/false`, and `[workspace.package]` inheritance
+are reproduced with exact package-relative output. When direct `readme` is
+absent, DUX observes Cargo's ordered `README.md`, `README.txt`, then `README`
+namespace, distinguishing missing, directory, and single-link regular-file
+state. Symlinks, hard links, special entries, absolute paths, malformed text,
+escapes, and out-of-workspace targets reject. At most 256 packages, 4 KiB per
+value, 256 KiB aggregate text, 2 MiB native paths, 2,048 records, 64 path
+components, and 4,096 watched objects are admitted. On local APFS, package-root
+directory writes are terminal, so implicit-name create/remove restoration
+cannot survive the accepted pass. Pinned Cargo does not require or read the
+file named by an explicit README or license declaration during metadata; those
+values therefore prove path derivation only, never file existence or content.
+
+Resolution policy 11
 binds root, pattern, namespace, match, seed, excluded, reachable, default, and
-both reported and independent dependency closure evidence. No authority edge
-is added.
+reported/independent dependency plus package-metadata closure evidence. No
+authority edge is added.
 
 Transient absent ancestor create/remove, attestation and discovery stability for unreported path
-dependencies, package README/license
-metadata probes, kernel actual-read identity, and post-witness mutations remain
+dependencies, kernel actual-read identity, and post-witness mutations remain
 outside the proof.
 Those limits and the remaining authority grants keep `ProtectedPath` intact.
 Every rule remains unschedulable, and every emitted candidate retains

@@ -4307,6 +4307,32 @@ Tasks:
       create/remove, safe unreported dependency manifests, kernel-level read
       identity, and post-witness changes remain open. No blocker, plan, FFI,
       scheduling, or effect authority was added.
+    - [x] 2026-07-18 slice: close Cargo 1.96's package README and
+      `license-file` metadata generation. Package-metadata policy 1 parses the
+      exact retained root/member manifests with pinned TOML 1.1.2 and
+      independently reproduces direct strings, `readme = true/false`, and
+      `[workspace.package]` inheritance with exact member-relative rebasing.
+      An absent direct `readme` binds Cargo's ordered `README.md`, `README.txt`,
+      then `README` lookup across every reported package root, preserving
+      missing, directory, and single-link regular-file observations. Selected
+      symlinks/hard links, special entries, malformed values, absolute paths,
+      escapes, and targets outside the witnessed workspace fail closed.
+      Explicit README/license targets are path declarations only: pinned Cargo
+      reports them without requiring the files to exist, so DUX does not claim
+      their bytes or current existence. The profile admits at most 256
+      packages, 4 KiB per string, 256 KiB aggregate text, 2 MiB native paths,
+      2,048 namespace records, 64 path components, and 4,096 watched objects.
+      Exact manifests and package-root generations are local-APFS fenced;
+      directory writes make implicit README create/remove restoration terminal
+      through the accepted pass. Resolution policy 11 records package,
+      manifest, declaration/probe/selection counts, identities, full manifest
+      digests, and a domain-separated closure. Unit and pinned real-Cargo tests
+      cover priority, suppression, explicit true, direct/inherited paths,
+      fabricated/omitted output, symlink rejection, and transient namespace
+      restoration. Transient absent ancestor-manifest create/remove, safe
+      unreported dependency manifests, kernel-level read identity, and
+      post-witness changes remain open. No blocker, plan, FFI, scheduling, or
+      effect authority was added.
     Kernel-level Cargo read identity, complete remaining Cargo manifest and
     namespace provenance, and all remaining
     protected-root, volume, process, descendant, plan, and executor grants are

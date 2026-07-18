@@ -28,6 +28,10 @@ use super::cargo_config::{
 use super::cargo_manifest_probes::{
     CargoManifestProbeError, CargoManifestProbeEvidence, CargoManifestProbeGuard,
 };
+use super::cargo_package_metadata::{
+    CargoPackageMetadataDeclaration, CargoPackageMetadataError, CargoPackageMetadataEvidence,
+    CargoPackageMetadataGuard,
+};
 #[cfg(target_os = "macos")]
 use super::cargo_spawn_macos::{
     CargoSpawnError, CargoSpawnRequest, ExecutableMutationFence, SuspendedCargoChild,
@@ -65,7 +69,7 @@ const VERSION_TIMEOUT: Duration = Duration::from_secs(5);
 const METADATA_TIMEOUT: Duration = Duration::from_secs(10);
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(2);
 const MAX_CARGO_EXECUTABLE_BYTES: usize = 256 * 1024 * 1024;
-const CARGO_RESOLUTION_POLICY_REVISION: u32 = 10;
+const CARGO_RESOLUTION_POLICY_REVISION: u32 = 11;
 const MAX_PACKAGE_ID_BYTES: usize = 4 * 1024;
 const MAX_WORKSPACE_DEFAULT_MEMBER_ROWS: usize = MAX_WORKSPACE_MEMBERS * MAX_WORKSPACE_MEMBERS;
 const MAX_PACKAGE_DEPENDENCY_DECLARATIONS: usize = 4 * 1024;
@@ -144,6 +148,7 @@ struct CargoInputGuards<'a> {
     manifest_probes: Option<&'a CargoManifestProbeGuard>,
     workspace_glob: Option<&'a CargoWorkspaceGlobGuard>,
     workspace: Option<&'a CargoWorkspaceManifestGuard>,
+    package_metadata: Option<&'a CargoPackageMetadataGuard>,
     target_namespace: Option<&'a CargoTargetNamespaceGuard>,
 }
 
@@ -160,6 +165,9 @@ impl CargoInputGuards<'_> {
         }
         if let Some(workspace) = self.workspace {
             workspace.poll()?;
+        }
+        if let Some(package_metadata) = self.package_metadata {
+            package_metadata.poll()?;
         }
         if let Some(target_namespace) = self.target_namespace {
             target_namespace.poll()?;
@@ -179,6 +187,9 @@ impl CargoInputGuards<'_> {
         }
         if let Some(workspace) = self.workspace {
             workspace.revalidate()?;
+        }
+        if let Some(package_metadata) = self.package_metadata {
+            package_metadata.revalidate()?;
         }
         if let Some(target_namespace) = self.target_namespace {
             target_namespace.revalidate()?;
@@ -219,6 +230,7 @@ pub(crate) struct RustTargetCargoMetadataWitness {
     workspace: CargoWorkspaceManifestEvidence,
     path_dependencies: CargoPathDependencyEvidence,
     dependency_manifests: CargoDependencyManifestEvidence,
+    package_metadata: CargoPackageMetadataEvidence,
     target_namespace: CargoTargetNamespaceEvidence,
     launch_policy_revision: u32,
     running_code_directory_hash_sha256: [u8; 32],
@@ -301,6 +313,12 @@ pub(crate) enum CargoMetadataValidationError {
     CargoPathDependenciesUnsupported,
     #[error("Cargo local path declarations do not match the exact workspace manifests")]
     CargoDependencyManifestUnsupported,
+    #[error("Cargo package README/license metadata is outside the bounded provenance profile")]
+    CargoPackageMetadataUnsupported,
+    #[error("Cargo package README/license metadata changed during resolution")]
+    CargoPackageMetadataChanged,
+    #[error("Cargo package README/license metadata could not be bounded")]
+    CargoPackageMetadataUnavailable,
     #[error("Cargo workspace manifests could not be captured within the reviewed bounds")]
     WorkspaceManifestUnavailable,
     #[error("Cargo workspace manifests changed during metadata resolution")]
@@ -385,6 +403,16 @@ impl From<CargoTargetNamespaceError> for CargoMetadataValidationError {
             CargoTargetNamespaceError::Invalid => Self::CargoTargetNamespaceUnsupported,
             CargoTargetNamespaceError::Changed => Self::CargoTargetNamespaceChanged,
             CargoTargetNamespaceError::Unavailable => Self::CargoTargetNamespaceUnavailable,
+        }
+    }
+}
+
+impl From<CargoPackageMetadataError> for CargoMetadataValidationError {
+    fn from(error: CargoPackageMetadataError) -> Self {
+        match error {
+            CargoPackageMetadataError::Invalid => Self::CargoPackageMetadataUnsupported,
+            CargoPackageMetadataError::Changed => Self::CargoPackageMetadataChanged,
+            CargoPackageMetadataError::Unavailable => Self::CargoPackageMetadataUnavailable,
         }
     }
 }
@@ -785,17 +813,19 @@ fn validate_cargo_metadata_with_limits(
             manifest_probes: Some(&manifest_probes),
             workspace_glob: Some(&workspace_glob),
             workspace: None,
+            package_metadata: None,
             target_namespace: None,
         },
     )?;
     require_success(&discovery_output)?;
     configuration.verify_read_intent(&discovery_output.stderr)?;
-    let (
-        discovery_metadata,
-        discovery_workspace,
-        discovery_path_dependencies,
-        discovery_target_namespace,
-    ) = parse_metadata_document(&discovery_output.stdout, &live)?;
+    let ParsedCargoMetadata {
+        document: discovery_metadata,
+        workspace_manifests: discovery_workspace,
+        path_dependencies: discovery_path_dependencies,
+        package_metadata: discovery_package_metadata,
+        target_namespace: discovery_target_namespace,
+    } = parse_metadata_document(&discovery_output.stdout, &live)?;
     let discovery_workspace_membership_consistency =
         validate_workspace_membership_consistency(&workspace_glob_expansion, &discovery_metadata)?;
     let workspace = match configuration_fence {
@@ -813,6 +843,21 @@ fn validate_cargo_metadata_with_limits(
     let discovery_dependency_manifests = workspace
         .dependency_evidence(&discovery_path_dependencies.reported_edges)
         .map_err(map_dependency_manifest_error)?;
+    workspace.revalidate()?;
+    let package_metadata = match configuration_fence {
+        ConfigurationFenceMode::Armed => CargoPackageMetadataGuard::capture(
+            project_directory.root(),
+            &discovery_package_metadata,
+        )?,
+        #[cfg(test)]
+        ConfigurationFenceMode::UnarmedForParallelTest => {
+            CargoPackageMetadataGuard::capture_unfenced_for_test(
+                project_directory.root(),
+                &discovery_package_metadata,
+            )?
+        }
+    };
+    workspace.revalidate()?;
     let target_namespace = match configuration_fence {
         ConfigurationFenceMode::Armed => CargoTargetNamespaceGuard::capture(
             project_directory.root(),
@@ -838,17 +883,26 @@ fn validate_cargo_metadata_with_limits(
             manifest_probes: Some(&manifest_probes),
             workspace_glob: Some(&workspace_glob),
             workspace: Some(&workspace),
+            package_metadata: Some(&package_metadata),
             target_namespace: Some(&target_namespace),
         },
     )?;
     require_success(&output)?;
     configuration.verify_read_intent(&output.stderr)?;
-    let (metadata, accepted_workspace, path_dependencies, accepted_target_namespace) =
-        parse_metadata_document(&output.stdout, &live)?;
+    let ParsedCargoMetadata {
+        document: metadata,
+        workspace_manifests: accepted_workspace,
+        path_dependencies,
+        package_metadata: accepted_package_metadata,
+        target_namespace: accepted_target_namespace,
+    } = parse_metadata_document(&output.stdout, &live)?;
     let workspace_membership_consistency =
         validate_workspace_membership_consistency(&workspace_glob_expansion, &metadata)?;
     if accepted_target_namespace != discovery_target_namespace {
         return Err(CargoMetadataValidationError::CargoTargetNamespaceChanged);
+    }
+    if accepted_package_metadata != discovery_package_metadata {
+        return Err(CargoMetadataValidationError::CargoPackageMetadataChanged);
     }
     if output.stdout != discovery_output.stdout
         || metadata != discovery_metadata
@@ -870,6 +924,7 @@ fn validate_cargo_metadata_with_limits(
     if dependency_manifest_evidence != discovery_dependency_manifests {
         return Err(CargoMetadataValidationError::WorkspaceManifestChanged);
     }
+    let package_metadata_evidence = package_metadata.evidence()?;
     let target_namespace_evidence = target_namespace.evidence()?;
 
     let after_version = cargo.read_version(limits.version)?;
@@ -885,6 +940,7 @@ fn validate_cargo_metadata_with_limits(
     manifest_probes.revalidate()?;
     workspace_glob.revalidate()?;
     workspace.revalidate()?;
+    package_metadata.revalidate()?;
     target_namespace.revalidate()?;
     live.revalidate_current()?;
 
@@ -903,6 +959,7 @@ fn validate_cargo_metadata_with_limits(
         workspace: workspace_evidence,
         path_dependencies,
         dependency_manifests: dependency_manifest_evidence,
+        package_metadata: package_metadata_evidence,
         target_namespace: target_namespace_evidence,
         launch_policy_revision: output.launch_policy_revision,
         running_code_directory_hash_sha256: output.running_code_directory_hash_sha256,
@@ -1196,6 +1253,8 @@ struct CargoMetadataPackageDocument {
     id: String,
     manifest_path: String,
     source: serde_json::Value,
+    readme: serde_json::Value,
+    license_file: serde_json::Value,
     dependencies: Vec<CargoMetadataDependencyDocument>,
     targets: Vec<CargoMetadataTargetDocument>,
 }
@@ -1233,18 +1292,18 @@ struct CargoWorkspaceMembershipConsistencyEvidence {
     closure_sha256: [u8; 32],
 }
 
+struct ParsedCargoMetadata {
+    document: CargoMetadataDocument,
+    workspace_manifests: Vec<CargoWorkspaceManifestDeclaration>,
+    path_dependencies: CargoPathDependencyEvidence,
+    package_metadata: Vec<CargoPackageMetadataDeclaration>,
+    target_namespace: Vec<CargoTargetNamespaceDeclaration>,
+}
+
 fn parse_metadata_document(
     bytes: &[u8],
     live: &RustTargetLiveWitness,
-) -> Result<
-    (
-        CargoMetadataDocument,
-        Vec<CargoWorkspaceManifestDeclaration>,
-        CargoPathDependencyEvidence,
-        Vec<CargoTargetNamespaceDeclaration>,
-    ),
-    CargoMetadataValidationError,
-> {
+) -> Result<ParsedCargoMetadata, CargoMetadataValidationError> {
     let metadata: CargoMetadataDocument =
         serde_json::from_slice(bytes).map_err(|_| CargoMetadataValidationError::InvalidMetadata)?;
     if metadata.version != 1 || !metadata.resolve.is_null() {
@@ -1348,7 +1407,35 @@ fn parse_metadata_document(
                 .collect(),
         })
         .collect();
-    Ok((metadata, declarations, path_dependencies, target_namespace))
+    let package_metadata = metadata
+        .packages
+        .iter()
+        .map(|package| -> Result<_, CargoMetadataValidationError> {
+            Ok(CargoPackageMetadataDeclaration {
+                package_id: package.id.clone(),
+                manifest_path: PathBuf::from(&package.manifest_path),
+                readme: required_nullable_string(&package.readme)?,
+                license_file: required_nullable_string(&package.license_file)?,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(ParsedCargoMetadata {
+        document: metadata,
+        workspace_manifests: declarations,
+        path_dependencies,
+        package_metadata,
+        target_namespace,
+    })
+}
+
+fn required_nullable_string(
+    value: &serde_json::Value,
+) -> Result<Option<String>, CargoMetadataValidationError> {
+    match value {
+        serde_json::Value::Null => Ok(None),
+        serde_json::Value::String(value) => Ok(Some(value.clone())),
+        _ => Err(CargoMetadataValidationError::InvalidMetadata),
+    }
 }
 
 fn validate_path_dependencies(
@@ -2503,6 +2590,34 @@ impl RustTargetCargoMetadataWitness {
 
     pub(super) fn dependency_manifest_closure_sha256(&self) -> [u8; 32] {
         self.dependency_manifests.closure_sha256
+    }
+
+    pub(super) fn package_metadata_policy_revision(&self) -> u32 {
+        self.package_metadata.policy_revision
+    }
+
+    pub(super) fn package_metadata_package_count(&self) -> u32 {
+        self.package_metadata.package_count
+    }
+
+    pub(super) fn implicit_readme_probe_count(&self) -> u32 {
+        self.package_metadata.implicit_readme_probe_count
+    }
+
+    pub(super) fn implicit_readme_selection_count(&self) -> u32 {
+        self.package_metadata.implicit_readme_selection_count
+    }
+
+    pub(super) fn declared_readme_count(&self) -> u32 {
+        self.package_metadata.declared_readme_count
+    }
+
+    pub(super) fn license_file_count(&self) -> u32 {
+        self.package_metadata.license_file_count
+    }
+
+    pub(super) fn package_metadata_closure_sha256(&self) -> [u8; 32] {
+        self.package_metadata.closure_sha256
     }
 
     pub(super) fn target_namespace_policy_revision(&self) -> u32 {
