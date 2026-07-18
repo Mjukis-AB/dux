@@ -8485,6 +8485,283 @@ fn running_scan_cancellation_is_durable_and_publishes_no_snapshot() {
 }
 
 #[test]
+fn subtree_scan_publishes_a_standalone_snapshot_and_preserves_the_source_review() {
+    let temp = TempDir::new().unwrap();
+    let config = config(&temp);
+    let root = temp.path().join("subtree-source");
+    let nested = root.join("nested");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::write(nested.join("old.bin"), b"old").unwrap();
+    std::fs::write(root.join("outside.bin"), b"outside").unwrap();
+    let engine = EngineHandle::open(config.clone()).unwrap();
+
+    let source_task = engine.start_scan(root).unwrap();
+    assert_eq!(
+        wait_terminal(&engine, source_task).phase,
+        TaskPhase::Succeeded
+    );
+    let source_scan = engine
+        .scan_result(source_task)
+        .unwrap()
+        .unwrap()
+        .scan_id()
+        .clone();
+    let mut source_review = engine
+        .acquire_explorer_snapshot_review(&source_scan)
+        .unwrap();
+    let source_root = source_review.root_node().unwrap();
+    let source_children = source_review
+        .child_nodes(source_root.id, SnapshotReviewNodeSort::NameAscending, 0, 10)
+        .unwrap();
+    let nested_id = source_children
+        .nodes
+        .iter()
+        .find(|node| node.name.display.as_ref() == "nested")
+        .unwrap()
+        .id;
+    assert_eq!(
+        source_review
+            .child_nodes(nested_id, SnapshotReviewNodeSort::NameAscending, 0, 10)
+            .unwrap()
+            .total_children,
+        1
+    );
+
+    std::fs::write(nested.join("new.bin"), b"new").unwrap();
+    let refresh_task = engine
+        .start_subtree_scan(&mut source_review, nested_id)
+        .unwrap();
+    assert_eq!(
+        wait_terminal(&engine, refresh_task).phase,
+        TaskPhase::Succeeded
+    );
+    let refresh = engine.scan_result(refresh_task).unwrap().unwrap();
+    assert_ne!(refresh.scan_id(), &source_scan);
+    assert_eq!(refresh.counts().file_count, 2);
+    assert!(refresh.snapshot_available());
+
+    // The source review remains immutable and live while the replacement is
+    // independently acquired.
+    assert_eq!(
+        source_review
+            .child_nodes(nested_id, SnapshotReviewNodeSort::NameAscending, 0, 10)
+            .unwrap()
+            .total_children,
+        1
+    );
+    let mut refreshed_review = engine
+        .acquire_explorer_snapshot_review(refresh.scan_id())
+        .unwrap();
+    let refreshed_root = refreshed_review.root_node().unwrap();
+    assert!(
+        refreshed_root
+            .name
+            .display
+            .ends_with("/subtree-source/nested")
+    );
+    assert_eq!(refreshed_root.child_count, 2);
+    assert_eq!(final_snapshot_count(&config), 2);
+}
+
+#[test]
+fn subtree_scan_rejects_files_and_reviews_from_another_engine() {
+    let first_temp = TempDir::new().unwrap();
+    let second_temp = TempDir::new().unwrap();
+    let root = first_temp.path().join("subtree-owner-source");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("file.bin"), b"file").unwrap();
+    let first = EngineHandle::open(config(&first_temp)).unwrap();
+    let second = EngineHandle::open(config(&second_temp)).unwrap();
+    let task = first.start_scan(root).unwrap();
+    assert_eq!(wait_terminal(&first, task).phase, TaskPhase::Succeeded);
+    let scan_id = first.scan_result(task).unwrap().unwrap().scan_id().clone();
+    let mut review = first.acquire_explorer_snapshot_review(&scan_id).unwrap();
+    let file_id = review
+        .child_nodes(0, SnapshotReviewNodeSort::NameAscending, 0, 10)
+        .unwrap()
+        .nodes[0]
+        .id;
+
+    assert_eq!(
+        first.start_subtree_scan(&mut review, file_id),
+        Err(StartSubtreeScanError::Review(
+            SnapshotReviewError::NodeNotDirectory
+        ))
+    );
+    assert_eq!(
+        second.start_subtree_scan(&mut review, 0),
+        Err(StartSubtreeScanError::ForeignReview)
+    );
+}
+
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test renames only a TempDir-owned subtree to force an identity-fence mismatch"
+)]
+fn subtree_scan_revalidates_identity_immediately_before_traversal() {
+    let temp = TempDir::new().unwrap();
+    let config = config(&temp);
+    let root = temp.path().join("subtree-race-source");
+    let target = root.join("target");
+    let moved = root.join("moved-target");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::write(target.join("old.bin"), b"old").unwrap();
+    let engine = EngineHandle::open(config.clone()).unwrap();
+    let source = engine.start_scan(root).unwrap();
+    assert_eq!(wait_terminal(&engine, source).phase, TaskPhase::Succeeded);
+    let scan_id = engine
+        .scan_result(source)
+        .unwrap()
+        .unwrap()
+        .scan_id()
+        .clone();
+    let mut review = engine.acquire_explorer_snapshot_review(&scan_id).unwrap();
+    let target_id = review
+        .child_nodes(0, SnapshotReviewNodeSort::NameAscending, 0, 10)
+        .unwrap()
+        .nodes[0]
+        .id;
+    let (reached_tx, reached_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let refresh = engine
+        .start_subtree_scan_with_before_traversal_hook(&mut review, target_id, move |_| {
+            reached_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        })
+        .unwrap();
+    reached_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    // DUX-DESTRUCTIVE: allow=test-subtree-traversal-root-rename -- move only this TempDir-owned directory to prove a selected historical identity cannot be replaced while queued
+    std::fs::rename(&target, &moved).unwrap();
+    std::fs::create_dir(&target).unwrap();
+    release_tx.send(()).unwrap();
+
+    let terminal = wait_terminal(&engine, refresh);
+    assert_eq!(terminal.phase, TaskPhase::Failed);
+    assert_eq!(terminal.failure, Some(TaskFailureKind::ScanRootChanged));
+    let result = engine.scan_result(refresh).unwrap().unwrap();
+    assert_eq!(result.status(), ScanTaskStatus::Failed);
+    assert!(!result.snapshot_available());
+    assert_eq!(final_snapshot_count(&config), 1);
+}
+
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test renames only a TempDir-owned subtree to force the final publication fence"
+)]
+fn subtree_scan_revalidates_identity_immediately_before_publication() {
+    let temp = TempDir::new().unwrap();
+    let config = config(&temp);
+    let root = temp.path().join("subtree-publication-source");
+    let target = root.join("target");
+    let moved = root.join("moved-target");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::write(target.join("payload.bin"), b"payload").unwrap();
+    let engine = EngineHandle::open(config.clone()).unwrap();
+    let source = engine.start_scan(root).unwrap();
+    assert_eq!(wait_terminal(&engine, source).phase, TaskPhase::Succeeded);
+    let scan_id = engine
+        .scan_result(source)
+        .unwrap()
+        .unwrap()
+        .scan_id()
+        .clone();
+    let mut review = engine.acquire_explorer_snapshot_review(&scan_id).unwrap();
+    let target_id = review
+        .child_nodes(0, SnapshotReviewNodeSort::NameAscending, 0, 10)
+        .unwrap()
+        .nodes[0]
+        .id;
+    let (reached_tx, reached_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let refresh = engine
+        .start_subtree_scan_with_before_candidate_persistence_hook(
+            &mut review,
+            target_id,
+            move || {
+                reached_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            },
+        )
+        .unwrap();
+    reached_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    // DUX-DESTRUCTIVE: allow=test-subtree-publication-root-rename -- replace only this TempDir-owned scanned directory before immutable publication
+    std::fs::rename(&target, &moved).unwrap();
+    std::fs::create_dir(&target).unwrap();
+    release_tx.send(()).unwrap();
+
+    let terminal = wait_terminal(&engine, refresh);
+    assert_eq!(terminal.phase, TaskPhase::Failed);
+    assert_eq!(terminal.failure, Some(TaskFailureKind::ScanRootChanged));
+    assert!(
+        !engine
+            .scan_result(refresh)
+            .unwrap()
+            .unwrap()
+            .snapshot_available()
+    );
+    assert_eq!(final_snapshot_count(&config), 1);
+}
+
+#[test]
+fn queued_subtree_cancellation_creates_no_refresh_history_or_snapshot() {
+    let temp = TempDir::new().unwrap();
+    let config = config(&temp);
+    let root = temp.path().join("queued-subtree-source");
+    let target = root.join("target");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::write(target.join("payload.bin"), b"payload").unwrap();
+    let engine =
+        EngineHandle::open_with_limits(config.clone(), RegistryLimits::testing(1, 4, 8, 16))
+            .unwrap();
+    let source = engine.start_scan(root).unwrap();
+    assert_eq!(wait_terminal(&engine, source).phase, TaskPhase::Succeeded);
+    let source_scan = engine
+        .scan_result(source)
+        .unwrap()
+        .unwrap()
+        .scan_id()
+        .clone();
+    let mut review = engine
+        .acquire_explorer_snapshot_review(&source_scan)
+        .unwrap();
+    let target_id = review
+        .child_nodes(0, SnapshotReviewNodeSort::NameAscending, 0, 10)
+        .unwrap()
+        .nodes[0]
+        .id;
+    let (blocker_started_tx, blocker_started_rx) = mpsc::channel();
+    let (blocker_release_tx, blocker_release_rx) = mpsc::channel();
+    let blocker = engine
+        .submit_test(Box::new(move |_| {
+            blocker_started_tx.send(()).unwrap();
+            blocker_release_rx.recv().unwrap();
+            WorkOutcome::Succeeded(TaskResult::TestOnly)
+        }))
+        .unwrap();
+    blocker_started_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    let refresh = engine.start_subtree_scan(&mut review, target_id).unwrap();
+
+    assert_eq!(
+        engine.cancel_task(refresh).unwrap(),
+        CancelOutcome::CancelledBeforeStart
+    );
+    assert_eq!(wait_terminal(&engine, refresh).phase, TaskPhase::Cancelled);
+    assert_eq!(engine.scan_result(refresh).unwrap(), None);
+    blocker_release_tx.send(()).unwrap();
+    assert_eq!(wait_terminal(&engine, blocker).phase, TaskPhase::Succeeded);
+    assert_eq!(final_snapshot_count(&config), 1);
+    let connection = rusqlite::Connection::open(config.database_path()).unwrap();
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM scans", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
 #[expect(
     clippy::disallowed_methods,
     reason = "test moves only a TempDir-owned scan root to force a deterministic scanner failure"

@@ -292,31 +292,41 @@ extension MenuBarPopoverPresentation {
             return nil
         case .queued:
             return progressPresentation(
-                title: String(localized: "Waiting to scan Home…", locale: locale),
+                title: state.scope?.isHome == false
+                    ? String(localized: "Waiting to refresh selected folder…", locale: locale)
+                    : String(localized: "Waiting to scan Home…", locale: locale),
                 facts: nil,
                 locale: locale
             )
         case let .scanning(facts):
             return progressPresentation(
-                title: String(localized: "Scanning Home…", locale: locale),
+                title: state.scope?.isHome == false
+                    ? String(localized: "Refreshing selected folder…", locale: locale)
+                    : String(localized: "Scanning Home…", locale: locale),
                 facts: facts,
                 locale: locale
             )
         case let .finalizing(facts):
             return progressPresentation(
-                title: String(localized: "Preparing scan results…", locale: locale),
+                title: state.scope?.isHome == false
+                    ? String(localized: "Preparing folder scan results…", locale: locale)
+                    : String(localized: "Preparing scan results…", locale: locale),
                 facts: facts,
                 locale: locale
             )
         case let .evaluating(facts):
             return progressPresentation(
-                title: String(localized: "Classifying scan results…", locale: locale),
+                title: state.scope?.isHome == false
+                    ? String(localized: "Classifying folder scan results…", locale: locale)
+                    : String(localized: "Classifying scan results…", locale: locale),
                 facts: facts,
                 locale: locale
             )
         case let .cancellationRequested(facts):
             return progressPresentation(
-                title: String(localized: "Stopping scan…", locale: locale),
+                title: state.scope?.isHome == false
+                    ? String(localized: "Stopping folder scan…", locale: locale)
+                    : String(localized: "Stopping scan…", locale: locale),
                 facts: facts,
                 locale: locale
             )
@@ -328,7 +338,9 @@ extension MenuBarPopoverPresentation {
             ].joined(separator: " · ")
             return MenuBarPopoverScanPresentation(
                 style: .success,
-                title: String(localized: "Scan finished", locale: locale),
+                title: state.scope?.isHome == false
+                    ? String(localized: "Folder scan finished", locale: locale)
+                    : String(localized: "Scan finished", locale: locale),
                 detail: detail,
                 progressAccessibilityValue: nil,
                 showsIndeterminateProgress: false
@@ -336,7 +348,9 @@ extension MenuBarPopoverPresentation {
         case .cancelled:
             return MenuBarPopoverScanPresentation(
                 style: .cancelled,
-                title: String(localized: "Scan stopped", locale: locale),
+                title: state.scope?.isHome == false
+                    ? String(localized: "Folder scan stopped", locale: locale)
+                    : String(localized: "Scan stopped", locale: locale),
                 detail: retainedResultsText(
                     hasPrevious: state.lastSuccessful != nil,
                     locale: locale
@@ -347,7 +361,9 @@ extension MenuBarPopoverPresentation {
         case let .failed(failure):
             return MenuBarPopoverScanPresentation(
                 style: .failure,
-                title: String(localized: "Scan couldn’t finish", locale: locale),
+                title: state.scope?.isHome == false
+                    ? String(localized: "Folder scan couldn’t finish", locale: locale)
+                    : String(localized: "Scan couldn’t finish", locale: locale),
                 detail: [
                     scanFailureDetail(failure, locale: locale),
                     retainedResultsText(

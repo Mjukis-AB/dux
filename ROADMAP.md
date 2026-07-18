@@ -3897,7 +3897,27 @@ Tasks:
     neutral and truthfully states that category details are not summarized for
     the omitted items; their individual categories remain available in the
     complete table.
-- [ ] Add scan cancellation and subtree refresh.
+- [x] Add scan cancellation and subtree refresh.
+  - [x] 2026-07-18 slice: add FFI contract v16's path-free, review-bound
+    selected-folder scan. Swift supplies only the exact retained review and a
+    versioned snapshot node ID; Rust verifies the review belongs to the engine,
+    resolves a directory from immutable snapshot evidence, and matches its
+    current device/inode identity before durable start, before traversal,
+    against the completed artifact, and immediately before publication.
+    Replacement, symlink, cross-volume, missing, file, released, foreign,
+    read-only, overlapping, and resource failures remain typed and fail closed.
+    The result is an ordinary standalone immutable snapshot rooted at that
+    folder—not a splice into or rewrite of its historical parent—and the live
+    path never crosses FFI. The existing bounded scan task provides polling and
+    idempotent cancellation; queued cancellation creates no scan row or
+    snapshot. The native app distinguishes Home and selected-folder scope so a
+    subtree result cannot replace Home coverage evidence, keeps the old review
+    and content visible through scanning and exact result validation, then
+    atomically switches leases only if the source presentation generation is
+    still current. Failure, cancellation, navigation, history selection,
+    reload, close, and shutdown suppress stale publication. Explorer exposes
+    Rescan This Folder on Command-R, Load Latest Snapshot as a separate action,
+    accessible progress/cancel status, and explicit standalone-root copy.
 - [ ] Add performance fixtures for million-node snapshots.
 
 Exit criteria:

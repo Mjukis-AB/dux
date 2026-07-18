@@ -30,6 +30,15 @@ struct AppScanSummary: Equatable, Sendable {
     let snapshotAvailable: Bool
 }
 
+enum AppScanScope: Equatable, Sendable {
+    case home
+    case subtree(displayName: String)
+
+    var isHome: Bool {
+        self == .home
+    }
+}
+
 enum AppScanFailure: Equatable, Sendable {
     case closed
     case busy
@@ -68,6 +77,17 @@ enum AppScanPhase: Equatable, Sendable {
 struct AppScanState: Equatable, Sendable {
     var phase: AppScanPhase
     var lastSuccessful: AppScanSummary?
+    var scope: AppScanScope?
+
+    init(
+        phase: AppScanPhase,
+        lastSuccessful: AppScanSummary?,
+        scope: AppScanScope? = nil
+    ) {
+        self.phase = phase
+        self.lastSuccessful = lastSuccessful
+        self.scope = scope
+    }
 
     static let idle = Self(phase: .idle, lastSuccessful: nil)
 }

@@ -34,6 +34,10 @@ enum ExplorerAccessibility {
     static let snapshotPreviousPage = "explorer-snapshot-previous-page"
     static let snapshotNextPage = "explorer-snapshot-next-page"
     static let snapshotReload = "explorer-snapshot-reload"
+    static let snapshotSubtreeRescan = "explorer-snapshot-subtree-rescan"
+    static let snapshotSubtreeScanStatus = "explorer-snapshot-subtree-scan-status"
+    static let snapshotSubtreeScanCancel = "explorer-snapshot-subtree-scan-cancel"
+    static let snapshotSubtreeScanNotice = "explorer-snapshot-subtree-scan-notice"
     static let snapshotHistory = "explorer-snapshot-history"
     static let snapshotHistoryStatus = "explorer-snapshot-history-status"
     static let snapshotError = "explorer-snapshot-error"
@@ -85,6 +89,10 @@ enum ExplorerAccessibility {
         snapshotPreviousPage,
         snapshotNextPage,
         snapshotReload,
+        snapshotSubtreeRescan,
+        snapshotSubtreeScanStatus,
+        snapshotSubtreeScanCancel,
+        snapshotSubtreeScanNotice,
         snapshotHistory,
         snapshotHistoryStatus,
         snapshotError,
@@ -317,7 +325,9 @@ extension ExplorerPresentation {
         locale: Locale
     ) -> ExplorerCoveragePresentation {
         let summary: AppScanSummary? = switch state.phase {
-        case let .succeeded(summary): summary
+        case let .succeeded(summary) where state.scope?.isHome != false: summary
+        case .succeeded:
+            state.lastSuccessful
         case .idle, .queued, .scanning, .finalizing, .evaluating,
              .cancellationRequested, .cancelled, .failed:
             state.lastSuccessful

@@ -146,6 +146,23 @@ final class MenuBarPopoverPresentationTests: XCTestCase {
         XCTAssertFalse(presentation.actions.showScanNow)
     }
 
+    func testSelectedFolderScanIsDistinctFromHomeInCompactStatus() throws {
+        let active = makePresentation(scanState: AppScanState(
+            phase: .scanning(makeFacts()),
+            lastSuccessful: makeSummary(),
+            scope: .subtree(displayName: "Caches")
+        ))
+        XCTAssertEqual(active.scan?.title, "Refreshing selected folder…")
+        XCTAssertTrue(active.scan?.detail?.contains("18.4 GiB observed") == true)
+
+        let finished = makePresentation(scanState: AppScanState(
+            phase: .succeeded(makeSummary()),
+            lastSuccessful: makeSummary(),
+            scope: .subtree(displayName: "Caches")
+        ))
+        XCTAssertEqual(finished.scan?.title, "Folder scan finished")
+    }
+
     func testScanPhasesWithoutAHeartbeatNeverInventZeroCounters() throws {
         for phase in [
             AppScanPhase.scanning(nil),

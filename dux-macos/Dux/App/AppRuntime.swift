@@ -69,13 +69,6 @@ final class AppRuntime {
         )
         let reviewController = DuxSnapshotReviewController(service: engineService)
         reviews = reviewController
-        let liveActions = SystemExplorerLiveFileActionPresenter()
-        explorerSnapshotBrowser = ExplorerSnapshotBrowserModel(
-            reviews: reviewController,
-            history: engineService,
-            coverage: engineService,
-            liveActions: liveActions
-        )
         let capacityResampleRouter = DuxCapacityResampleRouter()
         self.capacityResampleRouter = capacityResampleRouter
         let model = AppModel(
@@ -83,6 +76,15 @@ final class AppRuntime {
             capacityResampleRequester: capacityResampleRouter
         )
         self.model = model
+        let liveActions = SystemExplorerLiveFileActionPresenter()
+        explorerSnapshotBrowser = ExplorerSnapshotBrowserModel(
+            reviews: reviewController,
+            history: engineService,
+            coverage: engineService,
+            liveActions: liveActions,
+            subtreeScans: reviewController,
+            scanDriver: model
+        )
         scans = model
         capacityScheduler = DuxCapacitySamplingScheduler(sampler: model)
     }

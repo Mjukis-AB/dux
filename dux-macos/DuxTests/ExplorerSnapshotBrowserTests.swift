@@ -802,6 +802,189 @@ final class ExplorerSnapshotBrowserTests: XCTestCase {
         XCTAssertEqual(released, ["scan:older"])
     }
 
+    func testSubtreeRefreshAtomicallyInstallsExactSnapshotThenReleasesSource() async {
+        let reviews = BrowserReviewStub()
+        let driver = BrowserSubtreeScanDriver(
+            outcome: .succeeded(browserScanSummary(scanID: "scan:refreshed"))
+        )
+        let browser = ExplorerSnapshotBrowserModel(
+            reviews: reviews,
+            subtreeScans: BrowserSubtreeScanServiceStub(),
+            scanDriver: driver
+        )
+        await browser.reloadLatest()
+        let confirmedNodes = browser.nodes
+
+        await browser.refreshCurrentSubtree()
+
+        XCTAssertEqual(driver.requests, [
+            .init(sourceScanID: "scan:latest", nodeID: 0, displayName: "/Users/example"),
+        ])
+        XCTAssertEqual(browser.phase, .ready)
+        XCTAssertEqual(browser.scanID, "scan:refreshed")
+        XCTAssertFalse(browser.isLatestSnapshot)
+        XCTAssertEqual(browser.breadcrumbs.map(\.id), [0])
+        XCTAssertEqual(browser.nodes, confirmedNodes)
+        XCTAssertNotNil(browser.treemap)
+        XCTAssertFalse(browser.isSubtreeRefreshRunning)
+        XCTAssertTrue(browser.subtreeRefreshNotice?.message.contains("standalone snapshot root") == true)
+        let calls = await reviews.recordedCalls()
+        XCTAssertTrue(calls.contains(.acquire(scanID: "scan:refreshed")))
+        XCTAssertTrue(calls.contains(.root(scanID: "scan:refreshed")))
+        XCTAssertTrue(calls.contains(.release(scanID: "scan:latest")))
+    }
+
+    func testSubtreeFailureAndCancellationPreserveConfirmedSnapshot() async {
+        for outcome in [
+            AppScanRunOutcome.failed(.rootUnavailable),
+            .cancelled,
+        ] {
+            let reviews = BrowserReviewStub()
+            let driver = BrowserSubtreeScanDriver(outcome: outcome)
+            let browser = ExplorerSnapshotBrowserModel(
+                reviews: reviews,
+                subtreeScans: BrowserSubtreeScanServiceStub(),
+                scanDriver: driver
+            )
+            await browser.reloadLatest()
+            let confirmedNodes = browser.nodes
+
+            await browser.refreshCurrentSubtree()
+
+            XCTAssertEqual(browser.phase, .ready)
+            XCTAssertEqual(browser.scanID, "scan:latest")
+            XCTAssertEqual(browser.nodes, confirmedNodes)
+            XCTAssertNotNil(browser.subtreeRefreshNotice)
+            let released = await reviews.releasedScanIDs()
+            XCTAssertTrue(released.isEmpty)
+        }
+    }
+
+    func testSubtreeResultDoesNotReplaceViewAfterDirectoryNavigation() async throws {
+        let reviews = BrowserReviewStub()
+        let driver = BrowserSubtreeScanDriver(
+            outcome: .succeeded(browserScanSummary(scanID: "scan:refreshed")),
+            suspends: true
+        )
+        let browser = ExplorerSnapshotBrowserModel(
+            reviews: reviews,
+            subtreeScans: BrowserSubtreeScanServiceStub(),
+            scanDriver: driver
+        )
+        await browser.reloadLatest()
+        let directory = try XCTUnwrap(browser.nodes.first(where: { $0.kind == .directory }))
+
+        let refresh = Task { await browser.refreshCurrentSubtree() }
+        try await eventually { await driver.hasSuspendedRequest() }
+        XCTAssertTrue(browser.isSubtreeRefreshRunning)
+        await browser.openDirectory(directory)
+        driver.resume()
+        await refresh.value
+
+        XCTAssertEqual(browser.scanID, "scan:latest")
+        XCTAssertEqual(browser.breadcrumbs.map(\.id), [0, directory.id])
+        XCTAssertTrue(browser.subtreeRefreshNotice?.message.contains("Recent Scans") == true)
+        let calls = await reviews.recordedCalls()
+        XCTAssertFalse(calls.contains(.acquire(scanID: "scan:refreshed")))
+    }
+
+    func testUnvalidatedSubtreeReplacementKeepsSourceLeaseAndContent() async {
+        let reviews = BrowserReviewStub(mode: .exactUnavailable)
+        let driver = BrowserSubtreeScanDriver(
+            outcome: .succeeded(browserScanSummary(scanID: "scan:refreshed"))
+        )
+        let browser = ExplorerSnapshotBrowserModel(
+            reviews: reviews,
+            subtreeScans: BrowserSubtreeScanServiceStub(),
+            scanDriver: driver
+        )
+        await browser.reloadLatest()
+        let confirmedNodes = browser.nodes
+
+        await browser.refreshCurrentSubtree()
+
+        XCTAssertEqual(browser.phase, .ready)
+        XCTAssertEqual(browser.scanID, "scan:latest")
+        XCTAssertEqual(browser.nodes, confirmedNodes)
+        XCTAssertTrue(browser.subtreeRefreshNotice?.isFailure == true)
+        let released = await reviews.releasedScanIDs()
+        XCTAssertTrue(released.isEmpty)
+    }
+
+    func testCloseSuppressesSuspendedSubtreeResult() async throws {
+        let reviews = BrowserReviewStub()
+        let driver = BrowserSubtreeScanDriver(
+            outcome: .succeeded(browserScanSummary(scanID: "scan:refreshed")),
+            suspends: true
+        )
+        let browser = ExplorerSnapshotBrowserModel(
+            reviews: reviews,
+            subtreeScans: BrowserSubtreeScanServiceStub(),
+            scanDriver: driver
+        )
+        await browser.reloadLatest()
+        let refresh = Task { await browser.refreshCurrentSubtree() }
+        try await eventually { await driver.hasSuspendedRequest() }
+
+        await browser.close()
+        driver.resume()
+        await refresh.value
+
+        XCTAssertEqual(browser.phase, .idle)
+        XCTAssertNil(browser.scanID)
+        XCTAssertFalse(browser.isSubtreeRefreshRunning)
+        let calls = await reviews.recordedCalls()
+        XCTAssertFalse(calls.contains(.acquire(scanID: "scan:refreshed")))
+        let released = await reviews.releasedScanIDs()
+        XCTAssertEqual(released, ["scan:latest"])
+    }
+
+    func testCloseDuringSubtreeSnapshotAcquisitionReleasesBothReviews() async throws {
+        let reviews = BrowserReviewStub(mode: .suspendedExactAcquire)
+        let driver = BrowserSubtreeScanDriver(
+            outcome: .succeeded(browserScanSummary(scanID: "scan:refreshed"))
+        )
+        let browser = ExplorerSnapshotBrowserModel(
+            reviews: reviews,
+            subtreeScans: BrowserSubtreeScanServiceStub(),
+            scanDriver: driver
+        )
+        await browser.reloadLatest()
+        let refresh = Task { await browser.refreshCurrentSubtree() }
+        try await eventually { await reviews.hasSuspendedAcquisition() }
+
+        await browser.close()
+        await reviews.resumeAcquisition()
+        await refresh.value
+
+        XCTAssertEqual(browser.phase, .idle)
+        XCTAssertNil(browser.scanID)
+        let released = await reviews.releasedScanIDs()
+        XCTAssertEqual(released, ["scan:latest", "scan:refreshed"])
+    }
+
+    func testSubtreeTreemapMismatchRejectsReplacementAndKeepsSource() async {
+        let reviews = BrowserReviewStub(mode: .refreshedTreemapMismatch)
+        let driver = BrowserSubtreeScanDriver(
+            outcome: .succeeded(browserScanSummary(scanID: "scan:refreshed"))
+        )
+        let browser = ExplorerSnapshotBrowserModel(
+            reviews: reviews,
+            subtreeScans: BrowserSubtreeScanServiceStub(),
+            scanDriver: driver
+        )
+        await browser.reloadLatest()
+        let confirmedNodes = browser.nodes
+
+        await browser.refreshCurrentSubtree()
+
+        XCTAssertEqual(browser.scanID, "scan:latest")
+        XCTAssertEqual(browser.nodes, confirmedNodes)
+        XCTAssertTrue(browser.subtreeRefreshNotice?.isFailure == true)
+        let released = await reviews.releasedScanIDs()
+        XCTAssertEqual(released, ["scan:refreshed"])
+    }
+
     private func eventually(
         _ condition: @escaping @Sendable () async -> Bool,
         file: StaticString = #filePath,
@@ -814,6 +997,62 @@ final class ExplorerSnapshotBrowserTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(1))
         }
         XCTFail("Condition did not become true", file: file, line: line)
+    }
+}
+
+private struct BrowserSubtreeScanServiceStub: DuxSnapshotSubtreeScanServing {
+    func startSubtreeScan(
+        sourceScanID _: String,
+        nodeID _: UInt64
+    ) async throws -> HomeScanStartDisposition {
+        throw HomeScanServiceError.internalState
+    }
+}
+
+@MainActor
+private final class BrowserSubtreeScanDriver: ExplorerSubtreeScanDriving {
+    struct Request: Equatable {
+        let sourceScanID: String
+        let nodeID: UInt64
+        let displayName: String
+    }
+
+    private(set) var requests: [Request] = []
+    private let outcome: AppScanRunOutcome
+    private let suspends: Bool
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    init(outcome: AppScanRunOutcome, suspends: Bool = false) {
+        self.outcome = outcome
+        self.suspends = suspends
+    }
+
+    func startSubtreeScan(
+        sourceScanID: String,
+        nodeID: UInt64,
+        displayName: String,
+        using _: any DuxSnapshotSubtreeScanServing
+    ) async -> AppScanRunOutcome {
+        requests.append(Request(
+            sourceScanID: sourceScanID,
+            nodeID: nodeID,
+            displayName: displayName
+        ))
+        if suspends {
+            await withCheckedContinuation { continuation in
+                self.continuation = continuation
+            }
+        }
+        return outcome
+    }
+
+    func hasSuspendedRequest() -> Bool {
+        continuation != nil
+    }
+
+    func resume() {
+        continuation?.resume()
+        continuation = nil
     }
 }
 
@@ -840,6 +1079,7 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
         case nonUnicodeLiveItem
         case treemapCategoryMismatch
         case offPageCategoryMismatch
+        case refreshedTreemapMismatch
     }
 
     enum Call: Equatable, Sendable {
@@ -1088,7 +1328,10 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
         let represented = Array(allNodes.prefix(Int(maxCells)))
         let omitted = allNodes.dropFirst(represented.count)
         let cells = represented.enumerated().map { index, node in
-            let projectedNode = mode == .treemapCategoryMismatch && node.id == 1
+            let projectedNode = (
+                mode == .treemapCategoryMismatch
+                    || mode == .refreshedTreemapMismatch && scanID == "scan:refreshed"
+            ) && node.id == 1
                 ? browserNode(node, replacingCategoryWith: .browserCache)
                 : node
             return ExplorerSnapshotTreemapCell(
@@ -1379,6 +1622,24 @@ private func historicalBrowserScan(id: String, startedAt: TimeInterval) -> Explo
         coveragePermille: 1_000,
         issueCount: 0,
         snapshotRecorded: true
+    )
+}
+
+private func browserScanSummary(scanID: String) -> AppScanSummary {
+    AppScanSummary(
+        scanID: scanID,
+        startedAt: Date(timeIntervalSince1970: 2_000),
+        completedAt: Date(timeIntervalSince1970: 2_100),
+        progress: ScanProgressFacts(
+            files: 101,
+            directories: 1,
+            knownAllocatedBytes: 99_850,
+            issueCount: 0
+        ),
+        logicalBytes: 99_850,
+        coverage: .complete,
+        coveragePermille: 1_000,
+        snapshotAvailable: true
     )
 }
 

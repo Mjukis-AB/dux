@@ -173,6 +173,25 @@ final class ExplorerPresentationTests: XCTestCase {
         }
     }
 
+    func testSubtreeScanUsesFolderCopyWithoutReplacingHomeCoverage() throws {
+        let home = makeSummary(coverage: .limitedAccess, coveragePermille: 800)
+        let subtree = makeSummary(coverage: .complete, coveragePermille: 1_000)
+        let state = AppScanState(
+            phase: .succeeded(subtree),
+            lastSuccessful: home,
+            scope: .subtree(displayName: "Caches")
+        )
+
+        let presentation = make(scanState: state)
+
+        XCTAssertEqual(presentation.coverage.coverage, .limitedAccess)
+        XCTAssertEqual(presentation.coverage.title, "Limited Home access")
+        let scan = try XCTUnwrap(presentation.scan)
+        XCTAssertEqual(scan.title, "Refreshed snapshot ready for “Caches”")
+        XCTAssertTrue(scan.detail?.contains("selected folder") == true)
+        XCTAssertFalse(scan.detail?.contains("allocated in Home") == true)
+    }
+
     func testEveryActiveScanPhaseShowsOnlyCancelAction() throws {
         let phases: [AppScanPhase] = [
             .queued,
@@ -266,6 +285,14 @@ final class ExplorerPresentationTests: XCTestCase {
     func testAccessibilityAndShortcutContractsAreStableAndUnique() {
         XCTAssertEqual(ExplorerDestination.allCases, [.overview, .snapshot])
         XCTAssertEqual(ExplorerAccessibility.root, "explorer")
+        XCTAssertEqual(
+            ExplorerAccessibility.snapshotSubtreeRescan,
+            "explorer-snapshot-subtree-rescan"
+        )
+        XCTAssertEqual(
+            ExplorerAccessibility.snapshotSubtreeScanStatus,
+            "explorer-snapshot-subtree-scan-status"
+        )
         XCTAssertEqual(
             Set(ExplorerAccessibility.allIdentifiers).count,
             ExplorerAccessibility.allIdentifiers.count

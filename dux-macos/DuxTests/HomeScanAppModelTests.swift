@@ -190,6 +190,104 @@ final class HomeScanAppModelTests: XCTestCase {
         XCTAssertEqual(cancelCount, 1)
     }
 
+    func testSubtreeSuccessPreservesLastSuccessfulHomeBaseline() async {
+        let homeResult = successfulResult(scanID: "scan:home")
+        let subtreeResult = successfulResult(scanID: "scan:folder")
+        let homeService = HomeScanServiceSpy(
+            responses: [.success(.started(HomeScanTaskSpy(polls: [
+                .success(successPoll(revision: 1, result: homeResult)),
+            ])))]
+        )
+        let model = model(service: homeService, clock: ManualHomeScanClock())
+        await model.startHomeScan()
+        let homeSummary = try! XCTUnwrap(homeResult.successfulSummary)
+
+        let subtreeService = SubtreeScanServiceSpy(
+            response: .success(.started(HomeScanTaskSpy(polls: [
+                .success(successPoll(revision: 1, result: subtreeResult)),
+            ])))
+        )
+        let outcome = await model.startSubtreeScan(
+            sourceScanID: "scan:home",
+            nodeID: 42,
+            displayName: "Caches",
+            using: subtreeService
+        )
+
+        let subtreeSummary = try! XCTUnwrap(subtreeResult.successfulSummary)
+        XCTAssertEqual(outcome, .succeeded(subtreeSummary))
+        XCTAssertEqual(model.scanState.phase, .succeeded(subtreeSummary))
+        XCTAssertEqual(model.scanState.scope, .subtree(displayName: "Caches"))
+        XCTAssertEqual(model.scanState.lastSuccessful, homeSummary)
+        let request = await subtreeService.lastRequest()
+        XCTAssertEqual(request?.scanID, "scan:home")
+        XCTAssertEqual(request?.nodeID, 42)
+    }
+
+    func testDifferentScanRequestIsBusyWithoutReplacingActiveScope() async {
+        let task = HomeScanTaskSpy(polls: [
+            .success(activePoll(revision: 1, progress: nil)),
+            .success(successPoll(revision: 2, result: successfulResult())),
+        ])
+        let clock = ManualHomeScanClock()
+        let model = model(
+            service: HomeScanServiceSpy(responses: [.success(.started(task))]),
+            clock: clock
+        )
+        let home = Task { @MainActor in await model.startHomeScan() }
+        await clock.waitForSleepCount(1)
+
+        let outcome = await model.startSubtreeScan(
+            sourceScanID: "scan:home",
+            nodeID: 7,
+            displayName: "Build",
+            using: SubtreeScanServiceSpy(response: .failure(.busy))
+        )
+
+        XCTAssertEqual(outcome, .failed(.busy))
+        XCTAssertEqual(model.scanState.scope, .home)
+        XCTAssertEqual(model.scanState.phase, .scanning(nil))
+        await clock.advance()
+        await home.value
+    }
+
+    func testExactSubtreeStartsCoalesceOntoOneTask() async {
+        let task = HomeScanTaskSpy(polls: [
+            .success(activePoll(revision: 1, progress: nil)),
+            .success(successPoll(revision: 2, result: successfulResult(scanID: "scan:new"))),
+        ])
+        let service = SubtreeScanServiceSpy(response: .success(.started(task)))
+        let clock = ManualHomeScanClock()
+        let model = model(service: HomeScanServiceSpy(responses: []), clock: clock)
+
+        let first = Task { @MainActor in
+            await model.startSubtreeScan(
+                sourceScanID: "scan:old",
+                nodeID: 9,
+                displayName: "Caches",
+                using: service
+            )
+        }
+        await clock.waitForSleepCount(1)
+        let second = Task { @MainActor in
+            await model.startSubtreeScan(
+                sourceScanID: "scan:old",
+                nodeID: 9,
+                displayName: "Caches",
+                using: service
+            )
+        }
+        await Task.yield()
+        let startsBeforeCompletion = await service.startCount()
+        XCTAssertEqual(startsBeforeCompletion, 1)
+        await clock.advance()
+        let firstOutcome = await first.value
+        let secondOutcome = await second.value
+        let finalStartCount = await service.startCount()
+        XCTAssertEqual(firstOutcome, secondOutcome)
+        XCTAssertEqual(finalStartCount, 1)
+    }
+
     private func model(
         service: HomeScanServiceSpy,
         clock: ManualHomeScanClock
@@ -199,6 +297,36 @@ final class HomeScanAppModelTests: XCTestCase {
             homeScanService: service,
             homeScanClock: clock
         )
+    }
+}
+
+private actor SubtreeScanServiceSpy: DuxSnapshotSubtreeScanServing {
+    struct Request: Equatable, Sendable {
+        let scanID: String
+        let nodeID: UInt64
+    }
+
+    private let response: Result<HomeScanStartDisposition, HomeScanServiceError>
+    private var requests: [Request] = []
+
+    init(response: Result<HomeScanStartDisposition, HomeScanServiceError>) {
+        self.response = response
+    }
+
+    func startSubtreeScan(
+        sourceScanID: String,
+        nodeID: UInt64
+    ) async throws -> HomeScanStartDisposition {
+        requests.append(Request(scanID: sourceScanID, nodeID: nodeID))
+        return try response.get()
+    }
+
+    func lastRequest() -> Request? {
+        requests.last
+    }
+
+    func startCount() -> Int {
+        requests.count
     }
 }
 
@@ -415,7 +543,12 @@ private func cancelledPoll(revision: UInt64) -> HomeScanTaskPoll {
 
 private func successfulResult(
     scanID: String = "scan:test",
-    progress: ScanProgressFacts
+    progress: ScanProgressFacts = ScanProgressFacts(
+        files: 1,
+        directories: 1,
+        knownAllocatedBytes: 1,
+        issueCount: 0
+    )
 ) -> HomeScanTaskResult {
     HomeScanTaskResult(
         scanID: scanID,

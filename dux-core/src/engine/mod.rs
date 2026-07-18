@@ -69,8 +69,8 @@ pub use task::{
     SnapshotTerminalTempMaintenanceResult, SnapshotTerminalTempMaintenanceStartOutcome,
     SnapshotUnleasedTempMaintenanceFailureKind, SnapshotUnleasedTempMaintenanceOutcome,
     SnapshotUnleasedTempMaintenanceResult, SnapshotUnleasedTempMaintenanceStartOutcome,
-    StartTaskError, TaskAccessError, TaskEvent, TaskEventBatch, TaskEventKind, TaskFailureKind,
-    TaskId, TaskKind, TaskPhase, TaskSnapshot,
+    StartSubtreeScanError, StartTaskError, TaskAccessError, TaskEvent, TaskEventBatch,
+    TaskEventKind, TaskFailureKind, TaskId, TaskKind, TaskPhase, TaskSnapshot,
 };
 pub use volume_status::{
     CapacityHistoryDisposition, VolumeCapacityObservation, VolumeCapacityStatus,

@@ -56,8 +56,8 @@ pub use engine::{
     SnapshotReviewNameEncoding, SnapshotReviewNode, SnapshotReviewNodeKind, SnapshotReviewNodePage,
     SnapshotReviewNodeSort, SnapshotReviewReleaseOutcome, SnapshotReviewScanFlags,
     SnapshotReviewSession, SnapshotReviewTimestamp, SnapshotReviewTreemap,
-    SnapshotReviewTreemapCell, StartTaskError, TaskAccessError, TaskEvent, TaskEventBatch,
-    TaskEventKind, TaskFailureKind, TaskId, TaskKind, TaskPhase, TaskSnapshot,
+    SnapshotReviewTreemapCell, StartSubtreeScanError, StartTaskError, TaskAccessError, TaskEvent,
+    TaskEventBatch, TaskEventKind, TaskFailureKind, TaskId, TaskKind, TaskPhase, TaskSnapshot,
     VolumeCapacityObservation, VolumeCapacityStatus, VolumeCapacityStatusError,
 };
 pub use error::{DuxError, Result};

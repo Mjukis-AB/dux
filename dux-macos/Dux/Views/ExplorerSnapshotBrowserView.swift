@@ -9,6 +9,7 @@ struct ExplorerSnapshotBrowserView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             header
+            subtreeScanStatus
             content
         }
         .padding(20)
@@ -28,16 +29,31 @@ struct ExplorerSnapshotBrowserView: View {
                 Text("Snapshot Explorer")
                     .font(.largeTitle.bold())
                 Text(
-                    "Historical, read-only observations from retained Home scans. Names and sizes are not live filesystem authority."
+                    "Historical, read-only observations from retained storage scans. A refreshed folder opens as a new standalone snapshot root; names and sizes are not live filesystem authority."
                 )
                 .foregroundStyle(.secondary)
             }
             Spacer()
             historyMenu
             Button {
+                Task { await browser.refreshCurrentSubtree() }
+            } label: {
+                Label("Rescan This Folder", systemImage: "arrow.triangle.2.circlepath")
+            }
+            .disabled(!browser.canRefreshCurrentSubtree || model.scanState.phase.isActive)
+            .keyboardShortcut(
+                KeyEquivalent(ExplorerKeyboardShortcut.scanNow),
+                modifiers: [.command]
+            )
+            .help("Scan the current folder and open the result as a new standalone snapshot root")
+            .accessibilityIdentifier(ExplorerAccessibility.snapshotSubtreeRescan)
+            .accessibilityHint(
+                "Keeps this snapshot visible until the new folder snapshot is fully validated"
+            )
+            Button {
                 Task { await browser.reloadLatest(ifPresented: presentationID) }
             } label: {
-                Label("Refresh", systemImage: "arrow.clockwise")
+                Label("Load Latest Snapshot", systemImage: "arrow.clockwise")
             }
             .disabled(
                 browser.phase == .loading
@@ -46,6 +62,52 @@ struct ExplorerSnapshotBrowserView: View {
                     || browser.isSwitchingSnapshot
             )
             .accessibilityIdentifier(ExplorerAccessibility.snapshotReload)
+        }
+    }
+
+    @ViewBuilder
+    private var subtreeScanStatus: some View {
+        if browser.isSubtreeRefreshRunning,
+           model.scanState.scope?.isHome == false,
+           let scan = ExplorerScanPresentation.make(scanState: model.scanState)
+        {
+            HStack(alignment: .top, spacing: 12) {
+                ProgressView()
+                    .controlSize(.small)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(verbatim: scan.title)
+                        .font(.headline)
+                    if let detail = scan.detail {
+                        Text(verbatim: detail)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Text("The previous snapshot remains available while this scan runs.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Cancel") {
+                    Task { await model.cancelHomeScan() }
+                }
+                .disabled(!subtreeCancellationEnabled)
+                .accessibilityIdentifier(ExplorerAccessibility.snapshotSubtreeScanCancel)
+                .accessibilityHint("Requests cancellation; the previous snapshot remains visible")
+            }
+            .padding(12)
+            .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 10))
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier(ExplorerAccessibility.snapshotSubtreeScanStatus)
+        }
+    }
+
+    private var subtreeCancellationEnabled: Bool {
+        switch model.scanState.phase {
+        case .queued, .scanning, .finalizing, .evaluating:
+            true
+        case .idle, .cancellationRequested, .succeeded, .cancelled, .failed:
+            false
         }
     }
 
@@ -158,6 +220,30 @@ struct ExplorerSnapshotBrowserView: View {
                     in: RoundedRectangle(cornerRadius: 8)
                 )
                 .accessibilityIdentifier(ExplorerAccessibility.snapshotLiveActionStatus)
+            }
+
+            if let notice = browser.subtreeRefreshNotice {
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: notice.isFailure ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+                        .foregroundStyle(notice.isFailure ? .orange : .green)
+                    Text(verbatim: notice.message)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button {
+                        browser.dismissSubtreeRefreshNotice()
+                    } label: {
+                        Label("Dismiss", systemImage: "xmark")
+                            .labelStyle(.iconOnly)
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(10)
+                .background(
+                    (notice.isFailure ? Color.orange : Color.green).opacity(0.10),
+                    in: RoundedRectangle(cornerRadius: 8)
+                )
+                .accessibilityElement(children: .combine)
+                .accessibilityIdentifier(ExplorerAccessibility.snapshotSubtreeScanNotice)
             }
 
             if browser.contentMode == .browse {

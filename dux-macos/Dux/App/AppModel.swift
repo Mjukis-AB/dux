@@ -3,6 +3,10 @@ import Observation
 @MainActor
 @Observable
 final class AppModel: DuxCapacitySampling {
+    private enum ScanRequestKey: Equatable {
+        case home
+        case subtree(sourceScanID: String, nodeID: UInt64)
+    }
     private(set) var engineState = EngineConnectionState.idle
     private(set) var volumeState = VolumeCapacityState.idle {
         didSet {
@@ -57,9 +61,11 @@ final class AppModel: DuxCapacitySampling {
     @ObservationIgnored
     private var pressurePolicyIsInvalidated = false
     @ObservationIgnored
-    private var homeScanDriverTask: Task<Void, Never>?
+    private var homeScanDriverTask: Task<AppScanRunOutcome, Never>?
     @ObservationIgnored
     private var activeHomeScanTask: (any HomeScanTask)?
+    @ObservationIgnored
+    private var activeScanRequest: ScanRequestKey?
     @ObservationIgnored
     private var homeScanGeneration: UInt64 = 0
     @ObservationIgnored
@@ -560,32 +566,63 @@ final class AppModel: DuxCapacitySampling {
     }
 
     func startHomeScan() async {
+        let service = homeScanService
+        _ = await startScan(request: .home, scope: .home) {
+            try await service.startHomeScan()
+        }
+    }
+
+    func startSubtreeScan(
+        sourceScanID: String,
+        nodeID: UInt64,
+        displayName: String,
+        using service: any DuxSnapshotSubtreeScanServing
+    ) async -> AppScanRunOutcome {
+        await startScan(
+            request: .subtree(sourceScanID: sourceScanID, nodeID: nodeID),
+            scope: .subtree(displayName: displayName)
+        ) {
+            try await service.startSubtreeScan(
+                sourceScanID: sourceScanID,
+                nodeID: nodeID
+            )
+        }
+    }
+
+    private func startScan(
+        request: ScanRequestKey,
+        scope: AppScanScope,
+        start: @escaping @Sendable () async throws -> HomeScanStartDisposition
+    ) async -> AppScanRunOutcome {
         guard !homeScanIsInvalidated else {
-            return
+            return .superseded
         }
         if let homeScanDriverTask {
-            await homeScanDriverTask.value
-            return
+            guard activeScanRequest == request else {
+                return .failed(.busy)
+            }
+            return await homeScanDriverTask.value
         }
 
         homeScanGeneration &+= 1
         let generation = homeScanGeneration
         homeScanCancellationRequested = false
         latestHomeScanProgress = nil
+        activeScanRequest = request
+        scanState.scope = scope
         scanState.phase = .queued
 
-        let service = homeScanService
         let clock = homeScanClock
         let driver = Task { @MainActor [weak self] in
             guard let self else {
-                return
+                return AppScanRunOutcome.superseded
             }
             do {
-                let started = try await service.startHomeScan()
+                let started = try await start()
                 let task = started.task
                 guard self.isCurrentHomeScan(generation) else {
                     _ = try? await task.requestCancellation()
-                    return
+                    return .superseded
                 }
                 self.activeHomeScanTask = task
                 if self.homeScanCancellationRequested {
@@ -596,34 +633,36 @@ final class AppModel: DuxCapacitySampling {
                     let poll = try await task.poll()
                     guard self.isCurrentHomeScan(generation) else {
                         _ = try? await task.requestCancellation()
-                        return
+                        return .superseded
                     }
-                    let terminal = self.publishHomeScanPoll(poll)
-                    if terminal {
+                    if let outcome = self.publishHomeScanPoll(poll, scope: scope) {
                         self.finishHomeScanDriver(generation: generation)
-                        return
+                        return outcome
                     }
                     try await clock.sleepUntilNextPoll()
                 }
                 _ = try? await task.requestCancellation()
+                return .superseded
             } catch is CancellationError {
-                return
+                return .superseded
             } catch {
                 guard self.isCurrentHomeScan(generation) else {
-                    return
+                    return .superseded
                 }
                 if let task = self.activeHomeScanTask {
                     _ = try? await task.requestCancellation()
                 }
                 guard self.isCurrentHomeScan(generation) else {
-                    return
+                    return .superseded
                 }
-                self.scanState.phase = .failed(Self.homeScanFailure(for: error))
+                let failure = Self.homeScanFailure(for: error)
+                self.scanState.phase = .failed(failure)
                 self.finishHomeScanDriver(generation: generation)
+                return .failed(failure)
             }
         }
         homeScanDriverTask = driver
-        await driver.value
+        return await driver.value
     }
 
     func cancelHomeScan() async {
@@ -645,7 +684,7 @@ final class AppModel: DuxCapacitySampling {
     func shutdownHomeScan() async {
         guard !homeScanIsInvalidated else {
             if let homeScanDriverTask {
-                await homeScanDriverTask.value
+                _ = await homeScanDriverTask.value
             }
             return
         }
@@ -657,11 +696,12 @@ final class AppModel: DuxCapacitySampling {
         let driver = homeScanDriverTask
         activeHomeScanTask = nil
         homeScanDriverTask = nil
+        activeScanRequest = nil
         if let task {
             _ = try? await task.requestCancellation()
         }
         driver?.cancel()
-        await driver?.value
+        _ = await driver?.value
     }
 
     private func publishVolumeRefresh(
@@ -814,7 +854,10 @@ final class AppModel: DuxCapacitySampling {
         !homeScanIsInvalidated && generation == homeScanGeneration
     }
 
-    private func publishHomeScanPoll(_ poll: HomeScanTaskPoll) -> Bool {
+    private func publishHomeScanPoll(
+        _ poll: HomeScanTaskPoll,
+        scope: AppScanScope
+    ) -> AppScanRunOutcome? {
         if let progress = poll.progress {
             latestHomeScanProgress = progress
         }
@@ -827,12 +870,12 @@ final class AppModel: DuxCapacitySampling {
             } else {
                 scanState.phase = .queued
             }
-            return false
+            return nil
         case .running:
             if homeScanCancellationRequested || poll.cancellationRequested {
                 homeScanCancellationRequested = true
                 scanState.phase = .cancellationRequested(latestHomeScanProgress)
-                return false
+                return nil
             }
             scanState.phase = switch poll.stage {
             case .queued: .queued
@@ -841,21 +884,24 @@ final class AppModel: DuxCapacitySampling {
             case .evaluating: .evaluating(latestHomeScanProgress)
             case .terminal: .failed(.invalidResponse)
             }
-            return poll.stage == .terminal
+            return poll.stage == .terminal ? .failed(.invalidResponse) : nil
         case .succeeded:
             guard let summary = poll.result?.successfulSummary else {
                 scanState.phase = .failed(.invalidResponse)
-                return true
+                return .failed(.invalidResponse)
             }
-            scanState.lastSuccessful = summary
+            if scope.isHome {
+                scanState.lastSuccessful = summary
+            }
             scanState.phase = .succeeded(summary)
-            return true
+            return .succeeded(summary)
         case .failed:
-            scanState.phase = .failed(Self.homeScanFailure(for: poll.failure))
-            return true
+            let failure = Self.homeScanFailure(for: poll.failure)
+            scanState.phase = .failed(failure)
+            return .failed(failure)
         case .cancelled:
             scanState.phase = .cancelled
-            return true
+            return .cancelled
         }
     }
 
@@ -865,6 +911,7 @@ final class AppModel: DuxCapacitySampling {
         }
         activeHomeScanTask = nil
         homeScanDriverTask = nil
+        activeScanRequest = nil
         homeScanCancellationRequested = false
     }
 

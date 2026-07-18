@@ -1429,6 +1429,18 @@ pub enum StartTaskError {
     InternalState,
 }
 
+/// Failure to derive and admit a scan from one exact Explorer review node.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum StartSubtreeScanError {
+    #[error("snapshot review belongs to a different engine session")]
+    ForeignReview,
+    #[error("snapshot review could not produce a current directory target: {0}")]
+    Review(#[from] super::snapshot_review::SnapshotReviewError),
+    #[error("subtree scan could not be admitted: {0}")]
+    Task(#[from] StartTaskError),
+}
+
 /// Path-free scan-root validation categories suitable for UI and FFI mapping.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]

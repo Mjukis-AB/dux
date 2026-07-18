@@ -5,6 +5,18 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Completed Milestone 4's scan-cancellation and subtree-refresh slice with FFI
+  contract v16. Snapshot Explorer can rescan its current directory by sending
+  only the exact retained review and node ID; Rust keeps the live path sealed,
+  requires an engine-owned live review and directory, and repeats device/inode
+  identity checks from admission through atomic snapshot publication. The scan
+  reuses the ordinary bounded poll/cancel task and produces a new standalone
+  immutable snapshot rooted at the selected folder rather than modifying the
+  historical parent. The macOS app keeps the old snapshot visible until the
+  exact result root, page, and treemap all validate, generation-fences every
+  navigation/reload/close race, preserves Home coverage as a separate baseline,
+  and exposes Rescan This Folder, Load Latest Snapshot, and accessible
+  progress/cancellation UI. No live path or cleanup authority crosses FFI.
 - Completed Milestone 4's storage-category visualization slice with FFI
   contract v15. Snapshot review nodes now carry a display-only category joined
   from the exact scan's immutable, validated candidate evaluation. Exact

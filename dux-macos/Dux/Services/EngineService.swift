@@ -54,6 +54,7 @@ protocol DuxSnapshotReviewLease: AnyObject, Sendable {
         nodeID: UInt64,
         purpose: ExplorerSnapshotLivePathPurpose
     ) async throws -> ExplorerResolvedLiveItem
+    func startSubtreeScan(nodeID: UInt64) async throws -> HomeScanStartDisposition
     func release() async
 }
 
@@ -64,12 +65,16 @@ extension DuxSnapshotReviewLease {
     ) async throws -> ExplorerResolvedLiveItem {
         throw ExplorerSnapshotLivePathError.unavailable
     }
+
+    func startSubtreeScan(nodeID _: UInt64) async throws -> HomeScanStartDisposition {
+        throw ExplorerSnapshotSubtreeScanError.unavailable
+    }
 }
 
 struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewServing,
     DuxSnapshotHistoryServing, DuxScanCoverageServing, HomeScanServing, Sendable
 {
-    fileprivate static let expectedFFIContractVersion: UInt32 = 15
+    fileprivate static let expectedFFIContractVersion: UInt32 = 16
     fileprivate static let expectedRecordVersion: UInt32 = 1
 
     private let state: EngineServiceState
@@ -590,6 +595,10 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         switch error {
         case .Closed: .closed
         case .InvalidRecordVersion: .invalidResponse
+        case .ForeignReview: .invalidResponse
+        case .ReviewExpired, .ReviewUnavailable, .SnapshotNodeNotFound,
+             .SnapshotNodeNotDirectory:
+            .rootUnavailable
         case .InvalidRoot: .invalidRoot
         case .RootMissing: .rootMissing
         case .RootAccessDenied: .rootAccessDenied
@@ -1354,6 +1363,36 @@ private final class FFIDuxSnapshotReviewLease: DuxSnapshotReviewLease, @unchecke
         }
     }
 
+    func startSubtreeScan(nodeID: UInt64) async throws -> HomeScanStartDisposition {
+        try await state.perform { state in
+            precondition(!Thread.isMainThread, "Blocking FFI work reached the main thread")
+            let engine: DuxEngine
+            do {
+                engine = try state.resolveEngine()
+            } catch let error as EngineServiceError {
+                throw Self.subtreeScanError(error)
+            }
+            do {
+                let start = try engine.startSubtreeScan(
+                    review: self.lease,
+                    request: SubtreeScanRequest(
+                        recordVersion: EngineService.expectedRecordVersion,
+                        nodeId: nodeID
+                    )
+                )
+                guard
+                    start.recordVersion == EngineService.expectedRecordVersion,
+                    start.disposition == .started
+                else {
+                    throw ExplorerSnapshotSubtreeScanError.invalidResponse
+                }
+                return .started(FFIHomeScanTask(task: start.task, state: state))
+            } catch let error as ScanError {
+                throw Self.subtreeScanError(error)
+            }
+        }
+    }
+
     func release() async {
         await state.performNonthrowing { _ in
             _ = try? self.lease.release()
@@ -1404,6 +1443,38 @@ private final class FFIDuxSnapshotReviewLease: DuxSnapshotReviewLease, @unchecke
             ExplorerSnapshotLivePathError.changedSinceScan
         case .SnapshotLivePathAccessDenied: ExplorerSnapshotLivePathError.accessDenied
         default: EngineService.serviceError(error)
+        }
+    }
+
+    private static func subtreeScanError(_ error: ScanError) -> Error {
+        switch error {
+        case .ReviewExpired: ExplorerSnapshotSubtreeScanError.reviewExpired
+        case .ForeignReview: ExplorerSnapshotSubtreeScanError.foreignReview
+        case .SnapshotNodeNotFound: ExplorerSnapshotSubtreeScanError.nodeNotFound
+        case .SnapshotNodeNotDirectory: ExplorerSnapshotSubtreeScanError.nodeNotDirectory
+        case .RootMissing, .RootAccessDenied, .RootNotDirectory, .RootSymlink,
+             .RootChanged, .RootIdentityUnavailable, .UnsupportedPlatform,
+             .RootUnavailable, .InvalidRoot:
+            ExplorerSnapshotSubtreeScanError.rootUnavailable
+        case .QueueFull, .Busy:
+            ExplorerSnapshotSubtreeScanError.busy
+        case .Closed, .ReviewUnavailable, .ReadOnlyStore, .StorageUnavailable,
+             .RegistryUnavailable, .TaskUnavailable, .EventHistoryUnavailable:
+            ExplorerSnapshotSubtreeScanError.unavailable
+        case .InvalidRecordVersion, .InputTooLarge, .WrongTaskKind, .InternalState:
+            ExplorerSnapshotSubtreeScanError.invalidResponse
+        }
+    }
+
+    private static func subtreeScanError(_ error: EngineServiceError) -> Error {
+        switch error {
+        case .closed, .unavailable:
+            ExplorerSnapshotSubtreeScanError.unavailable
+        case .retryable:
+            ExplorerSnapshotSubtreeScanError.busy
+        case .invalidCapacityObservation, .conflictingCapacityObservation,
+             .supersededCapacityObservation, .unexpected:
+            ExplorerSnapshotSubtreeScanError.invalidResponse
         }
     }
 }

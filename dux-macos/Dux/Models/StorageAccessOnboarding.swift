@@ -136,7 +136,7 @@ extension StorageAccessOnboardingPresentation {
     }
 
     private static func latestSummary(in state: AppScanState) -> AppScanSummary? {
-        if case let .succeeded(summary) = state.phase {
+        if case let .succeeded(summary) = state.phase, state.scope?.isHome != false {
             return summary
         }
         return state.lastSuccessful

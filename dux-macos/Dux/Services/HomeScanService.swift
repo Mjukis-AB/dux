@@ -27,6 +27,20 @@ enum HomeScanServiceError: Error, Equatable, Sendable {
     case invalidResponse
 }
 
+/// Exact failures while converting a historical review node into a new,
+/// standalone scan root. This boundary remains path-free: Swift receives no
+/// live path and cannot substitute a display name for Rust's identity check.
+enum ExplorerSnapshotSubtreeScanError: Error, Equatable, Sendable {
+    case reviewExpired
+    case foreignReview
+    case nodeNotFound
+    case nodeNotDirectory
+    case rootUnavailable
+    case busy
+    case unavailable
+    case invalidResponse
+}
+
 enum HomeScanTaskPhase: Equatable, Sendable {
     case queued
     case running
@@ -139,8 +153,25 @@ enum HomeScanStartDisposition: Sendable {
     }
 }
 
+enum AppScanRunOutcome: Equatable, Sendable {
+    case succeeded(AppScanSummary)
+    case cancelled
+    case failed(AppScanFailure)
+    case superseded
+}
+
 protocol HomeScanServing: Sendable {
     func startHomeScan() async throws -> HomeScanStartDisposition
+}
+
+/// Starts a scan from one exact retained snapshot directory. Implementations
+/// must keep the live path inside Rust and return only the ordinary opaque scan
+/// task; a historical display name is never a scan root.
+protocol DuxSnapshotSubtreeScanServing: Sendable {
+    func startSubtreeScan(
+        sourceScanID: String,
+        nodeID: UInt64
+    ) async throws -> HomeScanStartDisposition
 }
 
 protocol HomeScanPollingClock: Sendable {

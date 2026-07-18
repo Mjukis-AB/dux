@@ -269,6 +269,33 @@ actor DuxSnapshotReviewController {
         return item
     }
 
+    func startSubtreeScan(
+        sourceScanID: String,
+        nodeID: UInt64
+    ) async throws -> HomeScanStartDisposition {
+        guard !isShuttingDown else {
+            throw HomeScanServiceError.closed
+        }
+        guard let entry = leases[sourceScanID] else {
+            throw HomeScanServiceError.rootUnavailable
+        }
+        let start: HomeScanStartDisposition
+        do {
+            start = try await entry.lease.startSubtreeScan(nodeID: nodeID)
+        } catch {
+            await discardExpiredLeaseIfCurrent(error, scanID: sourceScanID, entry: entry)
+            throw Self.subtreeScanServiceError(error)
+        }
+        guard
+            !isShuttingDown,
+            leases[sourceScanID]?.generation == entry.generation
+        else {
+            _ = try? await start.task.requestCancellation()
+            throw CancellationError()
+        }
+        return start
+    }
+
     private func discardExpiredLeaseIfCurrent(
         _ error: Error,
         scanID: String,
@@ -290,6 +317,23 @@ actor DuxSnapshotReviewController {
             || error as? ExplorerSnapshotTreemapError == .reviewExpired
             || error as? ExplorerSnapshotLargeFilesError == .reviewExpired
             || error as? ExplorerSnapshotLivePathError == .reviewExpired
+            || error as? ExplorerSnapshotSubtreeScanError == .reviewExpired
+    }
+
+    private static func subtreeScanServiceError(_ error: Error) -> Error {
+        guard let error = error as? ExplorerSnapshotSubtreeScanError else {
+            return error
+        }
+        return switch error {
+        case .reviewExpired, .nodeNotFound, .nodeNotDirectory, .rootUnavailable:
+            HomeScanServiceError.rootUnavailable
+        case .busy:
+            HomeScanServiceError.busy
+        case .foreignReview, .invalidResponse:
+            HomeScanServiceError.invalidResponse
+        case .unavailable:
+            HomeScanServiceError.persistenceUnavailable
+        }
     }
 
     func renewNow() async {
@@ -382,3 +426,5 @@ actor DuxSnapshotReviewController {
         renewalTask = nil
     }
 }
+
+extension DuxSnapshotReviewController: DuxSnapshotSubtreeScanServing {}

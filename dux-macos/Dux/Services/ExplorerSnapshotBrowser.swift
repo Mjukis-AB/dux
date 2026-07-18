@@ -55,6 +55,27 @@ struct UnavailableDuxScanCoverageBrowser: DuxScanCoverageServing {
     }
 }
 
+@MainActor
+protocol ExplorerSubtreeScanDriving: AnyObject {
+    func startSubtreeScan(
+        sourceScanID: String,
+        nodeID: UInt64,
+        displayName: String,
+        using service: any DuxSnapshotSubtreeScanServing
+    ) async -> AppScanRunOutcome
+}
+
+extension AppModel: ExplorerSubtreeScanDriving {}
+
+private struct UnavailableDuxSnapshotSubtreeScanService: DuxSnapshotSubtreeScanServing {
+    func startSubtreeScan(
+        sourceScanID _: String,
+        nodeID _: UInt64
+    ) async throws -> HomeScanStartDisposition {
+        throw HomeScanServiceError.internalState
+    }
+}
+
 enum ExplorerSnapshotBrowserFailure: Equatable, Sendable {
     case noSnapshot
     case expired
@@ -207,11 +228,15 @@ final class ExplorerSnapshotBrowserModel {
     private(set) var isCoverageLoading = false
     private(set) var isLiveActionLoading = false
     private(set) var liveActionNotice: ExplorerLiveActionNotice?
+    private(set) var isSubtreeRefreshRunning = false
+    private(set) var subtreeRefreshNotice: ExplorerLiveActionNotice?
 
     private let reviews: any DuxSnapshotReviewBrowsing
     private let history: any DuxSnapshotHistoryServing
     private let coverage: any DuxScanCoverageServing
     private let liveActions: any ExplorerLiveFileActionPresenting
+    private let subtreeScans: any DuxSnapshotSubtreeScanServing
+    private let scanDriver: (any ExplorerSubtreeScanDriving)?
 
     @ObservationIgnored
     private var generation: UInt64 = 0
@@ -225,18 +250,25 @@ final class ExplorerSnapshotBrowserModel {
     private var coverageGeneration: UInt64 = 0
     @ObservationIgnored
     private var liveActionGeneration: UInt64 = 0
+    @ObservationIgnored
+    private var subtreeRefreshGeneration: UInt64 = 0
 
     init(
         reviews: any DuxSnapshotReviewBrowsing,
         history: any DuxSnapshotHistoryServing = UnavailableDuxSnapshotHistoryBrowser(),
         coverage: any DuxScanCoverageServing = UnavailableDuxScanCoverageBrowser(),
         liveActions: any ExplorerLiveFileActionPresenting =
-            UnavailableExplorerLiveFileActionPresenter()
+            UnavailableExplorerLiveFileActionPresenter(),
+        subtreeScans: any DuxSnapshotSubtreeScanServing =
+            UnavailableDuxSnapshotSubtreeScanService(),
+        scanDriver: (any ExplorerSubtreeScanDriving)? = nil
     ) {
         self.reviews = reviews
         self.history = history
         self.coverage = coverage
         self.liveActions = liveActions
+        self.subtreeScans = subtreeScans
+        self.scanDriver = scanDriver
     }
 
     var currentDirectory: ExplorerSnapshotNode? {
@@ -299,6 +331,16 @@ final class ExplorerSnapshotBrowserModel {
 
     var canQuickLookSelectedLiveItem: Bool {
         canUseLiveAction(selectedNode, requiresFile: true)
+    }
+
+    var canRefreshCurrentSubtree: Bool {
+        phase == .ready
+            && currentDirectory?.kind == .directory
+            && scanDriver != nil
+            && !isSubtreeRefreshRunning
+            && !isSwitchingSnapshot
+            && !isNavigating
+            && !isPaging
     }
 
     func openLatestIfNeeded() async {
@@ -820,6 +862,78 @@ final class ExplorerSnapshotBrowserModel {
         await revealTreemapCell(cell)
     }
 
+    func refreshCurrentSubtree() async {
+        guard
+            canRefreshCurrentSubtree,
+            let scanDriver,
+            let sourceScanID = scanID,
+            let sourceDirectory = currentDirectory
+        else {
+            return
+        }
+
+        subtreeRefreshGeneration &+= 1
+        let refreshOperation = subtreeRefreshGeneration
+        let sourceGeneration = generation
+        let sourceNodeID = sourceDirectory.id
+        let displayName = sourceDirectory.name.display
+        isSubtreeRefreshRunning = true
+        subtreeRefreshNotice = nil
+
+        let outcome = await scanDriver.startSubtreeScan(
+            sourceScanID: sourceScanID,
+            nodeID: sourceNodeID,
+            displayName: displayName,
+            using: subtreeScans
+        )
+        guard refreshOperation == subtreeRefreshGeneration else {
+            return
+        }
+        isSubtreeRefreshRunning = false
+
+        switch outcome {
+        case let .succeeded(summary):
+            guard summary.snapshotAvailable else {
+                subtreeRefreshNotice = Self.subtreeRefreshFailureNotice(.snapshotRejected)
+                return
+            }
+            guard
+                sourceGeneration == generation,
+                scanID == sourceScanID,
+                currentDirectory?.id == sourceNodeID,
+                phase == .ready,
+                !Task.isCancelled
+            else {
+                subtreeRefreshNotice = ExplorerLiveActionNotice(
+                    message: "The folder scan finished and is available in Recent Scans. This view was not replaced because you navigated elsewhere.",
+                    isFailure: false
+                )
+                return
+            }
+            await installCompletedSubtreeSnapshot(
+                scanID: summary.scanID,
+                sourceScanID: sourceScanID,
+                refreshOperation: refreshOperation
+            )
+        case .cancelled:
+            subtreeRefreshNotice = ExplorerLiveActionNotice(
+                message: "Folder scan stopped. The previous snapshot remains visible.",
+                isFailure: false
+            )
+        case let .failed(failure):
+            subtreeRefreshNotice = Self.subtreeRefreshFailureNotice(failure)
+        case .superseded:
+            subtreeRefreshNotice = ExplorerLiveActionNotice(
+                message: "The folder scan changed before it could update this view. The previous snapshot remains visible.",
+                isFailure: true
+            )
+        }
+    }
+
+    func dismissSubtreeRefreshNotice() {
+        subtreeRefreshNotice = nil
+    }
+
     func revealLiveItem(nodeID: UInt64? = nil) async {
         await performLiveAction(.reveal, requestedNodeID: nodeID)
     }
@@ -840,6 +954,7 @@ final class ExplorerSnapshotBrowserModel {
         activePresentationID = nil
         generation &+= 1
         historyGeneration &+= 1
+        subtreeRefreshGeneration &+= 1
         let retainedScanID = scanID
         clearContent()
         historyScans = []
@@ -847,10 +962,149 @@ final class ExplorerSnapshotBrowserModel {
         isHistoryLoading = false
         historyFailure = nil
         unavailableHistoricalScanIDs = []
+        isSubtreeRefreshRunning = false
+        subtreeRefreshNotice = nil
         phase = .idle
         if let retainedScanID {
             await reviews.release(scanID: retainedScanID)
         }
+    }
+
+    private func installCompletedSubtreeSnapshot(
+        scanID requestedScanID: String,
+        sourceScanID: String,
+        refreshOperation: UInt64
+    ) async {
+        guard
+            requestedScanID != sourceScanID,
+            refreshOperation == subtreeRefreshGeneration,
+            scanID == sourceScanID,
+            !isSwitchingSnapshot
+        else {
+            return
+        }
+
+        invalidateLiveAction()
+        generation &+= 1
+        let installOperation = generation
+        isSwitchingSnapshot = true
+        operationFailure = nil
+        var acquired = false
+        do {
+            try await reviews.acquire(scanID: requestedScanID)
+            acquired = true
+            guard
+                installOperation == generation,
+                refreshOperation == subtreeRefreshGeneration,
+                !Task.isCancelled
+            else {
+                await reviews.release(scanID: requestedScanID)
+                return
+            }
+            let root = try await reviews.rootNode(scanID: requestedScanID)
+            guard root.kind == .directory else {
+                throw ExplorerSnapshotNodeError.invalidResponse
+            }
+            let page = try await reviews.childNodes(
+                scanID: requestedScanID,
+                parentID: root.id,
+                sort: sort,
+                offset: 0,
+                limit: Self.pageLimit
+            )
+            guard page.totalChildren == root.childCount else {
+                throw ExplorerSnapshotNodeError.invalidResponse
+            }
+            let replacementTreemap = try await requiredTreemap(
+                scanID: requestedScanID,
+                directory: root,
+                page: page
+            )
+            guard
+                installOperation == generation,
+                refreshOperation == subtreeRefreshGeneration,
+                self.scanID == sourceScanID,
+                !Task.isCancelled
+            else {
+                await reviews.release(scanID: requestedScanID)
+                return
+            }
+
+            clearLargeFiles()
+            clearCoverage()
+            self.scanID = requestedScanID
+            // This is an exact result, but another global scan may become the
+            // newest while its review is being acquired and validated.
+            isLatestSnapshot = false
+            breadcrumbs = [root]
+            publishPage(page)
+            treemap = replacementTreemap
+            treemapFailure = nil
+            selection = nil
+            selectedNodeSnapshot = nil
+            phase = .ready
+            subtreeRefreshNotice = ExplorerLiveActionNotice(
+                message: "Folder scan complete. This refreshed folder is now a standalone snapshot root; its former parent remains in the previous snapshot.",
+                isFailure: false
+            )
+            await reviews.release(scanID: sourceScanID)
+            guard
+                installOperation == generation,
+                refreshOperation == subtreeRefreshGeneration,
+                self.scanID == requestedScanID
+            else {
+                return
+            }
+            isSwitchingSnapshot = false
+            async let historyReload: Void = reloadHistory()
+            if contentMode == .largeFiles {
+                await reloadLargeFiles()
+            } else if contentMode == .coverage {
+                await reloadCoverage()
+            }
+            await historyReload
+        } catch {
+            if acquired {
+                await reviews.release(scanID: requestedScanID)
+            }
+            guard
+                installOperation == generation,
+                refreshOperation == subtreeRefreshGeneration,
+                self.scanID == sourceScanID,
+                !Task.isCancelled
+            else {
+                return
+            }
+            isSwitchingSnapshot = false
+            subtreeRefreshNotice = ExplorerLiveActionNotice(
+                message: "The new folder snapshot could not be validated. The previous snapshot remains visible.",
+                isFailure: true
+            )
+        }
+    }
+
+    private func requiredTreemap(
+        scanID: String,
+        directory: ExplorerSnapshotNode,
+        page: ExplorerSnapshotNodePage
+    ) async throws -> ExplorerSnapshotTreemap {
+        let value = try await reviews.treemap(
+            scanID: scanID,
+            parentID: directory.id,
+            maxCells: Self.treemapCellLimit
+        )
+        let pageNodesByID = Dictionary(uniqueKeysWithValues: page.nodes.map { ($0.id, $0) })
+        guard
+            value.parentID == directory.id,
+            value.totalChildren == directory.childCount,
+            value.totalChildLogicalBytes == directory.logicalBytes,
+            value.cells.allSatisfy({ cell in
+                pageNodesByID[cell.id].map { $0 == cell.node } ?? true
+            })
+        else {
+            throw ExplorerSnapshotTreemapError.invalidResponse
+        }
+        return value
     }
 
     private func performLiveAction(
@@ -1267,6 +1521,29 @@ final class ExplorerSnapshotBrowserModel {
         case .unavailable:
             "The item is missing or cannot be safely matched to this scan."
         }
+    }
+
+    private static func subtreeRefreshFailureNotice(
+        _ failure: AppScanFailure
+    ) -> ExplorerLiveActionNotice {
+        let reason = switch failure {
+        case .busy:
+            "Another scan is already using this location."
+        case .rootUnavailable:
+            "The current folder no longer matches the retained snapshot."
+        case .storageUnavailable, .incompatibleStorage:
+            "Snapshot storage is unavailable for this scan."
+        case .snapshotRejected:
+            "The scan finished without a usable replacement snapshot."
+        case .outcomeUnknown:
+            "DUX could not confirm whether the folder scan completed."
+        case .closed, .taskExpired, .scanFailed, .invalidResponse, .unexpected:
+            "The folder scan could not finish."
+        }
+        return ExplorerLiveActionNotice(
+            message: "\(reason) The previous snapshot remains visible.",
+            isFailure: true
+        )
     }
 
     private static func failure(for error: Error) -> ExplorerSnapshotBrowserFailure {

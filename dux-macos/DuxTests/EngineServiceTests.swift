@@ -57,7 +57,7 @@ final class EngineServiceTests: XCTestCase {
         // DUX-DESTRUCTIVE: allow=test-swift-retry-obstruction-remove -- remove only this test fixture's deliberate file obstruction
         try FileManager.default.removeItem(at: dataRoot)
         let status = try await service.loadStatus()
-        XCTAssertEqual(status.ffiContractVersion, 15)
+        XCTAssertEqual(status.ffiContractVersion, 16)
         let closed = await service.close()
         XCTAssertTrue(closed)
     }
@@ -67,7 +67,7 @@ final class EngineServiceTests: XCTestCase {
         let result = try await EngineService(engine: fixture.engine).loadStatus()
 
         XCTAssertEqual(result.libraryVersion, "0.5.0")
-        XCTAssertEqual(result.ffiContractVersion, 15)
+        XCTAssertEqual(result.ffiContractVersion, 16)
         XCTAssertTrue(result.executedOffMainThread)
     }
 
@@ -262,6 +262,45 @@ final class EngineServiceTests: XCTestCase {
             nestedLiveItem.exactTextPath,
             canonicalTestPath(folder.appending(path: "nested.txt"))
         )
+
+        let subtreeTask = try await review.startSubtreeScan(nodeID: folderNode.id).task
+        let subtreeDeadline = ContinuousClock.now + .seconds(5)
+        let subtreeTerminal: HomeScanTaskPoll
+        while true {
+            let poll = try await subtreeTask.poll()
+            if poll.phase.isTerminal {
+                subtreeTerminal = poll
+                break
+            }
+            XCTAssertLessThan(ContinuousClock.now, subtreeDeadline)
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(subtreeTerminal.phase, .succeeded)
+        let subtreeResult = try XCTUnwrap(subtreeTerminal.result)
+        XCTAssertEqual(subtreeResult.fileCount, 1)
+        XCTAssertEqual(subtreeResult.directoryCount, 1)
+        XCTAssertNotEqual(subtreeResult.scanID, result.scanID)
+
+        // Starting a standalone folder snapshot must not invalidate or mutate
+        // the source review that supplied the node identity.
+        let retainedSourceRoot = try await review.rootNode()
+        XCTAssertEqual(retainedSourceRoot, rootNode)
+        let subtreeReview = try await service.acquireExplorerReview(
+            scanID: subtreeResult.scanID
+        )
+        let subtreeRoot = try await subtreeReview.rootNode()
+        XCTAssertEqual(subtreeRoot.kind, .directory)
+        XCTAssertEqual(subtreeRoot.name.display, canonicalTestPath(folder))
+        XCTAssertEqual(subtreeRoot.childCount, 1)
+        let subtreePage = try await subtreeReview.childNodes(
+            parentID: subtreeRoot.id,
+            sort: .nameAscending,
+            offset: 0,
+            limit: 50
+        )
+        XCTAssertEqual(subtreePage.nodes.map(\.name.display), ["nested.txt"])
+        await subtreeReview.release()
+
         do {
             _ = try await review.treemap(parentID: rootNode.id, maxCells: 0)
             XCTFail("Expected an invalid treemap budget")
@@ -379,6 +418,11 @@ final class EngineServiceTests: XCTestCase {
         let cases: [(ScanError, HomeScanServiceError)] = [
             (.Closed, .closed),
             (.InvalidRecordVersion, .invalidResponse),
+            (.ForeignReview, .invalidResponse),
+            (.ReviewExpired, .rootUnavailable),
+            (.ReviewUnavailable, .rootUnavailable),
+            (.SnapshotNodeNotFound, .rootUnavailable),
+            (.SnapshotNodeNotDirectory, .rootUnavailable),
             (.InvalidRoot, .invalidRoot),
             (.RootMissing, .rootMissing),
             (.RootAccessDenied, .rootAccessDenied),
@@ -676,7 +720,7 @@ final class EngineServiceTests: XCTestCase {
             weakEngine = engine
 
             XCTAssertEqual(liveEngineInstanceCount(), baseline + 1)
-            XCTAssertEqual(try engine.libraryVersion().ffiContractVersion, 15)
+            XCTAssertEqual(try engine.libraryVersion().ffiContractVersion, 16)
             XCTAssertTrue(engine.close())
             XCTAssertTrue(engine.close())
             XCTAssertThrowsError(try engine.formatSize(bytes: 1_536)) { error in

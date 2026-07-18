@@ -77,6 +77,32 @@ final class StorageAccessOnboardingTests: XCTestCase {
         }
     }
 
+    func testSubtreeSuccessCannotOverrideMeasuredHomeAccessGuidance() {
+        let homeState = scanState(coverage: .partial)
+        let subtree = AppScanSummary(
+            scanID: "scan-folder",
+            startedAt: Date(timeIntervalSince1970: 3),
+            completedAt: Date(timeIntervalSince1970: 4),
+            progress: ScanProgressFacts(
+                files: 1,
+                directories: 1,
+                knownAllocatedBytes: 1,
+                issueCount: 0
+            ),
+            logicalBytes: 1,
+            coverage: .complete,
+            coveragePermille: 1_000,
+            snapshotAvailable: true
+        )
+        let state = AppScanState(
+            phase: .succeeded(subtree),
+            lastSuccessful: homeState.lastSuccessful,
+            scope: .subtree(displayName: "Caches")
+        )
+
+        XCTAssertTrue(presentation(scanState: state).showsBroaderAnalysisAction)
+    }
+
     func testRequestedGuidanceNeverClaimsFullDiskAccessStatus() throws {
         let states: [StorageAccessProbeState] = [
             .idle,

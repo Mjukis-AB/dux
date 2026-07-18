@@ -26,41 +26,76 @@ extension ExplorerScanPresentation {
             return nil
         case .queued:
             return progress(
-                title: String(localized: "Waiting to scan Home…", locale: locale),
+                title: scopeTitle(
+                    state: scanState,
+                    home: "Waiting to scan Home…",
+                    subtree: "Waiting to refresh",
+                    locale: locale
+                ),
                 facts: nil,
+                scope: scanState.scope,
                 locale: locale
             )
         case let .scanning(facts):
             return progress(
-                title: String(localized: "Scanning Home…", locale: locale),
+                title: scopeTitle(
+                    state: scanState,
+                    home: "Scanning Home…",
+                    subtree: "Refreshing",
+                    locale: locale
+                ),
                 facts: facts,
+                scope: scanState.scope,
                 locale: locale
             )
         case let .finalizing(facts):
             return progress(
-                title: String(localized: "Preparing Home scan results…", locale: locale),
+                title: scopeTitle(
+                    state: scanState,
+                    home: "Preparing Home scan results…",
+                    subtree: "Preparing refreshed snapshot for",
+                    locale: locale
+                ),
                 facts: facts,
+                scope: scanState.scope,
                 locale: locale
             )
         case let .evaluating(facts):
             return progress(
-                title: String(localized: "Classifying Home scan results…", locale: locale),
+                title: scopeTitle(
+                    state: scanState,
+                    home: "Classifying Home scan results…",
+                    subtree: "Classifying refreshed snapshot for",
+                    locale: locale
+                ),
                 facts: facts,
+                scope: scanState.scope,
                 locale: locale
             )
         case let .cancellationRequested(facts):
             return progress(
-                title: String(localized: "Stopping Home scan…", locale: locale),
+                title: scopeTitle(
+                    state: scanState,
+                    home: "Stopping Home scan…",
+                    subtree: "Stopping refresh of",
+                    locale: locale
+                ),
                 facts: facts,
+                scope: scanState.scope,
                 locale: locale
             )
         case let .succeeded(summary):
             return Self(
                 style: .success,
-                title: String(localized: "Home scan finished", locale: locale),
+                title: scopeTitle(
+                    state: scanState,
+                    home: "Home scan finished",
+                    subtree: "Refreshed snapshot ready for",
+                    locale: locale
+                ),
                 detail: [
                     completedText(at: summary.completedAt, now: now, locale: locale),
-                    factsText(summary.progress, locale: locale),
+                    factsText(summary.progress, scope: scanState.scope, locale: locale),
                 ].joined(separator: " · "),
                 progressAccessibilityValue: nil,
                 showsIndeterminateProgress: false
@@ -68,7 +103,12 @@ extension ExplorerScanPresentation {
         case .cancelled:
             return Self(
                 style: .cancelled,
-                title: String(localized: "Home scan stopped", locale: locale),
+                title: scopeTitle(
+                    state: scanState,
+                    home: "Home scan stopped",
+                    subtree: "Folder refresh stopped for",
+                    locale: locale
+                ),
                 detail: retainedResultText(
                     hasPrevious: scanState.lastSuccessful != nil,
                     locale: locale
@@ -79,7 +119,12 @@ extension ExplorerScanPresentation {
         case let .failed(failure):
             return Self(
                 style: .failure,
-                title: String(localized: "Home scan couldn’t finish", locale: locale),
+                title: scopeTitle(
+                    state: scanState,
+                    home: "Home scan couldn’t finish",
+                    subtree: "Folder refresh couldn’t finish for",
+                    locale: locale
+                ),
                 detail: [
                     failureDetail(failure, locale: locale),
                     retainedResultText(
@@ -96,9 +141,10 @@ extension ExplorerScanPresentation {
     private static func progress(
         title: String,
         facts: ScanProgressFacts?,
+        scope: AppScanScope?,
         locale: Locale
     ) -> Self {
-        let detail = facts.map { factsText($0, locale: locale) }
+        let detail = facts.map { factsText($0, scope: scope, locale: locale) }
         return Self(
             style: .progress,
             title: title,
@@ -110,21 +156,38 @@ extension ExplorerScanPresentation {
 
     private static func factsText(
         _ facts: ScanProgressFacts,
+        scope: AppScanScope? = .home,
         locale: Locale
     ) -> String {
         let files = facts.files.formatted(.number.locale(locale))
         let directories = facts.directories.formatted(.number.locale(locale))
-        let allocation = facts.knownAllocatedBytes.map {
-            String(
-                localized: "\(MenuBarCapacityFormatter.gib($0, locale: locale)) allocated in Home",
-                locale: locale
-            )
-        } ?? String(localized: "Home allocation unavailable", locale: locale)
+        let allocation = facts.knownAllocatedBytes.map { bytes in
+            let value = MenuBarCapacityFormatter.gib(bytes, locale: locale)
+            return scope?.isHome == false
+                ? String(localized: "\(value) allocated in selected folder", locale: locale)
+                : String(localized: "\(value) allocated in Home", locale: locale)
+        } ?? (scope?.isHome == false
+            ? String(localized: "Selected-folder allocation unavailable", locale: locale)
+            : String(localized: "Home allocation unavailable", locale: locale))
         let issues = facts.issueCount.formatted(.number.locale(locale))
         return String(
             localized: "\(files) files · \(directories) folders · \(allocation) · \(issues) scan issues",
             locale: locale
         )
+    }
+
+    private static func scopeTitle(
+        state: AppScanState,
+        home: String.LocalizationValue,
+        subtree: String.LocalizationValue,
+        locale: Locale
+    ) -> String {
+        switch state.scope {
+        case let .subtree(displayName):
+            return "\(String(localized: subtree, locale: locale)) “\(displayName)”"
+        case .home, nil:
+            return String(localized: home, locale: locale)
+        }
     }
 
     private static func completedText(

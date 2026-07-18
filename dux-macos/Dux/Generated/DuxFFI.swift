@@ -613,6 +613,14 @@ public protocol DuxEngineProtocol: AnyObject, Sendable {
 
     func startScan(request: ScanRequest) throws  -> ScanStart
 
+    /**
+     * Start a standalone immutable scan rooted at one directory from this
+     * engine's exact Explorer review. The resolved current path remains
+     * sealed inside Rust and the returned task uses the ordinary scan poll and
+     * cancellation contract.
+     */
+    func startSubtreeScan(review: SnapshotReviewSession, request: SubtreeScanRequest) throws  -> ScanStart
+
 }
 open class DuxEngine: DuxEngineProtocol, @unchecked Sendable {
     fileprivate let handle: UInt64
@@ -798,6 +806,22 @@ open func startScan(request: ScanRequest)throws  -> ScanStart  {
     uniffi_dux_ffi_fn_method_duxengine_start_scan(
             self.uniffiCloneHandle(),
         FfiConverterTypeScanRequest_lower(request),$0
+    )
+})
+}
+
+    /**
+     * Start a standalone immutable scan rooted at one directory from this
+     * engine's exact Explorer review. The resolved current path remains
+     * sealed inside Rust and the returned task uses the ordinary scan poll and
+     * cancellation contract.
+     */
+open func startSubtreeScan(review: SnapshotReviewSession, request: SubtreeScanRequest)throws  -> ScanStart  {
+    return try  FfiConverterTypeScanStart_lift(try rustCallWithError(FfiConverterTypeScanError_lift) {
+    uniffi_dux_ffi_fn_method_duxengine_start_subtree_scan(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeSnapshotReviewSession_lower(review),
+        FfiConverterTypeSubtreeScanRequest_lower(request),$0
     )
 })
 }
@@ -3941,6 +3965,65 @@ public func FfiConverterTypeStartupVolumeStatus_lower(_ value: StartupVolumeStat
 }
 
 
+/**
+ * Versioned, path-free request to rescan one directory selected from an exact
+ * retained review. Rust resolves and revalidates the node; names and paths are
+ * never accepted from Swift.
+ */
+public struct SubtreeScanRequest: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let nodeId: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, nodeId: UInt64) {
+        self.recordVersion = recordVersion
+        self.nodeId = nodeId
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SubtreeScanRequest: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSubtreeScanRequest: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SubtreeScanRequest {
+        return
+            try SubtreeScanRequest(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                nodeId: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SubtreeScanRequest, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterUInt64.write(value.nodeId, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSubtreeScanRequest_lift(_ buf: RustBuffer) throws -> SubtreeScanRequest {
+    return try FfiConverterTypeSubtreeScanRequest.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSubtreeScanRequest_lower(_ value: SubtreeScanRequest) -> RustBuffer {
+    return FfiConverterTypeSubtreeScanRequest.lower(value)
+}
+
+
 public enum EngineError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
 
 
@@ -5772,6 +5855,11 @@ public enum ScanError: Swift.Error, Equatable, Hashable, Foundation.LocalizedErr
 
     case Closed
     case InvalidRecordVersion
+    case ForeignReview
+    case ReviewExpired
+    case ReviewUnavailable
+    case SnapshotNodeNotFound
+    case SnapshotNodeNotDirectory
     case InvalidRoot
     case RootMissing
     case RootAccessDenied
@@ -5822,25 +5910,30 @@ public struct FfiConverterTypeScanError: FfiConverterRustBuffer {
 
         case 1: return .Closed
         case 2: return .InvalidRecordVersion
-        case 3: return .InvalidRoot
-        case 4: return .RootMissing
-        case 5: return .RootAccessDenied
-        case 6: return .RootNotDirectory
-        case 7: return .RootSymlink
-        case 8: return .RootChanged
-        case 9: return .RootIdentityUnavailable
-        case 10: return .UnsupportedPlatform
-        case 11: return .RootUnavailable
-        case 12: return .QueueFull
-        case 13: return .Busy
-        case 14: return .InputTooLarge
-        case 15: return .ReadOnlyStore
-        case 16: return .StorageUnavailable
-        case 17: return .RegistryUnavailable
-        case 18: return .TaskUnavailable
-        case 19: return .EventHistoryUnavailable
-        case 20: return .WrongTaskKind
-        case 21: return .InternalState
+        case 3: return .ForeignReview
+        case 4: return .ReviewExpired
+        case 5: return .ReviewUnavailable
+        case 6: return .SnapshotNodeNotFound
+        case 7: return .SnapshotNodeNotDirectory
+        case 8: return .InvalidRoot
+        case 9: return .RootMissing
+        case 10: return .RootAccessDenied
+        case 11: return .RootNotDirectory
+        case 12: return .RootSymlink
+        case 13: return .RootChanged
+        case 14: return .RootIdentityUnavailable
+        case 15: return .UnsupportedPlatform
+        case 16: return .RootUnavailable
+        case 17: return .QueueFull
+        case 18: return .Busy
+        case 19: return .InputTooLarge
+        case 20: return .ReadOnlyStore
+        case 21: return .StorageUnavailable
+        case 22: return .RegistryUnavailable
+        case 23: return .TaskUnavailable
+        case 24: return .EventHistoryUnavailable
+        case 25: return .WrongTaskKind
+        case 26: return .InternalState
 
          default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -5861,80 +5954,100 @@ public struct FfiConverterTypeScanError: FfiConverterRustBuffer {
             writeInt(&buf, Int32(2))
 
 
-        case .InvalidRoot:
+        case .ForeignReview:
             writeInt(&buf, Int32(3))
 
 
-        case .RootMissing:
+        case .ReviewExpired:
             writeInt(&buf, Int32(4))
 
 
-        case .RootAccessDenied:
+        case .ReviewUnavailable:
             writeInt(&buf, Int32(5))
 
 
-        case .RootNotDirectory:
+        case .SnapshotNodeNotFound:
             writeInt(&buf, Int32(6))
 
 
-        case .RootSymlink:
+        case .SnapshotNodeNotDirectory:
             writeInt(&buf, Int32(7))
 
 
-        case .RootChanged:
+        case .InvalidRoot:
             writeInt(&buf, Int32(8))
 
 
-        case .RootIdentityUnavailable:
+        case .RootMissing:
             writeInt(&buf, Int32(9))
 
 
-        case .UnsupportedPlatform:
+        case .RootAccessDenied:
             writeInt(&buf, Int32(10))
 
 
-        case .RootUnavailable:
+        case .RootNotDirectory:
             writeInt(&buf, Int32(11))
 
 
-        case .QueueFull:
+        case .RootSymlink:
             writeInt(&buf, Int32(12))
 
 
-        case .Busy:
+        case .RootChanged:
             writeInt(&buf, Int32(13))
 
 
-        case .InputTooLarge:
+        case .RootIdentityUnavailable:
             writeInt(&buf, Int32(14))
 
 
-        case .ReadOnlyStore:
+        case .UnsupportedPlatform:
             writeInt(&buf, Int32(15))
 
 
-        case .StorageUnavailable:
+        case .RootUnavailable:
             writeInt(&buf, Int32(16))
 
 
-        case .RegistryUnavailable:
+        case .QueueFull:
             writeInt(&buf, Int32(17))
 
 
-        case .TaskUnavailable:
+        case .Busy:
             writeInt(&buf, Int32(18))
 
 
-        case .EventHistoryUnavailable:
+        case .InputTooLarge:
             writeInt(&buf, Int32(19))
 
 
-        case .WrongTaskKind:
+        case .ReadOnlyStore:
             writeInt(&buf, Int32(20))
 
 
-        case .InternalState:
+        case .StorageUnavailable:
             writeInt(&buf, Int32(21))
+
+
+        case .RegistryUnavailable:
+            writeInt(&buf, Int32(22))
+
+
+        case .TaskUnavailable:
+            writeInt(&buf, Int32(23))
+
+
+        case .EventHistoryUnavailable:
+            writeInt(&buf, Int32(24))
+
+
+        case .WrongTaskKind:
+            writeInt(&buf, Int32(25))
+
+
+        case .InternalState:
+            writeInt(&buf, Int32(26))
 
         }
     }
@@ -7733,6 +7846,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_start_scan() != 56895) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_duxengine_start_subtree_scan() != 13545) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_maintenancetask_cancel() != 6237) {

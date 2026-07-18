@@ -7,8 +7,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::domain::{CandidateCategory, ScanId};
 use crate::path_validation::{
-    CanonicalPathError, FilesystemEntryKind, capture_path_snapshot, capture_scan_root,
-    validate_cleanup_path, validate_scan_root,
+    CanonicalPathError, FilesystemEntryKind, FilesystemIdentity, capture_path_snapshot,
+    capture_scan_root, validate_cleanup_path, validate_scan_root,
 };
 use crate::persistence::HistoryErrorKind;
 use crate::persistence::snapshot::{
@@ -279,6 +279,16 @@ pub struct SnapshotReviewLiveTarget {
     pub path: PathBuf,
 }
 
+/// Unforgeable owner shared by one engine and the reviews it created.
+pub(super) struct SnapshotReviewOwner;
+
+/// Current, no-follow directory evidence sealed inside the core. The path is
+/// never transported and the identity must be revalidated by the scan worker.
+pub(super) struct SnapshotReviewSubtreeTarget {
+    pub(super) path: PathBuf,
+    pub(super) identity: FilesystemIdentity,
+}
+
 /// Stable, path-free failures from an Explorer snapshot-review session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
@@ -353,6 +363,7 @@ pub enum SnapshotReviewReleaseOutcome {
 /// explicitly release it when review ends.
 #[must_use = "retain the session while Explorer is reviewing the snapshot"]
 pub struct SnapshotReviewSession {
+    owner: Arc<SnapshotReviewOwner>,
     scan_id: ScanId,
     lease: Option<StoredReviewLease>,
     document: Option<StoredReviewDocument>,
@@ -368,11 +379,13 @@ struct SortedChildCache {
 
 impl SnapshotReviewSession {
     pub(super) fn new(
+        owner: Arc<SnapshotReviewOwner>,
         scan_id: ScanId,
         lease: StoredReviewLease,
         category_roots: Vec<SnapshotReviewCategoryRoot>,
     ) -> Self {
         Self {
+            owner,
             scan_id,
             lease: Some(lease),
             document: None,
@@ -383,6 +396,52 @@ impl SnapshotReviewSession {
 
     pub fn scan_id(&self) -> &ScanId {
         &self.scan_id
+    }
+
+    pub(super) fn belongs_to(&self, owner: &Arc<SnapshotReviewOwner>) -> bool {
+        Arc::ptr_eq(&self.owner, owner)
+    }
+
+    /// Resolve a historical directory into a sealed current scan target. This
+    /// deliberately reuses the strict live-target ancestry/identity checks but
+    /// does not expose the resulting path outside the Rust core.
+    pub(super) fn subtree_scan_target(
+        &mut self,
+        node_id: u64,
+    ) -> Result<SnapshotReviewSubtreeTarget, SnapshotReviewError> {
+        self.ensure_document(SystemTime::now())?;
+        let document = self
+            .document
+            .as_deref()
+            .ok_or(SnapshotReviewError::InternalState)?;
+        let node_index = usize::try_from(node_id).map_err(|_| SnapshotReviewError::NodeNotFound)?;
+        let expected_identity = document
+            .nodes
+            .get(node_index)
+            .filter(|node| node.id == node_id)
+            .ok_or(SnapshotReviewError::NodeNotFound)?
+            .unix_identity
+            .ok_or(SnapshotReviewError::LivePathUnavailable)?;
+        let target =
+            resolve_live_target(document, node_id, SnapshotReviewLiveTargetPurpose::Reveal)?;
+        if target.kind != SnapshotReviewLiveTargetKind::Directory {
+            return Err(SnapshotReviewError::NodeNotDirectory);
+        }
+        let lexical = validate_scan_root(&target.path)
+            .map_err(|_| SnapshotReviewError::LivePathUnavailable)?;
+        let current = capture_scan_root(lexical).map_err(map_live_path_error)?;
+        if current.identity().volume() != expected_identity.device()
+            || current.identity().object() != u128::from(expected_identity.inode())
+        {
+            return Err(SnapshotReviewError::LivePathChanged);
+        }
+        // The additional root capture both supplies the worker fence and
+        // closes the interval after descendant validation.
+        self.ensure_document(SystemTime::now())?;
+        Ok(SnapshotReviewSubtreeTarget {
+            path: current.canonical_path().to_path_buf(),
+            identity: current.identity(),
+        })
     }
 
     pub fn expires_at(&self) -> Result<SystemTime, SnapshotReviewError> {

@@ -34,8 +34,8 @@ use super::settings::{
 };
 use super::snapshot_review::{
     MAX_SNAPSHOT_REVIEW_CATEGORY_BYTES, MAX_SNAPSHOT_REVIEW_CATEGORY_ROOTS,
-    SnapshotReviewCategoryRoot, SnapshotReviewError, SnapshotReviewSession, category_path_bytes,
-    map_repository_error as map_snapshot_review_error,
+    SnapshotReviewCategoryRoot, SnapshotReviewError, SnapshotReviewOwner, SnapshotReviewSession,
+    category_path_bytes, map_repository_error as map_snapshot_review_error,
 };
 use super::task::{
     CancelOutcome, CandidateEvaluationTaskFailureKind, CandidateEvaluationTaskStatus,
@@ -56,8 +56,8 @@ use super::task::{
     SnapshotTerminalTempMaintenanceResult, SnapshotTerminalTempMaintenanceStartOutcome,
     SnapshotUnleasedTempMaintenanceFailureKind, SnapshotUnleasedTempMaintenanceOutcome,
     SnapshotUnleasedTempMaintenanceResult, SnapshotUnleasedTempMaintenanceStartOutcome,
-    StartTaskError, TaskAccessError, TaskEvent, TaskEventBatch, TaskEventKind, TaskFailureKind,
-    TaskId, TaskKind, TaskPhase, TaskSnapshot,
+    StartSubtreeScanError, StartTaskError, TaskAccessError, TaskEvent, TaskEventBatch,
+    TaskEventKind, TaskFailureKind, TaskId, TaskKind, TaskPhase, TaskSnapshot,
 };
 use crate::domain::{
     CANDIDATE_CATALOG_SCHEMA_VERSION, CANDIDATE_CATALOG_SHA256, CANDIDATE_CONTEXT_FORMAT_VERSION,
@@ -65,6 +65,7 @@ use crate::domain::{
     ScanId, candidate_evaluation_context_digest_sha256, evaluate_completed_scan_candidates,
     validate_bundled_candidate_catalog,
 };
+use crate::path_validation::{FilesystemIdentity, capture_scan_root, validate_scan_root};
 use crate::persistence::snapshot::from_scan::prepare_completed_scan;
 use crate::persistence::snapshot::{
     HostValue, SnapshotCodecErrorKind, SnapshotOrphanReconciliationBatchOutcome,
@@ -93,7 +94,10 @@ use crate::persistence::{
     SnapshotRetentionCapSetting, SnapshotRetentionCapSettingSource,
     SnapshotRetentionCapSettingUpdate,
 };
-use crate::scanner::{CancellationToken, ScanConfig, ScanMessage, ScanTermination, Scanner};
+use crate::scanner::{
+    CancellationToken, ScanConfig, ScanMessage, ScanObjectIdentity, ScanTermination, Scanner,
+};
+use crate::tree::NodeId;
 
 const FORMAT_BATCH_LIMIT: usize = 256;
 
@@ -722,6 +726,7 @@ struct EngineInner {
     config: EngineConfig,
     store: Arc<StoreCoordinator>,
     snapshots: Arc<SnapshotRepository>,
+    snapshot_review_owner: Arc<SnapshotReviewOwner>,
     startup_volume_pressure: Mutex<super::volume_status::StartupVolumePressureBaseline>,
     shared: Arc<Shared>,
     workers: Mutex<Option<Vec<JoinHandle<()>>>>,
@@ -811,6 +816,7 @@ impl EngineHandle {
                 config,
                 store,
                 snapshots,
+                snapshot_review_owner: Arc::new(SnapshotReviewOwner),
                 startup_volume_pressure: Mutex::new(
                     super::volume_status::StartupVolumePressureBaseline::new(),
                 ),
@@ -941,6 +947,7 @@ impl EngineHandle {
             return Err(SnapshotReviewError::Closed);
         }
         Ok(SnapshotReviewSession::new(
+            Arc::clone(&self.inner.snapshot_review_owner),
             scan_id.clone(),
             lease,
             category_roots,
@@ -2436,6 +2443,94 @@ impl EngineHandle {
         self.start_scan_with_hooks(root, |_| {}, || {}, || {})
     }
 
+    /// Start one standalone immutable scan rooted at a directory selected from
+    /// this engine's exact Explorer review. The resolved path remains sealed
+    /// inside Rust and is fenced by its current filesystem identity.
+    pub fn start_subtree_scan(
+        &self,
+        review: &mut SnapshotReviewSession,
+        node_id: u64,
+    ) -> Result<TaskId, StartSubtreeScanError> {
+        self.start_subtree_scan_with_hooks(review, node_id, |_| {}, || {}, || {})
+    }
+
+    #[cfg(test)]
+    fn start_subtree_scan_with_before_traversal_hook(
+        &self,
+        review: &mut SnapshotReviewSession,
+        node_id: u64,
+        before_traversal: impl FnOnce(&ScanId) + Send + 'static,
+    ) -> Result<TaskId, StartSubtreeScanError> {
+        self.start_subtree_scan_with_hooks(review, node_id, before_traversal, || {}, || {})
+    }
+
+    #[cfg(test)]
+    fn start_subtree_scan_with_before_candidate_persistence_hook(
+        &self,
+        review: &mut SnapshotReviewSession,
+        node_id: u64,
+        before_candidate_persistence: impl FnOnce() + Send + 'static,
+    ) -> Result<TaskId, StartSubtreeScanError> {
+        self.start_subtree_scan_with_hooks(
+            review,
+            node_id,
+            |_| {},
+            || {},
+            before_candidate_persistence,
+        )
+    }
+
+    fn start_subtree_scan_with_hooks(
+        &self,
+        review: &mut SnapshotReviewSession,
+        node_id: u64,
+        before_traversal: impl FnOnce(&ScanId) + Send + 'static,
+        before_candidate_evaluation: impl FnOnce() + Send + 'static,
+        before_candidate_persistence: impl FnOnce() + Send + 'static,
+    ) -> Result<TaskId, StartSubtreeScanError> {
+        if !review.belongs_to(&self.inner.snapshot_review_owner) {
+            return Err(StartSubtreeScanError::ForeignReview);
+        }
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(StartTaskError::Closed.into());
+        }
+        let target = review.subtree_scan_target(node_id)?;
+        let status = self
+            .inner
+            .store
+            .status()
+            .map_err(|_| StartTaskError::PersistenceUnavailable)?;
+        if !matches!(
+            status.access,
+            crate::persistence::DatabaseAccess::ReadWriteCurrent
+        ) {
+            return Err(StartTaskError::ReadOnlyStore.into());
+        }
+        let store = Arc::clone(&self.inner.store);
+        let snapshots = Arc::clone(&self.inner.snapshots);
+        let root = target.path;
+        let expected_identity = target.identity;
+        self.submit(
+            TaskKind::Scan,
+            Some(root.clone()),
+            Box::new(move |context| {
+                run_scan_task(
+                    context,
+                    AdmittedScanRoot {
+                        path: root,
+                        expected_identity: Some(expected_identity),
+                    },
+                    store,
+                    snapshots,
+                    before_traversal,
+                    before_candidate_evaluation,
+                    before_candidate_persistence,
+                )
+            }),
+        )
+        .map_err(StartSubtreeScanError::from)
+    }
+
     #[cfg(test)]
     fn start_scan_with_hook(
         &self,
@@ -2472,7 +2567,10 @@ impl EngineHandle {
             Box::new(move |context| {
                 run_scan_task(
                     context,
-                    canonical_root,
+                    AdmittedScanRoot {
+                        path: canonical_root,
+                        expected_identity: None,
+                    },
                     store,
                     snapshots,
                     before_traversal,
@@ -4857,16 +4955,27 @@ const fn public_candidate_evaluation_failure(
     }
 }
 
+struct AdmittedScanRoot {
+    path: PathBuf,
+    expected_identity: Option<FilesystemIdentity>,
+}
+
 fn run_scan_task(
     context: TaskContext,
-    admitted_root: PathBuf,
+    admitted: AdmittedScanRoot,
     store: Arc<StoreCoordinator>,
     snapshots: Arc<SnapshotRepository>,
     before_traversal: impl FnOnce(&ScanId),
     before_candidate_evaluation: impl FnOnce(),
     before_candidate_persistence: impl FnOnce(),
 ) -> WorkOutcome {
-    if prepare_scan_root(&admitted_root).ok().as_deref() != Some(admitted_root.as_path()) {
+    let AdmittedScanRoot {
+        path: admitted_root,
+        expected_identity: expected_root_identity,
+    } = admitted;
+    if prepare_scan_root(&admitted_root).ok().as_deref() != Some(admitted_root.as_path())
+        || !current_root_matches(&admitted_root, expected_root_identity)
+    {
         return WorkOutcome::Failed(TaskFailureKind::ScanRootChanged, None);
     }
     let start = match start_durable_scan(&store, &admitted_root) {
@@ -4878,6 +4987,10 @@ fn run_scan_task(
     context.install_scan_cancellation(cancellation.clone());
     before_traversal(start.id());
 
+    if !current_root_matches(&admitted_root, expected_root_identity) {
+        return settle_changed_scan_root(&mut durable, start.started_at());
+    }
+
     let scanner = Scanner::new(ScanConfig {
         follow_symlinks: false,
         max_depth: None,
@@ -4885,7 +4998,7 @@ fn run_scan_task(
         num_threads: 0,
     })
     .with_cancellation(cancellation);
-    let (messages, scanner_handle) = scanner.scan(admitted_root);
+    let (messages, scanner_handle) = scanner.scan(admitted_root.clone());
     for message in messages {
         context.report_scan_message(message);
     }
@@ -4941,6 +5054,11 @@ fn run_scan_task(
                 );
                 return failed_scan_outcome(TaskFailureKind::SnapshotRejected, result);
             };
+            if !current_root_matches(&admitted_root, expected_root_identity)
+                || !artifact_root_matches(&artifact, expected_root_identity)
+            {
+                return settle_changed_scan_root(&mut durable, completed_at);
+            }
             let prepared = match prepare_completed_scan(start.id().clone(), completed_at, &artifact)
             {
                 Ok(prepared) => prepared,
@@ -4975,6 +5093,9 @@ fn run_scan_task(
             // passed. Requests after this point remain truthful task intent
             // but cannot rewrite the immutable terminal batch being committed.
             before_candidate_persistence();
+            if !current_root_matches(&admitted_root, expected_root_identity) {
+                return settle_changed_scan_root(&mut durable, completed_at);
+            }
             match snapshots.complete_scan_with_candidate_evaluation(
                 completed_at,
                 counts,
@@ -4999,6 +5120,69 @@ fn run_scan_task(
             }
         }
     }
+}
+
+fn current_root_matches(root: &Path, expected: Option<FilesystemIdentity>) -> bool {
+    let Some(expected) = expected else {
+        return true;
+    };
+    let Ok(root) = validate_scan_root(root) else {
+        return false;
+    };
+    capture_scan_root(root).is_ok_and(|observed| observed.identity() == expected)
+}
+
+fn artifact_root_matches(
+    artifact: &crate::scanner::CompletedScanArtifact,
+    expected: Option<FilesystemIdentity>,
+) -> bool {
+    let Some(expected) = expected else {
+        return true;
+    };
+    let (_, facts, _) = artifact.parts();
+    scan_identity_matches(
+        expected,
+        facts.node(NodeId::ROOT).and_then(|facts| facts.identity),
+    )
+}
+
+#[cfg(unix)]
+fn scan_identity_matches(
+    expected: FilesystemIdentity,
+    observed: Option<ScanObjectIdentity>,
+) -> bool {
+    matches!(
+        observed,
+        Some(ScanObjectIdentity::Unix { device, inode })
+            if expected.volume() == device && expected.object() == u128::from(inode)
+    )
+}
+
+#[cfg(windows)]
+fn scan_identity_matches(
+    expected: FilesystemIdentity,
+    observed: Option<ScanObjectIdentity>,
+) -> bool {
+    matches!(
+        observed,
+        Some(ScanObjectIdentity::Windows { volume_serial, file_id })
+            if expected.volume() == volume_serial
+                && expected.object() == u128::from_le_bytes(file_id)
+    )
+}
+
+fn settle_changed_scan_root(
+    durable: &mut DurableScanGuard,
+    observed_at: SystemTime,
+) -> WorkOutcome {
+    let result = durable.settle(
+        TerminalScanStatus::Failed,
+        ScanTaskStatus::Failed,
+        completion_time(observed_at),
+        ScanCounts::default(),
+        ScanCoverage::unknown(),
+    );
+    failed_scan_outcome(TaskFailureKind::ScanRootChanged, result)
 }
 
 fn settle_after_snapshot_error(

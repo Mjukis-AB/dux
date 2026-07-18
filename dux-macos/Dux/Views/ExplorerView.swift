@@ -67,8 +67,13 @@ struct ExplorerView: View {
         .navigationSplitViewStyle(.balanced)
         .toolbar {
             ToolbarItem(placement: .navigation) {
-                Label("Home", systemImage: "house")
-                    .help("The read-only scan root for this version of DUX")
+                if selection == .snapshot {
+                    Label("Snapshot", systemImage: "internaldrive")
+                        .help("The selected read-only storage snapshot")
+                } else {
+                    Label("Home", systemImage: "house")
+                        .help("The default read-only scan root")
+                }
             }
 
             ToolbarItemGroup(placement: .primaryAction) {
@@ -81,7 +86,7 @@ struct ExplorerView: View {
                 .help("Check startup-disk capacity without starting a scan")
                 .accessibilityIdentifier(ExplorerAccessibility.refreshCapacity)
 
-                if presentation.actions.showScanNow {
+                if presentation.actions.showScanNow, selection == .overview {
                     Button {
                         Task { await model.startHomeScan() }
                     } label: {
@@ -103,7 +108,7 @@ struct ExplorerView: View {
                         Label("Cancel scan", systemImage: "stop.circle")
                     }
                     .disabled(!presentation.actions.cancelScanEnabled)
-                    .help("Request cancellation of the current Home scan")
+                    .help("Request cancellation of the current storage scan")
                     .keyboardShortcut(
                         KeyEquivalent(ExplorerKeyboardShortcut.cancelScan),
                         modifiers: [.command]

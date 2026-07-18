@@ -2,6 +2,80 @@ import XCTest
 @testable import DUX
 
 final class SnapshotReviewControllerTests: XCTestCase {
+    func testSubtreeScanStartsFromExactRetainedLease() async throws {
+        let scanTask = ControllerScanTaskSpy()
+        let lease = StubSnapshotReviewLease(
+            scanID: "scan:one",
+            subtreeStart: .success(.started(scanTask))
+        )
+        let controller = DuxSnapshotReviewController(
+            service: StubSnapshotReviewService(leases: [lease]),
+            clock: SuspendedSnapshotReviewClock()
+        )
+        try await controller.acquire(scanID: "scan:one")
+
+        _ = try await controller.startSubtreeScan(sourceScanID: "scan:one", nodeID: 72)
+
+        let nodeIDs = await lease.subtreeNodeIDs()
+        let active = await controller.activeLeaseCount()
+        XCTAssertEqual(nodeIDs, [72])
+        XCTAssertEqual(active, 1)
+        await controller.shutdown()
+    }
+
+    func testExpiredSubtreeStartDropsExactLease() async throws {
+        let lease = StubSnapshotReviewLease(
+            scanID: "scan:one",
+            subtreeStart: .failure(.reviewExpired)
+        )
+        let controller = DuxSnapshotReviewController(
+            service: StubSnapshotReviewService(leases: [lease]),
+            clock: SuspendedSnapshotReviewClock()
+        )
+        try await controller.acquire(scanID: "scan:one")
+
+        do {
+            _ = try await controller.startSubtreeScan(sourceScanID: "scan:one", nodeID: 3)
+            XCTFail("expected expired subtree review")
+        } catch {
+            XCTAssertEqual(error as? HomeScanServiceError, .rootUnavailable)
+        }
+        let active = await controller.activeLeaseCount()
+        let releases = await lease.releaseCount()
+        XCTAssertEqual(active, 0)
+        XCTAssertEqual(releases, 1)
+    }
+
+    func testStaleSubtreeStartCancelsReturnedTaskBeforePublication() async throws {
+        let scanTask = ControllerScanTaskSpy()
+        let lease = StubSnapshotReviewLease(
+            scanID: "scan:one",
+            subtreeStart: .success(.started(scanTask)),
+            suspendsSubtreeStart: true
+        )
+        let controller = DuxSnapshotReviewController(
+            service: StubSnapshotReviewService(leases: [lease]),
+            clock: SuspendedSnapshotReviewClock()
+        )
+        try await controller.acquire(scanID: "scan:one")
+        let start = Task {
+            try await controller.startSubtreeScan(sourceScanID: "scan:one", nodeID: 8)
+        }
+        try await eventually { await lease.hasSuspendedSubtreeStart() }
+
+        await controller.release(scanID: "scan:one")
+        await lease.resumeSubtreeStart()
+
+        do {
+            _ = try await start.value
+            XCTFail("expected stale start cancellation")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+        let cancellations = await scanTask.cancelCount()
+        XCTAssertEqual(cancellations, 1)
+    }
+
     func testAcquireDeduplicatesUnderlyingLeaseAndReferenceCountsOwners() async throws {
         let lease = StubSnapshotReviewLease(scanID: "scan:one")
         let service = StubSnapshotReviewService(leases: [lease])
@@ -457,20 +531,29 @@ private actor StubSnapshotReviewLease: DuxSnapshotReviewLease {
     private let renewFails: Bool
     private let suspendsFirstRenewal: Bool
     private let navigationExpires: Bool
+    private let subtreeStart: Result<HomeScanStartDisposition, ExplorerSnapshotSubtreeScanError>
+    private let suspendsSubtreeStart: Bool
     private var renewals = 0
     private var releases = 0
     private var renewalContinuation: CheckedContinuation<Void, Never>?
+    private var subtreeStartContinuation: CheckedContinuation<Void, Never>?
+    private var requestedSubtreeNodeIDs: [UInt64] = []
 
     init(
         scanID: String,
         renewFails: Bool = false,
         suspendsFirstRenewal: Bool = false,
-        navigationExpires: Bool = false
+        navigationExpires: Bool = false,
+        subtreeStart: Result<HomeScanStartDisposition, ExplorerSnapshotSubtreeScanError> =
+            .failure(.unavailable),
+        suspendsSubtreeStart: Bool = false
     ) {
         self.scanID = scanID
         self.renewFails = renewFails
         self.suspendsFirstRenewal = suspendsFirstRenewal
         self.navigationExpires = navigationExpires
+        self.subtreeStart = subtreeStart
+        self.suspendsSubtreeStart = suspendsSubtreeStart
     }
 
     func renew() async throws -> Int64 {
@@ -523,6 +606,16 @@ private actor StubSnapshotReviewLease: DuxSnapshotReviewLease {
         throw EngineServiceError.unexpected("unused large-files stub")
     }
 
+    func startSubtreeScan(nodeID: UInt64) async throws -> HomeScanStartDisposition {
+        requestedSubtreeNodeIDs.append(nodeID)
+        if suspendsSubtreeStart {
+            await withCheckedContinuation { continuation in
+                subtreeStartContinuation = continuation
+            }
+        }
+        return try subtreeStart.get()
+    }
+
     func release() {
         releases += 1
     }
@@ -542,5 +635,35 @@ private actor StubSnapshotReviewLease: DuxSnapshotReviewLease {
 
     func releaseCount() -> Int {
         releases
+    }
+
+    func subtreeNodeIDs() -> [UInt64] {
+        requestedSubtreeNodeIDs
+    }
+
+    func hasSuspendedSubtreeStart() -> Bool {
+        subtreeStartContinuation != nil
+    }
+
+    func resumeSubtreeStart() {
+        subtreeStartContinuation?.resume()
+        subtreeStartContinuation = nil
+    }
+}
+
+private actor ControllerScanTaskSpy: HomeScanTask {
+    private var cancellations = 0
+
+    func poll() async throws -> HomeScanTaskPoll {
+        throw HomeScanServiceError.invalidResponse
+    }
+
+    func requestCancellation() async throws -> HomeScanCancelOutcome {
+        cancellations += 1
+        return .requested
+    }
+
+    func cancelCount() -> Int {
+        cancellations
     }
 }

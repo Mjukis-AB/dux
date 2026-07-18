@@ -56,7 +56,7 @@ Those capabilities retain their own gates below and in ADR 0004.
 
 ## Current realization
 
-FFI contract v15 now carries the real shared engine session first introduced in
+FFI contract v16 now carries the real shared engine session first introduced in
 v4. The app supplies input-only private data/cache roots; storage paths never
 return across the boundary. Seven maintenance kinds use opaque task objects
 with nonblocking versioned path-free poll/cancel records, and exact Explorer
@@ -149,6 +149,20 @@ action, reclaimability, AI data, plan, and execution authority remain sealed.
 Swift maps the closed enum directly and never infers a category from lossy
 display names. Color is redundant with a stable symbol, visible legend/table
 text, inspector disclosure, and VoiceOver copy.
+
+Contract v16 adds a path-free selected-folder scan bound to an exact retained
+snapshot review. Its request carries only record version and snapshot node ID;
+the engine verifies review ownership, resolves a directory from the immutable
+graph, and requires its current filesystem identity to match the recorded
+device/inode witness. That identity is fenced before durable admission, before
+traversal, against the completed artifact root, and immediately before atomic
+snapshot publication. The response reuses the ordinary opaque scan task and
+its explicit polling/cancellation contract. Success creates a new standalone
+immutable snapshot rooted at the selected folder; it never merges into or
+rewrites the source snapshot. Swift keeps the source review pinned until the
+exact result review, root, first page, and treemap validate, then performs a
+generation-fenced lease handoff. No path, merge authority, candidate detail,
+plan, AI input, or cleanup capability is added.
 
 The seventh task is scan recovery. It exposes only bounded page counts and
 typed outcomes; process-instance identities and recovery-scope keys remain

@@ -38,9 +38,9 @@ use dux_core::engine::{
     SnapshotTerminalTempMaintenanceOutcome as CoreTerminalTempOutcome,
     SnapshotTerminalTempMaintenanceStartOutcome,
     SnapshotUnleasedTempMaintenanceOutcome as CoreUnleasedTempOutcome,
-    SnapshotUnleasedTempMaintenanceStartOutcome, StartTaskError, TaskAccessError,
-    TaskEventBatch as CoreTaskEventBatch, TaskEventKind as CoreTaskEventKind, TaskFailureKind,
-    TaskId, TaskKind as CoreTaskKind, TaskPhase as CoreTaskPhase,
+    SnapshotUnleasedTempMaintenanceStartOutcome, StartSubtreeScanError, StartTaskError,
+    TaskAccessError, TaskEventBatch as CoreTaskEventBatch, TaskEventKind as CoreTaskEventKind,
+    TaskFailureKind, TaskId, TaskKind as CoreTaskKind, TaskPhase as CoreTaskPhase,
     VolumeCapacityObservation as CoreVolumeObservation,
     VolumeCapacityStatusError as CoreVolumeStatusError,
 };
@@ -51,7 +51,7 @@ use dux_core::{
     ScanId, SnapshotOpenErrorKind, VolumeCapacity, VolumeId,
 };
 
-const FFI_CONTRACT_VERSION: u32 = 15;
+const FFI_CONTRACT_VERSION: u32 = 16;
 const FFI_RECORD_VERSION: u32 = 1;
 const SNAPSHOT_NODE_RECORD_VERSION: u32 = 2;
 const SCAN_EVENT_PAGE_LIMIT: u16 = 64;
@@ -302,6 +302,15 @@ pub struct ScanRequest {
     pub root: String,
 }
 
+/// Versioned, path-free request to rescan one directory selected from an exact
+/// retained review. Rust resolves and revalidates the node; names and paths are
+/// never accepted from Swift.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct SubtreeScanRequest {
+    pub record_version: u32,
+    pub node_id: u64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum ScanStartDisposition {
     Started,
@@ -540,6 +549,16 @@ pub enum ScanError {
     Closed,
     #[error("scan request record version is unsupported")]
     InvalidRecordVersion,
+    #[error("snapshot review belongs to a different engine session")]
+    ForeignReview,
+    #[error("snapshot review lease is released or expired")]
+    ReviewExpired,
+    #[error("snapshot review is unavailable")]
+    ReviewUnavailable,
+    #[error("snapshot node does not exist")]
+    SnapshotNodeNotFound,
+    #[error("snapshot node is not a directory")]
+    SnapshotNodeNotDirectory,
     #[error("scan root must be an absolute discovery scope")]
     InvalidRoot,
     #[error("scan root does not exist")]
@@ -1390,6 +1409,43 @@ impl DuxEngine {
         })
     }
 
+    /// Start a standalone immutable scan rooted at one directory from this
+    /// engine's exact Explorer review. The resolved current path remains
+    /// sealed inside Rust and the returned task uses the ordinary scan poll and
+    /// cancellation contract.
+    pub fn start_subtree_scan(
+        &self,
+        review: Arc<SnapshotReviewSession>,
+        request: SubtreeScanRequest,
+    ) -> Result<ScanStart, ScanError> {
+        if request.record_version != FFI_RECORD_VERSION {
+            return Err(ScanError::InvalidRecordVersion);
+        }
+        if !Arc::ptr_eq(&review.engine_closed, &self.closed) {
+            return Err(ScanError::ForeignReview);
+        }
+        let state = self.state.lock().map_err(|_| ScanError::InternalState)?;
+        let EngineState::Open(engine) = &*state else {
+            return Err(ScanError::Closed);
+        };
+        if self.closed.load(Ordering::Acquire) {
+            return Err(ScanError::Closed);
+        }
+        let mut core_review = review.inner.lock().map_err(|_| ScanError::InternalState)?;
+        if self.closed.load(Ordering::Acquire) {
+            return Err(ScanError::Closed);
+        }
+        match engine.start_subtree_scan(&mut core_review, request.node_id) {
+            Ok(id) => Ok(scan_start(engine, id, ScanStartDisposition::Started)),
+            // A subtree request is bound to exact historical identity. Never
+            // attach it to an arbitrary same-path task.
+            Err(StartSubtreeScanError::Task(
+                StartTaskError::ScanAlreadyActive { .. } | StartTaskError::ScanScopeBusy,
+            )) => Err(ScanError::Busy),
+            Err(error) => Err(map_subtree_scan_start_error(error)),
+        }
+    }
+
     /// Return a bounded, newest-first page of durable scan metadata for
     /// Explorer selection. Paths and snapshot contents remain sealed; a
     /// selected snapshot must still be opened through a review lease.
@@ -1905,6 +1961,51 @@ fn map_scan_start_error(error: StartTaskError) -> ScanError {
         StartTaskError::TaskIdExhausted | StartTaskError::InternalState => {
             ScanError::RegistryUnavailable
         }
+        _ => ScanError::InternalState,
+    }
+}
+
+fn map_subtree_scan_start_error(error: StartSubtreeScanError) -> ScanError {
+    match error {
+        StartSubtreeScanError::ForeignReview => ScanError::ForeignReview,
+        StartSubtreeScanError::Review(error) => match error {
+            CoreReviewError::Closed => ScanError::Closed,
+            CoreReviewError::LeaseExpired => ScanError::ReviewExpired,
+            CoreReviewError::ScanNotFound | CoreReviewError::SnapshotUnavailable => {
+                ScanError::ReviewUnavailable
+            }
+            CoreReviewError::NodeNotFound => ScanError::SnapshotNodeNotFound,
+            CoreReviewError::NodeNotDirectory | CoreReviewError::LiveTargetUnsupported => {
+                ScanError::SnapshotNodeNotDirectory
+            }
+            CoreReviewError::LivePathUnavailable => ScanError::RootIdentityUnavailable,
+            CoreReviewError::LivePathMissing => ScanError::RootMissing,
+            CoreReviewError::LivePathSymlink => ScanError::RootSymlink,
+            CoreReviewError::LivePathCrossVolume | CoreReviewError::LivePathChanged => {
+                ScanError::RootChanged
+            }
+            CoreReviewError::LivePathAccessDenied => ScanError::RootAccessDenied,
+            CoreReviewError::ReadOnlyStore => ScanError::ReadOnlyStore,
+            CoreReviewError::Busy => ScanError::Busy,
+            CoreReviewError::IncompatibleSchema
+            | CoreReviewError::UnsafeStorage
+            | CoreReviewError::BudgetExceeded
+            | CoreReviewError::CorruptData
+            | CoreReviewError::IncompatibleSnapshot
+            | CoreReviewError::Unavailable
+            | CoreReviewError::OutcomeUnknown
+            | CoreReviewError::InternalState
+            | CoreReviewError::InvalidPage
+            | CoreReviewError::InvalidTreemapBudget
+            | CoreReviewError::InvalidLargeFileRequest => ScanError::StorageUnavailable,
+            _ => ScanError::InternalState,
+        },
+        StartSubtreeScanError::Task(error) => match error {
+            StartTaskError::ScanAlreadyActive { .. } | StartTaskError::ScanScopeBusy => {
+                ScanError::Busy
+            }
+            error => map_scan_start_error(error),
+        },
         _ => ScanError::InternalState,
     }
 }
@@ -2845,10 +2946,10 @@ mod tests {
     }
 
     #[test]
-    fn reports_contract_fifteen_and_preserves_legacy_formatting() {
+    fn reports_contract_sixteen_and_preserves_legacy_formatting() {
         let _guard = ENGINE_TEST_LOCK.lock().unwrap();
         let (_temp, engine) = engine();
-        assert_eq!(library_version().ffi_contract_version, 15);
+        assert_eq!(library_version().ffi_contract_version, 16);
         assert_eq!(engine.library_version().unwrap(), library_version());
         assert_eq!(engine.format_size(1536).unwrap().display, "1.5 KB");
         assert!(engine.close());
@@ -2875,6 +2976,116 @@ mod tests {
             assert!(Instant::now() < deadline, "scan did not become terminal");
             std::thread::yield_now();
         }
+    }
+
+    #[test]
+    fn subtree_scan_is_review_bound_path_free_and_returns_an_ordinary_scan_task() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (temp, engine) = engine();
+        let root = temp.path().join("ffi-subtree-source");
+        let nested = root.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("old.bin"), b"old").unwrap();
+        std::fs::write(root.join("outside.bin"), b"outside").unwrap();
+
+        let source = engine.start_scan(scan_request(&root)).unwrap();
+        let source_terminal = wait_for_scan(&source.task);
+        assert_eq!(source_terminal.phase, TaskPhase::Succeeded);
+        let source_scan = source_terminal.result.unwrap().scan_id;
+        let review = engine
+            .acquire_explorer_snapshot_review(source_scan)
+            .unwrap();
+        let children = review
+            .child_nodes(0, SnapshotNodeSort::NameAscending, 0, 10)
+            .unwrap();
+        let nested_node = children
+            .nodes
+            .iter()
+            .find(|node| node.name.display == "nested")
+            .unwrap();
+        let file_node = children
+            .nodes
+            .iter()
+            .find(|node| node.kind == SnapshotNodeKind::File)
+            .unwrap();
+
+        assert!(matches!(
+            engine.start_subtree_scan(
+                Arc::clone(&review),
+                SubtreeScanRequest {
+                    record_version: FFI_RECORD_VERSION + 1,
+                    node_id: nested_node.id,
+                },
+            ),
+            Err(ScanError::InvalidRecordVersion)
+        ));
+        assert!(matches!(
+            engine.start_subtree_scan(
+                Arc::clone(&review),
+                SubtreeScanRequest {
+                    record_version: FFI_RECORD_VERSION,
+                    node_id: file_node.id,
+                },
+            ),
+            Err(ScanError::SnapshotNodeNotDirectory)
+        ));
+        assert!(matches!(
+            engine.start_subtree_scan(
+                Arc::clone(&review),
+                SubtreeScanRequest {
+                    record_version: FFI_RECORD_VERSION,
+                    node_id: u64::MAX,
+                },
+            ),
+            Err(ScanError::SnapshotNodeNotFound)
+        ));
+
+        let (_other_temp, other_engine) = self::engine();
+        assert!(matches!(
+            other_engine.start_subtree_scan(
+                Arc::clone(&review),
+                SubtreeScanRequest {
+                    record_version: FFI_RECORD_VERSION,
+                    node_id: nested_node.id,
+                },
+            ),
+            Err(ScanError::ForeignReview)
+        ));
+
+        std::fs::write(nested.join("new.bin"), b"new").unwrap();
+        let refresh = engine
+            .start_subtree_scan(
+                Arc::clone(&review),
+                SubtreeScanRequest {
+                    record_version: FFI_RECORD_VERSION,
+                    node_id: nested_node.id,
+                },
+            )
+            .unwrap();
+        assert_eq!(refresh.disposition, ScanStartDisposition::Started);
+        let terminal = wait_for_scan(&refresh.task);
+        assert_eq!(terminal.phase, TaskPhase::Succeeded);
+        let result = terminal.result.unwrap();
+        assert_eq!(result.file_count, 2);
+        assert!(result.snapshot_available);
+        let refreshed = engine
+            .acquire_explorer_snapshot_review(result.scan_id)
+            .unwrap();
+        assert_eq!(refreshed.root_node().unwrap().child_count, 2);
+
+        assert_eq!(review.release().unwrap(), ReviewReleaseOutcome::Released);
+        assert!(matches!(
+            engine.start_subtree_scan(
+                review,
+                SubtreeScanRequest {
+                    record_version: FFI_RECORD_VERSION,
+                    node_id: nested_node.id,
+                },
+            ),
+            Err(ScanError::ReviewExpired)
+        ));
+        assert!(other_engine.close());
+        assert!(engine.close());
     }
 
     #[test]
