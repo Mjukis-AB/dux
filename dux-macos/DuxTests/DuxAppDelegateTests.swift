@@ -95,6 +95,22 @@ final class DuxAppDelegateTests: XCTestCase {
         )
     }
 
+    func testIncidentalTerminationRequestFromTransientMenuWindowIsCancelled() {
+        let delegate = DuxAppDelegate(runtime: RuntimeSpy())
+
+        XCTAssertEqual(
+            delegate.applicationShouldTerminate(NSApplication.shared),
+            .terminateCancel
+        )
+    }
+
+    func testExplicitQuitIntentIsOneShot() {
+        DuxTerminationIntent.requestExplicitQuit()
+
+        XCTAssertTrue(DuxTerminationIntent.consumeExplicitQuitRequest())
+        XCTAssertFalse(DuxTerminationIntent.consumeExplicitQuitRequest())
+    }
+
     func testApplicationActivationRunsMaintenanceThenArmedAccessReprobe() async {
         let runtime = RuntimeSpy()
         let delegate = DuxAppDelegate(runtime: runtime)

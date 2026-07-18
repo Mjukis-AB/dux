@@ -7,6 +7,20 @@ enum DuxSceneID {
 }
 
 @MainActor
+enum DuxTerminationIntent {
+    private(set) static var explicitQuitRequested = false
+
+    static func requestExplicitQuit() {
+        explicitQuitRequested = true
+    }
+
+    static func consumeExplicitQuitRequest() -> Bool {
+        defer { explicitQuitRequested = false }
+        return explicitQuitRequested
+    }
+}
+
+@MainActor
 enum AppActivation {
     static func openExplorer(using openWindow: OpenWindowAction) {
         openExplorer(
@@ -69,6 +83,7 @@ enum AppActivation {
     }
 
     static func quit() {
+        DuxTerminationIntent.requestExplicitQuit()
         NSApplication.shared.terminate(nil)
     }
 }

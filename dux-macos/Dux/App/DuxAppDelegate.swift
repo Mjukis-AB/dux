@@ -135,6 +135,11 @@ final class DuxAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard DuxTerminationIntent.consumeExplicitQuitRequest() else {
+            // MenuBarExtra owns a transient window. AppKit may ask to terminate
+            // an agent app when that window closes; that is not a user Quit.
+            return .terminateCancel
+        }
         switch terminationGate.begin() {
         case .terminateNow:
             return .terminateNow
