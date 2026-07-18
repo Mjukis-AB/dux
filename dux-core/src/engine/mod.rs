@@ -36,9 +36,11 @@ pub use scan_coverage_details::{
     DurableScanIssueLocation, MAX_SCAN_COVERAGE_DETAIL_PAGE_LIMIT, ScanCoverageDetailsError,
 };
 pub use settings::{
-    DiskPressurePolicy, DiskPressurePolicyError, DiskPressurePolicySource,
-    DiskPressurePolicyUpdate, SnapshotRetentionCap, SnapshotRetentionCapError,
-    SnapshotRetentionCapSource, SnapshotRetentionCapUpdate,
+    DirectCargoCodeSignature, DirectCargoEnrollmentError, DirectCargoEnrollmentPreview,
+    DirectCargoEnrollmentState, DirectCargoEnrollmentStatus, DirectCargoEnrollmentUpdate,
+    DirectCargoSignatureClass, DiskPressurePolicy, DiskPressurePolicyError,
+    DiskPressurePolicySource, DiskPressurePolicyUpdate, SnapshotRetentionCap,
+    SnapshotRetentionCapError, SnapshotRetentionCapSource, SnapshotRetentionCapUpdate,
 };
 pub use snapshot_review::{
     MAX_SNAPSHOT_REVIEW_LARGE_FILE_RESULTS, MAX_SNAPSHOT_REVIEW_NODE_PAGE_LIMIT,

@@ -28,9 +28,11 @@ use super::scan_coverage_details::{
     MAX_SCAN_COVERAGE_LOCATION_COMPONENTS, ScanCoverageDetailsError,
 };
 use super::settings::{
-    DiskPressurePolicy, DiskPressurePolicyError, DiskPressurePolicySource,
-    DiskPressurePolicyUpdate, SnapshotRetentionCap, SnapshotRetentionCapError,
-    SnapshotRetentionCapSource, SnapshotRetentionCapUpdate,
+    DirectCargoCodeSignature, DirectCargoEnrollmentError, DirectCargoEnrollmentPreview,
+    DirectCargoEnrollmentState, DirectCargoEnrollmentStatus, DirectCargoEnrollmentUpdate,
+    DirectCargoSignatureClass, DiskPressurePolicy, DiskPressurePolicyError,
+    DiskPressurePolicySource, DiskPressurePolicyUpdate, SnapshotRetentionCap,
+    SnapshotRetentionCapError, SnapshotRetentionCapSource, SnapshotRetentionCapUpdate,
 };
 use super::snapshot_review::{
     MAX_SNAPSHOT_REVIEW_CATEGORY_BYTES, MAX_SNAPSHOT_REVIEW_CATEGORY_ROOTS,
@@ -86,14 +88,15 @@ use crate::persistence::{
     StoredCleanupSessionSummary, StoredCleanupStatusCounts, StoredCleanupTrigger,
     TerminalScanStatus, observe_host_path,
 };
+use crate::persistence::{
+    CargoCodeSignatureRecord, CargoEnrollmentSetting, CargoEnrollmentSettingUpdate,
+    CargoEnrollmentState, CargoSignatureClass, DiskPressurePolicySetting,
+    DiskPressurePolicySettingSource, DiskPressurePolicySettingUpdate, SnapshotRetentionCapSetting,
+    SnapshotRetentionCapSettingSource, SnapshotRetentionCapSettingUpdate,
+};
 #[cfg(test)]
 use crate::persistence::{CleanupTrigger, NewCleanupSessionRecord, StoredCandidateRecord};
 use crate::persistence::{DatabaseStatus, StoreCoordinator};
-use crate::persistence::{
-    DiskPressurePolicySetting, DiskPressurePolicySettingSource, DiskPressurePolicySettingUpdate,
-    SnapshotRetentionCapSetting, SnapshotRetentionCapSettingSource,
-    SnapshotRetentionCapSettingUpdate,
-};
 use crate::scanner::{
     CancellationToken, ScanConfig, ScanMessage, ScanObjectIdentity, ScanTermination, Scanner,
 };
@@ -723,6 +726,7 @@ impl Shared {
 }
 
 struct EngineInner {
+    owner: Arc<()>,
     config: EngineConfig,
     store: Arc<StoreCoordinator>,
     snapshots: Arc<SnapshotRepository>,
@@ -813,6 +817,7 @@ impl EngineHandle {
 
         Ok(Self {
             inner: Arc::new(EngineInner {
+                owner: Arc::new(()),
                 config,
                 store,
                 snapshots,
@@ -994,6 +999,102 @@ impl EngineHandle {
             );
         }
         roots
+    }
+
+    /// Inspect one exact direct Cargo executable without changing durable
+    /// settings. The returned preview is bound to this engine session and must
+    /// be explicitly consumed by `commit_direct_cargo_enrollment`.
+    pub fn inspect_direct_cargo_enrollment(
+        &self,
+        executable: &Path,
+    ) -> Result<DirectCargoEnrollmentPreview, DirectCargoEnrollmentError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(DirectCargoEnrollmentError::Closed);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = executable;
+            Err(DirectCargoEnrollmentError::UnsupportedPlatform)
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let inner = crate::planner::inspect_direct_cargo_enrollment(
+                Arc::clone(&self.inner.store),
+                executable,
+            )
+            .map_err(map_direct_cargo_validation_error)?;
+            if self.lifecycle() != EngineLifecycle::Open {
+                return Err(DirectCargoEnrollmentError::Closed);
+            }
+            let path = inner.executable_path().to_path_buf();
+            let executable_sha256 = inner.executable_sha256();
+            let code_signature = public_direct_cargo_signature(inner.code_signature());
+            Ok(DirectCargoEnrollmentPreview {
+                path,
+                executable_sha256,
+                code_signature,
+                inner,
+                owner: Arc::clone(&self.inner.owner),
+            })
+        }
+    }
+
+    /// Persist exactly one previously inspected Cargo identity. A preview from
+    /// another engine session is rejected even when both sessions use the same
+    /// database path.
+    pub fn commit_direct_cargo_enrollment(
+        &self,
+        preview: DirectCargoEnrollmentPreview,
+    ) -> Result<DirectCargoEnrollmentUpdate, DirectCargoEnrollmentError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(DirectCargoEnrollmentError::Closed);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = preview;
+            Err(DirectCargoEnrollmentError::UnsupportedPlatform)
+        }
+        #[cfg(target_os = "macos")]
+        {
+            if !Arc::ptr_eq(&preview.owner, &self.inner.owner)
+                || !preview.inner.belongs_to(&self.inner.store)
+            {
+                return Err(DirectCargoEnrollmentError::WrongEngine);
+            }
+            crate::planner::commit_direct_cargo_enrollment(preview.inner)
+                .map(public_direct_cargo_update)
+                .map_err(map_direct_cargo_commit_error)
+        }
+    }
+
+    /// Load the revisioned explicit Cargo trust state. This observation grants
+    /// discovery permission only and cannot authorize cleanup.
+    pub fn direct_cargo_enrollment_status(
+        &self,
+    ) -> Result<DirectCargoEnrollmentStatus, DirectCargoEnrollmentError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(DirectCargoEnrollmentError::Closed);
+        }
+        self.inner
+            .store
+            .load_cargo_enrollment()
+            .map(public_direct_cargo_status)
+            .map_err(|error| map_direct_cargo_history_error(error.kind))
+    }
+
+    /// Revoke any active direct Cargo enrollment. A retained revisioned
+    /// tombstone prevents an older preview from recreating the prior state.
+    pub fn revoke_direct_cargo_enrollment(
+        &self,
+    ) -> Result<DirectCargoEnrollmentUpdate, DirectCargoEnrollmentError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(DirectCargoEnrollmentError::Closed);
+        }
+        self.inner
+            .store
+            .revoke_cargo_executable()
+            .map(public_direct_cargo_update)
+            .map_err(|error| map_direct_cargo_history_error(error.kind))
     }
 
     /// Load the effective, versioned snapshot-store size cap.
@@ -4321,6 +4422,113 @@ const fn map_candidate_review_error(kind: HistoryErrorKind) -> CandidateReviewEr
         | HistoryErrorKind::AlreadyExists
         | HistoryErrorKind::InvalidTransition => CandidateReviewError::NotReviewable,
         HistoryErrorKind::DatabaseUnavailable => CandidateReviewError::Unavailable,
+    }
+}
+
+fn public_direct_cargo_signature(signature: &CargoCodeSignatureRecord) -> DirectCargoCodeSignature {
+    DirectCargoCodeSignature {
+        class: match signature.class {
+            CargoSignatureClass::AdHoc => DirectCargoSignatureClass::AdHoc,
+            CargoSignatureClass::Cms => DirectCargoSignatureClass::Cms,
+        },
+        flags: signature.flags,
+        code_directory_hashes: signature.code_directory_hashes.clone(),
+        signing_identifier: signature.signing_identifier.clone(),
+        team_identifier: signature.team_identifier.clone(),
+        designated_requirement_sha256: signature.designated_requirement_sha256,
+    }
+}
+
+fn public_direct_cargo_status(setting: CargoEnrollmentSetting) -> DirectCargoEnrollmentStatus {
+    let state = match setting.state {
+        CargoEnrollmentState::NotEnrolled => DirectCargoEnrollmentState::NotEnrolled,
+        CargoEnrollmentState::Revoked => DirectCargoEnrollmentState::Revoked,
+        CargoEnrollmentState::Enrolled(identity) => DirectCargoEnrollmentState::Enrolled {
+            path: identity.path().to_path_buf(),
+            executable_sha256: identity.executable_sha256,
+            version_sha256: identity.version_sha256,
+            cargo_release: identity.cargo_release,
+            code_signature: Box::new(public_direct_cargo_signature(&identity.signature)),
+        },
+    };
+    DirectCargoEnrollmentStatus {
+        revision: setting.revision,
+        state,
+        updated_at: setting.updated_at,
+    }
+}
+
+fn public_direct_cargo_update(update: CargoEnrollmentSettingUpdate) -> DirectCargoEnrollmentUpdate {
+    DirectCargoEnrollmentUpdate {
+        status: public_direct_cargo_status(update.setting),
+        changed: update.changed,
+    }
+}
+
+const fn map_direct_cargo_history_error(kind: HistoryErrorKind) -> DirectCargoEnrollmentError {
+    match kind {
+        HistoryErrorKind::InvalidInput => DirectCargoEnrollmentError::InvalidClock,
+        HistoryErrorKind::InvalidTransition => DirectCargoEnrollmentError::RevisionExhausted,
+        HistoryErrorKind::IncompatibleSchema => DirectCargoEnrollmentError::IncompatibleSchema,
+        HistoryErrorKind::QueryLimitExceeded => DirectCargoEnrollmentError::QueryLimitExceeded,
+        HistoryErrorKind::Busy => DirectCargoEnrollmentError::Busy,
+        HistoryErrorKind::UnsafeStorage => DirectCargoEnrollmentError::UnsafeStorage,
+        HistoryErrorKind::CorruptData => DirectCargoEnrollmentError::CorruptData,
+        HistoryErrorKind::DatabaseUnavailable => DirectCargoEnrollmentError::Unavailable,
+        HistoryErrorKind::OutcomeUnknown => DirectCargoEnrollmentError::OutcomeUnknown,
+        HistoryErrorKind::AlreadyExists
+        | HistoryErrorKind::NotFound
+        | HistoryErrorKind::InternalState => DirectCargoEnrollmentError::InternalState,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn map_direct_cargo_validation_error(
+    error: crate::planner::CargoMetadataValidationError,
+) -> DirectCargoEnrollmentError {
+    use crate::planner::CargoMetadataValidationError as Error;
+    match error {
+        Error::InvalidExecutableLocator | Error::Lexical(_) => {
+            DirectCargoEnrollmentError::InvalidExecutableLocator
+        }
+        Error::ExecutableNotRegular => DirectCargoEnrollmentError::ExecutableNotRegular,
+        Error::ExecutableChanged
+        | Error::CargoVersionChanged
+        | Error::CargoEnrollmentChanged
+        | Error::LiveEvidenceChanged
+        | Error::Filesystem(_)
+        | Error::FileDigest(_) => DirectCargoEnrollmentError::ChangedDuringInspection,
+        Error::InvalidResolutionEnvironment => {
+            DirectCargoEnrollmentError::InvalidResolutionEnvironment
+        }
+        Error::InvalidCargoVersion => DirectCargoEnrollmentError::InvalidCargoVersion,
+        Error::InvalidCodeSignature => DirectCargoEnrollmentError::InvalidCodeSignature,
+        Error::Spawn { .. }
+        | Error::PipeConfiguration
+        | Error::OutputRead { .. }
+        | Error::ProcessFailed => DirectCargoEnrollmentError::InspectionUnavailable,
+        Error::Timeout | Error::OutputLimit { .. } => {
+            DirectCargoEnrollmentError::InspectionLimitExceeded
+        }
+        Error::CargoNotEnrolled
+        | Error::InvalidMetadata
+        | Error::WorkspaceMismatch
+        | Error::TargetDirectoryMismatch => DirectCargoEnrollmentError::InternalState,
+        Error::CargoEnrollmentStore { kind } => map_direct_cargo_history_error(kind),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn map_direct_cargo_commit_error(
+    error: crate::planner::DirectCargoEnrollmentCommitError,
+) -> DirectCargoEnrollmentError {
+    match error {
+        crate::planner::DirectCargoEnrollmentCommitError::Validation(error) => {
+            map_direct_cargo_validation_error(error)
+        }
+        crate::planner::DirectCargoEnrollmentCommitError::History(kind) => {
+            map_direct_cargo_history_error(kind)
+        }
     }
 }
 

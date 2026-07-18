@@ -270,6 +270,12 @@ fn validate_live_rust_target_inner(
 
 #[cfg(unix)]
 impl RustTargetLiveWitness {
+    pub(super) fn store(&self) -> Option<&std::sync::Arc<crate::persistence::StoreCoordinator>> {
+        self.durable_source
+            .as_ref()
+            .map(RustTargetDurableSource::store)
+    }
+
     pub(super) fn revalidate_current(&self) -> Result<(), RustTargetLiveValidationError> {
         if let Some(source) = self.durable_source.as_ref() {
             source

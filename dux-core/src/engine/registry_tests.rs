@@ -49,6 +49,211 @@ fn wait_terminal(engine: &EngineHandle, id: TaskId) -> TaskSnapshot {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn direct_toolchain_cargo() -> PathBuf {
+    let rustup_home = std::env::var_os("RUSTUP_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap()).join(".rustup"));
+    let toolchain = std::env::var_os("RUSTUP_TOOLCHAIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(format!("stable-{}-apple-darwin", std::env::consts::ARCH))
+        });
+    let cargo = rustup_home
+        .join("toolchains")
+        .join(toolchain)
+        .join("bin/cargo");
+    assert!(
+        cargo.is_file(),
+        "direct stable Cargo must exist at {cargo:?}"
+    );
+    cargo
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn direct_cargo_enrollment_is_explicit_engine_bound_revisioned_and_revocable() {
+    let first_temp = TempDir::new().unwrap();
+    let first = EngineHandle::open(config(&first_temp)).unwrap();
+    let cargo = direct_toolchain_cargo();
+    assert_eq!(
+        first.direct_cargo_enrollment_status().unwrap(),
+        DirectCargoEnrollmentStatus {
+            revision: 0,
+            state: DirectCargoEnrollmentState::NotEnrolled,
+            updated_at: None,
+        }
+    );
+
+    let foreign_preview = first.inspect_direct_cargo_enrollment(&cargo).unwrap();
+    assert_eq!(foreign_preview.path(), cargo);
+    assert!(
+        !foreign_preview
+            .code_signature()
+            .code_directory_hashes
+            .is_empty()
+    );
+    assert!(
+        !foreign_preview
+            .code_signature()
+            .signing_identifier
+            .is_empty()
+    );
+    let foreign_temp = TempDir::new().unwrap();
+    let foreign = EngineHandle::open(config(&foreign_temp)).unwrap();
+    assert_eq!(
+        foreign
+            .commit_direct_cargo_enrollment(foreign_preview)
+            .unwrap_err(),
+        DirectCargoEnrollmentError::WrongEngine
+    );
+
+    let same_database = EngineHandle::open(config(&first_temp)).unwrap();
+    let same_database_preview = first.inspect_direct_cargo_enrollment(&cargo).unwrap();
+    assert_eq!(
+        same_database
+            .commit_direct_cargo_enrollment(same_database_preview)
+            .unwrap_err(),
+        DirectCargoEnrollmentError::WrongEngine
+    );
+
+    let stale_missing = first.inspect_direct_cargo_enrollment(&cargo).unwrap();
+    let committed = first
+        .commit_direct_cargo_enrollment(first.inspect_direct_cargo_enrollment(&cargo).unwrap())
+        .unwrap();
+    assert!(committed.changed);
+    assert_eq!(committed.status.revision, 1);
+    assert!(matches!(
+        committed.status.state,
+        DirectCargoEnrollmentState::Enrolled { .. }
+    ));
+    assert_eq!(
+        first
+            .commit_direct_cargo_enrollment(stale_missing)
+            .unwrap_err(),
+        DirectCargoEnrollmentError::ChangedDuringInspection
+    );
+
+    let stale_enrolled = first.inspect_direct_cargo_enrollment(&cargo).unwrap();
+    let revoked = first.revoke_direct_cargo_enrollment().unwrap();
+    assert!(revoked.changed);
+    assert_eq!(revoked.status.revision, 2);
+    assert_eq!(revoked.status.state, DirectCargoEnrollmentState::Revoked);
+    assert_eq!(
+        first
+            .commit_direct_cargo_enrollment(stale_enrolled)
+            .unwrap_err(),
+        DirectCargoEnrollmentError::ChangedDuringInspection
+    );
+    assert_eq!(
+        first.direct_cargo_enrollment_status().unwrap(),
+        revoked.status
+    );
+
+    let reenrolled = first
+        .commit_direct_cargo_enrollment(first.inspect_direct_cargo_enrollment(&cargo).unwrap())
+        .unwrap();
+    assert_eq!(reenrolled.status.revision, 3);
+    assert!(reenrolled.changed);
+    first.close();
+    assert!(first.wait_until_closed(TEST_TIMEOUT));
+    assert_eq!(
+        first.direct_cargo_enrollment_status().unwrap_err(),
+        DirectCargoEnrollmentError::Closed
+    );
+    foreign.close();
+    assert!(foreign.wait_until_closed(TEST_TIMEOUT));
+    same_database.close();
+    assert!(same_database.wait_until_closed(TEST_TIMEOUT));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn direct_cargo_inspection_rejects_an_unsigned_script_before_execution() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = TempDir::new().unwrap();
+    let engine = EngineHandle::open(config(&temp)).unwrap();
+    let executable = temp.path().join("cargo");
+    std::fs::write(&executable, b"#!/bin/sh\nexit 99\n").unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let executable = std::fs::canonicalize(executable).unwrap();
+    assert_eq!(
+        engine
+            .inspect_direct_cargo_enrollment(&executable)
+            .unwrap_err(),
+        DirectCargoEnrollmentError::InvalidCodeSignature
+    );
+    engine.close();
+    assert!(engine.wait_until_closed(TEST_TIMEOUT));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn static_enrollment_inspection_never_executes_selected_signed_bytes() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = TempDir::new().unwrap();
+    let engine = EngineHandle::open(config(&temp)).unwrap();
+    let executable = temp.path().join("cargo");
+    std::fs::copy(std::env::current_exe().unwrap(), &executable).unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let executable = std::fs::canonicalize(executable).unwrap();
+
+    let preview = engine
+        .inspect_direct_cargo_enrollment(&executable)
+        .expect("static inspection accepts valid signed bytes without running them");
+    assert_eq!(
+        engine.direct_cargo_enrollment_status().unwrap().state,
+        DirectCargoEnrollmentState::NotEnrolled
+    );
+    assert!(matches!(
+        engine.commit_direct_cargo_enrollment(preview),
+        Err(DirectCargoEnrollmentError::InvalidCargoVersion)
+            | Err(DirectCargoEnrollmentError::InspectionUnavailable)
+    ));
+    assert_eq!(
+        engine.direct_cargo_enrollment_status().unwrap().state,
+        DirectCargoEnrollmentState::NotEnrolled
+    );
+    engine.close();
+    assert!(engine.wait_until_closed(TEST_TIMEOUT));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn direct_cargo_enrollment_preserves_typed_store_failures() {
+    let temp = TempDir::new().unwrap();
+    let engine = EngineHandle::open(config(&temp)).unwrap();
+    engine.inner.store.with_connection(|connection| {
+        connection
+            .execute(
+                "INSERT INTO settings (
+                     setting_key, value_json, value_schema_version,
+                     updated_at_unix_ms
+                 ) VALUES (?1, '{}', 2, 1)",
+                ["developer_rust_target_cargo_enrollment"],
+            )
+            .unwrap();
+    });
+    assert_eq!(
+        engine
+            .inspect_direct_cargo_enrollment(&direct_toolchain_cargo())
+            .unwrap_err(),
+        DirectCargoEnrollmentError::IncompatibleSchema
+    );
+    assert_eq!(
+        engine.direct_cargo_enrollment_status().unwrap_err(),
+        DirectCargoEnrollmentError::IncompatibleSchema
+    );
+    assert_eq!(
+        engine.revoke_direct_cargo_enrollment().unwrap_err(),
+        DirectCargoEnrollmentError::IncompatibleSchema
+    );
+    engine.close();
+    assert!(engine.wait_until_closed(TEST_TIMEOUT));
+}
+
 #[test]
 fn explorer_review_facade_is_scan_bound_expiring_and_idempotently_released() {
     let temp = TempDir::new().unwrap();

@@ -3,6 +3,8 @@
 use std::fs;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use nix::errno::Errno;
@@ -11,10 +13,18 @@ use nix::unistd::Pid;
 use serde_json::json;
 use tempfile::TempDir;
 
+#[cfg(target_os = "macos")]
+use super::cargo_code_signature_macos::inspect_cargo_code_signature;
 use super::rust_target::validate_live_rust_target_for_test;
 use super::rust_target_cargo::{
     CargoMetadataValidationError, CargoOutputStream, observe_cargo_executable,
-    validate_cargo_metadata, validate_cargo_metadata_for_test,
+    observe_cargo_executable_for_test, validate_cargo_metadata, validate_cargo_metadata_for_test,
+};
+#[cfg(target_os = "macos")]
+use super::rust_target_cargo::{
+    commit_direct_cargo_enrollment, inspect_direct_cargo_enrollment,
+    observe_enrolled_cargo_executable_for_test,
+    validate_cargo_metadata_with_enrollment_hook_for_test,
 };
 use super::rust_target_tests::{CARGO_CACHE_TAG_SIGNATURE, Fixture};
 use crate::domain::BlockReason;
@@ -51,7 +61,7 @@ impl FakeCargo {
     }
 
     fn observe(&self) -> super::rust_target_cargo::CargoExecutableObservation {
-        observe_cargo_executable(&self.executable).unwrap()
+        observe_cargo_executable_for_test(&self.executable).unwrap()
     }
 }
 
@@ -272,7 +282,7 @@ fn nonzero_exit_invalid_version_symlink_and_executable_rewrite_are_rejected() {
     ] {
         let invalid_version = FakeCargo::with_version("  exit 9", version);
         assert!(matches!(
-            observe_cargo_executable(&invalid_version.executable),
+            observe_cargo_executable_for_test(&invalid_version.executable),
             Err(CargoMetadataValidationError::InvalidCargoVersion)
         ));
     }
@@ -282,7 +292,7 @@ fn nonzero_exit_invalid_version_symlink_and_executable_rewrite_are_rejected() {
     let link = link_root.path().join("cargo");
     symlink(&real.executable, &link).unwrap();
     assert!(matches!(
-        observe_cargo_executable(&link),
+        observe_cargo_executable_for_test(&link),
         Err(CargoMetadataValidationError::InvalidExecutableLocator)
     ));
 
@@ -361,9 +371,102 @@ fn real_cargo_honors_project_config_and_no_deps_does_not_create_lockfile() {
     assert!(!unlocked_sentinel.exists());
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn exact_same_store_enrollment_is_retained_and_a_during_metadata_revoke_rejects() {
+    let cargo = direct_test_cargo().expect("macOS tests require the direct stable Cargo");
+    let fixture = Fixture::new(CARGO_CACHE_TAG_SIGNATURE);
+    prepare_real_package(&fixture, true);
+    let store_temp = TempDir::new().unwrap();
+    let store =
+        crate::persistence::StoreCoordinator::open(&store_temp.path().join("store/dux.sqlite3"))
+            .unwrap();
+    let enrolled = commit_direct_cargo_enrollment(
+        inspect_direct_cargo_enrollment(Arc::clone(&store), &cargo).unwrap(),
+    )
+    .unwrap();
+    let observation = observe_cargo_executable(&cargo).unwrap();
+    let witness = validate_cargo_metadata_with_enrollment_hook_for_test(
+        live(&fixture),
+        &observation,
+        Arc::clone(&store),
+        enrolled.setting.clone(),
+        || {},
+    )
+    .unwrap();
+    assert_eq!(witness.enrollment_revision(), 1);
+    witness.release().unwrap();
+
+    let changed_fixture = Fixture::new(CARGO_CACHE_TAG_SIGNATURE);
+    prepare_real_package(&changed_fixture, true);
+    assert!(matches!(
+        validate_cargo_metadata_with_enrollment_hook_for_test(
+            live(&changed_fixture),
+            &observation,
+            Arc::clone(&store),
+            enrolled.setting,
+            || {
+                store.revoke_cargo_executable().unwrap();
+            },
+        ),
+        Err(CargoMetadataValidationError::CargoEnrollmentChanged)
+    ));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn automatic_enrolled_observation_rejects_unmatched_signed_bytes_before_execution() {
+    let executable_temp = TempDir::new().unwrap();
+    let executable = executable_temp.path().join("cargo");
+    fs::copy(std::env::current_exe().unwrap(), &executable).unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o600)).unwrap();
+    let executable = fs::canonicalize(executable).unwrap();
+    let signature = inspect_cargo_code_signature(&executable).unwrap();
+
+    let store_temp = TempDir::new().unwrap();
+    let store =
+        crate::persistence::StoreCoordinator::open(&store_temp.path().join("store/dux.sqlite3"))
+            .unwrap();
+    store
+        .enroll_cargo_executable(
+            crate::persistence::CargoExecutableEnrollmentIdentity::new(
+                executable,
+                [0; 32],
+                [0; 32],
+                crate::persistence::CARGO_ENROLLMENT_SUPPORTED_RELEASE,
+                signature,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let enrollment = store.load_cargo_enrollment().unwrap();
+    assert!(matches!(
+        observe_enrolled_cargo_executable_for_test(&store, &enrollment),
+        Err(CargoMetadataValidationError::CargoEnrollmentChanged)
+    ));
+}
+
 fn direct_test_cargo() -> Option<PathBuf> {
-    let configured = std::env::var_os("CARGO")?;
-    let canonical = fs::canonicalize(configured).ok()?;
+    let configured = std::env::var_os("CARGO").and_then(|value| fs::canonicalize(value).ok());
+    #[cfg(target_os = "macos")]
+    let configured = configured.or_else(|| {
+        let rustup_home = std::env::var_os("RUSTUP_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".rustup")))?;
+        let toolchain = std::env::var_os("RUSTUP_TOOLCHAIN")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(format!("stable-{}-apple-darwin", std::env::consts::ARCH))
+            });
+        fs::canonicalize(
+            rustup_home
+                .join("toolchains")
+                .join(toolchain)
+                .join("bin/cargo"),
+        )
+        .ok()
+    });
+    let canonical = configured?;
     (canonical.file_name()?.to_str()? == "cargo").then_some(canonical)
 }
 

@@ -5,6 +5,23 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Continued Milestone 5 with explicit revisioned trust enrollment for one
+  direct macOS Cargo 1.96.0 executable. A read-only, non-cloneable preview
+  executes no selected bytes and binds the canonical single-link file, full
+  digest, scrubbed environment identities, and strict bounded
+  Security.framework static-code evidence. Commit consumes that same-engine,
+  same-settings-revision preview, revalidates it, and explicitly authorizes a
+  bounded verbose-version execution before the exact version digest and
+  enrollment are conditionally written. Exact retries are no-ops,
+  replacements advance the revision, and
+  revocation retains a tombstone that rejects stale previews. Ad-hoc signing
+  is identified as byte-integrity evidence only and gains local trust solely
+  through explicit enrollment. The sealed metadata entry derives Cargo from
+  the durable source's own store, proves the current digest/signature and
+  rereads that exact enrollment before any automatic execution, then brackets
+  metadata with the same guard. No FFI, blocker removal, plan, schedule, or effect was added; exact
+  config/include provenance, retained-cwd spawn, and swap/restore exclusion
+  remain required.
 - Continued Milestone 5 with an exact full-batch evaluator replay inside the
   retained Rust-target source boundary. A snapshot-native single pass shares
   the catalog's marker declarations and final candidate policy without

@@ -20,6 +20,7 @@ mod candidate_history;
     )
 )]
 mod capacity_history;
+mod cargo_enrollment;
 #[cfg_attr(
     not(test),
     allow(
@@ -84,6 +85,12 @@ pub(crate) use candidate_history::{
 };
 pub(crate) use capacity_history::{
     CapacityPressureBaseline, CapacityWriteOutcome, RawCapacityObservation,
+};
+pub(crate) use cargo_enrollment::{
+    CARGO_CODE_SIGN_ADHOC_FLAG, CARGO_ENROLLMENT_SUPPORTED_RELEASE,
+    CARGO_SIGNATURE_POLICY_REVISION, CargoCodeSignatureRecord, CargoEnrollmentSetting,
+    CargoEnrollmentSettingUpdate, CargoEnrollmentState, CargoExecutableEnrollmentIdentity,
+    CargoSignatureClass,
 };
 pub(crate) use cleanup_history::CleanupSessionId;
 #[cfg(test)]

@@ -4,10 +4,18 @@
 //! into a cleanup plan. The first witness is deliberately staged while the
 //! remaining Cargo, process, mount, approval, and executor guards are absent.
 
+#[cfg(target_os = "macos")]
+mod cargo_code_signature_macos;
 mod rust_target;
 #[cfg(unix)]
 mod rust_target_cargo;
 mod rust_target_source;
+
+#[cfg(target_os = "macos")]
+pub(crate) use rust_target_cargo::{
+    CargoMetadataValidationError, DirectCargoEnrollmentCommitError, DirectCargoEnrollmentPreview,
+    commit_direct_cargo_enrollment, inspect_direct_cargo_enrollment,
+};
 
 #[cfg(all(test, unix))]
 mod rust_target_cargo_tests;

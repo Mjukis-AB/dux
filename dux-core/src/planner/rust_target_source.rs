@@ -197,6 +197,10 @@ fn acquire_rust_target_durable_source_with_clock_and_hook(
 }
 
 impl RustTargetDurableSource {
+    pub(super) fn store(&self) -> &Arc<StoreCoordinator> {
+        &self.store
+    }
+
     pub(super) fn scan_id(&self) -> &ScanId {
         self.record.scan().id()
     }

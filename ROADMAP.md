@@ -4046,8 +4046,33 @@ Tasks:
     then add authoritative volume and protected-root grants,
     change/process/descendant guards, and executor-time revalidation before
     removing `ProtectedPath` or enabling scheduling.
-    Trusted settings enrollment/code-signature provenance, exact config-file
-    identities, retained-cwd spawn, and swap/restore exclusion remain open.
+    - [x] 2026-07-18 slice: add explicit, revisioned enrollment for one exact
+      direct Cargo executable. The macOS core exposes inspect-then-commit,
+      status, and revoke operations; inspection accepts no `PATH` or rustup
+      selection, executes no selected bytes, and binds the canonical
+      single-link file, full SHA-256, canonical scrubbed resolution
+      environment, and strict bounded Security.framework static-code evidence.
+      CMS and ad-hoc signatures are distinguished; ad-hoc evidence is integrity
+      only and becomes locally trusted solely through the explicit user commit.
+      A non-cloneable preview belongs to one engine/store and one exact prior
+      settings revision. Consuming commit rechecks the static evidence, then
+      explicitly authorizes execution of the selected bytes to bind the exact
+      reviewed Cargo 1.96.0 verbose-version digest before a conditional write.
+      Exact retries are no-ops;
+      replacements advance the monotonic revision; revocation retains a
+      tombstone; and stale pre-change or pre-revocation previews cannot restore
+      old trust. The sealed metadata entry derives Cargo only from the same
+      durable store, statically matches stored bytes/signature and rereads the
+      exact enrollment before any automatic execution, then retains the
+      enrollment guard before and after Cargo.
+      Malformed, oversized, newer-schema, changed, unsigned, foreign-engine,
+      and ambiguous-write cases fail closed. This adds discovery provenance
+      only: no FFI/Swift surface, blocker removal, plan, schedule, or effect was
+      added.
+    Exact Cargo 1.96 config/include identities, retained-cwd spawn,
+    path-based executable/config swap-and-restore exclusion, and all remaining
+    protected-root, volume, process, descendant, plan, and executor grants are
+    still open.
 - [ ] Implement candidate groups and overlap resolution.
 - [ ] Implement exact-path plan review.
 - [ ] Implement Trash executor for Explorer selections.

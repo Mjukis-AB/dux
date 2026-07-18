@@ -264,8 +264,24 @@ the exact project workspace root, and the already witnessed target directory
 are accepted. The manifest is now read in full through a retained descriptor
 and SHA-256-bound before/open/after, detecting in-place content changes that
 identity alone misses.
+On macOS, a fifth sealed checkpoint now derives production Cargo observation
+only from one explicit revisioned setting in the same durable store as the
+Rust-target source. Read-only inspection binds the direct Cargo path, full
+digest, canonical scrubbed environment, and strict all-architecture/no-network
+Security.framework static-code evidence without executing selected bytes.
+Ad-hoc signatures are classified as integrity only, not publisher identity.
+Trust comes from a consuming user commit of one non-cloneable preview bound to
+its exact engine/store and prior setting revision. Commit repeats the static
+checks, then explicitly authorizes bounded execution to bind the reviewed
+verbose-version digest before conditionally writing; exact retries are no-ops,
+while replacement and revocation advance the revision. Revocation persists a field-free
+tombstone so stale previews cannot recreate earlier trust. The enrolled
+metadata entry statically matches the stored bytes/signature and rereads the
+complete enrollment before any automatic execution, then retains the same
+guard before and after the fixed Cargo command. This checkpoint exposes no blocker-removal, plan,
+FFI, scheduling, or effect edge.
 Every rule remains unschedulable, and every emitted candidate retains
-`ProtectedPath` because trusted Cargo metadata/config resolution,
+`ProtectedPath` because exact Cargo config/include and cwd/exec continuity,
 protected-root, authoritative volume/mount, process, descendant, approval, and
 executor-time authority is deliberately unresolved. These rows and all planner
 witnesses are observations, not cleanup authority. The durable binding exposes
@@ -2120,7 +2136,7 @@ coverage is labelled as Home-scoped and unknown coverage stays unknown.
 | Strict lexical/live path evidence | Implemented, crate-private and non-authoritative, including retained-descriptor bounded regular-file prefix and full-file SHA-256 reads on Unix | Bind trusted scan/volume/rule witnesses and executor revalidation; Windows planner use requires retained handle-relative ancestry |
 | Protected-root registry | Implemented text-only policy; production construction sealed | Trusted OS home/profile/mount discovery and stable rule grants |
 | Dangerous-path corpus and fuzzing | Implemented | Keep cross-platform and promote every crash regression |
-| Rule schema/loader | Strict schema plus a build-time digest/policy-gated and strict load-time-validated discovery catalog; ten rules remain selected-root RevealOnly observations, while independently researched `developer.rust.target` revision 2 requires snapshot `Cargo.toml` plus `CACHEDIR.TAG` evidence and proposes only SafeRegenerable/RemoveKnownRegenerableContents. Every rule is unschedulable and every result remains blocked by `ProtectedPath`. Sealed Unix-only live and Cargo-resolution witnesses now verify the exact tag, manifest digest, current default layout, and scrubbed-context Cargo workspace/target result without clearing that blocker | Developer ID signing must cover catalog bytes; before the Rust rule can lose its blocker, bind a trusted direct Cargo enrollment and exact config provenance, prove authoritative volume/protected-root grants, add process/descendant/change guards, and complete adversarial review |
+| Rule schema/loader | Strict schema plus a build-time digest/policy-gated and strict load-time-validated discovery catalog; ten rules remain selected-root RevealOnly observations, while independently researched `developer.rust.target` revision 2 requires snapshot `Cargo.toml` plus `CACHEDIR.TAG` evidence and proposes only SafeRegenerable/RemoveKnownRegenerableContents. Every rule is unschedulable and every result remains blocked by `ProtectedPath`. Sealed Unix-only live and Cargo-resolution witnesses verify the exact tag, manifest digest, current default layout, and scrubbed-context Cargo workspace/target result. macOS additionally has explicit revisioned same-store direct-Cargo enrollment with bounded static-code evidence, stale-preview rejection, and revocation tombstones, still without clearing that blocker | Developer ID signing must cover catalog bytes; before the Rust rule can lose its blocker, bind exact config/include provenance and retained cwd/exec continuity, prove authoritative volume/protected-root grants, add process/descendant/change guards, and complete adversarial review |
 | Candidate and cleanup-plan records | Completed fresh scans create deterministic, snapshot-bound durable candidate batches; exact-scan summaries plus bounded lossless path/evidence pages and semantic review commands remain non-authoritative history. A crate-private planner module now seals an exact current-evaluator/current-catalog succeeded scan/evaluation/candidate join to a fully decoded retained snapshot and fresh cleanup-review lease, replays the complete batch from that snapshot with bounded working state, rejects every immutable-field mismatch, carries scan-time Unix identities into the ephemeral Rust-target live and bounded Cargo metadata witnesses, and exposes no replayed candidate or plan conversion. Cleanup plans remain non-executable domain/history data | Keep full-batch replay exact through overlap planning; add FFI/UI transport and trusted Cargo/config/volume/protected-root/process/executor witnesses |
 | macOS app cleanup | Absent | Entire cleanup release gate in §17.3 |
 | Legacy CLI deletion | Active arbitrary-descendant permanent path routed through a temporary core adapter; strict-target/volume/identity rechecks only; scanned-byte estimates labeled in CLI | Replace adapter with reviewed plan/approval/executor chain without weakening current checks |

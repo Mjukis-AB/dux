@@ -143,12 +143,14 @@ environment observations that produced the accepted metadata.
 
 The manifest is now fully read through a retained nonblocking descriptor and
 SHA-256-bound before/open/after, so an in-place same-inode rewrite also rejects
-the observation. Cargo still does not report the identity of every config or
-included manifest it read, the executable is not yet bound to a signed settings
-grant, and a copied or renamed rustup binary cannot yet be authenticated as
-Cargo. Path-based cwd/exec/config swap-and-restore races also remain. Therefore
-this witness is supporting evidence only: it cannot clear `ProtectedPath`,
-construct a plan, cross FFI, schedule, or execute.
+the observation. The original test-only witness can still accept a deliberately
+unsigned fake Cargo to exercise bounded subprocess failures, but it cannot be
+called by production planning authority. The sealed enrolled production entry
+described below requires exact durable trust and macOS static-code evidence.
+Cargo still does not report the identity of every config or included manifest
+it read. Path-based cwd/exec/config swap-and-restore races also remain.
+Therefore either witness is supporting evidence only: neither can clear
+`ProtectedPath`, construct a plan, cross FFI, schedule, or execute.
 
 ## Durable discovery-source binding
 
@@ -226,6 +228,77 @@ accounting and the auto-releasing pin. No replayed candidate or capability can
 escape this boundary, and the checkpoint still cannot clear `ProtectedPath`,
 create a plan, cross FFI, schedule, or execute.
 
+## Explicit direct-Cargo enrollment and macOS static-code evidence
+
+A fifth 2026-07-18 checkpoint adds an explicit local trust decision for the
+direct Cargo executable. It does not search `PATH`, invoke a rustup proxy, infer
+trust from an installed toolchain, or choose a Cargo binary automatically. The
+macOS core API accepts one canonical absolute single-link regular file named
+`cargo` and separates the operation into inspection and commit. Inspection is
+read-only and does not execute the selected file. Its non-cloneable preview can
+be committed only through the exact engine/store that created it.
+
+Inspection binds all of the following bounded evidence:
+
+- the lossless canonical executable path and current filesystem identity;
+- a full SHA-256 of the executable, capped at 256 MiB;
+- the canonical `HOME`, `CARGO_HOME`, and temporary-directory identities used
+  by the future scrubbed subprocess environment; and
+- static-code policy revision 1: signature flags, sorted unique Code Directory
+  hashes, signing identifier, optional team identifier, optional SHA-256 of the
+  serialized designated requirement (capped at 64 KiB), and whether the
+  signature is CMS or ad-hoc.
+
+Static-code inspection calls Security.framework directly. It requests strict
+validation for all architectures, disables network access, and uses
+single-threaded validation. It does not shell out to `codesign` or `spctl` and
+does not treat Gatekeeper assessment as cleanup authority. A valid ad-hoc
+signature authenticates no publisher; it only lets macOS validate the embedded
+Code Directory against the current bytes. DUX accepts it only because the user
+explicitly enrolls that exact observed path, bytes, version output, and signing
+evidence. A CMS team identifier is retained as evidence, not elevated into a
+global publisher allowlist.
+
+The shared settings database stores one canonical, deny-unknown-fields v1 value
+under `developer_rust_target_cargo_enrollment`. The row is bounded to 96 KiB and
+contains a monotonic revision plus a canonical millisecond timestamp. The
+inspection preview also freezes the complete setting that existed before and
+after inspection. Commit first proves that setting is still current and repeats
+the executable, environment, and signature checks. Consuming the preview is the
+explicit authorization point that executes the selected file with the bounded
+scrubbed `--version --verbose` command. Only an exact reviewed Cargo 1.96.0
+release is accepted; its complete output SHA-256 joins the enrollment identity.
+The setting is then conditionally written only if its prior state remains exact.
+An identical enrollment is an idempotent no-op. A changed identity advances the
+revision. Revocation advances it again and retains a field-free
+`revoked` tombstone, so a preview created before enrollment, replacement, or
+revocation cannot recreate prior trust. Post-commit uncertainty is reconciled
+only when the complete exact expected state can be reread; otherwise the result
+is outcome-unknown.
+
+The sealed production metadata entry no longer accepts a Cargo path from its
+caller. It obtains the exact enrollment from the same store coordinator owned
+by the durable Rust-target source, statically observes that enrolled path again,
+requires its path, full digest, and signature to match, and rereads the complete
+enrollment before executing any bytes. Only then may it run bounded version
+validation, require every stored release/version fact, and continue into the
+existing enrollment rereads around the fixed metadata command. The resulting witness
+retains the enrollment revision and signature observation. Missing, revoked,
+corrupt, newer-schema, changed, unsigned, malformed, stale-preview, or
+foreign-engine state fails closed.
+
+This checkpoint deliberately exposes only the Rust core API. FFI and Swift
+settings UI remain future work, so the application cannot ask a user to enroll
+Cargo yet. That UI must clearly disclose that confirmation executes the exact
+statically previewed binary for bounded version validation. More importantly,
+enrollment establishes only local executable
+provenance for discovery. It does not identify Cargo's `.cargo/config`, legacy
+extensionless config, recursive `include` files, outer working-directory
+configuration, or all manifests Cargo may read. The current path-based working
+directory and executable launch can still be swapped and restored around
+checks. Those identities and retained-handle or generation fences are the next
+Cargo authority checkpoint. `ProtectedPath` therefore remains untouched.
+
 ## Required before executable use
 
 Removing `ProtectedPath` requires a separate reviewed implementation that
@@ -233,8 +306,8 @@ proves, at minimum:
 
 - trusted home, selected-volume, canonical ancestry, and mount identity;
 - a stable code-owned protected-root boundary grant;
-- trusted settings/code-signature enrollment for the direct Cargo executable,
-  retained-cwd execution, and exact config/include identity provenance beyond
+- the now-enrolled direct Cargo executable plus retained-cwd execution, exact
+  Cargo config/include identity provenance, and swap/restore exclusion beyond
   the implemented bounded scrubbed-context metadata result;
 - current target kind, symlink, link-count, mount, and descendant policy;
 - inactive Cargo/rustc state and post-witness change revalidation;

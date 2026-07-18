@@ -4,6 +4,7 @@ use std::mem::MaybeUninit;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -15,6 +16,8 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+#[cfg(target_os = "macos")]
+use super::cargo_code_signature_macos::inspect_cargo_code_signature;
 use super::rust_target::{RustTargetLiveValidationError, RustTargetLiveWitness};
 use super::rust_target_source::RustTargetSourceError;
 use crate::path_validation::{
@@ -22,10 +25,11 @@ use crate::path_validation::{
     FilesystemEntryKind, LexicalPathError, capture_regular_file_sha256, capture_scan_root,
     validate_cleanup_path, validate_scan_root,
 };
+use crate::persistence::{
+    CARGO_ENROLLMENT_SUPPORTED_RELEASE, CargoEnrollmentSetting, CargoEnrollmentSettingUpdate,
+    CargoEnrollmentState, CargoExecutableEnrollmentIdentity, HistoryErrorKind, StoreCoordinator,
+};
 
-const SUPPORTED_CARGO_MAJOR: u32 = 1;
-const SUPPORTED_CARGO_MINOR: u32 = 96;
-const SUPPORTED_CARGO_PATCH: u32 = 0;
 const VERSION_STDOUT_LIMIT: usize = 16 * 1024;
 const VERSION_STDERR_LIMIT: usize = 16 * 1024;
 const METADATA_STDOUT_LIMIT: usize = 8 * 1024 * 1024;
@@ -36,12 +40,19 @@ const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(2);
 const MAX_CARGO_EXECUTABLE_BYTES: usize = 256 * 1024 * 1024;
 const CARGO_RESOLUTION_POLICY_REVISION: u32 = 1;
 
-/// A canonical Cargo-named executable observation.
-///
-/// Observation is deliberately separate from target validation. It rejects
-/// symlink launchers and binds regular-file bytes plus verbose-version output,
-/// but it cannot authenticate Cargo or exclude an exec swap/restore race. A
-/// future signed settings grant must add that provenance before authority use.
+/// Static executable evidence captured without executing untrusted bytes.
+struct CargoExecutableStaticObservation {
+    executable: PathBuf,
+    parent: CanonicalScanRoot,
+    file: CanonicalFileDigestSnapshot,
+    environment: CargoResolutionEnvironment,
+    #[cfg(target_os = "macos")]
+    code_signature: Option<crate::persistence::CargoCodeSignatureRecord>,
+}
+
+/// A canonical Cargo-named executable observation after verbose-version
+/// execution. Production creates this only for an enrolled executable or after
+/// the consuming enrollment commit explicitly authorizes execution.
 pub(crate) struct CargoExecutableObservation {
     executable: PathBuf,
     parent: CanonicalScanRoot,
@@ -49,6 +60,27 @@ pub(crate) struct CargoExecutableObservation {
     release: CargoRelease,
     version_sha256: [u8; 32],
     environment: CargoResolutionEnvironment,
+    #[cfg(target_os = "macos")]
+    code_signature: Option<crate::persistence::CargoCodeSignatureRecord>,
+}
+
+/// Exact inspection result that can be committed only to its originating
+/// store. It cannot clear a blocker, create a plan, or perform an effect.
+pub(crate) struct DirectCargoEnrollmentPreview {
+    store: Arc<StoreCoordinator>,
+    expected_enrollment: CargoEnrollmentSetting,
+    observation: CargoExecutableStaticObservation,
+}
+
+#[derive(Debug)]
+pub(crate) enum DirectCargoEnrollmentCommitError {
+    Validation(CargoMetadataValidationError),
+    History(HistoryErrorKind),
+}
+
+struct EnrollmentGuard {
+    store: Arc<StoreCoordinator>,
+    enrollment: CargoEnrollmentSetting,
 }
 
 struct CargoResolutionEnvironment {
@@ -68,6 +100,9 @@ struct CargoExecutableEvidence {
     release: CargoRelease,
     version_sha256: [u8; 32],
     environment: CargoResolutionEnvironment,
+    enrollment_revision: u64,
+    #[cfg(target_os = "macos")]
+    code_signature: Option<crate::persistence::CargoCodeSignatureRecord>,
 }
 
 /// Current Cargo workspace/config evidence layered over the live layout check.
@@ -80,6 +115,7 @@ pub(crate) struct RustTargetCargoMetadataWitness {
     cargo: CargoExecutableEvidence,
     metadata_sha256: [u8; 32],
     resolution_policy_revision: u32,
+    enrollment_revision: u64,
 }
 
 impl RustTargetCargoMetadataWitness {
@@ -109,6 +145,14 @@ pub(crate) enum CargoMetadataValidationError {
     InvalidCargoVersion,
     #[error("Cargo verbose version changed")]
     CargoVersionChanged,
+    #[error("Cargo does not have valid bounded macOS code-signing evidence")]
+    InvalidCodeSignature,
+    #[error("no current direct Cargo executable is explicitly enrolled")]
+    CargoNotEnrolled,
+    #[error("the direct Cargo enrollment is corrupt, unavailable, or changed")]
+    CargoEnrollmentChanged,
+    #[error("the direct Cargo enrollment store operation failed: {kind:?}")]
+    CargoEnrollmentStore { kind: HistoryErrorKind },
     #[error("Cargo subprocess could not be started: {kind:?}")]
     Spawn {
         kind: io::ErrorKind,
@@ -160,45 +204,312 @@ impl From<RustTargetLiveValidationError> for CargoMetadataValidationError {
 pub(crate) fn observe_cargo_executable(
     executable: &Path,
 ) -> Result<CargoExecutableObservation, CargoMetadataValidationError> {
+    observe_cargo_executable_inner(executable, true)
+}
+
+fn observe_cargo_executable_inner(
+    executable: &Path,
+    require_platform_signature: bool,
+) -> Result<CargoExecutableObservation, CargoMetadataValidationError> {
+    inspect_cargo_executable_static(executable, require_platform_signature)?.execute_version()
+}
+
+fn inspect_cargo_executable_static(
+    executable: &Path,
+    require_platform_signature: bool,
+) -> Result<CargoExecutableStaticObservation, CargoMetadataValidationError> {
+    CargoExecutableEnrollmentIdentity::validate_path(executable)
+        .map_err(|_| CargoMetadataValidationError::InvalidExecutableLocator)?;
     let (parent, file) = capture_exact_cargo_executable(executable)?;
+    #[cfg(target_os = "macos")]
+    let code_signature = if require_platform_signature {
+        Some(
+            inspect_cargo_code_signature(executable)
+                .map_err(|_| CargoMetadataValidationError::InvalidCodeSignature)?,
+        )
+    } else {
+        None
+    };
+    #[cfg(not(target_os = "macos"))]
+    let _ = require_platform_signature;
     let environment = capture_resolution_environment()?;
-    let output = run_cargo(
-        executable,
-        parent.canonical_path(),
-        &[OsStr::new("--version"), OsStr::new("--verbose")],
-        ProcessLimits::version(),
-        &environment,
-    )?;
-    require_success(&output)?;
-    let release = parse_cargo_release(&output.stdout)?;
-    let version_sha256 = sha256(&output.stdout);
     let (after_parent, after_file) = capture_exact_cargo_executable(executable)?;
-    if after_parent != parent || after_file != file {
+    #[cfg(target_os = "macos")]
+    let after_code_signature = if require_platform_signature {
+        Some(
+            inspect_cargo_code_signature(executable)
+                .map_err(|_| CargoMetadataValidationError::InvalidCodeSignature)?,
+        )
+    } else {
+        None
+    };
+    if after_parent != parent || after_file != file || {
+        #[cfg(target_os = "macos")]
+        {
+            after_code_signature != code_signature
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            false
+        }
+    } {
         return Err(CargoMetadataValidationError::ExecutableChanged);
     }
-    Ok(CargoExecutableObservation {
+    Ok(CargoExecutableStaticObservation {
         executable: executable.to_path_buf(),
         parent,
         file,
-        release,
-        version_sha256,
         environment,
+        #[cfg(target_os = "macos")]
+        code_signature,
     })
 }
 
+#[cfg(test)]
+pub(super) fn observe_cargo_executable_for_test(
+    executable: &Path,
+) -> Result<CargoExecutableObservation, CargoMetadataValidationError> {
+    observe_cargo_executable_inner(executable, false)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn inspect_direct_cargo_enrollment(
+    store: Arc<StoreCoordinator>,
+    executable: &Path,
+) -> Result<DirectCargoEnrollmentPreview, CargoMetadataValidationError> {
+    let expected_enrollment = store
+        .load_cargo_enrollment()
+        .map_err(|error| CargoMetadataValidationError::CargoEnrollmentStore { kind: error.kind })?;
+    let observation = inspect_cargo_executable_static(executable, true)?;
+    observation.revalidate()?;
+    if store
+        .load_cargo_enrollment()
+        .map_err(|error| CargoMetadataValidationError::CargoEnrollmentStore { kind: error.kind })?
+        != expected_enrollment
+    {
+        return Err(CargoMetadataValidationError::CargoEnrollmentChanged);
+    }
+    Ok(DirectCargoEnrollmentPreview {
+        store,
+        expected_enrollment,
+        observation,
+    })
+}
+
+#[cfg(target_os = "macos")]
+impl DirectCargoEnrollmentPreview {
+    pub(crate) fn belongs_to(&self, store: &Arc<StoreCoordinator>) -> bool {
+        Arc::ptr_eq(&self.store, store)
+    }
+
+    pub(crate) fn executable_path(&self) -> &Path {
+        &self.observation.executable
+    }
+
+    pub(crate) fn executable_sha256(&self) -> [u8; 32] {
+        self.observation.file.sha256()
+    }
+
+    pub(crate) fn code_signature(&self) -> &crate::persistence::CargoCodeSignatureRecord {
+        self.observation
+            .code_signature
+            .as_ref()
+            .expect("direct macOS enrollment inspection always requires a signature")
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn commit_direct_cargo_enrollment(
+    preview: DirectCargoEnrollmentPreview,
+) -> Result<CargoEnrollmentSettingUpdate, DirectCargoEnrollmentCommitError> {
+    if preview
+        .store
+        .load_cargo_enrollment()
+        .map_err(|error| DirectCargoEnrollmentCommitError::History(error.kind))?
+        != preview.expected_enrollment
+    {
+        return Err(DirectCargoEnrollmentCommitError::Validation(
+            CargoMetadataValidationError::CargoEnrollmentChanged,
+        ));
+    }
+    preview
+        .observation
+        .revalidate()
+        .map_err(DirectCargoEnrollmentCommitError::Validation)?;
+    let identity = preview
+        .observation
+        .execute_version()
+        .and_then(|observation| observation.enrollment_identity())
+        .map_err(DirectCargoEnrollmentCommitError::Validation)?;
+    preview
+        .store
+        .enroll_cargo_executable_if_current(identity, &preview.expected_enrollment)
+        .map_err(|error| {
+            if error.kind == HistoryErrorKind::InvalidTransition
+                && preview.expected_enrollment.revision < i64::MAX as u64
+            {
+                DirectCargoEnrollmentCommitError::Validation(
+                    CargoMetadataValidationError::CargoEnrollmentChanged,
+                )
+            } else {
+                DirectCargoEnrollmentCommitError::History(error.kind)
+            }
+        })
+}
+
+pub(crate) fn revoke_direct_cargo_enrollment(
+    store: &StoreCoordinator,
+) -> Result<CargoEnrollmentSettingUpdate, CargoMetadataValidationError> {
+    store
+        .revoke_cargo_executable()
+        .map_err(map_enrollment_history)
+}
+
+pub(crate) fn load_direct_cargo_enrollment(
+    store: &StoreCoordinator,
+) -> Result<CargoEnrollmentSetting, CargoMetadataValidationError> {
+    store
+        .load_cargo_enrollment()
+        .map_err(map_enrollment_history)
+}
+
+fn map_enrollment_history<T>(_error: T) -> CargoMetadataValidationError {
+    CargoMetadataValidationError::CargoEnrollmentChanged
+}
+
+impl EnrollmentGuard {
+    fn revision(&self) -> u64 {
+        self.enrollment.revision
+    }
+
+    fn revalidate(
+        &self,
+        cargo: &CargoExecutableObservation,
+    ) -> Result<(), CargoMetadataValidationError> {
+        let current = load_direct_cargo_enrollment(&self.store)?;
+        if current != self.enrollment {
+            return Err(CargoMetadataValidationError::CargoEnrollmentChanged);
+        }
+        require_enrollment_match(cargo, &current)
+    }
+}
+
+fn require_enrollment_match(
+    cargo: &CargoExecutableObservation,
+    enrollment: &CargoEnrollmentSetting,
+) -> Result<(), CargoMetadataValidationError> {
+    let CargoEnrollmentState::Enrolled(identity) = &enrollment.state else {
+        return Err(CargoMetadataValidationError::CargoNotEnrolled);
+    };
+    if identity.path() != cargo.executable
+        || identity.executable_sha256 != cargo.file.sha256()
+        || identity.version_sha256 != cargo.version_sha256
+        || identity.cargo_release
+            != [
+                cargo.release.major,
+                cargo.release.minor,
+                cargo.release.patch,
+            ]
+    {
+        return Err(CargoMetadataValidationError::CargoEnrollmentChanged);
+    }
+    #[cfg(target_os = "macos")]
+    if cargo.code_signature.as_ref() != Some(&identity.signature) {
+        return Err(CargoMetadataValidationError::CargoEnrollmentChanged);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = &identity.signature;
+        return Err(CargoMetadataValidationError::CargoEnrollmentChanged);
+    }
+    #[cfg(target_os = "macos")]
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn require_static_enrollment_match(
+    cargo: &CargoExecutableStaticObservation,
+    enrollment: &CargoEnrollmentSetting,
+) -> Result<(), CargoMetadataValidationError> {
+    let CargoEnrollmentState::Enrolled(identity) = &enrollment.state else {
+        return Err(CargoMetadataValidationError::CargoNotEnrolled);
+    };
+    if identity.path() != cargo.executable
+        || identity.executable_sha256 != cargo.file.sha256()
+        || cargo.code_signature.as_ref() != Some(&identity.signature)
+    {
+        return Err(CargoMetadataValidationError::CargoEnrollmentChanged);
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn observe_enrolled_cargo_executable(
+    store: &StoreCoordinator,
+    enrollment: &CargoEnrollmentSetting,
+) -> Result<CargoExecutableObservation, CargoMetadataValidationError> {
+    let executable = match &enrollment.state {
+        CargoEnrollmentState::Enrolled(identity) => identity.path(),
+        CargoEnrollmentState::NotEnrolled | CargoEnrollmentState::Revoked => {
+            return Err(CargoMetadataValidationError::CargoNotEnrolled);
+        }
+    };
+    let cargo = inspect_cargo_executable_static(executable, true)?;
+    require_static_enrollment_match(&cargo, enrollment)?;
+    if load_direct_cargo_enrollment(store)? != *enrollment {
+        return Err(CargoMetadataValidationError::CargoEnrollmentChanged);
+    }
+    let cargo = cargo.execute_version()?;
+    require_enrollment_match(&cargo, enrollment)?;
+    Ok(cargo)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn validate_enrolled_cargo_metadata(
+    live: RustTargetLiveWitness,
+) -> Result<RustTargetCargoMetadataWitness, CargoMetadataValidationError> {
+    let store = Arc::clone(
+        live.store()
+            .ok_or(CargoMetadataValidationError::CargoEnrollmentChanged)?,
+    );
+    let enrollment = load_direct_cargo_enrollment(&store)?;
+    let cargo = observe_enrolled_cargo_executable(&store, &enrollment)?;
+    validate_cargo_metadata_with_limits(
+        live,
+        &cargo,
+        RunnerLimits::production(),
+        Some(EnrollmentGuard { store, enrollment }),
+        || {},
+    )
+}
+
+#[cfg(all(test, target_os = "macos"))]
+pub(super) fn observe_enrolled_cargo_executable_for_test(
+    store: &StoreCoordinator,
+    enrollment: &CargoEnrollmentSetting,
+) -> Result<CargoExecutableObservation, CargoMetadataValidationError> {
+    observe_enrolled_cargo_executable(store, enrollment)
+}
+
+#[cfg(test)]
 pub(crate) fn validate_cargo_metadata(
     live: RustTargetLiveWitness,
     cargo: &CargoExecutableObservation,
 ) -> Result<RustTargetCargoMetadataWitness, CargoMetadataValidationError> {
-    validate_cargo_metadata_with_limits(live, cargo, RunnerLimits::production())
+    validate_cargo_metadata_with_limits(live, cargo, RunnerLimits::production(), None, || {})
 }
 
 fn validate_cargo_metadata_with_limits(
     live: RustTargetLiveWitness,
     cargo: &CargoExecutableObservation,
     limits: RunnerLimits,
+    enrollment_guard: Option<EnrollmentGuard>,
+    after_metadata: impl FnOnce(),
 ) -> Result<RustTargetCargoMetadataWitness, CargoMetadataValidationError> {
     live.revalidate_current()?;
+    if let Some(guard) = enrollment_guard.as_ref() {
+        guard.revalidate(cargo)?;
+    }
     cargo.revalidate()?;
     let before_version = cargo.read_version(limits.version)?;
 
@@ -221,6 +532,7 @@ fn validate_cargo_metadata_with_limits(
         &cargo.environment,
     )?;
     require_success(&output)?;
+    after_metadata();
     let metadata: CargoMetadataDocument = serde_json::from_slice(&output.stdout)
         .map_err(|_| CargoMetadataValidationError::InvalidMetadata)?;
     if metadata.version != 1 {
@@ -244,18 +556,90 @@ fn validate_cargo_metadata_with_limits(
         return Err(CargoMetadataValidationError::CargoVersionChanged);
     }
     cargo.revalidate()?;
+    if let Some(guard) = enrollment_guard.as_ref() {
+        guard.revalidate(cargo)?;
+    }
     live.revalidate_current()?;
 
     Ok(RustTargetCargoMetadataWitness {
         live,
-        cargo: cargo.evidence(),
+        cargo: cargo.evidence(
+            enrollment_guard
+                .as_ref()
+                .map_or(0, EnrollmentGuard::revision),
+        ),
         metadata_sha256: sha256(&output.stdout),
         resolution_policy_revision: CARGO_RESOLUTION_POLICY_REVISION,
+        enrollment_revision: enrollment_guard
+            .as_ref()
+            .map_or(0, EnrollmentGuard::revision),
     })
 }
 
+impl CargoExecutableStaticObservation {
+    fn execute_version(self) -> Result<CargoExecutableObservation, CargoMetadataValidationError> {
+        self.revalidate()?;
+        let output = run_cargo(
+            &self.executable,
+            self.parent.canonical_path(),
+            &[OsStr::new("--version"), OsStr::new("--verbose")],
+            ProcessLimits::version(),
+            &self.environment,
+        )?;
+        require_success(&output)?;
+        let release = parse_cargo_release(&output.stdout)?;
+        let version_sha256 = sha256(&output.stdout);
+        self.revalidate()?;
+        Ok(CargoExecutableObservation {
+            executable: self.executable,
+            parent: self.parent,
+            file: self.file,
+            release,
+            version_sha256,
+            environment: self.environment,
+            #[cfg(target_os = "macos")]
+            code_signature: self.code_signature,
+        })
+    }
+
+    fn revalidate(&self) -> Result<(), CargoMetadataValidationError> {
+        let (parent, file) = capture_exact_cargo_executable(&self.executable)?;
+        if parent != self.parent || file != self.file {
+            return Err(CargoMetadataValidationError::ExecutableChanged);
+        }
+        #[cfg(target_os = "macos")]
+        if self.code_signature.is_some()
+            && inspect_cargo_code_signature(&self.executable)
+                .map_err(|_| CargoMetadataValidationError::InvalidCodeSignature)?
+                != *self
+                    .code_signature
+                    .as_ref()
+                    .expect("checked as present above")
+        {
+            return Err(CargoMetadataValidationError::ExecutableChanged);
+        }
+        self.environment.revalidate()
+    }
+}
+
 impl CargoExecutableObservation {
-    fn evidence(&self) -> CargoExecutableEvidence {
+    #[cfg(target_os = "macos")]
+    fn enrollment_identity(
+        &self,
+    ) -> Result<CargoExecutableEnrollmentIdentity, CargoMetadataValidationError> {
+        CargoExecutableEnrollmentIdentity::new(
+            self.executable.clone(),
+            self.file.sha256(),
+            self.version_sha256,
+            [self.release.major, self.release.minor, self.release.patch],
+            self.code_signature
+                .clone()
+                .ok_or(CargoMetadataValidationError::InvalidCodeSignature)?,
+        )
+        .map_err(map_enrollment_history)
+    }
+
+    fn evidence(&self, enrollment_revision: u64) -> CargoExecutableEvidence {
         CargoExecutableEvidence {
             executable: self.executable.clone(),
             parent: self.parent.clone(),
@@ -263,12 +647,26 @@ impl CargoExecutableObservation {
             release: self.release,
             version_sha256: self.version_sha256,
             environment: self.environment.evidence(),
+            enrollment_revision,
+            #[cfg(target_os = "macos")]
+            code_signature: self.code_signature.clone(),
         }
     }
 
     fn revalidate(&self) -> Result<(), CargoMetadataValidationError> {
         let (parent, file) = capture_exact_cargo_executable(&self.executable)?;
         if parent != self.parent || file != self.file {
+            return Err(CargoMetadataValidationError::ExecutableChanged);
+        }
+        #[cfg(target_os = "macos")]
+        if self.code_signature.is_some()
+            && inspect_cargo_code_signature(&self.executable)
+                .map_err(|_| CargoMetadataValidationError::InvalidCodeSignature)?
+                != *self
+                    .code_signature
+                    .as_ref()
+                    .expect("checked as present above")
+        {
             return Err(CargoMetadataValidationError::ExecutableChanged);
         }
         self.environment.revalidate()?;
@@ -399,9 +797,11 @@ fn parse_cargo_release(bytes: &[u8]) -> Result<CargoRelease, CargoMetadataValida
         .find_map(|line| line.strip_prefix("host: "))
         .ok_or(CargoMetadataValidationError::InvalidCargoVersion)?;
     if first_release != verbose_release
-        || first_release.major != SUPPORTED_CARGO_MAJOR
-        || first_release.minor != SUPPORTED_CARGO_MINOR
-        || first_release.patch != SUPPORTED_CARGO_PATCH
+        || [
+            first_release.major,
+            first_release.minor,
+            first_release.patch,
+        ] != CARGO_ENROLLMENT_SUPPORTED_RELEASE
         || commit_hash.len() != 40
         || !commit_hash.bytes().all(|byte| byte.is_ascii_hexdigit())
         || !supported_cargo_host(host)
@@ -753,6 +1153,10 @@ impl RustTargetCargoMetadataWitness {
     pub(super) fn resolution_policy_revision(&self) -> u32 {
         self.resolution_policy_revision
     }
+
+    pub(super) fn enrollment_revision(&self) -> u64 {
+        self.enrollment_revision
+    }
 }
 
 #[cfg(test)]
@@ -794,5 +1198,24 @@ pub(super) fn validate_cargo_metadata_for_test(
             version: ProcessLimits::version(),
             metadata: limits,
         },
+        None,
+        || {},
+    )
+}
+
+#[cfg(test)]
+pub(super) fn validate_cargo_metadata_with_enrollment_hook_for_test(
+    live: RustTargetLiveWitness,
+    cargo: &CargoExecutableObservation,
+    store: Arc<StoreCoordinator>,
+    enrollment: CargoEnrollmentSetting,
+    after_metadata: impl FnOnce(),
+) -> Result<RustTargetCargoMetadataWitness, CargoMetadataValidationError> {
+    validate_cargo_metadata_with_limits(
+        live,
+        cargo,
+        RunnerLimits::production(),
+        Some(EnrollmentGuard { store, enrollment }),
+        after_metadata,
     )
 }
