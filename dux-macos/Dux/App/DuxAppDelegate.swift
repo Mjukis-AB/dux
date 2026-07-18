@@ -123,10 +123,19 @@ final class DuxAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidBecomeActive(_ notification: Notification) {
         _ = notification
-        automaticTerminationLease.reassert()
+        scheduleAutomaticTerminationReassertion()
         Task {
             await handleApplicationBecameActive()
         }
+    }
+
+    func applicationDidResignActive(_ notification: Notification) {
+        _ = notification
+        // Closing a MenuBarExtra window can resign the agent application before
+        // AppKit has finished restoring its transient scene. Reassert after the
+        // scene turn as well as immediately so automatic termination cannot win
+        // that race.
+        scheduleAutomaticTerminationReassertion()
     }
 
     func handleApplicationBecameActive() async {
@@ -148,7 +157,7 @@ final class DuxAppDelegate: NSObject, NSApplicationDelegate {
         _ sender: NSApplication
     ) -> Bool {
         _ = sender
-        automaticTerminationLease.reassert()
+        scheduleAutomaticTerminationReassertion()
         return false
     }
 
@@ -156,7 +165,7 @@ final class DuxAppDelegate: NSObject, NSApplicationDelegate {
         guard DuxTerminationIntent.consumeExplicitQuitRequest() else {
             // MenuBarExtra owns a transient window. AppKit may ask to terminate
             // an agent app when that window closes; that is not a user Quit.
-            automaticTerminationLease.reassert()
+            scheduleAutomaticTerminationReassertion()
             return .terminateCancel
         }
         switch terminationGate.begin() {
@@ -183,6 +192,22 @@ final class DuxAppDelegate: NSObject, NSApplicationDelegate {
     private func installObservers() {
         guard observers.isEmpty else {
             return
+        }
+        for name in [
+            NSWindow.willCloseNotification,
+            NSWindow.didResignKeyNotification,
+        ] {
+            observers.append(
+                NotificationCenter.default.addObserver(
+                    forName: name,
+                    object: nil,
+                    queue: .main
+                ) { [weak self] _ in
+                    Task { @MainActor in
+                        self?.scheduleAutomaticTerminationReassertion()
+                    }
+                }
+            )
         }
         observers.append(
             NSWorkspace.shared.notificationCenter.addObserver(
@@ -249,6 +274,18 @@ final class DuxAppDelegate: NSObject, NSApplicationDelegate {
             NSWorkspace.shared.notificationCenter.removeObserver(observer)
         }
         observers.removeAll(keepingCapacity: false)
+    }
+
+    private func scheduleAutomaticTerminationReassertion() {
+        automaticTerminationLease.reassert()
+        for delay in [0, 50, 250] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(delay)) {
+                [weak self] in
+                Task { @MainActor in
+                    self?.automaticTerminationLease.reassert()
+                }
+            }
+        }
     }
 }
 

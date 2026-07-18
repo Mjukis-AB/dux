@@ -3615,6 +3615,12 @@ Tasks:
   slice reasserts the lease after SwiftUI restores the transient scene and at
   AppKit's last-window/termination callbacks, because scene restoration can
   otherwise re-enable automatic termination after the initial launch lease.
+  Corrected 2026-07-19: transient-window close/resignation notifications now
+  trigger immediate and delayed lease reassertion across the AppKit scene
+  teardown turn. This closes the remaining timing window in which AppKit could
+  mark the `LSUIElement` process eligible for automatic termination after the
+  popover disappeared. The behavior is covered by a delegate lifecycle test;
+  it does not alter explicit Quit or runtime shutdown authority.
 - [x] Implement Explorer window shell and Overview. Completed 2026-07-17: one
   reusable `Window(id: "explorer")` opens after the menu-bar scene, shares the
   process-wide `AppModel`, activates only after the open request, and does not

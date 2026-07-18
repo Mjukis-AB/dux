@@ -30,6 +30,11 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Fixed
+- Hardened popover teardown lifetime handling again: transient window close,
+  key resignation, application resignation, last-window callbacks, and
+  incidental termination requests now reassert the AppKit lifetime lease both
+  immediately and after the scene teardown run-loop turns. This prevents the
+  menu-bar process from disappearing when the popover is opened and closed.
 - Hardened the menu-bar app lifetime lease to restore
   `automaticTerminationSupportEnabled` before reasserting the disable lease.
   This prevents AppKit's transient `MenuBarExtra` teardown from terminating

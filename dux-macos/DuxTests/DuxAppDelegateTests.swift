@@ -143,6 +143,25 @@ final class DuxAppDelegateTests: XCTestCase {
         )
     }
 
+    func testTransientSceneResignationReassertsAutomaticTerminationLease() {
+        let controller = AutomaticTerminationControllerSpy()
+        let lease = DuxAutomaticTerminationLease(controller: controller)
+        lease.acquire()
+        let delegate = DuxAppDelegate(
+            runtime: RuntimeSpy(),
+            automaticTerminationLease: lease
+        )
+
+        delegate.applicationDidResignActive(
+            Notification(name: NSApplication.didResignActiveNotification)
+        )
+
+        XCTAssertEqual(
+            controller.events,
+            ["support:true", "disable", "disable"]
+        )
+    }
+
     func testExplicitQuitIntentIsOneShot() {
         DuxTerminationIntent.requestExplicitQuit()
 
