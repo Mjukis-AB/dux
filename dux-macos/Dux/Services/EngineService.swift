@@ -1,5 +1,6 @@
 import Dispatch
 import Foundation
+import OSLog
 
 protocol DuxVolumeStatusServing: Sendable {
     func observeVolumeCapacity(_ snapshot: VolumeCapacitySnapshot) async throws
@@ -814,7 +815,21 @@ private final class EngineServiceState: @unchecked Sendable {
     }
 }
 
+private enum HomeScanResponseViolation: String, Error {
+    case envelope
+    case progressRecord
+    case resultRecord
+    case terminalStatus
+    case phaseShape
+    case terminalAggregates
+    case transition
+}
+
 private final class FFIHomeScanTask: HomeScanTask, @unchecked Sendable {
+    private static let logger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "se.mjukis.dux",
+        category: "scan-contract"
+    )
     private let task: ScanTask
     private let state: EngineServiceState
     private var lastPoll: HomeScanTaskPoll?
@@ -830,7 +845,15 @@ private final class FFIHomeScanTask: HomeScanTask, @unchecked Sendable {
                 let poll = try Self.map(self.task.poll(), after: self.lastPoll)
                 self.lastPoll = poll
                 return poll
+            } catch let violation as HomeScanResponseViolation {
+                Self.logger.error(
+                    "Rejected path-free scan poll: \(violation.rawValue, privacy: .public)"
+                )
+                throw HomeScanServiceError.invalidResponse
             } catch let error as ScanError {
+                Self.logger.error(
+                    "Scan FFI poll failed: \(Self.diagnosticCode(error), privacy: .public)"
+                )
                 throw EngineService.homeScanServiceError(error)
             }
         }
@@ -851,12 +874,24 @@ private final class FFIHomeScanTask: HomeScanTask, @unchecked Sendable {
         }
     }
 
+    private static func diagnosticCode(_ error: ScanError) -> String {
+        switch error {
+        case .InternalState: "internal-state"
+        case .RegistryUnavailable: "registry-unavailable"
+        case .TaskUnavailable: "task-unavailable"
+        case .EventHistoryUnavailable: "event-history-unavailable"
+        case .WrongTaskKind: "wrong-task-kind"
+        case .InvalidRecordVersion: "invalid-record-version"
+        default: "ffi-error"
+        }
+    }
+
     private static func map(
         _ raw: ScanPoll,
         after previous: HomeScanTaskPoll?
     ) throws -> HomeScanTaskPoll {
         guard raw.recordVersion == EngineService.expectedRecordVersion, raw.revision > 0 else {
-            throw HomeScanServiceError.invalidResponse
+            throw HomeScanResponseViolation.envelope
         }
         let progress = try raw.progress.map(mapProgress)
         let result = try raw.result.map(mapResult)
@@ -882,7 +917,7 @@ private final class FFIHomeScanTask: HomeScanTask, @unchecked Sendable {
             failure: raw.failure,
             result: raw.result
         ) else {
-            throw HomeScanServiceError.invalidResponse
+            throw HomeScanResponseViolation.phaseShape
         }
 
         let mapped = HomeScanTaskPoll(
@@ -896,7 +931,7 @@ private final class FFIHomeScanTask: HomeScanTask, @unchecked Sendable {
             result: result
         )
         guard validTerminalResult(progress: mapped.progress, result: mapped.result) else {
-            throw HomeScanServiceError.invalidResponse
+            throw HomeScanResponseViolation.terminalAggregates
         }
         if let previous {
             guard
@@ -908,7 +943,7 @@ private final class FFIHomeScanTask: HomeScanTask, @unchecked Sendable {
                 validProgressTransition(from: previous.progress, to: mapped.progress),
                 validTerminalResult(progress: previous.progress, result: mapped.result)
             else {
-                throw HomeScanServiceError.invalidResponse
+                throw HomeScanResponseViolation.transition
             }
         }
         return mapped
@@ -916,7 +951,7 @@ private final class FFIHomeScanTask: HomeScanTask, @unchecked Sendable {
 
     private static func mapProgress(_ raw: ScanProgress) throws -> ScanProgressFacts {
         guard raw.recordVersion == EngineService.expectedRecordVersion else {
-            throw HomeScanServiceError.invalidResponse
+            throw HomeScanResponseViolation.progressRecord
         }
         return ScanProgressFacts(
             files: raw.filesScanned,
@@ -935,7 +970,7 @@ private final class FFIHomeScanTask: HomeScanTask, @unchecked Sendable {
             validCoverage(raw.coverage),
             validCandidateEvaluation(raw.candidateEvaluation)
         else {
-            throw HomeScanServiceError.invalidResponse
+            throw HomeScanResponseViolation.resultRecord
         }
 
         let succeeded = raw.status == .succeeded
@@ -946,7 +981,7 @@ private final class FFIHomeScanTask: HomeScanTask, @unchecked Sendable {
                 raw.coverage.status != .unknown,
                 raw.candidateEvaluation.status != .notRun
             else {
-                throw HomeScanServiceError.invalidResponse
+                throw HomeScanResponseViolation.terminalStatus
             }
         case .failed, .cancelled, .interrupted:
             guard
@@ -957,7 +992,7 @@ private final class FFIHomeScanTask: HomeScanTask, @unchecked Sendable {
                 raw.allocatedBytes == nil,
                 raw.candidateEvaluation.status == .notRun
             else {
-                throw HomeScanServiceError.invalidResponse
+                throw HomeScanResponseViolation.terminalStatus
             }
         }
 

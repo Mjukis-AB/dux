@@ -414,6 +414,68 @@ final class EngineServiceTests: XCTestCase {
         XCTAssertEqual(advanced.progress?.knownAllocatedBytes, 96)
     }
 
+    func testHomeScanAdapterPreservesTypedFailureAfterLargePartialProgress() async throws {
+        let progress = ScanProgress(
+            recordVersion: 1,
+            filesScanned: 120_000,
+            directoriesScanned: 30_000,
+            knownAllocatedBytes: 64 * 1_024 * 1_024 * 1_024,
+            errorCount: 20_000
+        )
+        let failedResult = ScanTaskResult(
+            recordVersion: 1,
+            scanId: "scan:rejected-production-shape",
+            startedAtUnixMs: 1,
+            completedAtUnixMs: 180_001,
+            status: .failed,
+            directoryCount: 0,
+            fileCount: 0,
+            logicalBytes: 0,
+            allocatedBytes: nil,
+            snapshotAvailable: false,
+            coverage: ScanCoverageSummary(
+                recordVersion: 1,
+                status: .unknown,
+                measuredPermille: nil,
+                issueRecordCount: 0,
+                issueOccurrenceCount: 0
+            ),
+            candidateEvaluation: ScanCandidateEvaluationSummary(
+                recordVersion: 1,
+                status: .notRun,
+                candidateCount: 0,
+                failure: nil
+            )
+        )
+        let generated = RecordingGeneratedScanTask(
+            polls: [
+                generatedActivePoll(revision: 2, progress: progress),
+                ScanPoll(
+                    recordVersion: 1,
+                    phase: .failed,
+                    stage: .terminal,
+                    cancellationRequested: false,
+                    revision: 3,
+                    progress: progress,
+                    eventsTruncated: false,
+                    failure: .snapshotRejected,
+                    result: failedResult
+                ),
+            ]
+        )
+        let task = try await EngineService(
+            engine: RecordingScanEngine(task: generated)
+        ).startHomeScan().task
+
+        _ = try await task.poll()
+        let terminal = try await task.poll()
+
+        XCTAssertEqual(terminal.phase, .failed)
+        XCTAssertEqual(terminal.failure, .snapshotRejected)
+        XCTAssertEqual(terminal.result?.succeeded, false)
+        XCTAssertEqual(terminal.progress?.issueCount, 20_000)
+    }
+
     func testHomeScanAdapterMapsEveryTypedStartError() async {
         let cases: [(ScanError, HomeScanServiceError)] = [
             (.Closed, .closed),
