@@ -632,6 +632,10 @@ EXCEPTIONS = {
         "swift-filesystem-effect",
         "test",
     ),
+    "macos-trash-platform-adapter": ExceptionSpec(
+        "dux-macos/Dux/Services/ExplorerLiveFileActions.swift",
+        "swift-filesystem-effect",
+    ),
     "release-checksum-sidecars-remove": ExceptionSpec(
         ".github/workflows/release.yml", "shell-remove"
     ),
@@ -759,6 +763,7 @@ EXCEPTION_PRIMITIVES = {
     "test-swift-storage-roots-fixture-remove": "removeItem",
     "test-swift-retry-obstruction-remove": "removeItem",
     "test-swift-home-scan-fixture-write": "write",
+    "macos-trash-platform-adapter": "trashItem",
     "release-checksum-sidecars-remove": "rm",
     "lint-list-repository-sources": "subprocess.run",
     "test-lint-rejected-xcframework-output": "subprocess.run",

@@ -304,6 +304,51 @@ final class ExplorerSnapshotHistoryTests: XCTestCase {
     }
 }
 
+private final class RecordingTrashFileManager: TrashFileManaging {
+    enum Failure: Error {
+        case denied
+    }
+
+    var calls = 0
+    var requestedURL: URL?
+    var shouldFail = false
+
+    func moveToTrash(at url: URL) throws {
+        calls += 1
+        requestedURL = url
+        if shouldFail {
+            throw Failure.denied
+        }
+    }
+}
+
+final class MacOSTrashPlatformAdapterTests: XCTestCase {
+    func testRecordingAdapterReceivesTheExactReviewedURLOnceWithoutMutation() {
+        let fileManager = RecordingTrashFileManager()
+        let adapter = MacOSTrashPlatformAdapter(fileManager: fileManager)
+        let reviewedURL = URL(fileURLWithPath: "/private/tmp/dux-reviewed-item")
+
+        guard case .success = adapter.trash(reviewedURL) else {
+            return XCTFail("the recording adapter should report success")
+        }
+        XCTAssertEqual(fileManager.calls, 1)
+        XCTAssertEqual(fileManager.requestedURL, reviewedURL)
+    }
+
+    func testFoundationFailureMapsToUnknownAndIsNotRetried() {
+        let fileManager = RecordingTrashFileManager()
+        fileManager.shouldFail = true
+        let adapter = MacOSTrashPlatformAdapter(fileManager: fileManager)
+
+        guard case .failure(.outcomeUnknown) = adapter.trash(
+            URL(fileURLWithPath: "/private/tmp/dux-reviewed-item")
+        ) else {
+            return XCTFail("Foundation failures must map to an unknown outcome")
+        }
+        XCTAssertEqual(fileManager.calls, 1)
+    }
+}
+
 final class ExplorerScanCoverageDetailsAdapterTests: XCTestCase {
     func testMapsAndAssemblesExactRootRelativeCoveragePages() throws {
         let coverage = ScanCoverageSummary(

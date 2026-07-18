@@ -99,3 +99,44 @@ final class UnavailableExplorerLiveFileActionPresenter: ExplorerLiveFileActionPr
     func quickLook(_: ExplorerResolvedLiveItem) -> Bool { false }
     func dismissQuickLook() {}
 }
+
+/// The only Foundation-facing Trash dependency. This remains an internal
+/// adapter contract until the core-owned one-shot callback is wired; UI and
+/// FFI code must not construct or pass arbitrary cleanup URLs here.
+protocol TrashFileManaging {
+    func moveToTrash(at url: URL) throws
+}
+
+extension FileManager: TrashFileManaging {
+    func moveToTrash(at url: URL) throws {
+        // DUX-DESTRUCTIVE: allow=macos-trash-platform-adapter -- the sole synchronous FileManager Trash primitive in the reviewed adapter
+        try trashItem(at: url, resultingItemURL: nil)
+    }
+}
+
+enum MacOSTrashAdapterError: Error, Equatable {
+    /// Foundation may have moved or reconciled an item before throwing. The
+    /// journal must conservatively recover instead of claiming a clean
+    /// failure or retrying.
+    case outcomeUnknown
+}
+
+struct MacOSTrashPlatformAdapter {
+    private let fileManager: any TrashFileManaging
+
+    init(fileManager: any TrashFileManaging = FileManager.default) {
+        self.fileManager = fileManager
+    }
+
+    /// This is deliberately not called by the app yet. A future core-owned
+    /// callback supplies the exact reviewed target while holding its one-shot
+    /// journal admission; no caller may retry after this returns.
+    func trash(_ url: URL) -> Result<Void, MacOSTrashAdapterError> {
+        do {
+            try fileManager.moveToTrash(at: url)
+            return .success(())
+        } catch {
+            return .failure(.outcomeUnknown)
+        }
+    }
+}

@@ -25,6 +25,13 @@ All notable changes to DUX will be documented in this file.
   bounded path-free errors. Recording adapters verify exact-path delivery,
   no mutation, single-call behavior, and no retry after an unknown outcome;
   no Swift/FFI caller or real platform effect is connected.
+- Continued Milestone 5 with an internal macOS Trash adapter contract. The
+  Foundation dependency is injected behind a narrow `TrashFileManaging`
+  protocol; a successful synchronous `FileManager.trashItem` maps to success,
+  while every thrown Foundation result maps conservatively to path-free
+  `OutcomeUnknown`. Fake-only tests verify exact URL delivery, no mutation, one
+  call, and no retry. UI/FFI wiring and real cleanup remain gated on the
+  core-owned callback.
 - Continued Milestone 5 with a separate core-owned Trash review witness for
   Explorer selections. A retained snapshot node is resolved to fresh no-follow
   ancestry and target identity; final symlinks remain link objects while

@@ -763,6 +763,13 @@ journal while the claim is held; its recording tests perform no filesystem
 mutation and cannot retry. `FileManager.trashItem`, approval binding, and the
 actual mutation remain later gates.
 
+The macOS side now has only an internal, dependency-injected adapter contract
+around `FileManager.trashItem(at:resultingItemURL:)`. It accepts no review IDs,
+plan state, or FFI input and is not called by the app; fake-only tests assert
+that a Foundation throw becomes `OutcomeUnknown` without a retry. A future
+core-owned synchronous callback must supply the exact already-revalidated
+one-shot target while the journal claim remains held.
+
 Any ambiguity returns a typed rejection, skip, or `ChangedSincePlan`. The
 executor MUST NOT silently refresh a target and proceed; changed evidence needs
 a new plan and approval.
@@ -996,7 +1003,8 @@ not the existing read-only live-target record, is not serializable or cloneable,
 and cannot approve or construct a plan. Journal admission now owns a private
 synchronous driver seam and terminal effect outcome recording, but no Swift/FFI
 caller or real macOS adapter is connected. Approval, journal admission, the
-centralized executor, and the macOS adapter remain required before any mutation.
+centralized executor, and the core-owned callback into the macOS adapter remain
+required before any mutation.
 
 Linux implements the XDG Trash specification with correct mount behavior or
 refuses Trash. Windows uses an independently reviewed recoverable shell API or

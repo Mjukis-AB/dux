@@ -4499,6 +4499,12 @@ Tasks:
     adapters verify exact-path delivery, no mutation, single-call behavior,
     and no retry after an unknown outcome. The driver is crate-private and no
     Swift/FFI caller or real platform primitive can invoke it yet.
+  - [x] 2026-07-19 slice: add the internal macOS Trash adapter contract. A
+    Foundation-backed `TrashFileManaging` seam maps a successful synchronous
+    `FileManager.trashItem(at:resultingItemURL:)` call to success and every
+    thrown Foundation result to path-free `OutcomeUnknown`. Injected fake tests
+    verify exact URL delivery, no mutation, one call, and no retry. The adapter
+    is not wired to UI or FFI; only the future core-owned callback may invoke it.
 - [ ] Implement permanent-safe executor for approved rules.
 - [ ] Implement execution-time revalidation.
 - [ ] Implement cleanup session/item history.
