@@ -5319,3 +5319,7 @@ fn finish_job(
 #[cfg(test)]
 #[path = "registry_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "snapshot_performance_tests.rs"]
+mod snapshot_performance_tests;

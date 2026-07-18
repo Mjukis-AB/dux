@@ -1278,7 +1278,7 @@ get_history(query) -> HistoryPageDto
 record_ai_insight(input_digest, insight)
 ```
 
-Current native realization (FFI contract v15):
+Current native realization (FFI contract v16):
 `observe_startup_volume(versioned Foundation facts) -> versioned path-free
 status` is the first production volume endpoint. It returns Rust-owned pressure,
 headline source/boundaries, prior durable pressure, and history disposition.
@@ -3918,7 +3918,30 @@ Tasks:
     reload, close, and shutdown suppress stale publication. Explorer exposes
     Rescan This Folder on Command-R, Load Latest Snapshot as a separate action,
     accessible progress/cancel status, and explicit standalone-root copy.
-- [ ] Add performance fixtures for million-node snapshots.
+- [x] Add performance fixtures for million-node snapshots.
+  - [x] 2026-07-18 slice: add generated balanced and worst-case wide immutable
+    snapshot fixtures over the real durable publication, exact review lease,
+    retained decode/index, paging, treemap, Large Files, release, and shutdown
+    path. Normal CI runs both shapes at 10,000 nodes; isolated Release lanes run
+    exact balanced/wide 1,000,000-node and balanced 5,000,000-node scenarios,
+    emit versioned JSON, capture macOS peak RSS, and are available through a
+    weekly/manual artifact-producing workflow. The checked baseline records
+    roughly 124 MB wire and 423–460 MB peak RSS for 1M, with first review at
+    1.51–1.65 seconds off-main; the wide first page measured 7 ms, cached page
+    1 ms, and 48-cell treemap 15 ms. That evidence raises the direct-child sort
+    ceiling from 100,000 to the measured 999,999, while retaining one compact
+    index and revalidating the exact lease after potentially long page/treemap
+    work.
+    A repeated native 64-cell layout gate remains below one 60 Hz frame.
+
+    The exact 5M lane measured a 619,996,236-byte wire and approximately 2.01 GB
+    publication-process peak RSS, then proved the existing conservative
+    `wire × 3`/1 GiB decoded-review budget refuses the review before decode.
+    DUX deliberately keeps that typed resource refusal: raising the UI-process
+    budget without a streaming/indexed format is not justified by the evidence.
+    No fixture creates live paths, FFI node floods, AI input, plans, or cleanup
+    authority. Commands, topology, measurements, and interpretation live in
+    `docs/SNAPSHOT_PERFORMANCE.md`.
 
 Exit criteria:
 

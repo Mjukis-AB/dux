@@ -221,8 +221,10 @@ Version 1 rejects values outside these code-owned limits:
 Lengths are checked with overflow-safe arithmetic. A tiny truncated file that
 claims the maximum node count fails on its first missing record and does not
 reserve memory proportional to the unproven count. A legitimate maximum file
-can still require substantial decoded memory; the roadmap's 1M/5M-node memory
-benchmarks and later indexed/paged display work remain required.
+can still require substantial decoded memory. Generated Release fixtures now
+measure exact balanced/wide 1M and balanced 5M publication/review behavior; see
+`SNAPSHOT_PERFORMANCE.md`. The current decoded Explorer admits the measured 1M
+shapes and deliberately rejects 5M before decode under its fixed memory budget.
 
 The wire can encode unsigned 64-bit aggregates, but a completed scan prepared
 for durable publication additionally requires every summary count to fit
@@ -592,8 +594,9 @@ This checkpoint does not implement:
   sparse/compressed-allocation runtime verification plus bounded accounting
   probes for slow filesystem drivers (Windows stage regressions are compiled
   but have not run on this host);
-- measured Explorer 1M/5M-node paging latency and memory budgets plus any
-  justified persistent indexes;
+- a future streaming/indexed representation if interactive Explorer review of
+  a measured 5M-node snapshot is required; the current v1 format remains
+  persistable while its decoded review is refused before allocation;
 - migration from or hardening of the legacy CLI cache.
 
 Those items remain separate roadmap work. None may weaken the immutable

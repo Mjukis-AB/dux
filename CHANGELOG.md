@@ -5,6 +5,17 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Completed Milestone 4's million-node performance-fixture slice. Generated
+  balanced and worst-case wide snapshots now exercise real durable immutable
+  publication and Explorer review without creating millions of filesystem
+  entries; scaled versions run in normal CI, and isolated Release 1M/5M lanes
+  emit versioned timing/size observations with peak-RSS logs through a scheduled
+  or manual workflow. Checked Apple-silicon baselines justify admitting exactly
+  999,999 sortable direct children with post-work lease revalidation and
+  retain the typed pre-decode refusal for a 5M review rather than raising the
+  fixed 1 GiB UI-process budget after a roughly 2.01 GB publication peak. A
+  repeated maximum-cell native treemap layout also gates the 60 Hz interaction
+  budget. The fixtures and projections remain read-only and non-authoritative.
 - Completed Milestone 4's scan-cancellation and subtree-refresh slice with FFI
   contract v16. Snapshot Explorer can rescan its current directory by sending
   only the exact retained review and node ID; Rust keeps the live path sealed,

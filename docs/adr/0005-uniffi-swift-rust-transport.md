@@ -79,9 +79,11 @@ durable pin and retained immutable file. A session decodes once, release drops
 the cache, invalid/expired sessions surrender admission immediately, and a
 separate per-engine budget permits at most two retained trees within a
 conservative 1 GiB decoded-memory estimate. A compact decode-time child index
-and one sorted-child cache avoid full-subtree work on repeated pages;
-directories above 100,000 direct children remain budget-gated until measured
-latency work establishes a responsive strategy. Swift
+and one sorted-child cache avoid full-subtree work on repeated pages. Generated
+Release fixtures exercise balanced and wide million-node snapshots through the
+real repository/review path. The measured wide page and treemap justify an
+exact 999,999-direct-child ceiling with post-work lease revalidation; greater
+fan-out remains budget-gated. Swift
 converts into app-owned models, preserves typed expiry/navigation failures,
 generation-fences controller results, and immediately removes an expired lease.
 Contract v11 adds one logical-size treemap call under the same exact lease. It

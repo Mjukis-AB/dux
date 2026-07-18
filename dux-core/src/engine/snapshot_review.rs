@@ -27,10 +27,10 @@ pub const MAX_SNAPSHOT_REVIEW_PARENT_CONTEXT_COMPONENTS: usize = 8;
 /// instead of publishing a partial classification when this cap is exceeded.
 pub(super) const MAX_SNAPSHOT_REVIEW_CATEGORY_ROOTS: usize = 4_096;
 pub(super) const MAX_SNAPSHOT_REVIEW_CATEGORY_BYTES: usize = 1024 * 1024;
-// Sorting runs on the engine's serial FFI executor. Keep a defensive ceiling
-// well below the full snapshot-node budget until the million-node latency gate
-// in M4 has measured a cancellable/background strategy.
-const MAX_SNAPSHOT_REVIEW_SORTABLE_CHILDREN: u64 = 100_000;
+// Sorting runs on the engine's serial utility executor, never the main actor.
+// The M4 generated Release fixture measures this exact ceiling on the real
+// retained-review path; larger fan-out remains a typed resource refusal.
+const MAX_SNAPSHOT_REVIEW_SORTABLE_CHILDREN: u64 = 999_999;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SnapshotReviewNodeSort {
@@ -538,14 +538,18 @@ impl SnapshotReviewSession {
             .sorted_children
             .as_ref()
             .ok_or(SnapshotReviewError::InternalState)?;
-        build_child_page(
+        let page = build_child_page(
             document,
             &cache.indices,
             parent_id,
             offset,
             limit,
             &self.category_index,
-        )
+        )?;
+        // A million-child first sort can outlive a lease boundary. Do not
+        // return historical projections after their exact review expired.
+        self.ensure_document(SystemTime::now())?;
+        Ok(page)
     }
 
     /// Return a bounded, deterministic direct-child logical-size projection.
@@ -583,13 +587,16 @@ impl SnapshotReviewSession {
             .sorted_children
             .as_ref()
             .ok_or(SnapshotReviewError::InternalState)?;
-        build_treemap(
+        let treemap = build_treemap(
             document,
             &cache.indices,
             parent_id,
             max_cells,
             &self.category_index,
-        )
+        )?;
+        // Revalidate after the potentially million-child sort and aggregate.
+        self.ensure_document(SystemTime::now())?;
+        Ok(treemap)
     }
 
     /// Return the largest matching regular files from this exact retained

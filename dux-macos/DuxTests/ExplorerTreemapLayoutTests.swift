@@ -49,4 +49,30 @@ final class ExplorerTreemapLayoutTests: XCTestCase {
             ).isEmpty
         )
     }
+
+    func testMaximumCellLayoutMeetsTheSixtyHertzInteractionBudget() {
+        let items = (0..<64).map { index in
+            ExplorerTreemapLayoutItem(
+                id: .node(UInt64(index + 1)),
+                logicalBytes: UInt64(64 - index)
+            )
+        }
+        let bounds = CGRect(x: 0, y: 0, width: 1_200, height: 800)
+        let repetitions = 120
+        let started = Date.timeIntervalSinceReferenceDate
+        for _ in 0..<repetitions {
+            XCTAssertEqual(
+                ExplorerTreemapLayout.rectangles(for: items, in: bounds).count,
+                items.count
+            )
+        }
+        let averageDuration =
+            (Date.timeIntervalSinceReferenceDate - started) / Double(repetitions)
+
+        XCTAssertLessThan(
+            averageDuration,
+            1.0 / 60.0,
+            "The bounded 64-cell layout must leave one 60 Hz frame available"
+        )
+    }
 }
