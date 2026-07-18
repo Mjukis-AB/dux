@@ -15,7 +15,8 @@ use windows_sys::Win32::Storage::FileSystem::{
 
 use super::filesystem::{
     AncestorIdentity, CanonicalPathError, FilesystemEntryKind, FilesystemIdentity,
-    PlatformEntrySnapshot, PlatformPathSnapshot, PlatformRootSnapshot, map_io_error,
+    PlatformEntrySnapshot, PlatformPathSnapshot, PlatformRootSnapshot, TrashPlatformPathSnapshot,
+    map_io_error,
 };
 
 // This backend reopens cumulative full paths. OPEN_REPARSE_POINT prevents the
@@ -90,6 +91,16 @@ pub(super) fn capture_descendant(
     }
 
     Err(CanonicalPathError::CanonicalEscapesScanRoot)
+}
+
+pub(super) fn capture_trash_descendant(
+    _root: &Path,
+    _relative_path: &Path,
+) -> Result<TrashPlatformPathSnapshot, CanonicalPathError> {
+    // Reparse-safe final-link evidence needs a handle-relative implementation
+    // and explicit tag validation. Keep this boundary unavailable rather than
+    // treating FILE_FLAG_OPEN_REPARSE_POINT as sufficient authority.
+    Err(CanonicalPathError::UnsupportedPlatform)
 }
 
 pub(super) fn open_regular_descendant(

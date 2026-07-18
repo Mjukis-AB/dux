@@ -11,6 +11,12 @@ All notable changes to DUX will be documented in this file.
   DUX when the popover is closed.
 
 ### Added
+- Continued Milestone 5 with a crate-private no-follow final-link witness for
+  future Trash review. Unix/macOS captures preserve the selected symlink's own
+  identity and lexical object path, including dangling and loop links, without
+  resolving or reading the target; root/intermediate symlinks and special
+  entries fail closed. Windows remains unsupported at this evidence boundary,
+  and no plan, approval, FFI, journal, or mutation authority was added.
 - Continued Milestone 5 with a sealed planner-owned exact-path review
   evidence boundary. A code-owned canonical scan-root observation is required;
   selected candidates are grouped and coalesced deterministically, then each

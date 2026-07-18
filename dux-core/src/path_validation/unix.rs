@@ -8,7 +8,8 @@ use nix::sys::stat::{Mode, SFlag, fstat, fstatat};
 
 use super::filesystem::{
     AncestorIdentity, CanonicalPathError, FilesystemEntryKind, FilesystemIdentity,
-    PlatformEntrySnapshot, PlatformPathSnapshot, PlatformRootSnapshot, map_io_error,
+    PlatformEntrySnapshot, PlatformPathSnapshot, PlatformRootSnapshot, TrashPlatformEntrySnapshot,
+    TrashPlatformPathSnapshot, TrashTargetKind, map_io_error,
 };
 
 const DIRECTORY_FLAGS: OFlag = OFlag::O_RDONLY
@@ -89,6 +90,58 @@ pub(super) fn capture_descendant(
             });
         }
         if snapshot.kind != FilesystemEntryKind::Directory {
+            return Err(CanonicalPathError::NonDirectoryAncestor {
+                component_index: component_index + 1,
+            });
+        }
+        let next = open_directory_at(&directory, component, component_index + 1)?;
+        let opened = fstat(&next).map_err(|error| map_nix_error(component_index + 1, error))?;
+        if identity(&opened) != snapshot.identity {
+            return Err(CanonicalPathError::ChangedDuringValidation {
+                component_index: component_index + 1,
+            });
+        }
+        ancestors.push(AncestorIdentity::new(relative.clone(), snapshot.identity));
+        directory = next;
+    }
+
+    Err(CanonicalPathError::CanonicalEscapesScanRoot)
+}
+
+pub(super) fn capture_trash_descendant(
+    root: &Path,
+    relative_path: &Path,
+) -> Result<TrashPlatformPathSnapshot, CanonicalPathError> {
+    let mut directory =
+        open(root, DIRECTORY_FLAGS, Mode::empty()).map_err(|error| map_nix_error(0, error))?;
+    let root_stat = fstat(&directory).map_err(|error| map_nix_error(0, error))?;
+    if kind(&root_stat) != Some(FilesystemEntryKind::Directory) {
+        return Err(CanonicalPathError::ScanRootNotDirectory);
+    }
+    let root_identity = identity(&root_stat);
+    let mut ancestors = vec![AncestorIdentity::new(PathBuf::new(), root_identity)];
+    let components: Vec<&OsStr> = normal_components(relative_path)?.collect();
+    let mut relative = PathBuf::new();
+
+    for (component_index, component) in components.iter().enumerate() {
+        let target = component_index + 1 == components.len();
+        let snapshot = inspect_trash_at(&directory, component, component_index + 1, target)?;
+        if snapshot.identity.volume() != root_identity.volume() {
+            return Err(CanonicalPathError::CrossVolume {
+                component_index: component_index + 1,
+                expected: root_identity.volume(),
+                observed: snapshot.identity.volume(),
+            });
+        }
+        relative.push(component);
+
+        if target {
+            return Ok(TrashPlatformPathSnapshot {
+                target: snapshot,
+                ancestors,
+            });
+        }
+        if snapshot.kind != TrashTargetKind::Directory {
             return Err(CanonicalPathError::NonDirectoryAncestor {
                 component_index: component_index + 1,
             });
@@ -225,6 +278,37 @@ fn inspect_at(
     }
     let kind = kind(&stat).ok_or(CanonicalPathError::UnsupportedTargetKind)?;
     Ok(PlatformEntrySnapshot {
+        identity: identity(&stat),
+        kind,
+        hard_link_count: hard_link_count(&stat),
+    })
+}
+
+fn inspect_trash_at(
+    directory: &OwnedFd,
+    component: &OsStr,
+    component_index: usize,
+    target: bool,
+) -> Result<TrashPlatformEntrySnapshot, CanonicalPathError> {
+    let stat = fstatat(directory, component, AtFlags::AT_SYMLINK_NOFOLLOW)
+        .map_err(|error| map_nix_error(component_index, error))?;
+    let flags = SFlag::from_bits_truncate(stat.st_mode) & SFlag::S_IFMT;
+    let kind = if flags == SFlag::S_IFLNK {
+        if !target {
+            return Err(CanonicalPathError::SymlinkOrReparsePoint {
+                component_index,
+                target: false,
+            });
+        }
+        TrashTargetKind::Symlink
+    } else if flags == SFlag::S_IFDIR {
+        TrashTargetKind::Directory
+    } else if flags == SFlag::S_IFREG {
+        TrashTargetKind::RegularFile
+    } else {
+        return Err(CanonicalPathError::UnsupportedTargetKind);
+    };
+    Ok(TrashPlatformEntrySnapshot {
         identity: identity(&stat),
         kind,
         hard_link_count: hard_link_count(&stat),

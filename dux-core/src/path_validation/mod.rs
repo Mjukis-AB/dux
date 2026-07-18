@@ -23,6 +23,7 @@ mod unsupported {
 
     use super::filesystem::{
         CanonicalPathError, PlatformEntrySnapshot, PlatformPathSnapshot, PlatformRootSnapshot,
+        TrashPlatformPathSnapshot,
     };
 
     pub(super) fn capture_root(_path: &Path) -> Result<PlatformRootSnapshot, CanonicalPathError> {
@@ -33,6 +34,13 @@ mod unsupported {
         _root: &Path,
         _relative_path: &Path,
     ) -> Result<PlatformPathSnapshot, CanonicalPathError> {
+        Err(CanonicalPathError::UnsupportedPlatform)
+    }
+
+    pub(super) fn capture_trash_descendant(
+        _root: &Path,
+        _relative_path: &Path,
+    ) -> Result<TrashPlatformPathSnapshot, CanonicalPathError> {
         Err(CanonicalPathError::UnsupportedPlatform)
     }
 
@@ -78,7 +86,7 @@ pub(crate) use filesystem::{
     CanonicalFileContentsSnapshot, CanonicalFileDigestError, CanonicalFileDigestSnapshot,
     CanonicalFilePrefixError, CanonicalFilePrefixSnapshot, capture_path_snapshot,
     capture_regular_file_contents, capture_regular_file_prefix, capture_regular_file_sha256,
-    capture_scan_root,
+    capture_scan_root, capture_trash_path_snapshot,
 };
 #[allow(unused_imports)]
 pub(crate) use lexical::{validate_cleanup_path, validate_scan_root};

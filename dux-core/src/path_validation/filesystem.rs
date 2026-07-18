@@ -32,6 +32,19 @@ pub enum FilesystemEntryKind {
     RegularFile,
 }
 
+/// The final object kind captured by the separate ad-hoc Trash witness.
+///
+/// Unlike [`FilesystemEntryKind`], this deliberately includes a symlink. The
+/// witness never follows that final link; it exists so a future macOS Trash
+/// adapter can move the link object itself while preserving the existing
+/// no-symlink ancestry rules.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum TrashTargetKind {
+    Directory,
+    RegularFile,
+    Symlink,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AncestorIdentity {
     relative_path: PathBuf,
@@ -93,6 +106,58 @@ pub struct CanonicalPathSnapshot {
     target_kind: FilesystemEntryKind,
     hard_link_count: u64,
     ancestors: Vec<AncestorIdentity>,
+}
+
+/// No-follow live evidence for an object selected for ad-hoc Trash.
+///
+/// The `object_path` is the validated lexical path to the directory entry; it
+/// is intentionally not canonicalized through a final symlink. This is
+/// momentary, non-authoritative evidence and cannot construct a cleanup plan
+/// or invoke a platform effect.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TrashPathSnapshot {
+    scan_root: PathBuf,
+    requested_path: PathBuf,
+    object_path: PathBuf,
+    relative_path: PathBuf,
+    target_identity: FilesystemIdentity,
+    target_kind: TrashTargetKind,
+    hard_link_count: u64,
+    ancestors: Vec<AncestorIdentity>,
+}
+
+impl TrashPathSnapshot {
+    pub(crate) fn scan_root(&self) -> &Path {
+        &self.scan_root
+    }
+
+    pub(crate) fn requested_path(&self) -> &Path {
+        &self.requested_path
+    }
+
+    pub(crate) fn object_path(&self) -> &Path {
+        &self.object_path
+    }
+
+    pub(crate) fn relative_path(&self) -> &Path {
+        &self.relative_path
+    }
+
+    pub(crate) fn target_identity(&self) -> FilesystemIdentity {
+        self.target_identity
+    }
+
+    pub(crate) fn target_kind(&self) -> TrashTargetKind {
+        self.target_kind
+    }
+
+    pub(crate) fn hard_link_count(&self) -> u64 {
+        self.hard_link_count
+    }
+
+    pub(crate) fn ancestors(&self) -> &[AncestorIdentity] {
+        &self.ancestors
+    }
 }
 
 impl CanonicalPathSnapshot {
@@ -289,6 +354,19 @@ pub(super) struct PlatformPathSnapshot {
     pub(super) ancestors: Vec<AncestorIdentity>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct TrashPlatformEntrySnapshot {
+    pub(super) identity: FilesystemIdentity,
+    pub(super) kind: TrashTargetKind,
+    pub(super) hard_link_count: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct TrashPlatformPathSnapshot {
+    pub(super) target: TrashPlatformEntrySnapshot,
+    pub(super) ancestors: Vec<AncestorIdentity>,
+}
+
 pub(crate) fn capture_scan_root(
     root: LexicalScanRoot,
 ) -> Result<CanonicalScanRoot, CanonicalPathError> {
@@ -374,6 +452,44 @@ pub(crate) fn capture_path_snapshot(
         scan_root: root.canonical_path.clone(),
         requested_path: target.as_path().to_path_buf(),
         canonical_path,
+        relative_path,
+        target_identity: first.target.identity,
+        target_kind: first.target.kind,
+        hard_link_count: first.target.hard_link_count,
+        ancestors: first.ancestors,
+    })
+}
+
+pub(crate) fn capture_trash_path_snapshot(
+    root: &CanonicalScanRoot,
+    target: LexicalCleanupPath,
+) -> Result<TrashPathSnapshot, CanonicalPathError> {
+    if target.scan_root() != root.requested_path() {
+        return Err(CanonicalPathError::MismatchedScanRoot);
+    }
+
+    let first_root = platform::capture_root(root.canonical_path())?;
+    if first_root.identity != root.identity {
+        return Err(CanonicalPathError::ChangedDuringValidation { component_index: 0 });
+    }
+
+    let relative_path = target.relative_to_scan_root().to_path_buf();
+    let first = platform::capture_trash_descendant(root.canonical_path(), &relative_path)?;
+    if first.ancestors.first().map(AncestorIdentity::identity) != Some(root.identity) {
+        return Err(CanonicalPathError::ChangedDuringValidation { component_index: 0 });
+    }
+    let second = platform::capture_trash_descendant(root.canonical_path(), &relative_path)?;
+    let second_root = platform::capture_root(root.canonical_path())?;
+    if first != second || first_root != second_root || first_root.identity != root.identity {
+        return Err(CanonicalPathError::ChangedDuringValidation {
+            component_index: first.ancestors.len(),
+        });
+    }
+
+    Ok(TrashPathSnapshot {
+        scan_root: root.canonical_path.clone(),
+        requested_path: target.as_path().to_path_buf(),
+        object_path: root.canonical_path.join(&relative_path),
         relative_path,
         target_identity: first.target.identity,
         target_kind: first.target.kind,
@@ -605,6 +721,15 @@ mod tests {
             let target = validate_cleanup_path(&self.lexical_root, &path).unwrap();
             capture_path_snapshot(&self.canonical_root, target)
         }
+
+        fn capture_trash(
+            &self,
+            relative_path: &str,
+        ) -> Result<TrashPathSnapshot, CanonicalPathError> {
+            let path = self.root_path.join(relative_path);
+            let target = validate_cleanup_path(&self.lexical_root, &path).unwrap();
+            capture_trash_path_snapshot(&self.canonical_root, target)
+        }
     }
 
     #[test]
@@ -682,6 +807,82 @@ mod tests {
             fixture.capture("loop-link"),
             Err(CanonicalPathError::SymlinkOrReparsePoint { target: true, .. })
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn trash_witness_captures_final_symlink_without_following_it() {
+        use std::os::unix::fs::MetadataExt;
+        use std::os::unix::fs::symlink;
+
+        let fixture = Fixture::new();
+        std::fs::create_dir(fixture.root_path.join("real")).unwrap();
+        let target = fixture.root_path.join("real/file");
+        std::fs::write(&target, b"target remains").unwrap();
+        symlink("real/file", fixture.root_path.join("file-link")).unwrap();
+        symlink("missing", fixture.root_path.join("dangling-link")).unwrap();
+        symlink("loop-link", fixture.root_path.join("loop-link")).unwrap();
+
+        let target_identity = std::fs::symlink_metadata(&target).unwrap();
+        let link = fixture.capture_trash("file-link").unwrap();
+        assert_eq!(link.target_kind(), TrashTargetKind::Symlink);
+        assert_eq!(link.object_path(), fixture.root_path.join("file-link"));
+        assert_eq!(
+            link.target_identity().object(),
+            std::fs::symlink_metadata(fixture.root_path.join("file-link"))
+                .unwrap()
+                .ino()
+                .into()
+        );
+        assert_ne!(
+            link.target_identity().object(),
+            target_identity.ino().into()
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"target remains");
+
+        assert_eq!(
+            fixture
+                .capture_trash("dangling-link")
+                .unwrap()
+                .target_kind(),
+            TrashTargetKind::Symlink
+        );
+        assert_eq!(
+            fixture.capture_trash("loop-link").unwrap().target_kind(),
+            TrashTargetKind::Symlink
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn trash_witness_keeps_ancestor_and_special_entry_guards() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = Fixture::new();
+        std::fs::create_dir(fixture.root_path.join("real")).unwrap();
+        std::fs::write(fixture.root_path.join("real/file"), b"data").unwrap();
+        symlink("real", fixture.root_path.join("directory-link")).unwrap();
+
+        assert!(matches!(
+            fixture.capture_trash("directory-link/file"),
+            Err(CanonicalPathError::SymlinkOrReparsePoint { target: false, .. })
+        ));
+    }
+
+    #[test]
+    fn trash_witness_accepts_non_symlink_objects_without_canonicalization() {
+        let fixture = Fixture::new();
+        std::fs::create_dir(fixture.root_path.join("directory")).unwrap();
+        std::fs::write(fixture.root_path.join("file"), b"data").unwrap();
+
+        assert_eq!(
+            fixture.capture_trash("directory").unwrap().target_kind(),
+            TrashTargetKind::Directory
+        );
+        assert_eq!(
+            fixture.capture_trash("file").unwrap().target_kind(),
+            TrashTargetKind::RegularFile
+        );
     }
 
     #[cfg(unix)]

@@ -4434,6 +4434,16 @@ Tasks:
     approval binding, executor revalidation, and plan/journal integration remain
     open.
 - [ ] Implement Trash executor for Explorer selections.
+  - [x] 2026-07-18 slice: add a crate-private Unix/macOS no-follow final-link
+    witness for future Trash admission. It keeps the requested and validated
+    lexical object paths, ordered no-follow ancestor identities, volume/object
+    identity, target kind, and link count without canonicalizing or reading a
+    symlink target. Regular files and directories use the same witness shape;
+    final dangling and loop links are retained as link objects, while root or
+    intermediate links and special entries fail closed. Windows remains
+    `UnsupportedPlatform` until handle-relative reparse-tag validation exists.
+    The witness is non-actionable and adds no plan, approval, journal, FFI,
+    `FileManager.trashItem`, or mutation authority.
 - [ ] Implement permanent-safe executor for approved rules.
 - [ ] Implement execution-time revalidation.
 - [ ] Implement cleanup session/item history.
