@@ -5,6 +5,19 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Continued Milestone 5 with a sealed, crate-private Rust-target live witness.
+  It accepts only the exact unschedulable `developer.rust.target` revision-2
+  candidate and unresolved `ProtectedPath` blocker, then no-follow validates
+  the selected root, direct `target` directory, single-link `Cargo.toml`
+  sibling, and single-link `CACHEDIR.TAG` child on one volume. A new generic
+  nonblocking retained-descriptor prefix reader binds the tag read to
+  before/open/after identities and requires Cargo's exact 43-byte standard
+  signature while permitting standards-compliant trailing comments. The
+  witness cannot be cloned, serialized, converted to a plan, sent across FFI,
+  or used to reach an effect; it cannot clear a blocker. Cargo metadata/config
+  resolution, authoritative volume and protected-root grants,
+  process/descendant guards, approval, and executor-time revalidation remain
+  required.
 - Began Milestone 5 with an independently researched, fail-closed Rust Cargo
   `target` rule. Revision 2 requires snapshot evidence of a direct regular
   `Cargo.toml` sibling and `CACHEDIR.TAG` child before proposing a

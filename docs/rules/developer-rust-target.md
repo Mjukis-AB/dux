@@ -18,12 +18,12 @@ The Cargo Book provides the two policy facts used by this rule:
   describes its subject as generated target-directory artifacts and says the
   no-option command removes the entire target directory.
 
-Cargo has emitted `CACHEDIR.TAG` in target directories since Cargo 1.39. The
-[Cargo changelog](https://doc.rust-lang.org/cargo/CHANGELOG.html) also records
-that Cargo 1.97 refuses an explicit target directory that does not look like a
-Cargo target, preventing accidental deletion. A local Cargo 1.96.0 fixture
-confirmed that a new default target contains a regular `CACHEDIR.TAG` beginning
-with the standard cache-directory signature.
+Cargo has emitted `CACHEDIR.TAG` in target directories since Cargo 1.46
+([Cargo changelog entry #8378](https://doc.rust-lang.org/cargo/CHANGELOG.html)).
+The changelog also records that Cargo 1.97 refuses an explicit target directory
+that does not look like a Cargo target, preventing accidental deletion. A local
+Cargo 1.96.0 fixture confirmed that a new default target contains a regular
+`CACHEDIR.TAG` beginning with the standard cache-directory signature.
 
 These sources establish that an actual Cargo target directory is generated and
 may be rebuilt. Rebuilding can still cost substantial time, CPU, and network
@@ -71,6 +71,38 @@ The catalog digest is checked during build and load. Only this exact rule ID and
 revision may carry the safe-regenerable action pair; the other bundled rules
 remain informational and reveal-only.
 
+## Live default-layout witness
+
+A later 2026-07-18 checkpoint adds a sealed, crate-private Unix planner witness
+without changing the rule or its blockers. It accepts only the exact revision-2
+candidate, source scan, policy, three evidence facts, unschedulable flag, and
+sole unresolved `ProtectedPath` blocker. It then validates the current scan
+root, direct target directory, direct `Cargo.toml` sibling, and direct
+`CACHEDIR.TAG` child without following symlinks; requires both marker files to
+be regular, single-link objects on the root volume; and proves their parent
+identities match the target layout.
+
+The tag is opened through a nonblocking retained descriptor and compared with
+path identity observations before and after a bounded read. DUX requires the
+same exact 43-byte prefix
+[Cargo's own target-directory validator](https://doc.rust-lang.org/beta/nightly-rustc/src/cargo/ops/cargo_clean.rs.html#146-175)
+reads:
+
+```text
+Signature: 8a477f597d28d172789f06886806bc55
+```
+
+Trailing bytes are accepted because the cache-directory tag standard permits
+comments and Cargo's own validator checks only this prefix. The signature is a
+generic cache marker that anyone can forge; it does not authenticate Cargo.
+
+This witness cannot be cloned, serialized, converted into a cleanup plan, sent
+across FFI, or used to perform an effect; it cannot clear `ProtectedPath`. It
+deliberately does not parse the manifest or run Cargo, so `.cargo/config`,
+environment overrides, custom target directories, outer workspaces, and
+`package.workspace` remain unresolved. Windows also remains unsupported at
+this boundary until ancestor traversal is handle-relative.
+
 ## Required before executable use
 
 Removing `ProtectedPath` requires a separate reviewed implementation that
@@ -78,8 +110,9 @@ proves, at minimum:
 
 - trusted home, selected-volume, canonical ancestry, and mount identity;
 - a stable code-owned protected-root boundary grant;
-- exact live `CACHEDIR.TAG` signature plus marker and target identities;
-- authoritative Cargo workspace and target-directory resolution;
+- trusted Cargo metadata/config resolution authoritatively binding the
+  workspace manifest and target directory to the already implemented live
+  tag/layout identities;
 - current target kind, symlink, link-count, mount, and descendant policy;
 - inactive Cargo/rustc state and changed-since-scan revalidation;
 - overlap resolution, exclusions, current reviewed plan, expiry, and approval;

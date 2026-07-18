@@ -18,9 +18,12 @@ mod windows;
 
 #[cfg(not(any(unix, windows)))]
 mod unsupported {
+    use std::fs::File;
     use std::path::Path;
 
-    use super::filesystem::{CanonicalPathError, PlatformPathSnapshot, PlatformRootSnapshot};
+    use super::filesystem::{
+        CanonicalPathError, PlatformEntrySnapshot, PlatformPathSnapshot, PlatformRootSnapshot,
+    };
 
     pub(super) fn capture_root(_path: &Path) -> Result<PlatformRootSnapshot, CanonicalPathError> {
         Err(CanonicalPathError::UnsupportedPlatform)
@@ -30,6 +33,13 @@ mod unsupported {
         _root: &Path,
         _relative_path: &Path,
     ) -> Result<PlatformPathSnapshot, CanonicalPathError> {
+        Err(CanonicalPathError::UnsupportedPlatform)
+    }
+
+    pub(super) fn open_regular_descendant(
+        _root: &Path,
+        _relative_path: &Path,
+    ) -> Result<(File, PlatformEntrySnapshot), CanonicalPathError> {
         Err(CanonicalPathError::UnsupportedPlatform)
     }
 
@@ -64,6 +74,9 @@ use unsupported as platform;
 use windows as platform;
 
 #[allow(unused_imports)]
-pub(crate) use filesystem::{capture_path_snapshot, capture_scan_root};
+pub(crate) use filesystem::{
+    CanonicalFilePrefixError, CanonicalFilePrefixSnapshot, capture_path_snapshot,
+    capture_regular_file_prefix, capture_scan_root,
+};
 #[allow(unused_imports)]
 pub(crate) use lexical::{validate_cleanup_path, validate_scan_root};

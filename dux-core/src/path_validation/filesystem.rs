@@ -1,4 +1,4 @@
-use std::io;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
@@ -180,6 +180,40 @@ pub enum CanonicalPathError {
     ChangedDuringValidation { component_index: usize },
 }
 
+#[derive(Debug, Error)]
+pub(crate) enum CanonicalFilePrefixError {
+    #[error("invalid bounded file-prefix length")]
+    InvalidLength,
+    #[error(transparent)]
+    Path(#[from] CanonicalPathError),
+    #[error("validated file prefix cannot be read: {kind:?}")]
+    Read {
+        kind: io::ErrorKind,
+        #[source]
+        source: io::Error,
+    },
+}
+
+/// A bounded prefix read from the exact regular-file object captured here.
+///
+/// The path is validated before and after the retained-handle read. This is
+/// still momentary evidence, not a retained cleanup handle or authorization.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CanonicalFilePrefixSnapshot {
+    path: CanonicalPathSnapshot,
+    prefix: Vec<u8>,
+}
+
+impl CanonicalFilePrefixSnapshot {
+    pub(crate) fn path(&self) -> &CanonicalPathSnapshot {
+        &self.path
+    }
+
+    pub(crate) fn prefix(&self) -> &[u8] {
+        &self.prefix
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct PlatformEntrySnapshot {
     pub(super) identity: FilesystemIdentity,
@@ -288,6 +322,55 @@ pub(crate) fn capture_path_snapshot(
         target_kind: first.target.kind,
         hard_link_count: first.target.hard_link_count,
         ancestors: first.ancestors,
+    })
+}
+
+const MAX_FILE_PREFIX_BYTES: usize = 4 * 1024;
+
+pub(crate) fn capture_regular_file_prefix(
+    root: &CanonicalScanRoot,
+    target: LexicalCleanupPath,
+    prefix_length: usize,
+) -> Result<CanonicalFilePrefixSnapshot, CanonicalFilePrefixError> {
+    if prefix_length == 0 || prefix_length > MAX_FILE_PREFIX_BYTES {
+        return Err(CanonicalFilePrefixError::InvalidLength);
+    }
+
+    let before = capture_path_snapshot(root, target.clone())?;
+    if before.target_kind != FilesystemEntryKind::RegularFile {
+        return Err(CanonicalPathError::UnsupportedTargetKind.into());
+    }
+
+    let (mut file, opened) =
+        platform::open_regular_descendant(root.canonical_path(), target.relative_to_scan_root())?;
+    if opened.identity != before.target_identity
+        || opened.kind != before.target_kind
+        || opened.hard_link_count != before.hard_link_count
+    {
+        return Err(CanonicalPathError::ChangedDuringValidation {
+            component_index: before.ancestors.len(),
+        }
+        .into());
+    }
+
+    let mut prefix = vec![0_u8; prefix_length];
+    file.read_exact(&mut prefix)
+        .map_err(|source| CanonicalFilePrefixError::Read {
+            kind: source.kind(),
+            source,
+        })?;
+
+    let after = capture_path_snapshot(root, target)?;
+    if before != after {
+        return Err(CanonicalPathError::ChangedDuringValidation {
+            component_index: before.ancestors.len(),
+        }
+        .into());
+    }
+
+    Ok(CanonicalFilePrefixSnapshot {
+        path: after,
+        prefix,
     })
 }
 

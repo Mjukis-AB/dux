@@ -1,4 +1,5 @@
 use std::ffi::OsStr;
+use std::fs::File;
 use std::os::fd::OwnedFd;
 use std::path::{Component, Path, PathBuf};
 
@@ -13,6 +14,13 @@ use super::filesystem::{
 const DIRECTORY_FLAGS: OFlag = OFlag::O_RDONLY
     .union(OFlag::O_DIRECTORY)
     .union(OFlag::O_NOFOLLOW)
+    .union(OFlag::O_CLOEXEC);
+const REGULAR_FILE_FLAGS: OFlag = OFlag::O_RDONLY
+    .union(OFlag::O_NOFOLLOW)
+    // A regular file ignores this flag. If the inspected entry is replaced by
+    // a FIFO before openat, it prevents validation from blocking indefinitely
+    // before the retained descriptor can be fstat-checked.
+    .union(OFlag::O_NONBLOCK)
     .union(OFlag::O_CLOEXEC);
 
 pub(super) fn capture_root(path: &Path) -> Result<PlatformRootSnapshot, CanonicalPathError> {
@@ -93,6 +101,71 @@ pub(super) fn capture_descendant(
             });
         }
         ancestors.push(AncestorIdentity::new(relative.clone(), snapshot.identity));
+        directory = next;
+    }
+
+    Err(CanonicalPathError::CanonicalEscapesScanRoot)
+}
+
+pub(super) fn open_regular_descendant(
+    root: &Path,
+    relative_path: &Path,
+) -> Result<(File, PlatformEntrySnapshot), CanonicalPathError> {
+    let mut directory =
+        open(root, DIRECTORY_FLAGS, Mode::empty()).map_err(|error| map_nix_error(0, error))?;
+    let root_stat = fstat(&directory).map_err(|error| map_nix_error(0, error))?;
+    if kind(&root_stat) != Some(FilesystemEntryKind::Directory) {
+        return Err(CanonicalPathError::ScanRootNotDirectory);
+    }
+    let root_identity = identity(&root_stat);
+    let components: Vec<&OsStr> = normal_components(relative_path)?.collect();
+
+    for (index, component) in components.iter().enumerate() {
+        let component_index = index + 1;
+        let target = index + 1 == components.len();
+        let snapshot = inspect_at(&directory, component, component_index, target)?;
+        if snapshot.identity.volume() != root_identity.volume() {
+            return Err(CanonicalPathError::CrossVolume {
+                component_index,
+                expected: root_identity.volume(),
+                observed: snapshot.identity.volume(),
+            });
+        }
+        if target {
+            if snapshot.kind != FilesystemEntryKind::RegularFile {
+                return Err(CanonicalPathError::UnsupportedTargetKind);
+            }
+            let opened = openat(&directory, *component, REGULAR_FILE_FLAGS, Mode::empty())
+                .map_err(|error| {
+                    if error == nix::errno::Errno::ELOOP {
+                        CanonicalPathError::SymlinkOrReparsePoint {
+                            component_index,
+                            target: true,
+                        }
+                    } else {
+                        map_nix_error(component_index, error)
+                    }
+                })?;
+            let opened_stat =
+                fstat(&opened).map_err(|error| map_nix_error(component_index, error))?;
+            let opened_snapshot = PlatformEntrySnapshot {
+                identity: identity(&opened_stat),
+                kind: kind(&opened_stat).ok_or(CanonicalPathError::UnsupportedTargetKind)?,
+                hard_link_count: hard_link_count(&opened_stat),
+            };
+            if opened_snapshot != snapshot {
+                return Err(CanonicalPathError::ChangedDuringValidation { component_index });
+            }
+            return Ok((File::from(opened), opened_snapshot));
+        }
+        if snapshot.kind != FilesystemEntryKind::Directory {
+            return Err(CanonicalPathError::NonDirectoryAncestor { component_index });
+        }
+        let next = open_directory_at(&directory, component, component_index)?;
+        let opened = fstat(&next).map_err(|error| map_nix_error(component_index, error))?;
+        if identity(&opened) != snapshot.identity {
+            return Err(CanonicalPathError::ChangedDuringValidation { component_index });
+        }
         directory = next;
     }
 
@@ -194,4 +267,14 @@ fn map_nix_error(component_index: usize, error: nix::errno::Errno) -> CanonicalP
         component_index,
         std::io::Error::from_raw_os_error(error as i32),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retained_regular_file_open_is_nonblocking_against_fifo_replacement() {
+        assert!(REGULAR_FILE_FLAGS.contains(OFlag::O_NONBLOCK));
+    }
 }

@@ -3971,10 +3971,24 @@ Tasks:
     filename is supporting immutable-snapshot evidence only, not proof of its
     contents or current Cargo ownership. See
     `docs/rules/developer-rust-target.md`.
-  - [ ] Prove the live Cargo workspace/target relationship, exact standard
-    `CACHEDIR.TAG` signature, authoritative volume and protected-root grant,
-    change/process guards, planner-owned current validation, and executor-time
-    revalidation before removing `ProtectedPath` or enabling scheduling.
+  - [x] Stage a sealed Unix live default-layout witness (2026-07-18). A private
+    planner module accepts only the exact revision-2 policy/evidence shape while
+    `ProtectedPath` remains its sole blocker, reconstructs no-follow root,
+    target, sibling manifest, and child tag identities, requires single-link
+    regular markers on the same volume, and reads Cargo's exact 43-byte tag
+    prefix through a nonblocking retained descriptor with before/open/after
+    identity checks. The ephemeral witness cannot clone, serialize, construct a
+    plan, clear a blocker, cross FFI, or execute. It intentionally proves only
+    the current direct default layout; it does not resolve Cargo
+    workspace/config, authoritative mount/protected-root scope, process
+    inactivity, target descendants, or executor-time state. Windows remains
+    unsupported at this planner boundary until ancestry is handle-relative.
+  - [ ] Prove the live Cargo workspace/target relationship through an exact
+    Cargo metadata/config result, authoritative volume and protected-root grant,
+    change/process/descendant guards, durable source binding, and executor-time
+    revalidation before removing `ProtectedPath` or enabling scheduling. The
+    exact standard `CACHEDIR.TAG` prefix and first planner-owned live identity
+    observation are complete, but are supporting evidence only.
 - [ ] Implement candidate groups and overlap resolution.
 - [ ] Implement exact-path plan review.
 - [ ] Implement Trash executor for Explorer selections.

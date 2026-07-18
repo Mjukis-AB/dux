@@ -92,6 +92,28 @@ pub(super) fn capture_descendant(
     Err(CanonicalPathError::CanonicalEscapesScanRoot)
 }
 
+pub(super) fn open_regular_descendant(
+    root: &Path,
+    relative_path: &Path,
+) -> Result<(std::fs::File, PlatformEntrySnapshot), CanonicalPathError> {
+    let root_snapshot = capture_entry(root, 0, false)?;
+    let target_path = root.join(relative_path);
+    let component_index = relative_path.components().count();
+    let file = open_read_entry(&target_path, component_index)?;
+    let snapshot = snapshot_from_file(&file, component_index, true)?;
+    if snapshot.identity.volume() != root_snapshot.identity.volume() {
+        return Err(CanonicalPathError::CrossVolume {
+            component_index,
+            expected: root_snapshot.identity.volume(),
+            observed: snapshot.identity.volume(),
+        });
+    }
+    if snapshot.kind != FilesystemEntryKind::RegularFile {
+        return Err(CanonicalPathError::UnsupportedTargetKind);
+    }
+    Ok((file, snapshot))
+}
+
 /// Compares the ordinary drive path accepted by the lexical validator with
 /// the equivalent verbatim drive path commonly returned by `canonicalize`.
 /// Component comparison is deliberately fail-closed for non-ASCII case-only
@@ -147,12 +169,36 @@ fn capture_entry(
     component_index: usize,
     target: bool,
 ) -> Result<PlatformEntrySnapshot, CanonicalPathError> {
-    let file = OpenOptions::new()
+    let file = open_entry(path, component_index)?;
+    snapshot_from_file(&file, component_index, target)
+}
+
+fn open_entry(path: &Path, component_index: usize) -> Result<std::fs::File, CanonicalPathError> {
+    OpenOptions::new()
         .access_mode(0)
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
         .open(path)
-        .map_err(|source| map_io_error(component_index, source))?;
+        .map_err(|source| map_io_error(component_index, source))
+}
+
+fn open_read_entry(
+    path: &Path,
+    component_index: usize,
+) -> Result<std::fs::File, CanonicalPathError> {
+    OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .map_err(|source| map_io_error(component_index, source))
+}
+
+fn snapshot_from_file(
+    file: &std::fs::File,
+    component_index: usize,
+    target: bool,
+) -> Result<PlatformEntrySnapshot, CanonicalPathError> {
     let handle = file.as_raw_handle();
 
     let mut id_info = MaybeUninit::<FILE_ID_INFO>::zeroed();

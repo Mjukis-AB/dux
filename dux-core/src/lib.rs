@@ -7,7 +7,11 @@ pub mod error;
 // of trusted mount, volume, home-resolution, rule-scope, and planner witnesses.
 #[allow(dead_code)]
 pub(crate) mod path_validation;
+// Planner witnesses are staged as read-only, crate-private evidence. They do
+// not construct cleanup plans, clear blockers, or cross the FFI boundary.
 pub mod persistence;
+#[allow(dead_code)]
+mod planner;
 pub mod projection;
 
 /// Non-shipping, filesystem-free invariant oracle for the isolated fuzz crate.
