@@ -1,6 +1,7 @@
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::{LexicalCleanupPath, LexicalScanRoot, platform};
@@ -204,6 +205,44 @@ pub(crate) struct CanonicalFilePrefixSnapshot {
     prefix: Vec<u8>,
 }
 
+#[derive(Debug, Error)]
+pub(crate) enum CanonicalFileDigestError {
+    #[error("invalid bounded file-digest length")]
+    InvalidLength,
+    #[error("validated file exceeds its digest byte limit")]
+    TooLarge,
+    #[error(transparent)]
+    Path(#[from] CanonicalPathError),
+    #[error("validated file cannot be read for digest: {kind:?}")]
+    Read {
+        kind: io::ErrorKind,
+        #[source]
+        source: io::Error,
+    },
+}
+
+/// A bounded full-file digest tied to one exact regular-file observation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CanonicalFileDigestSnapshot {
+    path: CanonicalPathSnapshot,
+    byte_length: u64,
+    sha256: [u8; 32],
+}
+
+impl CanonicalFileDigestSnapshot {
+    pub(crate) fn path(&self) -> &CanonicalPathSnapshot {
+        &self.path
+    }
+
+    pub(crate) fn byte_length(&self) -> u64 {
+        self.byte_length
+    }
+
+    pub(crate) fn sha256(&self) -> [u8; 32] {
+        self.sha256
+    }
+}
+
 impl CanonicalFilePrefixSnapshot {
     pub(crate) fn path(&self) -> &CanonicalPathSnapshot {
         &self.path
@@ -371,6 +410,67 @@ pub(crate) fn capture_regular_file_prefix(
     Ok(CanonicalFilePrefixSnapshot {
         path: after,
         prefix,
+    })
+}
+
+pub(crate) fn capture_regular_file_sha256(
+    root: &CanonicalScanRoot,
+    target: LexicalCleanupPath,
+    maximum_bytes: usize,
+) -> Result<CanonicalFileDigestSnapshot, CanonicalFileDigestError> {
+    if maximum_bytes == 0 {
+        return Err(CanonicalFileDigestError::InvalidLength);
+    }
+
+    let before = capture_path_snapshot(root, target.clone())?;
+    if before.target_kind != FilesystemEntryKind::RegularFile {
+        return Err(CanonicalPathError::UnsupportedTargetKind.into());
+    }
+    let (mut file, opened) =
+        platform::open_regular_descendant(root.canonical_path(), target.relative_to_scan_root())?;
+    if opened.identity != before.target_identity
+        || opened.kind != before.target_kind
+        || opened.hard_link_count != before.hard_link_count
+    {
+        return Err(CanonicalPathError::ChangedDuringValidation {
+            component_index: before.ancestors.len(),
+        }
+        .into());
+    }
+
+    let mut digest = Sha256::new();
+    let mut byte_length = 0_usize;
+    let mut buffer = [0_u8; 16 * 1024];
+    loop {
+        let count = file
+            .read(&mut buffer)
+            .map_err(|source| CanonicalFileDigestError::Read {
+                kind: source.kind(),
+                source,
+            })?;
+        if count == 0 {
+            break;
+        }
+        byte_length = byte_length
+            .checked_add(count)
+            .ok_or(CanonicalFileDigestError::TooLarge)?;
+        if byte_length > maximum_bytes {
+            return Err(CanonicalFileDigestError::TooLarge);
+        }
+        digest.update(&buffer[..count]);
+    }
+
+    let after = capture_path_snapshot(root, target)?;
+    if before != after {
+        return Err(CanonicalPathError::ChangedDuringValidation {
+            component_index: before.ancestors.len(),
+        }
+        .into());
+    }
+    Ok(CanonicalFileDigestSnapshot {
+        path: after,
+        byte_length: byte_length as u64,
+        sha256: digest.finalize().into(),
     })
 }
 

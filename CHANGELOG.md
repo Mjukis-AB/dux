@@ -5,6 +5,19 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Continued Milestone 5 with a second sealed Unix Rust-target checkpoint that
+  consumes the live layout witness and resolves its exact workspace root and
+  target directory through an observed canonical executable named `cargo`. The
+  runner rejects symlink launchers, including the usual rustup proxy, binds the
+  file's full SHA-256 and the reviewed Cargo 1.96.0 verbose version, preserves
+  that exact executable/environment evidence in the witness, uses a canonical
+  manifest-parent working directory, clears the ambient environment, and invokes only fixed
+  `metadata --format-version 1 --no-deps --locked --offline` arguments. Stdout,
+  stderr, time, and JSON shape are bounded; timeout or output overflow kills
+  the original process group and reaps the direct child. Full-file manifest hashing now
+  detects same-inode content changes around both live and Cargo checks. The new
+  witness remains crate-private, non-cloneable, non-serializable, blocked by
+  `ProtectedPath`, and unable to plan, cross FFI, schedule, or execute.
 - Continued Milestone 5 with a sealed, crate-private Rust-target live witness.
   It accepts only the exact unschedulable `developer.rust.target` revision-2
   candidate and unresolved `ProtectedPath` blocker, then no-follow validates

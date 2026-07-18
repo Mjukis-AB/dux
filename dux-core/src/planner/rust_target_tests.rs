@@ -16,19 +16,19 @@ use crate::domain::{
 };
 use crate::path_validation::FilesystemEntryKind;
 
-const CARGO_CACHE_TAG_SIGNATURE: &[u8] = b"Signature: 8a477f597d28d172789f06886806bc55";
+pub(super) const CARGO_CACHE_TAG_SIGNATURE: &[u8] = b"Signature: 8a477f597d28d172789f06886806bc55";
 
-struct Fixture {
+pub(super) struct Fixture {
     _temp: TempDir,
-    root: PathBuf,
-    target: PathBuf,
-    manifest: PathBuf,
-    cache_tag: PathBuf,
-    scan_id: ScanId,
+    pub(super) root: PathBuf,
+    pub(super) target: PathBuf,
+    pub(super) manifest: PathBuf,
+    pub(super) cache_tag: PathBuf,
+    pub(super) scan_id: ScanId,
 }
 
 impl Fixture {
-    fn new(tag_bytes: &[u8]) -> Self {
+    pub(super) fn new(tag_bytes: &[u8]) -> Self {
         Self::with_manifest(tag_bytes, true)
     }
 
@@ -65,7 +65,7 @@ impl Fixture {
         }
     }
 
-    fn candidate(&self) -> Candidate {
+    pub(super) fn candidate(&self) -> Candidate {
         candidate(
             &self.scan_id,
             &self.target,
@@ -75,7 +75,7 @@ impl Fixture {
         )
     }
 
-    fn source(&self) -> RustTargetValidationSource<'_> {
+    pub(super) fn source(&self) -> RustTargetValidationSource<'_> {
         RustTargetValidationSource::new(&self.scan_id, &self.root)
     }
 }

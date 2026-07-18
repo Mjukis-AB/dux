@@ -228,11 +228,26 @@ through a nonblocking retained descriptor with before/open/after identity
 checks. The ephemeral witness has no clone, serialization, plan conversion,
 blocker-removal, FFI, or execution operation. Windows fails closed at this
 planner boundary.
+A second sealed Unix checkpoint consumes that witness and derives every Cargo
+path and expected result from it. It rejects symlink launchers, including the
+usual rustup proxy, and observes one canonical single-link executable named
+`cargo` by full bounded SHA-256 plus the exact reviewed Cargo 1.96.0
+verbose-version digest, and the returned witness retains that executable plus
+canonical environment evidence. It then invokes only fixed format-version-1,
+no-dependency, locked, offline metadata arguments from the exact manifest
+parent. The child receives a cleared minimal environment;
+nonblocking stdout/stderr, runtime, and JSON are bounded; timeout and overflow
+terminate the original process group, and raw output is neither persisted nor
+exposed. Only `resolve: null`,
+the exact project workspace root, and the already witnessed target directory
+are accepted. The manifest is now read in full through a retained descriptor
+and SHA-256-bound before/open/after, detecting in-place content changes that
+identity alone misses.
 Every rule remains unschedulable, and every emitted candidate retains
 `ProtectedPath` because trusted Cargo metadata/config resolution,
 protected-root, authoritative volume/mount, process, descendant, approval, and
-executor-time authority is deliberately unresolved. These rows and the live
-witness are observations, not cleanup authority.
+executor-time authority is deliberately unresolved. These rows and both
+planner witnesses are observations, not cleanup authority.
 
 The existing CLI still offers permanent deletion, but its filesystem effect is
 now centralized in the temporary core-owned
@@ -2079,11 +2094,11 @@ coverage is labelled as Home-scoped and unknown coverage stays unknown.
 
 | Control | Current state | Gate before app cleanup |
 |---|---|---|
-| Strict lexical/live path evidence | Implemented, crate-private and non-authoritative, including a retained-descriptor bounded regular-file prefix read on Unix | Bind trusted scan/volume/rule witnesses and executor revalidation; Windows planner use requires retained handle-relative ancestry |
+| Strict lexical/live path evidence | Implemented, crate-private and non-authoritative, including retained-descriptor bounded regular-file prefix and full-file SHA-256 reads on Unix | Bind trusted scan/volume/rule witnesses and executor revalidation; Windows planner use requires retained handle-relative ancestry |
 | Protected-root registry | Implemented text-only policy; production construction sealed | Trusted OS home/profile/mount discovery and stable rule grants |
 | Dangerous-path corpus and fuzzing | Implemented | Keep cross-platform and promote every crash regression |
-| Rule schema/loader | Strict schema plus a build-time digest/policy-gated and strict load-time-validated discovery catalog; ten rules remain selected-root RevealOnly observations, while independently researched `developer.rust.target` revision 2 requires snapshot `Cargo.toml` plus `CACHEDIR.TAG` evidence and proposes only SafeRegenerable/RemoveKnownRegenerableContents. Every rule is unschedulable and every result remains blocked by `ProtectedPath`. A sealed Unix-only live witness now verifies the exact tag prefix and current default-layout identities without clearing that blocker | Developer ID signing must cover catalog bytes; before the Rust rule can lose its blocker, prove the trusted Cargo metadata workspace/target relationship and authoritative volume/protected-root grant, add process/descendant/change guards, and complete adversarial review |
-| Candidate and cleanup-plan records | Completed fresh scans create deterministic, snapshot-bound durable candidate batches; exact-scan summaries plus bounded lossless path/evidence pages and semantic review commands remain non-authoritative history. A crate-private planner module now holds an ephemeral Rust-target current-evidence witness with no plan conversion, while cleanup plans remain non-executable domain/history data | Bind the planner source to one retained succeeded snapshot/evaluation, then add FFI/UI transport and trusted Cargo/volume/protected-root/process/executor witnesses |
+| Rule schema/loader | Strict schema plus a build-time digest/policy-gated and strict load-time-validated discovery catalog; ten rules remain selected-root RevealOnly observations, while independently researched `developer.rust.target` revision 2 requires snapshot `Cargo.toml` plus `CACHEDIR.TAG` evidence and proposes only SafeRegenerable/RemoveKnownRegenerableContents. Every rule is unschedulable and every result remains blocked by `ProtectedPath`. Sealed Unix-only live and Cargo-resolution witnesses now verify the exact tag, manifest digest, current default layout, and scrubbed-context Cargo workspace/target result without clearing that blocker | Developer ID signing must cover catalog bytes; before the Rust rule can lose its blocker, bind a trusted direct Cargo enrollment and exact config provenance, prove authoritative volume/protected-root grants, add process/descendant/change guards, and complete adversarial review |
+| Candidate and cleanup-plan records | Completed fresh scans create deterministic, snapshot-bound durable candidate batches; exact-scan summaries plus bounded lossless path/evidence pages and semantic review commands remain non-authoritative history. A crate-private planner module now layers ephemeral Rust-target live and bounded Cargo metadata witnesses with no plan conversion, while cleanup plans remain non-executable domain/history data | Bind the planner source to one retained succeeded snapshot/evaluation, then add FFI/UI transport and trusted Cargo/config/volume/protected-root/process/executor witnesses |
 | macOS app cleanup | Absent | Entire cleanup release gate in §17.3 |
 | Legacy CLI deletion | Active arbitrary-descendant permanent path routed through a temporary core adapter; strict-target/volume/identity rechecks only; scanned-byte estimates labeled in CLI | Replace adapter with reviewed plan/approval/executor chain without weakening current checks |
 | Centralized executor | Production executor absent; temporary legacy adapter is containment only | Typed admission, integration with the existing cross-process lease/journal, and live target revalidation required |

@@ -8,16 +8,17 @@ use crate::domain::{
     ScanId,
 };
 use crate::path_validation::{
-    CanonicalFilePrefixError, CanonicalFilePrefixSnapshot, CanonicalPathError,
-    CanonicalPathSnapshot, CanonicalScanRoot, FilesystemEntryKind, LexicalPathError,
-    capture_path_snapshot, capture_regular_file_prefix, capture_scan_root, validate_cleanup_path,
-    validate_scan_root,
+    CanonicalFileDigestError, CanonicalFileDigestSnapshot, CanonicalFilePrefixError,
+    CanonicalFilePrefixSnapshot, CanonicalPathError, CanonicalPathSnapshot, CanonicalScanRoot,
+    FilesystemEntryKind, LexicalPathError, capture_path_snapshot, capture_regular_file_prefix,
+    capture_regular_file_sha256, capture_scan_root, validate_cleanup_path, validate_scan_root,
 };
 
 const RUST_TARGET_RULE_ID: &str = "developer.rust.target";
 const RUST_TARGET_RULE_REVISION: u32 = 2;
 const RUST_TARGET_WITNESS_REVISION: u32 = 1;
 const CARGO_CACHE_TAG_SIGNATURE: &[u8; 43] = b"Signature: 8a477f597d28d172789f06886806bc55";
+const MAX_CARGO_MANIFEST_BYTES: usize = 4 * 1024 * 1024;
 
 /// Historical source binding supplied by the future planner's durable loader.
 ///
@@ -49,7 +50,7 @@ pub(crate) struct RustTargetLiveWitness {
     candidate_id: CandidateId,
     scan_root: CanonicalScanRoot,
     target: CanonicalPathSnapshot,
-    manifest: CanonicalPathSnapshot,
+    manifest: CanonicalFileDigestSnapshot,
     cache_tag: CanonicalFilePrefixSnapshot,
     protected_path_still_unresolved: ProtectedPathStillUnresolved,
 }
@@ -82,6 +83,8 @@ pub(crate) enum RustTargetLiveValidationError {
     Filesystem(#[from] CanonicalPathError),
     #[error(transparent)]
     FilePrefix(#[from] CanonicalFilePrefixError),
+    #[error(transparent)]
+    FileDigest(#[from] CanonicalFileDigestError),
 }
 
 pub(crate) fn validate_live_rust_target(
@@ -111,11 +114,12 @@ pub(crate) fn validate_live_rust_target(
             return Err(RustTargetLiveValidationError::LayoutMismatch);
         }
 
-        let manifest = capture_path_snapshot(&scan_root, lexical_manifest.clone())?;
-        if manifest.target_kind() != FilesystemEntryKind::RegularFile {
-            return Err(RustTargetLiveValidationError::LayoutMismatch);
-        }
-        if manifest.hard_link_count() != 1 {
+        let manifest = capture_regular_file_sha256(
+            &scan_root,
+            lexical_manifest.clone(),
+            MAX_CARGO_MANIFEST_BYTES,
+        )?;
+        if manifest.path().hard_link_count() != 1 {
             return Err(RustTargetLiveValidationError::MultiplyLinkedMarker);
         }
 
@@ -137,6 +141,7 @@ pub(crate) fn validate_live_rust_target(
             .ok_or(RustTargetLiveValidationError::LayoutMismatch)?
             .identity();
         let manifest_parent = manifest
+            .path()
             .ancestors()
             .last()
             .ok_or(RustTargetLiveValidationError::LayoutMismatch)?
@@ -153,7 +158,8 @@ pub(crate) fn validate_live_rust_target(
 
         let final_root = capture_scan_root(lexical_root)?;
         let final_target = capture_path_snapshot(&final_root, lexical_target)?;
-        let final_manifest = capture_path_snapshot(&final_root, lexical_manifest)?;
+        let final_manifest =
+            capture_regular_file_sha256(&final_root, lexical_manifest, MAX_CARGO_MANIFEST_BYTES)?;
         let final_cache_tag = capture_path_snapshot(&final_root, lexical_cache_tag)?;
         if final_root != scan_root
             || final_target != target
@@ -173,6 +179,55 @@ pub(crate) fn validate_live_rust_target(
             cache_tag,
             protected_path_still_unresolved: ProtectedPathStillUnresolved,
         })
+    }
+}
+
+#[cfg(unix)]
+impl RustTargetLiveWitness {
+    pub(super) fn revalidate_current(&self) -> Result<(), RustTargetLiveValidationError> {
+        let lexical_root = validate_scan_root(self.scan_root.canonical_path())?;
+        let current_root = capture_scan_root(lexical_root.clone())?;
+        if current_root != self.scan_root {
+            return Err(RustTargetLiveValidationError::ChangedDuringValidation);
+        }
+
+        let lexical_target = validate_cleanup_path(&lexical_root, self.target.canonical_path())?;
+        let lexical_manifest =
+            validate_cleanup_path(&lexical_root, self.manifest.path().canonical_path())?;
+        let lexical_cache_tag =
+            validate_cleanup_path(&lexical_root, self.cache_tag.path().canonical_path())?;
+        let current_target = capture_path_snapshot(&current_root, lexical_target)?;
+        let current_manifest =
+            capture_regular_file_sha256(&current_root, lexical_manifest, MAX_CARGO_MANIFEST_BYTES)?;
+        let current_cache_tag = capture_regular_file_prefix(
+            &current_root,
+            lexical_cache_tag,
+            CARGO_CACHE_TAG_SIGNATURE.len(),
+        )?;
+        if current_target != self.target
+            || current_manifest != self.manifest
+            || current_cache_tag != self.cache_tag
+            || current_cache_tag.prefix() != CARGO_CACHE_TAG_SIGNATURE
+        {
+            return Err(RustTargetLiveValidationError::ChangedDuringValidation);
+        }
+        Ok(())
+    }
+
+    pub(super) fn project_root(&self) -> &Path {
+        self.manifest
+            .path()
+            .canonical_path()
+            .parent()
+            .expect("validated Cargo.toml always has a parent")
+    }
+
+    pub(super) fn manifest_path(&self) -> &Path {
+        self.manifest.path().canonical_path()
+    }
+
+    pub(super) fn target_path(&self) -> &Path {
+        self.target.canonical_path()
     }
 }
 
@@ -264,7 +319,7 @@ impl RustTargetLiveWitness {
     }
 
     pub(super) fn manifest(&self) -> &CanonicalPathSnapshot {
-        &self.manifest
+        self.manifest.path()
     }
 
     pub(super) fn cache_tag(&self) -> &CanonicalFilePrefixSnapshot {

@@ -3983,12 +3983,29 @@ Tasks:
     workspace/config, authoritative mount/protected-root scope, process
     inactivity, target descendants, or executor-time state. Windows remains
     unsupported at this planner boundary until ancestry is handle-relative.
-  - [ ] Prove the live Cargo workspace/target relationship through an exact
-    Cargo metadata/config result, authoritative volume and protected-root grant,
+  - [x] Stage a bounded Cargo workspace/target resolution witness (2026-07-18).
+    A second sealed Unix type consumes the live witness, accepts no caller
+    manifest/cwd/arguments/expected paths, and invokes only an observed
+    canonical regular file named `cargo`; symlink launchers, including the usual
+    rustup proxy, fail closed. Observation and every resolution bind the file's
+    full bounded SHA-256, identity, single-link shape, and exact reviewed Cargo
+    1.96.0 verbose version; the returned witness preserves that executable and
+    canonical environment evidence. The subprocess runs from the manifest
+    parent with a cleared, fixed environment and exact
+    offline/locked/no-dependency format-version-1
+    arguments; nonblocking stdout/stderr, time, and JSON are bounded, while
+    timeout and overflow terminate the original process group. Only
+    `resolve: null`, the exact project workspace root, and the
+    exact already witnessed target directory are accepted. A new retained-file
+    full SHA-256 snapshot detects same-inode manifest changes before and after
+    Cargo. The combined witness still cannot clone, serialize, clear
+    `ProtectedPath`, construct a plan, cross FFI, schedule, or execute.
+  - [ ] Promote the bounded Cargo observation into trusted planning authority,
+    then add authoritative volume and protected-root grants,
     change/process/descendant guards, durable source binding, and executor-time
-    revalidation before removing `ProtectedPath` or enabling scheduling. The
-    exact standard `CACHEDIR.TAG` prefix and first planner-owned live identity
-    observation are complete, but are supporting evidence only.
+    revalidation before removing `ProtectedPath` or enabling scheduling.
+    Trusted settings enrollment/code-signature provenance, exact config-file
+    identities, retained-cwd spawn, and swap/restore exclusion remain open.
 - [ ] Implement candidate groups and overlap resolution.
 - [ ] Implement exact-path plan review.
 - [ ] Implement Trash executor for Explorer selections.

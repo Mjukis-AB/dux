@@ -103,6 +103,53 @@ environment overrides, custom target directories, outer workspaces, and
 `package.workspace` remain unresolved. Windows also remains unsupported at
 this boundary until ancestor traversal is handle-relative.
 
+## Bounded Cargo resolution witness
+
+A second 2026-07-18 Unix checkpoint consumes the live default-layout witness
+and accepts no caller-supplied manifest, working directory, command arguments,
+or expected result paths. It invokes one observed canonical regular file named
+`cargo`; all symlink launchers, including the common rustup proxy, are rejected
+because a project `rust-toolchain.toml` can otherwise redirect execution before
+Cargo processes `--offline`, according to
+[rustup's override precedence](https://rust-lang.github.io/rustup/overrides.html).
+
+Observation binds a single-link executable's full bounded SHA-256 and the exact
+reviewed Cargo 1.96.0 `--version --verbose` digest. Other and future Cargo
+releases fail closed until their metadata behavior is reviewed and the policy
+revision is updated. Resolution repeats those checks around a fixed command run
+from the current manifest parent:
+
+```text
+cargo metadata --format-version 1 --no-deps --locked --offline --quiet \
+  --color=never --manifest-path <exact-live-Cargo.toml>
+```
+
+The [Cargo metadata reference](https://doc.rust-lang.org/cargo/commands/cargo-metadata.html)
+defines these flags and output fields. The
+[Cargo configuration reference](https://doc.rust-lang.org/cargo/reference/config.html)
+specifies that configuration discovery begins at the process working
+directory, so the manifest parent is intentional. The child receives a minimal
+environment containing only canonical home, Cargo-home, temporary-directory,
+locale, and forced offline/color values; ambient target-directory, rustup,
+compiler-wrapper, proxy, credential, dynamic-loader, and `PATH` inputs are not
+inherited. `PATH` is set to the fixed non-directory `/dev/null` sentinel. The
+result must be one bounded format-version-1 JSON document with
+`resolve: null`, the exact manifest parent as `workspace_root`, and the exact
+already witnessed directory as `target_directory`. Stdout, stderr, runtime,
+and JSON are bounded; timeout or output overflow terminates the original
+process group and reaps the direct child. Raw output is not retained. The
+returned witness preserves the exact executable digest/identity and canonical
+environment observations that produced the accepted metadata.
+
+The manifest is now fully read through a retained nonblocking descriptor and
+SHA-256-bound before/open/after, so an in-place same-inode rewrite also rejects
+the observation. Cargo still does not report the identity of every config or
+included manifest it read, the executable is not yet bound to a signed settings
+grant, and a copied or renamed rustup binary cannot yet be authenticated as
+Cargo. Path-based cwd/exec/config swap-and-restore races also remain. Therefore
+this witness is supporting evidence only: it cannot clear `ProtectedPath`,
+construct a plan, cross FFI, schedule, or execute.
+
 ## Required before executable use
 
 Removing `ProtectedPath` requires a separate reviewed implementation that
@@ -110,9 +157,9 @@ proves, at minimum:
 
 - trusted home, selected-volume, canonical ancestry, and mount identity;
 - a stable code-owned protected-root boundary grant;
-- trusted Cargo metadata/config resolution authoritatively binding the
-  workspace manifest and target directory to the already implemented live
-  tag/layout identities;
+- trusted settings/code-signature enrollment for the direct Cargo executable,
+  retained-cwd execution, and exact config/include identity provenance beyond
+  the implemented bounded scrubbed-context metadata result;
 - current target kind, symlink, link-count, mount, and descendant policy;
 - inactive Cargo/rustc state and changed-since-scan revalidation;
 - overlap resolution, exclusions, current reviewed plan, expiry, and approval;

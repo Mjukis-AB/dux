@@ -270,6 +270,9 @@ EXCEPTIONS = {
         "dux-core/src/cleanup/legacy_cli.rs", "rust-filesystem-effect", "test:replaced_ancestor_cannot_redirect_delete_outside_scan_root"
     ),
     "finder-reveal": ExceptionSpec("dux-cli/src/app/state.rs", "rust-process-spawn", "open_in_finder"),
+    "cargo-metadata-observer-spawn": ExceptionSpec(
+        "dux-core/src/planner/rust_target_cargo.rs", "rust-process-spawn", "run_cargo"
+    ),
     "test-cli-inspection-spawn": ExceptionSpec(
         "dux-cli/tests/inspection_cli.rs",
         "rust-process-spawn",
@@ -565,6 +568,7 @@ EXCEPTION_PRIMITIVES = {
     "test-delete-changed-evidence": "rename",
     "test-delete-replaced-ancestor": "rename",
     "finder-reveal": "Command::new",
+    "cargo-metadata-observer-spawn": "Command::new",
     "test-cli-inspection-spawn": "Command::new",
     "test-persistence-helper-spawn": "Command::new",
     "test-capacity-cross-process-helper-spawn": "Command::new",
@@ -639,6 +643,7 @@ CLIPPY_SUPPRESSION_COUNTS = {
     "dux-cli/src/app/state.rs": 3,
     "dux-core/src/cache/mod.rs": 2,
     "dux-core/src/path_validation/protected.rs": 1,
+    "dux-core/src/planner/rust_target_cargo.rs": 1,
     "dux-core/src/engine/registry_tests.rs": 5,
     "dux-core/src/engine/volume_status.rs": 1,
     "dux-core/src/persistence/persistence_tests.rs": 3,
@@ -653,6 +658,7 @@ CLIPPY_PRODUCT_SUPPRESSION_SYMBOLS = {
     "dux-core/src/cleanup/legacy_cli.rs": {"execute_plan"},
     "dux-cli/src/app/state.rs": {"open_in_finder"},
     "dux-core/src/cache/mod.rs": {"save_cache"},
+    "dux-core/src/planner/rust_target_cargo.rs": {"run_cargo"},
 }
 
 LEGACY_ADAPTER_ALLOWED_PATHS = {
