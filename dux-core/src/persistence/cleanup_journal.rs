@@ -258,7 +258,7 @@ impl From<ValidationOutcome> for PathStatus {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum EffectOutcome {
+pub(crate) enum EffectOutcome {
     Trashed,
     Removed,
     Evicted,

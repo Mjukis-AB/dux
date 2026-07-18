@@ -1,3 +1,4 @@
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -5,7 +6,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use rusqlite::{params, types::Value};
 use tempfile::TempDir;
 
-use crate::cleanup::executor::TrashExecutionAdmission;
+use crate::cleanup::executor::{
+    TrashExecutionAdmission, TrashExecutionError, TrashPlatformEffect, TrashPlatformError,
+};
+use crate::engine::SnapshotReviewTrashTarget;
+use crate::path_validation::{
+    capture_scan_root, capture_trash_path_snapshot, validate_cleanup_path, validate_scan_root,
+};
 
 use super::lease::*;
 use super::*;
@@ -49,6 +56,26 @@ impl Fixture {
         selected: &[usize],
     ) -> Self {
         let temp = TempDir::new().unwrap();
+        Self::new_with_selected_in_temp(temp, mode, action, item_count, selected)
+    }
+
+    fn new_with_selected_in_current_dir(
+        mode: CleanupMode,
+        action: CandidateAction,
+        item_count: usize,
+        selected: &[usize],
+    ) -> Self {
+        let temp = TempDir::new_in(std::env::current_dir().unwrap()).unwrap();
+        Self::new_with_selected_in_temp(temp, mode, action, item_count, selected)
+    }
+
+    fn new_with_selected_in_temp(
+        temp: TempDir,
+        mode: CleanupMode,
+        action: CandidateAction,
+        item_count: usize,
+        selected: &[usize],
+    ) -> Self {
         let database = temp.path().join("store").join("dux.sqlite3");
         let root = temp.path().join("root");
         let store = StoreCoordinator::open(&database).unwrap();
@@ -861,8 +888,12 @@ fn dry_run_validates_every_path_and_terminalizes_without_an_effect() {
 
 #[test]
 fn trash_admission_binds_the_review_to_the_frozen_journal_path() {
-    let fixture =
-        Fixture::new_with_selected(CleanupMode::Trash, CandidateAction::MoveToTrash, 1, &[0]);
+    let fixture = Fixture::new_with_selected_in_current_dir(
+        CleanupMode::Trash,
+        CandidateAction::MoveToTrash,
+        1,
+        &[0],
+    );
     let expected = fixture._temp.path().join("root/cleanup-fixture-0");
     let claim = fixture.claim();
 
@@ -879,6 +910,138 @@ fn trash_admission_binds_the_review_to_the_frozen_journal_path() {
     // Keep the executor symbol exercised in this journal-focused test module;
     // the platform adapter is intentionally not called by this slice.
     let _ = std::mem::size_of::<TrashExecutionAdmission>();
+}
+
+struct RecordingTrashPlatform {
+    calls: usize,
+    result: Result<(), TrashPlatformError>,
+    requested_path: Option<PathBuf>,
+}
+
+impl TrashPlatformEffect for RecordingTrashPlatform {
+    fn trash(
+        &mut self,
+        target: &crate::path_validation::TrashPathSnapshot,
+    ) -> Result<(), TrashPlatformError> {
+        self.calls += 1;
+        self.requested_path = Some(target.requested_path().to_path_buf());
+        self.result
+    }
+}
+
+fn fixture_trash_target(fixture: &Fixture) -> SnapshotReviewTrashTarget {
+    let root = fixture._temp.path().join("root");
+    fs::create_dir_all(&root).unwrap();
+    let item = root.join("cleanup-fixture-0");
+    fs::write(&item, b"review me").unwrap();
+    let lexical_root = validate_scan_root(&root).unwrap();
+    let live_root = capture_scan_root(lexical_root.clone()).unwrap();
+    let lexical_item = validate_cleanup_path(&lexical_root, &item).unwrap();
+    let snapshot = capture_trash_path_snapshot(&live_root, lexical_item).unwrap();
+    SnapshotReviewTrashTarget {
+        node_id: 11,
+        snapshot,
+    }
+}
+
+#[test]
+fn trash_execution_driver_records_success_and_calls_once() {
+    let fixture = Fixture::new_with_selected_in_current_dir(
+        CleanupMode::Trash,
+        CandidateAction::MoveToTrash,
+        1,
+        &[0],
+    );
+    let expected_path = fixture._temp.path().join("root/cleanup-fixture-0");
+    let admission = TrashExecutionAdmission::from_claim(
+        fixture.claim(),
+        fixture_trash_target(&fixture),
+        0,
+        0,
+        fixture.started_at + Duration::from_secs(1),
+    )
+    .unwrap();
+    let mut platform = RecordingTrashPlatform {
+        calls: 0,
+        result: Ok(()),
+        requested_path: None,
+    };
+
+    admission
+        .execute_with(&mut platform, fixture.started_at + Duration::from_secs(3))
+        .unwrap();
+
+    assert_eq!(platform.calls, 1);
+    assert_eq!(
+        platform.requested_path.as_deref(),
+        Some(expected_path.as_path())
+    );
+    assert!(
+        expected_path.exists(),
+        "recording adapter must not mutate files"
+    );
+    let journal = fixture.lease().load(&fixture.session_id).unwrap().unwrap();
+    assert_eq!(journal.items[0].paths[0].status, PathStatus::Trashed);
+}
+
+#[test]
+fn trash_execution_driver_records_unknown_outcome_without_retrying() {
+    let fixture = Fixture::new_with_selected_in_current_dir(
+        CleanupMode::Trash,
+        CandidateAction::MoveToTrash,
+        1,
+        &[0],
+    );
+    let admission = TrashExecutionAdmission::from_claim(
+        fixture.claim(),
+        fixture_trash_target(&fixture),
+        0,
+        0,
+        fixture.started_at + Duration::from_secs(1),
+    )
+    .unwrap();
+    let mut platform = RecordingTrashPlatform {
+        calls: 0,
+        result: Err(TrashPlatformError::OutcomeUnknown),
+        requested_path: None,
+    };
+
+    assert_eq!(
+        admission
+            .execute_with(&mut platform, fixture.started_at + Duration::from_secs(3))
+            .unwrap_err(),
+        TrashExecutionError::Platform(TrashPlatformError::OutcomeUnknown)
+    );
+    assert_eq!(platform.calls, 1);
+    let journal = fixture.lease().load(&fixture.session_id).unwrap().unwrap();
+    assert_eq!(journal.items[0].paths[0].status, PathStatus::OutcomeUnknown);
+}
+
+#[test]
+fn trash_admission_rejects_a_non_trash_journal_row_before_driver_call() {
+    let fixture = Fixture::new_with_selected_in_current_dir(
+        CleanupMode::PermanentSafe,
+        CandidateAction::RemoveKnownRegenerableContents,
+        1,
+        &[],
+    );
+    let error = match TrashExecutionAdmission::from_claim(
+        fixture.claim(),
+        fixture_trash_target(&fixture),
+        0,
+        0,
+        fixture.started_at + Duration::from_secs(1),
+    ) {
+        Ok(_) => panic!("permanent-safe rows must not enter Trash admission"),
+        Err(error) => error,
+    };
+
+    assert_eq!(
+        error,
+        crate::cleanup::executor::TrashAdmissionError::UnsupportedEffectMode
+    );
+    let journal = fixture.lease().load(&fixture.session_id).unwrap().unwrap();
+    assert_eq!(journal.items[0].paths[0].status, PathStatus::Rejected);
 }
 
 #[test]

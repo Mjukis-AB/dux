@@ -18,6 +18,13 @@ All notable changes to DUX will be documented in this file.
   platform call. Errors are typed and path-free. This slice performs no
   filesystem mutation and does not add approval, FFI, Swift, or
   `FileManager.trashItem` authority.
+- Continued Milestone 5 with a private synchronous Trash platform-driver seam.
+  The consuming admission repeats its no-follow target and durable receipt
+  checks immediately before the driver, records `Trashed`, `Failed`, or
+  conservative `OutcomeUnknown` while the journal claim is held, and returns
+  bounded path-free errors. Recording adapters verify exact-path delivery,
+  no mutation, single-call behavior, and no retry after an unknown outcome;
+  no Swift/FFI caller or real platform effect is connected.
 - Continued Milestone 5 with a separate core-owned Trash review witness for
   Explorer selections. A retained snapshot node is resolved to fresh no-follow
   ancestry and target identity; final symlinks remain link objects while

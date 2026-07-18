@@ -756,9 +756,12 @@ no-follow root/ancestor/object witness, records a fenced `effect_started`
 receipt, and revalidates that receipt immediately before a future adapter call.
 Missing, changed, unsupported, or unbound evidence is recorded as a typed
 rejection/changed/unavailable result. The capability has a consuming
-pre-effect-cancellation path and carries no FFI path or platform primitive;
-`FileManager.trashItem`, approval binding, and the actual mutation remain later
-gates.
+pre-effect-cancellation path and carries no FFI path or platform primitive. A
+private synchronous driver seam now repeats the target/receipt fence immediately
+before the call and settles `Trashed`, `Failed`, or `OutcomeUnknown` in the
+journal while the claim is held; its recording tests perform no filesystem
+mutation and cannot retry. `FileManager.trashItem`, approval binding, and the
+actual mutation remain later gates.
 
 Any ambiguity returns a typed rejection, skip, or `ChangedSincePlan`. The
 executor MUST NOT silently refresh a target and proceed; changed evidence needs
@@ -990,9 +993,10 @@ retained Explorer node to a fresh no-follow target snapshot. It keeps the
 selected final symlink as a link object while rejecting symlinked roots or
 intermediate ancestors, special entries, and identity changes. This witness is
 not the existing read-only live-target record, is not serializable or cloneable,
-and cannot approve, construct a plan, or invoke a platform effect. Approval,
-journal admission, the centralized executor, and the macOS adapter remain
-required before any mutation.
+and cannot approve or construct a plan. Journal admission now owns a private
+synchronous driver seam and terminal effect outcome recording, but no Swift/FFI
+caller or real macOS adapter is connected. Approval, journal admission, the
+centralized executor, and the macOS adapter remain required before any mutation.
 
 Linux implements the XDG Trash specification with correct mount behavior or
 refuses Trash. Windows uses an independently reviewed recoverable shell API or

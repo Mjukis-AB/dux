@@ -453,6 +453,33 @@ impl CleanupJournalClaim {
         Ok(())
     }
 
+    /// Confirm that the claimed journal row is a Trash-compatible effect
+    /// before an admission can reach `effect_started`. This prevents a future
+    /// platform driver from being called for a permanent-removal or eviction
+    /// row and relying on terminal journaling to reject it afterward.
+    pub(crate) fn validate_trash_effect(
+        &self,
+        item_ordinal: usize,
+        path_ordinal: usize,
+    ) -> Result<(), HistoryError> {
+        let journal = self.snapshot()?;
+        let item = journal
+            .items
+            .get(item_ordinal)
+            .ok_or_else(|| HistoryError::new(HistoryErrorKind::InvalidInput))?;
+        item.paths
+            .get(path_ordinal)
+            .ok_or_else(|| HistoryError::new(HistoryErrorKind::InvalidInput))?;
+        if !super::success_matches(
+            journal.mode,
+            item.frozen.proposed_action,
+            PathStatus::Trashed,
+        ) {
+            return Err(HistoryError::new(HistoryErrorKind::InvalidTransition));
+        }
+        Ok(())
+    }
+
     pub(super) fn heartbeat(&self, heartbeat_at: SystemTime) -> Result<(), HistoryError> {
         let heartbeat_at = canonical_input_time(heartbeat_at)?;
         match self
@@ -700,7 +727,7 @@ impl CleanupJournalClaim {
         )
     }
 
-    pub(super) fn finish_effect(
+    pub(crate) fn finish_effect(
         &mut self,
         receipt: &EffectStartReceipt,
         outcome: EffectOutcome,

@@ -4491,6 +4491,14 @@ Tasks:
     settles the receipt without touching the filesystem. The capability is
     non-Clone and path-free at its error boundary. No macOS `FileManager`,
     Swift/FFI surface, approval binding, or real Trash mutation exists yet.
+  - [x] 2026-07-19 slice: close the core effect lifecycle with a private,
+    synchronous one-shot platform-driver seam. The consuming admission repeats
+    target and receipt validation immediately before the driver call, records
+    `Trashed`, `Failed`, or conservative `OutcomeUnknown` while the journal
+    claim remains held, and returns only bounded path-free errors. Recording
+    adapters verify exact-path delivery, no mutation, single-call behavior,
+    and no retry after an unknown outcome. The driver is crate-private and no
+    Swift/FFI caller or real platform primitive can invoke it yet.
 - [ ] Implement permanent-safe executor for approved rules.
 - [ ] Implement execution-time revalidation.
 - [ ] Implement cleanup session/item history.

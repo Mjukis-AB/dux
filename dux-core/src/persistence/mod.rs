@@ -101,7 +101,9 @@ pub(crate) use cleanup_history_query::{
     StoredCleanupRecordFormat, StoredCleanupSessionStatus, StoredCleanupSessionSummary,
     StoredCleanupStatusCounts, StoredCleanupTrigger,
 };
-pub(crate) use cleanup_journal::{CleanupJournalClaim, EffectStartReceipt, ValidationOutcome};
+pub(crate) use cleanup_journal::{
+    CleanupJournalClaim, EffectOutcome, EffectStartReceipt, ValidationOutcome,
+};
 pub(crate) use codec::{HostPathObservationEncoding, observe_host_path};
 pub(crate) use history::{
     HistoryErrorKind, MAX_RECENT_SCAN_HISTORY_LIMIT, NewScanRecord, ScanCompletionRecord,

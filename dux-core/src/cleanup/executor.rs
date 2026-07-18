@@ -13,8 +13,8 @@ use crate::path_validation::{
     validate_scan_root,
 };
 use crate::persistence::{
-    CleanupJournalClaim, CleanupSessionId, EffectStartReceipt, HistoryErrorKind, StoreCoordinator,
-    ValidationOutcome,
+    CleanupJournalClaim, CleanupSessionId, EffectOutcome, EffectStartReceipt, HistoryErrorKind,
+    StoreCoordinator, ValidationOutcome,
 };
 
 /// The only failures returned by the core Trash admission boundary. Paths are
@@ -28,6 +28,8 @@ pub(crate) enum TrashAdmissionError {
     TargetChanged,
     #[error("the reviewed Trash target has an unsupported kind")]
     UnsupportedTargetKind,
+    #[error("the cleanup journal row is not a Trash effect")]
+    UnsupportedEffectMode,
     #[error("the reviewed Trash target is not bound to the planned journal path")]
     TargetNotBound,
     #[error("the cleanup journal rejected the Trash admission: {0:?}")]
@@ -40,6 +42,36 @@ pub(crate) struct TrashExecutionAdmission {
     target: SnapshotReviewTrashTarget,
     claim: CleanupJournalClaim,
     receipt: EffectStartReceipt,
+}
+
+/// A platform driver invoked synchronously while the journal claim and
+/// cleanup lock remain held. Implementations must not retain the snapshot or
+/// retry after returning; the snapshot is stale outside this one-shot call.
+pub(crate) trait TrashPlatformEffect {
+    fn trash(
+        &mut self,
+        target: &crate::path_validation::TrashPathSnapshot,
+    ) -> Result<(), TrashPlatformError>;
+}
+
+/// Path-free, bounded platform outcomes. A Foundation error after call entry
+/// is conservatively represented as [`Self::OutcomeUnknown`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum TrashPlatformError {
+    #[error("the Trash platform adapter does not support this target")]
+    Unsupported,
+    #[error("the Trash platform adapter failed before completing the operation")]
+    Failed,
+    #[error("the Trash platform operation outcome is unknown")]
+    OutcomeUnknown,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum TrashExecutionError {
+    #[error("Trash admission failed: {0}")]
+    Admission(TrashAdmissionError),
+    #[error("Trash platform effect failed: {0}")]
+    Platform(TrashPlatformError),
 }
 
 impl TrashExecutionAdmission {
@@ -103,10 +135,27 @@ impl TrashExecutionAdmission {
             .begin_validation(item_ordinal, path_ordinal)
             .map_err(|error| TrashAdmissionError::Journal(error.kind))?;
 
+        if let Err(error) = claim.validate_trash_effect(item_ordinal, path_ordinal) {
+            if error.kind == HistoryErrorKind::InvalidTransition {
+                claim
+                    .finish_validation(
+                        item_ordinal,
+                        path_ordinal,
+                        ValidationOutcome::Rejected,
+                        Some("trash_effect_mode_mismatch"),
+                        observed_at,
+                    )
+                    .map_err(|journal_error| TrashAdmissionError::Journal(journal_error.kind))?;
+                return Err(TrashAdmissionError::UnsupportedEffectMode);
+            }
+            return Err(TrashAdmissionError::Journal(error.kind));
+        }
+
         if let Err(error) = revalidate_target(&target) {
             let outcome = match error {
                 TrashAdmissionError::TargetChanged => ValidationOutcome::ChangedSincePlan,
                 TrashAdmissionError::UnsupportedTargetKind => ValidationOutcome::Rejected,
+                TrashAdmissionError::UnsupportedEffectMode => ValidationOutcome::Rejected,
                 TrashAdmissionError::TargetUnavailable | TrashAdmissionError::Journal(_) => {
                     ValidationOutcome::Unavailable
                 }
@@ -163,6 +212,65 @@ impl TrashExecutionAdmission {
             .cancel_effect_before_call(&self.receipt, completed_at)
             .map_err(|error| TrashAdmissionError::Journal(error.kind))
     }
+
+    /// Revalidate the target and durable receipt immediately before invoking
+    /// the synchronous platform driver, then settle the journal outcome while
+    /// the one-shot claim is still held. The caller cannot retry this
+    /// admission because it is consumed by the method.
+    pub(crate) fn execute_with(
+        mut self,
+        platform: &mut impl TrashPlatformEffect,
+        completed_at: SystemTime,
+    ) -> Result<(), TrashExecutionError> {
+        if let Err(error) = revalidate_target(&self.target) {
+            self.claim
+                .cancel_effect_before_call(&self.receipt, completed_at)
+                .map_err(|journal_error| {
+                    TrashExecutionError::Admission(TrashAdmissionError::Journal(journal_error.kind))
+                })?;
+            return Err(TrashExecutionError::Admission(error));
+        }
+        if let Err(error) = self.claim.revalidate_effect_receipt(&self.receipt) {
+            self.claim
+                .cancel_effect_before_call(&self.receipt, completed_at)
+                .map_err(|journal_error| {
+                    TrashExecutionError::Admission(TrashAdmissionError::Journal(journal_error.kind))
+                })?;
+            return Err(TrashExecutionError::Admission(
+                TrashAdmissionError::Journal(error.kind),
+            ));
+        }
+
+        let platform_result = platform.trash(&self.target.snapshot);
+        let (outcome, error_category, platform_error) = match platform_result {
+            Ok(()) => (EffectOutcome::Trashed, None, None),
+            Err(error @ TrashPlatformError::Unsupported) => (
+                EffectOutcome::Failed,
+                Some("trash_platform_unsupported"),
+                Some(error),
+            ),
+            Err(error @ TrashPlatformError::Failed) => (
+                EffectOutcome::Failed,
+                Some("trash_platform_failed"),
+                Some(error),
+            ),
+            Err(error @ TrashPlatformError::OutcomeUnknown) => (
+                EffectOutcome::OutcomeUnknown,
+                Some("trash_platform_outcome_unknown"),
+                Some(error),
+            ),
+        };
+        self.claim
+            .finish_effect(&self.receipt, outcome, error_category, completed_at)
+            .map_err(|error| {
+                TrashExecutionError::Admission(TrashAdmissionError::Journal(error.kind))
+            })?;
+
+        match platform_error {
+            Some(error) => Err(TrashExecutionError::Platform(error)),
+            None => Ok(()),
+        }
+    }
 }
 
 fn revalidate_target(target: &SnapshotReviewTrashTarget) -> Result<(), TrashAdmissionError> {
@@ -214,6 +322,7 @@ fn validation_error_category(error: TrashAdmissionError) -> &'static str {
         TrashAdmissionError::TargetUnavailable => "trash_target_unavailable",
         TrashAdmissionError::TargetChanged => "trash_target_changed",
         TrashAdmissionError::UnsupportedTargetKind => "trash_target_unsupported",
+        TrashAdmissionError::UnsupportedEffectMode => "trash_effect_mode_mismatch",
         TrashAdmissionError::TargetNotBound => "trash_target_not_bound",
         TrashAdmissionError::Journal(_) => "trash_journal_rejected",
     }
