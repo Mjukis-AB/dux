@@ -5,13 +5,18 @@ use thiserror::Error;
 
 use crate::domain::{
     BlockReason, Candidate, CandidateAction, CandidateCategory, CandidateId, Evidence, SafetyTier,
-    ScanId,
+    ScanId, current_rust_target_candidate_id,
 };
 use crate::path_validation::{
     CanonicalFileDigestError, CanonicalFileDigestSnapshot, CanonicalFilePrefixError,
     CanonicalFilePrefixSnapshot, CanonicalPathError, CanonicalPathSnapshot, CanonicalScanRoot,
     FilesystemEntryKind, LexicalPathError, capture_path_snapshot, capture_regular_file_prefix,
     capture_regular_file_sha256, capture_scan_root, validate_cleanup_path, validate_scan_root,
+};
+use crate::persistence::CompleteCandidateRecord;
+
+use super::rust_target_source::{
+    RustTargetDurableSource, RustTargetSnapshotBindings, RustTargetSourceError,
 };
 
 const RUST_TARGET_RULE_ID: &str = "developer.rust.target";
@@ -24,11 +29,13 @@ const MAX_CARGO_MANIFEST_BYTES: usize = 4 * 1024 * 1024;
 ///
 /// The path remains a locator until `validate_live_rust_target` reconstructs
 /// all live filesystem evidence. This type itself grants no authority.
+#[cfg(test)]
 pub(crate) struct RustTargetValidationSource<'a> {
     source_scan_id: &'a ScanId,
     scan_root: &'a Path,
 }
 
+#[cfg(test)]
 impl<'a> RustTargetValidationSource<'a> {
     pub(crate) fn new(source_scan_id: &'a ScanId, scan_root: &'a Path) -> Self {
         Self {
@@ -52,6 +59,7 @@ pub(crate) struct RustTargetLiveWitness {
     target: CanonicalPathSnapshot,
     manifest: CanonicalFileDigestSnapshot,
     cache_tag: CanonicalFilePrefixSnapshot,
+    durable_source: Option<RustTargetDurableSource>,
     protected_path_still_unresolved: ProtectedPathStillUnresolved,
 }
 
@@ -77,6 +85,10 @@ pub(crate) enum RustTargetLiveValidationError {
     InvalidCacheTagSignature,
     #[error("live Rust target evidence changed during validation")]
     ChangedDuringValidation,
+    #[error("live Rust target objects do not match their exact scan-time identities")]
+    ChangedSinceScan,
+    #[error("durable Rust target discovery evidence changed during validation")]
+    DurableSourceChanged,
     #[error(transparent)]
     Lexical(#[from] LexicalPathError),
     #[error(transparent)]
@@ -88,24 +100,78 @@ pub(crate) enum RustTargetLiveValidationError {
 }
 
 pub(crate) fn validate_live_rust_target(
+    source: RustTargetDurableSource,
+) -> Result<RustTargetLiveWitness, RustTargetLiveValidationError> {
+    source
+        .revalidate_current()
+        .map_err(|_| RustTargetLiveValidationError::DurableSourceChanged)?;
+    let paths = validate_durable_candidate_for_source(source.scan_id(), source.candidate())?;
+    let source_scan_id = source.scan_id().clone();
+    let candidate_id = source.candidate().id().clone();
+    let scan_root = source.scan_root().to_path_buf();
+    let bindings = source.bindings();
+    validate_live_rust_target_inner(
+        source_scan_id,
+        candidate_id,
+        scan_root,
+        paths,
+        Some(source),
+        Some(bindings),
+    )
+}
+
+#[cfg(test)]
+pub(super) fn validate_live_rust_target_for_test(
     source: RustTargetValidationSource<'_>,
     candidate: &Candidate,
 ) -> Result<RustTargetLiveWitness, RustTargetLiveValidationError> {
     validate_candidate_policy(source.source_scan_id, candidate)?;
-    let (target_path, manifest_path, cache_tag_path) = validate_candidate_layout(candidate)?;
+    let paths = validate_candidate_layout(candidate.paths(), candidate.evidence())?;
+    validate_live_rust_target_inner(
+        candidate.source_scan_id().clone(),
+        candidate.id().clone(),
+        source.scan_root.to_path_buf(),
+        paths,
+        None,
+        None,
+    )
+}
+
+fn validate_live_rust_target_inner(
+    source_scan_id: ScanId,
+    candidate_id: CandidateId,
+    source_scan_root: PathBuf,
+    paths: RustTargetCandidatePaths,
+    durable_source: Option<RustTargetDurableSource>,
+    snapshot_bindings: Option<RustTargetSnapshotBindings>,
+) -> Result<RustTargetLiveWitness, RustTargetLiveValidationError> {
+    let RustTargetCandidatePaths {
+        target: target_path,
+        manifest: manifest_path,
+        cache_tag: cache_tag_path,
+    } = paths;
 
     #[cfg(not(unix))]
     {
-        let _ = (source.scan_root, target_path, manifest_path, cache_tag_path);
+        let _ = (
+            source_scan_id,
+            candidate_id,
+            source_scan_root,
+            target_path,
+            manifest_path,
+            cache_tag_path,
+            durable_source,
+            snapshot_bindings,
+        );
         return Err(RustTargetLiveValidationError::UnsupportedPlatform);
     }
 
     #[cfg(unix)]
     {
-        let lexical_root = validate_scan_root(source.scan_root)?;
+        let lexical_root = validate_scan_root(&source_scan_root)?;
         let scan_root = capture_scan_root(lexical_root.clone())?;
 
-        let lexical_target = validate_cleanup_path(&lexical_root, target_path)?;
+        let lexical_target = validate_cleanup_path(&lexical_root, &target_path)?;
         let lexical_manifest = validate_cleanup_path(&lexical_root, &manifest_path)?;
         let lexical_cache_tag = validate_cleanup_path(&lexical_root, &cache_tag_path)?;
 
@@ -156,6 +222,19 @@ pub(crate) fn validate_live_rust_target(
             return Err(RustTargetLiveValidationError::LayoutMismatch);
         }
 
+        if let Some(bindings) = snapshot_bindings
+            && (!matches_snapshot_identity(scan_root.identity(), bindings.root)
+                || !matches_snapshot_ancestors(target.ancestors(), &bindings.target_ancestors)
+                || !matches_snapshot_identity(target.target_identity(), bindings.target)
+                || !matches_snapshot_identity(manifest.path().target_identity(), bindings.manifest)
+                || !matches_snapshot_identity(
+                    cache_tag.path().target_identity(),
+                    bindings.cache_tag,
+                ))
+        {
+            return Err(RustTargetLiveValidationError::ChangedSinceScan);
+        }
+
         let final_root = capture_scan_root(lexical_root)?;
         let final_target = capture_path_snapshot(&final_root, lexical_target)?;
         let final_manifest =
@@ -169,14 +248,21 @@ pub(crate) fn validate_live_rust_target(
             return Err(RustTargetLiveValidationError::ChangedDuringValidation);
         }
 
+        if let Some(source) = durable_source.as_ref() {
+            source
+                .revalidate_current()
+                .map_err(|_| RustTargetLiveValidationError::DurableSourceChanged)?;
+        }
+
         Ok(RustTargetLiveWitness {
             witness_revision: RUST_TARGET_WITNESS_REVISION,
-            source_scan_id: candidate.source_scan_id().clone(),
-            candidate_id: candidate.id().clone(),
+            source_scan_id,
+            candidate_id,
             scan_root,
             target,
             manifest,
             cache_tag,
+            durable_source,
             protected_path_still_unresolved: ProtectedPathStillUnresolved,
         })
     }
@@ -185,6 +271,11 @@ pub(crate) fn validate_live_rust_target(
 #[cfg(unix)]
 impl RustTargetLiveWitness {
     pub(super) fn revalidate_current(&self) -> Result<(), RustTargetLiveValidationError> {
+        if let Some(source) = self.durable_source.as_ref() {
+            source
+                .revalidate_current()
+                .map_err(|_| RustTargetLiveValidationError::DurableSourceChanged)?;
+        }
         let lexical_root = validate_scan_root(self.scan_root.canonical_path())?;
         let current_root = capture_scan_root(lexical_root.clone())?;
         if current_root != self.scan_root {
@@ -211,6 +302,11 @@ impl RustTargetLiveWitness {
         {
             return Err(RustTargetLiveValidationError::ChangedDuringValidation);
         }
+        if let Some(source) = self.durable_source.as_ref() {
+            source
+                .revalidate_current()
+                .map_err(|_| RustTargetLiveValidationError::DurableSourceChanged)?;
+        }
         Ok(())
     }
 
@@ -228,6 +324,13 @@ impl RustTargetLiveWitness {
 
     pub(super) fn target_path(&self) -> &Path {
         self.target.canonical_path()
+    }
+
+    pub(crate) fn release(self) -> Result<(), RustTargetSourceError> {
+        match self.durable_source {
+            Some(source) => source.release(),
+            None => Ok(()),
+        }
     }
 }
 
@@ -253,10 +356,45 @@ fn validate_candidate_policy(
     Ok(())
 }
 
+pub(super) struct RustTargetCandidatePaths {
+    pub(super) target: PathBuf,
+    pub(super) manifest: PathBuf,
+    pub(super) cache_tag: PathBuf,
+}
+
+pub(super) fn validate_durable_candidate_for_source(
+    source_scan_id: &ScanId,
+    candidate: &CompleteCandidateRecord,
+) -> Result<RustTargetCandidatePaths, RustTargetLiveValidationError> {
+    if candidate.source_scan_id() != source_scan_id {
+        return Err(RustTargetLiveValidationError::SourceScanMismatch);
+    }
+    if candidate.rule().id().as_str() != RUST_TARGET_RULE_ID
+        || candidate.rule().revision().get() != RUST_TARGET_RULE_REVISION
+        || candidate.category() != CandidateCategory::DeveloperArtifact
+        || candidate.safety() != SafetyTier::SafeRegenerable
+        || candidate.action() != CandidateAction::RemoveKnownRegenerableContents
+        || candidate.rule_schedule_eligible()
+    {
+        return Err(RustTargetLiveValidationError::CandidatePolicyMismatch);
+    }
+    if candidate.blockers() != [BlockReason::ProtectedPath] {
+        return Err(RustTargetLiveValidationError::ProtectedPathNotUnresolved);
+    }
+    let paths = validate_candidate_layout(candidate.paths(), candidate.evidence())?;
+    let expected_id = current_rust_target_candidate_id(source_scan_id, &paths.target)
+        .map_err(|_| RustTargetLiveValidationError::CandidatePolicyMismatch)?;
+    if candidate.id() != &expected_id {
+        return Err(RustTargetLiveValidationError::CandidatePolicyMismatch);
+    }
+    Ok(paths)
+}
+
 fn validate_candidate_layout(
-    candidate: &Candidate,
-) -> Result<(&Path, PathBuf, PathBuf), RustTargetLiveValidationError> {
-    let [target_path] = candidate.paths() else {
+    candidate_paths: &[PathBuf],
+    candidate_evidence: &[Evidence],
+) -> Result<RustTargetCandidatePaths, RustTargetLiveValidationError> {
+    let [target_path] = candidate_paths else {
         return Err(RustTargetLiveValidationError::CandidateEvidenceMismatch);
     };
     if target_path.file_name() != Some(OsStr::new("target")) {
@@ -271,7 +409,7 @@ fn validate_candidate_layout(
     let mut matched_target = 0_u8;
     let mut matched_manifest = 0_u8;
     let mut matched_cache_tag = 0_u8;
-    for evidence in candidate.evidence() {
+    for evidence in candidate_evidence {
         match evidence {
             Evidence::MatchedPath { path } if path == target_path => {
                 matched_target = matched_target.saturating_add(1);
@@ -285,7 +423,7 @@ fn validate_candidate_layout(
             _ => return Err(RustTargetLiveValidationError::CandidateEvidenceMismatch),
         }
     }
-    if candidate.evidence().len() != 3
+    if candidate_evidence.len() != 3
         || matched_target != 1
         || matched_manifest != 1
         || matched_cache_tag != 1
@@ -293,7 +431,31 @@ fn validate_candidate_layout(
         return Err(RustTargetLiveValidationError::CandidateEvidenceMismatch);
     }
 
-    Ok((target_path, manifest_path, cache_tag_path))
+    Ok(RustTargetCandidatePaths {
+        target: target_path.clone(),
+        manifest: manifest_path,
+        cache_tag: cache_tag_path,
+    })
+}
+
+#[cfg(unix)]
+fn matches_snapshot_identity(
+    live: crate::path_validation::FilesystemIdentity,
+    snapshot: crate::persistence::snapshot::SnapshotUnixIdentity,
+) -> bool {
+    live.volume() == snapshot.device() && live.object() == u128::from(snapshot.inode())
+}
+
+#[cfg(unix)]
+fn matches_snapshot_ancestors(
+    live: &[crate::path_validation::AncestorIdentity],
+    snapshot: &[crate::persistence::snapshot::SnapshotUnixIdentity],
+) -> bool {
+    live.len() == snapshot.len()
+        && live
+            .iter()
+            .zip(snapshot)
+            .all(|(live, snapshot)| matches_snapshot_identity(live.identity(), *snapshot))
 }
 
 #[cfg(test)]

@@ -16,6 +16,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::rust_target::{RustTargetLiveValidationError, RustTargetLiveWitness};
+use super::rust_target_source::RustTargetSourceError;
 use crate::path_validation::{
     CanonicalFileDigestError, CanonicalFileDigestSnapshot, CanonicalPathError, CanonicalScanRoot,
     FilesystemEntryKind, LexicalPathError, capture_regular_file_sha256, capture_scan_root,
@@ -79,6 +80,12 @@ pub(crate) struct RustTargetCargoMetadataWitness {
     cargo: CargoExecutableEvidence,
     metadata_sha256: [u8; 32],
     resolution_policy_revision: u32,
+}
+
+impl RustTargetCargoMetadataWitness {
+    pub(crate) fn release(self) -> Result<(), RustTargetSourceError> {
+        self.live.release()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

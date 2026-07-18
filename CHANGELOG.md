@@ -5,6 +5,21 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Continued Milestone 5 by sealing Rust-target validation to one exact durable
+  discovery source. Production acquisition now requires a succeeded complete-
+  coverage scan, its exact checksummed snapshot, the current evaluator/catalog/
+  context identity, and the exact still-discovered deterministic candidate. A
+  non-cloneable source owns a bounded cleanup-review lease, uses the charged
+  decoded-review budget and index to verify the snapshot graph, carries
+  scan-time Unix observations for the root, complete ancestor chain, target,
+  manifest, and tag, and is retained through both live and Cargo witnesses.
+  Fresh lease and complete-source checks bracket acquisition and revalidation;
+  different observed device/inode objects, stale evaluator state, forged candidate IDs,
+  review-status races, repository mismatch, pin expiry, and source drift fail
+  closed. Failure, explicit release, and drop make a best-effort exact pin
+  release so ordinary retries cannot exhaust the review-pin cap. Inode reuse
+  remains an explicit limitation. The source stays non-authoritative and cannot clear
+  `ProtectedPath`, create a plan, cross FFI, schedule, or execute.
 - Continued Milestone 5 with a second sealed Unix Rust-target checkpoint that
   consumes the live layout witness and resolves its exact workspace root and
   target directory through an observed canonical executable named `cargo`. The

@@ -7,8 +7,11 @@
 mod rust_target;
 #[cfg(unix)]
 mod rust_target_cargo;
+mod rust_target_source;
 
 #[cfg(all(test, unix))]
 mod rust_target_cargo_tests;
+#[cfg(all(test, unix))]
+mod rust_target_source_tests;
 #[cfg(test)]
 mod rust_target_tests;

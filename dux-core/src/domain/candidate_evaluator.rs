@@ -399,12 +399,25 @@ pub(crate) fn candidate_evaluation_context_digest_sha256(
     artifact: &CompletedScanArtifact,
 ) -> [u8; 32] {
     let (tree, _, coverage) = artifact.parts();
-    candidate_evaluation_context_digest_for_tree(source_scan_id, tree, coverage)
+    candidate_evaluation_context_digest_for_observation(source_scan_id, tree.root_path(), coverage)
 }
 
 fn candidate_evaluation_context_digest_for_tree(
     source_scan_id: &ScanId,
     tree: &DiskTree,
+    coverage: &ScanCoverage,
+) -> [u8; 32] {
+    candidate_evaluation_context_digest_for_observation(source_scan_id, tree.root_path(), coverage)
+}
+
+/// Recompute the current evaluator context from one durable scan observation.
+///
+/// The immutable snapshot digest is bound separately by persistence. This
+/// digest deliberately covers only the evaluator policy, scan identity/root,
+/// and exact coverage facts available before candidate evaluation starts.
+pub(crate) fn candidate_evaluation_context_digest_for_observation(
+    source_scan_id: &ScanId,
+    root: &Path,
     coverage: &ScanCoverage,
 ) -> [u8; 32] {
     let mut hasher = Sha256::new();
@@ -416,7 +429,7 @@ fn candidate_evaluation_context_digest_for_tree(
     update_length_prefixed(&mut hasher, SELECTED_SCAN_ROOT_SCOPE);
     update_length_prefixed(&mut hasher, UNRESOLVED_PROTECTION);
     update_length_prefixed(&mut hasher, source_scan_id.as_str().as_bytes());
-    update_length_prefixed(&mut hasher, &native_path_bytes(tree.root_path()));
+    update_length_prefixed(&mut hasher, &native_path_bytes(root));
     hasher.update([coverage_status_rank(coverage.status())]);
     match coverage.measured_permille() {
         Some(value) => {
@@ -438,6 +451,20 @@ fn candidate_evaluation_context_digest_for_tree(
         hasher.update(issue.occurrence_count().to_le_bytes());
     }
     hasher.finalize().into()
+}
+
+/// Deterministic ID expected for the current bundled Rust-target rule.
+pub(crate) fn current_rust_target_candidate_id(
+    source_scan_id: &ScanId,
+    path: &Path,
+) -> Result<CandidateId, CandidateEvaluationError> {
+    let catalog = load_and_validate_catalog()?;
+    let binding = CATALOG_BINDINGS
+        .iter()
+        .find(|binding| binding.rule_id == SAFE_RUST_RULE_ID)
+        .ok_or(CandidateEvaluationError::InvalidBundledCatalog)?;
+    let rule = rule_for(catalog, binding)?;
+    Ok(candidate_id(source_scan_id, rule, &native_path_bytes(path)))
 }
 
 const fn coverage_status_rank(status: ScanCoverageStatus) -> u8 {

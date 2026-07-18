@@ -11,7 +11,7 @@ use nix::unistd::Pid;
 use serde_json::json;
 use tempfile::TempDir;
 
-use super::rust_target::validate_live_rust_target;
+use super::rust_target::validate_live_rust_target_for_test;
 use super::rust_target_cargo::{
     CargoMetadataValidationError, CargoOutputStream, observe_cargo_executable,
     validate_cargo_metadata, validate_cargo_metadata_for_test,
@@ -85,7 +85,7 @@ fn valid_metadata_action(fixture: &Fixture) -> String {
 }
 
 fn live(fixture: &Fixture) -> super::rust_target::RustTargetLiveWitness {
-    validate_live_rust_target(fixture.source(), &fixture.candidate()).unwrap()
+    validate_live_rust_target_for_test(fixture.source(), &fixture.candidate()).unwrap()
 }
 
 #[test]
@@ -100,7 +100,7 @@ fn fixed_command_environment_and_exact_metadata_create_only_observational_witnes
     let observation = fake.observe();
     let candidate = fixture.candidate();
     let witness = validate_cargo_metadata(
-        validate_live_rust_target(fixture.source(), &candidate).unwrap(),
+        validate_live_rust_target_for_test(fixture.source(), &candidate).unwrap(),
         &observation,
     )
     .unwrap();
@@ -126,6 +126,7 @@ fn fixed_command_environment_and_exact_metadata_create_only_observational_witnes
     assert!(witness.live().protected_path_is_still_unresolved());
     assert_eq!(candidate.blockers(), [BlockReason::ProtectedPath]);
     assert!(!candidate.rule_marks_schedule_eligible());
+    witness.release().unwrap();
 }
 
 #[test]

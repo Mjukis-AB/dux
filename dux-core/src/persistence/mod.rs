@@ -74,6 +74,7 @@ mod store;
 pub(crate) use candidate_evaluation_history::{
     CandidateEvaluationCompletion, CandidateEvaluationFailureKind, CandidateEvaluationIdentity,
     CandidateEvaluationObservation, CandidateEvaluationRecord, CandidateEvaluationStatus,
+    CandidateValidationSourceRecord,
 };
 #[cfg(test)]
 pub(crate) use candidate_history::StoredCandidateRecord;

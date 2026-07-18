@@ -150,6 +150,45 @@ Cargo. Path-based cwd/exec/config swap-and-restore races also remain. Therefore
 this witness is supporting evidence only: it cannot clear `ProtectedPath`,
 construct a plan, cross FFI, schedule, or execute.
 
+## Durable discovery-source binding
+
+A third 2026-07-18 checkpoint removes the earlier forgeable planner input of a
+caller-paired scan ID and path. Production live validation can now begin only
+from a sealed, non-cloneable source loaded under one store coordinator. The
+loader requires an exact succeeded scan with complete coverage and an available
+immutable snapshot; the exact evaluation must have succeeded with the current
+evaluator revision, catalog schema and SHA-256, context format and recomputed
+context digest, plus the scan's exact snapshot version and digest. The selected
+candidate must still be `Discovered`, retain the exact revision-2 policy and
+three evidence facts, and match the deterministic candidate ID recomputed from
+the current bundled rule and lossless target path.
+
+Acquisition holds an exact `CleanupReview` snapshot lease, decodes the
+checksummed retained snapshot through the existing charged review-memory
+budget, and locates the root, complete ancestor chain, direct `target`, sibling
+manifest, and child cache tag in the snapshot graph. Each must have the expected
+kind and a Unix device/inode observation. A second complete source read must
+equal the first after decoding, and the lease is checked with fresh clock reads
+immediately before the source is returned. The live validator then requires
+the current root, ancestor chain, and three terminal objects to retain those
+scan-time observations. Ordinary replacements with different observed
+device/inode values are therefore rejected, but Unix inode reuse remains
+possible; this witness does not prove unbroken object continuity.
+The source is owned by the live witness and, transitively, the Cargo witness;
+both repeat lease and source-history validation around their filesystem work.
+Holding the value alone does not renew its bounded pin, so an expired or removed
+lease fails closed. Acquisition failures, consuming release, and witness drop
+all make a best-effort exact pin release; unresolved database failure remains
+safe and expires naturally.
+
+This binding proves exact persisted provenance and changed-since-scan identity,
+not cleanup authority. It does not independently replay rule evaluation from
+the decoded snapshot, prove current descendants, authenticate Cargo or its
+configuration inputs, grant protected-root or volume authority, establish
+process inactivity, remove `ProtectedPath`, or expose a plan/FFI/execution
+conversion. Final authority still needs retained-handle or generation evidence
+strong enough to address inode reuse.
+
 ## Required before executable use
 
 Removing `ProtectedPath` requires a separate reviewed implementation that
@@ -161,7 +200,8 @@ proves, at minimum:
   retained-cwd execution, and exact config/include identity provenance beyond
   the implemented bounded scrubbed-context metadata result;
 - current target kind, symlink, link-count, mount, and descendant policy;
-- inactive Cargo/rustc state and changed-since-scan revalidation;
+- independent evaluator replay if required by final planner admission, plus
+  inactive Cargo/rustc state and post-witness change revalidation;
 - overlap resolution, exclusions, current reviewed plan, expiry, and approval;
 - handle-relative executor-time revalidation and durable journal fencing; and
 - exact-path UI disclosure, global permanent-cleanup disablement, capacity

@@ -12,16 +12,20 @@ use std::time::{Duration, Instant, SystemTime};
 
 use rusqlite::{Connection, OptionalExtension, Row, Transaction, params};
 
-use crate::domain::{MAX_EVALUATED_CANDIDATES, ScanId};
+use crate::domain::{
+    CANDIDATE_CATALOG_SCHEMA_VERSION, CANDIDATE_CATALOG_SHA256, CANDIDATE_CONTEXT_FORMAT_VERSION,
+    CANDIDATE_EVALUATOR_REVISION, CandidateId, MAX_EVALUATED_CANDIDATES, ScanCoverageStatus,
+    ScanId, candidate_evaluation_context_digest_for_observation,
+};
 
 use super::candidate_history::{
-    CompleteCandidateRecord, NewCandidateRecord, PreparedCandidate,
+    CandidateHistoryStatus, CompleteCandidateRecord, NewCandidateRecord, PreparedCandidate,
     candidate_record_batch_fits_materialization_budget, complete_candidate_matches_new,
     ensure_prepared_candidate_batch_budget, insert_candidate,
     load_complete_candidate_batch_within_budget,
 };
 use super::history::{
-    HistoryError, HistoryErrorKind, ScanStatus, load_scan_record_within_budget,
+    HistoryError, HistoryErrorKind, ScanRecord, ScanStatus, load_scan_record_within_budget,
     map_query_sql_error, map_write_sql_error, system_time_to_unix_ms, unix_ms_to_system_time,
 };
 use super::snapshot::SnapshotReference;
@@ -318,6 +322,25 @@ impl CandidateEvaluationRecord {
         &self.candidates
     }
 
+    fn matches_current_scan_observation(&self, scan: &ScanRecord) -> bool {
+        let Some(snapshot) = scan.snapshot() else {
+            return false;
+        };
+        self.request.scan_id == *scan.id()
+            && self.request.identity.evaluator_revision == CANDIDATE_EVALUATOR_REVISION
+            && self.request.identity.rule_catalog_schema_version == CANDIDATE_CATALOG_SCHEMA_VERSION
+            && self.request.identity.rule_catalog_sha256 == CANDIDATE_CATALOG_SHA256
+            && self.request.identity.context_format_version == CANDIDATE_CONTEXT_FORMAT_VERSION
+            && self.request.identity.context_sha256
+                == candidate_evaluation_context_digest_for_observation(
+                    scan.id(),
+                    scan.root(),
+                    scan.coverage(),
+                )
+            && self.request.snapshot_version == snapshot.version()
+            && self.request.snapshot_sha256 == snapshot.digest().bytes()
+    }
+
     pub(super) fn exactly_matches_request(&self, request: &NewCandidateEvaluation) -> bool {
         self.request == *request
     }
@@ -356,6 +379,27 @@ impl CandidateEvaluationRecord {
             && self.completed_at == Some(completed_at)
             && self.status == CandidateEvaluationStatus::Failed { kind }
             && self.candidates.is_empty()
+    }
+}
+
+/// One complete current evaluator result joined to its exact succeeded scan.
+///
+/// This owning record is a sealed durable observation, not cleanup authority.
+/// It intentionally has no clone or serialization implementation.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct CandidateValidationSourceRecord {
+    scan: ScanRecord,
+    evaluation: CandidateEvaluationRecord,
+    candidate: CompleteCandidateRecord,
+}
+
+impl CandidateValidationSourceRecord {
+    pub(crate) fn scan(&self) -> &ScanRecord {
+        &self.scan
+    }
+
+    pub(crate) fn candidate(&self) -> &CompleteCandidateRecord {
+        &self.candidate
     }
 }
 
@@ -534,6 +578,48 @@ pub(super) fn load_candidate_evaluation_for_scan(
             });
         };
         Ok(observation_from_record(record))
+    })
+}
+
+pub(super) fn load_candidate_validation_source(
+    connection: &Connection,
+    scan_id: &ScanId,
+    candidate_id: &CandidateId,
+) -> Result<CandidateValidationSourceRecord, HistoryError> {
+    run_bounded_evaluation_query(connection, || {
+        let scan = load_scan_record_within_budget(connection, scan_id)?
+            .ok_or_else(|| HistoryError::new(HistoryErrorKind::NotFound))?;
+        if scan.status() != ScanStatus::Succeeded
+            || scan.coverage().status() != ScanCoverageStatus::Complete
+            || scan.snapshot().is_none()
+        {
+            return Err(HistoryError::new(HistoryErrorKind::InvalidTransition));
+        }
+        let evaluation = load_candidate_evaluation_within_budget(connection, scan_id)?
+            .ok_or_else(|| HistoryError::new(HistoryErrorKind::NotFound))?;
+        if !matches!(
+            evaluation.status(),
+            CandidateEvaluationStatus::Succeeded { .. }
+        ) || !evaluation.matches_current_scan_observation(&scan)
+        {
+            return Err(HistoryError::new(HistoryErrorKind::InvalidTransition));
+        }
+        let candidate = evaluation
+            .candidates()
+            .iter()
+            .find(|candidate| candidate.id() == candidate_id)
+            .cloned()
+            .ok_or_else(|| HistoryError::new(HistoryErrorKind::NotFound))?;
+        if candidate.source_scan_id() != scan_id
+            || candidate.status() != CandidateHistoryStatus::Discovered
+        {
+            return Err(HistoryError::new(HistoryErrorKind::InvalidTransition));
+        }
+        Ok(CandidateValidationSourceRecord {
+            scan,
+            evaluation,
+            candidate,
+        })
     })
 }
 

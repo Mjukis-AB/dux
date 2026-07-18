@@ -6,7 +6,7 @@ use std::time::SystemTime;
 use tempfile::TempDir;
 
 use super::rust_target::{
-    RustTargetLiveValidationError, RustTargetValidationSource, validate_live_rust_target,
+    RustTargetLiveValidationError, RustTargetValidationSource, validate_live_rust_target_for_test,
 };
 use crate::domain::{
     BlockReason, Candidate, CandidateAction, CandidateCategory, CandidateId, CandidateInput,
@@ -80,7 +80,7 @@ impl Fixture {
     }
 }
 
-fn rust_rule(schedule_eligible: bool) -> Rule {
+pub(super) fn rust_rule(schedule_eligible: bool) -> Rule {
     Rule::try_new(RuleDefinition {
         reference: RuleRef::new(
             RuleId::new("developer.rust.target").unwrap(),
@@ -112,7 +112,7 @@ fn rust_rule(schedule_eligible: bool) -> Rule {
     .unwrap()
 }
 
-fn exact_evidence(target: &Path) -> Vec<Evidence> {
+pub(super) fn exact_evidence(target: &Path) -> Vec<Evidence> {
     vec![
         Evidence::MatchedPath {
             path: target.to_path_buf(),
@@ -126,7 +126,7 @@ fn exact_evidence(target: &Path) -> Vec<Evidence> {
     ]
 }
 
-fn candidate(
+pub(super) fn candidate(
     scan_id: &ScanId,
     target: &Path,
     rule: Rule,
@@ -155,7 +155,7 @@ fn exact_signature_and_arbitrary_suffix_create_non_authoritative_witness() {
     let fixture = Fixture::new(&tag);
     let candidate = fixture.candidate();
 
-    let witness = validate_live_rust_target(fixture.source(), &candidate).unwrap();
+    let witness = validate_live_rust_target_for_test(fixture.source(), &candidate).unwrap();
 
     assert_eq!(witness.witness_revision(), 1);
     assert_eq!(witness.source_scan_id(), &fixture.scan_id);
@@ -185,7 +185,9 @@ fn malformed_or_truncated_cache_tag_fails_closed() {
         b"Signature: 8a477f597d28d172789f06886806bc54".as_slice(),
     ] {
         let fixture = Fixture::new(invalid);
-        assert!(validate_live_rust_target(fixture.source(), &fixture.candidate()).is_err());
+        assert!(
+            validate_live_rust_target_for_test(fixture.source(), &fixture.candidate()).is_err()
+        );
     }
 }
 
@@ -194,7 +196,7 @@ fn source_policy_and_exact_evidence_are_all_required() {
     let fixture = Fixture::new(CARGO_CACHE_TAG_SIGNATURE);
     let wrong_scan = ScanId::new("scan:other").unwrap();
     assert!(matches!(
-        validate_live_rust_target(
+        validate_live_rust_target_for_test(
             RustTargetValidationSource::new(&wrong_scan, &fixture.root),
             &fixture.candidate(),
         ),
@@ -209,7 +211,7 @@ fn source_policy_and_exact_evidence_are_all_required() {
         vec![BlockReason::ProtectedPath],
     );
     assert!(matches!(
-        validate_live_rust_target(fixture.source(), &scheduled),
+        validate_live_rust_target_for_test(fixture.source(), &scheduled),
         Err(RustTargetLiveValidationError::CandidatePolicyMismatch)
     ));
 
@@ -225,7 +227,7 @@ fn source_policy_and_exact_evidence_are_all_required() {
         vec![BlockReason::ProtectedPath],
     );
     assert!(matches!(
-        validate_live_rust_target(fixture.source(), &forged),
+        validate_live_rust_target_for_test(fixture.source(), &forged),
         Err(RustTargetLiveValidationError::CandidateEvidenceMismatch)
     ));
 }
@@ -234,7 +236,8 @@ fn source_policy_and_exact_evidence_are_all_required() {
 fn symlinked_or_multiply_linked_markers_fail_closed() {
     let symlink_fixture = Fixture::with_symlinked_manifest(CARGO_CACHE_TAG_SIGNATURE);
     assert!(
-        validate_live_rust_target(symlink_fixture.source(), &symlink_fixture.candidate()).is_err()
+        validate_live_rust_target_for_test(symlink_fixture.source(), &symlink_fixture.candidate(),)
+            .is_err()
     );
 
     let linked_fixture = Fixture::new(CARGO_CACHE_TAG_SIGNATURE);
@@ -244,7 +247,7 @@ fn symlinked_or_multiply_linked_markers_fail_closed() {
     )
     .unwrap();
     assert!(matches!(
-        validate_live_rust_target(linked_fixture.source(), &linked_fixture.candidate()),
+        validate_live_rust_target_for_test(linked_fixture.source(), &linked_fixture.candidate()),
         Err(RustTargetLiveValidationError::MultiplyLinkedMarker)
     ));
 }
@@ -253,7 +256,7 @@ fn symlinked_or_multiply_linked_markers_fail_closed() {
 fn witness_does_not_remove_blocker_or_unlock_plan_construction() {
     let fixture = Fixture::new(CARGO_CACHE_TAG_SIGNATURE);
     let candidate = fixture.candidate();
-    let _witness = validate_live_rust_target(fixture.source(), &candidate).unwrap();
+    let _witness = validate_live_rust_target_for_test(fixture.source(), &candidate).unwrap();
 
     assert_eq!(candidate.blockers(), [BlockReason::ProtectedPath]);
     assert_eq!(

@@ -27,8 +27,9 @@ pub use candidate::{BlockReason, Candidate, CandidateValidationError, Evidence, 
 pub(crate) use candidate_evaluator::{
     CANDIDATE_CATALOG_SCHEMA_VERSION, CANDIDATE_CATALOG_SHA256, CANDIDATE_CONTEXT_FORMAT_VERSION,
     CANDIDATE_EVALUATOR_REVISION, CandidateEvaluationError, MAX_EVALUATED_CANDIDATES,
-    candidate_evaluation_context_digest_sha256, evaluate_completed_scan_candidates,
-    validate_bundled_candidate_catalog,
+    candidate_evaluation_context_digest_for_observation,
+    candidate_evaluation_context_digest_sha256, current_rust_target_candidate_id,
+    evaluate_completed_scan_candidates, validate_bundled_candidate_catalog,
 };
 pub use cleanup_plan::{
     CLEANUP_PLAN_VALIDITY, CleanupMode, CleanupPlan, CleanupPlanItem, CleanupPlanValidationError,

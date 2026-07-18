@@ -661,6 +661,10 @@ enum SnapshotReviewTestFault {
 }
 
 impl SnapshotRepository {
+    pub(crate) fn coordinates_store(&self, store: &Arc<StoreCoordinator>) -> bool {
+        Arc::ptr_eq(&self.database, store)
+    }
+
     pub(crate) fn open(
         database: Arc<StoreCoordinator>,
         access: SnapshotStoreAccess,

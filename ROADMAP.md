@@ -4000,10 +4000,32 @@ Tasks:
     full SHA-256 snapshot detects same-inode manifest changes before and after
     Cargo. The combined witness still cannot clone, serialize, clear
     `ProtectedPath`, construct a plan, cross FFI, schedule, or execute.
+  - [x] Bind the Rust-target planner checkpoints to their exact durable
+    discovery source (2026-07-18). Production acquisition now accepts only a
+    succeeded, complete-coverage scan with an available immutable snapshot and
+    one `Discovered` candidate from the current evaluator revision, catalog
+    schema/SHA-256, context format/digest, and exact snapshot version/digest.
+    It recomputes the current deterministic Rust candidate ID, decodes the
+    retained snapshot through the charged review-memory budget, locates the
+    exact root/ancestor/target/manifest/tag graph, and carries its Unix
+    device/inode observations into live validation. A
+    non-cloneable source owns an exact `CleanupReview` lease and repeats the
+    complete history read around snapshot acquisition; fresh lease and history
+    checks bracket every live and Cargo revalidation, while consuming release
+    and best-effort drop cleanup prevent ordinary failure/success loops from
+    exhausting the pin cap. Different observed device/inode objects,
+    candidate review-state changes, forged IDs, stale evaluator identities,
+    repository mismatch, pin expiry, and source drift fail closed. The source
+    remains a private locator/provenance witness: it exposes no public or FFI
+    path surface and no plan, blocker-removal, scheduling, or effect capability.
+    Device/inode reuse is still possible, so retained/generation evidence
+    remains required before authority; the source also does not yet replay the
+    evaluator independently from snapshot bytes.
   - [ ] Promote the bounded Cargo observation into trusted planning authority,
     then add authoritative volume and protected-root grants,
-    change/process/descendant guards, durable source binding, and executor-time
-    revalidation before removing `ProtectedPath` or enabling scheduling.
+    change/process/descendant guards, exact evaluator replay where required,
+    and executor-time revalidation before removing `ProtectedPath` or enabling
+    scheduling.
     Trusted settings enrollment/code-signature provenance, exact config-file
     identities, retained-cwd spawn, and swap/restore exclusion remain open.
 - [ ] Implement candidate groups and overlap resolution.
