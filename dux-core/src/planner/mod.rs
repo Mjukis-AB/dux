@@ -6,6 +6,8 @@
 
 #[cfg(target_os = "macos")]
 mod cargo_code_signature_macos;
+#[cfg(unix)]
+mod cargo_config;
 mod rust_target;
 #[cfg(unix)]
 mod rust_target_cargo;

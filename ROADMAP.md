@@ -4069,10 +4069,27 @@ Tasks:
       and ambiguous-write cases fail closed. This adds discovery provenance
       only: no FFI/Swift surface, blocker removal, plan, schedule, or effect was
       added.
-    Exact Cargo 1.96 config/include identities, retained-cwd spawn,
-    path-based executable/config swap-and-restore exclusion, and all remaining
-    protected-root, volume, process, descendant, plan, and executor grants are
-    still open.
+    - [x] 2026-07-18 slice: close Cargo 1.96 file-based configuration to one
+      exactly bounded negative case and retain the metadata working directory.
+      Production now accepts metadata only when both `config` and
+      `config.toml` are absent from every manifest-parent ancestor's `.cargo`
+      directory and from the exact Cargo home, so the recursive include closure
+      is necessarily empty. Canonical directory identities, a revisioned
+      closure digest, 64-ancestor/132-watch/64-KiB bounds, and macOS vnode
+      fences bracket the fixed metadata process; any observed directory event,
+      including create-remove, is terminal. Configured projects fail closed
+      before metadata execution. The child enters the exact retained project
+      directory with `fchdir`, all retained/watch descriptors are close-on-exec,
+      and path plus descriptor identities are rechecked around launch and
+      output collection. The witness remains non-authoritative and still
+      carries `ProtectedPath`. Non-local and non-APFS lookup directories reject;
+      kqueue supplies strong reviewed-filesystem change inference, not proof of
+      which inode Cargo opened. Positive configuration,
+      workspace-member manifest provenance, and a pathname-independent Cargo
+      executable launch remain open.
+    Direct positive Cargo config/include read attestation, path-based executable
+    swap-and-restore exclusion, and all remaining protected-root, volume,
+    process, descendant, plan, and executor grants are still open.
 - [ ] Implement candidate groups and overlap resolution.
 - [ ] Implement exact-path plan review.
 - [ ] Implement Trash executor for Explorer selections.

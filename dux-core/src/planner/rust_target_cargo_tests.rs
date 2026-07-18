@@ -18,7 +18,9 @@ use super::cargo_code_signature_macos::inspect_cargo_code_signature;
 use super::rust_target::validate_live_rust_target_for_test;
 use super::rust_target_cargo::{
     CargoMetadataValidationError, CargoOutputStream, observe_cargo_executable,
-    observe_cargo_executable_for_test, validate_cargo_metadata, validate_cargo_metadata_for_test,
+    observe_cargo_executable_for_test, revalidate_retained_cargo_directory_after_hook_for_test,
+    validate_cargo_metadata, validate_cargo_metadata_for_test,
+    validate_cargo_metadata_with_configuration_fence_for_test,
 };
 #[cfg(target_os = "macos")]
 use super::rust_target_cargo::{
@@ -132,7 +134,10 @@ fn fixed_command_environment_and_exact_metadata_create_only_observational_witnes
     );
     assert_ne!(witness.cargo_executable_parent_identity().object(), 0);
     assert_ne!(witness.metadata_sha256(), [0; 32]);
-    assert_eq!(witness.resolution_policy_revision(), 1);
+    assert_eq!(witness.configuration_policy_revision(), 1);
+    assert!(witness.configuration_lookup_count() >= 2);
+    assert_ne!(witness.configuration_closure_sha256(), [0; 32]);
+    assert_eq!(witness.resolution_policy_revision(), 2);
     assert!(witness.live().protected_path_is_still_unresolved());
     assert_eq!(candidate.blockers(), [BlockReason::ProtectedPath]);
     assert!(!candidate.rule_marks_schedule_eligible());
@@ -322,7 +327,66 @@ fn same_inode_manifest_rewrite_during_metadata_is_detected_by_full_digest() {
 }
 
 #[test]
-fn real_cargo_honors_project_config_and_no_deps_does_not_create_lockfile() {
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test renames only a TempDir-owned cwd to prove retained-directory identity rejection"
+)]
+fn retained_working_directory_rejects_path_replacement() {
+    let temp = TempDir::new().unwrap();
+    let parent = fs::canonicalize(temp.path()).unwrap();
+    let current = parent.join("current");
+    let displaced = parent.join("displaced");
+    fs::create_dir(&current).unwrap();
+
+    let result = revalidate_retained_cargo_directory_after_hook_for_test(&current, || {
+        // DUX-DESTRUCTIVE: allow=test-cargo-cwd-replace -- rename only the TempDir-owned retained cwd to prove pathname replacement is rejected
+        fs::rename(&current, &displaced).unwrap();
+        fs::create_dir(&current).unwrap();
+    });
+    assert!(matches!(
+        result,
+        Err(CargoMetadataValidationError::CargoWorkingDirectoryChanged)
+    ));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn create_then_remove_config_during_metadata_is_terminal_and_kills_cargo() {
+    let fixture = Fixture::new(CARGO_CACHE_TAG_SIGNATURE);
+    let fake = FakeCargo::new(
+        "  /bin/mkdir .cargo\n  : > .cargo/config.toml\n  /bin/rm .cargo/config.toml\n  /bin/rmdir .cargo\n  /bin/sleep 30",
+    );
+    let started = Instant::now();
+    let result =
+        validate_cargo_metadata_with_configuration_fence_for_test(live(&fixture), &fake.observe());
+    assert!(matches!(
+        result,
+        Err(CargoMetadataValidationError::CargoConfigurationChanged)
+    ));
+    assert!(started.elapsed() < Duration::from_secs(2));
+}
+
+#[test]
+fn present_config_rejects_before_metadata_subprocess_execution() {
+    let fixture = Fixture::new(CARGO_CACHE_TAG_SIGNATURE);
+    let sentinel = fixture.manifest.parent().unwrap().join("spawned");
+    let fake = FakeCargo::new(&format!(
+        "  : > {}\n  exit 0",
+        shell_quote(sentinel.to_str().unwrap())
+    ));
+    let config = fixture.manifest.parent().unwrap().join(".cargo");
+    fs::create_dir(&config).unwrap();
+    fs::write(config.join("config"), "[build]\n").unwrap();
+
+    assert!(matches!(
+        validate_cargo_metadata(live(&fixture), &fake.observe()),
+        Err(CargoMetadataValidationError::CargoConfigurationPresent)
+    ));
+    assert!(!sentinel.exists());
+}
+
+#[test]
+fn real_cargo_rejects_project_config_and_no_deps_does_not_create_lockfile() {
     let Some(cargo) = direct_test_cargo() else {
         return;
     };
@@ -359,7 +423,7 @@ fn real_cargo_honors_project_config_and_no_deps_does_not_create_lockfile() {
     .unwrap();
     assert!(matches!(
         validate_cargo_metadata(live(&configured), &observation),
-        Err(CargoMetadataValidationError::TargetDirectoryMismatch)
+        Err(CargoMetadataValidationError::CargoConfigurationPresent)
     ));
     assert!(!configured_sentinel.exists());
 

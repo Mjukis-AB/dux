@@ -4495,6 +4495,7 @@ fn map_direct_cargo_validation_error(
         Error::ExecutableChanged
         | Error::CargoVersionChanged
         | Error::CargoEnrollmentChanged
+        | Error::CargoWorkingDirectoryChanged
         | Error::LiveEvidenceChanged
         | Error::Filesystem(_)
         | Error::FileDigest(_) => DirectCargoEnrollmentError::ChangedDuringInspection,
@@ -4511,6 +4512,9 @@ fn map_direct_cargo_validation_error(
             DirectCargoEnrollmentError::InspectionLimitExceeded
         }
         Error::CargoNotEnrolled
+        | Error::CargoConfigurationPresent
+        | Error::CargoConfigurationChanged
+        | Error::CargoConfigurationUnavailable
         | Error::InvalidMetadata
         | Error::WorkspaceMismatch
         | Error::TargetDirectoryMismatch => DirectCargoEnrollmentError::InternalState,

@@ -1,6 +1,7 @@
 use std::ffi::OsStr;
 use std::io::{self, Read};
 use std::mem::MaybeUninit;
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -8,9 +9,10 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use nix::fcntl::{FcntlArg, OFlag, fcntl};
+use nix::fcntl::{FcntlArg, OFlag, fcntl, open};
 use nix::libc;
 use nix::sys::signal::{Signal, killpg};
+use nix::sys::stat::{Mode, fstat};
 use nix::unistd::Pid;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -18,6 +20,9 @@ use thiserror::Error;
 
 #[cfg(target_os = "macos")]
 use super::cargo_code_signature_macos::inspect_cargo_code_signature;
+use super::cargo_config::{
+    CargoConfigurationError, CargoConfigurationEvidence, CargoConfigurationGuard,
+};
 use super::rust_target::{RustTargetLiveValidationError, RustTargetLiveWitness};
 use super::rust_target_source::RustTargetSourceError;
 use crate::path_validation::{
@@ -38,7 +43,7 @@ const VERSION_TIMEOUT: Duration = Duration::from_secs(5);
 const METADATA_TIMEOUT: Duration = Duration::from_secs(10);
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(2);
 const MAX_CARGO_EXECUTABLE_BYTES: usize = 256 * 1024 * 1024;
-const CARGO_RESOLUTION_POLICY_REVISION: u32 = 1;
+const CARGO_RESOLUTION_POLICY_REVISION: u32 = 2;
 
 /// Static executable evidence captured without executing untrusted bytes.
 struct CargoExecutableStaticObservation {
@@ -89,6 +94,13 @@ struct CargoResolutionEnvironment {
     temporary_directory: CanonicalScanRoot,
 }
 
+/// An exact directory kept open across process creation so the child changes
+/// directory by descriptor rather than resolving a mutable pathname.
+struct RetainedCargoDirectory {
+    root: CanonicalScanRoot,
+    directory: OwnedFd,
+}
+
 /// Exact executable and environment evidence used for one metadata result.
 ///
 /// This intentionally has no clone or serialization implementation. It is a
@@ -114,6 +126,7 @@ pub(crate) struct RustTargetCargoMetadataWitness {
     live: RustTargetLiveWitness,
     cargo: CargoExecutableEvidence,
     metadata_sha256: [u8; 32],
+    configuration: CargoConfigurationEvidence,
     resolution_policy_revision: u32,
     enrollment_revision: u64,
 }
@@ -179,6 +192,14 @@ pub(crate) enum CargoMetadataValidationError {
     WorkspaceMismatch,
     #[error("Cargo metadata does not resolve the candidate as its target directory")]
     TargetDirectoryMismatch,
+    #[error("Cargo configuration is present and cannot yet be directly attested")]
+    CargoConfigurationPresent,
+    #[error("Cargo configuration discovery state changed during resolution")]
+    CargoConfigurationChanged,
+    #[error("Cargo configuration discovery state could not be bounded")]
+    CargoConfigurationUnavailable,
+    #[error("Cargo working-directory continuity changed during process creation")]
+    CargoWorkingDirectoryChanged,
     #[error("live Rust-target evidence changed during Cargo resolution")]
     LiveEvidenceChanged,
     #[error(transparent)]
@@ -198,6 +219,16 @@ pub(crate) enum CargoOutputStream {
 impl From<RustTargetLiveValidationError> for CargoMetadataValidationError {
     fn from(_error: RustTargetLiveValidationError) -> Self {
         Self::LiveEvidenceChanged
+    }
+}
+
+impl From<CargoConfigurationError> for CargoMetadataValidationError {
+    fn from(error: CargoConfigurationError) -> Self {
+        match error {
+            CargoConfigurationError::Present => Self::CargoConfigurationPresent,
+            CargoConfigurationError::Changed => Self::CargoConfigurationChanged,
+            CargoConfigurationError::Unavailable => Self::CargoConfigurationUnavailable,
+        }
     }
 }
 
@@ -479,6 +510,7 @@ pub(crate) fn validate_enrolled_cargo_metadata(
         &cargo,
         RunnerLimits::production(),
         Some(EnrollmentGuard { store, enrollment }),
+        ConfigurationFenceMode::Armed,
         || {},
     )
 }
@@ -496,7 +528,14 @@ pub(crate) fn validate_cargo_metadata(
     live: RustTargetLiveWitness,
     cargo: &CargoExecutableObservation,
 ) -> Result<RustTargetCargoMetadataWitness, CargoMetadataValidationError> {
-    validate_cargo_metadata_with_limits(live, cargo, RunnerLimits::production(), None, || {})
+    validate_cargo_metadata_with_limits(
+        live,
+        cargo,
+        RunnerLimits::production(),
+        None,
+        ConfigurationFenceMode::UnarmedForParallelTest,
+        || {},
+    )
 }
 
 fn validate_cargo_metadata_with_limits(
@@ -504,6 +543,7 @@ fn validate_cargo_metadata_with_limits(
     cargo: &CargoExecutableObservation,
     limits: RunnerLimits,
     enrollment_guard: Option<EnrollmentGuard>,
+    configuration_fence: ConfigurationFenceMode,
     after_metadata: impl FnOnce(),
 ) -> Result<RustTargetCargoMetadataWitness, CargoMetadataValidationError> {
     live.revalidate_current()?;
@@ -513,9 +553,25 @@ fn validate_cargo_metadata_with_limits(
     cargo.revalidate()?;
     let before_version = cargo.read_version(limits.version)?;
 
+    let project_directory = RetainedCargoDirectory::capture(live.project_root())?;
+    live.revalidate_current()?;
+    let configuration = match configuration_fence {
+        ConfigurationFenceMode::Armed => CargoConfigurationGuard::capture(
+            project_directory.root(),
+            &cargo.environment.cargo_home,
+        )?,
+        #[cfg(test)]
+        ConfigurationFenceMode::UnarmedForParallelTest => {
+            CargoConfigurationGuard::capture_unfenced_for_test(
+                project_directory.root(),
+                &cargo.environment.cargo_home,
+            )?
+        }
+    };
+
     let output = run_cargo(
         &cargo.executable,
-        live.project_root(),
+        &project_directory,
         &[
             OsStr::new("metadata"),
             OsStr::new("--format-version"),
@@ -530,9 +586,12 @@ fn validate_cargo_metadata_with_limits(
         ],
         limits.metadata,
         &cargo.environment,
+        Some(&configuration),
     )?;
     require_success(&output)?;
     after_metadata();
+    project_directory.revalidate()?;
+    let configuration_evidence = configuration.evidence()?;
     let metadata: CargoMetadataDocument = serde_json::from_slice(&output.stdout)
         .map_err(|_| CargoMetadataValidationError::InvalidMetadata)?;
     if metadata.version != 1 {
@@ -559,6 +618,8 @@ fn validate_cargo_metadata_with_limits(
     if let Some(guard) = enrollment_guard.as_ref() {
         guard.revalidate(cargo)?;
     }
+    project_directory.revalidate()?;
+    configuration.revalidate()?;
     live.revalidate_current()?;
 
     Ok(RustTargetCargoMetadataWitness {
@@ -569,6 +630,7 @@ fn validate_cargo_metadata_with_limits(
                 .map_or(0, EnrollmentGuard::revision),
         ),
         metadata_sha256: sha256(&output.stdout),
+        configuration: configuration_evidence,
         resolution_policy_revision: CARGO_RESOLUTION_POLICY_REVISION,
         enrollment_revision: enrollment_guard
             .as_ref()
@@ -579,12 +641,14 @@ fn validate_cargo_metadata_with_limits(
 impl CargoExecutableStaticObservation {
     fn execute_version(self) -> Result<CargoExecutableObservation, CargoMetadataValidationError> {
         self.revalidate()?;
+        let current_directory = RetainedCargoDirectory::capture(self.parent.canonical_path())?;
         let output = run_cargo(
             &self.executable,
-            self.parent.canonical_path(),
+            &current_directory,
             &[OsStr::new("--version"), OsStr::new("--verbose")],
             ProcessLimits::version(),
             &self.environment,
+            None,
         )?;
         require_success(&output)?;
         let release = parse_cargo_release(&output.stdout)?;
@@ -677,12 +741,14 @@ impl CargoExecutableObservation {
         &self,
         limits: ProcessLimits,
     ) -> Result<[u8; 32], CargoMetadataValidationError> {
+        let current_directory = RetainedCargoDirectory::capture(self.parent.canonical_path())?;
         let output = run_cargo(
             &self.executable,
-            self.parent.canonical_path(),
+            &current_directory,
             &[OsStr::new("--version"), OsStr::new("--verbose")],
             limits,
             &self.environment,
+            None,
         )?;
         require_success(&output)?;
         let release = parse_cargo_release(&output.stdout)?;
@@ -711,6 +777,45 @@ impl CargoResolutionEnvironment {
             }
         }
         Ok(())
+    }
+}
+
+impl RetainedCargoDirectory {
+    fn capture(path: &Path) -> Result<Self, CargoMetadataValidationError> {
+        let root = capture_exact_directory(path)?;
+        let directory = open(
+            root.canonical_path(),
+            OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|_| CargoMetadataValidationError::CargoWorkingDirectoryChanged)?;
+        let retained = Self { root, directory };
+        retained.revalidate()?;
+        Ok(retained)
+    }
+
+    fn root(&self) -> &CanonicalScanRoot {
+        &self.root
+    }
+
+    fn revalidate(&self) -> Result<(), CargoMetadataValidationError> {
+        let status = fstat(&self.directory)
+            .map_err(|_| CargoMetadataValidationError::CargoWorkingDirectoryChanged)?;
+        if status.st_dev as u64 != self.root.identity().volume()
+            || u128::from(status.st_ino) != self.root.identity().object()
+        {
+            return Err(CargoMetadataValidationError::CargoWorkingDirectoryChanged);
+        }
+        let current = capture_exact_directory(self.root.canonical_path())
+            .map_err(|_| CargoMetadataValidationError::CargoWorkingDirectoryChanged)?;
+        if current != self.root {
+            return Err(CargoMetadataValidationError::CargoWorkingDirectoryChanged);
+        }
+        Ok(())
+    }
+
+    fn raw_fd(&self) -> libc::c_int {
+        self.directory.as_raw_fd()
     }
 }
 
@@ -855,6 +960,13 @@ struct RunnerLimits {
     metadata: ProcessLimits,
 }
 
+#[derive(Clone, Copy)]
+enum ConfigurationFenceMode {
+    Armed,
+    #[cfg(test)]
+    UnarmedForParallelTest,
+}
+
 impl RunnerLimits {
     const fn production() -> Self {
         Self {
@@ -901,16 +1013,16 @@ struct BoundedOutput {
 )]
 fn run_cargo(
     executable: &Path,
-    current_dir: &Path,
+    current_directory: &RetainedCargoDirectory,
     arguments: &[&OsStr],
     limits: ProcessLimits,
     environment: &CargoResolutionEnvironment,
+    configuration: Option<&CargoConfigurationGuard>,
 ) -> Result<BoundedOutput, CargoMetadataValidationError> {
     // DUX-DESTRUCTIVE: allow=cargo-metadata-observer-spawn -- launch only the exactly observed canonical executable with fixed observer-owned arguments, bounded nonblocking pipes, offline mode, and process-group termination; this observation does not authenticate Cargo or grant cleanup authority
     let mut command = Command::new(executable);
     command
         .args(arguments)
-        .current_dir(current_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -927,18 +1039,46 @@ fn run_cargo(
         .env("CARGO_NET_OFFLINE", "true")
         .env("CARGO_TERM_COLOR", "never")
         .process_group(0);
+    let directory_fd = current_directory.raw_fd();
+    // SAFETY: `fchdir` is async-signal-safe and the descriptor remains owned
+    // by `current_directory` until `spawn` has completed. The closure performs
+    // no allocation or other non-signal-safe work before exec.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::fchdir(directory_fd) == -1 {
+                Err(io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        });
+    }
+    current_directory.revalidate()?;
+    if let Some(configuration) = configuration {
+        configuration.revalidate()?;
+    }
     let mut child = command
         .spawn()
         .map_err(|source| CargoMetadataValidationError::Spawn {
             kind: source.kind(),
             source,
         })?;
-    collect_bounded_output(&mut child, limits)
+    if let Err(error) = current_directory.revalidate() {
+        terminate_process_group(&mut child);
+        return Err(error);
+    }
+    if let Some(configuration) = configuration
+        && let Err(error) = configuration.revalidate()
+    {
+        terminate_process_group(&mut child);
+        return Err(error.into());
+    }
+    collect_bounded_output(&mut child, limits, configuration)
 }
 
 fn collect_bounded_output(
     child: &mut Child,
     limits: ProcessLimits,
+    configuration: Option<&CargoConfigurationGuard>,
 ) -> Result<BoundedOutput, CargoMetadataValidationError> {
     let Some(mut stdout) = child.stdout.take() else {
         terminate_process_group(child);
@@ -964,6 +1104,12 @@ fn collect_bounded_output(
     let mut child_exited = false;
 
     loop {
+        if let Some(configuration) = configuration
+            && let Err(error) = configuration.poll()
+        {
+            terminate_process_group(child);
+            return Err(error.into());
+        }
         let stdout_result = drain_pipe(
             &mut stdout,
             &mut stdout_bytes,
@@ -1000,6 +1146,12 @@ fn collect_bounded_output(
             };
         }
         if child_exited && stdout_eof && stderr_eof {
+            if let Some(configuration) = configuration
+                && let Err(error) = configuration.revalidate()
+            {
+                terminate_process_group(child);
+                return Err(error.into());
+            }
             let status = finish_process_group(child)?;
             return Ok(BoundedOutput {
                 status,
@@ -1150,6 +1302,18 @@ impl RustTargetCargoMetadataWitness {
         self.metadata_sha256
     }
 
+    pub(super) fn configuration_policy_revision(&self) -> u32 {
+        self.configuration.policy_revision
+    }
+
+    pub(super) fn configuration_lookup_count(&self) -> u32 {
+        self.configuration.lookup_count
+    }
+
+    pub(super) fn configuration_closure_sha256(&self) -> [u8; 32] {
+        self.configuration.closure_sha256
+    }
+
     pub(super) fn resolution_policy_revision(&self) -> u32 {
         self.resolution_policy_revision
     }
@@ -1199,8 +1363,34 @@ pub(super) fn validate_cargo_metadata_for_test(
             metadata: limits,
         },
         None,
+        ConfigurationFenceMode::UnarmedForParallelTest,
         || {},
     )
+}
+
+#[cfg(test)]
+pub(super) fn validate_cargo_metadata_with_configuration_fence_for_test(
+    live: RustTargetLiveWitness,
+    cargo: &CargoExecutableObservation,
+) -> Result<RustTargetCargoMetadataWitness, CargoMetadataValidationError> {
+    validate_cargo_metadata_with_limits(
+        live,
+        cargo,
+        RunnerLimits::production(),
+        None,
+        ConfigurationFenceMode::Armed,
+        || {},
+    )
+}
+
+#[cfg(test)]
+pub(super) fn revalidate_retained_cargo_directory_after_hook_for_test(
+    path: &Path,
+    hook: impl FnOnce(),
+) -> Result<(), CargoMetadataValidationError> {
+    let directory = RetainedCargoDirectory::capture(path)?;
+    hook();
+    directory.revalidate()
 }
 
 #[cfg(test)]
@@ -1216,6 +1406,7 @@ pub(super) fn validate_cargo_metadata_with_enrollment_hook_for_test(
         cargo,
         RunnerLimits::production(),
         Some(EnrollmentGuard { store, enrollment }),
+        ConfigurationFenceMode::UnarmedForParallelTest,
         after_metadata,
     )
 }

@@ -147,10 +147,31 @@ the observation. The original test-only witness can still accept a deliberately
 unsigned fake Cargo to exercise bounded subprocess failures, but it cannot be
 called by production planning authority. The sealed enrolled production entry
 described below requires exact durable trust and macOS static-code evidence.
-Cargo still does not report the identity of every config or included manifest
-it read. Path-based cwd/exec/config swap-and-restore races also remain.
-Therefore either witness is supporting evidence only: neither can clear
-`ProtectedPath`, construct a plan, cross FFI, schedule, or execute.
+
+The production metadata entry now admits only an exactly negative Cargo 1.96
+file-configuration closure. It checks both the legacy extensionless `config`
+and `config.toml` at every `.cargo` directory Cargo would discover from the
+process cwd through its ancestors, followed by the exact Cargo home. Any
+present file rejects before metadata execution, which makes recursive
+`include` resolution empty without reimplementing Cargo's TOML semantics. The
+observation is bounded to 64 cwd ancestors, 132 unique watched directories,
+and 64 KiB of native path material and records a revisioned SHA-256 closure
+digest. Canonical identities are revalidated around a macOS kqueue vnode fence;
+any event is terminal even when a created config is immediately removed.
+
+The project cwd is also opened no-follow and retained. DUX's custom pre-exec
+hook calls only async-signal-safe `fchdir` on that close-on-exec descriptor, and
+the descriptor plus pathname identity are revalidated before and after spawn.
+This removes pathname resolution from child cwd selection. It does not remove
+the executable pathname race: macOS has no supported `fexecve`/`execveat`, so
+that requires the later suspended direct-`posix_spawn` checkpoint. Every lookup
+directory must be local APFS; other, remote, virtual, and unprobeable
+filesystems reject. Kqueue is strong reviewed-filesystem change inference, not
+direct evidence of the exact config inode Cargo read.
+Positive configs and included files, every workspace-member manifest, and the
+executable launch therefore remain unattested. Either witness is still
+supporting evidence only: neither can clear `ProtectedPath`, construct a plan,
+cross FFI, schedule, or execute.
 
 ## Durable discovery-source binding
 
@@ -292,12 +313,13 @@ settings UI remain future work, so the application cannot ask a user to enroll
 Cargo yet. That UI must clearly disclose that confirmation executes the exact
 statically previewed binary for bounded version validation. More importantly,
 enrollment establishes only local executable
-provenance for discovery. It does not identify Cargo's `.cargo/config`, legacy
-extensionless config, recursive `include` files, outer working-directory
-configuration, or all manifests Cargo may read. The current path-based working
-directory and executable launch can still be swapped and restored around
-checks. Those identities and retained-handle or generation fences are the next
-Cargo authority checkpoint. `ProtectedPath` therefore remains untouched.
+provenance for discovery. Positive `.cargo/config`, legacy extensionless
+config, and recursive `include` inputs are not directly attested; projects
+containing them now reject. The exact negative lookup closure and retained cwd
+cover the currently admitted case, but Cargo's executable launch remains
+path-based and workspace-member manifests are not yet attested. Direct-read or
+generation evidence is still required before promotion. `ProtectedPath`
+therefore remains untouched.
 
 ## Required before executable use
 
@@ -306,9 +328,10 @@ proves, at minimum:
 
 - trusted home, selected-volume, canonical ancestry, and mount identity;
 - a stable code-owned protected-root boundary grant;
-- the now-enrolled direct Cargo executable plus retained-cwd execution, exact
-  Cargo config/include identity provenance, and swap/restore exclusion beyond
-  the implemented bounded scrubbed-context metadata result;
+- the now-enrolled direct Cargo executable plus pathname-independent launch,
+  direct positive Cargo config/include identity provenance if configured
+  projects are ever admitted, and swap/restore exclusion beyond the
+  implemented retained-cwd/negative-closure result;
 - current target kind, symlink, link-count, mount, and descendant policy;
 - inactive Cargo/rustc state and post-witness change revalidation;
 - overlap resolution that consumes the still-exact replayed full batch,

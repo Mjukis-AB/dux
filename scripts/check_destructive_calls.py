@@ -273,6 +273,21 @@ EXCEPTIONS = {
     "cargo-metadata-observer-spawn": ExceptionSpec(
         "dux-core/src/planner/rust_target_cargo.rs", "rust-process-spawn", "run_cargo"
     ),
+    "test-cargo-config-reset": ExceptionSpec(
+        "dux-core/src/planner/cargo_config.rs",
+        "rust-filesystem-effect",
+        "test:extensionless_project_and_outer_configs_are_rejected",
+    ),
+    "test-cargo-config-transient-remove": ExceptionSpec(
+        "dux-core/src/planner/cargo_config.rs",
+        "rust-filesystem-effect",
+        "test:create_then_remove_is_still_a_terminal_vnode_event",
+    ),
+    "test-cargo-cwd-replace": ExceptionSpec(
+        "dux-core/src/planner/rust_target_cargo_tests.rs",
+        "rust-filesystem-effect",
+        "test:retained_working_directory_rejects_path_replacement",
+    ),
     "test-cli-inspection-spawn": ExceptionSpec(
         "dux-cli/tests/inspection_cli.rs",
         "rust-process-spawn",
@@ -589,6 +604,9 @@ EXCEPTION_PRIMITIVES = {
     "test-delete-replaced-ancestor": "rename",
     "finder-reveal": "Command::new",
     "cargo-metadata-observer-spawn": "Command::new",
+    "test-cargo-config-reset": "remove_file",
+    "test-cargo-config-transient-remove": "remove_file",
+    "test-cargo-cwd-replace": "rename",
     "test-cli-inspection-spawn": "Command::new",
     "test-persistence-helper-spawn": "Command::new",
     "test-capacity-cross-process-helper-spawn": "Command::new",
@@ -668,6 +686,8 @@ CLIPPY_SUPPRESSION_COUNTS = {
     "dux-core/src/cache/mod.rs": 2,
     "dux-core/src/path_validation/protected.rs": 1,
     "dux-core/src/planner/rust_target_cargo.rs": 1,
+    "dux-core/src/planner/cargo_config.rs": 2,
+    "dux-core/src/planner/rust_target_cargo_tests.rs": 1,
     "dux-core/src/planner/rust_target_source_tests.rs": 2,
     "dux-core/src/engine/registry_tests.rs": 5,
     "dux-core/src/engine/volume_status.rs": 1,

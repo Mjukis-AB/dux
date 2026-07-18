@@ -5,6 +5,18 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Continued Milestone 5 with an exact negative Cargo 1.96 configuration
+  closure and descriptor-retained metadata cwd. Production rejects any
+  `config` or `config.toml` in Cargo's cwd-ancestor and Cargo-home lookup set,
+  bounding and digesting the necessarily empty include closure. Identity-bound
+  close-on-exec macOS vnode watches make create-remove and other directory
+  events terminal while Cargo runs. The child enters a retained no-follow
+  project directory through `fchdir`, and path/descriptor continuity is
+  rechecked around launch. Configured projects fail before metadata execution.
+  Non-local, non-APFS, and unprobeable lookup directories reject. This remains
+  reviewed-filesystem inference and discovery evidence only:
+  positive config reads, workspace-member manifests, and Cargo's path-based
+  executable launch remain open, and `ProtectedPath` is unchanged.
 - Continued Milestone 5 with explicit revisioned trust enrollment for one
   direct macOS Cargo 1.96.0 executable. A read-only, non-cloneable preview
   executes no selected bytes and binds the canonical single-link file, full
@@ -19,9 +31,9 @@ All notable changes to DUX will be documented in this file.
   through explicit enrollment. The sealed metadata entry derives Cargo from
   the durable source's own store, proves the current digest/signature and
   rereads that exact enrollment before any automatic execution, then brackets
-  metadata with the same guard. No FFI, blocker removal, plan, schedule, or effect was added; exact
-  config/include provenance, retained-cwd spawn, and swap/restore exclusion
-  remain required.
+  metadata with the same guard. No FFI, blocker removal, plan, schedule, or
+  effect was added; positive config/include provenance, path-independent Cargo
+  launch, and remaining swap/restore exclusion remain required.
 - Continued Milestone 5 with an exact full-batch evaluator replay inside the
   retained Rust-target source boundary. A snapshot-native single pass shares
   the catalog's marker declarations and final candidate policy without

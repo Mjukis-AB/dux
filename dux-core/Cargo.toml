@@ -28,7 +28,7 @@ nix = { version = "0.31", default-features = false, features = ["dir", "fs", "pr
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "=0.10.1"
-nix = { version = "0.31", default-features = false, features = ["dir", "fs", "mount", "process", "signal", "user"] }
+nix = { version = "0.31", default-features = false, features = ["dir", "event", "fs", "mount", "process", "signal", "user"] }
 security-framework = { version = "=3.7.0", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
