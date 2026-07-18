@@ -1424,6 +1424,7 @@ private final class FFIDuxSnapshotReviewLease: DuxSnapshotReviewLease, @unchecke
                 )
                 return try ExplorerCandidateDetailAdapter.mapPaths(
                     raw,
+                    expectedScanID: self.scanID,
                     expectedCandidateID: candidateID,
                     expectedCursor: cursor,
                     requestedLimit: limit
@@ -1451,6 +1452,7 @@ private final class FFIDuxSnapshotReviewLease: DuxSnapshotReviewLease, @unchecke
                 )
                 return try ExplorerCandidateDetailAdapter.mapEvidence(
                     raw,
+                    expectedScanID: self.scanID,
                     expectedCandidateID: candidateID,
                     expectedCursor: cursor,
                     requestedLimit: limit

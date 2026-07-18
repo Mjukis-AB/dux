@@ -154,6 +154,7 @@ enum ExplorerCandidateDetailAdapter {
 
     static func mapPaths(
         _ raw: CandidatePathPage,
+        expectedScanID: String,
         expectedCandidateID: String,
         expectedCursor: UInt16,
         requestedLimit: UInt16
@@ -161,6 +162,7 @@ enum ExplorerCandidateDetailAdapter {
         guard
             raw.recordVersion == recordVersion,
             validScanID(raw.scanId),
+            raw.scanId == expectedScanID,
             raw.candidate.candidateId == expectedCandidateID,
             raw.cursor == expectedCursor,
             (1 ... maximumPageLimit).contains(requestedLimit),
@@ -189,6 +191,7 @@ enum ExplorerCandidateDetailAdapter {
 
     static func mapEvidence(
         _ raw: CandidateEvidencePage,
+        expectedScanID: String,
         expectedCandidateID: String,
         expectedCursor: UInt16,
         requestedLimit: UInt16
@@ -196,6 +199,7 @@ enum ExplorerCandidateDetailAdapter {
         guard
             raw.recordVersion == recordVersion,
             validScanID(raw.scanId),
+            raw.scanId == expectedScanID,
             raw.candidate.candidateId == expectedCandidateID,
             raw.cursor == expectedCursor,
             (1 ... maximumPageLimit).contains(requestedLimit),

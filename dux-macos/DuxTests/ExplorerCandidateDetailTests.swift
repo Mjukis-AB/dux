@@ -37,6 +37,7 @@ final class ExplorerCandidateDetailTests: XCTestCase {
 
         let mapped = try ExplorerCandidateDetailAdapter.mapPaths(
             page,
+            expectedScanID: "scan:example",
             expectedCandidateID: "candidate:example",
             expectedCursor: 0,
             requestedLimit: 64
@@ -93,6 +94,7 @@ final class ExplorerCandidateDetailTests: XCTestCase {
         XCTAssertThrowsError(
             try ExplorerCandidateDetailAdapter.mapEvidence(
                 page,
+                expectedScanID: "scan:example",
                 expectedCandidateID: "candidate:example",
                 expectedCursor: 0,
                 requestedLimit: 64
