@@ -11,6 +11,13 @@ All notable changes to DUX will be documented in this file.
   DUX when the popover is closed.
 
 ### Added
+- Continued Milestone 5 with code-owned current-account home discovery for the
+  protected-root text policy on Unix/macOS. The resolver uses the OS account
+  database rather than mutable environment variables, rejects real/effective
+  UID ambiguity and lossy/relative homes, captures no-follow home identity
+  twice, and checks final-directory ownership. It remains non-authoritative:
+  no protected-root grant, plan, FFI, approval, or cleanup effect was added;
+  Windows known-folder/reparse evidence remains unsupported.
 - Continued Milestone 5 with a private repeated filesystem-boundary witness
   for future protected-volume planning. Unix captures the complete no-follow
   root-to-scan ancestry; macOS records descriptor-bound `fstatfs` identity and

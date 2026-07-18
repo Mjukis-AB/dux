@@ -2,7 +2,13 @@ use std::path::{Component, Path};
 
 use thiserror::Error;
 
-use super::{CanonicalPathSnapshot, CanonicalScanRoot, LexicalCleanupPath};
+use super::{
+    CanonicalPathSnapshot, CanonicalScanRoot, LexicalCleanupPath, capture_scan_root,
+    validate_scan_root,
+};
+
+#[cfg(unix)]
+use nix::unistd::{User, geteuid, getuid};
 
 /// Bump whenever a protected-root entry or its coverage changes.
 pub(crate) const PROTECTED_ROOT_POLICY_REVISION: u32 = 2;
@@ -73,6 +79,14 @@ impl ProtectedRootDisposition {
 
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub(crate) enum ProtectedRootError {
+    #[error(
+        "the current account home directory could not be discovered from the OS account database"
+    )]
+    CurrentAccountUnavailable,
+    #[error("the current account identity is ambiguous for protected-root policy")]
+    CurrentAccountAmbiguous,
+    #[error("protected-root policy is unsupported on this platform")]
+    UnsupportedPlatform,
     #[error("host path policy cannot represent the configured home directory")]
     InvalidHomeDirectory,
     #[error("host path policy cannot represent {form:?}")]
@@ -83,19 +97,69 @@ pub(crate) enum ProtectedRootError {
 
 /// Versioned, crate-private textual deny registry.
 ///
-/// The home directory must eventually come from a trusted account/known-folder
-/// adapter. This checkpoint accepts already validated live directory evidence
-/// and never reads HOME, USERPROFILE, or similar mutable environment values.
+/// The registry is textual policy only. Production construction derives the
+/// current account home from the OS account database, validates it as a live
+/// no-follow directory, and checks that its owner is the current account. It
+/// never reads HOME, USERPROFILE, or similar mutable environment values.
 #[derive(Clone, Debug)]
 pub(crate) struct ProtectedRootRegistry {
     policy: PlatformPolicy,
 }
 
 impl ProtectedRootRegistry {
-    /// Test-only injection until a trusted account/known-folder adapter owns
-    /// production construction.
-    #[cfg(test)]
-    fn with_home_directory_evidence(
+    /// Build policy from the current account's OS-owned home directory.
+    ///
+    /// This creates no cleanup authority. It only supplies a validated,
+    /// text-derived profile path to the protected-root classifier. Setuid
+    /// ambiguity, missing account records, non-absolute homes, symlinks,
+    /// replacement races, and ownership mismatches all fail closed.
+    pub(crate) fn from_current_account() -> Result<Self, ProtectedRootError> {
+        #[cfg(unix)]
+        {
+            let real_uid = getuid();
+            let effective_uid = geteuid();
+            if real_uid != effective_uid {
+                return Err(ProtectedRootError::CurrentAccountAmbiguous);
+            }
+            let first = User::from_uid(effective_uid)
+                .map_err(|_| ProtectedRootError::CurrentAccountUnavailable)?
+                .ok_or(ProtectedRootError::CurrentAccountUnavailable)?;
+            let second = User::from_uid(effective_uid)
+                .map_err(|_| ProtectedRootError::CurrentAccountUnavailable)?
+                .ok_or(ProtectedRootError::CurrentAccountUnavailable)?;
+            if first.uid != second.uid || first.dir != second.dir {
+                return Err(ProtectedRootError::CurrentAccountAmbiguous);
+            }
+            validate_account_home_path(&first.dir)?;
+            let lexical = validate_scan_root(&first.dir)
+                .map_err(|_| ProtectedRootError::InvalidHomeDirectory)?;
+            let canonical =
+                capture_scan_root(lexical).map_err(|_| ProtectedRootError::InvalidHomeDirectory)?;
+            let owner = std::fs::symlink_metadata(canonical.canonical_path())
+                .map_err(|_| ProtectedRootError::InvalidHomeDirectory)?;
+            use std::os::unix::fs::MetadataExt;
+            if owner.uid() != effective_uid.as_raw() {
+                return Err(ProtectedRootError::InvalidHomeDirectory);
+            }
+            let recaptured = capture_scan_root(
+                validate_scan_root(canonical.requested_path())
+                    .map_err(|_| ProtectedRootError::InvalidHomeDirectory)?,
+            )
+            .map_err(|_| ProtectedRootError::InvalidHomeDirectory)?;
+            if recaptured.identity() != canonical.identity()
+                || recaptured.canonical_path() != canonical.canonical_path()
+            {
+                return Err(ProtectedRootError::CurrentAccountAmbiguous);
+            }
+            Self::from_home_directory_evidence(&canonical)
+        }
+        #[cfg(not(unix))]
+        {
+            Err(ProtectedRootError::UnsupportedPlatform)
+        }
+    }
+
+    fn from_home_directory_evidence(
         home_directory: &CanonicalScanRoot,
     ) -> Result<Self, ProtectedRootError> {
         let platform = PolicyPlatform::current();
@@ -120,6 +184,14 @@ impl ProtectedRootRegistry {
                 home_paths,
             },
         })
+    }
+
+    /// Test-only injection of already-captured evidence.
+    #[cfg(test)]
+    fn with_home_directory_evidence(
+        home_directory: &CanonicalScanRoot,
+    ) -> Result<Self, ProtectedRootError> {
+        Self::from_home_directory_evidence(home_directory)
     }
 
     /// Runs the requested spelling through the registry before filesystem
@@ -200,6 +272,14 @@ impl ProtectedRootRegistry {
             ),
         ]))
     }
+}
+
+#[cfg(unix)]
+fn validate_account_home_path(path: &Path) -> Result<(), ProtectedRootError> {
+    if !path.is_absolute() || path.as_os_str().is_empty() || path.to_str().is_none() {
+        return Err(ProtectedRootError::InvalidHomeDirectory);
+    }
+    Ok(())
 }
 
 fn parse(path: &Path, form: ProtectedPathForm) -> Result<PolicyPath, ProtectedRootError> {
@@ -1825,6 +1905,33 @@ mod tests {
             target(&policy, &PolicyPath::unix(&["tmp", "file"])),
             denied(ProtectedPathKind::FilesystemRoot)
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn current_account_registry_uses_os_account_home_and_stays_text_only() {
+        let registry = ProtectedRootRegistry::from_current_account().unwrap();
+        let home = User::from_uid(geteuid()).unwrap().unwrap().dir;
+        let lexical_home = validate_scan_root(&home).unwrap();
+        let lexical_target = validate_cleanup_path(&lexical_home, &home.join("Library")).unwrap();
+        assert!(matches!(
+            registry.preflight(&lexical_target).unwrap(),
+            ProtectedRootDisposition::Denied { .. }
+                | ProtectedRootDisposition::SpecificRuleRequired { .. }
+        ));
+        assert!(!format!("{registry:?}").contains("HOME"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn account_home_validation_rejects_ambiguous_or_lossy_paths() {
+        for path in [Path::new("relative/home"), Path::new("")] {
+            assert_eq!(
+                validate_account_home_path(path),
+                Err(ProtectedRootError::InvalidHomeDirectory)
+            );
+        }
+        assert!(validate_account_home_path(Path::new("/tmp")).is_ok());
     }
 }
 

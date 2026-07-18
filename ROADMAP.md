@@ -4444,6 +4444,15 @@ Tasks:
     trusted volume/location grant, change `ProtectedPath`, construct a plan,
     cross FFI, or authorize an effect. APFS firmlink semantics, trusted home
     discovery, and rule-boundary grants remain open.
+  - [x] 2026-07-18 slice: add code-owned current-account home discovery for
+    the textual registry on Unix/macOS. The resolver uses the OS account
+    database for the real/effective UID (never HOME/USERPROFILE), rejects
+    setuid ambiguity and lossy/relative homes, captures the no-follow live
+    directory twice, and requires the final home directory to be owned by the
+    current account. This supplies only protected-policy input; it does not
+    grant a rule, authorize a plan, cross FFI, or enable cleanup. Windows
+    known-folder/reparse evidence, firmlink semantics, profile-container and
+    volume grants remain open.
 - [ ] Implement Trash executor for Explorer selections.
   - [x] 2026-07-18 slice: add a crate-private Unix/macOS no-follow final-link
     witness for future Trash admission. It keeps the requested and validated
