@@ -4521,6 +4521,8 @@ fn map_direct_cargo_validation_error(
         Error::CargoNotEnrolled
         | Error::InvalidMetadata
         | Error::InvalidWorkspaceMembers
+        | Error::InvalidPathDependencies
+        | Error::CargoPathDependenciesUnsupported
         | Error::WorkspaceManifestUnavailable
         | Error::WorkspaceMismatch
         | Error::TargetDirectoryMismatch => DirectCargoEnrollmentError::InternalState,

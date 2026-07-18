@@ -333,7 +333,7 @@ path, identity, length, and SHA-256. Exact local-APFS manifest and complete
 ancestry-through-root vnode fences remain polled while an identical second
 command runs; a current-open-descriptor plus 128-slot reserve preflight rejects
 insufficient process limits instead of reducing coverage. Only that
-independently parsed second output is accepted. Resolution policy 6 retains
+independently parsed second output is accepted. Resolution policy 7 retains
 manifest policy 1, member/manifest counts, closure digest, launch evidence, and
 accepted-output digest together with configuration-policy-3 file/edge/byte and
 read-intent evidence. Before discovery, a separate policy-1 closure reproduces
@@ -343,14 +343,25 @@ present single-link manifests. Local-APFS manifest and candidate-directory
 delete/rename/revoke events are terminal; directory entry writes replay the
 exact observation, rejecting persistent changes without treating unrelated
 restored high-ancestor activity as a manifest change. Cargo 1.96's exact
+package serialization is also required to expose a closed path-dependency
+graph. Path-dependency policy 1 admits at most 4,096 declarations and 256 KiB
+of aggregate local-path text, requires the exact local-source/path invariant,
+and maps every normalized absolute local target to one reported package
+`Cargo.toml`. Its domain-separated evidence binds total/local/unique counts
+and duplicate-preserving sorted owner-to-manifest edges. Every admitted target
+is consequently behind the workspace-manifest guard throughout the accepted
+second pass; an unreported external, excluded, or standalone target rejects
+without producing a witness. This is deliberately conservative: discovery
+may already have read a rejected external manifest, while Cargo may not read
+some standalone or excluded targets that DUX still rejects. Cargo 1.96's exact
 `metadata --no-deps` path deliberately
 does not load or create `Cargo.lock`; an executable malformed-lock regression
 pins that reviewed version-specific behavior. This remains path-based stability
 evidence for reported and potential ancestor manifests, not proof of Cargo's
 complete reads or workspace-glob namespace generation. Transient absent
-ancestor create/remove, external path-dependency manifests and their ancestor
-probes, target/glob namespaces, source/build files, and post-witness mutations
-remain outside the proof.
+ancestor create/remove, attestation and discovery stability for unreported
+path dependencies, target/glob namespaces, source/build files, and post-witness
+mutations remain outside the proof.
 Those limits and the remaining authority grants keep `ProtectedPath` intact.
 Every rule remains unschedulable, and every emitted candidate retains
 `ProtectedPath` because kernel-level actual-read identity and complete Cargo
@@ -2209,7 +2220,7 @@ coverage is labelled as Home-scoped and unknown coverage stays unknown.
 | Strict lexical/live path evidence | Implemented, crate-private and non-authoritative, including retained-descriptor bounded regular-file prefix and full-file SHA-256 reads on Unix | Bind trusted scan/volume/rule witnesses and executor revalidation; Windows planner use requires retained handle-relative ancestry |
 | Protected-root registry | Implemented text-only policy; production construction sealed | Trusted OS home/profile/mount discovery and stable rule grants |
 | Dangerous-path corpus and fuzzing | Implemented | Keep cross-platform and promote every crash regression |
-| Rule schema/loader | Strict schema plus a build-time digest/policy-gated and strict load-time-validated discovery catalog; ten rules remain selected-root RevealOnly observations, while independently researched `developer.rust.target` revision 2 requires snapshot `Cargo.toml` plus `CACHEDIR.TAG` evidence and proposes only SafeRegenerable/RemoveKnownRegenerableContents. Every rule is unschedulable and every result remains blocked by `ProtectedPath`. Sealed Unix-only live and Cargo-resolution witnesses verify the exact tag, manifest digest, current default layout, and scrubbed-context Cargo workspace/target result. macOS additionally has explicit revisioned same-store direct-Cargo enrollment, bounded policy-3 positive config/include byte closure and ordered Cargo trace intent, descriptor-retained metadata cwd, static-code evidence, suspended selected-running-code attestation, complete executable/config/manifest ancestry APFS fences, a guarded two-pass reported root/member-manifest closure, stale-preview rejection, and revocation tombstones, still without clearing that blocker | Developer ID signing must cover catalog bytes; before the Rust rule can lose its blocker, complete Cargo manifest/read-set and namespace provenance, review the documented path-intent/path-based/same-UID launch limits, prove authoritative volume/protected-root grants, add process/descendant/change guards, and complete adversarial review |
+| Rule schema/loader | Strict schema plus a build-time digest/policy-gated and strict load-time-validated discovery catalog; ten rules remain selected-root RevealOnly observations, while independently researched `developer.rust.target` revision 2 requires snapshot `Cargo.toml` plus `CACHEDIR.TAG` evidence and proposes only SafeRegenerable/RemoveKnownRegenerableContents. Every rule is unschedulable and every result remains blocked by `ProtectedPath`. Sealed Unix-only live and Cargo-resolution witnesses verify the exact tag, manifest digest, current default layout, and scrubbed-context Cargo workspace/target result. macOS additionally has explicit revisioned same-store direct-Cargo enrollment, bounded policy-3 positive config/include byte closure and ordered Cargo trace intent, descriptor-retained metadata cwd, static-code evidence, suspended selected-running-code attestation, complete executable/config/manifest ancestry APFS fences, a guarded two-pass reported root/member-manifest closure, a policy-1 closed accepted path-dependency graph, stale-preview rejection, and revocation tombstones, still without clearing that blocker | Developer ID signing must cover catalog bytes; before the Rust rule can lose its blocker, complete Cargo manifest/read-set and namespace provenance, review the documented conservative path-dependency compatibility and path-intent/path-based/same-UID launch limits, prove authoritative volume/protected-root grants, add process/descendant/change guards, and complete adversarial review |
 | Candidate and cleanup-plan records | Completed fresh scans create deterministic, snapshot-bound durable candidate batches; exact-scan summaries plus bounded lossless path/evidence pages and semantic review commands remain non-authoritative history. A crate-private planner module now seals an exact current-evaluator/current-catalog succeeded scan/evaluation/candidate join to a fully decoded retained snapshot and fresh cleanup-review lease, replays the complete batch from that snapshot with bounded working state, rejects every immutable-field mismatch, carries scan-time Unix identities into the ephemeral Rust-target live and bounded Cargo metadata witnesses, and exposes no replayed candidate or plan conversion. Cleanup plans remain non-executable domain/history data | Keep full-batch replay exact through overlap planning; add FFI/UI transport and trusted Cargo/config/volume/protected-root/process/executor witnesses |
 | macOS app cleanup | Absent | Entire cleanup release gate in §17.3 |
 | Legacy CLI deletion | Active arbitrary-descendant permanent path routed through a temporary core adapter; strict-target/volume/identity rechecks only; scanned-byte estimates labeled in CLI | Replace adapter with reviewed plan/approval/executor chain without weakening current checks |

@@ -25,6 +25,15 @@ that does not look like a Cargo target, preventing accidental deletion. A local
 Cargo 1.96.0 fixture confirmed that a new default target contains a regular
 `CACHEDIR.TAG` beginning with the standard cache-directory signature.
 
+The exact pinned implementation review also covers
+[`--no-deps` workspace-package output](https://github.com/rust-lang/cargo/blob/30a34c6821b57de0aaec83a901aca39f88f6778c/src/cargo/ops/cargo_output_metadata.rs#L35-L59),
+[package/dependency serialization](https://github.com/rust-lang/cargo/blob/30a34c6821b57de0aaec83a901aca39f88f6778c/src/cargo/core/package.rs#L221-L237),
+[dependency local-path serialization](https://github.com/rust-lang/cargo/blob/30a34c6821b57de0aaec83a901aca39f88f6778c/src/cargo/core/dependency.rs#L169-L195),
+[path-source null encoding](https://github.com/rust-lang/cargo/blob/30a34c6821b57de0aaec83a901aca39f88f6778c/src/cargo/core/source_id.rs#L625-L634),
+and [recursive workspace path-dependency discovery](https://github.com/rust-lang/cargo/blob/30a34c6821b57de0aaec83a901aca39f88f6778c/src/cargo/core/workspace.rs#L850-L990).
+Those exact-commit sources, not current Cargo behavior in general, support the
+bounded accepted profile below.
+
 These sources establish that an actual Cargo target directory is generated and
 may be rebuilt. Rebuilding can still cost substantial time, CPU, and network
 access, and an output binary may be convenient or temporarily difficult to
@@ -222,7 +231,7 @@ app and launch; insufficient `RLIMIT_NOFILE` rejects rather than silently
 dropping coverage. Configuration and workspace guards are rechecked before
 spawn and resume, throughout bounded output, after exact-child reaping, and
 before evidence extraction. Only a byte-identical, independently parsed second
-result is accepted. Resolution-policy revision 6 records the manifest policy,
+result is accepted. Resolution-policy revision 7 records the manifest policy,
 member and retained-manifest counts, closure digest, accepted-output digest,
 and configuration root/file/edge/byte plus read-intent evidence.
 
@@ -237,16 +246,34 @@ delete/rename/revoke events are terminal, while directory entry writes trigger
 exact observation replay. Persistent entry changes and file write/restore
 reject; unchanged relevant state after unrelated high-ancestor directory
 activity may continue. Counts, present bytes, and the
-domain-separated ordered closure digest are retained in resolution policy 6.
+domain-separated ordered closure digest are retained in resolution policy 7.
+
+The strict document also requires every package's serialized dependency list.
+Across at most 4,096 declarations and 256 KiB of aggregate local-path text,
+path-dependency policy 1 requires a local source and path to occur together,
+requires each path to be absolute, normalized, and control-free, and requires
+the exact `path/Cargo.toml` to equal one reported package manifest. Registry
+and Git sources must not carry a local path. Duplicate declarations, including
+across dependency kinds, remain repeated owner-to-target edges while the unique
+target count remains separate. A domain-separated digest binds those sorted
+rows; the accepted-output digest separately binds their complete JSON fields.
+Because every admitted target is a reported package, its manifest is already
+covered by the workspace guard throughout the accepted second pass. Malformed
+graphs and unreported targets reject before that pass can produce a witness.
 
 This proves the exact reported root/member manifest bytes remained stable
-under the reviewed path-based inference model. Cargo 1.96's exact
+under the reviewed path-based inference model and excludes unreported local
+dependency declarations from accepted witnesses. It does not attest those
+unreported manifests. Cargo can read an external manifest during discovery
+before DUX rejects the document, while standalone or excluded path
+declarations can be conservatively rejected even when Cargo did not read the
+target manifest. Cargo 1.96's exact
 `metadata --no-deps` code path deliberately does not load or create
 `Cargo.lock`; real-Cargo tests include a malformed lockfile to pin that
 version-specific behavior. DUX still does not prove Cargo's full read set,
 workspace-glob/target namespace generations, transient absent ancestor
-create/remove, external path-dependency manifests or their ancestor probes, or
-source/build files. It is not fd-based Cargo reads;
+create/remove, attestation of safe unreported path dependencies, external
+discovery-manifest stability, or source/build files. It is not fd-based Cargo reads;
 kqueue remains event inference and same-UID/post-witness changes still require
 later guards. `ProtectedPath` and every authority edge remain unchanged.
 

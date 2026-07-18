@@ -5,6 +5,23 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Continued Milestone 5 with a closed, bounded Cargo 1.96 path-dependency
+  graph for accepted metadata. Every package must expose its dependency list;
+  local-source declarations require an absolute, normalized, control-free
+  path whose exact `Cargo.toml` is already one of the reported workspace
+  package manifests guarded during the second pass. DUX rejects malformed
+  source/path pairs, more than 4,096 dependency declarations, more than
+  256 KiB of aggregate local-path text, and every unreported local target.
+  Path-dependency policy 1 records total/local/unique counts and a
+  domain-separated digest of the sorted, duplicate-preserving owner-to-
+  manifest edges; resolution policy 7 binds that evidence across identical
+  metadata passes. Real pinned-Cargo tests accept an internal implicit member
+  and reject an unreported false-target optional build dependency. This is a
+  conservative accepted-profile rule, not attestation of an external
+  manifest: discovery may read an external manifest before DUX rejects its
+  output, while standalone or excluded declarations may be rejected even when
+  Cargo did not read them. No cleanup authority or `ProtectedPath` change was
+  added.
 - Continued Milestone 5 with a bounded Cargo 1.96 ancestor-manifest probe
   namespace captured before metadata discovery. DUX reproduces Cargo's exact
   nearest-to-farthest candidate ordering plus `target/package` and Cargo-home
@@ -17,9 +34,9 @@ All notable changes to DUX will be documented in this file.
   unrelated restored high-ancestor activity.
   Resolution policy 6 records probe policy 1, counts, bytes, and a
   domain-separated closure digest across both metadata passes. A transient
-  absent-entry create/remove remains unproven, as do external path-dependency
-  manifests and kernel-level Cargo read identity. No cleanup authority or
-  `ProtectedPath` change was added.
+  absent-entry create/remove remains unproven, as do attestation of unreported
+  path-dependency manifests and kernel-level Cargo read identity. No cleanup
+  authority or `ProtectedPath` change was added.
 - Continued Milestone 5 with positive, bounded Cargo 1.96 configuration and
   include provenance. DUX discovers accepted project/ancestor config roots,
   parses only their top-level include declarations with Cargo's exact TOML

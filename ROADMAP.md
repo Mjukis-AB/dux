@@ -4192,6 +4192,29 @@ Tasks:
       manifests and their ancestor probes, glob/target/source/build
       namespaces, and post-witness changes remain open. No blocker, plan, FFI,
       scheduling, or effect authority was added.
+    - [x] 2026-07-18 slice: close the accepted Cargo 1.96 local path-
+      dependency graph over already reported workspace packages. Every
+      serialized package must include its full dependency list. Across at most
+      4,096 declarations and 256 KiB of local-path text, policy 1 requires
+      `source: null` exactly for local paths, rejects relative, non-normalized,
+      control-bearing, or mismatched values, and maps every local directory's
+      exact `Cargo.toml` to a reported package manifest. Duplicate aliases and
+      dependency kinds remain valid but are retained in total/local counts;
+      unique targets are counted separately. A domain-separated sorted edge
+      digest binds owner IDs and target manifest bytes, and resolution policy
+      7 requires identical graph evidence across both metadata passes. The
+      existing workspace guard therefore fences every admitted target during
+      the accepted pass. Exact-Cargo regressions accept an internal implicit
+      member and reject an external false-target optional build dependency
+      that Cargo exposes but omits from the workspace package set. This is
+      deliberately sufficient rather than necessary: discovery can read a
+      rejected external manifest before no witness is produced, while
+      standalone and excluded dependencies can be rejected even if Cargo did
+      not read their manifests. Attesting safe unreported dependencies,
+      transient absent ancestor create/remove, workspace glob/target/source/
+      build namespaces, kernel-level read identity, and post-witness changes
+      remain open. No blocker, plan, FFI, scheduling, or effect authority was
+      added.
     Kernel-level Cargo read identity, complete remaining Cargo manifest and
     namespace provenance, and all remaining
     protected-root, volume, process, descendant, plan, and executor grants are

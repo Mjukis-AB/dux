@@ -113,7 +113,8 @@ fn metadata_json(workspace_root: &Path, target_directory: &Path) -> String {
         "packages": [{
             "id": package_id,
             "manifest_path": workspace_root.join("Cargo.toml"),
-            "source": null
+            "source": null,
+            "dependencies": []
         }],
         "workspace_members": [package_id],
         "workspace_default_members": [package_id],
@@ -123,6 +124,23 @@ fn metadata_json(workspace_root: &Path, target_directory: &Path) -> String {
         "workspace_root": workspace_root,
         "metadata": {},
         "future_additive_field": {"accepted": true}
+    }))
+    .unwrap()
+}
+
+fn package_metadata_json(
+    fixture: &Fixture,
+    packages: Vec<serde_json::Value>,
+    workspace_members: Vec<&str>,
+) -> String {
+    serde_json::to_string(&json!({
+        "packages": packages,
+        "workspace_default_members": workspace_members,
+        "workspace_members": workspace_members,
+        "resolve": null,
+        "target_directory": fixture.target,
+        "version": 1,
+        "workspace_root": fixture.manifest.parent().unwrap()
     }))
     .unwrap()
 }
@@ -187,6 +205,11 @@ fn fixed_command_environment_and_exact_metadata_create_only_observational_witnes
     assert_eq!(witness.workspace_member_count(), 1);
     assert_eq!(witness.workspace_manifest_count(), 1);
     assert_ne!(witness.workspace_manifest_closure_sha256(), [0; 32]);
+    assert_eq!(witness.path_dependency_policy_revision(), 1);
+    assert_eq!(witness.dependency_declaration_count(), 0);
+    assert_eq!(witness.local_path_dependency_count(), 0);
+    assert_eq!(witness.unique_local_dependency_manifest_count(), 0);
+    assert_ne!(witness.path_dependency_closure_sha256(), [0; 32]);
     assert_eq!(witness.manifest_probe_policy_revision(), 1);
     assert!(witness.manifest_probe_count() >= 1);
     assert_eq!(witness.present_ancestor_manifest_count(), 0);
@@ -194,7 +217,7 @@ fn fixed_command_environment_and_exact_metadata_create_only_observational_witnes
     assert_ne!(witness.manifest_probe_closure_sha256(), [0; 32]);
     assert_eq!(witness.launch_policy_revision(), 0);
     assert_eq!(witness.running_code_directory_hash_sha256(), [0; 32]);
-    assert_eq!(witness.resolution_policy_revision(), 6);
+    assert_eq!(witness.resolution_policy_revision(), 7);
     assert!(witness.live().protected_path_is_still_unresolved());
     assert_eq!(candidate.blockers(), [BlockReason::ProtectedPath]);
     assert!(!candidate.rule_marks_schedule_eligible());
@@ -264,7 +287,8 @@ fn malformed_or_ambiguous_workspace_members_fail_closed() {
     let package = json!({
         "id": "member-a",
         "manifest_path": fixture.manifest,
-        "source": null
+        "source": null,
+        "dependencies": []
     });
     let cases = [
         json!({
@@ -291,7 +315,8 @@ fn malformed_or_ambiguous_workspace_members_fail_closed() {
                 {
                     "id": "member-b",
                     "manifest_path": fixture.manifest,
-                    "source": null
+                    "source": null,
+                    "dependencies": []
                 }
             ],
             "workspace_members": ["member-a", "member-b"],
@@ -314,7 +339,8 @@ fn malformed_or_ambiguous_workspace_members_fail_closed() {
             "packages": [{
                 "id": "member-a",
                 "manifest_path": fixture.manifest,
-                "source": "registry+https://example.invalid/index"
+                "source": "registry+https://example.invalid/index",
+                "dependencies": []
             }],
             "workspace_members": ["member-a"],
             "workspace_default_members": ["member-a"],
@@ -345,6 +371,174 @@ fn malformed_or_ambiguous_workspace_members_fail_closed() {
             Err(CargoMetadataValidationError::InvalidWorkspaceMembers)
         ));
     }
+}
+
+#[test]
+fn reported_path_dependency_graph_is_bounded_and_observational() {
+    let fixture = Fixture::new(CARGO_CACHE_TAG_SIGNATURE);
+    let project = fixture.manifest.parent().unwrap();
+    let member = project.join("member");
+    fs::create_dir(&member).unwrap();
+    fs::write(
+        member.join("Cargo.toml"),
+        "[package]\nname = \"member\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    let document = package_metadata_json(
+        &fixture,
+        vec![
+            json!({
+                "id": "root",
+                "manifest_path": fixture.manifest,
+                "source": null,
+                "dependencies": [
+                    {"source": null, "path": member},
+                    {"source": null, "path": member},
+                    {"source": "registry+https://example.invalid/index", "path": null}
+                ]
+            }),
+            json!({
+                "id": "member",
+                "manifest_path": member.join("Cargo.toml"),
+                "source": null,
+                "dependencies": []
+            }),
+        ],
+        vec!["root", "member"],
+    );
+    let action = format!("  printf %s {}\n  exit 0", shell_quote(&document));
+    let fake = FakeCargo::new(&action);
+    let witness = validate_cargo_metadata(live(&fixture), &fake.observe()).unwrap();
+
+    assert_eq!(witness.path_dependency_policy_revision(), 1);
+    assert_eq!(witness.dependency_declaration_count(), 3);
+    assert_eq!(witness.local_path_dependency_count(), 2);
+    assert_eq!(witness.unique_local_dependency_manifest_count(), 1);
+    assert_ne!(witness.path_dependency_closure_sha256(), [0; 32]);
+    assert_eq!(witness.resolution_policy_revision(), 7);
+    witness.release().unwrap();
+}
+
+#[test]
+fn malformed_or_unreported_path_dependencies_fail_closed() {
+    let fixture = Fixture::new(CARGO_CACHE_TAG_SIGNATURE);
+    let project = fixture.manifest.parent().unwrap();
+    let root_package = |dependencies: serde_json::Value| {
+        json!({
+            "id": "root",
+            "manifest_path": fixture.manifest,
+            "source": null,
+            "dependencies": dependencies
+        })
+    };
+    let invalid_cases = [
+        root_package(json!([{"path": null}])),
+        root_package(json!([{"source": null, "path": null}])),
+        root_package(json!([{"source": {}, "path": null}])),
+        root_package(json!([{"source": 7, "path": null}])),
+        root_package(json!([{"source": "", "path": null}])),
+        root_package(json!([{"source": "git\u{85}source", "path": null}])),
+        root_package(json!([{
+            "source": "registry+https://example.invalid/index",
+            "path": project
+        }])),
+        root_package(json!([{"source": null, "path": "relative"}])),
+        root_package(json!([{"source": null, "path": "/bad\u{85}path"}])),
+        root_package(json!([{
+            "source": null,
+            "path": format!("{}/", project.display())
+        }])),
+    ];
+    for package in invalid_cases {
+        let document = package_metadata_json(&fixture, vec![package], vec!["root"]);
+        let action = format!("  printf %s {}\n  exit 0", shell_quote(&document));
+        let fake = FakeCargo::new(&action);
+        assert!(matches!(
+            validate_cargo_metadata(live(&fixture), &fake.observe()),
+            Err(CargoMetadataValidationError::InvalidPathDependencies)
+                | Err(CargoMetadataValidationError::InvalidMetadata)
+        ));
+    }
+
+    let missing_dependencies = package_metadata_json(
+        &fixture,
+        vec![json!({
+            "id": "root",
+            "manifest_path": fixture.manifest,
+            "source": null
+        })],
+        vec!["root"],
+    );
+    let fake = FakeCargo::new(&format!(
+        "  printf %s {}\n  exit 0",
+        shell_quote(&missing_dependencies)
+    ));
+    assert!(matches!(
+        validate_cargo_metadata(live(&fixture), &fake.observe()),
+        Err(CargoMetadataValidationError::InvalidMetadata)
+    ));
+
+    let unreported = project.join("unreported");
+    let document = package_metadata_json(
+        &fixture,
+        vec![root_package(json!([{"source": null, "path": unreported}]))],
+        vec!["root"],
+    );
+    let fake = FakeCargo::new(&format!("  printf %s {}\n  exit 0", shell_quote(&document)));
+    assert!(matches!(
+        validate_cargo_metadata(live(&fixture), &fake.observe()),
+        Err(CargoMetadataValidationError::CargoPathDependenciesUnsupported)
+    ));
+}
+
+#[test]
+fn path_dependency_count_and_byte_limits_fail_closed() {
+    let fixture = Fixture::new(CARGO_CACHE_TAG_SIGNATURE);
+    let registry_dependencies: Vec<_> = (0..4_096)
+        .map(|_| json!({"source": "registry+https://example.invalid/index", "path": null}))
+        .collect();
+    let package = json!({
+        "id": "root",
+        "manifest_path": fixture.manifest,
+        "source": null,
+        "dependencies": registry_dependencies
+    });
+    let document = package_metadata_json(&fixture, vec![package], vec!["root"]);
+    let fake = FakeCargo::new(&format!("  printf %s {}\n  exit 0", shell_quote(&document)));
+    let witness = validate_cargo_metadata(live(&fixture), &fake.observe()).unwrap();
+    assert_eq!(witness.dependency_declaration_count(), 4_096);
+    assert_eq!(witness.local_path_dependency_count(), 0);
+    witness.release().unwrap();
+
+    let registry_dependencies: Vec<_> = (0..4_097)
+        .map(|_| json!({"source": "registry+https://example.invalid/index", "path": null}))
+        .collect();
+    let package = json!({
+        "id": "root",
+        "manifest_path": fixture.manifest,
+        "source": null,
+        "dependencies": registry_dependencies
+    });
+    let document = package_metadata_json(&fixture, vec![package], vec!["root"]);
+    let fake = FakeCargo::new(&format!("  printf %s {}\n  exit 0", shell_quote(&document)));
+    assert!(matches!(
+        validate_cargo_metadata(live(&fixture), &fake.observe()),
+        Err(CargoMetadataValidationError::InvalidPathDependencies)
+    ));
+
+    let oversized_path = format!("/{}", "a".repeat(256 * 1024));
+    let package = json!({
+        "id": "root",
+        "manifest_path": fixture.manifest,
+        "source": null,
+        "dependencies": [{"source": null, "path": oversized_path}]
+    });
+    let document = package_metadata_json(&fixture, vec![package], vec!["root"]);
+    let fake = FakeCargo::new(&format!("  printf %s {}\n  exit 0", shell_quote(&document)));
+    assert!(matches!(
+        validate_cargo_metadata(live(&fixture), &fake.observe()),
+        Err(CargoMetadataValidationError::InvalidPathDependencies)
+    ));
 }
 
 #[test]
@@ -546,12 +740,14 @@ fn member_manifest_write_and_restore_during_accepted_pass_is_terminal() {
             {
                 "id": "root",
                 "manifest_path": fixture.manifest,
-                "source": null
+                "source": null,
+                "dependencies": []
             },
             {
                 "id": "member",
                 "manifest_path": member_manifest,
-                "source": null
+                "source": null,
+                "dependencies": []
             }
         ],
         "workspace_members": ["root", "member"],
@@ -808,8 +1004,137 @@ fn real_cargo_attests_virtual_root_and_every_workspace_member_manifest() {
     assert_eq!(witness.workspace_member_count(), 2);
     assert_eq!(witness.workspace_manifest_count(), 3);
     assert_ne!(witness.workspace_manifest_closure_sha256(), [0; 32]);
-    assert_eq!(witness.resolution_policy_revision(), 6);
+    assert_eq!(witness.resolution_policy_revision(), 7);
     witness.release().unwrap();
+}
+
+#[test]
+fn real_cargo_accepts_only_reported_internal_path_dependencies() {
+    let Some(cargo) = direct_test_cargo() else {
+        return;
+    };
+    let fixture = Fixture::new(CARGO_CACHE_TAG_SIGNATURE);
+    let project = fixture.manifest.parent().unwrap();
+    fs::write(
+        &fixture.manifest,
+        "[package]\nname = \"root\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\ninternal = { path = \"internal\" }\n\n[workspace]\nresolver = \"3\"\n",
+    )
+    .unwrap();
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/lib.rs"), "pub fn root() {}\n").unwrap();
+    let internal = project.join("internal");
+    fs::create_dir_all(internal.join("src")).unwrap();
+    fs::write(
+        internal.join("Cargo.toml"),
+        "[package]\nname = \"internal\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .unwrap();
+    fs::write(internal.join("src/lib.rs"), "pub fn internal() {}\n").unwrap();
+
+    let observation = observe_cargo_executable(&cargo).unwrap();
+    let witness =
+        validate_cargo_metadata_with_input_fences_for_test(live(&fixture), &observation).unwrap();
+    assert_eq!(witness.workspace_member_count(), 2);
+    assert_eq!(witness.workspace_manifest_count(), 2);
+    assert_eq!(witness.dependency_declaration_count(), 1);
+    assert_eq!(witness.local_path_dependency_count(), 1);
+    assert_eq!(witness.unique_local_dependency_manifest_count(), 1);
+    assert_ne!(witness.path_dependency_closure_sha256(), [0; 32]);
+    assert_eq!(witness.resolution_policy_revision(), 7);
+    witness.release().unwrap();
+}
+
+#[test]
+fn real_cargo_rejects_unreported_external_path_dependencies() {
+    let Some(cargo) = direct_test_cargo() else {
+        return;
+    };
+    let fixture = Fixture::new(CARGO_CACHE_TAG_SIGNATURE);
+    let project = fixture.manifest.parent().unwrap();
+    fs::write(
+        &fixture.manifest,
+        "[package]\nname = \"root\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[target.'cfg(any())'.build-dependencies]\nexternal = { path = \"../external\", optional = true }\n\n[workspace]\nresolver = \"3\"\n",
+    )
+    .unwrap();
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/lib.rs"), "pub fn root() {}\n").unwrap();
+    let external = fixture.root.join("external");
+    fs::create_dir_all(external.join("src")).unwrap();
+    fs::write(
+        external.join("Cargo.toml"),
+        "[package]\nname = \"external\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .unwrap();
+    fs::write(external.join("src/lib.rs"), "pub fn external() {}\n").unwrap();
+    fs::write(
+        fixture.root.join("Cargo.toml"),
+        "[workspace]\nexclude = [\"project\", \"external\"]\nresolver = \"3\"\n",
+    )
+    .unwrap();
+
+    let observation = observe_cargo_executable(&cargo).unwrap();
+    assert!(matches!(
+        validate_cargo_metadata_with_input_fences_for_test(live(&fixture), &observation),
+        Err(CargoMetadataValidationError::CargoPathDependenciesUnsupported)
+    ));
+}
+
+#[test]
+fn real_cargo_conservatively_rejects_excluded_path_dependencies() {
+    let Some(cargo) = direct_test_cargo() else {
+        return;
+    };
+    let fixture = Fixture::new(CARGO_CACHE_TAG_SIGNATURE);
+    let project = fixture.manifest.parent().unwrap();
+    fs::write(
+        &fixture.manifest,
+        "[package]\nname = \"root\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\nexcluded = { path = \"excluded\" }\n\n[workspace]\nexclude = [\"excluded\"]\nresolver = \"3\"\n",
+    )
+    .unwrap();
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/lib.rs"), "pub fn root() {}\n").unwrap();
+    let excluded = project.join("excluded");
+    fs::create_dir_all(excluded.join("src")).unwrap();
+    fs::write(
+        excluded.join("Cargo.toml"),
+        "[package]\nname = \"excluded\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .unwrap();
+    fs::write(excluded.join("src/lib.rs"), "pub fn excluded() {}\n").unwrap();
+
+    let observation = observe_cargo_executable(&cargo).unwrap();
+    assert!(matches!(
+        validate_cargo_metadata_with_input_fences_for_test(live(&fixture), &observation),
+        Err(CargoMetadataValidationError::CargoPathDependenciesUnsupported)
+    ));
+}
+
+#[test]
+fn real_cargo_conservatively_rejects_unread_standalone_path_dependencies() {
+    let Some(cargo) = direct_test_cargo() else {
+        return;
+    };
+    let fixture = Fixture::new(CARGO_CACHE_TAG_SIGNATURE);
+    let project = fixture.manifest.parent().unwrap();
+    fs::write(
+        &fixture.manifest,
+        "[package]\nname = \"root\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\nstandalone = { path = \"../standalone\" }\n",
+    )
+    .unwrap();
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/lib.rs"), "pub fn root() {}\n").unwrap();
+    let standalone = fixture.root.join("standalone");
+    fs::create_dir(&standalone).unwrap();
+    // Exact Cargo 1.96 does not parse this dependency manifest in the
+    // standalone `metadata --no-deps` path. DUX still rejects its serialized
+    // unreported path conservatively.
+    fs::write(standalone.join("Cargo.toml"), "[\n").unwrap();
+
+    let observation = observe_cargo_executable(&cargo).unwrap();
+    assert!(matches!(
+        validate_cargo_metadata_with_input_fences_for_test(live(&fixture), &observation),
+        Err(CargoMetadataValidationError::CargoPathDependenciesUnsupported)
+    ));
 }
 
 #[test]
@@ -832,7 +1157,7 @@ fn real_cargo_attests_excluding_ancestor_manifest_probe() {
         fs::metadata(ancestor).unwrap().len()
     );
     assert_ne!(witness.manifest_probe_closure_sha256(), [0; 32]);
-    assert_eq!(witness.resolution_policy_revision(), 6);
+    assert_eq!(witness.resolution_policy_revision(), 7);
     witness.release().unwrap();
 }
 

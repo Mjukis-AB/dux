@@ -777,6 +777,7 @@ mod tests {
         fs::create_dir(&parent).unwrap();
         // DUX-DESTRUCTIVE: allow=test-manifest-probe-replacement-remove -- remove only the empty TempDir-owned replacement before restoring the watched ancestor
         fs::remove_dir(&parent).unwrap();
+        // DUX-DESTRUCTIVE: allow=test-manifest-probe-ancestor-restore -- restore only the displaced TempDir-owned watched ancestor after exercising replacement
         fs::rename(&displaced, &parent).unwrap();
         assert_eq!(guard.poll(), Err(CargoManifestProbeError::Changed));
     }

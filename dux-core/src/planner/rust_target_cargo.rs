@@ -56,8 +56,11 @@ const VERSION_TIMEOUT: Duration = Duration::from_secs(5);
 const METADATA_TIMEOUT: Duration = Duration::from_secs(10);
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(2);
 const MAX_CARGO_EXECUTABLE_BYTES: usize = 256 * 1024 * 1024;
-const CARGO_RESOLUTION_POLICY_REVISION: u32 = 6;
+const CARGO_RESOLUTION_POLICY_REVISION: u32 = 7;
 const MAX_PACKAGE_ID_BYTES: usize = 4 * 1024;
+const MAX_PACKAGE_DEPENDENCY_DECLARATIONS: usize = 4 * 1024;
+const MAX_LOCAL_DEPENDENCY_PATH_BYTES: usize = 256 * 1024;
+const CARGO_PATH_DEPENDENCY_POLICY_REVISION: u32 = 1;
 const CARGO_ENROLLMENT_SUPPORTED_COMMIT: &str = "30a34c6821b57de0aaec83a901aca39f88f6778c";
 
 /// Static executable evidence captured without executing untrusted bytes.
@@ -187,6 +190,7 @@ pub(crate) struct RustTargetCargoMetadataWitness {
     configuration: CargoConfigurationEvidence,
     manifest_probes: CargoManifestProbeEvidence,
     workspace: CargoWorkspaceManifestEvidence,
+    path_dependencies: CargoPathDependencyEvidence,
     launch_policy_revision: u32,
     running_code_directory_hash_sha256: [u8; 32],
     resolution_policy_revision: u32,
@@ -256,6 +260,10 @@ pub(crate) enum CargoMetadataValidationError {
     TargetDirectoryMismatch,
     #[error("Cargo metadata has an invalid or ambiguous workspace-member declaration")]
     InvalidWorkspaceMembers,
+    #[error("Cargo metadata has malformed or out-of-bounds dependency declarations")]
+    InvalidPathDependencies,
+    #[error("Cargo metadata references a local dependency not reported as a workspace package")]
+    CargoPathDependenciesUnsupported,
     #[error("Cargo workspace manifests could not be captured within the reviewed bounds")]
     WorkspaceManifestUnavailable,
     #[error("Cargo workspace manifests changed during metadata resolution")]
@@ -702,7 +710,7 @@ fn validate_cargo_metadata_with_limits(
     )?;
     require_success(&discovery_output)?;
     configuration.verify_read_intent(&discovery_output.stderr)?;
-    let (discovery_metadata, discovery_workspace) =
+    let (discovery_metadata, discovery_workspace, discovery_path_dependencies) =
         parse_metadata_document(&discovery_output.stdout, &live)?;
     let workspace = match configuration_fence {
         ConfigurationFenceMode::Armed => {
@@ -731,10 +739,12 @@ fn validate_cargo_metadata_with_limits(
     )?;
     require_success(&output)?;
     configuration.verify_read_intent(&output.stderr)?;
-    let (metadata, accepted_workspace) = parse_metadata_document(&output.stdout, &live)?;
+    let (metadata, accepted_workspace, path_dependencies) =
+        parse_metadata_document(&output.stdout, &live)?;
     if output.stdout != discovery_output.stdout
         || metadata != discovery_metadata
         || accepted_workspace != discovery_workspace
+        || path_dependencies != discovery_path_dependencies
     {
         return Err(CargoMetadataValidationError::WorkspaceManifestChanged);
     }
@@ -769,6 +779,7 @@ fn validate_cargo_metadata_with_limits(
         configuration: configuration_evidence,
         manifest_probes: manifest_probe_evidence,
         workspace: workspace_evidence,
+        path_dependencies,
         launch_policy_revision: output.launch_policy_revision,
         running_code_directory_hash_sha256: output.running_code_directory_hash_sha256,
         resolution_policy_revision: CARGO_RESOLUTION_POLICY_REVISION,
@@ -1045,6 +1056,22 @@ struct CargoMetadataPackageDocument {
     id: String,
     manifest_path: String,
     source: serde_json::Value,
+    dependencies: Vec<CargoMetadataDependencyDocument>,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+struct CargoMetadataDependencyDocument {
+    source: serde_json::Value,
+    path: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct CargoPathDependencyEvidence {
+    policy_revision: u32,
+    dependency_declaration_count: u32,
+    local_path_dependency_count: u32,
+    unique_local_manifest_count: u32,
+    closure_sha256: [u8; 32],
 }
 
 fn parse_metadata_document(
@@ -1054,6 +1081,7 @@ fn parse_metadata_document(
     (
         CargoMetadataDocument,
         Vec<CargoWorkspaceManifestDeclaration>,
+        CargoPathDependencyEvidence,
     ),
     CargoMetadataValidationError,
 > {
@@ -1116,6 +1144,7 @@ fn parse_metadata_document(
         }
     }
 
+    let path_dependencies = validate_path_dependencies(&metadata, &manifest_paths)?;
     let mut declarations = Vec::with_capacity(metadata.workspace_members.len() + 1);
     let mut root_is_member = false;
     for member in &metadata.workspace_members {
@@ -1144,7 +1173,94 @@ fn parse_metadata_document(
             .as_bytes()
             .cmp(right.path.as_os_str().as_bytes())
     });
-    Ok((metadata, declarations))
+    Ok((metadata, declarations, path_dependencies))
+}
+
+fn validate_path_dependencies(
+    metadata: &CargoMetadataDocument,
+    reported_manifest_paths: &BTreeSet<Vec<u8>>,
+) -> Result<CargoPathDependencyEvidence, CargoMetadataValidationError> {
+    let mut declaration_count = 0_usize;
+    let mut local_path_count = 0_usize;
+    let mut local_path_bytes = 0_usize;
+    let mut unique_manifests = BTreeSet::new();
+    let mut edges = Vec::new();
+
+    for package in &metadata.packages {
+        declaration_count = declaration_count
+            .checked_add(package.dependencies.len())
+            .ok_or(CargoMetadataValidationError::InvalidPathDependencies)?;
+        if declaration_count > MAX_PACKAGE_DEPENDENCY_DECLARATIONS {
+            return Err(CargoMetadataValidationError::InvalidPathDependencies);
+        }
+        for dependency in &package.dependencies {
+            let Some(path) = dependency.path.as_deref() else {
+                let Some(source) = dependency.source.as_str() else {
+                    return Err(CargoMetadataValidationError::InvalidPathDependencies);
+                };
+                if source.is_empty() || source.chars().any(char::is_control) {
+                    return Err(CargoMetadataValidationError::InvalidPathDependencies);
+                }
+                continue;
+            };
+            if !dependency.source.is_null() {
+                return Err(CargoMetadataValidationError::InvalidPathDependencies);
+            }
+            local_path_count = local_path_count
+                .checked_add(1)
+                .ok_or(CargoMetadataValidationError::InvalidPathDependencies)?;
+            local_path_bytes = local_path_bytes
+                .checked_add(path.len())
+                .ok_or(CargoMetadataValidationError::InvalidPathDependencies)?;
+            if local_path_bytes > MAX_LOCAL_DEPENDENCY_PATH_BYTES {
+                return Err(CargoMetadataValidationError::InvalidPathDependencies);
+            }
+            let dependency_root = Path::new(path);
+            let normalized_root: PathBuf = dependency_root.components().collect();
+            if path.is_empty()
+                || path.chars().any(char::is_control)
+                || !dependency_root.is_absolute()
+                || normalized_root.as_os_str().as_bytes() != path.as_bytes()
+                || dependency_root.components().any(|component| {
+                    matches!(
+                        component,
+                        std::path::Component::CurDir | std::path::Component::ParentDir
+                    )
+                })
+            {
+                return Err(CargoMetadataValidationError::InvalidPathDependencies);
+            }
+            let manifest = dependency_root.join("Cargo.toml");
+            let manifest_bytes = manifest.as_os_str().as_bytes().to_vec();
+            if !reported_manifest_paths.contains(&manifest_bytes) {
+                return Err(CargoMetadataValidationError::CargoPathDependenciesUnsupported);
+            }
+            unique_manifests.insert(manifest_bytes.clone());
+            edges.push((package.id.as_bytes().to_vec(), manifest_bytes));
+        }
+    }
+
+    edges.sort();
+    let mut digest = Sha256::new();
+    digest.update(b"dux-cargo-reported-path-dependencies-v1\0");
+    digest.update((declaration_count as u64).to_le_bytes());
+    digest.update((local_path_count as u64).to_le_bytes());
+    digest.update((unique_manifests.len() as u64).to_le_bytes());
+    for (ordinal, (package_id, manifest)) in edges.iter().enumerate() {
+        digest.update((ordinal as u64).to_le_bytes());
+        digest.update((package_id.len() as u64).to_le_bytes());
+        digest.update(package_id);
+        digest.update((manifest.len() as u64).to_le_bytes());
+        digest.update(manifest);
+    }
+
+    Ok(CargoPathDependencyEvidence {
+        policy_revision: CARGO_PATH_DEPENDENCY_POLICY_REVISION,
+        dependency_declaration_count: declaration_count as u32,
+        local_path_dependency_count: local_path_count as u32,
+        unique_local_manifest_count: unique_manifests.len() as u32,
+        closure_sha256: digest.finalize().into(),
+    })
 }
 
 fn parse_cargo_release(bytes: &[u8]) -> Result<CargoRelease, CargoMetadataValidationError> {
@@ -1850,6 +1966,26 @@ impl RustTargetCargoMetadataWitness {
 
     pub(super) fn workspace_manifest_closure_sha256(&self) -> [u8; 32] {
         self.workspace.closure_sha256
+    }
+
+    pub(super) fn path_dependency_policy_revision(&self) -> u32 {
+        self.path_dependencies.policy_revision
+    }
+
+    pub(super) fn dependency_declaration_count(&self) -> u32 {
+        self.path_dependencies.dependency_declaration_count
+    }
+
+    pub(super) fn local_path_dependency_count(&self) -> u32 {
+        self.path_dependencies.local_path_dependency_count
+    }
+
+    pub(super) fn unique_local_dependency_manifest_count(&self) -> u32 {
+        self.path_dependencies.unique_local_manifest_count
+    }
+
+    pub(super) fn path_dependency_closure_sha256(&self) -> [u8; 32] {
+        self.path_dependencies.closure_sha256
     }
 
     pub(super) fn launch_policy_revision(&self) -> u32 {
