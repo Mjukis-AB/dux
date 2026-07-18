@@ -61,6 +61,20 @@ final class HomeScanAppModelTests: XCTestCase {
         XCTAssertEqual(pollCount, 3)
     }
 
+    func testProgressiveEventsAreRetainedAndResetForEachGeneration() async {
+        let event = HomeScanEvent(sequence: 1, kind: .started)
+        let task = HomeScanTaskSpy(polls: [
+            .success(successPoll(revision: 2, result: successfulResult(), events: [event], eventCursor: 1, oldestEventSequence: 1)),
+        ])
+        let model = model(
+            service: HomeScanServiceSpy(responses: [.success(.started(task))]),
+            clock: ManualHomeScanClock()
+        )
+
+        await model.startHomeScan()
+        XCTAssertEqual(model.latestHomeScanEvents, [event])
+    }
+
     func testCancellationRemainsRequestedUntilRustReportsTerminal() async {
         let facts = ScanProgressFacts(
             files: 8,
@@ -497,7 +511,10 @@ private struct HomeScanVolumeMonitorStub: VolumeMonitoring {
 private func activePoll(
     revision: UInt64,
     progress: ScanProgressFacts?,
-    cancellationRequested: Bool = false
+    cancellationRequested: Bool = false,
+    events: [HomeScanEvent] = [],
+    eventCursor: UInt64 = 0,
+    oldestEventSequence: UInt64 = 0
 ) -> HomeScanTaskPoll {
     HomeScanTaskPoll(
         phase: .running,
@@ -507,14 +524,20 @@ private func activePoll(
         progress: progress,
         eventsTruncated: false,
         failure: nil,
-        result: nil
+        result: nil,
+        events: events,
+        eventCursor: eventCursor,
+        oldestAvailableEventSequence: oldestEventSequence
     )
 }
 
 private func successPoll(
     revision: UInt64,
     result: HomeScanTaskResult,
-    cancelled: Bool = false
+    cancelled: Bool = false,
+    events: [HomeScanEvent] = [],
+    eventCursor: UInt64 = 0,
+    oldestEventSequence: UInt64 = 0
 ) -> HomeScanTaskPoll {
     HomeScanTaskPoll(
         phase: .succeeded,
@@ -524,7 +547,10 @@ private func successPoll(
         progress: nil,
         eventsTruncated: false,
         failure: nil,
-        result: result
+        result: result,
+        events: events,
+        eventCursor: eventCursor,
+        oldestAvailableEventSequence: oldestEventSequence
     )
 }
 

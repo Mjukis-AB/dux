@@ -112,7 +112,7 @@ extension DuxSnapshotReviewLease {
 struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewServing,
     DuxSnapshotHistoryServing, DuxScanCoverageServing, HomeScanServing, Sendable
 {
-    fileprivate static let expectedFFIContractVersion: UInt32 = 17
+    fileprivate static let expectedFFIContractVersion: UInt32 = 18
     fileprivate static let expectedRecordVersion: UInt32 = 1
 
     private let state: EngineServiceState
@@ -862,6 +862,7 @@ private enum HomeScanResponseViolation: String, Error {
     case phaseShape
     case terminalAggregates
     case transition
+    case events
 }
 
 private final class FFIHomeScanTask: HomeScanTask, @unchecked Sendable {
@@ -935,6 +936,7 @@ private final class FFIHomeScanTask: HomeScanTask, @unchecked Sendable {
         let progress = try raw.progress.map(mapProgress)
         let result = try raw.result.map(mapResult)
         let failure = raw.failure.map(mapFailure)
+        let events = try raw.events.map(mapEvent)
         let phase: HomeScanTaskPhase = switch raw.phase {
         case .queued: .queued
         case .running: .running
@@ -967,7 +969,10 @@ private final class FFIHomeScanTask: HomeScanTask, @unchecked Sendable {
             progress: progress,
             eventsTruncated: raw.eventsTruncated,
             failure: failure,
-            result: result
+            result: result,
+            events: events,
+            eventCursor: raw.nextEventSequence,
+            oldestAvailableEventSequence: raw.oldestAvailableEventSequence
         )
         guard validTerminalResult(progress: mapped.progress, result: mapped.result) else {
             throw HomeScanResponseViolation.terminalAggregates
@@ -977,6 +982,7 @@ private final class FFIHomeScanTask: HomeScanTask, @unchecked Sendable {
                 mapped.revision >= previous.revision,
                 !previous.cancellationRequested || mapped.cancellationRequested,
                 !previous.eventsTruncated || mapped.eventsTruncated,
+                validEventTransition(from: previous, to: mapped),
                 validPhaseTransition(from: previous.phase, to: mapped.phase),
                 validStageTransition(from: previous.stage, to: mapped.stage),
                 validProgressTransition(from: previous.progress, to: mapped.progress),
@@ -986,6 +992,123 @@ private final class FFIHomeScanTask: HomeScanTask, @unchecked Sendable {
             }
         }
         return mapped
+    }
+
+    private static func mapEvent(_ raw: ScanEvent) throws -> HomeScanEvent {
+        guard raw.recordVersion == EngineService.expectedRecordVersion, raw.sequence > 0 else {
+            throw HomeScanResponseViolation.events
+        }
+        let kind: HomeScanEventKind = switch raw.kind {
+        case .queued: .queued
+        case .started: .started
+        case let .progress(completed, total):
+            try mapProgressEvent(completed: completed, total: total)
+        case let .scanProgress(filesScanned, directoriesScanned, knownAllocatedBytes, errorCount):
+            .scanning(
+                files: filesScanned,
+                directories: directoriesScanned,
+                knownAllocatedBytes: knownAllocatedBytes,
+                errors: errorCount
+            )
+        case .scanFinalizing: .finalizing
+        case .candidateEvaluationStarted: .candidateEvaluationStarted
+        case let .candidateEvaluationFinished(status, candidateCount, failure):
+            try mapCandidateEvaluationEvent(
+                status: status,
+                candidateCount: candidateCount,
+                failure: failure
+            )
+        case .cancellationRequested: .cancellationRequested
+        case let .terminal(phase):
+            .terminal(mapTaskPhase(phase))
+        case .maintenance: .maintenance
+        }
+        return HomeScanEvent(sequence: raw.sequence, kind: kind)
+    }
+
+    private static func mapProgressEvent(
+        completed: UInt64,
+        total: UInt64
+    ) throws -> HomeScanEventKind {
+        guard completed <= total else { throw HomeScanResponseViolation.events }
+        return .progress(completed: completed, total: total)
+    }
+
+    private static func mapCandidateEvaluationEvent(
+        status: ScanCandidateEvaluationStatus,
+        candidateCount: UInt32,
+        failure: ScanCandidateEvaluationFailure?
+    ) throws -> HomeScanEventKind {
+        let mappedStatus: HomeScanCandidateEvaluation = switch status {
+        case .notRun: .notRun
+        case .succeeded: .succeeded(candidateCount: candidateCount)
+        case .failed: .failed
+        }
+        guard candidateCount <= 4_096 else { throw HomeScanResponseViolation.events }
+        if mappedStatus == .notRun || mappedStatus == .succeeded(candidateCount: candidateCount) {
+            guard failure == nil else { throw HomeScanResponseViolation.events }
+        } else {
+            guard failure != nil else { throw HomeScanResponseViolation.events }
+        }
+        return .candidateEvaluationFinished(
+            status: mappedStatus,
+            candidateCount: candidateCount,
+            failure: failure.map(mapCandidateEvaluationFailure)
+        )
+    }
+
+    private static func mapTaskPhase(_ phase: TaskPhase) -> HomeScanTaskPhase {
+        switch phase {
+        case .queued: .queued
+        case .running: .running
+        case .succeeded: .succeeded
+        case .failed: .failed
+        case .cancelled: .cancelled
+        }
+    }
+
+    private static func mapCandidateEvaluationFailure(
+        _ failure: ScanCandidateEvaluationFailure
+    ) -> HomeScanCandidateEvaluationFailure {
+        switch failure {
+        case .cancelled: .cancelled
+        case .catalogInvalid: .catalogInvalid
+        case .contextInvalid: .contextInvalid
+        case .evaluationFailed: .evaluationFailed
+        case .candidateInvalid: .candidateInvalid
+        case .limitExceeded: .limitExceeded
+        case .internalState: .internalState
+        }
+    }
+
+    private static func validEventTransition(
+        from previous: HomeScanTaskPoll,
+        to current: HomeScanTaskPoll
+    ) -> Bool {
+        guard
+            current.eventCursor >= previous.eventCursor,
+            current.oldestAvailableEventSequence >= previous.oldestAvailableEventSequence,
+            !previous.eventsTruncated || current.eventsTruncated,
+            current.oldestAvailableEventSequence <= current.eventCursor || current.eventCursor == 0
+        else { return false }
+
+        var last = previous.eventCursor
+        for event in current.events {
+            guard event.sequence > last, event.sequence <= current.eventCursor else { return false }
+            if case let .terminal(eventPhase) = event.kind {
+                guard eventPhase == current.phase || !current.phase.isTerminal else { return false }
+            }
+            last = event.sequence
+        }
+        if current.events.isEmpty {
+            guard current.eventCursor == previous.eventCursor else { return false }
+        } else if last != current.eventCursor {
+            return false
+        }
+        if !current.eventsTruncated, current.oldestAvailableEventSequence > previous.eventCursor + 1 {
+            return false
+        }
+        return true
     }
 
     private static func mapProgress(_ raw: ScanProgress) throws -> ScanProgressFacts {

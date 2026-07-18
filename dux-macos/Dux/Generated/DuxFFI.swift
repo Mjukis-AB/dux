@@ -3055,6 +3055,64 @@ public func FfiConverterTypeScanCoverageSummary_lower(_ value: ScanCoverageSumma
 }
 
 
+public struct ScanEvent: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let sequence: UInt64
+    public let kind: ScanEventKind
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, sequence: UInt64, kind: ScanEventKind) {
+        self.recordVersion = recordVersion
+        self.sequence = sequence
+        self.kind = kind
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension ScanEvent: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeScanEvent: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ScanEvent {
+        return
+            try ScanEvent(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                sequence: FfiConverterUInt64.read(from: &buf),
+                kind: FfiConverterTypeScanEventKind.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ScanEvent, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterUInt64.write(value.sequence, into: &buf)
+        FfiConverterTypeScanEventKind.write(value.kind, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeScanEvent_lift(_ buf: RustBuffer) throws -> ScanEvent {
+    return try FfiConverterTypeScanEvent.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeScanEvent_lower(_ value: ScanEvent) -> RustBuffer {
+    return FfiConverterTypeScanEvent.lower(value)
+}
+
+
 /**
  * One path-free aggregate observation. The task retains its event cursor
  * privately; `events_truncated` records whether any aggregate events were
@@ -3067,19 +3125,25 @@ public struct ScanPoll: Equatable, Hashable {
     public let cancellationRequested: Bool
     public let revision: UInt64
     public let progress: ScanProgress?
+    public let events: [ScanEvent]
+    public let nextEventSequence: UInt64
+    public let oldestAvailableEventSequence: UInt64
     public let eventsTruncated: Bool
     public let failure: ScanTaskFailure?
     public let result: ScanTaskResult?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(recordVersion: UInt32, phase: TaskPhase, stage: ScanStage, cancellationRequested: Bool, revision: UInt64, progress: ScanProgress?, eventsTruncated: Bool, failure: ScanTaskFailure?, result: ScanTaskResult?) {
+    public init(recordVersion: UInt32, phase: TaskPhase, stage: ScanStage, cancellationRequested: Bool, revision: UInt64, progress: ScanProgress?, events: [ScanEvent], nextEventSequence: UInt64, oldestAvailableEventSequence: UInt64, eventsTruncated: Bool, failure: ScanTaskFailure?, result: ScanTaskResult?) {
         self.recordVersion = recordVersion
         self.phase = phase
         self.stage = stage
         self.cancellationRequested = cancellationRequested
         self.revision = revision
         self.progress = progress
+        self.events = events
+        self.nextEventSequence = nextEventSequence
+        self.oldestAvailableEventSequence = oldestAvailableEventSequence
         self.eventsTruncated = eventsTruncated
         self.failure = failure
         self.result = result
@@ -3107,6 +3171,9 @@ public struct FfiConverterTypeScanPoll: FfiConverterRustBuffer {
                 cancellationRequested: FfiConverterBool.read(from: &buf),
                 revision: FfiConverterUInt64.read(from: &buf),
                 progress: FfiConverterOptionTypeScanProgress.read(from: &buf),
+                events: FfiConverterSequenceTypeScanEvent.read(from: &buf),
+                nextEventSequence: FfiConverterUInt64.read(from: &buf),
+                oldestAvailableEventSequence: FfiConverterUInt64.read(from: &buf),
                 eventsTruncated: FfiConverterBool.read(from: &buf),
                 failure: FfiConverterOptionTypeScanTaskFailure.read(from: &buf),
                 result: FfiConverterOptionTypeScanTaskResult.read(from: &buf)
@@ -3120,6 +3187,9 @@ public struct FfiConverterTypeScanPoll: FfiConverterRustBuffer {
         FfiConverterBool.write(value.cancellationRequested, into: &buf)
         FfiConverterUInt64.write(value.revision, into: &buf)
         FfiConverterOptionTypeScanProgress.write(value.progress, into: &buf)
+        FfiConverterSequenceTypeScanEvent.write(value.events, into: &buf)
+        FfiConverterUInt64.write(value.nextEventSequence, into: &buf)
+        FfiConverterUInt64.write(value.oldestAvailableEventSequence, into: &buf)
         FfiConverterBool.write(value.eventsTruncated, into: &buf)
         FfiConverterOptionTypeScanTaskFailure.write(value.failure, into: &buf)
         FfiConverterOptionTypeScanTaskResult.write(value.result, into: &buf)
@@ -7372,6 +7442,152 @@ public func FfiConverterTypeScanError_lower(_ value: ScanError) -> RustBuffer {
 
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * Typed, path-free observations emitted while a scan task runs. Maintenance
+ * events are intentionally coalesced into `Maintenance` because they are
+ * engine bookkeeping, not user-facing scan progress.
+ */
+
+public enum ScanEventKind: Equatable, Hashable {
+
+    case queued
+    case started
+    case progress(completed: UInt64, total: UInt64
+    )
+    case scanProgress(filesScanned: UInt64, directoriesScanned: UInt64, knownAllocatedBytes: UInt64, errorCount: UInt64
+    )
+    case scanFinalizing
+    case candidateEvaluationStarted
+    case candidateEvaluationFinished(status: ScanCandidateEvaluationStatus, candidateCount: UInt32, failure: ScanCandidateEvaluationFailure?
+    )
+    case cancellationRequested
+    case terminal(phase: TaskPhase
+    )
+    case maintenance
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension ScanEventKind: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeScanEventKind: FfiConverterRustBuffer {
+    typealias SwiftType = ScanEventKind
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ScanEventKind {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .queued
+
+        case 2: return .started
+
+        case 3: return .progress(completed: try FfiConverterUInt64.read(from: &buf), total: try FfiConverterUInt64.read(from: &buf)
+        )
+
+        case 4: return .scanProgress(filesScanned: try FfiConverterUInt64.read(from: &buf), directoriesScanned: try FfiConverterUInt64.read(from: &buf), knownAllocatedBytes: try FfiConverterUInt64.read(from: &buf), errorCount: try FfiConverterUInt64.read(from: &buf)
+        )
+
+        case 5: return .scanFinalizing
+
+        case 6: return .candidateEvaluationStarted
+
+        case 7: return .candidateEvaluationFinished(status: try FfiConverterTypeScanCandidateEvaluationStatus.read(from: &buf), candidateCount: try FfiConverterUInt32.read(from: &buf), failure: try FfiConverterOptionTypeScanCandidateEvaluationFailure.read(from: &buf)
+        )
+
+        case 8: return .cancellationRequested
+
+        case 9: return .terminal(phase: try FfiConverterTypeTaskPhase.read(from: &buf)
+        )
+
+        case 10: return .maintenance
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: ScanEventKind, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .queued:
+            writeInt(&buf, Int32(1))
+
+
+        case .started:
+            writeInt(&buf, Int32(2))
+
+
+        case let .progress(completed,total):
+            writeInt(&buf, Int32(3))
+            FfiConverterUInt64.write(completed, into: &buf)
+            FfiConverterUInt64.write(total, into: &buf)
+
+
+        case let .scanProgress(filesScanned,directoriesScanned,knownAllocatedBytes,errorCount):
+            writeInt(&buf, Int32(4))
+            FfiConverterUInt64.write(filesScanned, into: &buf)
+            FfiConverterUInt64.write(directoriesScanned, into: &buf)
+            FfiConverterUInt64.write(knownAllocatedBytes, into: &buf)
+            FfiConverterUInt64.write(errorCount, into: &buf)
+
+
+        case .scanFinalizing:
+            writeInt(&buf, Int32(5))
+
+
+        case .candidateEvaluationStarted:
+            writeInt(&buf, Int32(6))
+
+
+        case let .candidateEvaluationFinished(status,candidateCount,failure):
+            writeInt(&buf, Int32(7))
+            FfiConverterTypeScanCandidateEvaluationStatus.write(status, into: &buf)
+            FfiConverterUInt32.write(candidateCount, into: &buf)
+            FfiConverterOptionTypeScanCandidateEvaluationFailure.write(failure, into: &buf)
+
+
+        case .cancellationRequested:
+            writeInt(&buf, Int32(8))
+
+
+        case let .terminal(phase):
+            writeInt(&buf, Int32(9))
+            FfiConverterTypeTaskPhase.write(phase, into: &buf)
+
+
+        case .maintenance:
+            writeInt(&buf, Int32(10))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeScanEventKind_lift(_ buf: RustBuffer) throws -> ScanEventKind {
+    return try FfiConverterTypeScanEventKind.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeScanEventKind_lower(_ value: ScanEventKind) -> RustBuffer {
+    return FfiConverterTypeScanEventKind.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 
 public enum ScanStage: Equatable, Hashable {
 
@@ -9096,6 +9312,31 @@ fileprivate struct FfiConverterSequenceTypeHistoricalScanSummary: FfiConverterRu
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeHistoricalScanSummary.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeScanEvent: FfiConverterRustBuffer {
+    typealias SwiftType = [ScanEvent]
+
+    public static func write(_ value: [ScanEvent], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeScanEvent.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [ScanEvent] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [ScanEvent]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeScanEvent.read(from: &buf))
         }
         return seq
     }

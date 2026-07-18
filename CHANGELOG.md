@@ -5,6 +5,16 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Continued Milestone 4 with FFI contract v18 progressive scan events. The
+  existing bounded task-event ring is now transported with each scan poll as
+  typed, sequenced, path-free observations plus an explicit last-delivered
+  cursor, oldest-retained sequence, and sticky truncation signal. The Swift
+  adapter rejects malformed versions, sequence/cursor regressions, impossible
+  terminal transitions, and candidate-event shapes before publishing an
+  app-owned event model. AppModel retains at most the latest 64 events per scan
+  generation and preserves them through terminal results. Internal maintenance
+  events are deliberately coalesced and remain non-authoritative; no event
+  grants path, AI, planning, or cleanup authority.
 - Continued Milestone 5 with policy-2 exact replay for Cargo's potential
   ancestor-manifest namespace. On macOS DUX captures an event cursor before
   discovery, arms one bounded ephemeral FSEvents history replay for the

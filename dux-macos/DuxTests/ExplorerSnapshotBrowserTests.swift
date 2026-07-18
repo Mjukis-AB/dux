@@ -1180,6 +1180,32 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
         )
     }
 
+    func candidateSummaries(
+        scanID _: String,
+        cursor _: UInt16,
+        limit _: UInt16
+    ) async throws -> ExplorerCandidateSummaryPage {
+        throw ExplorerCandidateDetailError.reviewNotAcquired
+    }
+
+    func candidatePaths(
+        scanID _: String,
+        candidateID _: String,
+        cursor _: UInt16,
+        limit _: UInt16
+    ) async throws -> ExplorerCandidatePathPage {
+        throw ExplorerCandidateDetailError.reviewNotAcquired
+    }
+
+    func candidateEvidence(
+        scanID _: String,
+        candidateID _: String,
+        cursor _: UInt16,
+        limit _: UInt16
+    ) async throws -> ExplorerCandidateEvidencePage {
+        throw ExplorerCandidateDetailError.reviewNotAcquired
+    }
+
     func childNodes(
         scanID: String,
         parentID: UInt64,

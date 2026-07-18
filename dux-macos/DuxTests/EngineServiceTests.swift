@@ -57,7 +57,7 @@ final class EngineServiceTests: XCTestCase {
         // DUX-DESTRUCTIVE: allow=test-swift-retry-obstruction-remove -- remove only this test fixture's deliberate file obstruction
         try FileManager.default.removeItem(at: dataRoot)
         let status = try await service.loadStatus()
-        XCTAssertEqual(status.ffiContractVersion, 16)
+        XCTAssertEqual(status.ffiContractVersion, 18)
         let closed = await service.close()
         XCTAssertTrue(closed)
     }
@@ -67,7 +67,7 @@ final class EngineServiceTests: XCTestCase {
         let result = try await EngineService(engine: fixture.engine).loadStatus()
 
         XCTAssertEqual(result.libraryVersion, "0.5.0")
-        XCTAssertEqual(result.ffiContractVersion, 16)
+        XCTAssertEqual(result.ffiContractVersion, 18)
         XCTAssertTrue(result.executedOffMainThread)
     }
 
@@ -353,6 +353,9 @@ final class EngineServiceTests: XCTestCase {
                     cancellationRequested: false,
                     revision: 1,
                     progress: nil,
+                    events: [],
+                    nextEventSequence: 0,
+                    oldestAvailableEventSequence: 0,
                     eventsTruncated: false,
                     failure: nil,
                     result: nil
@@ -368,7 +371,20 @@ final class EngineServiceTests: XCTestCase {
 
         let regressing = RecordingGeneratedScanTask(
             polls: [
-                generatedActivePoll(revision: 2),
+                ScanPoll(
+                    recordVersion: 1,
+                    phase: .running,
+                    stage: .scanning,
+                    cancellationRequested: false,
+                    revision: 2,
+                    progress: nil,
+                    events: [],
+                    nextEventSequence: 3,
+                    oldestAvailableEventSequence: 1,
+                    eventsTruncated: false,
+                    failure: nil,
+                    result: nil
+                ),
                 generatedActivePoll(revision: 1),
             ]
         )
@@ -457,6 +473,9 @@ final class EngineServiceTests: XCTestCase {
                     cancellationRequested: false,
                     revision: 3,
                     progress: progress,
+                    events: [],
+                    nextEventSequence: 0,
+                    oldestAvailableEventSequence: 0,
                     eventsTruncated: false,
                     failure: .snapshotRejected,
                     result: failedResult
@@ -524,6 +543,70 @@ final class EngineServiceTests: XCTestCase {
         }
     }
 
+    func testHomeScanAdapterMapsSequencedTypedEventsAndCursor() async throws {
+        let generated = RecordingGeneratedScanTask(
+            polls: [
+                ScanPoll(
+                    recordVersion: 1,
+                    phase: .running,
+                    stage: .scanning,
+                    cancellationRequested: false,
+                    revision: 1,
+                    progress: nil,
+                    events: [
+                        ScanEvent(recordVersion: 1, sequence: 1, kind: .queued),
+                        ScanEvent(recordVersion: 1, sequence: 2, kind: .started),
+                        ScanEvent(
+                            recordVersion: 1,
+                            sequence: 3,
+                            kind: .scanProgress(
+                                filesScanned: 4,
+                                directoriesScanned: 2,
+                                knownAllocatedBytes: 512,
+                                errorCount: 1
+                            )
+                        ),
+                    ],
+                    nextEventSequence: 3,
+                    oldestAvailableEventSequence: 1,
+                    eventsTruncated: false,
+                    failure: nil,
+                    result: nil
+                ),
+                ScanPoll(
+                    recordVersion: 1,
+                    phase: .running,
+                    stage: .scanning,
+                    cancellationRequested: false,
+                    revision: 2,
+                    progress: nil,
+                    events: [],
+                    nextEventSequence: 3,
+                    oldestAvailableEventSequence: 1,
+                    eventsTruncated: false,
+                    failure: nil,
+                    result: nil
+                ),
+            ]
+        )
+        let task = try await EngineService(
+            engine: RecordingScanEngine(task: generated)
+        ).startHomeScan().task
+
+        let first = try await task.poll()
+        XCTAssertEqual(first.eventCursor, 3)
+        XCTAssertEqual(first.events.map(\.sequence), [1, 2, 3])
+        XCTAssertEqual(first.events[2].kind, .scanning(
+            files: 4,
+            directories: 2,
+            knownAllocatedBytes: 512,
+            errors: 1
+        ))
+        let second = try await task.poll()
+        XCTAssertTrue(second.events.isEmpty)
+        XCTAssertEqual(second.eventCursor, 3)
+    }
+
     func testHomeScanAdapterRejectsMalformedNestedAndTerminalRecords() async throws {
         let malformedCoverage = ScanTaskResult(
             recordVersion: 1,
@@ -569,6 +652,9 @@ final class EngineServiceTests: XCTestCase {
                     cancellationRequested: false,
                     revision: 2,
                     progress: nil,
+                    events: [],
+                    nextEventSequence: 0,
+                    oldestAvailableEventSequence: 0,
                     eventsTruncated: false,
                     failure: nil,
                     result: nil
@@ -782,7 +868,7 @@ final class EngineServiceTests: XCTestCase {
             weakEngine = engine
 
             XCTAssertEqual(liveEngineInstanceCount(), baseline + 1)
-            XCTAssertEqual(try engine.libraryVersion().ffiContractVersion, 16)
+            XCTAssertEqual(try engine.libraryVersion().ffiContractVersion, 18)
             XCTAssertTrue(engine.close())
             XCTAssertTrue(engine.close())
             XCTAssertThrowsError(try engine.formatSize(bytes: 1_536)) { error in
@@ -1167,6 +1253,9 @@ private func generatedActivePoll(
         cancellationRequested: false,
         revision: revision,
         progress: progress,
+        events: [],
+        nextEventSequence: 0,
+        oldestAvailableEventSequence: 0,
         eventsTruncated: false,
         failure: nil,
         result: nil
@@ -1181,6 +1270,9 @@ private func generatedSuccessPoll(result: ScanTaskResult) -> ScanPoll {
         cancellationRequested: false,
         revision: 3,
         progress: nil,
+        events: [],
+        nextEventSequence: 0,
+        oldestAvailableEventSequence: 0,
         eventsTruncated: false,
         failure: nil,
         result: result

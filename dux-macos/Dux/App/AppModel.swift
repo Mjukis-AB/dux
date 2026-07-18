@@ -32,6 +32,7 @@ final class AppModel: DuxCapacitySampling {
     private(set) var showsStorageAccessIntroduction: Bool
     private(set) var broaderStorageAnalysisRequested = false
     private(set) var storageAccessProbeState = StorageAccessProbeState.idle
+    private(set) var latestHomeScanEvents: [HomeScanEvent] = []
 
     private let engineService: any EngineServing
     private let volumeMonitor: any VolumeMonitoring
@@ -608,6 +609,7 @@ final class AppModel: DuxCapacitySampling {
         let generation = homeScanGeneration
         homeScanCancellationRequested = false
         latestHomeScanProgress = nil
+        latestHomeScanEvents = []
         activeScanRequest = request
         scanState.scope = scope
         scanState.phase = .queued
@@ -858,6 +860,12 @@ final class AppModel: DuxCapacitySampling {
         _ poll: HomeScanTaskPoll,
         scope: AppScanScope
     ) -> AppScanRunOutcome? {
+        if !poll.events.isEmpty {
+            latestHomeScanEvents.append(contentsOf: poll.events)
+            if latestHomeScanEvents.count > 64 {
+                latestHomeScanEvents.removeFirst(latestHomeScanEvents.count - 64)
+            }
+        }
         if let progress = poll.progress {
             latestHomeScanProgress = progress
         }

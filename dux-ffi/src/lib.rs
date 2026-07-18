@@ -60,7 +60,7 @@ use dux_core::{
     VolumeId,
 };
 
-const FFI_CONTRACT_VERSION: u32 = 17;
+const FFI_CONTRACT_VERSION: u32 = 18;
 const FFI_RECORD_VERSION: u32 = 1;
 const SNAPSHOT_NODE_RECORD_VERSION: u32 = 2;
 const SCAN_EVENT_PAGE_LIMIT: u16 = 64;
@@ -349,6 +349,44 @@ pub enum ScanStage {
     Finalizing,
     Evaluating,
     Terminal,
+}
+
+/// Typed, path-free observations emitted while a scan task runs. Maintenance
+/// events are intentionally coalesced into `Maintenance` because they are
+/// engine bookkeeping, not user-facing scan progress.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum ScanEventKind {
+    Queued,
+    Started,
+    Progress {
+        completed: u64,
+        total: u64,
+    },
+    ScanProgress {
+        files_scanned: u64,
+        directories_scanned: u64,
+        known_allocated_bytes: u64,
+        error_count: u64,
+    },
+    ScanFinalizing,
+    CandidateEvaluationStarted,
+    CandidateEvaluationFinished {
+        status: ScanCandidateEvaluationStatus,
+        candidate_count: u32,
+        failure: Option<ScanCandidateEvaluationFailure>,
+    },
+    CancellationRequested,
+    Terminal {
+        phase: TaskPhase,
+    },
+    Maintenance,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct ScanEvent {
+    pub record_version: u32,
+    pub sequence: u64,
+    pub kind: ScanEventKind,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
@@ -694,9 +732,11 @@ pub struct ScanProgress {
     pub error_count: u64,
 }
 
-/// One path-free aggregate observation. The task retains its event cursor
-/// privately; `events_truncated` records whether any aggregate events were
-/// already gone from the bounded core ring before this object observed them.
+/// One path-free aggregate observation plus the next bounded page of typed
+/// task events. `next_event_sequence` is the last delivered event sequence
+/// (the cursor to pass on the next poll), not a one-past count. The
+/// `events_truncated` bit is sticky when the requested cursor predates the
+/// bounded core ring.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct ScanPoll {
     pub record_version: u32,
@@ -705,6 +745,9 @@ pub struct ScanPoll {
     pub cancellation_requested: bool,
     pub revision: u64,
     pub progress: Option<ScanProgress>,
+    pub events: Vec<ScanEvent>,
+    pub next_event_sequence: u64,
+    pub oldest_available_event_sequence: u64,
     pub events_truncated: bool,
     pub failure: Option<ScanTaskFailure>,
     pub result: Option<ScanTaskResult>,
@@ -1332,6 +1375,8 @@ impl SnapshotReviewSession {
 #[derive(Clone, Copy, Debug)]
 struct ScanProgressState {
     event_cursor: u64,
+    next_event_sequence: u64,
+    oldest_available_event_sequence: u64,
     stage: ScanStage,
     has_progress: bool,
     files_scanned: u64,
@@ -1345,6 +1390,8 @@ impl Default for ScanProgressState {
     fn default() -> Self {
         Self {
             event_cursor: 0,
+            next_event_sequence: 0,
+            oldest_available_event_sequence: 0,
             stage: ScanStage::Queued,
             has_progress: false,
             files_scanned: 0,
@@ -1357,8 +1404,19 @@ impl Default for ScanProgressState {
 }
 
 impl ScanProgressState {
-    fn apply(&mut self, batch: CoreTaskEventBatch) {
+    fn apply(&mut self, batch: CoreTaskEventBatch) -> Vec<ScanEvent> {
         self.events_truncated |= batch.truncated;
+        self.next_event_sequence = batch.next_sequence;
+        self.oldest_available_event_sequence = batch.oldest_available_sequence;
+        let events = batch
+            .events
+            .iter()
+            .map(|event| ScanEvent {
+                record_version: FFI_RECORD_VERSION,
+                sequence: event.sequence,
+                kind: map_scan_event_kind(&event.kind),
+            })
+            .collect();
         for event in batch.events {
             match event.kind {
                 CoreTaskEventKind::Queued => self.stage = ScanStage::Queued,
@@ -1402,6 +1460,79 @@ impl ScanProgressState {
             }
         }
         self.event_cursor = batch.next_sequence;
+        events
+    }
+}
+
+fn map_scan_event_kind(kind: &CoreTaskEventKind) -> ScanEventKind {
+    match kind {
+        CoreTaskEventKind::Queued => ScanEventKind::Queued,
+        CoreTaskEventKind::Started => ScanEventKind::Started,
+        CoreTaskEventKind::Progress { completed, total } => ScanEventKind::Progress {
+            completed: *completed,
+            total: *total,
+        },
+        CoreTaskEventKind::ScanProgress {
+            files,
+            directories,
+            known_allocated_bytes,
+            errors,
+        } => ScanEventKind::ScanProgress {
+            files_scanned: *files,
+            directories_scanned: *directories,
+            known_allocated_bytes: *known_allocated_bytes,
+            error_count: *errors,
+        },
+        CoreTaskEventKind::ScanFinalizing => ScanEventKind::ScanFinalizing,
+        CoreTaskEventKind::CandidateEvaluationStarted => ScanEventKind::CandidateEvaluationStarted,
+        CoreTaskEventKind::CandidateEvaluationFinished { status } => {
+            let (status, candidate_count, failure) = match *status {
+                CoreCandidateEvaluationStatus::NotRun => {
+                    (ScanCandidateEvaluationStatus::NotRun, 0, None)
+                }
+                CoreCandidateEvaluationStatus::Succeeded { candidate_count } => (
+                    ScanCandidateEvaluationStatus::Succeeded,
+                    candidate_count,
+                    None,
+                ),
+                CoreCandidateEvaluationStatus::Failed { kind } => (
+                    ScanCandidateEvaluationStatus::Failed,
+                    0,
+                    Some(map_scan_candidate_evaluation_failure(kind)),
+                ),
+                _ => (
+                    ScanCandidateEvaluationStatus::Failed,
+                    0,
+                    Some(ScanCandidateEvaluationFailure::InternalState),
+                ),
+            };
+            ScanEventKind::CandidateEvaluationFinished {
+                status,
+                candidate_count,
+                failure,
+            }
+        }
+        CoreTaskEventKind::CancellationRequested => ScanEventKind::CancellationRequested,
+        CoreTaskEventKind::Terminal { phase } => ScanEventKind::Terminal {
+            phase: map_phase(*phase),
+        },
+        CoreTaskEventKind::ScanRecoveryMaintenanceBatchApplying
+        | CoreTaskEventKind::ScanRecoveryMaintenanceBatchFinished { .. }
+        | CoreTaskEventKind::HistoryMaintenanceBatchApplying
+        | CoreTaskEventKind::HistoryMaintenanceBatchFinished { .. }
+        | CoreTaskEventKind::SnapshotRetentionBatchApplying
+        | CoreTaskEventKind::SnapshotRetentionBatchFinished { .. }
+        | CoreTaskEventKind::SnapshotOrphanMaintenanceBatchApplying
+        | CoreTaskEventKind::SnapshotOrphanMaintenanceBatchFinished { .. }
+        | CoreTaskEventKind::SnapshotProvisioningStageMaintenanceBatchApplying
+        | CoreTaskEventKind::SnapshotProvisioningStageMaintenanceBatchFinished { .. }
+        | CoreTaskEventKind::SnapshotTerminalTempMaintenanceBatchApplying
+        | CoreTaskEventKind::SnapshotTerminalTempMaintenanceBatchFinished { .. }
+        | CoreTaskEventKind::SnapshotUnleasedTempMaintenanceBatchApplying
+        | CoreTaskEventKind::SnapshotUnleasedTempMaintenanceBatchFinished { .. } => {
+            ScanEventKind::Maintenance
+        }
+        _ => ScanEventKind::Maintenance,
     }
 }
 
@@ -1420,7 +1551,7 @@ impl ScanTask {
             .engine
             .task_events(self.id, progress.event_cursor, SCAN_EVENT_PAGE_LIMIT)
             .map_err(map_scan_access_error)?;
-        progress.apply(events);
+        let events = progress.apply(events);
 
         let snapshot = self
             .engine
@@ -1461,6 +1592,9 @@ impl ScanTask {
                 known_allocated_bytes: progress.known_allocated_bytes,
                 error_count: progress.error_count,
             }),
+            events,
+            next_event_sequence: progress.next_event_sequence,
+            oldest_available_event_sequence: progress.oldest_available_event_sequence,
             events_truncated: progress.events_truncated,
             failure,
             result,
@@ -3507,10 +3641,10 @@ mod tests {
     }
 
     #[test]
-    fn reports_contract_seventeen_and_preserves_legacy_formatting() {
+    fn reports_contract_eighteen_and_preserves_legacy_formatting() {
         let _guard = ENGINE_TEST_LOCK.lock().unwrap();
         let (_temp, engine) = engine();
-        assert_eq!(library_version().ffi_contract_version, 17);
+        assert_eq!(library_version().ffi_contract_version, 18);
         assert_eq!(engine.library_version().unwrap(), library_version());
         assert_eq!(engine.format_size(1536).unwrap().display, "1.5 KB");
         assert!(engine.close());
@@ -3537,6 +3671,48 @@ mod tests {
             assert!(Instant::now() < deadline, "scan did not become terminal");
             std::thread::yield_now();
         }
+    }
+
+    #[test]
+    fn scan_poll_exposes_ordered_typed_events_and_stable_cursor() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (temp, engine) = engine();
+        let root = temp.path().join("scan-root");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("one.txt"), b"one").unwrap();
+
+        let start = engine.start_scan(scan_request(&root)).unwrap();
+        let mut observed = Vec::new();
+        let mut terminal = None;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while terminal.is_none() {
+            let poll = start.task.poll().unwrap();
+            observed.extend(poll.events.iter().map(|event| event.sequence));
+            if matches!(
+                poll.phase,
+                TaskPhase::Succeeded | TaskPhase::Failed | TaskPhase::Cancelled
+            ) {
+                terminal = Some(poll);
+            } else {
+                assert!(Instant::now() < deadline, "scan did not become terminal");
+                std::thread::yield_now();
+            }
+        }
+        assert!(!observed.is_empty());
+        assert!(observed.windows(2).all(|pair| pair[0] < pair[1]));
+        assert_eq!(
+            observed.last().copied(),
+            Some(terminal.unwrap().next_event_sequence)
+        );
+        assert!(observed.contains(&1));
+
+        let drained = start.task.poll().unwrap();
+        observed.extend(drained.events.iter().map(|event| event.sequence));
+        let empty = start.task.poll().unwrap();
+        assert!(empty.events.is_empty());
+        assert_eq!(empty.next_event_sequence, observed.last().copied().unwrap());
+        assert_eq!(empty.oldest_available_event_sequence, 1);
+        assert!(engine.close());
     }
 
     #[test]
@@ -3662,7 +3838,7 @@ mod tests {
         use dux_core::engine::{TaskEvent as CoreTaskEvent, TaskEventKind};
 
         let mut state = ScanProgressState::default();
-        state.apply(CoreTaskEventBatch {
+        let events = state.apply(CoreTaskEventBatch {
             events: vec![
                 CoreTaskEvent {
                     sequence: 4,
@@ -3687,7 +3863,19 @@ mod tests {
             truncated: true,
             terminal: false,
         });
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.sequence)
+                .collect::<Vec<_>>(),
+            vec![4, 5, 6]
+        );
+        assert!(matches!(events[0].kind, ScanEventKind::Started));
+        assert!(matches!(events[1].kind, ScanEventKind::ScanProgress { .. }));
+        assert!(matches!(events[2].kind, ScanEventKind::ScanFinalizing));
         assert_eq!(state.event_cursor, 6);
+        assert_eq!(state.next_event_sequence, 6);
+        assert_eq!(state.oldest_available_event_sequence, 4);
         assert_eq!(state.stage, ScanStage::Finalizing);
         assert!(state.has_progress);
         assert_eq!(state.files_scanned, 12);
@@ -3696,7 +3884,7 @@ mod tests {
         assert_eq!(state.error_count, 2);
         assert!(state.events_truncated);
 
-        state.apply(CoreTaskEventBatch {
+        let events = state.apply(CoreTaskEventBatch {
             events: vec![CoreTaskEvent {
                 sequence: 7,
                 kind: TaskEventKind::CandidateEvaluationStarted,
@@ -3706,6 +3894,11 @@ mod tests {
             truncated: false,
             terminal: false,
         });
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            events[0].kind,
+            ScanEventKind::CandidateEvaluationStarted
+        ));
         assert_eq!(state.stage, ScanStage::Evaluating);
         assert!(state.events_truncated);
     }

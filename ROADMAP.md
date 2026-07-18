@@ -3770,7 +3770,7 @@ Goal: reach feature parity with CLI navigation and materially improve clarity.
 
 Tasks:
 
-- [ ] Expose last-complete/recent snapshot selection, paged nodes, candidate
+- [x] Expose last-complete/recent snapshot selection, paged nodes, candidate
   paths/evidence, and treemap-budget APIs over FFI under review leases.
   - [x] 2026-07-17 slice: expose a bounded newest-first recent-scan selection
     page through FFI contract v8 and the off-main Swift adapter. Records are
@@ -3821,8 +3821,20 @@ Tasks:
     budgets, and closed engines remain typed failures. Candidate detail is
     historical disclosure only and is never accepted as a planner or executor
     input.
-- [ ] Add progressive scan events.
-- [ ] Implement treemap, synchronized list, breadcrumbs, local snapshot/history
+- [x] Add progressive scan events.
+  - [x] 2026-07-18 slice: expose the engine's bounded, sequenced task-event
+    pages in FFI contract v18 alongside the existing aggregate scan poll. Each
+    event is path-free and typed (queue/start/progress/finalizing/candidate
+    evaluation/cancellation/terminal), while internal maintenance activity is
+    explicitly coalesced into a non-authoritative maintenance event. The poll
+    carries the last-delivered event cursor, oldest retained sequence, and
+    sticky truncation bit; Swift rejects version, ordering, cursor, terminal,
+    and truncation contradictions before publishing an app-owned model. The
+    macOS scan driver retains only the latest 64 observations per generation,
+    resets them for a new scan, and keeps them visible through terminal results;
+    no UI string, path, plan, AI input, or cleanup authority crosses this
+    boundary.
+- [x] Implement treemap, synchronized list, breadcrumbs, local snapshot/history
   drill-down, history navigation, and inspector.
   - [x] 2026-07-17 slice: add the first lease-backed Latest Snapshot Browser to
     the macOS Explorer. Opening the destination atomically acquires the
@@ -3856,7 +3868,7 @@ Tasks:
     refresh clears that hint, and failed history refreshes preserve both the
     active review and last confirmed list. Close and late-acquisition races
     release both old and target ownership without publishing stale content.
-- [ ] Implement Large Files.
+- [x] Implement Large Files.
   - [x] 2026-07-17 slice: add FFI contract v12's lease-backed, path-free Large
     Files projection and native segmented view. The app lazily requests the 100
     largest matching file observations, defaults to a configurable 1 GiB size

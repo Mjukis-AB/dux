@@ -81,6 +81,16 @@ enum HomeScanCandidateEvaluation: Equatable, Sendable {
     case failed
 }
 
+enum HomeScanCandidateEvaluationFailure: Equatable, Sendable {
+    case cancelled
+    case catalogInvalid
+    case contextInvalid
+    case evaluationFailed
+    case candidateInvalid
+    case limitExceeded
+    case internalState
+}
+
 struct HomeScanTaskResult: Equatable, Sendable {
     let scanID: String
     let startedAt: Date
@@ -118,6 +128,28 @@ struct HomeScanTaskResult: Equatable, Sendable {
     }
 }
 
+enum HomeScanEventKind: Equatable, Sendable {
+    case queued
+    case started
+    case progress(completed: UInt64, total: UInt64)
+    case scanning(files: UInt64, directories: UInt64, knownAllocatedBytes: UInt64, errors: UInt64)
+    case finalizing
+    case candidateEvaluationStarted
+    case candidateEvaluationFinished(
+        status: HomeScanCandidateEvaluation,
+        candidateCount: UInt32,
+        failure: HomeScanCandidateEvaluationFailure?
+    )
+    case cancellationRequested
+    case terminal(HomeScanTaskPhase)
+    case maintenance
+}
+
+struct HomeScanEvent: Equatable, Sendable {
+    let sequence: UInt64
+    let kind: HomeScanEventKind
+}
+
 struct HomeScanTaskPoll: Equatable, Sendable {
     let phase: HomeScanTaskPhase
     let stage: HomeScanTaskStage
@@ -127,6 +159,36 @@ struct HomeScanTaskPoll: Equatable, Sendable {
     let eventsTruncated: Bool
     let failure: HomeScanTaskFailure?
     let result: HomeScanTaskResult?
+    let events: [HomeScanEvent]
+    /// The last event sequence delivered by the engine (not a one-past count).
+    let eventCursor: UInt64
+    let oldestAvailableEventSequence: UInt64
+
+    init(
+        phase: HomeScanTaskPhase,
+        stage: HomeScanTaskStage,
+        cancellationRequested: Bool,
+        revision: UInt64,
+        progress: ScanProgressFacts?,
+        eventsTruncated: Bool,
+        failure: HomeScanTaskFailure?,
+        result: HomeScanTaskResult?,
+        events: [HomeScanEvent] = [],
+        eventCursor: UInt64 = 0,
+        oldestAvailableEventSequence: UInt64 = 0
+    ) {
+        self.phase = phase
+        self.stage = stage
+        self.cancellationRequested = cancellationRequested
+        self.revision = revision
+        self.progress = progress
+        self.eventsTruncated = eventsTruncated
+        self.failure = failure
+        self.result = result
+        self.events = events
+        self.eventCursor = eventCursor
+        self.oldestAvailableEventSequence = oldestAvailableEventSequence
+    }
 }
 
 enum HomeScanCancelOutcome: Equatable, Sendable {
