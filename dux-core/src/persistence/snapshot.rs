@@ -9,7 +9,7 @@ use std::marker::PhantomData;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 use std::time::SystemTime;
 
@@ -62,10 +62,10 @@ pub(crate) mod from_scan;
 mod storage;
 
 pub(crate) use codec::{
-    HostValue, MAX_SNAPSHOT_DEPTH, MAX_SNAPSHOT_NODES, SNAPSHOT_FORMAT_VERSION, SnapshotCodecError,
-    SnapshotCodecErrorKind, SnapshotDigest, SnapshotDocument, SnapshotMetadata, SnapshotNode,
-    SnapshotNodeKind, SnapshotScanFlags, SnapshotTimestamp, SnapshotTotals, SnapshotUnixIdentity,
-    decode_snapshot, encode_snapshot, validate_snapshot_document,
+    HostEncoding, HostValue, MAX_SNAPSHOT_DEPTH, MAX_SNAPSHOT_NODES, SNAPSHOT_FORMAT_VERSION,
+    SnapshotCodecError, SnapshotCodecErrorKind, SnapshotDigest, SnapshotDocument, SnapshotMetadata,
+    SnapshotNode, SnapshotNodeKind, SnapshotScanFlags, SnapshotTimestamp, SnapshotTotals,
+    SnapshotUnixIdentity, decode_snapshot, encode_snapshot, validate_snapshot_document,
 };
 pub(crate) use storage::{
     RetainedSnapshot, SecureSnapshotStore, SnapshotFileName, SnapshotFileUsage,
@@ -397,7 +397,13 @@ pub(crate) struct SnapshotRepository {
 struct SnapshotReviewContext {
     owner: OnceLock<ProcessInstanceId>,
     active_slots: Arc<AtomicUsize>,
+    decoded_slots: Arc<AtomicUsize>,
+    decoded_bytes: Arc<AtomicU64>,
 }
+
+const MAX_DECODED_REVIEW_DOCUMENTS_PER_OWNER: usize = 2;
+const MAX_ESTIMATED_DECODED_REVIEW_BYTES_PER_OWNER: u64 = 1_024 * 1_024 * 1_024;
+const DECODED_REVIEW_WIRE_MULTIPLIER: u64 = 3;
 
 #[allow(
     dead_code,
@@ -405,6 +411,52 @@ struct SnapshotReviewContext {
 )]
 struct SnapshotReviewSlot {
     active_slots: Arc<AtomicUsize>,
+}
+
+struct SnapshotReviewDecodedSlot {
+    decoded_slots: Arc<AtomicUsize>,
+    decoded_bytes: Arc<AtomicU64>,
+    charged_bytes: u64,
+}
+
+pub(crate) struct SnapshotReviewDocument {
+    document: SnapshotDocument,
+    child_offsets: Vec<u32>,
+    child_indices: Vec<u32>,
+    _slot: SnapshotReviewDecodedSlot,
+}
+
+impl std::ops::Deref for SnapshotReviewDocument {
+    type Target = SnapshotDocument;
+
+    fn deref(&self) -> &Self::Target {
+        &self.document
+    }
+}
+
+impl SnapshotReviewDocument {
+    pub(crate) fn direct_child_indices(
+        &self,
+        parent_index: usize,
+    ) -> Result<&[u32], SnapshotRepositoryError> {
+        let start = *self.child_offsets.get(parent_index).ok_or_else(|| {
+            repository_error(SnapshotRepositoryErrorKind::Codec(
+                SnapshotCodecErrorKind::CorruptData,
+            ))
+        })?;
+        let end = *self.child_offsets.get(parent_index + 1).ok_or_else(|| {
+            repository_error(SnapshotRepositoryErrorKind::Codec(
+                SnapshotCodecErrorKind::CorruptData,
+            ))
+        })?;
+        self.child_indices
+            .get(start as usize..end as usize)
+            .ok_or_else(|| {
+                repository_error(SnapshotRepositoryErrorKind::Codec(
+                    SnapshotCodecErrorKind::CorruptData,
+                ))
+            })
+    }
 }
 
 #[allow(
@@ -448,6 +500,134 @@ impl Drop for SnapshotReviewSlot {
     }
 }
 
+impl SnapshotReviewDecodedSlot {
+    fn reserve(
+        decoded_slots: &Arc<AtomicUsize>,
+        decoded_bytes: &Arc<AtomicU64>,
+        wire_bytes: u64,
+    ) -> Result<Self, SnapshotRepositoryError> {
+        let charged_bytes = wire_bytes
+            .checked_mul(DECODED_REVIEW_WIRE_MULTIPLIER)
+            .ok_or_else(review_budget_exceeded)?;
+        if charged_bytes > MAX_ESTIMATED_DECODED_REVIEW_BYTES_PER_OWNER {
+            return Err(review_budget_exceeded());
+        }
+        decoded_slots
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+                (active < MAX_DECODED_REVIEW_DOCUMENTS_PER_OWNER).then_some(active + 1)
+            })
+            .map_err(|_| review_budget_exceeded())?;
+        if decoded_bytes
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+                active
+                    .checked_add(charged_bytes)
+                    .filter(|total| *total <= MAX_ESTIMATED_DECODED_REVIEW_BYTES_PER_OWNER)
+            })
+            .is_err()
+        {
+            let previous = decoded_slots.fetch_sub(1, Ordering::AcqRel);
+            debug_assert!(previous > 0, "decoded snapshot review slot underflow");
+            return Err(review_budget_exceeded());
+        }
+        Ok(Self {
+            decoded_slots: Arc::clone(decoded_slots),
+            decoded_bytes: Arc::clone(decoded_bytes),
+            charged_bytes,
+        })
+    }
+}
+
+fn review_budget_exceeded() -> SnapshotRepositoryError {
+    repository_error(SnapshotRepositoryErrorKind::History(
+        HistoryErrorKind::QueryLimitExceeded,
+    ))
+}
+
+impl Drop for SnapshotReviewDecodedSlot {
+    fn drop(&mut self) {
+        let previous_bytes = self
+            .decoded_bytes
+            .fetch_sub(self.charged_bytes, Ordering::AcqRel);
+        debug_assert!(
+            previous_bytes >= self.charged_bytes,
+            "decoded snapshot byte underflow"
+        );
+        let previous = self.decoded_slots.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous > 0, "decoded snapshot review slot underflow");
+    }
+}
+
+fn build_review_child_index(
+    document: &SnapshotDocument,
+) -> Result<(Vec<u32>, Vec<u32>), SnapshotRepositoryError> {
+    let node_count = document.nodes.len();
+    let mut offsets = Vec::new();
+    offsets
+        .try_reserve_exact(node_count.saturating_add(1))
+        .map_err(|_| review_budget_exceeded())?;
+    offsets.push(0_u32);
+    for node in &document.nodes {
+        let next = offsets
+            .last()
+            .copied()
+            .and_then(|offset| {
+                u32::try_from(node.child_count)
+                    .ok()
+                    .and_then(|children| offset.checked_add(children))
+            })
+            .ok_or_else(review_budget_exceeded)?;
+        offsets.push(next);
+    }
+    let total_children =
+        usize::try_from(*offsets.last().unwrap_or(&0)).map_err(|_| review_budget_exceeded())?;
+    if total_children != node_count.saturating_sub(1) {
+        return Err(repository_error(SnapshotRepositoryErrorKind::Codec(
+            SnapshotCodecErrorKind::CorruptData,
+        )));
+    }
+
+    let mut indices = Vec::new();
+    indices
+        .try_reserve_exact(total_children)
+        .map_err(|_| review_budget_exceeded())?;
+    indices.resize(total_children, 0_u32);
+    let mut cursors = Vec::new();
+    cursors
+        .try_reserve_exact(node_count)
+        .map_err(|_| review_budget_exceeded())?;
+    cursors.extend_from_slice(&offsets[..node_count]);
+    for (index, node) in document.nodes.iter().enumerate().skip(1) {
+        let parent = usize::try_from(node.parent.ok_or_else(|| {
+            repository_error(SnapshotRepositoryErrorKind::Codec(
+                SnapshotCodecErrorKind::CorruptData,
+            ))
+        })?)
+        .map_err(|_| review_budget_exceeded())?;
+        let cursor = cursors.get_mut(parent).ok_or_else(|| {
+            repository_error(SnapshotRepositoryErrorKind::Codec(
+                SnapshotCodecErrorKind::CorruptData,
+            ))
+        })?;
+        let destination = indices.get_mut(*cursor as usize).ok_or_else(|| {
+            repository_error(SnapshotRepositoryErrorKind::Codec(
+                SnapshotCodecErrorKind::CorruptData,
+            ))
+        })?;
+        *destination = u32::try_from(index).map_err(|_| review_budget_exceeded())?;
+        *cursor = cursor.checked_add(1).ok_or_else(review_budget_exceeded)?;
+    }
+    if cursors
+        .iter()
+        .zip(offsets.iter().skip(1))
+        .any(|(cursor, end)| cursor != end)
+    {
+        return Err(repository_error(SnapshotRepositoryErrorKind::Codec(
+            SnapshotCodecErrorKind::CorruptData,
+        )));
+    }
+    Ok((offsets, indices))
+}
+
 /// One exact, expiring snapshot review pin plus a retained immutable handle.
 ///
 /// The lease is intentionally non-cloneable and not `Sync`. Dropping it never
@@ -463,6 +643,8 @@ pub(crate) struct SnapshotReviewLease {
     retained: RetainedSnapshot,
     reference: SnapshotReference,
     pin: PreparedSnapshotReviewPin,
+    decoded_slots: Arc<AtomicUsize>,
+    decoded_bytes: Arc<AtomicU64>,
     _slot: SnapshotReviewSlot,
     _not_sync: PhantomData<Cell<()>>,
     #[cfg(test)]
@@ -487,6 +669,8 @@ impl SnapshotRepository {
             SnapshotStoreAccess::ReadWrite => Some(SnapshotReviewContext {
                 owner: OnceLock::new(),
                 active_slots: Arc::new(AtomicUsize::new(0)),
+                decoded_slots: Arc::new(AtomicUsize::new(0)),
+                decoded_bytes: Arc::new(AtomicU64::new(0)),
             }),
             SnapshotStoreAccess::ReadOnly => None,
         };
@@ -1567,6 +1751,8 @@ impl SnapshotRepository {
             retained,
             reference: reference.clone(),
             pin,
+            decoded_slots: Arc::clone(&context.decoded_slots),
+            decoded_bytes: Arc::clone(&context.decoded_bytes),
             _slot: slot,
             _not_sync: PhantomData,
             #[cfg(test)]
@@ -2339,6 +2525,35 @@ impl SnapshotReviewLease {
         &self,
         observed_at: SystemTime,
     ) -> Result<SnapshotDocument, SnapshotRepositoryError> {
+        self.validate(observed_at)?;
+        decode_reference(&self.retained, &self.reference)
+    }
+
+    /// Decode once for an Explorer session while retaining a separately
+    /// bounded per-engine decoded-document slot.
+    pub(crate) fn load_for_review(
+        &self,
+        observed_at: SystemTime,
+    ) -> Result<SnapshotReviewDocument, SnapshotRepositoryError> {
+        let wire_bytes = self.retained.len().map_err(map_storage)?;
+        let slot = SnapshotReviewDecodedSlot::reserve(
+            &self.decoded_slots,
+            &self.decoded_bytes,
+            wire_bytes,
+        )?;
+        let document = self.load(observed_at)?;
+        let (child_offsets, child_indices) = build_review_child_index(&document)?;
+        Ok(SnapshotReviewDocument {
+            document,
+            child_offsets,
+            child_indices,
+            _slot: slot,
+        })
+    }
+
+    /// Re-prove the exact durable pin and retained immutable object without
+    /// decoding it again. Explorer uses this before every cached page read.
+    pub(crate) fn validate(&self, observed_at: SystemTime) -> Result<(), SnapshotRepositoryError> {
         self.ensure_unexpired(observed_at)?;
         let database_guard = self
             .database
@@ -2348,7 +2563,7 @@ impl SnapshotReviewLease {
             .map_err(map_review_history)?;
         self.retained.revalidate().map_err(map_storage)?;
         drop(database_guard);
-        decode_reference(&self.retained, &self.reference)
+        Ok(())
     }
 
     /// Extend this exact live lease by the fixed duration. Expired leases are

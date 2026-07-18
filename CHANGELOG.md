@@ -5,6 +5,105 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Completed Milestone 4's storage-category visualization slice with FFI
+  contract v15. Snapshot review nodes now carry a display-only category joined
+  from the exact scan's immutable, validated candidate evaluation. Exact
+  classified roots and descendants use the nearest historical assertion;
+  ambiguous, absent, over-budget, or non-Unicode candidate evidence remains
+  explicitly Unclassified. A 4,096-root and independent 1 MiB path-payload
+  ceiling bounds the optional join, ancestor lookup is indexed, and release or
+  expiry discards the index. The macOS
+  treemap uses stable category colors plus symbols and a visible legend, while
+  both Explorer tables, the inspector, and VoiceOver expose the same category
+  in text. Category metadata contains no candidate identity, path, evidence,
+  safety, action, reclaimability, AI result, plan, or cleanup authority.
+- Completed Milestone 4's Finder, Copy Path, and Quick Look slice with FFI
+  contract v14. Snapshot Explorer sends only the exact retained review's node
+  ID and requested read-only purpose. Rust reconstructs the path from immutable
+  snapshot evidence, rejects symlinks and special entries, and descriptor-walks
+  the current root, ancestors, and target while matching recorded device/inode
+  identities before rechecking the lease. Swift rejects hostile path records,
+  fences delayed results against selection and snapshot changes, rejects
+  non-Unicode paths rather than constructing a lossy URL, and keeps one lifecycle-owned Quick
+  Look panel. Current paths are ephemeral UI data only and never become AI,
+  candidate, plan, or cleanup input; path-based macOS APIs retain a documented
+  post-validation same-user race.
+- Completed Milestone 4's scan-coverage details slice with FFI contract v13.
+  An exact scan-history endpoint returns bounded canonical issue pages without
+  requiring a retained snapshot, so coverage evidence remains readable for
+  non-succeeded and pruned scans. It exposes exact totals, all semantic issue
+  kinds, and only bounded root-relative historical display context—never the
+  absolute scan root or a live filesystem capability. Snapshot Explorer adds a
+  lazy Coverage tab with strict cross-page validation, generation-fenced state,
+  accessible measured-coverage visuals, truthful Unknown handling, and plain
+  explanations. Coverage discovery cannot authorize Finder, AI, planning, or
+  cleanup work.
+- Continued Milestone 4 with FFI contract v12 and a bounded Large Files mode in
+  Snapshot Explorer. Rust scans the retained immutable snapshot through the
+  existing review lease with O(k) top-result memory, returns exact matching
+  file count and logical-byte totals, and revalidates expiry after the query.
+  The app requests at most the 100 largest observations (hard cap 200), defaults
+  to 1 GiB, offers deterministic size and strict last-modified filters, shows
+  bounded historical parent context, and discloses omitted matches and scan
+  coverage limits. Swift rejects malformed ordering, totals, timestamps,
+  contexts, and node shapes and generation-fences mode/filter/snapshot races.
+  This is discovery only: it creates no live URL, Finder action, reclaimability
+  estimate, selection for deletion, AI input, plan, or cleanup authority.
+- Continued Milestone 4 with a bounded Recent Scans chooser in the macOS
+  Snapshot Explorer. It requests only the newest 50 path-free history rows,
+  displays all lifecycle states and truncated-history disclosure, and enables
+  only succeeded rows carrying recorded-snapshot evidence. Selection still
+  performs authoritative exact-ID lease acquisition and validates the root,
+  first child page, and treemap before replacing the confirmed view; only then
+  is the prior review released. Missing retained snapshots leave the current
+  browser intact and receive a session-only unavailable mark that explicit
+  history refresh clears. History loading and failure are independent from the
+  active review, and late close/acquisition races release all browser-owned
+  leases. No history hint grants filesystem, planning, AI, or cleanup
+  authority.
+- Continued Milestone 4 with FFI contract v11 and a synchronized logical-size
+  treemap/inspector in the macOS snapshot browser. Every lease-bound treemap
+  request returns at most 64 positive-size direct children in deterministic
+  logical order plus exact path-free Other accounting, including zero-size
+  children; the app requests 48. Logical ranks let a selected cell load its
+  exact bounded table page without downloading the directory, while table rows
+  outside the projection highlight Other without turning that aggregate into a
+  node. A deterministic binary treemap, textual table fallback, keyboard and
+  VoiceOver labels, and a historical-facts inspector expose sizes, counts,
+  timestamps, and scan warnings. Treemap failure preserves the confirmed table;
+  expiry invalidates the entire review. No category, candidate, live path,
+  Finder action, reclaimability claim, AI input, plan, or cleanup authority was
+  added.
+- Continued Milestone 4 with the first real Latest Snapshot Browser in the
+  macOS Explorer. The new destination acquires only when opened, uses the
+  core-selected newest retained review, and publishes the root plus one bounded
+  100-row child page only after acquisition, root, and page reads all succeed.
+  Folder buttons and ID-backed breadcrumbs drill through the immutable
+  snapshot; server-side name, logical, allocated, and modified sorting resets
+  to the first page, while previous/next controls replace rather than accumulate
+  pages. A synchronized table shows logical and allocated sizes, item counts,
+  modified time, observation warnings, and proportional share bars with textual
+  accessibility summaries. Leaving Explorer or shutting down generation-fences
+  pending work and explicitly releases the review. Snapshot absence, expiry,
+  retryable pressure, resource-budget refusal, unavailable storage, and invalid
+  responses remain distinct read-only states. No display name becomes a live
+  URL, filesystem identity, or cleanup authority.
+- Continued Milestone 4 with FFI contract v10's bounded snapshot-node transport.
+  An exact Explorer review lease now exposes the retained root plus deterministic
+  direct-child pages (maximum 200) sorted by name, logical size, allocated size,
+  or modification time. Rust decodes a snapshot once per active review, still
+  revalidates the durable pin and retained immutable file before every cached
+  read, drops invalid/expired caches immediately, and independently limits each
+  engine to two retained trees within a conservative 1 GiB decoded-memory
+  admission estimate. A decode-time compact child index and one sorted-child
+  cache avoid rescanning an entire subtree on every page, while directories
+  above 100,000 direct children remain budget-gated pending M4 latency work.
+  Versioned records
+  preserve lossless historical host bytes and explicit display text while
+  omitting Unix identity, live handles, candidates, plans, and all cleanup
+  capability. Swift maps into validated
+  app-owned models off-main, and the review controller generation-fences root
+  and page results by scan ID. Candidate details remain separate M4 work.
 - Continued Milestone 4 with FFI contract v9's exact newest-available snapshot
   review acquisition. Rust deterministically selects the newest succeeded
   snapshot without an exact retention tombstone, then acquires the existing

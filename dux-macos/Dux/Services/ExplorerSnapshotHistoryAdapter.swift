@@ -133,3 +133,780 @@ enum ExplorerSnapshotHistoryAdapter {
         }
     }
 }
+
+/// The only conversion boundary between generated snapshot-node records and
+/// app-owned Explorer navigation models.
+enum ExplorerSnapshotNodeAdapter {
+    private static let recordVersion: UInt32 = 1
+    private static let nodeRecordVersion: UInt32 = 2
+    private static let maximumPageLimit = 200
+    static let maximumTreemapCells: UInt16 = 64
+
+    static func mapRoot(_ raw: SnapshotNode) throws -> ExplorerSnapshotNode {
+        let root = try mapNode(raw, maximumNameBytes: 65_536)
+        guard
+            root.id == 0,
+            root.parentID == nil,
+            root.depth == 0,
+            root.kind == .directory
+        else {
+            throw ExplorerSnapshotNodeError.invalidResponse
+        }
+        return root
+    }
+
+    static func mapPage(
+        _ raw: SnapshotNodePage,
+        expectedParentID: UInt64,
+        expectedOffset: UInt64,
+        requestedLimit: UInt16
+    ) throws -> ExplorerSnapshotNodePage {
+        let remainingChildren = raw.totalChildren >= raw.offset
+            ? raw.totalChildren - raw.offset
+            : 0
+        let expectedNodeCount = min(UInt64(requestedLimit), remainingChildren)
+        guard
+            (1 ... maximumPageLimit).contains(Int(requestedLimit)),
+            raw.recordVersion == recordVersion,
+            raw.parentId == expectedParentID,
+            raw.offset == expectedOffset,
+            raw.offset <= raw.totalChildren,
+            UInt64(raw.nodes.count) == expectedNodeCount,
+            raw.hasMore == (raw.offset + UInt64(raw.nodes.count) < raw.totalChildren)
+        else {
+            throw ExplorerSnapshotNodeError.invalidResponse
+        }
+        let nodes = try raw.nodes.map { try mapNode($0, maximumNameBytes: 1_024) }
+        guard
+            Set(nodes.map(\.id)).count == nodes.count,
+            nodes.allSatisfy({ $0.parentID == expectedParentID && $0.depth > 0 })
+        else {
+            throw ExplorerSnapshotNodeError.invalidResponse
+        }
+        return ExplorerSnapshotNodePage(
+            parentID: raw.parentId,
+            offset: raw.offset,
+            totalChildren: raw.totalChildren,
+            hasMore: raw.hasMore,
+            nodes: nodes
+        )
+    }
+
+    static func mapTreemap(
+        _ raw: SnapshotTreemap,
+        expectedParentID: UInt64,
+        requestedMaxCells: UInt16
+    ) throws -> ExplorerSnapshotTreemap {
+        guard
+            (1 ... maximumTreemapCells).contains(requestedMaxCells),
+            raw.recordVersion == recordVersion,
+            raw.parentId == expectedParentID,
+            raw.cells.count <= Int(requestedMaxCells),
+            raw.totalChildren == UInt64(raw.cells.count) + raw.otherChildCount,
+            raw.zeroLogicalChildCount <= raw.otherChildCount,
+            raw.otherLogicalBytes > 0
+                || raw.zeroLogicalChildCount == raw.otherChildCount,
+            raw.otherChildCount > 0
+                || (raw.otherLogicalBytes == 0 && raw.zeroLogicalChildCount == 0)
+        else {
+            throw ExplorerSnapshotTreemapError.invalidResponse
+        }
+
+        var representedLogicalBytes: UInt64 = 0
+        var previousLogicalBytes = UInt64.max
+        var cells: [ExplorerSnapshotTreemapCell] = []
+        cells.reserveCapacity(raw.cells.count)
+        for (index, rawCell) in raw.cells.enumerated() {
+            let node = try mapNode(rawCell.node, maximumNameBytes: 1_024)
+            let (nextTotal, overflow) = representedLogicalBytes.addingReportingOverflow(
+                node.logicalBytes
+            )
+            guard
+                rawCell.recordVersion == recordVersion,
+                rawCell.logicalRank == UInt64(index),
+                node.parentID == expectedParentID,
+                node.depth > 0,
+                node.logicalBytes > 0,
+                node.logicalBytes <= previousLogicalBytes,
+                !overflow
+            else {
+                throw ExplorerSnapshotTreemapError.invalidResponse
+            }
+            representedLogicalBytes = nextTotal
+            previousLogicalBytes = node.logicalBytes
+            cells.append(ExplorerSnapshotTreemapCell(node: node, logicalRank: rawCell.logicalRank))
+        }
+
+        let (accountedLogicalBytes, overflow) = representedLogicalBytes.addingReportingOverflow(
+            raw.otherLogicalBytes
+        )
+        guard
+            !overflow,
+            accountedLogicalBytes == raw.totalChildLogicalBytes,
+            Set(cells.map(\.id)).count == cells.count,
+            raw.totalChildLogicalBytes > 0 || cells.isEmpty,
+            raw.totalChildLogicalBytes > 0 || raw.zeroLogicalChildCount == raw.totalChildren
+        else {
+            throw ExplorerSnapshotTreemapError.invalidResponse
+        }
+
+        return ExplorerSnapshotTreemap(
+            parentID: raw.parentId,
+            totalChildren: raw.totalChildren,
+            totalChildLogicalBytes: raw.totalChildLogicalBytes,
+            otherChildCount: raw.otherChildCount,
+            otherLogicalBytes: raw.otherLogicalBytes,
+            zeroLogicalChildCount: raw.zeroLogicalChildCount,
+            cells: cells
+        )
+    }
+
+    static func ffiSort(_ sort: ExplorerSnapshotNodeSort) -> SnapshotNodeSort {
+        switch sort {
+        case .nameAscending: .nameAscending
+        case .logicalBytesDescending: .logicalBytesDescending
+        case .allocatedBytesDescending: .allocatedBytesDescending
+        case .modifiedNewest: .modifiedNewest
+        }
+    }
+
+    static func mapNode(
+        _ raw: SnapshotNode,
+        maximumNameBytes: Int
+    ) throws -> ExplorerSnapshotNode {
+        guard
+            raw.recordVersion == nodeRecordVersion,
+            !raw.name.encodedBytes.isEmpty,
+            raw.name.encodedBytes.count <= maximumNameBytes,
+            raw.modifiedAt.map(validTimestamp) ?? true,
+            raw.accessedAt.map(validTimestamp) ?? true,
+            raw.kind == .directory || raw.childCount == 0
+        else {
+            throw ExplorerSnapshotNodeError.invalidResponse
+        }
+        let name = try mapName(raw.name, maximumNameBytes: maximumNameBytes)
+        return ExplorerSnapshotNode(
+            id: raw.id,
+            parentID: raw.parentId,
+            depth: raw.depth,
+            kind: mapKind(raw.kind),
+            category: mapCategory(raw.category),
+            name: name,
+            logicalBytes: raw.logicalBytes,
+            allocatedBytes: raw.allocatedBytes,
+            fileCount: raw.fileCount,
+            childCount: raw.childCount,
+            modifiedAt: raw.modifiedAt.map(mapTimestamp),
+            accessedAt: raw.accessedAt.map(mapTimestamp),
+            scanFlags: ExplorerSnapshotScanFlags(
+                inaccessible: raw.scanFlags.inaccessible,
+                timedOut: raw.scanFlags.timedOut,
+                hardLinkDuplicate: raw.scanFlags.hardLinkDuplicate,
+                mountBoundary: raw.scanFlags.mountBoundary
+            )
+        )
+    }
+
+    static func mapName(
+        _ raw: SnapshotNodeName,
+        maximumNameBytes: Int
+    ) throws -> ExplorerSnapshotNodeName {
+        guard
+            !raw.encodedBytes.isEmpty,
+            raw.encodedBytes.count <= maximumNameBytes
+        else {
+            throw ExplorerSnapshotNodeError.invalidResponse
+        }
+        let (encoding, decoded) = try decodeName(raw)
+        guard decoded == raw.display else {
+            throw ExplorerSnapshotNodeError.invalidResponse
+        }
+        return ExplorerSnapshotNodeName(
+            encoding: encoding,
+            encodedBytes: raw.encodedBytes,
+            display: raw.display
+        )
+    }
+
+    private static func decodeName(
+        _ raw: SnapshotNodeName
+    ) throws -> (ExplorerSnapshotNameEncoding, String) {
+        switch raw.encoding {
+        case .unixBytes:
+            guard !raw.encodedBytes.contains(0) else {
+                throw ExplorerSnapshotNodeError.invalidResponse
+            }
+            return (.unixBytes, String(decoding: raw.encodedBytes, as: UTF8.self))
+        case .windowsUtf16LittleEndian:
+            guard
+                raw.encodedBytes.count.isMultiple(of: 2),
+                !raw.encodedBytes.isEmpty
+            else {
+                throw ExplorerSnapshotNodeError.invalidResponse
+            }
+            let bytes = [UInt8](raw.encodedBytes)
+            let units = stride(from: 0, to: bytes.count, by: 2).map {
+                UInt16(bytes[$0]) | (UInt16(bytes[$0 + 1]) << 8)
+            }
+            guard !units.contains(0) else {
+                throw ExplorerSnapshotNodeError.invalidResponse
+            }
+            return (.windowsUTF16LittleEndian, String(decoding: units, as: UTF16.self))
+        }
+    }
+
+    private static func mapKind(_ kind: SnapshotNodeKind) -> ExplorerSnapshotNodeKind {
+        switch kind {
+        case .directory: .directory
+        case .file: .file
+        case .symlink: .symlink
+        case .other: .other
+        case .error: .error
+        }
+    }
+
+    private static func mapCategory(
+        _ category: SnapshotStorageCategory
+    ) -> ExplorerStorageCategory {
+        switch category {
+        case .unclassified: .unclassified
+        case .developerArtifact: .developerArtifact
+        case .applicationCache: .applicationCache
+        case .browserCache: .browserCache
+        case .logAndDiagnostic: .logAndDiagnostic
+        case .installerAndDownload: .installerAndDownload
+        case .deviceAndSimulatorData: .deviceAndSimulatorData
+        case .cloudFile: .cloudFile
+        case .largeReviewItem: .largeReviewItem
+        case .protectedSystemData: .protectedSystemData
+        case .unknownStorage: .unknownStorage
+        }
+    }
+
+    private static func validTimestamp(_ timestamp: SnapshotNodeTimestamp) -> Bool {
+        timestamp.nanoseconds < 1_000_000_000
+    }
+
+    static func mapTimestamp(
+        _ timestamp: SnapshotNodeTimestamp
+    ) -> ExplorerSnapshotTimestamp {
+        ExplorerSnapshotTimestamp(
+            secondsSinceUnixEpoch: timestamp.secondsSinceUnixEpoch,
+            nanoseconds: timestamp.nanoseconds
+        )
+    }
+}
+
+/// Strict conversion boundary for the path-free, bounded Large Files
+/// projection. Invalid or internally inconsistent records are never rendered.
+enum ExplorerSnapshotLargeFilesAdapter {
+    static let maximumResults: UInt16 = 200
+    private static let recordVersion: UInt32 = 1
+    private static let maximumContextComponents = 8
+
+    static func request(
+        minimumLogicalBytes: UInt64,
+        modifiedBefore: ExplorerSnapshotTimestamp?,
+        maxResults: UInt16
+    ) throws -> SnapshotLargeFileRequest {
+        guard
+            minimumLogicalBytes > 0,
+            (1 ... maximumResults).contains(maxResults),
+            modifiedBefore.map({ $0.nanoseconds < 1_000_000_000 }) ?? true
+        else {
+            throw ExplorerSnapshotLargeFilesError.invalidRequest
+        }
+        return SnapshotLargeFileRequest(
+            recordVersion: recordVersion,
+            minimumLogicalBytes: minimumLogicalBytes,
+            modifiedBefore: modifiedBefore.map {
+                SnapshotNodeTimestamp(
+                    secondsSinceUnixEpoch: $0.secondsSinceUnixEpoch,
+                    nanoseconds: $0.nanoseconds
+                )
+            },
+            maxResults: maxResults
+        )
+    }
+
+    static func map(
+        _ raw: SnapshotLargeFilePage,
+        minimumLogicalBytes: UInt64,
+        modifiedBefore: ExplorerSnapshotTimestamp?,
+        requestedMaxResults: UInt16
+    ) throws -> ExplorerSnapshotLargeFilesPage {
+        guard
+            minimumLogicalBytes > 0,
+            (1 ... maximumResults).contains(requestedMaxResults),
+            raw.recordVersion == recordVersion,
+            raw.files.count <= Int(requestedMaxResults),
+            raw.totalMatchingFiles >= UInt64(raw.files.count),
+            UInt64(raw.files.count)
+                == min(UInt64(requestedMaxResults), raw.totalMatchingFiles),
+            raw.hasMore == (raw.totalMatchingFiles > UInt64(raw.files.count))
+        else {
+            throw ExplorerSnapshotLargeFilesError.invalidResponse
+        }
+
+        var files: [ExplorerSnapshotLargeFile] = []
+        files.reserveCapacity(raw.files.count)
+        var returnedLogicalBytes: UInt64 = 0
+        for rawFile in raw.files {
+            let node = try ExplorerSnapshotNodeAdapter.mapNode(
+                rawFile.node,
+                maximumNameBytes: 1_024
+            )
+            let parentContext = try rawFile.parentContext.map {
+                try ExplorerSnapshotNodeAdapter.mapName($0, maximumNameBytes: 1_024)
+            }
+            let parentDepth = Int(node.depth) - 1
+            let timestampMatches = switch (modifiedBefore, node.modifiedAt) {
+            case (nil, _): true
+            case let (cutoff?, observed?): timestamp(observed, precedes: cutoff)
+            case (_?, nil): false
+            }
+            let contextMatches = rawFile.contextTruncated
+                ? parentContext.count == maximumContextComponents
+                    && parentDepth > maximumContextComponents
+                : parentContext.count == parentDepth
+            let (nextTotal, overflow) = returnedLogicalBytes.addingReportingOverflow(
+                node.logicalBytes
+            )
+            guard
+                rawFile.recordVersion == recordVersion,
+                node.kind == .file,
+                node.parentID != nil,
+                node.depth > 0,
+                node.fileCount == 1,
+                node.childCount == 0,
+                node.logicalBytes >= minimumLogicalBytes,
+                timestampMatches,
+                parentContext.count <= maximumContextComponents,
+                contextMatches,
+                !overflow
+            else {
+                throw ExplorerSnapshotLargeFilesError.invalidResponse
+            }
+            returnedLogicalBytes = nextTotal
+            files.append(
+                ExplorerSnapshotLargeFile(
+                    node: node,
+                    parentContext: parentContext,
+                    contextTruncated: rawFile.contextTruncated
+                )
+            )
+        }
+
+        guard
+            Set(files.map(\.id)).count == files.count,
+            zip(files, files.dropFirst()).allSatisfy(orderedBefore),
+            raw.totalMatchingLogicalBytes >= returnedLogicalBytes,
+            raw.hasMore
+                || (raw.totalMatchingFiles == UInt64(files.count)
+                    && raw.totalMatchingLogicalBytes == returnedLogicalBytes)
+        else {
+            throw ExplorerSnapshotLargeFilesError.invalidResponse
+        }
+
+        return ExplorerSnapshotLargeFilesPage(
+            minimumLogicalBytes: minimumLogicalBytes,
+            modifiedBefore: modifiedBefore,
+            totalMatchingFiles: raw.totalMatchingFiles,
+            totalMatchingLogicalBytes: raw.totalMatchingLogicalBytes,
+            hasMore: raw.hasMore,
+            files: files
+        )
+    }
+
+    private static func orderedBefore(
+        _ pair: (ExplorerSnapshotLargeFile, ExplorerSnapshotLargeFile)
+    ) -> Bool {
+        let left = pair.0.node
+        let right = pair.1.node
+        if left.logicalBytes != right.logicalBytes {
+            return left.logicalBytes > right.logicalBytes
+        }
+        let leftEncoding = encodingKey(left.name.encoding)
+        let rightEncoding = encodingKey(right.name.encoding)
+        if leftEncoding != rightEncoding {
+            return leftEncoding < rightEncoding
+        }
+        if left.name.encodedBytes != right.name.encodedBytes {
+            return left.name.encodedBytes.lexicographicallyPrecedes(right.name.encodedBytes)
+        }
+        return left.id < right.id
+    }
+
+    private static func encodingKey(_ encoding: ExplorerSnapshotNameEncoding) -> UInt8 {
+        switch encoding {
+        case .unixBytes: 0
+        case .windowsUTF16LittleEndian: 1
+        }
+    }
+
+    private static func timestamp(
+        _ observed: ExplorerSnapshotTimestamp,
+        precedes cutoff: ExplorerSnapshotTimestamp
+    ) -> Bool {
+        observed.secondsSinceUnixEpoch < cutoff.secondsSinceUnixEpoch
+            || (observed.secondsSinceUnixEpoch == cutoff.secondsSinceUnixEpoch
+                && observed.nanoseconds < cutoff.nanoseconds)
+    }
+}
+
+/// Strict conversion boundary for an ephemeral, identity-checked current path.
+/// Historical display names never enter this adapter as path input.
+enum ExplorerSnapshotLivePathAdapter {
+    private static let recordVersion: UInt32 = 1
+    private static let maximumPathBytes = 32 * 1_024
+
+    static func request(
+        nodeID: UInt64,
+        purpose: ExplorerSnapshotLivePathPurpose
+    ) -> SnapshotLiveTargetRequest {
+        SnapshotLiveTargetRequest(
+            recordVersion: recordVersion,
+            nodeId: nodeID,
+            purpose: ffiPurpose(purpose)
+        )
+    }
+
+    static func map(
+        _ raw: SnapshotLiveTarget,
+        requestedNodeID: UInt64,
+        requestedPurpose: ExplorerSnapshotLivePathPurpose
+    ) throws -> ExplorerResolvedLiveItem {
+        let expectedPurpose = ffiPurpose(requestedPurpose)
+        let kind: ExplorerSnapshotNodeKind = switch raw.kind {
+        case .directory: .directory
+        case .file: .file
+        }
+        let bytes = [UInt8](raw.absolutePathBytes)
+        guard
+            raw.recordVersion == recordVersion,
+            raw.nodeId == requestedNodeID,
+            raw.purpose == expectedPurpose,
+            raw.pathEncoding == .unixBytes,
+            !bytes.isEmpty,
+            bytes.count <= maximumPathBytes,
+            bytes.first == UInt8(ascii: "/"),
+            !bytes.contains(0),
+            !bytes.contains(where: { $0 < 0x20 || $0 == 0x7f }),
+            validAbsoluteUnixPath(bytes),
+            raw.displayPath == String(decoding: bytes, as: UTF8.self),
+            requestedPurpose != .quickLook || kind == .file
+        else {
+            throw ExplorerSnapshotLivePathError.invalidResponse
+        }
+
+        let exactText = String(data: Data(bytes), encoding: .utf8)
+        guard raw.exactTextPath == exactText else {
+            throw ExplorerSnapshotLivePathError.invalidResponse
+        }
+        guard let exactText else {
+            // Swift Foundation's value-type URL rewrites invalid UTF-8 bytes.
+            // Refuse a different current path rather than presenting it.
+            throw ExplorerSnapshotLivePathError.unsupportedItem
+        }
+        guard !exactText.unicodeScalars.contains(where: {
+            $0.properties.generalCategory == .control
+        }) else {
+            throw ExplorerSnapshotLivePathError.invalidResponse
+        }
+        var terminated = bytes
+        terminated.append(0)
+        let url = terminated.withUnsafeBufferPointer { buffer in
+            buffer.baseAddress!.withMemoryRebound(to: CChar.self, capacity: buffer.count) {
+                URL(
+                    fileURLWithFileSystemRepresentation: $0,
+                    isDirectory: kind == .directory,
+                    relativeTo: nil
+                )
+            }
+        }
+        let roundTrippedBytes = url.withUnsafeFileSystemRepresentation { pointer -> Data? in
+            guard let pointer else {
+                return nil
+            }
+            return Data(bytes: pointer, count: strlen(pointer))
+        }
+        guard url.isFileURL, roundTrippedBytes == Data(bytes) else {
+            throw ExplorerSnapshotLivePathError.unsupportedItem
+        }
+        return ExplorerResolvedLiveItem(
+            nodeID: raw.nodeId,
+            kind: kind,
+            url: url,
+            exactTextPath: exactText
+        )
+    }
+
+    private static func validAbsoluteUnixPath(_ bytes: [UInt8]) -> Bool {
+        guard bytes.first == UInt8(ascii: "/") else {
+            return false
+        }
+        if bytes.count == 1 {
+            return true
+        }
+        guard bytes.last != UInt8(ascii: "/") else {
+            return false
+        }
+        return bytes.dropFirst().split(separator: UInt8(ascii: "/"), omittingEmptySubsequences: false)
+            .allSatisfy { component in
+                !component.isEmpty
+                    && component != [UInt8(ascii: ".")]
+                    && component != [UInt8(ascii: "."), UInt8(ascii: ".")]
+            }
+    }
+
+    private static func ffiPurpose(
+        _ purpose: ExplorerSnapshotLivePathPurpose
+    ) -> SnapshotLiveTargetPurpose {
+        switch purpose {
+        case .reveal: .reveal
+        case .copyPath: .copyPath
+        case .quickLook: .quickLook
+        }
+    }
+}
+
+/// Strict boundary for bounded, root-relative historical scan issues. Values
+/// remain display observations and cannot be used as filesystem paths.
+enum ExplorerScanCoverageDetailsAdapter {
+    static let maximumPageLimit: UInt16 = 64
+    private static let recordVersion: UInt32 = 1
+    private static let maximumIssueRecords: UInt16 = 256
+    private static let maximumLocationComponents = 8
+    private static let maximumLocationComponentCharacters = 128
+
+    static func map(
+        _ raw: ScanCoverageDetailsPage,
+        requestedScanID: String,
+        requestedOffset: UInt16,
+        requestedLimit: UInt16
+    ) throws -> ExplorerScanCoverageDetailsPage {
+        guard
+            ExplorerSnapshotHistoryAdapter.validScanID(requestedScanID),
+            (1 ... maximumPageLimit).contains(requestedLimit),
+            raw.recordVersion == recordVersion,
+            raw.scanId == requestedScanID,
+            raw.offset == requestedOffset,
+            raw.totalIssueRecords <= maximumIssueRecords,
+            raw.coverage.recordVersion == recordVersion,
+            raw.coverage.issueRecordCount == UInt64(raw.totalIssueRecords),
+            raw.coverage.issueOccurrenceCount == raw.totalIssueOccurrences,
+            raw.coverage.measuredPermille.map({ $0 <= 1_000 }) ?? true,
+            Int(raw.offset) <= Int(raw.totalIssueRecords),
+            raw.issues.count
+                == min(Int(requestedLimit), Int(raw.totalIssueRecords) - Int(raw.offset)),
+            raw.hasMore == (Int(raw.offset) + raw.issues.count < Int(raw.totalIssueRecords))
+        else {
+            throw ExplorerScanCoverageError.invalidResponse
+        }
+
+        var pageOccurrences: UInt64 = 0
+        let issues = try raw.issues.enumerated().map { index, issue in
+            let expectedOrdinal = Int(raw.offset) + index
+            let (nextOccurrences, overflow) = pageOccurrences.addingReportingOverflow(
+                UInt64(issue.occurrenceCount)
+            )
+            guard
+                issue.recordVersion == recordVersion,
+                issue.ordinal == UInt16(expectedOrdinal),
+                issue.occurrenceCount > 0,
+                !overflow,
+                nextOccurrences <= raw.totalIssueOccurrences,
+                issue.locationComponents.count <= maximumLocationComponents,
+                issue.locationComponents.allSatisfy(validLocationComponent)
+            else {
+                throw ExplorerScanCoverageError.invalidResponse
+            }
+            pageOccurrences = nextOccurrences
+            let kind = mapKind(issue.kind)
+            let locationScope: ExplorerScanCoverageLocationScope
+            switch issue.locationScope {
+            case .global:
+                guard
+                    permitsGlobalScope(kind),
+                    issue.locationComponents.isEmpty,
+                    !issue.locationTruncated
+                else {
+                    throw ExplorerScanCoverageError.invalidResponse
+                }
+                locationScope = .global
+            case .scanRoot:
+                guard issue.locationComponents.isEmpty, !issue.locationTruncated else {
+                    throw ExplorerScanCoverageError.invalidResponse
+                }
+                locationScope = .scanRoot
+            case .descendant:
+                guard
+                    !issue.locationComponents.isEmpty
+                else {
+                    throw ExplorerScanCoverageError.invalidResponse
+                }
+                locationScope = .descendant
+            }
+            return ExplorerScanCoverageIssue(
+                ordinal: issue.ordinal,
+                kind: kind,
+                occurrenceCount: issue.occurrenceCount,
+                locationScope: locationScope,
+                locationComponents: issue.locationComponents,
+                locationTruncated: issue.locationTruncated
+            )
+        }
+        let coverage: AppScanCoverage = switch raw.coverage.status {
+        case .unknown: .unknown
+        case .complete: .complete
+        case .limitedAccess: .limitedAccess
+        case .partial: .partial
+        }
+        return ExplorerScanCoverageDetailsPage(
+            scanID: raw.scanId,
+            coverage: coverage,
+            measuredPermille: raw.coverage.measuredPermille,
+            offset: raw.offset,
+            totalIssueRecords: raw.totalIssueRecords,
+            totalIssueOccurrences: raw.totalIssueOccurrences,
+            hasMore: raw.hasMore,
+            issues: issues
+        )
+    }
+
+    static func assemble(
+        _ pages: [ExplorerScanCoverageDetailsPage],
+        requestedScanID: String
+    ) throws -> ExplorerScanCoverageDetails {
+        guard let first = pages.first else {
+            throw ExplorerScanCoverageError.invalidResponse
+        }
+        var issues: [ExplorerScanCoverageIssue] = []
+        var occurrences: UInt64 = 0
+        for (index, page) in pages.enumerated() {
+            guard
+                page.scanID == requestedScanID,
+                page.coverage == first.coverage,
+                page.measuredPermille == first.measuredPermille,
+                page.totalIssueRecords == first.totalIssueRecords,
+                page.totalIssueOccurrences == first.totalIssueOccurrences,
+                page.offset == UInt16(issues.count),
+                page.hasMore == (index < pages.count - 1)
+            else {
+                throw ExplorerScanCoverageError.invalidResponse
+            }
+            for issue in page.issues {
+                let (next, overflow) = occurrences.addingReportingOverflow(
+                    UInt64(issue.occurrenceCount)
+                )
+                guard !overflow else {
+                    throw ExplorerScanCoverageError.invalidResponse
+                }
+                occurrences = next
+            }
+            issues.append(contentsOf: page.issues)
+        }
+        guard
+            issues.count == Int(first.totalIssueRecords),
+            occurrences == first.totalIssueOccurrences,
+            Set(issues.map(\.ordinal)).count == issues.count,
+            canonicalKindOrder(issues),
+            validCoverage(
+                first.coverage,
+                measuredPermille: first.measuredPermille,
+                issues: issues
+            )
+        else {
+            throw ExplorerScanCoverageError.invalidResponse
+        }
+        return ExplorerScanCoverageDetails(
+            scanID: requestedScanID,
+            coverage: first.coverage,
+            measuredPermille: first.measuredPermille,
+            totalIssueRecords: first.totalIssueRecords,
+            totalIssueOccurrences: first.totalIssueOccurrences,
+            issues: issues
+        )
+    }
+
+    private static func validCoverage(
+        _ coverage: AppScanCoverage,
+        measuredPermille: UInt16?,
+        issues: [ExplorerScanCoverageIssue]
+    ) -> Bool {
+        switch coverage {
+        case .unknown:
+            measuredPermille == nil && issues.isEmpty
+        case .complete:
+            measuredPermille == 1_000 && issues.isEmpty
+        case .limitedAccess:
+            measuredPermille != 1_000 && !issues.isEmpty
+                && issues.allSatisfy { $0.kind == .permissionDenied }
+        case .partial:
+            measuredPermille != 1_000 && !issues.isEmpty
+                && issues.contains { $0.kind != .permissionDenied }
+        }
+    }
+
+    private static func mapKind(
+        _ kind: HistoricalScanIssueKind
+    ) -> ExplorerScanCoverageIssueKind {
+        switch kind {
+        case .permissionDenied: .permissionDenied
+        case .timedOut: .timedOut
+        case .differentFilesystem: .differentFilesystem
+        case .networkOrVirtualFilesystem: .networkOrVirtualFilesystem
+        case .symlinkSkipped: .symlinkSkipped
+        case .fileChangedDuringScan: .fileChangedDuringScan
+        case .metadataError: .metadataError
+        case .cancelled: .cancelled
+        case .policyExcluded: .policyExcluded
+        case .depthLimited: .depthLimited
+        case .probePoolExhausted: .probePoolExhausted
+        case .filesystemBoundaryUnknown: .filesystemBoundaryUnknown
+        case .issueLimitReached: .issueLimitReached
+        }
+    }
+
+    private static func kindRank(_ kind: ExplorerScanCoverageIssueKind) -> UInt8 {
+        switch kind {
+        case .permissionDenied: 0
+        case .timedOut: 1
+        case .differentFilesystem: 2
+        case .networkOrVirtualFilesystem: 3
+        case .symlinkSkipped: 4
+        case .fileChangedDuringScan: 5
+        case .metadataError: 6
+        case .cancelled: 7
+        case .policyExcluded: 8
+        case .depthLimited: 9
+        case .probePoolExhausted: 10
+        case .filesystemBoundaryUnknown: 11
+        case .issueLimitReached: 12
+        }
+    }
+
+    private static func canonicalKindOrder(_ issues: [ExplorerScanCoverageIssue]) -> Bool {
+        zip(issues, issues.dropFirst()).allSatisfy { pair in
+            kindRank(pair.0.kind) <= kindRank(pair.1.kind)
+        }
+    }
+
+    private static func permitsGlobalScope(_ kind: ExplorerScanCoverageIssueKind) -> Bool {
+        switch kind {
+        case .cancelled, .probePoolExhausted, .issueLimitReached:
+            true
+        default:
+            false
+        }
+    }
+
+    private static func validLocationComponent(_ component: String) -> Bool {
+        !component.isEmpty
+            && component.unicodeScalars.count <= maximumLocationComponentCharacters
+            && component != "."
+            && component != ".."
+            && !component.contains("/")
+            && !component.unicodeScalars.contains(where: { $0.value == 0 })
+    }
+}

@@ -22,13 +22,20 @@ use super::cleanup_history::{
     MAX_RECENT_CLEANUP_HISTORY_LIMIT,
 };
 use super::config::EngineConfig;
+use super::scan_coverage_details::{
+    DurableScanCoverageDetailsPage, DurableScanIssue, DurableScanIssueLocation,
+    MAX_SCAN_COVERAGE_DETAIL_PAGE_LIMIT, MAX_SCAN_COVERAGE_LOCATION_COMPONENT_CHARS,
+    MAX_SCAN_COVERAGE_LOCATION_COMPONENTS, ScanCoverageDetailsError,
+};
 use super::settings::{
     DiskPressurePolicy, DiskPressurePolicyError, DiskPressurePolicySource,
     DiskPressurePolicyUpdate, SnapshotRetentionCap, SnapshotRetentionCapError,
     SnapshotRetentionCapSource, SnapshotRetentionCapUpdate,
 };
 use super::snapshot_review::{
-    SnapshotReviewError, SnapshotReviewSession, map_repository_error as map_snapshot_review_error,
+    MAX_SNAPSHOT_REVIEW_CATEGORY_BYTES, MAX_SNAPSHOT_REVIEW_CATEGORY_ROOTS,
+    SnapshotReviewCategoryRoot, SnapshotReviewError, SnapshotReviewSession, category_path_bytes,
+    map_repository_error as map_snapshot_review_error,
 };
 use super::task::{
     CancelOutcome, CandidateEvaluationTaskFailureKind, CandidateEvaluationTaskStatus,
@@ -925,6 +932,7 @@ impl EngineHandle {
                 SystemTime::now(),
             )
             .map_err(|error| map_snapshot_review_error(error.kind))?;
+        let category_roots = self.snapshot_review_category_roots(scan_id);
         // Linearize successful acquisition before close. If close won while
         // storage validation was in flight, do not publish a new session and
         // remove its exact durable pin while the lease is still available.
@@ -932,7 +940,53 @@ impl EngineHandle {
             let _ = lease.release();
             return Err(SnapshotReviewError::Closed);
         }
-        Ok(SnapshotReviewSession::new(scan_id.clone(), lease))
+        Ok(SnapshotReviewSession::new(
+            scan_id.clone(),
+            lease,
+            category_roots,
+        ))
+    }
+
+    fn snapshot_review_category_roots(&self, scan_id: &ScanId) -> Vec<SnapshotReviewCategoryRoot> {
+        let Ok(CandidateEvaluationObservation::Succeeded(evaluation)) =
+            self.inner.store.load_candidate_evaluation_for_scan(scan_id)
+        else {
+            // Categories are optional historical display metadata. Missing,
+            // legacy, pending, failed, busy, or corrupt discovery state must
+            // not prevent review of an independently validated snapshot.
+            return Vec::new();
+        };
+        let Some((root_count, root_bytes)) = evaluation.candidates().iter().try_fold(
+            (0_usize, 0_usize),
+            |(count, bytes), candidate| {
+                let count = count.checked_add(candidate.paths().len())?;
+                let bytes = candidate.paths().iter().try_fold(bytes, |total, path| {
+                    total.checked_add(category_path_bytes(path))
+                })?;
+                Some((count, bytes))
+            },
+        ) else {
+            return Vec::new();
+        };
+        if root_count > MAX_SNAPSHOT_REVIEW_CATEGORY_ROOTS
+            || root_bytes > MAX_SNAPSHOT_REVIEW_CATEGORY_BYTES
+        {
+            return Vec::new();
+        }
+        let mut roots = Vec::new();
+        if roots.try_reserve_exact(root_count).is_err() {
+            return Vec::new();
+        }
+        for candidate in evaluation.candidates() {
+            roots.extend(
+                candidate
+                    .paths()
+                    .iter()
+                    .cloned()
+                    .map(|path| SnapshotReviewCategoryRoot::new(path, candidate.category())),
+            );
+        }
+        roots
     }
 
     /// Load the effective, versioned snapshot-store size cap.
@@ -1090,6 +1144,76 @@ impl EngineHandle {
             scans,
             has_more: page.has_more(),
         })
+    }
+
+    /// Load one bounded page of durable coverage issues for a stable scan ID.
+    /// Locations are root-relative historical display components only; this
+    /// method neither opens a snapshot nor grants filesystem authority.
+    pub fn scan_coverage_details(
+        &self,
+        scan_id: &ScanId,
+        offset: u16,
+        limit: u16,
+    ) -> Result<DurableScanCoverageDetailsPage, ScanCoverageDetailsError> {
+        if !(1..=MAX_SCAN_COVERAGE_DETAIL_PAGE_LIMIT).contains(&limit) {
+            return Err(ScanCoverageDetailsError::InvalidLimit {
+                max: MAX_SCAN_COVERAGE_DETAIL_PAGE_LIMIT,
+            });
+        }
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(ScanCoverageDetailsError::Closed);
+        }
+        let record = self
+            .inner
+            .store
+            .load_scan(scan_id)
+            .map_err(|error| map_scan_coverage_details_error(error.kind))?
+            .ok_or(ScanCoverageDetailsError::ScanNotFound)?;
+        let coverage = record.coverage();
+        let total_issue_records = u16::try_from(coverage.issues().len())
+            .map_err(|_| ScanCoverageDetailsError::CorruptData)?;
+        if offset > total_issue_records {
+            return Err(ScanCoverageDetailsError::InvalidOffset);
+        }
+        let total_issue_occurrences = coverage
+            .issues()
+            .iter()
+            .map(|issue| u64::from(issue.occurrence_count()))
+            .sum();
+        let end = usize::from(offset)
+            .saturating_add(usize::from(limit))
+            .min(coverage.issues().len());
+        let issues = coverage.issues()[usize::from(offset)..end]
+            .iter()
+            .enumerate()
+            .map(|(page_index, issue)| {
+                let location = issue
+                    .path()
+                    .map(|path| historical_issue_location(record.root(), path))
+                    .transpose()?;
+                Ok(DurableScanIssue::new(
+                    offset
+                        .checked_add(
+                            u16::try_from(page_index)
+                                .map_err(|_| ScanCoverageDetailsError::CorruptData)?,
+                        )
+                        .ok_or(ScanCoverageDetailsError::CorruptData)?,
+                    issue.kind().into(),
+                    issue.occurrence_count(),
+                    location,
+                ))
+            })
+            .collect::<Result<Vec<_>, ScanCoverageDetailsError>>()?;
+        Ok(DurableScanCoverageDetailsPage::new(
+            scan_id.clone(),
+            coverage.status(),
+            coverage.measured_permille(),
+            offset,
+            total_issue_records,
+            total_issue_occurrences,
+            end < coverage.issues().len(),
+            issues,
+        ))
     }
 
     /// Return one keyset-bounded page of path-free cleanup-session summaries.
@@ -3480,6 +3604,65 @@ const fn map_scan_history_error(kind: HistoryErrorKind) -> ScanHistoryError {
         | HistoryErrorKind::DatabaseUnavailable
         | HistoryErrorKind::OutcomeUnknown => ScanHistoryError::Unavailable,
     }
+}
+
+const fn map_scan_coverage_details_error(kind: HistoryErrorKind) -> ScanCoverageDetailsError {
+    match kind {
+        HistoryErrorKind::IncompatibleSchema => ScanCoverageDetailsError::IncompatibleSchema,
+        HistoryErrorKind::QueryLimitExceeded => ScanCoverageDetailsError::QueryLimitExceeded,
+        HistoryErrorKind::Busy => ScanCoverageDetailsError::Busy,
+        HistoryErrorKind::UnsafeStorage => ScanCoverageDetailsError::UnsafeStorage,
+        HistoryErrorKind::CorruptData => ScanCoverageDetailsError::CorruptData,
+        HistoryErrorKind::InternalState => ScanCoverageDetailsError::InternalState,
+        HistoryErrorKind::InvalidInput
+        | HistoryErrorKind::AlreadyExists
+        | HistoryErrorKind::NotFound
+        | HistoryErrorKind::InvalidTransition
+        | HistoryErrorKind::DatabaseUnavailable
+        | HistoryErrorKind::OutcomeUnknown => ScanCoverageDetailsError::Unavailable,
+    }
+}
+
+fn historical_issue_location(
+    root: &Path,
+    observed: &Path,
+) -> Result<DurableScanIssueLocation, ScanCoverageDetailsError> {
+    let relative = observed
+        .strip_prefix(root)
+        .map_err(|_| ScanCoverageDetailsError::CorruptData)?;
+    let raw_components = relative
+        .components()
+        .map(|component| match component {
+            std::path::Component::Normal(value) => Ok(value.to_string_lossy()),
+            _ => Err(ScanCoverageDetailsError::CorruptData),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if raw_components.is_empty() {
+        return Ok(DurableScanIssueLocation::new(true, false, Vec::new()));
+    }
+    let retained_start = raw_components
+        .len()
+        .saturating_sub(MAX_SCAN_COVERAGE_LOCATION_COMPONENTS);
+    let mut context_truncated = retained_start > 0;
+    let components = raw_components[retained_start..]
+        .iter()
+        .map(|component| {
+            let mut chars = component.chars();
+            let display = chars
+                .by_ref()
+                .take(MAX_SCAN_COVERAGE_LOCATION_COMPONENT_CHARS)
+                .collect::<String>();
+            if chars.next().is_some() {
+                context_truncated = true;
+            }
+            Arc::<str>::from(display)
+        })
+        .collect();
+    Ok(DurableScanIssueLocation::new(
+        false,
+        context_truncated,
+        components,
+    ))
 }
 
 fn stored_cleanup_history_cursor(

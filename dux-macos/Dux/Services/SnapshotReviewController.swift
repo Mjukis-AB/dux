@@ -17,6 +17,7 @@ actor DuxSnapshotReviewController {
     private struct LeaseEntry: Sendable {
         let generation: UUID
         let lease: any DuxSnapshotReviewLease
+        var ownerCount: UInt64
     }
 
     private let service: any DuxSnapshotReviewServing
@@ -42,7 +43,7 @@ actor DuxSnapshotReviewController {
         guard !isShuttingDown else {
             throw EngineServiceError.closed
         }
-        if leases[scanID] != nil {
+        if retainExistingLease(scanID: scanID) {
             return
         }
 
@@ -66,12 +67,17 @@ actor DuxSnapshotReviewController {
         }
         pendingAcquisitions.removeValue(forKey: scanID)
         if leases[scanID] == nil {
-            leases[scanID] = LeaseEntry(generation: generation, lease: lease)
+            leases[scanID] = LeaseEntry(
+                generation: generation,
+                lease: lease,
+                ownerCount: 1
+            )
             startRenewalLoopIfNeeded()
         } else {
             // Actor reentrancy can complete two acquisitions for the same
             // scan. Keep the first installed generation and release the stale
             // lease explicitly.
+            _ = retainExistingLease(scanID: scanID)
             await lease.release()
         }
     }
@@ -107,9 +113,14 @@ actor DuxSnapshotReviewController {
 
         let scanID = lease.scanID
         if leases[scanID] == nil {
-            leases[scanID] = LeaseEntry(generation: generation, lease: lease)
+            leases[scanID] = LeaseEntry(
+                generation: generation,
+                lease: lease,
+                ownerCount: 1
+            )
             startRenewalLoopIfNeeded()
         } else {
+            _ = retainExistingLease(scanID: scanID)
             await lease.release()
         }
         return scanID
@@ -117,11 +128,168 @@ actor DuxSnapshotReviewController {
 
     func release(scanID: String) async {
         pendingAcquisitions.removeValue(forKey: scanID)
-        guard let entry = leases.removeValue(forKey: scanID) else {
+        guard var entry = leases[scanID] else {
             return
         }
+        if entry.ownerCount > 1 {
+            entry.ownerCount -= 1
+            leases[scanID] = entry
+            return
+        }
+        leases.removeValue(forKey: scanID)
         await entry.lease.release()
         stopRenewalLoopIfEmpty()
+    }
+
+    func rootNode(scanID: String) async throws -> ExplorerSnapshotNode {
+        guard !isShuttingDown else {
+            throw EngineServiceError.closed
+        }
+        guard let entry = leases[scanID] else {
+            throw ExplorerSnapshotNodeError.reviewNotAcquired
+        }
+        let node: ExplorerSnapshotNode
+        do {
+            node = try await entry.lease.rootNode()
+        } catch {
+            await discardExpiredLeaseIfCurrent(error, scanID: scanID, entry: entry)
+            throw error
+        }
+        guard leases[scanID]?.generation == entry.generation else {
+            throw CancellationError()
+        }
+        return node
+    }
+
+    func childNodes(
+        scanID: String,
+        parentID: UInt64,
+        sort: ExplorerSnapshotNodeSort,
+        offset: UInt64,
+        limit: UInt16
+    ) async throws -> ExplorerSnapshotNodePage {
+        guard !isShuttingDown else {
+            throw EngineServiceError.closed
+        }
+        guard let entry = leases[scanID] else {
+            throw ExplorerSnapshotNodeError.reviewNotAcquired
+        }
+        let page: ExplorerSnapshotNodePage
+        do {
+            page = try await entry.lease.childNodes(
+                parentID: parentID,
+                sort: sort,
+                offset: offset,
+                limit: limit
+            )
+        } catch {
+            await discardExpiredLeaseIfCurrent(error, scanID: scanID, entry: entry)
+            throw error
+        }
+        guard leases[scanID]?.generation == entry.generation else {
+            throw CancellationError()
+        }
+        return page
+    }
+
+    func treemap(
+        scanID: String,
+        parentID: UInt64,
+        maxCells: UInt16
+    ) async throws -> ExplorerSnapshotTreemap {
+        guard !isShuttingDown else {
+            throw EngineServiceError.closed
+        }
+        guard let entry = leases[scanID] else {
+            throw ExplorerSnapshotTreemapError.reviewNotAcquired
+        }
+        let treemap: ExplorerSnapshotTreemap
+        do {
+            treemap = try await entry.lease.treemap(parentID: parentID, maxCells: maxCells)
+        } catch {
+            await discardExpiredLeaseIfCurrent(error, scanID: scanID, entry: entry)
+            throw error
+        }
+        guard leases[scanID]?.generation == entry.generation else {
+            throw CancellationError()
+        }
+        return treemap
+    }
+
+    func largeFiles(
+        scanID: String,
+        minimumLogicalBytes: UInt64,
+        modifiedBefore: ExplorerSnapshotTimestamp?,
+        maxResults: UInt16
+    ) async throws -> ExplorerSnapshotLargeFilesPage {
+        guard !isShuttingDown else {
+            throw EngineServiceError.closed
+        }
+        guard let entry = leases[scanID] else {
+            throw ExplorerSnapshotLargeFilesError.reviewNotAcquired
+        }
+        let page: ExplorerSnapshotLargeFilesPage
+        do {
+            page = try await entry.lease.largeFiles(
+                minimumLogicalBytes: minimumLogicalBytes,
+                modifiedBefore: modifiedBefore,
+                maxResults: maxResults
+            )
+        } catch {
+            await discardExpiredLeaseIfCurrent(error, scanID: scanID, entry: entry)
+            throw error
+        }
+        guard leases[scanID]?.generation == entry.generation else {
+            throw CancellationError()
+        }
+        return page
+    }
+
+    func resolveLiveItem(
+        scanID: String,
+        nodeID: UInt64,
+        purpose: ExplorerSnapshotLivePathPurpose
+    ) async throws -> ExplorerResolvedLiveItem {
+        guard !isShuttingDown else {
+            throw EngineServiceError.closed
+        }
+        guard let entry = leases[scanID] else {
+            throw ExplorerSnapshotLivePathError.reviewNotAcquired
+        }
+        let item: ExplorerResolvedLiveItem
+        do {
+            item = try await entry.lease.resolveLiveItem(nodeID: nodeID, purpose: purpose)
+        } catch {
+            await discardExpiredLeaseIfCurrent(error, scanID: scanID, entry: entry)
+            throw error
+        }
+        guard leases[scanID]?.generation == entry.generation else {
+            throw CancellationError()
+        }
+        return item
+    }
+
+    private func discardExpiredLeaseIfCurrent(
+        _ error: Error,
+        scanID: String,
+        entry: LeaseEntry
+    ) async {
+        guard
+            isReviewExpired(error),
+            leases[scanID]?.generation == entry.generation
+        else {
+            return
+        }
+        leases.removeValue(forKey: scanID)
+        await entry.lease.release()
+        stopRenewalLoopIfEmpty()
+    }
+
+    private func isReviewExpired(_ error: Error) -> Bool {
+        error as? ExplorerSnapshotNodeError == .reviewExpired
+            || error as? ExplorerSnapshotTreemapError == .reviewExpired
+            || error as? ExplorerSnapshotLargeFilesError == .reviewExpired
+            || error as? ExplorerSnapshotLivePathError == .reviewExpired
     }
 
     func renewNow() async {
@@ -174,6 +342,19 @@ actor DuxSnapshotReviewController {
 
     func activeLeaseCount() -> Int {
         leases.count
+    }
+
+    func activeOwnerCount(scanID: String) -> UInt64 {
+        leases[scanID]?.ownerCount ?? 0
+    }
+
+    private func retainExistingLease(scanID: String) -> Bool {
+        guard var entry = leases[scanID], entry.ownerCount < UInt64.max else {
+            return false
+        }
+        entry.ownerCount += 1
+        leases[scanID] = entry
+        return true
     }
 
     private func startRenewalLoopIfNeeded() {

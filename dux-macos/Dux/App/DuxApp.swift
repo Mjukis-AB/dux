@@ -5,6 +5,7 @@ import SwiftUI
 struct DuxApp: App {
     @NSApplicationDelegateAdaptor(DuxAppDelegate.self) private var appDelegate
     @State private var model = AppRuntime.shared.model
+    @State private var explorerSnapshotBrowser = AppRuntime.shared.explorerSnapshotBrowser
 
     var body: some Scene {
         MenuBarExtra(
@@ -33,7 +34,7 @@ struct DuxApp: App {
 
     private var explorerScene: some Scene {
         Window("DUX Explorer", id: DuxSceneID.explorer) {
-            ExplorerView(model: model)
+            ExplorerView(model: model, snapshotBrowser: explorerSnapshotBrowser)
         }
         .defaultSize(width: 960, height: 680)
         .windowResizability(.contentMinSize)

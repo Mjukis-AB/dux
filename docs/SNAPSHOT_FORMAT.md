@@ -581,8 +581,9 @@ This checkpoint does not implement:
   of an engine scan left `running` (schema v9 same-scope claimed recovery is
   implemented without snapshot authority);
 - FFI, Swift, or CLI scan/history transport;
-- paged FFI/Swift snapshot browsing (review-lease ownership and native periodic
-  scheduling are implemented without changing the snapshot wire);
+- candidate-path/evidence FFI/Swift browsing (contract v12 now provides bounded
+  root/direct-child pages, a coarse logical-size treemap, and a path-free Large
+  Files projection under review leases without changing the snapshot wire);
 - cross-reboot or unclaimed legacy recovery of `running` temp-lease parents;
   schema v9 same-scope recovery preserves the exact lease for terminal-temp
   reconciliation, and legacy external provisioning stages remain manual debt;
@@ -591,7 +592,8 @@ This checkpoint does not implement:
   sparse/compressed-allocation runtime verification plus bounded accounting
   probes for slow filesystem drivers (Windows stage regressions are compiled
   but have not run on this host);
-- Explorer paging/indexes and measured 1M/5M-node memory budgets;
+- measured Explorer 1M/5M-node paging latency and memory budgets plus any
+  justified persistent indexes;
 - migration from or hardening of the legacy CLI cache.
 
 Those items remain separate roadmap work. None may weaken the immutable

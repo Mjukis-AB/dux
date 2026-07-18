@@ -98,6 +98,40 @@ impl HostValue {
         )
         .is_ok_and(|value| value == *self)
     }
+
+    pub(crate) const fn encoding(&self) -> HostEncoding {
+        self.encoding
+    }
+
+    pub(crate) fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    pub(crate) fn display_lossy(&self) -> String {
+        match self.encoding {
+            HostEncoding::UnixBytes => String::from_utf8_lossy(&self.bytes).into_owned(),
+            HostEncoding::WindowsUtf16Le => {
+                let units = self
+                    .bytes
+                    .chunks_exact(2)
+                    .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]));
+                char::decode_utf16(units)
+                    .map(|result| result.unwrap_or(char::REPLACEMENT_CHARACTER))
+                    .collect()
+            }
+        }
+    }
+
+    /// Decode this lossless host-native observation back into a path value.
+    /// Callers must still apply their own lexical and live-filesystem checks.
+    pub(crate) fn to_path_buf(&self) -> Result<std::path::PathBuf, SnapshotCodecError> {
+        host_path(self)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_encoded_bytes_for_test(encoding: HostEncoding, bytes: Vec<u8>) -> Self {
+        Self { encoding, bytes }
+    }
 }
 
 #[cfg(unix)]
@@ -236,6 +270,14 @@ impl SnapshotTimestamp {
             seconds_since_unix_epoch,
             nanoseconds,
         })
+    }
+
+    pub(crate) const fn seconds_since_unix_epoch(self) -> u64 {
+        self.seconds_since_unix_epoch
+    }
+
+    pub(crate) const fn nanoseconds(self) -> u32 {
+        self.nanoseconds
     }
 }
 

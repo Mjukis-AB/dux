@@ -1278,7 +1278,7 @@ get_history(query) -> HistoryPageDto
 record_ai_insight(input_digest, insight)
 ```
 
-Current native realization (FFI contract v9):
+Current native realization (FFI contract v15):
 `observe_startup_volume(versioned Foundation facts) -> versioned path-free
 status` is the first production volume endpoint. It returns Rust-owned pressure,
 headline source/boundaries, prior durable pressure, and history disposition.
@@ -1323,6 +1323,40 @@ Swift learns the selected stable scan ID from the acquired lease, validates it,
 owns renewal independently from render state, generation-fences overlapping
 requests, and explicitly releases stale or malformed handles. This still
 transports no paths, nodes, candidates, plans, or cleanup authority.
+
+Contract v10 adds the retained historical root and deterministic direct-child
+pages, capped at 200 and sorted inside Rust. Contract v11 adds a coarse
+logical-size treemap under that same exact lease: at most 64 represented
+positive-size children, stable logical ranks, and exact Other child/byte
+accounting including zero-size children. The projection reuses the retained
+decoded document and the existing 100,000-direct-child sort budget. It exposes
+no category assertion, current path, candidate, reclaimability estimate, plan,
+AI input, or cleanup authority.
+
+Contract v12 adds one whole-snapshot Large Files projection under the same
+exact review lease. The request requires a positive logical-size threshold,
+accepts an optional strict modification cutoff, and is capped at 200 results;
+the app requests 100 and defaults to 1 GiB. Rust uses O(k) top-result memory,
+returns deterministic logical-size/name/ID ordering, bounded historical parent
+context, and exact matching file-count/logical-byte aggregates, then revalidates
+the lease before returning. Unknown modification times do not match an age
+filter. The response is historical discovery only and carries no current path,
+reclaimability, candidate status, AI input, plan, or cleanup capability.
+
+Contract v15 adds one display-only storage category to every snapshot node
+projection. Rust joins only the exact scan's immutable, fully validated
+candidate evaluation: a classified root and its descendants inherit the
+nearest historical category, while missing, failed, legacy, or ambiguous
+evidence remains Unclassified. The optional join is independently capped at
+4,096 roots and 1 MiB of exact path payload, uses an exact-root index with
+ancestor lookup, and is discarded on release or expiry. Candidate persistence
+currently requires Unicode host paths; a candidate evaluation containing a
+non-Unicode path fails closed, so Explorer shows Unclassified rather than
+using a lossy name. The FFI enum intentionally copies the category
+names without exposing candidate identity, paths, evidence, safety, action,
+status, reclaimability, plan, AI input, or cleanup capability. Swift maps the
+enum without filename or display-string inference and renders redundant color,
+symbol, visible text, legend, inspector, and VoiceOver alternatives.
 
 Requirements:
 
@@ -3744,13 +3778,125 @@ Tasks:
     state, generation-fences concurrent latest requests, and releases stale
     handles. Paged nodes, candidate details, and treemap budgets remain in this
     task.
+  - [x] 2026-07-17 slice: expose the retained snapshot root and deterministic
+    direct-child pages through FFI contract v10 and app-owned Swift models.
+    Pages are capped at 200, support name/logical/allocated/modified ordering,
+    retain lossless historical host bytes plus display text, and omit live
+    filesystem identity and every cleanup capability. Each request revalidates
+    the exact durable pin and retained immutable file; decoding is cached only
+    while the review remains live, uses a compact child index, and is separately
+    capped at two trees within a conservative 1 GiB decoded-memory admission
+    estimate per engine. Direct-child sorting is budget-gated above 100,000
+    entries until the measured million-node latency work lands. The native
+    controller generation-fences results by
+    scan ID and immediately evicts expired leases.
+    Candidate paths/evidence remain in this task.
+  - [x] 2026-07-17 slice: add FFI contract v11's lease-bound logical-size
+    treemap budget. Rust returns no more than 64 positive-size direct-child
+    cells in the same deterministic logical ordering as node pages, with
+    contiguous ranks and exact Other counts/bytes including zero-size children;
+    the app requests 48. Invalid budgets, oversized fan-out, expiry, missing
+    nodes, and non-directory parents stay typed. Swift validates hostile
+    versions, ranks, identities, counts, and overflow before publishing an
+    app-owned projection. No live path, category, candidate, plan, AI input, or
+    cleanup capability crosses.
 - [ ] Add progressive scan events.
 - [ ] Implement treemap, synchronized list, breadcrumbs, local snapshot/history
   drill-down, history navigation, and inspector.
+  - [x] 2026-07-17 slice: add the first lease-backed Latest Snapshot Browser to
+    the macOS Explorer. Opening the destination atomically acquires the
+    core-selected newest review, reads its root, and publishes one bounded
+    100-row direct-child page. The table exposes truthful logical/allocated
+    sizes, item counts, modification time, scan warnings, and proportional
+    share bars; server-side sorting, previous/next page replacement, folder
+    drill-down, and ID-backed breadcrumbs stay generation-fenced. Leaving the
+    destination and app shutdown release the exact review, including late
+    acquisitions. Historical display names never become live paths or cleanup
+    authority. History selection and measured large-snapshot budgets remain in
+    this task.
+  - [x] 2026-07-17 slice: render the bounded projection as a deterministic
+    logical-size treemap synchronized with the existing table by node ID and
+    logical rank. Selecting an off-page cell loads its exact 100-row logical
+    page; selecting an omitted table row highlights Other without treating the
+    aggregate as a node. A historical-only inspector exposes name, kind, sizes,
+    counts, timestamps, and scan warnings, while the table remains the textual
+    and accessibility fallback. Treemap failure preserves a confirmed list and
+    review expiry invalidates both. Finder, Quick Look, copy-path, category,
+    candidate, reclaimability, AI, and cleanup actions remain deferred.
+  - [x] 2026-07-17 slice: add a bounded Recent Scans chooser to the Snapshot
+    Explorer. Presentation loads at most the newest 50 path-free history rows
+    independently from the latest review, shows every lifecycle state, and
+    discloses when older rows are omitted. Only succeeded rows with recorded
+    snapshot evidence can be requested, and that evidence remains advisory:
+    selection acquires the exact scan-bound review before loading its root,
+    first page, and treemap. The prior confirmed snapshot stays visible until
+    the replacement is fully validated, then its lease is released. Missing or
+    expired historical snapshots are marked unavailable only for the session;
+    refresh clears that hint, and failed history refreshes preserve both the
+    active review and last confirmed list. Close and late-acquisition races
+    release both old and target ownership without publishing stale content.
 - [ ] Implement Large Files.
-- [ ] Implement scan coverage details.
-- [ ] Implement reveal, copy path, and Quick Look.
-- [ ] Add category colors and accessible text alternatives.
+  - [x] 2026-07-17 slice: add FFI contract v12's lease-backed, path-free Large
+    Files projection and native segmented view. The app lazily requests the 100
+    largest matching file observations, defaults to a configurable 1 GiB size
+    threshold, supports strict modification-age presets, renders bounded
+    historical parent context and exact aggregate/truncation disclosure, and
+    keeps the existing historical inspector. Rust uses O(k) memory with a hard
+    cap of 200 and post-query lease validation; Swift strictly validates record
+    shapes, ordering, totals, contexts, filter semantics, and snapshot/mode
+    races. Type/root/candidate filters and deterministic semantic labels remain
+    follow-up work. No live path, preselection, AI, plan, or cleanup authority
+    is introduced.
+- [x] Implement scan coverage details.
+  - [x] 2026-07-17 slice: add FFI contract v13's exact, paged durable-history
+    coverage endpoint and a native Coverage view. The endpoint remains useful
+    for failed, cancelled, interrupted, legacy, and snapshot-pruned scans; it
+    does not acquire or depend on a snapshot lease. Rust fully validates the
+    immutable scan record before returning at most 64 of the canonical 256
+    issue records, with exact record/occurrence totals, zero-based ordinals,
+    all 13 semantic issue kinds, and no absolute root. Locations are historical
+    display observations only: Global, Scan root, or at most the nearest eight
+    root-relative components with explicit truncation. Swift loads all pages
+    off-main, rejects contradictory versions, totals, coverage states,
+    ordinals, scopes, locations, and pagination, and generation-fences scan and
+    mode changes. The UI distinguishes Unknown from measured zero, renders an
+    accessible measured-coverage bar only when a measurement exists, explains
+    exact limitations and historical context, and grants no live path, access
+    state, reclaimability, AI, planning, or cleanup authority.
+- [x] Implement reveal, copy path, and Quick Look.
+  - [x] 2026-07-18 slice: add FFI contract v14's purpose-bound current-item
+    resolution under the exact retained snapshot review. Callers supply only a
+    node ID and Reveal, Copy Path, or Quick Look purpose—never a path. Rust
+    reconstructs the lossless path from the validated immutable graph, then
+    uses descriptor-relative no-follow traversal to match the recorded Unix
+    device/inode and kind for the root, every ancestor, and the target before
+    revalidating the lease. Missing identities, replacements, moves, symlinks,
+    special files, cross-volume paths, access failures, and unsupported action
+    shapes fail closed with path-free typed errors. Swift validates all echoes
+    and absolute-path bytes, generation-fences selection/mode/snapshot/close
+    races, and invokes injected Finder, pasteboard, or app-global Quick Look
+    adapters only after a fresh match. Non-Unicode paths are rejected because
+    Swift Foundation cannot round-trip them through a path-based URL without
+    changing the bytes. These are ephemeral,
+    read-only conveniences: path-based macOS APIs leave a documented
+    post-validation same-user TOCTOU window and no result can enter candidate,
+    AI, planning, or cleanup authority.
+- [x] Add category colors and accessible text alternatives.
+  - [x] 2026-07-18 slice: add FFI contract v15's display-only historical
+    storage classification to every bounded snapshot-node projection. Rust
+    uses only the exact scan's immutable validated candidate evaluation,
+    applies the nearest classified ancestor, and fails closed to Unclassified
+    for absent, conflicting, non-Unicode, or over-budget evidence. The optional
+    join is capped at 4,096 roots and 1 MiB of exact path payload, indexed for
+    ancestor lookup, and cleared with the review lifecycle. No candidate ID, path, evidence,
+    status, safety, action, reclaimability, plan, AI result, or cleanup witness
+    crosses this boundary. The native treemap colors represented cells by a
+    stable app-owned palette while retaining kind icons, category glyphs,
+    visible legend text, a non-color selection mark, category columns in both
+    tables, inspector disclosure, and complete VoiceOver summaries. Other is
+    neutral and truthfully states that category details are not summarized for
+    the omitted items; their individual categories remain available in the
+    complete table.
 - [ ] Add scan cancellation and subtree refresh.
 - [ ] Add performance fixtures for million-node snapshots.
 

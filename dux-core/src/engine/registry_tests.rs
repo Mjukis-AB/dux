@@ -7,6 +7,12 @@ use std::time::{Duration, Instant, SystemTime};
 use tempfile::TempDir;
 
 use super::*;
+use crate::engine::{
+    MAX_SNAPSHOT_REVIEW_LARGE_FILE_RESULTS, MAX_SNAPSHOT_REVIEW_NODE_PAGE_LIMIT,
+    MAX_SNAPSHOT_REVIEW_PARENT_CONTEXT_COMPONENTS, MAX_SNAPSHOT_REVIEW_TREEMAP_CELLS,
+    SnapshotReviewCategory, SnapshotReviewLiveTargetKind, SnapshotReviewLiveTargetPurpose,
+    SnapshotReviewNodeKind, SnapshotReviewNodeSort, SnapshotReviewTimestamp,
+};
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -89,6 +95,610 @@ fn explorer_review_facade_is_scan_bound_expiring_and_idempotently_released() {
         engine.acquire_explorer_snapshot_review(&scan_id),
         Err(SnapshotReviewError::Closed)
     ));
+}
+
+#[test]
+fn explorer_review_pages_direct_children_with_stable_sorting_and_typed_rejections() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("paged-review-root");
+    std::fs::create_dir_all(root.join("middle")).unwrap();
+    std::fs::write(root.join("small.bin"), [1_u8; 3]).unwrap();
+    std::fs::write(root.join("large.bin"), [2_u8; 9]).unwrap();
+    std::fs::write(root.join("middle/nested.bin"), [3_u8; 5]).unwrap();
+    let engine = EngineHandle::open(config(&temp)).unwrap();
+    let task = engine.start_scan(root.clone()).unwrap();
+    assert_eq!(wait_terminal(&engine, task).phase, TaskPhase::Succeeded);
+    let scan_id = engine.scan_result(task).unwrap().unwrap().scan_id().clone();
+    let mut review = engine.acquire_explorer_snapshot_review(&scan_id).unwrap();
+
+    let root_node = review.root_node().unwrap();
+    assert_eq!(root_node.id, 0);
+    assert_eq!(root_node.parent_id, None);
+    assert_eq!(root_node.kind, SnapshotReviewNodeKind::Directory);
+    assert!(root_node.name.display.ends_with("/paged-review-root"));
+    assert_eq!(root_node.child_count, 3);
+
+    let first = review
+        .child_nodes(0, SnapshotReviewNodeSort::LogicalBytesDescending, 0, 2)
+        .unwrap();
+    assert_eq!(first.parent_id, 0);
+    assert_eq!(first.offset, 0);
+    assert_eq!(first.total_children, 3);
+    assert!(first.has_more);
+    assert_eq!(first.nodes.len(), 2);
+    assert!(first.nodes[0].logical_bytes >= first.nodes[1].logical_bytes);
+
+    let last = review
+        .child_nodes(0, SnapshotReviewNodeSort::NameAscending, 2, 2)
+        .unwrap();
+    assert_eq!(last.nodes.len(), 1);
+    assert!(!last.has_more);
+    assert_eq!(last.nodes[0].name.display.as_ref(), "small.bin");
+
+    let file_id = first
+        .nodes
+        .iter()
+        .find(|node| node.kind == SnapshotReviewNodeKind::File)
+        .unwrap()
+        .id;
+    assert_eq!(
+        review
+            .child_nodes(file_id, SnapshotReviewNodeSort::NameAscending, 0, 1)
+            .unwrap_err(),
+        SnapshotReviewError::NodeNotDirectory
+    );
+    assert_eq!(
+        review
+            .child_nodes(u64::MAX, SnapshotReviewNodeSort::NameAscending, 0, 1)
+            .unwrap_err(),
+        SnapshotReviewError::NodeNotFound
+    );
+    assert_eq!(
+        review
+            .child_nodes(0, SnapshotReviewNodeSort::NameAscending, 0, 0)
+            .unwrap_err(),
+        SnapshotReviewError::InvalidPage
+    );
+    assert_eq!(
+        review
+            .child_nodes(0, SnapshotReviewNodeSort::NameAscending, 4, 1)
+            .unwrap_err(),
+        SnapshotReviewError::InvalidPage
+    );
+
+    review.release().unwrap();
+}
+
+#[test]
+fn explorer_review_joins_immutable_candidate_categories_without_coloring_siblings() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("category-review-root");
+    std::fs::create_dir_all(root.join("project/target/nested")).unwrap();
+    std::fs::write(root.join("project/Cargo.toml"), b"[package]").unwrap();
+    std::fs::write(root.join("project/target/nested/artifact"), b"artifact").unwrap();
+    std::fs::write(root.join("sibling"), b"ordinary").unwrap();
+    let engine = EngineHandle::open(config(&temp)).unwrap();
+    let task = engine.start_scan(root).unwrap();
+    assert_eq!(wait_terminal(&engine, task).phase, TaskPhase::Succeeded);
+    let result = engine.scan_result(task).unwrap().unwrap();
+    assert_eq!(
+        result.candidate_evaluation(),
+        CandidateEvaluationTaskStatus::Succeeded { candidate_count: 1 }
+    );
+    let mut review = engine
+        .acquire_explorer_snapshot_review(result.scan_id())
+        .unwrap();
+    assert_eq!(review.category_root_count_for_test(), 1);
+
+    assert_eq!(
+        review.root_node().unwrap().category,
+        SnapshotReviewCategory::Unclassified
+    );
+    let root_page = review
+        .child_nodes(0, SnapshotReviewNodeSort::NameAscending, 0, 10)
+        .unwrap();
+    let project = root_page
+        .nodes
+        .iter()
+        .find(|node| node.name.display.as_ref() == "project")
+        .unwrap();
+    let sibling = root_page
+        .nodes
+        .iter()
+        .find(|node| node.name.display.as_ref() == "sibling")
+        .unwrap();
+    assert_eq!(project.category, SnapshotReviewCategory::Unclassified);
+    assert_eq!(sibling.category, SnapshotReviewCategory::Unclassified);
+
+    let project_page = review
+        .child_nodes(project.id, SnapshotReviewNodeSort::NameAscending, 0, 10)
+        .unwrap();
+    let target = project_page
+        .nodes
+        .iter()
+        .find(|node| node.name.display.as_ref() == "target")
+        .unwrap();
+    assert_eq!(target.category, SnapshotReviewCategory::DeveloperArtifact);
+    let target_page = review
+        .child_nodes(target.id, SnapshotReviewNodeSort::NameAscending, 0, 10)
+        .unwrap();
+    assert_eq!(target_page.nodes.len(), 1);
+    assert_eq!(
+        target_page.nodes[0].category,
+        SnapshotReviewCategory::DeveloperArtifact
+    );
+    review.release().unwrap();
+    assert_eq!(review.category_root_count_for_test(), 0);
+
+    let mut expiring = engine
+        .acquire_explorer_snapshot_review(result.scan_id())
+        .unwrap();
+    assert_eq!(expiring.category_root_count_for_test(), 1);
+    let expiry = expiring.expires_at().unwrap();
+    assert_eq!(
+        expiring.renew_at_for_test(expiry),
+        Err(SnapshotReviewError::LeaseExpired)
+    );
+    assert_eq!(expiring.category_root_count_for_test(), 0);
+}
+
+#[test]
+fn explorer_review_gracefully_unclassifies_legacy_snapshot_without_evaluation() {
+    use crate::persistence::snapshot::{
+        SnapshotDocument, SnapshotMetadata, SnapshotNode, SnapshotNodeKind, SnapshotScanFlags,
+        SnapshotTimestamp, SnapshotTotals,
+    };
+
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("legacy-category-root");
+    std::fs::create_dir(&root).unwrap();
+    let engine = EngineHandle::open(config(&temp)).unwrap();
+    let scan_id = ScanId::new("scan:legacy-category").unwrap();
+    let started_at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_750_000_000);
+    engine
+        .inner
+        .store
+        .record_scan_started(
+            &NewScanRecord::try_new(scan_id.clone(), root.clone(), started_at).unwrap(),
+        )
+        .unwrap();
+    let document = SnapshotDocument {
+        metadata: SnapshotMetadata {
+            scan_id: scan_id.clone(),
+            root: HostValue::from_root(&root).unwrap(),
+            captured_at: SnapshotTimestamp::new(1_750_000_001, 0).unwrap(),
+            totals: SnapshotTotals {
+                directory_count: 1,
+                file_count: 0,
+                logical_bytes: 0,
+                allocated_bytes: Some(0),
+            },
+        },
+        nodes: vec![SnapshotNode {
+            id: 0,
+            parent: None,
+            depth: 0,
+            kind: SnapshotNodeKind::Directory,
+            name: None,
+            logical_bytes: 0,
+            allocated_bytes: Some(0),
+            file_count: 0,
+            child_count: 0,
+            modified_at: None,
+            accessed_at: None,
+            scan_flags: SnapshotScanFlags::NONE,
+            unix_identity: None,
+        }],
+    };
+    engine
+        .inner
+        .snapshots
+        .complete_scan(
+            started_at + Duration::from_secs(1),
+            ScanCounts {
+                directory_count: 1,
+                file_count: 0,
+                logical_bytes: 0,
+                allocated_bytes: Some(0),
+            },
+            &ScanCoverage::try_from_terminal(None, Vec::new()).unwrap(),
+            &document,
+        )
+        .unwrap();
+
+    let mut review = engine.acquire_explorer_snapshot_review(&scan_id).unwrap();
+    assert_eq!(
+        review.root_node().unwrap().category,
+        SnapshotReviewCategory::Unclassified
+    );
+}
+
+#[test]
+fn explorer_review_treemap_is_bounded_ranked_and_accounts_exact_other() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("treemap-review-root");
+    std::fs::create_dir(&root).unwrap();
+    for size in 1_u8..=65 {
+        std::fs::write(
+            root.join(format!("payload-{size:02}")),
+            vec![size; usize::from(size)],
+        )
+        .unwrap();
+    }
+    std::fs::write(root.join("empty-a"), []).unwrap();
+    std::fs::write(root.join("empty-b"), []).unwrap();
+    let engine = EngineHandle::open(config(&temp)).unwrap();
+    let task = engine.start_scan(root).unwrap();
+    assert_eq!(wait_terminal(&engine, task).phase, TaskPhase::Succeeded);
+    let scan_id = engine.scan_result(task).unwrap().unwrap().scan_id().clone();
+    let mut review = engine.acquire_explorer_snapshot_review(&scan_id).unwrap();
+
+    assert_eq!(
+        review.treemap(0, 0).unwrap_err(),
+        SnapshotReviewError::InvalidTreemapBudget
+    );
+    assert_eq!(
+        review
+            .treemap(0, MAX_SNAPSHOT_REVIEW_TREEMAP_CELLS + 1)
+            .unwrap_err(),
+        SnapshotReviewError::InvalidTreemapBudget
+    );
+
+    // Build a different ordering first; treemap must switch to and then share
+    // the exact logical ordering used by child pages.
+    let _ = review
+        .child_nodes(0, SnapshotReviewNodeSort::NameAscending, 0, 4)
+        .unwrap();
+    let treemap = review
+        .treemap(0, MAX_SNAPSHOT_REVIEW_TREEMAP_CELLS)
+        .unwrap();
+    assert_eq!(treemap.parent_id, 0);
+    assert_eq!(treemap.total_children, 67);
+    assert_eq!(treemap.total_child_logical_bytes, (1_u64..=65).sum::<u64>());
+    assert_eq!(treemap.cells.len(), 64);
+    assert_eq!(treemap.other_child_count, 3);
+    assert_eq!(treemap.other_logical_bytes, 1);
+    assert_eq!(treemap.zero_logical_child_count, 2);
+    assert_eq!(
+        treemap
+            .cells
+            .iter()
+            .map(|cell| cell.logical_rank)
+            .collect::<Vec<_>>(),
+        (0_u64..64).collect::<Vec<_>>()
+    );
+    assert!(
+        treemap
+            .cells
+            .windows(2)
+            .all(|pair| pair[0].node.logical_bytes >= pair[1].node.logical_bytes)
+    );
+    assert!(treemap.cells.iter().all(|cell| cell.node.logical_bytes > 0));
+
+    let logical_page = review
+        .child_nodes(
+            0,
+            SnapshotReviewNodeSort::LogicalBytesDescending,
+            0,
+            MAX_SNAPSHOT_REVIEW_NODE_PAGE_LIMIT,
+        )
+        .unwrap();
+    assert_eq!(
+        treemap
+            .cells
+            .iter()
+            .map(|cell| cell.node.id)
+            .collect::<Vec<_>>(),
+        logical_page.nodes[..64]
+            .iter()
+            .map(|node| node.id)
+            .collect::<Vec<_>>()
+    );
+
+    let file_id = treemap.cells[0].node.id;
+    assert_eq!(
+        review.treemap(file_id, 1).unwrap_err(),
+        SnapshotReviewError::NodeNotDirectory
+    );
+    assert_eq!(
+        review.treemap(u64::MAX, 1).unwrap_err(),
+        SnapshotReviewError::NodeNotFound
+    );
+    review.release().unwrap();
+    assert_eq!(
+        review.treemap(0, 1).unwrap_err(),
+        SnapshotReviewError::LeaseExpired
+    );
+}
+
+#[test]
+fn explorer_review_large_files_is_bounded_exact_and_historical_only() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("large-file-review-root");
+    std::fs::create_dir_all(root.join("alpha")).unwrap();
+    std::fs::create_dir_all(root.join("beta")).unwrap();
+    std::fs::write(root.join("z.bin"), [0_u8; 20]).unwrap();
+    std::fs::write(root.join("alpha/same.bin"), [0_u8; 10]).unwrap();
+    std::fs::write(root.join("beta/same.bin"), [0_u8; 10]).unwrap();
+    std::fs::write(root.join("beta/small.bin"), [0_u8; 2]).unwrap();
+
+    let mut deep = root.clone();
+    for depth in 0..=MAX_SNAPSHOT_REVIEW_PARENT_CONTEXT_COMPONENTS {
+        deep.push(format!("d{depth}"));
+    }
+    std::fs::create_dir_all(&deep).unwrap();
+    std::fs::write(deep.join("deep.bin"), [0_u8; 15]).unwrap();
+
+    let engine = EngineHandle::open(config(&temp)).unwrap();
+    let task = engine.start_scan(root).unwrap();
+    assert_eq!(wait_terminal(&engine, task).phase, TaskPhase::Succeeded);
+    let scan_id = engine.scan_result(task).unwrap().unwrap().scan_id().clone();
+    let mut review = engine.acquire_explorer_snapshot_review(&scan_id).unwrap();
+
+    assert_eq!(
+        review.large_files(0, None, 1).unwrap_err(),
+        SnapshotReviewError::InvalidLargeFileRequest
+    );
+    assert_eq!(
+        review.large_files(1, None, 0).unwrap_err(),
+        SnapshotReviewError::InvalidLargeFileRequest
+    );
+    assert_eq!(
+        review
+            .large_files(1, None, MAX_SNAPSHOT_REVIEW_LARGE_FILE_RESULTS + 1)
+            .unwrap_err(),
+        SnapshotReviewError::InvalidLargeFileRequest
+    );
+    assert_eq!(
+        review
+            .large_files(
+                1,
+                Some(SnapshotReviewTimestamp {
+                    seconds_since_unix_epoch: 1,
+                    nanoseconds: 1_000_000_000,
+                }),
+                1,
+            )
+            .unwrap_err(),
+        SnapshotReviewError::InvalidLargeFileRequest
+    );
+
+    let bounded = review.large_files(5, None, 2).unwrap();
+    assert_eq!(bounded.total_matching_files, 4);
+    assert_eq!(bounded.total_matching_logical_bytes, 55);
+    assert!(bounded.has_more);
+    assert_eq!(bounded.files.len(), 2);
+    assert_eq!(bounded.files[0].node.name.display.as_ref(), "z.bin");
+    assert_eq!(bounded.files[0].node.logical_bytes, 20);
+    assert!(bounded.files[0].parent_context.is_empty());
+    assert_eq!(bounded.files[1].node.name.display.as_ref(), "deep.bin");
+    assert_eq!(bounded.files[1].node.logical_bytes, 15);
+
+    let complete = review.large_files(5, None, 10).unwrap();
+    assert_eq!(complete.total_matching_files, 4);
+    assert_eq!(complete.total_matching_logical_bytes, 55);
+    assert!(!complete.has_more);
+    assert_eq!(complete.files.len(), 4);
+    assert_eq!(
+        complete
+            .files
+            .iter()
+            .map(|file| file.node.logical_bytes)
+            .sum::<u64>(),
+        complete.total_matching_logical_bytes
+    );
+    assert!(
+        complete
+            .files
+            .iter()
+            .all(|file| file.node.kind == SnapshotReviewNodeKind::File)
+    );
+    assert_eq!(complete.files[2].node.name.display.as_ref(), "same.bin");
+    assert_eq!(complete.files[3].node.name.display.as_ref(), "same.bin");
+    assert!(complete.files[2].node.id < complete.files[3].node.id);
+    assert_ne!(
+        complete.files[2].parent_context[0].display,
+        complete.files[3].parent_context[0].display
+    );
+    let deep_file = complete
+        .files
+        .iter()
+        .find(|file| file.node.name.display.as_ref() == "deep.bin")
+        .unwrap();
+    assert_eq!(
+        deep_file.parent_context.len(),
+        MAX_SNAPSHOT_REVIEW_PARENT_CONTEXT_COMPONENTS
+    );
+    assert!(deep_file.context_truncated);
+    assert_eq!(deep_file.parent_context[0].display.as_ref(), "d1");
+    assert_eq!(deep_file.parent_context[7].display.as_ref(), "d8");
+
+    review.release().unwrap();
+    assert_eq!(
+        review.large_files(1, None, 1).unwrap_err(),
+        SnapshotReviewError::LeaseExpired
+    );
+}
+
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test mutates only TempDir-owned fixtures to exercise stale live-path rejection"
+)]
+fn explorer_review_live_targets_are_purpose_bound_and_reject_stale_paths() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("live-target-review-root");
+    std::fs::create_dir_all(root.join("nested")).unwrap();
+    std::fs::write(root.join("payload.bin"), b"snapshot identity").unwrap();
+    std::fs::write(root.join("nested/child.bin"), b"nested identity").unwrap();
+
+    let engine = EngineHandle::open(config(&temp)).unwrap();
+    let task = engine.start_scan(root.clone()).unwrap();
+    assert_eq!(wait_terminal(&engine, task).phase, TaskPhase::Succeeded);
+    let scan_id = engine.scan_result(task).unwrap().unwrap().scan_id().clone();
+    let mut review = engine.acquire_explorer_snapshot_review(&scan_id).unwrap();
+
+    for purpose in [
+        SnapshotReviewLiveTargetPurpose::Reveal,
+        SnapshotReviewLiveTargetPurpose::CopyPath,
+    ] {
+        let target = review.live_target(0, purpose).unwrap();
+        assert_eq!(target.node_id, 0);
+        assert_eq!(target.purpose, purpose);
+        assert_eq!(target.kind, SnapshotReviewLiveTargetKind::Directory);
+        assert_eq!(target.path, std::fs::canonicalize(&root).unwrap());
+    }
+    assert_eq!(
+        review
+            .live_target(0, SnapshotReviewLiveTargetPurpose::QuickLook)
+            .unwrap_err(),
+        SnapshotReviewError::LiveTargetUnsupported
+    );
+
+    let children = review
+        .child_nodes(0, SnapshotReviewNodeSort::NameAscending, 0, 10)
+        .unwrap();
+    let directory_id = children
+        .nodes
+        .iter()
+        .find(|node| node.name.display.as_ref() == "nested")
+        .unwrap()
+        .id;
+    let file_id = children
+        .nodes
+        .iter()
+        .find(|node| node.name.display.as_ref() == "payload.bin")
+        .unwrap()
+        .id;
+
+    assert_eq!(
+        review
+            .live_target(directory_id, SnapshotReviewLiveTargetPurpose::QuickLook,)
+            .unwrap_err(),
+        SnapshotReviewError::LiveTargetUnsupported
+    );
+    for purpose in [
+        SnapshotReviewLiveTargetPurpose::Reveal,
+        SnapshotReviewLiveTargetPurpose::CopyPath,
+        SnapshotReviewLiveTargetPurpose::QuickLook,
+    ] {
+        let target = review.live_target(file_id, purpose).unwrap();
+        assert_eq!(target.node_id, file_id);
+        assert_eq!(target.purpose, purpose);
+        assert_eq!(target.kind, SnapshotReviewLiveTargetKind::File);
+        assert_eq!(
+            target.path,
+            std::fs::canonicalize(root.join("payload.bin")).unwrap()
+        );
+    }
+    assert_eq!(
+        review
+            .live_target(u64::MAX, SnapshotReviewLiveTargetPurpose::Reveal)
+            .unwrap_err(),
+        SnapshotReviewError::NodeNotFound
+    );
+
+    // DUX-DESTRUCTIVE: allow=test-live-target-replace-rename -- rename only the temporary live-target fixture to prove snapshot identity mismatch
+    std::fs::rename(root.join("payload.bin"), root.join("payload.original")).unwrap();
+    std::fs::write(root.join("payload.bin"), b"replacement identity").unwrap();
+    assert_eq!(
+        review
+            .live_target(file_id, SnapshotReviewLiveTargetPurpose::Reveal)
+            .unwrap_err(),
+        SnapshotReviewError::LivePathChanged
+    );
+    // DUX-DESTRUCTIVE: allow=test-live-target-missing-remove -- remove only the replacement inside the temporary live-target fixture
+    std::fs::remove_file(root.join("payload.bin")).unwrap();
+    assert_eq!(
+        review
+            .live_target(file_id, SnapshotReviewLiveTargetPurpose::Reveal)
+            .unwrap_err(),
+        SnapshotReviewError::LivePathMissing
+    );
+
+    review.release().unwrap();
+    assert_eq!(
+        review
+            .live_target(0, SnapshotReviewLiveTargetPurpose::Reveal)
+            .unwrap_err(),
+        SnapshotReviewError::LeaseExpired
+    );
+}
+
+#[cfg(unix)]
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test replaces only a TempDir-owned ancestor to exercise symlink rejection"
+)]
+fn explorer_review_live_target_rejects_a_replaced_symlink_ancestor() {
+    use std::os::unix::fs::symlink;
+
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("symlink-live-target-root");
+    let outside = temp.path().join("outside");
+    std::fs::create_dir_all(root.join("nested")).unwrap();
+    std::fs::create_dir(&outside).unwrap();
+    std::fs::write(root.join("nested/child.bin"), b"snapshot identity").unwrap();
+    std::fs::write(outside.join("child.bin"), b"outside identity").unwrap();
+
+    let engine = EngineHandle::open(config(&temp)).unwrap();
+    let task = engine.start_scan(root.clone()).unwrap();
+    assert_eq!(wait_terminal(&engine, task).phase, TaskPhase::Succeeded);
+    let scan_id = engine.scan_result(task).unwrap().unwrap().scan_id().clone();
+    let mut review = engine.acquire_explorer_snapshot_review(&scan_id).unwrap();
+    let directory_id = review
+        .child_nodes(0, SnapshotReviewNodeSort::NameAscending, 0, 10)
+        .unwrap()
+        .nodes[0]
+        .id;
+    let file_id = review
+        .child_nodes(directory_id, SnapshotReviewNodeSort::NameAscending, 0, 10)
+        .unwrap()
+        .nodes[0]
+        .id;
+
+    // DUX-DESTRUCTIVE: allow=test-live-target-symlink-ancestor-rename -- rename only the temporary fixture ancestor before replacing it with a test symlink
+    std::fs::rename(root.join("nested"), root.join("nested.original")).unwrap();
+    symlink(&outside, root.join("nested")).unwrap();
+    assert_eq!(
+        review
+            .live_target(file_id, SnapshotReviewLiveTargetPurpose::Reveal)
+            .unwrap_err(),
+        SnapshotReviewError::LivePathSymlink
+    );
+}
+
+#[test]
+fn explorer_review_bounds_retained_decoded_documents_separately_from_live_pins() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("decoded-review-budget-root");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("payload"), b"bounded decode").unwrap();
+    let engine = EngineHandle::open(config(&temp)).unwrap();
+    let task = engine.start_scan(root).unwrap();
+    assert_eq!(wait_terminal(&engine, task).phase, TaskPhase::Succeeded);
+    let scan_id = engine.scan_result(task).unwrap().unwrap().scan_id().clone();
+
+    let mut first = engine.acquire_explorer_snapshot_review(&scan_id).unwrap();
+    let mut second = engine.acquire_explorer_snapshot_review(&scan_id).unwrap();
+    let mut waiting = engine.acquire_explorer_snapshot_review(&scan_id).unwrap();
+    assert!(first.root_node().is_ok());
+    assert!(second.root_node().is_ok());
+    assert_eq!(
+        waiting.root_node().unwrap_err(),
+        SnapshotReviewError::BudgetExceeded
+    );
+
+    let first_expiry = first.expires_at().unwrap();
+    assert_eq!(
+        first.renew_at_for_test(first_expiry).unwrap_err(),
+        SnapshotReviewError::LeaseExpired
+    );
+    assert!(waiting.root_node().is_ok());
+    first.release().unwrap();
+    second.release().unwrap();
+    waiting.release().unwrap();
 }
 
 #[test]
@@ -1127,6 +1737,111 @@ fn recent_scan_history_orders_ties_reports_more_and_exposes_only_succeeded_count
     let complete = engine.recent_scan_history(3).unwrap();
     assert!(!complete.has_more);
     assert_eq!(complete.scans.len(), 3);
+}
+
+#[test]
+fn scan_coverage_details_are_exact_paged_and_root_relative_without_snapshot_authority() {
+    use crate::domain::{CoveragePermille, ScanCoverage, ScanIssue, ScanIssueKind};
+
+    let (_temp, engine) = engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let root = engine
+        .config()
+        .cache_directory()
+        .join("private-root-marker");
+    let id = ScanId::new("scan:coverage-details").unwrap();
+    let started = SystemTime::UNIX_EPOCH + Duration::from_millis(1_750_000_000_000);
+    engine
+        .inner
+        .store
+        .record_scan_started(&NewScanRecord::try_new(id.clone(), root.clone(), started).unwrap())
+        .unwrap();
+    let deep = (0..10).fold(root.clone(), |path, index| {
+        path.join(format!("part-{index}"))
+    });
+    let coverage = ScanCoverage::try_from_terminal(
+        Some(CoveragePermille::new(500).unwrap()),
+        vec![
+            ScanIssue::try_new(ScanIssueKind::MetadataError, Some(root.clone()), 2).unwrap(),
+            ScanIssue::try_new(ScanIssueKind::MetadataError, Some(deep), 3).unwrap(),
+            ScanIssue::try_new(ScanIssueKind::Cancelled, None, 4).unwrap(),
+        ],
+    )
+    .unwrap();
+    engine
+        .inner
+        .store
+        .record_scan_finished_reconciled(
+            &ScanCompletionRecord::try_new_with_coverage(
+                id.clone(),
+                started + Duration::from_secs(1),
+                TerminalScanStatus::Cancelled,
+                ScanCounts::default(),
+                coverage,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+    let first = engine.scan_coverage_details(&id, 0, 2).unwrap();
+    assert_eq!(first.scan_id(), &id);
+    assert_eq!(first.status(), crate::ScanCoverageStatus::Partial);
+    assert_eq!(first.measured_permille().unwrap().get(), 500);
+    assert_eq!(first.total_issue_records(), 3);
+    assert_eq!(first.total_issue_occurrences(), 9);
+    assert!(first.has_more());
+    assert_eq!(
+        first
+            .issues()
+            .iter()
+            .map(|issue| issue.ordinal())
+            .collect::<Vec<_>>(),
+        [0, 1]
+    );
+    let root_location = first.issues()[0].location().unwrap();
+    assert!(root_location.is_scan_root());
+    assert!(root_location.components().is_empty());
+    let deep_location = first.issues()[1].location().unwrap();
+    assert!(!deep_location.is_scan_root());
+    assert!(deep_location.context_truncated());
+    assert_eq!(deep_location.components().len(), 8);
+    assert_eq!(deep_location.components()[0].as_ref(), "part-2");
+    assert_eq!(deep_location.components()[7].as_ref(), "part-9");
+    assert!(
+        deep_location
+            .components()
+            .iter()
+            .all(|component| !component.contains("private-root-marker"))
+    );
+
+    let second = engine.scan_coverage_details(&id, 2, 2).unwrap();
+    assert!(!second.has_more());
+    assert_eq!(second.issues()[0].ordinal(), 2);
+    assert!(second.issues()[0].location().is_none());
+    let empty = engine.scan_coverage_details(&id, 3, 2).unwrap();
+    assert!(empty.issues().is_empty());
+    assert!(!empty.has_more());
+    assert_eq!(
+        engine.scan_coverage_details(&id, 4, 2),
+        Err(ScanCoverageDetailsError::InvalidOffset)
+    );
+    assert_eq!(
+        engine.scan_coverage_details(&ScanId::new("scan:missing-coverage").unwrap(), 0, 2),
+        Err(ScanCoverageDetailsError::ScanNotFound)
+    );
+}
+
+#[test]
+fn scan_coverage_location_marks_a_shortened_component_without_inventing_ancestors() {
+    let root = PathBuf::from("/private/coverage-root");
+    let observed = root.join("x".repeat(MAX_SCAN_COVERAGE_LOCATION_COMPONENT_CHARS + 1));
+    let location = historical_issue_location(&root, &observed).unwrap();
+    assert!(!location.is_scan_root());
+    assert!(location.context_truncated());
+    assert_eq!(location.components().len(), 1);
+    assert_eq!(
+        location.components()[0].chars().count(),
+        MAX_SCAN_COVERAGE_LOCATION_COMPONENT_CHARS
+    );
 }
 
 #[test]
@@ -7648,6 +8363,13 @@ fn cancellation_after_completed_traversal_cancels_discovery_not_scan() {
     );
     assert!(durable_candidates.candidates().is_empty());
     assert_eq!(final_snapshot_count(&config), 1);
+    let mut review = engine
+        .acquire_explorer_snapshot_review(result.scan_id())
+        .unwrap();
+    assert_eq!(
+        review.root_node().unwrap().category,
+        SnapshotReviewCategory::Unclassified
+    );
 }
 
 #[test]

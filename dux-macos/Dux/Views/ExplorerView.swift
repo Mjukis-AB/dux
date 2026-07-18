@@ -5,6 +5,7 @@ struct ExplorerView: View {
     @State private var selection = ExplorerDestination.overview
 
     let model: AppModel
+    let snapshotBrowser: ExplorerSnapshotBrowserModel
 
     var body: some View {
         let presentation = ExplorerPresentation.make(
@@ -24,6 +25,11 @@ struct ExplorerView: View {
                 }
                 .accessibilityIdentifier(ExplorerAccessibility.overviewDestination)
 
+                NavigationLink(value: ExplorerDestination.snapshot) {
+                    Label("Explore Snapshot", systemImage: "internaldrive")
+                }
+                .accessibilityIdentifier(ExplorerAccessibility.snapshotDestination)
+
                 Section {
                     Button {
                         AppActivation.openSettings(using: openSettings)
@@ -42,12 +48,21 @@ struct ExplorerView: View {
             .navigationSplitViewColumnWidth(min: 180, ideal: 210, max: 250)
             .accessibilityIdentifier(ExplorerAccessibility.sidebar)
         } detail: {
-            ExplorerOverviewView(
-                presentation: presentation,
-                storageAccess: storageAccess,
-                model: model
-            )
+            switch selection {
+            case .overview:
+                ExplorerOverviewView(
+                    presentation: presentation,
+                    storageAccess: storageAccess,
+                    model: model
+                )
                 .navigationTitle("Overview")
+            case .snapshot:
+                ExplorerSnapshotBrowserView(
+                    browser: snapshotBrowser,
+                    model: model
+                )
+                .navigationTitle("Explore Snapshot")
+            }
         }
         .navigationSplitViewStyle(.balanced)
         .toolbar {

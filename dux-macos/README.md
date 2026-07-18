@@ -244,7 +244,7 @@ bar, Explorer, and Settings scenes. Capacity is never derived from directory
 scan totals, and the Rust engine pressure evaluator remains the only owner of
 Healthy/Warning/Critical thresholds and hysteresis.
 
-Settings uses FFI contract v9's carried-forward typed pressure-policy
+Settings uses FFI contract v12's carried-forward typed pressure-policy
 get/set/reset calls. Rust
 persists canonical exact integer configuration and remains the sole semantic
 validator/evaluator. Swift holds GiB and percentage edits as text and converts
@@ -268,17 +268,97 @@ reports the terminal outcome, and a late success remains success. App shutdown
 requests scan cancellation and quiesces the publication driver before
 maintenance, review, and engine shutdown.
 
-Explorer's FFI v9 newest-snapshot entry point does not trust the recent-history
+Explorer's FFI v12 review entry point does not trust the recent-history
 hint. Rust selects the exact newest succeeded, non-tombstoned snapshot and
 acquires its existing expiring review lease after repeating repository and
 file-format validation. Swift validates the returned scan ID and owns lease
 renewal/release outside render state; concurrent stale acquisitions are
-released. Paths and snapshot nodes remain sealed until the later paged API.
+released. The same lease exposes a historical root and bounded direct-child
+pages through validated app-owned models. Lossless observation bytes support
+display and drill-down only; no current path, filesystem identity, plan, or
+cleanup capability crosses.
+
+Explorer now consumes that transport in a separate Latest Snapshot destination.
+It acquires no review while Overview is selected and never switches snapshots
+implicitly after a scan. A successful open publishes only after the root and
+first 100-row child page are both validated. Folder drill-down, ID-backed
+breadcrumbs, four server-side sorts, proportional size bars, and bounded
+previous/next page replacement retain only one page in Swift. Closing the
+destination or the app generation-fences pending work and releases the exact
+review. Empty history, expiry, engine pressure, browsing-budget refusal, and
+invalid data are explicit states; observation names remain display-only and are
+never converted to live URLs or filesystem actions.
+
+The same lease now supplies a coarse logical-size treemap capped at 64
+represented positive-size children; the app requests 48. Every response carries
+deterministic logical ranks and exact Other child/byte accounting, including
+zero-size children. Treemap selection uses those ranks to load the exact
+100-row logical table page, and table selection highlights either the matching
+cell or Other. A deterministic rectangular layout and a historical-only
+inspector show names, kinds, sizes, counts, timestamps, and scan warnings with
+textual accessibility labels. The table remains the complete fallback if the
+treemap is unavailable. Other is never a node, and the inspector deliberately
+offers no Finder, Quick Look, path-copy, AI, or cleanup action.
 
 Explorer snapshot selection starts with FFI v8's bounded newest-first recent
 scan page. The native adapter validates its version, stable IDs, ordering,
 timestamps, lifecycle/count shape, coverage, and recorded-snapshot hints before
-publishing app-owned immutable values. The newest recorded reference in that
-page is only a review candidate: opening it must still acquire the existing
-expiring scan-bound lease. Snapshot paths, nodes, issue paths, candidate
-details, and treemap data do not cross in this slice.
+publishing app-owned immutable values. Snapshot Explorer requests at most the
+newest 50 rows, shows non-reviewable lifecycle states instead of hiding them,
+and discloses when older history is omitted. A recorded reference is only a
+review candidate: opening it acquires the exact expiring scan-bound lease and
+validates its root, first page, and treemap before replacing the last confirmed
+view. Missing retained snapshots are marked unavailable only for the session;
+refresh retries them. History failure does not close an active review or erase
+the last confirmed list. Snapshot paths, issue paths, candidate details, and
+cleanup authority do not cross in this slice.
+
+Large Files is a second, lazy view over the same retained review lease. FFI v12
+requires a positive size threshold, supports an optional strict modification
+cutoff, and returns at most 200 deterministic file observations; the app asks
+for 100 and defaults to 1 GiB. Exact matching count and logical-byte totals make
+truncation explicit, while at most eight historical parent components provide
+display context without constructing a live path. Size and age presets rerun
+the bounded query off the main actor, and mode/filter/snapshot generations
+discard late results. Unknown modification times are excluded by age filters.
+The view labels all values as historical observations—not reclaimable space—and
+offers no Finder, Quick Look, deletion, AI, planning, or cleanup action.
+
+Coverage is a third lazy Explorer view backed by FFI v13's exact durable scan
+history endpoint rather than the snapshot lease. The app loads canonical issue
+pages of at most 64 records, validates exact cross-page totals and coverage
+invariants, and displays all retained limitations with bounded root-relative
+historical context. Unknown coverage is never drawn as zero; a measured bar is
+shown only when the scan recorded a quantitative estimate. These locations are
+display observations, not live paths, current access tests, reclaimable-space
+estimates, or cleanup inputs.
+
+FFI v14 enables three narrowly scoped live conveniences for a selected
+historical file or folder: Reveal in Finder, Copy Path, and file-only Quick
+Look. The app never builds a path from breadcrumbs or display names. It asks
+the exact retained review to resolve a node ID for one purpose; Rust matches
+the current root, every ancestor, and target to the snapshot's recorded
+device/inode identities using no-follow descriptor traversal, then rechecks the
+lease. Swift validates the complete response and discards delayed results after
+selection, mode, snapshot, presentation, or close changes. Paths that cannot
+round-trip exactly through Swift Foundation's path-based URL are rejected for
+all actions rather than silently changing their bytes.
+
+The returned path is current only at the validation instant. Finder and Quick
+Look accept paths rather than retained file handles, leaving a narrow
+post-validation same-user filesystem race. The feature is therefore limited to
+non-destructive UI actions, says that Quick Look shows current contents, and
+does not retain or route the path into AI, candidates, reclaimability, plans,
+or cleanup execution.
+
+FFI v15 adds a display-only historical storage category to the root, page,
+treemap, and Large Files node records. Rust joins only the exact scan's
+immutable validated candidate evaluation and returns Unclassified when no
+unambiguous historical assertion exists. The optional exact-path join is
+limited to 4,096 roots and 1 MiB, indexed by exact root, and cleared with the
+review lifecycle. Candidate persistence currently rejects non-Unicode host
+paths, so affected evaluation fails closed to Unclassified; Swift does not
+infer categories from lossy names. Treemap color is always redundant with a category symbol and
+visible legend; both tables, the inspector, and VoiceOver expose the same text.
+The category is not reclaimability or safety evidence and cannot carry a
+candidate identity, path, action, plan, AI result, or cleanup authority.

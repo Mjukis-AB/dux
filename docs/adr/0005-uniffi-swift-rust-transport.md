@@ -56,13 +56,14 @@ Those capabilities retain their own gates below and in ADR 0004.
 
 ## Current realization
 
-FFI contract v9 now carries the real shared engine session first introduced in
+FFI contract v15 now carries the real shared engine session first introduced in
 v4. The app supplies input-only private data/cache roots; storage paths never
 return across the boundary. Seven maintenance kinds use opaque task objects
 with nonblocking versioned path-free poll/cancel records, and exact Explorer
 reviews use opaque scan-bound lease objects. No maintenance task accepts a path,
 cap, inventory, victim, candidate, or cleanup instruction. Review sessions
-expose only scan ID, expiry, renewal, and idempotent release.
+expose scan ID, expiry, renewal, idempotent release, and bounded read-only
+snapshot navigation.
 
 Contract v9 adds one path-free newest-available review acquisition. The core
 selects the deterministic newest succeeded, non-tombstoned snapshot and then
@@ -70,7 +71,84 @@ uses the same exact scan-bound lease acquisition, which repeats catalog,
 tombstone, retained-file identity, and full-format checks while pinning. The
 Swift adapter receives the authoritative selected scan ID from the lease and
 owns renewal/release; recent-history metadata remains only a presentation hint.
-No node, path, candidate, plan, or cleanup command crosses in this contract.
+Contract v10 adds one root record and direct-child pages capped at 200 under
+that exact lease. Records preserve historical host bytes and an explicitly
+lossy display string, expose only snapshot observations, and omit Unix identity,
+live path handles, candidates, plans, and effects. Every page revalidates the
+durable pin and retained immutable file. A session decodes once, release drops
+the cache, invalid/expired sessions surrender admission immediately, and a
+separate per-engine budget permits at most two retained trees within a
+conservative 1 GiB decoded-memory estimate. A compact decode-time child index
+and one sorted-child cache avoid full-subtree work on repeated pages;
+directories above 100,000 direct children remain budget-gated until measured
+latency work establishes a responsive strategy. Swift
+converts into app-owned models, preserves typed expiry/navigation failures,
+generation-fences controller results, and immediately removes an expired lease.
+Contract v11 adds one logical-size treemap call under the same exact lease. It
+returns at most 64 positive-size direct-child records with deterministic logical
+ranks and exact path-free Other count/byte accounting, including zero-size
+children. It reuses the retained document, logical ordering cache,
+decoded-memory admission, and 100,000-child sort ceiling; it grants no path,
+category, candidate, reclaimability, plan, AI, or cleanup authority.
+
+Contract v12 adds one path-free Large Files query under the same review lease.
+It requires a positive threshold, optionally filters strictly before an
+observed modification timestamp, and returns no more than 200 deterministic
+file records with exact match count/logical-byte totals and at most eight
+historical parent-name components. Rust retains only O(k) top-result state and
+revalidates the lease after the whole-snapshot pass. The DTO cannot express a
+live path, reclaimability decision, candidate, AI input, plan, or cleanup
+instruction.
+
+Contract v13 adds an exact paged scan-coverage history query independent of
+snapshot leases. A request names only a stable scan ID, version, offset, and a
+limit capped at 64. Rust fully validates the durable record and returns exact
+coverage totals plus canonical issue ordinals and all 13 semantic kinds.
+Historical locations are scoped as global, scan root, or descendant and expose
+at most the nearest eight root-relative display components; the absolute root,
+URLs, and current filesystem handles never cross FFI. This metadata endpoint
+therefore remains useful after snapshot pruning and for failed, cancelled, or
+interrupted scans without granting review or cleanup authority.
+
+Contract v14 adds a purpose-bound live-target resolver to the existing exact
+snapshot review lease. Its versioned request contains only a snapshot node ID
+and Reveal, Copy Path, or Quick Look purpose. Rust reconstructs the lossless
+host path from the validated immutable snapshot graph; callers cannot submit or
+concatenate a path. It then uses descriptor-relative no-follow validation and
+requires the current root, every ancestor, and the target to match the
+snapshot's Unix device/inode identities and entry kinds. The review lease is
+revalidated after that work. Only files and directories are eligible, Quick
+Look is file-only, and missing identities, changed objects, symlinks, special
+entries, cross-volume paths, and access failures remain typed and path-free.
+
+The response is deliberately ephemeral read-only evidence: it contains the
+echoed request, current kind, lossless absolute host bytes, lossy display text,
+and exact Unicode text only when available. It exposes no identities, snapshot
+digest, candidate, plan, or cleanup witness. Finder and Quick Look are
+path-based macOS APIs, so validation and presentation cannot be atomic; a
+same-user filesystem mutation can race after return. That residual risk is
+accepted only for these non-destructive conveniences and must never be reused
+to authorize reading for AI, reclaimability, planning, or cleanup.
+The current Unix identity witness is device plus inode. Inode reuse after an
+object is removed is therefore an accepted residual ambiguity for these
+read-only actions; it is not cleanup authority and should be strengthened with
+birth-time or filesystem-generation evidence if the platform-neutral snapshot
+schema later carries it.
+
+Contract v15 adds a display-only storage category to each bounded snapshot node
+record. The category is joined from the exact scan's immutable, validated
+candidate evaluation; Rust uses the nearest classified historical root and
+returns Unclassified when evaluation evidence is absent, ambiguous, or exceeds
+the independent 4,096-root/1 MiB path-payload budget. An exact-root index makes
+lookup proportional to node depth and is discarded on release or expiry.
+Candidate persistence currently rejects non-Unicode host paths, so those
+evaluations fail closed to Unclassified; display names are never used as a
+substitute. This is
+not a candidate transport: candidate identity, paths, evidence, status, safety,
+action, reclaimability, AI data, plan, and execution authority remain sealed.
+Swift maps the closed enum directly and never infers a category from lossy
+display names. Color is redundant with a stable symbol, visible legend/table
+text, inspector disclosure, and VoiceOver copy.
 
 The seventh task is scan recovery. It exposes only bounded page counts and
 typed outcomes; process-instance identities and recovery-scope keys remain
@@ -137,8 +215,9 @@ durable release expires naturally, and concurrent close callers observe the same
 result. The app first requests cancellation and quiesces its scan publication
 driver, then stops maintenance and releases reviews before close. This is
 evidence that the accepted opaque-object design scales to coarse asynchronous
-ownership; it does not satisfy the still-separate snapshot paging, planner,
-executor, or cleanup gates.
+ownership, bounded snapshot paging, and coarse treemap projection; candidate
+detail, planner,
+executor, and cleanup gates remain separate.
 
 ## Decision
 

@@ -27,16 +27,49 @@ protocol DuxSnapshotHistoryServing: Sendable {
     func loadRecentSnapshotHistory(limit: UInt16) async throws -> ExplorerSnapshotHistoryPage
 }
 
+protocol DuxScanCoverageServing: Sendable {
+    func loadScanCoverageDetails(scanID: String) async throws -> ExplorerScanCoverageDetails
+}
+
 protocol DuxSnapshotReviewLease: AnyObject, Sendable {
     var scanID: String { get }
     func renew() async throws -> Int64
+    func rootNode() async throws -> ExplorerSnapshotNode
+    func childNodes(
+        parentID: UInt64,
+        sort: ExplorerSnapshotNodeSort,
+        offset: UInt64,
+        limit: UInt16
+    ) async throws -> ExplorerSnapshotNodePage
+    func treemap(
+        parentID: UInt64,
+        maxCells: UInt16
+    ) async throws -> ExplorerSnapshotTreemap
+    func largeFiles(
+        minimumLogicalBytes: UInt64,
+        modifiedBefore: ExplorerSnapshotTimestamp?,
+        maxResults: UInt16
+    ) async throws -> ExplorerSnapshotLargeFilesPage
+    func resolveLiveItem(
+        nodeID: UInt64,
+        purpose: ExplorerSnapshotLivePathPurpose
+    ) async throws -> ExplorerResolvedLiveItem
     func release() async
 }
 
+extension DuxSnapshotReviewLease {
+    func resolveLiveItem(
+        nodeID _: UInt64,
+        purpose _: ExplorerSnapshotLivePathPurpose
+    ) async throws -> ExplorerResolvedLiveItem {
+        throw ExplorerSnapshotLivePathError.unavailable
+    }
+}
+
 struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewServing,
-    DuxSnapshotHistoryServing, HomeScanServing, Sendable
+    DuxSnapshotHistoryServing, DuxScanCoverageServing, HomeScanServing, Sendable
 {
-    fileprivate static let expectedFFIContractVersion: UInt32 = 9
+    fileprivate static let expectedFFIContractVersion: UInt32 = 15
     fileprivate static let expectedRecordVersion: UInt32 = 1
 
     private let state: EngineServiceState
@@ -271,7 +304,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
             do {
                 return try engine.acquireExplorerSnapshotReview(scanId: scanID)
             } catch let error as EngineError {
-                throw Self.serviceError(error)
+                throw Self.snapshotReviewAcquisitionError(error)
             }
         }
         return FFIDuxSnapshotReviewLease(lease: lease, state: state, scanID: scanID)
@@ -289,7 +322,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
                     throw error
                 }
             } catch let error as EngineError {
-                throw Self.serviceError(error)
+                throw Self.snapshotReviewAcquisitionError(error)
             }
         }
         guard
@@ -319,6 +352,54 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
                 )
             } catch let error as EngineError {
                 throw Self.serviceError(error)
+            }
+        }
+    }
+
+    func loadScanCoverageDetails(scanID: String) async throws -> ExplorerScanCoverageDetails {
+        guard ExplorerSnapshotHistoryAdapter.validScanID(scanID) else {
+            throw ExplorerScanCoverageError.invalidRequest
+        }
+        return try await state.perform { state in
+            precondition(!Thread.isMainThread, "Blocking FFI work reached the main thread")
+            let engine = try state.resolveEngine()
+            var pages: [ExplorerScanCoverageDetailsPage] = []
+            var offset: UInt16 = 0
+            do {
+                repeat {
+                    let raw = try engine.scanCoverageDetails(
+                        scanId: scanID,
+                        request: ScanCoverageDetailsRequest(
+                            recordVersion: Self.expectedRecordVersion,
+                            offset: offset,
+                            limit: ExplorerScanCoverageDetailsAdapter.maximumPageLimit
+                        )
+                    )
+                    let page = try ExplorerScanCoverageDetailsAdapter.map(
+                        raw,
+                        requestedScanID: scanID,
+                        requestedOffset: offset,
+                        requestedLimit: ExplorerScanCoverageDetailsAdapter.maximumPageLimit
+                    )
+                    pages.append(page)
+                    guard page.hasMore else {
+                        break
+                    }
+                    let next = Int(offset) + page.issues.count
+                    guard next <= Int(UInt16.max), next > Int(offset) else {
+                        throw ExplorerScanCoverageError.invalidResponse
+                    }
+                    offset = UInt16(next)
+                } while pages.count <= 4
+                guard pages.count <= 4 else {
+                    throw ExplorerScanCoverageError.invalidResponse
+                }
+                return try ExplorerScanCoverageDetailsAdapter.assemble(
+                    pages,
+                    requestedScanID: scanID
+                )
+            } catch let error as EngineError {
+                throw Self.scanCoverageError(error)
             }
         }
     }
@@ -376,13 +457,51 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
             .conflictingCapacityObservation
         case .SupersededCapacityObservation:
             .supersededCapacityObservation
-        case .Busy, .StorageUnavailable, .RegistryUnavailable, .BudgetExceeded:
+        case .Busy, .StorageUnavailable, .RegistryUnavailable:
             .retryable
         case .ReadOnlyStore, .IncompatibleSchema, .UnsafeStorage, .CorruptData,
              .OutcomeUnknown, .InternalState:
             .unavailable
         default:
             .unexpected(String(describing: error))
+        }
+    }
+
+    private static func snapshotReviewAcquisitionError(
+        _ error: EngineError
+    ) -> ExplorerSnapshotReviewAcquisitionError {
+        switch error {
+        case .Closed:
+            .closed
+        case .ScanNotFound:
+            .scanNotFound
+        case .SnapshotUnavailable:
+            .snapshotUnavailable
+        case .Busy, .StorageUnavailable, .RegistryUnavailable:
+            .retryable
+        case .BudgetExceeded:
+            .budgetExceeded
+        case .ReadOnlyStore, .IncompatibleSchema, .UnsafeStorage, .CorruptData,
+             .IncompatibleSnapshot, .OutcomeUnknown, .InternalState:
+            .unavailable
+        default:
+            .invalidResponse
+        }
+    }
+
+    private static func scanCoverageError(_ error: EngineError) -> ExplorerScanCoverageError {
+        switch error {
+        case .ScanNotFound:
+            .scanNotFound
+        case .Busy, .StorageUnavailable, .RegistryUnavailable, .BudgetExceeded:
+            .retryable
+        case .InvalidScanId, .InvalidScanCoverageDetailsRequest:
+            .invalidRequest
+        case .Closed, .ReadOnlyStore, .IncompatibleSchema, .UnsafeStorage, .CorruptData,
+             .OutcomeUnknown, .InternalState:
+            .unavailable
+        default:
+            .invalidResponse
         }
     }
 
@@ -595,7 +714,14 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
             .retryable
         case .Closed, .InvalidStorage, .InvalidScanId, .InvalidCapacityObservation,
              .ConflictingCapacityObservation, .SupersededCapacityObservation, .ScanNotFound,
-             .SnapshotUnavailable, .ReviewExpired, .ReadOnlyStore,
+             .SnapshotUnavailable, .ReviewExpired, .SnapshotNodeNotFound,
+             .SnapshotNodeNotDirectory, .InvalidSnapshotNodePage,
+             .InvalidSnapshotTreemapBudget, .InvalidSnapshotLargeFileRequest,
+             .InvalidSnapshotLiveTargetRequest, .SnapshotLiveTargetUnsupported,
+             .SnapshotLivePathUnavailable, .SnapshotLivePathMissing,
+             .SnapshotLivePathSymlink, .SnapshotLivePathCrossVolume,
+             .SnapshotLivePathChanged, .SnapshotLivePathAccessDenied,
+             .InvalidScanCoverageDetailsRequest, .ReadOnlyStore,
              .IncompatibleSchema, .UnsafeStorage, .CorruptData,
              .IncompatibleSnapshot, .OutcomeUnknown, .InternalState:
             .blockedUntilRestart
@@ -1124,9 +1250,160 @@ private final class FFIDuxSnapshotReviewLease: DuxSnapshotReviewLease, @unchecke
         }
     }
 
+    func rootNode() async throws -> ExplorerSnapshotNode {
+        try await state.perform { _ in
+            do {
+                return try ExplorerSnapshotNodeAdapter.mapRoot(try self.lease.rootNode())
+            } catch let error as EngineError {
+                throw Self.navigationError(error)
+            }
+        }
+    }
+
+    func childNodes(
+        parentID: UInt64,
+        sort: ExplorerSnapshotNodeSort,
+        offset: UInt64,
+        limit: UInt16
+    ) async throws -> ExplorerSnapshotNodePage {
+        guard (1 ... 200).contains(limit) else {
+            throw ExplorerSnapshotNodeError.invalidLimit
+        }
+        return try await state.perform { _ in
+            do {
+                let raw = try self.lease.childNodes(
+                    parentId: parentID,
+                    sort: ExplorerSnapshotNodeAdapter.ffiSort(sort),
+                    offset: offset,
+                    limit: limit
+                )
+                return try ExplorerSnapshotNodeAdapter.mapPage(
+                    raw,
+                    expectedParentID: parentID,
+                    expectedOffset: offset,
+                    requestedLimit: limit
+                )
+            } catch let error as EngineError {
+                throw Self.navigationError(error)
+            }
+        }
+    }
+
+    func treemap(
+        parentID: UInt64,
+        maxCells: UInt16
+    ) async throws -> ExplorerSnapshotTreemap {
+        guard (1 ... ExplorerSnapshotNodeAdapter.maximumTreemapCells).contains(maxCells) else {
+            throw ExplorerSnapshotTreemapError.invalidBudget
+        }
+        return try await state.perform { _ in
+            do {
+                let raw = try self.lease.treemap(parentId: parentID, maxCells: maxCells)
+                return try ExplorerSnapshotNodeAdapter.mapTreemap(
+                    raw,
+                    expectedParentID: parentID,
+                    requestedMaxCells: maxCells
+                )
+            } catch let error as EngineError {
+                throw Self.treemapError(error)
+            }
+        }
+    }
+
+    func largeFiles(
+        minimumLogicalBytes: UInt64,
+        modifiedBefore: ExplorerSnapshotTimestamp?,
+        maxResults: UInt16
+    ) async throws -> ExplorerSnapshotLargeFilesPage {
+        let request = try ExplorerSnapshotLargeFilesAdapter.request(
+            minimumLogicalBytes: minimumLogicalBytes,
+            modifiedBefore: modifiedBefore,
+            maxResults: maxResults
+        )
+        return try await state.perform { _ in
+            do {
+                let raw = try self.lease.largeFiles(request: request)
+                return try ExplorerSnapshotLargeFilesAdapter.map(
+                    raw,
+                    minimumLogicalBytes: minimumLogicalBytes,
+                    modifiedBefore: modifiedBefore,
+                    requestedMaxResults: maxResults
+                )
+            } catch let error as EngineError {
+                throw Self.largeFilesError(error)
+            }
+        }
+    }
+
+    func resolveLiveItem(
+        nodeID: UInt64,
+        purpose: ExplorerSnapshotLivePathPurpose
+    ) async throws -> ExplorerResolvedLiveItem {
+        let request = ExplorerSnapshotLivePathAdapter.request(nodeID: nodeID, purpose: purpose)
+        return try await state.perform { _ in
+            do {
+                let raw = try self.lease.resolveLiveTarget(request: request)
+                return try ExplorerSnapshotLivePathAdapter.map(
+                    raw,
+                    requestedNodeID: nodeID,
+                    requestedPurpose: purpose
+                )
+            } catch let error as EngineError {
+                throw Self.livePathError(error)
+            }
+        }
+    }
+
     func release() async {
         await state.performNonthrowing { _ in
             _ = try? self.lease.release()
+        }
+    }
+
+    private static func navigationError(_ error: EngineError) -> Error {
+        switch error {
+        case .ReviewExpired: ExplorerSnapshotNodeError.reviewExpired
+        case .SnapshotNodeNotFound: ExplorerSnapshotNodeError.nodeNotFound
+        case .SnapshotNodeNotDirectory: ExplorerSnapshotNodeError.nodeNotDirectory
+        case .InvalidSnapshotNodePage: ExplorerSnapshotNodeError.invalidPage
+        case .BudgetExceeded: ExplorerSnapshotNodeError.budgetExceeded
+        default: EngineService.serviceError(error)
+        }
+    }
+
+    private static func treemapError(_ error: EngineError) -> Error {
+        switch error {
+        case .ReviewExpired: ExplorerSnapshotTreemapError.reviewExpired
+        case .SnapshotNodeNotFound: ExplorerSnapshotTreemapError.nodeNotFound
+        case .SnapshotNodeNotDirectory: ExplorerSnapshotTreemapError.nodeNotDirectory
+        case .InvalidSnapshotTreemapBudget: ExplorerSnapshotTreemapError.invalidBudget
+        case .BudgetExceeded: ExplorerSnapshotTreemapError.budgetExceeded
+        default: EngineService.serviceError(error)
+        }
+    }
+
+    private static func largeFilesError(_ error: EngineError) -> Error {
+        switch error {
+        case .ReviewExpired: ExplorerSnapshotLargeFilesError.reviewExpired
+        case .InvalidSnapshotLargeFileRequest: ExplorerSnapshotLargeFilesError.invalidRequest
+        case .BudgetExceeded: ExplorerSnapshotLargeFilesError.budgetExceeded
+        default: EngineService.serviceError(error)
+        }
+    }
+
+    private static func livePathError(_ error: EngineError) -> Error {
+        switch error {
+        case .ReviewExpired: ExplorerSnapshotLivePathError.reviewExpired
+        case .SnapshotNodeNotFound: ExplorerSnapshotLivePathError.nodeNotFound
+        case .InvalidSnapshotLiveTargetRequest: ExplorerSnapshotLivePathError.invalidResponse
+        case .SnapshotLiveTargetUnsupported: ExplorerSnapshotLivePathError.unsupportedItem
+        case .SnapshotLivePathUnavailable: ExplorerSnapshotLivePathError.identityUnavailable
+        case .SnapshotLivePathMissing: ExplorerSnapshotLivePathError.unavailable
+        case .SnapshotLivePathSymlink, .SnapshotLivePathCrossVolume,
+             .SnapshotLivePathChanged:
+            ExplorerSnapshotLivePathError.changedSinceScan
+        case .SnapshotLivePathAccessDenied: ExplorerSnapshotLivePathError.accessDenied
+        default: EngineService.serviceError(error)
         }
     }
 }

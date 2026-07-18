@@ -81,7 +81,7 @@ phase. A successful task publishes one finished event and immutable typed
 result. Expected failures are stable, path-free categories; a panic becomes an
 internal task failure and always releases exclusive admission.
 
-FFI contract v9 (carrying the unchanged v5 maintenance API) and the native app
+FFI contract v15 (carrying the unchanged v5 maintenance API) and the native app
 now own this idle boundary. UniFFI exposes
 only opaque maintenance tasks and path-free typed aggregates. The in-process
 scheduler starts after a 60-second grace, rechecks Low Power Mode and thermal

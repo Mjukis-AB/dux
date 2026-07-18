@@ -550,6 +550,24 @@ fileprivate struct FfiConverterString: FfiConverter {
     }
 }
 
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterData: FfiConverterRustBuffer {
+    typealias SwiftType = Data
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Data {
+        let len: Int32 = try readInt(&buf)
+        return Data(try readBytes(&buf, count: Int(len)))
+    }
+
+    public static func write(_ value: Data, into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        writeBytes(&buf, value)
+    }
+}
+
 
 
 
@@ -582,6 +600,12 @@ public protocol DuxEngineProtocol: AnyObject, Sendable {
     func recentScanHistory(limit: UInt16) throws  -> RecentScanHistoryPage
 
     func resetDiskPressurePolicy() throws  -> PressurePolicyUpdate
+
+    /**
+     * Return one exact, bounded page of durable coverage issues. This reads
+     * history metadata only and remains available without a retained snapshot.
+     */
+    func scanCoverageDetails(scanId: String, request: ScanCoverageDetailsRequest) throws  -> ScanCoverageDetailsPage
 
     func setDiskPressurePolicy(input: PressurePolicyInput) throws  -> PressurePolicyUpdate
 
@@ -733,6 +757,20 @@ open func resetDiskPressurePolicy()throws  -> PressurePolicyUpdate  {
     return try  FfiConverterTypePressurePolicyUpdate_lift(try rustCallWithError(FfiConverterTypePressurePolicyError_lift) {
     uniffi_dux_ffi_fn_method_duxengine_reset_disk_pressure_policy(
             self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+    /**
+     * Return one exact, bounded page of durable coverage issues. This reads
+     * history metadata only and remains available without a retained snapshot.
+     */
+open func scanCoverageDetails(scanId: String, request: ScanCoverageDetailsRequest)throws  -> ScanCoverageDetailsPage  {
+    return try  FfiConverterTypeScanCoverageDetailsPage_lift(try rustCallWithError(FfiConverterTypeEngineError_lift) {
+    uniffi_dux_ffi_fn_method_duxengine_scan_coverage_details(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(scanId),
+        FfiConverterTypeScanCoverageDetailsRequest_lower(request),$0
     )
 })
 }
@@ -1068,11 +1106,21 @@ public func FfiConverterTypeScanTask_lower(_ value: ScanTask) -> UInt64 {
 
 public protocol SnapshotReviewSessionProtocol: AnyObject, Sendable {
 
+    func childNodes(parentId: UInt64, sort: SnapshotNodeSort, offset: UInt64, limit: UInt16) throws  -> SnapshotNodePage
+
     func info() throws  -> SnapshotReviewInfo
+
+    func largeFiles(request: SnapshotLargeFileRequest) throws  -> SnapshotLargeFilePage
 
     func release() throws  -> ReviewReleaseOutcome
 
     func renew() throws  -> SnapshotReviewInfo
+
+    func resolveLiveTarget(request: SnapshotLiveTargetRequest) throws  -> SnapshotLiveTarget
+
+    func rootNode() throws  -> SnapshotNode
+
+    func treemap(parentId: UInt64, maxCells: UInt16) throws  -> SnapshotTreemap
 
 }
 open class SnapshotReviewSession: SnapshotReviewSessionProtocol, @unchecked Sendable {
@@ -1128,10 +1176,31 @@ open class SnapshotReviewSession: SnapshotReviewSessionProtocol, @unchecked Send
 
 
 
+open func childNodes(parentId: UInt64, sort: SnapshotNodeSort, offset: UInt64, limit: UInt16)throws  -> SnapshotNodePage  {
+    return try  FfiConverterTypeSnapshotNodePage_lift(try rustCallWithError(FfiConverterTypeEngineError_lift) {
+    uniffi_dux_ffi_fn_method_snapshotreviewsession_child_nodes(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt64.lower(parentId),
+        FfiConverterTypeSnapshotNodeSort_lower(sort),
+        FfiConverterUInt64.lower(offset),
+        FfiConverterUInt16.lower(limit),$0
+    )
+})
+}
+
 open func info()throws  -> SnapshotReviewInfo  {
     return try  FfiConverterTypeSnapshotReviewInfo_lift(try rustCallWithError(FfiConverterTypeEngineError_lift) {
     uniffi_dux_ffi_fn_method_snapshotreviewsession_info(
             self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+open func largeFiles(request: SnapshotLargeFileRequest)throws  -> SnapshotLargeFilePage  {
+    return try  FfiConverterTypeSnapshotLargeFilePage_lift(try rustCallWithError(FfiConverterTypeEngineError_lift) {
+    uniffi_dux_ffi_fn_method_snapshotreviewsession_large_files(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeSnapshotLargeFileRequest_lower(request),$0
     )
 })
 }
@@ -1148,6 +1217,33 @@ open func renew()throws  -> SnapshotReviewInfo  {
     return try  FfiConverterTypeSnapshotReviewInfo_lift(try rustCallWithError(FfiConverterTypeEngineError_lift) {
     uniffi_dux_ffi_fn_method_snapshotreviewsession_renew(
             self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+open func resolveLiveTarget(request: SnapshotLiveTargetRequest)throws  -> SnapshotLiveTarget  {
+    return try  FfiConverterTypeSnapshotLiveTarget_lift(try rustCallWithError(FfiConverterTypeEngineError_lift) {
+    uniffi_dux_ffi_fn_method_snapshotreviewsession_resolve_live_target(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeSnapshotLiveTargetRequest_lower(request),$0
+    )
+})
+}
+
+open func rootNode()throws  -> SnapshotNode  {
+    return try  FfiConverterTypeSnapshotNode_lift(try rustCallWithError(FfiConverterTypeEngineError_lift) {
+    uniffi_dux_ffi_fn_method_snapshotreviewsession_root_node(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+open func treemap(parentId: UInt64, maxCells: UInt16)throws  -> SnapshotTreemap  {
+    return try  FfiConverterTypeSnapshotTreemap_lift(try rustCallWithError(FfiConverterTypeEngineError_lift) {
+    uniffi_dux_ffi_fn_method_snapshotreviewsession_treemap(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt64.lower(parentId),
+        FfiConverterUInt16.lower(maxCells),$0
     )
 })
 }
@@ -1370,6 +1466,84 @@ public func FfiConverterTypeHistoricalScanCounts_lift(_ buf: RustBuffer) throws 
 #endif
 public func FfiConverterTypeHistoricalScanCounts_lower(_ value: HistoricalScanCounts) -> RustBuffer {
     return FfiConverterTypeHistoricalScanCounts.lower(value)
+}
+
+
+/**
+ * One historical coverage observation. Location components are bounded,
+ * root-relative display context and never a live path or cleanup capability.
+ */
+public struct HistoricalScanIssue: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let ordinal: UInt16
+    public let kind: HistoricalScanIssueKind
+    public let occurrenceCount: UInt32
+    public let locationScope: HistoricalScanIssueLocationScope
+    public let locationComponents: [String]
+    public let locationTruncated: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, ordinal: UInt16, kind: HistoricalScanIssueKind, occurrenceCount: UInt32, locationScope: HistoricalScanIssueLocationScope, locationComponents: [String], locationTruncated: Bool) {
+        self.recordVersion = recordVersion
+        self.ordinal = ordinal
+        self.kind = kind
+        self.occurrenceCount = occurrenceCount
+        self.locationScope = locationScope
+        self.locationComponents = locationComponents
+        self.locationTruncated = locationTruncated
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension HistoricalScanIssue: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeHistoricalScanIssue: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> HistoricalScanIssue {
+        return
+            try HistoricalScanIssue(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                ordinal: FfiConverterUInt16.read(from: &buf),
+                kind: FfiConverterTypeHistoricalScanIssueKind.read(from: &buf),
+                occurrenceCount: FfiConverterUInt32.read(from: &buf),
+                locationScope: FfiConverterTypeHistoricalScanIssueLocationScope.read(from: &buf),
+                locationComponents: FfiConverterSequenceString.read(from: &buf),
+                locationTruncated: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: HistoricalScanIssue, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterUInt16.write(value.ordinal, into: &buf)
+        FfiConverterTypeHistoricalScanIssueKind.write(value.kind, into: &buf)
+        FfiConverterUInt32.write(value.occurrenceCount, into: &buf)
+        FfiConverterTypeHistoricalScanIssueLocationScope.write(value.locationScope, into: &buf)
+        FfiConverterSequenceString.write(value.locationComponents, into: &buf)
+        FfiConverterBool.write(value.locationTruncated, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHistoricalScanIssue_lift(_ buf: RustBuffer) throws -> HistoricalScanIssue {
+    return try FfiConverterTypeHistoricalScanIssue.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHistoricalScanIssue_lower(_ value: HistoricalScanIssue) -> RustBuffer {
+    return FfiConverterTypeHistoricalScanIssue.lower(value)
 }
 
 
@@ -2112,6 +2286,142 @@ public func FfiConverterTypeScanCandidateEvaluationSummary_lower(_ value: ScanCa
 }
 
 
+public struct ScanCoverageDetailsPage: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let scanId: String
+    public let coverage: ScanCoverageSummary
+    public let offset: UInt16
+    public let totalIssueRecords: UInt16
+    public let totalIssueOccurrences: UInt64
+    public let hasMore: Bool
+    public let issues: [HistoricalScanIssue]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, scanId: String, coverage: ScanCoverageSummary, offset: UInt16, totalIssueRecords: UInt16, totalIssueOccurrences: UInt64, hasMore: Bool, issues: [HistoricalScanIssue]) {
+        self.recordVersion = recordVersion
+        self.scanId = scanId
+        self.coverage = coverage
+        self.offset = offset
+        self.totalIssueRecords = totalIssueRecords
+        self.totalIssueOccurrences = totalIssueOccurrences
+        self.hasMore = hasMore
+        self.issues = issues
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension ScanCoverageDetailsPage: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeScanCoverageDetailsPage: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ScanCoverageDetailsPage {
+        return
+            try ScanCoverageDetailsPage(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                scanId: FfiConverterString.read(from: &buf),
+                coverage: FfiConverterTypeScanCoverageSummary.read(from: &buf),
+                offset: FfiConverterUInt16.read(from: &buf),
+                totalIssueRecords: FfiConverterUInt16.read(from: &buf),
+                totalIssueOccurrences: FfiConverterUInt64.read(from: &buf),
+                hasMore: FfiConverterBool.read(from: &buf),
+                issues: FfiConverterSequenceTypeHistoricalScanIssue.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ScanCoverageDetailsPage, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterString.write(value.scanId, into: &buf)
+        FfiConverterTypeScanCoverageSummary.write(value.coverage, into: &buf)
+        FfiConverterUInt16.write(value.offset, into: &buf)
+        FfiConverterUInt16.write(value.totalIssueRecords, into: &buf)
+        FfiConverterUInt64.write(value.totalIssueOccurrences, into: &buf)
+        FfiConverterBool.write(value.hasMore, into: &buf)
+        FfiConverterSequenceTypeHistoricalScanIssue.write(value.issues, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeScanCoverageDetailsPage_lift(_ buf: RustBuffer) throws -> ScanCoverageDetailsPage {
+    return try FfiConverterTypeScanCoverageDetailsPage.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeScanCoverageDetailsPage_lower(_ value: ScanCoverageDetailsPage) -> RustBuffer {
+    return FfiConverterTypeScanCoverageDetailsPage.lower(value)
+}
+
+
+public struct ScanCoverageDetailsRequest: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let offset: UInt16
+    public let limit: UInt16
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, offset: UInt16, limit: UInt16) {
+        self.recordVersion = recordVersion
+        self.offset = offset
+        self.limit = limit
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension ScanCoverageDetailsRequest: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeScanCoverageDetailsRequest: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ScanCoverageDetailsRequest {
+        return
+            try ScanCoverageDetailsRequest(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                offset: FfiConverterUInt16.read(from: &buf),
+                limit: FfiConverterUInt16.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ScanCoverageDetailsRequest, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterUInt16.write(value.offset, into: &buf)
+        FfiConverterUInt16.write(value.limit, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeScanCoverageDetailsRequest_lift(_ buf: RustBuffer) throws -> ScanCoverageDetailsRequest {
+    return try FfiConverterTypeScanCoverageDetailsRequest.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeScanCoverageDetailsRequest_lower(_ value: ScanCoverageDetailsRequest) -> RustBuffer {
+    return FfiConverterTypeScanCoverageDetailsRequest.lower(value)
+}
+
+
 public struct ScanCoverageSummary: Equatable, Hashable {
     public let recordVersion: UInt32
     public let status: ScanCoverageStatus
@@ -2549,6 +2859,698 @@ public func FfiConverterTypeScanTaskResult_lower(_ value: ScanTaskResult) -> Rus
 }
 
 
+public struct SnapshotLargeFile: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let node: SnapshotNode
+    /**
+     * Root-to-parent historical name components, excluding the scan root.
+     */
+    public let parentContext: [SnapshotNodeName]
+    public let contextTruncated: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, node: SnapshotNode,
+        /**
+         * Root-to-parent historical name components, excluding the scan root.
+         */parentContext: [SnapshotNodeName], contextTruncated: Bool) {
+        self.recordVersion = recordVersion
+        self.node = node
+        self.parentContext = parentContext
+        self.contextTruncated = contextTruncated
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SnapshotLargeFile: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSnapshotLargeFile: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SnapshotLargeFile {
+        return
+            try SnapshotLargeFile(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                node: FfiConverterTypeSnapshotNode.read(from: &buf),
+                parentContext: FfiConverterSequenceTypeSnapshotNodeName.read(from: &buf),
+                contextTruncated: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SnapshotLargeFile, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterTypeSnapshotNode.write(value.node, into: &buf)
+        FfiConverterSequenceTypeSnapshotNodeName.write(value.parentContext, into: &buf)
+        FfiConverterBool.write(value.contextTruncated, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotLargeFile_lift(_ buf: RustBuffer) throws -> SnapshotLargeFile {
+    return try FfiConverterTypeSnapshotLargeFile.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotLargeFile_lower(_ value: SnapshotLargeFile) -> RustBuffer {
+    return FfiConverterTypeSnapshotLargeFile.lower(value)
+}
+
+
+public struct SnapshotLargeFilePage: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let totalMatchingFiles: UInt64
+    public let totalMatchingLogicalBytes: UInt64
+    public let hasMore: Bool
+    public let files: [SnapshotLargeFile]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, totalMatchingFiles: UInt64, totalMatchingLogicalBytes: UInt64, hasMore: Bool, files: [SnapshotLargeFile]) {
+        self.recordVersion = recordVersion
+        self.totalMatchingFiles = totalMatchingFiles
+        self.totalMatchingLogicalBytes = totalMatchingLogicalBytes
+        self.hasMore = hasMore
+        self.files = files
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SnapshotLargeFilePage: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSnapshotLargeFilePage: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SnapshotLargeFilePage {
+        return
+            try SnapshotLargeFilePage(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                totalMatchingFiles: FfiConverterUInt64.read(from: &buf),
+                totalMatchingLogicalBytes: FfiConverterUInt64.read(from: &buf),
+                hasMore: FfiConverterBool.read(from: &buf),
+                files: FfiConverterSequenceTypeSnapshotLargeFile.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SnapshotLargeFilePage, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterUInt64.write(value.totalMatchingFiles, into: &buf)
+        FfiConverterUInt64.write(value.totalMatchingLogicalBytes, into: &buf)
+        FfiConverterBool.write(value.hasMore, into: &buf)
+        FfiConverterSequenceTypeSnapshotLargeFile.write(value.files, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotLargeFilePage_lift(_ buf: RustBuffer) throws -> SnapshotLargeFilePage {
+    return try FfiConverterTypeSnapshotLargeFilePage.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotLargeFilePage_lower(_ value: SnapshotLargeFilePage) -> RustBuffer {
+    return FfiConverterTypeSnapshotLargeFilePage.lower(value)
+}
+
+
+/**
+ * Versioned, bounded historical large-file discovery input. It grants no
+ * cleanup authority.
+ */
+public struct SnapshotLargeFileRequest: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let minimumLogicalBytes: UInt64
+    public let modifiedBefore: SnapshotNodeTimestamp?
+    public let maxResults: UInt16
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, minimumLogicalBytes: UInt64, modifiedBefore: SnapshotNodeTimestamp?, maxResults: UInt16) {
+        self.recordVersion = recordVersion
+        self.minimumLogicalBytes = minimumLogicalBytes
+        self.modifiedBefore = modifiedBefore
+        self.maxResults = maxResults
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SnapshotLargeFileRequest: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSnapshotLargeFileRequest: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SnapshotLargeFileRequest {
+        return
+            try SnapshotLargeFileRequest(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                minimumLogicalBytes: FfiConverterUInt64.read(from: &buf),
+                modifiedBefore: FfiConverterOptionTypeSnapshotNodeTimestamp.read(from: &buf),
+                maxResults: FfiConverterUInt16.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SnapshotLargeFileRequest, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterUInt64.write(value.minimumLogicalBytes, into: &buf)
+        FfiConverterOptionTypeSnapshotNodeTimestamp.write(value.modifiedBefore, into: &buf)
+        FfiConverterUInt16.write(value.maxResults, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotLargeFileRequest_lift(_ buf: RustBuffer) throws -> SnapshotLargeFileRequest {
+    return try FfiConverterTypeSnapshotLargeFileRequest.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotLargeFileRequest_lower(_ value: SnapshotLargeFileRequest) -> RustBuffer {
+    return FfiConverterTypeSnapshotLargeFileRequest.lower(value)
+}
+
+
+/**
+ * A freshly validated current path for one immediate presentation action.
+ * This value can become stale immediately, grants no cleanup authority, and
+ * must not be persisted, logged, sent to AI, or reconstructed from node names.
+ */
+public struct SnapshotLiveTarget: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let nodeId: UInt64
+    public let purpose: SnapshotLiveTargetPurpose
+    public let kind: SnapshotLiveTargetKind
+    public let pathEncoding: SnapshotNameEncoding
+    public let absolutePathBytes: Data
+    public let displayPath: String
+    public let exactTextPath: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, nodeId: UInt64, purpose: SnapshotLiveTargetPurpose, kind: SnapshotLiveTargetKind, pathEncoding: SnapshotNameEncoding, absolutePathBytes: Data, displayPath: String, exactTextPath: String?) {
+        self.recordVersion = recordVersion
+        self.nodeId = nodeId
+        self.purpose = purpose
+        self.kind = kind
+        self.pathEncoding = pathEncoding
+        self.absolutePathBytes = absolutePathBytes
+        self.displayPath = displayPath
+        self.exactTextPath = exactTextPath
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SnapshotLiveTarget: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSnapshotLiveTarget: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SnapshotLiveTarget {
+        return
+            try SnapshotLiveTarget(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                nodeId: FfiConverterUInt64.read(from: &buf),
+                purpose: FfiConverterTypeSnapshotLiveTargetPurpose.read(from: &buf),
+                kind: FfiConverterTypeSnapshotLiveTargetKind.read(from: &buf),
+                pathEncoding: FfiConverterTypeSnapshotNameEncoding.read(from: &buf),
+                absolutePathBytes: FfiConverterData.read(from: &buf),
+                displayPath: FfiConverterString.read(from: &buf),
+                exactTextPath: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SnapshotLiveTarget, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterUInt64.write(value.nodeId, into: &buf)
+        FfiConverterTypeSnapshotLiveTargetPurpose.write(value.purpose, into: &buf)
+        FfiConverterTypeSnapshotLiveTargetKind.write(value.kind, into: &buf)
+        FfiConverterTypeSnapshotNameEncoding.write(value.pathEncoding, into: &buf)
+        FfiConverterData.write(value.absolutePathBytes, into: &buf)
+        FfiConverterString.write(value.displayPath, into: &buf)
+        FfiConverterOptionString.write(value.exactTextPath, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotLiveTarget_lift(_ buf: RustBuffer) throws -> SnapshotLiveTarget {
+    return try FfiConverterTypeSnapshotLiveTarget.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotLiveTarget_lower(_ value: SnapshotLiveTarget) -> RustBuffer {
+    return FfiConverterTypeSnapshotLiveTarget.lower(value)
+}
+
+
+/**
+ * Versioned request for one user-initiated, read-only macOS platform action.
+ * The snapshot-local node ID is not durable filesystem identity and no path
+ * may be supplied by Swift.
+ */
+public struct SnapshotLiveTargetRequest: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let nodeId: UInt64
+    public let purpose: SnapshotLiveTargetPurpose
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, nodeId: UInt64, purpose: SnapshotLiveTargetPurpose) {
+        self.recordVersion = recordVersion
+        self.nodeId = nodeId
+        self.purpose = purpose
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SnapshotLiveTargetRequest: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSnapshotLiveTargetRequest: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SnapshotLiveTargetRequest {
+        return
+            try SnapshotLiveTargetRequest(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                nodeId: FfiConverterUInt64.read(from: &buf),
+                purpose: FfiConverterTypeSnapshotLiveTargetPurpose.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SnapshotLiveTargetRequest, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterUInt64.write(value.nodeId, into: &buf)
+        FfiConverterTypeSnapshotLiveTargetPurpose.write(value.purpose, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotLiveTargetRequest_lift(_ buf: RustBuffer) throws -> SnapshotLiveTargetRequest {
+    return try FfiConverterTypeSnapshotLiveTargetRequest.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotLiveTargetRequest_lower(_ value: SnapshotLiveTargetRequest) -> RustBuffer {
+    return FfiConverterTypeSnapshotLiveTargetRequest.lower(value)
+}
+
+
+public struct SnapshotNode: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let id: UInt64
+    public let parentId: UInt64?
+    public let depth: UInt32
+    public let kind: SnapshotNodeKind
+    public let category: SnapshotStorageCategory
+    public let name: SnapshotNodeName
+    public let logicalBytes: UInt64
+    public let allocatedBytes: UInt64?
+    public let fileCount: UInt64
+    public let childCount: UInt64
+    public let modifiedAt: SnapshotNodeTimestamp?
+    public let accessedAt: SnapshotNodeTimestamp?
+    public let scanFlags: SnapshotNodeScanFlags
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, id: UInt64, parentId: UInt64?, depth: UInt32, kind: SnapshotNodeKind, category: SnapshotStorageCategory, name: SnapshotNodeName, logicalBytes: UInt64, allocatedBytes: UInt64?, fileCount: UInt64, childCount: UInt64, modifiedAt: SnapshotNodeTimestamp?, accessedAt: SnapshotNodeTimestamp?, scanFlags: SnapshotNodeScanFlags) {
+        self.recordVersion = recordVersion
+        self.id = id
+        self.parentId = parentId
+        self.depth = depth
+        self.kind = kind
+        self.category = category
+        self.name = name
+        self.logicalBytes = logicalBytes
+        self.allocatedBytes = allocatedBytes
+        self.fileCount = fileCount
+        self.childCount = childCount
+        self.modifiedAt = modifiedAt
+        self.accessedAt = accessedAt
+        self.scanFlags = scanFlags
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SnapshotNode: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSnapshotNode: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SnapshotNode {
+        return
+            try SnapshotNode(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                id: FfiConverterUInt64.read(from: &buf),
+                parentId: FfiConverterOptionUInt64.read(from: &buf),
+                depth: FfiConverterUInt32.read(from: &buf),
+                kind: FfiConverterTypeSnapshotNodeKind.read(from: &buf),
+                category: FfiConverterTypeSnapshotStorageCategory.read(from: &buf),
+                name: FfiConverterTypeSnapshotNodeName.read(from: &buf),
+                logicalBytes: FfiConverterUInt64.read(from: &buf),
+                allocatedBytes: FfiConverterOptionUInt64.read(from: &buf),
+                fileCount: FfiConverterUInt64.read(from: &buf),
+                childCount: FfiConverterUInt64.read(from: &buf),
+                modifiedAt: FfiConverterOptionTypeSnapshotNodeTimestamp.read(from: &buf),
+                accessedAt: FfiConverterOptionTypeSnapshotNodeTimestamp.read(from: &buf),
+                scanFlags: FfiConverterTypeSnapshotNodeScanFlags.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SnapshotNode, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterUInt64.write(value.id, into: &buf)
+        FfiConverterOptionUInt64.write(value.parentId, into: &buf)
+        FfiConverterUInt32.write(value.depth, into: &buf)
+        FfiConverterTypeSnapshotNodeKind.write(value.kind, into: &buf)
+        FfiConverterTypeSnapshotStorageCategory.write(value.category, into: &buf)
+        FfiConverterTypeSnapshotNodeName.write(value.name, into: &buf)
+        FfiConverterUInt64.write(value.logicalBytes, into: &buf)
+        FfiConverterOptionUInt64.write(value.allocatedBytes, into: &buf)
+        FfiConverterUInt64.write(value.fileCount, into: &buf)
+        FfiConverterUInt64.write(value.childCount, into: &buf)
+        FfiConverterOptionTypeSnapshotNodeTimestamp.write(value.modifiedAt, into: &buf)
+        FfiConverterOptionTypeSnapshotNodeTimestamp.write(value.accessedAt, into: &buf)
+        FfiConverterTypeSnapshotNodeScanFlags.write(value.scanFlags, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotNode_lift(_ buf: RustBuffer) throws -> SnapshotNode {
+    return try FfiConverterTypeSnapshotNode.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotNode_lower(_ value: SnapshotNode) -> RustBuffer {
+    return FfiConverterTypeSnapshotNode.lower(value)
+}
+
+
+public struct SnapshotNodeName: Equatable, Hashable {
+    public let encoding: SnapshotNameEncoding
+    public let encodedBytes: Data
+    public let display: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(encoding: SnapshotNameEncoding, encodedBytes: Data, display: String) {
+        self.encoding = encoding
+        self.encodedBytes = encodedBytes
+        self.display = display
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SnapshotNodeName: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSnapshotNodeName: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SnapshotNodeName {
+        return
+            try SnapshotNodeName(
+                encoding: FfiConverterTypeSnapshotNameEncoding.read(from: &buf),
+                encodedBytes: FfiConverterData.read(from: &buf),
+                display: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SnapshotNodeName, into buf: inout [UInt8]) {
+        FfiConverterTypeSnapshotNameEncoding.write(value.encoding, into: &buf)
+        FfiConverterData.write(value.encodedBytes, into: &buf)
+        FfiConverterString.write(value.display, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotNodeName_lift(_ buf: RustBuffer) throws -> SnapshotNodeName {
+    return try FfiConverterTypeSnapshotNodeName.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotNodeName_lower(_ value: SnapshotNodeName) -> RustBuffer {
+    return FfiConverterTypeSnapshotNodeName.lower(value)
+}
+
+
+public struct SnapshotNodePage: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let parentId: UInt64
+    public let offset: UInt64
+    public let totalChildren: UInt64
+    public let hasMore: Bool
+    public let nodes: [SnapshotNode]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, parentId: UInt64, offset: UInt64, totalChildren: UInt64, hasMore: Bool, nodes: [SnapshotNode]) {
+        self.recordVersion = recordVersion
+        self.parentId = parentId
+        self.offset = offset
+        self.totalChildren = totalChildren
+        self.hasMore = hasMore
+        self.nodes = nodes
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SnapshotNodePage: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSnapshotNodePage: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SnapshotNodePage {
+        return
+            try SnapshotNodePage(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                parentId: FfiConverterUInt64.read(from: &buf),
+                offset: FfiConverterUInt64.read(from: &buf),
+                totalChildren: FfiConverterUInt64.read(from: &buf),
+                hasMore: FfiConverterBool.read(from: &buf),
+                nodes: FfiConverterSequenceTypeSnapshotNode.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SnapshotNodePage, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterUInt64.write(value.parentId, into: &buf)
+        FfiConverterUInt64.write(value.offset, into: &buf)
+        FfiConverterUInt64.write(value.totalChildren, into: &buf)
+        FfiConverterBool.write(value.hasMore, into: &buf)
+        FfiConverterSequenceTypeSnapshotNode.write(value.nodes, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotNodePage_lift(_ buf: RustBuffer) throws -> SnapshotNodePage {
+    return try FfiConverterTypeSnapshotNodePage.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotNodePage_lower(_ value: SnapshotNodePage) -> RustBuffer {
+    return FfiConverterTypeSnapshotNodePage.lower(value)
+}
+
+
+public struct SnapshotNodeScanFlags: Equatable, Hashable {
+    public let inaccessible: Bool
+    public let timedOut: Bool
+    public let hardLinkDuplicate: Bool
+    public let mountBoundary: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(inaccessible: Bool, timedOut: Bool, hardLinkDuplicate: Bool, mountBoundary: Bool) {
+        self.inaccessible = inaccessible
+        self.timedOut = timedOut
+        self.hardLinkDuplicate = hardLinkDuplicate
+        self.mountBoundary = mountBoundary
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SnapshotNodeScanFlags: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSnapshotNodeScanFlags: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SnapshotNodeScanFlags {
+        return
+            try SnapshotNodeScanFlags(
+                inaccessible: FfiConverterBool.read(from: &buf),
+                timedOut: FfiConverterBool.read(from: &buf),
+                hardLinkDuplicate: FfiConverterBool.read(from: &buf),
+                mountBoundary: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SnapshotNodeScanFlags, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.inaccessible, into: &buf)
+        FfiConverterBool.write(value.timedOut, into: &buf)
+        FfiConverterBool.write(value.hardLinkDuplicate, into: &buf)
+        FfiConverterBool.write(value.mountBoundary, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotNodeScanFlags_lift(_ buf: RustBuffer) throws -> SnapshotNodeScanFlags {
+    return try FfiConverterTypeSnapshotNodeScanFlags.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotNodeScanFlags_lower(_ value: SnapshotNodeScanFlags) -> RustBuffer {
+    return FfiConverterTypeSnapshotNodeScanFlags.lower(value)
+}
+
+
+public struct SnapshotNodeTimestamp: Equatable, Hashable {
+    public let secondsSinceUnixEpoch: UInt64
+    public let nanoseconds: UInt32
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(secondsSinceUnixEpoch: UInt64, nanoseconds: UInt32) {
+        self.secondsSinceUnixEpoch = secondsSinceUnixEpoch
+        self.nanoseconds = nanoseconds
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SnapshotNodeTimestamp: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSnapshotNodeTimestamp: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SnapshotNodeTimestamp {
+        return
+            try SnapshotNodeTimestamp(
+                secondsSinceUnixEpoch: FfiConverterUInt64.read(from: &buf),
+                nanoseconds: FfiConverterUInt32.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SnapshotNodeTimestamp, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.secondsSinceUnixEpoch, into: &buf)
+        FfiConverterUInt32.write(value.nanoseconds, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotNodeTimestamp_lift(_ buf: RustBuffer) throws -> SnapshotNodeTimestamp {
+    return try FfiConverterTypeSnapshotNodeTimestamp.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotNodeTimestamp_lower(_ value: SnapshotNodeTimestamp) -> RustBuffer {
+    return FfiConverterTypeSnapshotNodeTimestamp.lower(value)
+}
+
+
 public struct SnapshotReviewInfo: Equatable, Hashable {
     public let recordVersion: UInt32
     public let scanId: String
@@ -2608,6 +3610,142 @@ public func FfiConverterTypeSnapshotReviewInfo_lift(_ buf: RustBuffer) throws ->
 #endif
 public func FfiConverterTypeSnapshotReviewInfo_lower(_ value: SnapshotReviewInfo) -> RustBuffer {
     return FfiConverterTypeSnapshotReviewInfo.lower(value)
+}
+
+
+public struct SnapshotTreemap: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let parentId: UInt64
+    public let totalChildren: UInt64
+    public let totalChildLogicalBytes: UInt64
+    public let otherChildCount: UInt64
+    public let otherLogicalBytes: UInt64
+    public let zeroLogicalChildCount: UInt64
+    public let cells: [SnapshotTreemapCell]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, parentId: UInt64, totalChildren: UInt64, totalChildLogicalBytes: UInt64, otherChildCount: UInt64, otherLogicalBytes: UInt64, zeroLogicalChildCount: UInt64, cells: [SnapshotTreemapCell]) {
+        self.recordVersion = recordVersion
+        self.parentId = parentId
+        self.totalChildren = totalChildren
+        self.totalChildLogicalBytes = totalChildLogicalBytes
+        self.otherChildCount = otherChildCount
+        self.otherLogicalBytes = otherLogicalBytes
+        self.zeroLogicalChildCount = zeroLogicalChildCount
+        self.cells = cells
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SnapshotTreemap: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSnapshotTreemap: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SnapshotTreemap {
+        return
+            try SnapshotTreemap(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                parentId: FfiConverterUInt64.read(from: &buf),
+                totalChildren: FfiConverterUInt64.read(from: &buf),
+                totalChildLogicalBytes: FfiConverterUInt64.read(from: &buf),
+                otherChildCount: FfiConverterUInt64.read(from: &buf),
+                otherLogicalBytes: FfiConverterUInt64.read(from: &buf),
+                zeroLogicalChildCount: FfiConverterUInt64.read(from: &buf),
+                cells: FfiConverterSequenceTypeSnapshotTreemapCell.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SnapshotTreemap, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterUInt64.write(value.parentId, into: &buf)
+        FfiConverterUInt64.write(value.totalChildren, into: &buf)
+        FfiConverterUInt64.write(value.totalChildLogicalBytes, into: &buf)
+        FfiConverterUInt64.write(value.otherChildCount, into: &buf)
+        FfiConverterUInt64.write(value.otherLogicalBytes, into: &buf)
+        FfiConverterUInt64.write(value.zeroLogicalChildCount, into: &buf)
+        FfiConverterSequenceTypeSnapshotTreemapCell.write(value.cells, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotTreemap_lift(_ buf: RustBuffer) throws -> SnapshotTreemap {
+    return try FfiConverterTypeSnapshotTreemap.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotTreemap_lower(_ value: SnapshotTreemap) -> RustBuffer {
+    return FfiConverterTypeSnapshotTreemap.lower(value)
+}
+
+
+public struct SnapshotTreemapCell: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let node: SnapshotNode
+    public let logicalRank: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, node: SnapshotNode, logicalRank: UInt64) {
+        self.recordVersion = recordVersion
+        self.node = node
+        self.logicalRank = logicalRank
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SnapshotTreemapCell: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSnapshotTreemapCell: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SnapshotTreemapCell {
+        return
+            try SnapshotTreemapCell(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                node: FfiConverterTypeSnapshotNode.read(from: &buf),
+                logicalRank: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SnapshotTreemapCell, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterTypeSnapshotNode.write(value.node, into: &buf)
+        FfiConverterUInt64.write(value.logicalRank, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotTreemapCell_lift(_ buf: RustBuffer) throws -> SnapshotTreemapCell {
+    return try FfiConverterTypeSnapshotTreemapCell.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotTreemapCell_lower(_ value: SnapshotTreemapCell) -> RustBuffer {
+    return FfiConverterTypeSnapshotTreemapCell.lower(value)
 }
 
 
@@ -2818,6 +3956,20 @@ public enum EngineError: Swift.Error, Equatable, Hashable, Foundation.LocalizedE
     case ScanNotFound
     case SnapshotUnavailable
     case ReviewExpired
+    case SnapshotNodeNotFound
+    case SnapshotNodeNotDirectory
+    case InvalidSnapshotNodePage
+    case InvalidSnapshotTreemapBudget
+    case InvalidSnapshotLargeFileRequest
+    case InvalidSnapshotLiveTargetRequest
+    case SnapshotLiveTargetUnsupported
+    case SnapshotLivePathUnavailable
+    case SnapshotLivePathMissing
+    case SnapshotLivePathSymlink
+    case SnapshotLivePathCrossVolume
+    case SnapshotLivePathChanged
+    case SnapshotLivePathAccessDenied
+    case InvalidScanCoverageDetailsRequest
     case ReadOnlyStore
     case IncompatibleSchema
     case Busy
@@ -2867,15 +4019,29 @@ public struct FfiConverterTypeEngineError: FfiConverterRustBuffer {
         case 9: return .ScanNotFound
         case 10: return .SnapshotUnavailable
         case 11: return .ReviewExpired
-        case 12: return .ReadOnlyStore
-        case 13: return .IncompatibleSchema
-        case 14: return .Busy
-        case 15: return .UnsafeStorage
-        case 16: return .BudgetExceeded
-        case 17: return .CorruptData
-        case 18: return .IncompatibleSnapshot
-        case 19: return .OutcomeUnknown
-        case 20: return .InternalState
+        case 12: return .SnapshotNodeNotFound
+        case 13: return .SnapshotNodeNotDirectory
+        case 14: return .InvalidSnapshotNodePage
+        case 15: return .InvalidSnapshotTreemapBudget
+        case 16: return .InvalidSnapshotLargeFileRequest
+        case 17: return .InvalidSnapshotLiveTargetRequest
+        case 18: return .SnapshotLiveTargetUnsupported
+        case 19: return .SnapshotLivePathUnavailable
+        case 20: return .SnapshotLivePathMissing
+        case 21: return .SnapshotLivePathSymlink
+        case 22: return .SnapshotLivePathCrossVolume
+        case 23: return .SnapshotLivePathChanged
+        case 24: return .SnapshotLivePathAccessDenied
+        case 25: return .InvalidScanCoverageDetailsRequest
+        case 26: return .ReadOnlyStore
+        case 27: return .IncompatibleSchema
+        case 28: return .Busy
+        case 29: return .UnsafeStorage
+        case 30: return .BudgetExceeded
+        case 31: return .CorruptData
+        case 32: return .IncompatibleSnapshot
+        case 33: return .OutcomeUnknown
+        case 34: return .InternalState
 
          default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -2932,40 +4098,96 @@ public struct FfiConverterTypeEngineError: FfiConverterRustBuffer {
             writeInt(&buf, Int32(11))
 
 
-        case .ReadOnlyStore:
+        case .SnapshotNodeNotFound:
             writeInt(&buf, Int32(12))
 
 
-        case .IncompatibleSchema:
+        case .SnapshotNodeNotDirectory:
             writeInt(&buf, Int32(13))
 
 
-        case .Busy:
+        case .InvalidSnapshotNodePage:
             writeInt(&buf, Int32(14))
 
 
-        case .UnsafeStorage:
+        case .InvalidSnapshotTreemapBudget:
             writeInt(&buf, Int32(15))
 
 
-        case .BudgetExceeded:
+        case .InvalidSnapshotLargeFileRequest:
             writeInt(&buf, Int32(16))
 
 
-        case .CorruptData:
+        case .InvalidSnapshotLiveTargetRequest:
             writeInt(&buf, Int32(17))
 
 
-        case .IncompatibleSnapshot:
+        case .SnapshotLiveTargetUnsupported:
             writeInt(&buf, Int32(18))
 
 
-        case .OutcomeUnknown:
+        case .SnapshotLivePathUnavailable:
             writeInt(&buf, Int32(19))
 
 
-        case .InternalState:
+        case .SnapshotLivePathMissing:
             writeInt(&buf, Int32(20))
+
+
+        case .SnapshotLivePathSymlink:
+            writeInt(&buf, Int32(21))
+
+
+        case .SnapshotLivePathCrossVolume:
+            writeInt(&buf, Int32(22))
+
+
+        case .SnapshotLivePathChanged:
+            writeInt(&buf, Int32(23))
+
+
+        case .SnapshotLivePathAccessDenied:
+            writeInt(&buf, Int32(24))
+
+
+        case .InvalidScanCoverageDetailsRequest:
+            writeInt(&buf, Int32(25))
+
+
+        case .ReadOnlyStore:
+            writeInt(&buf, Int32(26))
+
+
+        case .IncompatibleSchema:
+            writeInt(&buf, Int32(27))
+
+
+        case .Busy:
+            writeInt(&buf, Int32(28))
+
+
+        case .UnsafeStorage:
+            writeInt(&buf, Int32(29))
+
+
+        case .BudgetExceeded:
+            writeInt(&buf, Int32(30))
+
+
+        case .CorruptData:
+            writeInt(&buf, Int32(31))
+
+
+        case .IncompatibleSnapshot:
+            writeInt(&buf, Int32(32))
+
+
+        case .OutcomeUnknown:
+            writeInt(&buf, Int32(33))
+
+
+        case .InternalState:
+            writeInt(&buf, Int32(34))
 
         }
     }
@@ -2985,6 +4207,224 @@ public func FfiConverterTypeEngineError_lift(_ buf: RustBuffer) throws -> Engine
 public func FfiConverterTypeEngineError_lower(_ value: EngineError) -> RustBuffer {
     return FfiConverterTypeEngineError.lower(value)
 }
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum HistoricalScanIssueKind: Equatable, Hashable {
+
+    case permissionDenied
+    case timedOut
+    case differentFilesystem
+    case networkOrVirtualFilesystem
+    case symlinkSkipped
+    case fileChangedDuringScan
+    case metadataError
+    case cancelled
+    case policyExcluded
+    case depthLimited
+    case probePoolExhausted
+    case filesystemBoundaryUnknown
+    case issueLimitReached
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension HistoricalScanIssueKind: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeHistoricalScanIssueKind: FfiConverterRustBuffer {
+    typealias SwiftType = HistoricalScanIssueKind
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> HistoricalScanIssueKind {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .permissionDenied
+
+        case 2: return .timedOut
+
+        case 3: return .differentFilesystem
+
+        case 4: return .networkOrVirtualFilesystem
+
+        case 5: return .symlinkSkipped
+
+        case 6: return .fileChangedDuringScan
+
+        case 7: return .metadataError
+
+        case 8: return .cancelled
+
+        case 9: return .policyExcluded
+
+        case 10: return .depthLimited
+
+        case 11: return .probePoolExhausted
+
+        case 12: return .filesystemBoundaryUnknown
+
+        case 13: return .issueLimitReached
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: HistoricalScanIssueKind, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .permissionDenied:
+            writeInt(&buf, Int32(1))
+
+
+        case .timedOut:
+            writeInt(&buf, Int32(2))
+
+
+        case .differentFilesystem:
+            writeInt(&buf, Int32(3))
+
+
+        case .networkOrVirtualFilesystem:
+            writeInt(&buf, Int32(4))
+
+
+        case .symlinkSkipped:
+            writeInt(&buf, Int32(5))
+
+
+        case .fileChangedDuringScan:
+            writeInt(&buf, Int32(6))
+
+
+        case .metadataError:
+            writeInt(&buf, Int32(7))
+
+
+        case .cancelled:
+            writeInt(&buf, Int32(8))
+
+
+        case .policyExcluded:
+            writeInt(&buf, Int32(9))
+
+
+        case .depthLimited:
+            writeInt(&buf, Int32(10))
+
+
+        case .probePoolExhausted:
+            writeInt(&buf, Int32(11))
+
+
+        case .filesystemBoundaryUnknown:
+            writeInt(&buf, Int32(12))
+
+
+        case .issueLimitReached:
+            writeInt(&buf, Int32(13))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHistoricalScanIssueKind_lift(_ buf: RustBuffer) throws -> HistoricalScanIssueKind {
+    return try FfiConverterTypeHistoricalScanIssueKind.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHistoricalScanIssueKind_lower(_ value: HistoricalScanIssueKind) -> RustBuffer {
+    return FfiConverterTypeHistoricalScanIssueKind.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum HistoricalScanIssueLocationScope: Equatable, Hashable {
+
+    case global
+    case scanRoot
+    case descendant
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension HistoricalScanIssueLocationScope: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeHistoricalScanIssueLocationScope: FfiConverterRustBuffer {
+    typealias SwiftType = HistoricalScanIssueLocationScope
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> HistoricalScanIssueLocationScope {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .global
+
+        case 2: return .scanRoot
+
+        case 3: return .descendant
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: HistoricalScanIssueLocationScope, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .global:
+            writeInt(&buf, Int32(1))
+
+
+        case .scanRoot:
+            writeInt(&buf, Int32(2))
+
+
+        case .descendant:
+            writeInt(&buf, Int32(3))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHistoricalScanIssueLocationScope_lift(_ buf: RustBuffer) throws -> HistoricalScanIssueLocationScope {
+    return try FfiConverterTypeHistoricalScanIssueLocationScope.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHistoricalScanIssueLocationScope_lower(_ value: HistoricalScanIssueLocationScope) -> RustBuffer {
+    return FfiConverterTypeHistoricalScanIssueLocationScope.lower(value)
+}
+
 
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
@@ -4849,6 +6289,517 @@ public func FfiConverterTypeScanTerminalStatus_lower(_ value: ScanTerminalStatus
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 
+public enum SnapshotLiveTargetKind: Equatable, Hashable {
+
+    case directory
+    case file
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SnapshotLiveTargetKind: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSnapshotLiveTargetKind: FfiConverterRustBuffer {
+    typealias SwiftType = SnapshotLiveTargetKind
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SnapshotLiveTargetKind {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .directory
+
+        case 2: return .file
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: SnapshotLiveTargetKind, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .directory:
+            writeInt(&buf, Int32(1))
+
+
+        case .file:
+            writeInt(&buf, Int32(2))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotLiveTargetKind_lift(_ buf: RustBuffer) throws -> SnapshotLiveTargetKind {
+    return try FfiConverterTypeSnapshotLiveTargetKind.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotLiveTargetKind_lower(_ value: SnapshotLiveTargetKind) -> RustBuffer {
+    return FfiConverterTypeSnapshotLiveTargetKind.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum SnapshotLiveTargetPurpose: Equatable, Hashable {
+
+    case reveal
+    case copyPath
+    case quickLook
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SnapshotLiveTargetPurpose: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSnapshotLiveTargetPurpose: FfiConverterRustBuffer {
+    typealias SwiftType = SnapshotLiveTargetPurpose
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SnapshotLiveTargetPurpose {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .reveal
+
+        case 2: return .copyPath
+
+        case 3: return .quickLook
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: SnapshotLiveTargetPurpose, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .reveal:
+            writeInt(&buf, Int32(1))
+
+
+        case .copyPath:
+            writeInt(&buf, Int32(2))
+
+
+        case .quickLook:
+            writeInt(&buf, Int32(3))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotLiveTargetPurpose_lift(_ buf: RustBuffer) throws -> SnapshotLiveTargetPurpose {
+    return try FfiConverterTypeSnapshotLiveTargetPurpose.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotLiveTargetPurpose_lower(_ value: SnapshotLiveTargetPurpose) -> RustBuffer {
+    return FfiConverterTypeSnapshotLiveTargetPurpose.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum SnapshotNameEncoding: Equatable, Hashable {
+
+    case unixBytes
+    case windowsUtf16LittleEndian
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SnapshotNameEncoding: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSnapshotNameEncoding: FfiConverterRustBuffer {
+    typealias SwiftType = SnapshotNameEncoding
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SnapshotNameEncoding {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .unixBytes
+
+        case 2: return .windowsUtf16LittleEndian
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: SnapshotNameEncoding, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .unixBytes:
+            writeInt(&buf, Int32(1))
+
+
+        case .windowsUtf16LittleEndian:
+            writeInt(&buf, Int32(2))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotNameEncoding_lift(_ buf: RustBuffer) throws -> SnapshotNameEncoding {
+    return try FfiConverterTypeSnapshotNameEncoding.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotNameEncoding_lower(_ value: SnapshotNameEncoding) -> RustBuffer {
+    return FfiConverterTypeSnapshotNameEncoding.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum SnapshotNodeKind: Equatable, Hashable {
+
+    case directory
+    case file
+    case symlink
+    case other
+    case error
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SnapshotNodeKind: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSnapshotNodeKind: FfiConverterRustBuffer {
+    typealias SwiftType = SnapshotNodeKind
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SnapshotNodeKind {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .directory
+
+        case 2: return .file
+
+        case 3: return .symlink
+
+        case 4: return .other
+
+        case 5: return .error
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: SnapshotNodeKind, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .directory:
+            writeInt(&buf, Int32(1))
+
+
+        case .file:
+            writeInt(&buf, Int32(2))
+
+
+        case .symlink:
+            writeInt(&buf, Int32(3))
+
+
+        case .other:
+            writeInt(&buf, Int32(4))
+
+
+        case .error:
+            writeInt(&buf, Int32(5))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotNodeKind_lift(_ buf: RustBuffer) throws -> SnapshotNodeKind {
+    return try FfiConverterTypeSnapshotNodeKind.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotNodeKind_lower(_ value: SnapshotNodeKind) -> RustBuffer {
+    return FfiConverterTypeSnapshotNodeKind.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum SnapshotNodeSort: Equatable, Hashable {
+
+    case nameAscending
+    case logicalBytesDescending
+    case allocatedBytesDescending
+    case modifiedNewest
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SnapshotNodeSort: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSnapshotNodeSort: FfiConverterRustBuffer {
+    typealias SwiftType = SnapshotNodeSort
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SnapshotNodeSort {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .nameAscending
+
+        case 2: return .logicalBytesDescending
+
+        case 3: return .allocatedBytesDescending
+
+        case 4: return .modifiedNewest
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: SnapshotNodeSort, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .nameAscending:
+            writeInt(&buf, Int32(1))
+
+
+        case .logicalBytesDescending:
+            writeInt(&buf, Int32(2))
+
+
+        case .allocatedBytesDescending:
+            writeInt(&buf, Int32(3))
+
+
+        case .modifiedNewest:
+            writeInt(&buf, Int32(4))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotNodeSort_lift(_ buf: RustBuffer) throws -> SnapshotNodeSort {
+    return try FfiConverterTypeSnapshotNodeSort.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotNodeSort_lower(_ value: SnapshotNodeSort) -> RustBuffer {
+    return FfiConverterTypeSnapshotNodeSort.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * Historical display classification only. This value carries no candidate,
+ * safety, action, reclaimability, planning, AI, or cleanup authority.
+ */
+
+public enum SnapshotStorageCategory: Equatable, Hashable {
+
+    case unclassified
+    case developerArtifact
+    case applicationCache
+    case browserCache
+    case logAndDiagnostic
+    case installerAndDownload
+    case deviceAndSimulatorData
+    case cloudFile
+    case largeReviewItem
+    case protectedSystemData
+    case unknownStorage
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SnapshotStorageCategory: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSnapshotStorageCategory: FfiConverterRustBuffer {
+    typealias SwiftType = SnapshotStorageCategory
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SnapshotStorageCategory {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .unclassified
+
+        case 2: return .developerArtifact
+
+        case 3: return .applicationCache
+
+        case 4: return .browserCache
+
+        case 5: return .logAndDiagnostic
+
+        case 6: return .installerAndDownload
+
+        case 7: return .deviceAndSimulatorData
+
+        case 8: return .cloudFile
+
+        case 9: return .largeReviewItem
+
+        case 10: return .protectedSystemData
+
+        case 11: return .unknownStorage
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: SnapshotStorageCategory, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .unclassified:
+            writeInt(&buf, Int32(1))
+
+
+        case .developerArtifact:
+            writeInt(&buf, Int32(2))
+
+
+        case .applicationCache:
+            writeInt(&buf, Int32(3))
+
+
+        case .browserCache:
+            writeInt(&buf, Int32(4))
+
+
+        case .logAndDiagnostic:
+            writeInt(&buf, Int32(5))
+
+
+        case .installerAndDownload:
+            writeInt(&buf, Int32(6))
+
+
+        case .deviceAndSimulatorData:
+            writeInt(&buf, Int32(7))
+
+
+        case .cloudFile:
+            writeInt(&buf, Int32(8))
+
+
+        case .largeReviewItem:
+            writeInt(&buf, Int32(9))
+
+
+        case .protectedSystemData:
+            writeInt(&buf, Int32(10))
+
+
+        case .unknownStorage:
+            writeInt(&buf, Int32(11))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotStorageCategory_lift(_ buf: RustBuffer) throws -> SnapshotStorageCategory {
+    return try FfiConverterTypeSnapshotStorageCategory.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotStorageCategory_lower(_ value: SnapshotStorageCategory) -> RustBuffer {
+    return FfiConverterTypeSnapshotStorageCategory.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
 public enum TaskPhase: Equatable, Hashable {
 
     case queued
@@ -5420,6 +7371,30 @@ fileprivate struct FfiConverterOptionTypeScanTaskResult: FfiConverterRustBuffer 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeSnapshotNodeTimestamp: FfiConverterRustBuffer {
+    typealias SwiftType = SnapshotNodeTimestamp?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeSnapshotNodeTimestamp.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeSnapshotNodeTimestamp.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeMaintenanceFailure: FfiConverterRustBuffer {
     typealias SwiftType = MaintenanceFailure?
 
@@ -5516,6 +7491,56 @@ fileprivate struct FfiConverterOptionTypeVolumePressure: FfiConverterRustBuffer 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
+    typealias SwiftType = [String]
+
+    public static func write(_ value: [String], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterString.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [String] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [String]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterString.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeHistoricalScanIssue: FfiConverterRustBuffer {
+    typealias SwiftType = [HistoricalScanIssue]
+
+    public static func write(_ value: [HistoricalScanIssue], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeHistoricalScanIssue.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [HistoricalScanIssue] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [HistoricalScanIssue]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeHistoricalScanIssue.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeHistoricalScanSummary: FfiConverterRustBuffer {
     typealias SwiftType = [HistoricalScanSummary]
 
@@ -5533,6 +7558,106 @@ fileprivate struct FfiConverterSequenceTypeHistoricalScanSummary: FfiConverterRu
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeHistoricalScanSummary.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeSnapshotLargeFile: FfiConverterRustBuffer {
+    typealias SwiftType = [SnapshotLargeFile]
+
+    public static func write(_ value: [SnapshotLargeFile], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeSnapshotLargeFile.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [SnapshotLargeFile] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [SnapshotLargeFile]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeSnapshotLargeFile.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeSnapshotNode: FfiConverterRustBuffer {
+    typealias SwiftType = [SnapshotNode]
+
+    public static func write(_ value: [SnapshotNode], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeSnapshotNode.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [SnapshotNode] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [SnapshotNode]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeSnapshotNode.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeSnapshotNodeName: FfiConverterRustBuffer {
+    typealias SwiftType = [SnapshotNodeName]
+
+    public static func write(_ value: [SnapshotNodeName], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeSnapshotNodeName.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [SnapshotNodeName] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [SnapshotNodeName]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeSnapshotNodeName.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeSnapshotTreemapCell: FfiConverterRustBuffer {
+    typealias SwiftType = [SnapshotTreemapCell]
+
+    public static func write(_ value: [SnapshotTreemapCell], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeSnapshotTreemapCell.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [SnapshotTreemapCell] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [SnapshotTreemapCell]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeSnapshotTreemapCell.read(from: &buf))
         }
         return seq
     }
@@ -5598,6 +7723,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_dux_ffi_checksum_method_duxengine_reset_disk_pressure_policy() != 23462) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_dux_ffi_checksum_method_duxengine_scan_coverage_details() != 53756) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_dux_ffi_checksum_method_duxengine_set_disk_pressure_policy() != 62356) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -5619,13 +7747,28 @@ private let initializationResult: InitializationResult = {
     if (uniffi_dux_ffi_checksum_method_scantask_poll() != 54370) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_dux_ffi_checksum_method_snapshotreviewsession_child_nodes() != 11906) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_dux_ffi_checksum_method_snapshotreviewsession_info() != 45428) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_snapshotreviewsession_large_files() != 42281) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_snapshotreviewsession_release() != 11466) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_snapshotreviewsession_renew() != 3715) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_snapshotreviewsession_resolve_live_target() != 43607) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_snapshotreviewsession_root_node() != 18544) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_snapshotreviewsession_treemap() != 46336) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_constructor_duxengine_new() != 46135) {

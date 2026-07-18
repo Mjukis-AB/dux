@@ -2,7 +2,7 @@ import XCTest
 @testable import DUX
 
 final class SnapshotReviewControllerTests: XCTestCase {
-    func testAcquireDeduplicatesAndReleaseIsExplicit() async throws {
+    func testAcquireDeduplicatesUnderlyingLeaseAndReferenceCountsOwners() async throws {
         let lease = StubSnapshotReviewLease(scanID: "scan:one")
         let service = StubSnapshotReviewService(leases: [lease])
         let controller = DuxSnapshotReviewController(
@@ -15,13 +15,22 @@ final class SnapshotReviewControllerTests: XCTestCase {
 
         let acquisitions = await service.acquisitionCount()
         let activeBeforeRelease = await controller.activeLeaseCount()
+        let ownersBeforeRelease = await controller.activeOwnerCount(scanID: "scan:one")
         XCTAssertEqual(acquisitions, 1)
         XCTAssertEqual(activeBeforeRelease, 1)
+        XCTAssertEqual(ownersBeforeRelease, 2)
         await controller.release(scanID: "scan:one")
-        let releases = await lease.releaseCount()
-        let activeAfterRelease = await controller.activeLeaseCount()
-        XCTAssertEqual(releases, 1)
-        XCTAssertEqual(activeAfterRelease, 0)
+        let releasesAfterFirstOwner = await lease.releaseCount()
+        let activeAfterFirstOwner = await controller.activeLeaseCount()
+        let ownersAfterFirstOwner = await controller.activeOwnerCount(scanID: "scan:one")
+        XCTAssertEqual(releasesAfterFirstOwner, 0)
+        XCTAssertEqual(activeAfterFirstOwner, 1)
+        XCTAssertEqual(ownersAfterFirstOwner, 1)
+        await controller.release(scanID: "scan:one")
+        let finalReleases = await lease.releaseCount()
+        let activeAfterFinalOwner = await controller.activeLeaseCount()
+        XCTAssertEqual(finalReleases, 1)
+        XCTAssertEqual(activeAfterFinalOwner, 0)
     }
 
     func testAcquireLatestUsesReturnedScanIDAndRetainsLease() async throws {
@@ -42,6 +51,38 @@ final class SnapshotReviewControllerTests: XCTestCase {
         await controller.release(scanID: scanID)
         let releases = await lease.releaseCount()
         XCTAssertEqual(releases, 1)
+    }
+
+    func testLatestOwnersSharingScanCannotReleaseEachOthersLease() async throws {
+        let retained = StubSnapshotReviewLease(scanID: "scan:latest")
+        let duplicate = StubSnapshotReviewLease(scanID: "scan:latest")
+        let service = StubSnapshotReviewService(leases: [retained, duplicate])
+        let controller = DuxSnapshotReviewController(
+            service: service,
+            clock: SuspendedSnapshotReviewClock()
+        )
+
+        let first = try await controller.acquireLatest()
+        let second = try await controller.acquireLatest()
+        XCTAssertEqual(first, second)
+        let sharedOwners = await controller.activeOwnerCount(scanID: first)
+        let duplicateReleases = await duplicate.releaseCount()
+        XCTAssertEqual(sharedOwners, 2)
+        XCTAssertEqual(duplicateReleases, 1)
+
+        await controller.release(scanID: first)
+        let leasesAfterFirst = await controller.activeLeaseCount()
+        let ownersAfterFirst = await controller.activeOwnerCount(scanID: first)
+        let retainedReleasesAfterFirst = await retained.releaseCount()
+        XCTAssertEqual(leasesAfterFirst, 1)
+        XCTAssertEqual(ownersAfterFirst, 1)
+        XCTAssertEqual(retainedReleasesAfterFirst, 0)
+
+        await controller.release(scanID: second)
+        let finalLeases = await controller.activeLeaseCount()
+        let finalReleases = await retained.releaseCount()
+        XCTAssertEqual(finalLeases, 0)
+        XCTAssertEqual(finalReleases, 1)
     }
 
     func testConcurrentLatestAcquisitionReleasesStaleLease() async throws {
@@ -118,6 +159,88 @@ final class SnapshotReviewControllerTests: XCTestCase {
         XCTAssertEqual(renewals, 1)
         XCTAssertEqual(releases, 1)
         XCTAssertEqual(active, 0)
+    }
+
+    func testExpiredNavigationDropsLeaseAndAllowsImmediateReacquisition() async throws {
+        let expired = StubSnapshotReviewLease(scanID: "scan:one", navigationExpires: true)
+        let replacement = StubSnapshotReviewLease(scanID: "scan:one")
+        let service = StubSnapshotReviewService(leases: [expired, replacement])
+        let controller = DuxSnapshotReviewController(
+            service: service,
+            clock: SuspendedSnapshotReviewClock()
+        )
+        try await controller.acquire(scanID: "scan:one")
+
+        do {
+            _ = try await controller.rootNode(scanID: "scan:one")
+            XCTFail("expected expired review")
+        } catch {
+            XCTAssertEqual(error as? ExplorerSnapshotNodeError, .reviewExpired)
+        }
+        let activeAfterExpiry = await controller.activeLeaseCount()
+        let expiredReleases = await expired.releaseCount()
+        XCTAssertEqual(activeAfterExpiry, 0)
+        XCTAssertEqual(expiredReleases, 1)
+
+        try await controller.acquire(scanID: "scan:one")
+        let acquisitions = await service.acquisitionCount()
+        let activeAfterReacquire = await controller.activeLeaseCount()
+        XCTAssertEqual(acquisitions, 2)
+        XCTAssertEqual(activeAfterReacquire, 1)
+        await controller.shutdown()
+    }
+
+    func testExpiredTreemapDropsAndReleasesExactLease() async throws {
+        let expired = StubSnapshotReviewLease(scanID: "scan:one", navigationExpires: true)
+        let service = StubSnapshotReviewService(leases: [expired])
+        let controller = DuxSnapshotReviewController(
+            service: service,
+            clock: SuspendedSnapshotReviewClock()
+        )
+        try await controller.acquire(scanID: "scan:one")
+
+        do {
+            _ = try await controller.treemap(
+                scanID: "scan:one",
+                parentID: 0,
+                maxCells: 48
+            )
+            XCTFail("expected expired review")
+        } catch {
+            XCTAssertEqual(error as? ExplorerSnapshotTreemapError, .reviewExpired)
+        }
+
+        let active = await controller.activeLeaseCount()
+        let releases = await expired.releaseCount()
+        XCTAssertEqual(active, 0)
+        XCTAssertEqual(releases, 1)
+    }
+
+    func testExpiredLargeFilesDropsAndReleasesExactLease() async throws {
+        let expired = StubSnapshotReviewLease(scanID: "scan:one", navigationExpires: true)
+        let service = StubSnapshotReviewService(leases: [expired])
+        let controller = DuxSnapshotReviewController(
+            service: service,
+            clock: SuspendedSnapshotReviewClock()
+        )
+        try await controller.acquire(scanID: "scan:one")
+
+        do {
+            _ = try await controller.largeFiles(
+                scanID: "scan:one",
+                minimumLogicalBytes: 1_073_741_824,
+                modifiedBefore: nil,
+                maxResults: 100
+            )
+            XCTFail("expected expired review")
+        } catch {
+            XCTAssertEqual(error as? ExplorerSnapshotLargeFilesError, .reviewExpired)
+        }
+
+        let active = await controller.activeLeaseCount()
+        let releases = await expired.releaseCount()
+        XCTAssertEqual(active, 0)
+        XCTAssertEqual(releases, 1)
     }
 
     func testReleaseInvalidatesPendingAcquisitionAndReleasesItsCompletion() async throws {
@@ -333,6 +456,7 @@ private actor StubSnapshotReviewLease: DuxSnapshotReviewLease {
 
     private let renewFails: Bool
     private let suspendsFirstRenewal: Bool
+    private let navigationExpires: Bool
     private var renewals = 0
     private var releases = 0
     private var renewalContinuation: CheckedContinuation<Void, Never>?
@@ -340,11 +464,13 @@ private actor StubSnapshotReviewLease: DuxSnapshotReviewLease {
     init(
         scanID: String,
         renewFails: Bool = false,
-        suspendsFirstRenewal: Bool = false
+        suspendsFirstRenewal: Bool = false,
+        navigationExpires: Bool = false
     ) {
         self.scanID = scanID
         self.renewFails = renewFails
         self.suspendsFirstRenewal = suspendsFirstRenewal
+        self.navigationExpires = navigationExpires
     }
 
     func renew() async throws -> Int64 {
@@ -358,6 +484,43 @@ private actor StubSnapshotReviewLease: DuxSnapshotReviewLease {
             throw EngineServiceError.unexpected("renew failed")
         }
         return 1
+    }
+
+    func rootNode() throws -> ExplorerSnapshotNode {
+        if navigationExpires {
+            throw ExplorerSnapshotNodeError.reviewExpired
+        }
+        throw EngineServiceError.unexpected("unused root node stub")
+    }
+
+    func childNodes(
+        parentID _: UInt64,
+        sort _: ExplorerSnapshotNodeSort,
+        offset _: UInt64,
+        limit _: UInt16
+    ) throws -> ExplorerSnapshotNodePage {
+        throw EngineServiceError.unexpected("unused child node stub")
+    }
+
+    func treemap(
+        parentID _: UInt64,
+        maxCells _: UInt16
+    ) throws -> ExplorerSnapshotTreemap {
+        if navigationExpires {
+            throw ExplorerSnapshotTreemapError.reviewExpired
+        }
+        throw EngineServiceError.unexpected("unused treemap stub")
+    }
+
+    func largeFiles(
+        minimumLogicalBytes _: UInt64,
+        modifiedBefore _: ExplorerSnapshotTimestamp?,
+        maxResults _: UInt16
+    ) throws -> ExplorerSnapshotLargeFilesPage {
+        if navigationExpires {
+            throw ExplorerSnapshotLargeFilesError.reviewExpired
+        }
+        throw EngineServiceError.unexpected("unused large-files stub")
     }
 
     func release() {

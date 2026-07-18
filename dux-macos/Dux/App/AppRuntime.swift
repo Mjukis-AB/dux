@@ -48,6 +48,7 @@ final class AppRuntime {
     static let shared = AppRuntime()
 
     let model: AppModel
+    let explorerSnapshotBrowser: ExplorerSnapshotBrowserModel
 
     private let engineService: any DuxEngineClosing
     private let scheduler: any DuxMaintenanceScheduling
@@ -66,7 +67,15 @@ final class AppRuntime {
             service: engineService,
             energyPolicy: SystemDuxMaintenanceEnergyPolicy()
         )
-        reviews = DuxSnapshotReviewController(service: engineService)
+        let reviewController = DuxSnapshotReviewController(service: engineService)
+        reviews = reviewController
+        let liveActions = SystemExplorerLiveFileActionPresenter()
+        explorerSnapshotBrowser = ExplorerSnapshotBrowserModel(
+            reviews: reviewController,
+            history: engineService,
+            coverage: engineService,
+            liveActions: liveActions
+        )
         let capacityResampleRouter = DuxCapacityResampleRouter()
         self.capacityResampleRouter = capacityResampleRouter
         let model = AppModel(
@@ -84,7 +93,8 @@ final class AppRuntime {
         scheduler: any DuxMaintenanceScheduling,
         capacityScheduler: any DuxCapacityScheduling,
         reviews: any DuxReviewManaging,
-        scans: (any DuxScanManaging)? = nil
+        scans: (any DuxScanManaging)? = nil,
+        explorerSnapshotBrowser: ExplorerSnapshotBrowserModel? = nil
     ) {
         self.model = model
         self.engineService = engineService
@@ -93,6 +103,8 @@ final class AppRuntime {
         capacityResampleRouter = nil
         self.reviews = reviews
         self.scans = scans ?? model
+        self.explorerSnapshotBrowser = explorerSnapshotBrowser
+            ?? ExplorerSnapshotBrowserModel(reviews: UnavailableDuxSnapshotReviewBrowser())
     }
 
     func start() async {
@@ -144,9 +156,11 @@ final class AppRuntime {
         let scheduler = scheduler
         let reviews = reviews
         let scans = scans
+        let explorerSnapshotBrowser = explorerSnapshotBrowser
         let engineService = engineService
         let task = Task {
             await scans.shutdownHomeScan()
+            await explorerSnapshotBrowser.close()
             await capacityResampleRouter?.invalidate()
             await capacityScheduler.stop()
             await scheduler.stop()

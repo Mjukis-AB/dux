@@ -9,6 +9,7 @@ mod candidate_history;
 mod cleanup_history;
 mod config;
 mod registry;
+mod scan_coverage_details;
 mod settings;
 mod snapshot_review;
 mod task;
@@ -30,13 +31,24 @@ pub use cleanup_history::{
 };
 pub use config::{EngineConfig, EngineConfigError, EngineConfigField, EngineConfigReason};
 pub use registry::EngineHandle;
+pub use scan_coverage_details::{
+    DurableScanCoverageDetailsPage, DurableScanIssue, DurableScanIssueKind,
+    DurableScanIssueLocation, MAX_SCAN_COVERAGE_DETAIL_PAGE_LIMIT, ScanCoverageDetailsError,
+};
 pub use settings::{
     DiskPressurePolicy, DiskPressurePolicyError, DiskPressurePolicySource,
     DiskPressurePolicyUpdate, SnapshotRetentionCap, SnapshotRetentionCapError,
     SnapshotRetentionCapSource, SnapshotRetentionCapUpdate,
 };
 pub use snapshot_review::{
-    SnapshotReviewError, SnapshotReviewReleaseOutcome, SnapshotReviewSession,
+    MAX_SNAPSHOT_REVIEW_LARGE_FILE_RESULTS, MAX_SNAPSHOT_REVIEW_NODE_PAGE_LIMIT,
+    MAX_SNAPSHOT_REVIEW_PARENT_CONTEXT_COMPONENTS, MAX_SNAPSHOT_REVIEW_TREEMAP_CELLS,
+    SnapshotReviewCategory, SnapshotReviewError, SnapshotReviewLargeFile,
+    SnapshotReviewLargeFilePage, SnapshotReviewLiveTarget, SnapshotReviewLiveTargetKind,
+    SnapshotReviewLiveTargetPurpose, SnapshotReviewName, SnapshotReviewNameEncoding,
+    SnapshotReviewNode, SnapshotReviewNodeKind, SnapshotReviewNodePage, SnapshotReviewNodeSort,
+    SnapshotReviewReleaseOutcome, SnapshotReviewScanFlags, SnapshotReviewSession,
+    SnapshotReviewTimestamp, SnapshotReviewTreemap, SnapshotReviewTreemapCell,
 };
 pub use task::{
     CancelOutcome, CandidateEvaluationTaskFailureKind, CandidateEvaluationTaskStatus,

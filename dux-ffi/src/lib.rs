@@ -1,6 +1,6 @@
 //! Owned, versioned UniFFI boundary for the DUX macOS application.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -13,17 +13,28 @@ use dux_core::engine::{
     DiskPressurePolicyError as CorePressurePolicyError,
     DiskPressurePolicySource as CorePressurePolicySource,
     DiskPressurePolicyUpdate as CorePressurePolicyUpdate,
-    DurableScanStatus as CoreDurableScanStatus, EngineConfig, EngineHandle, EngineOpenError,
-    HistoryMaintenanceStartOutcome, ScanHistoryError as CoreScanHistoryError,
+    DurableScanIssueKind as CoreDurableScanIssueKind, DurableScanStatus as CoreDurableScanStatus,
+    EngineConfig, EngineHandle, EngineOpenError, HistoryMaintenanceStartOutcome,
+    ScanCoverageDetailsError as CoreScanCoverageDetailsError,
+    ScanHistoryError as CoreScanHistoryError,
     ScanRecoveryMaintenanceOutcome as CoreScanRecoveryOutcome, ScanRecoveryMaintenanceStartOutcome,
     ScanRootErrorKind, ScanTaskResult as CoreScanTaskResult, ScanTaskStatus as CoreScanTaskStatus,
     SnapshotOrphanMaintenanceOutcome as CoreOrphanOutcome, SnapshotOrphanMaintenanceStartOutcome,
     SnapshotProvisioningStageMaintenanceOutcome as CoreStageOutcome,
     SnapshotProvisioningStageMaintenanceStartOutcome,
     SnapshotRetentionOutcome as CoreRetentionOutcome, SnapshotRetentionStartOutcome,
-    SnapshotReviewError as CoreReviewError,
+    SnapshotReviewCategory as CoreReviewCategory, SnapshotReviewError as CoreReviewError,
+    SnapshotReviewLargeFile as CoreReviewLargeFile,
+    SnapshotReviewLargeFilePage as CoreReviewLargeFilePage,
+    SnapshotReviewLiveTarget as CoreReviewLiveTarget,
+    SnapshotReviewLiveTargetKind as CoreReviewLiveTargetKind,
+    SnapshotReviewLiveTargetPurpose as CoreReviewLiveTargetPurpose,
+    SnapshotReviewNameEncoding as CoreReviewNameEncoding, SnapshotReviewNode as CoreReviewNode,
+    SnapshotReviewNodeKind as CoreReviewNodeKind, SnapshotReviewNodePage as CoreReviewNodePage,
+    SnapshotReviewNodeSort as CoreReviewNodeSort,
     SnapshotReviewReleaseOutcome as CoreReviewReleaseOutcome,
-    SnapshotReviewSession as CoreReviewSession,
+    SnapshotReviewSession as CoreReviewSession, SnapshotReviewTimestamp as CoreReviewTimestamp,
+    SnapshotReviewTreemap as CoreReviewTreemap, SnapshotReviewTreemapCell as CoreReviewTreemapCell,
     SnapshotTerminalTempMaintenanceOutcome as CoreTerminalTempOutcome,
     SnapshotTerminalTempMaintenanceStartOutcome,
     SnapshotUnleasedTempMaintenanceOutcome as CoreUnleasedTempOutcome,
@@ -40,10 +51,12 @@ use dux_core::{
     ScanId, SnapshotOpenErrorKind, VolumeCapacity, VolumeId,
 };
 
-const FFI_CONTRACT_VERSION: u32 = 9;
+const FFI_CONTRACT_VERSION: u32 = 15;
 const FFI_RECORD_VERSION: u32 = 1;
+const SNAPSHOT_NODE_RECORD_VERSION: u32 = 2;
 const SCAN_EVENT_PAGE_LIMIT: u16 = 64;
 const RECENT_SCAN_HISTORY_PAGE_LIMIT: u16 = 200;
+const SCAN_COVERAGE_DETAIL_PAGE_LIMIT: u16 = 64;
 const MAX_SCAN_ROOT_UTF8_BYTES: usize = 32 * 1_024;
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 static LIVE_ENGINE_INSTANCE_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -233,6 +246,34 @@ pub enum EngineError {
     SnapshotUnavailable,
     #[error("snapshot review lease expired")]
     ReviewExpired,
+    #[error("snapshot node does not exist")]
+    SnapshotNodeNotFound,
+    #[error("snapshot node is not a directory")]
+    SnapshotNodeNotDirectory,
+    #[error("snapshot node page is invalid")]
+    InvalidSnapshotNodePage,
+    #[error("snapshot treemap cell budget is invalid")]
+    InvalidSnapshotTreemapBudget,
+    #[error("snapshot large-file request is invalid")]
+    InvalidSnapshotLargeFileRequest,
+    #[error("snapshot live-target request is invalid")]
+    InvalidSnapshotLiveTargetRequest,
+    #[error("the requested platform action is unsupported for this snapshot item")]
+    SnapshotLiveTargetUnsupported,
+    #[error("the snapshot item has no safely usable current path")]
+    SnapshotLivePathUnavailable,
+    #[error("the snapshot item no longer exists at its observed location")]
+    SnapshotLivePathMissing,
+    #[error("the snapshot item or one of its ancestors is now a symbolic link")]
+    SnapshotLivePathSymlink,
+    #[error("the snapshot item now crosses a filesystem boundary")]
+    SnapshotLivePathCrossVolume,
+    #[error("the current filesystem item no longer matches the snapshot")]
+    SnapshotLivePathChanged,
+    #[error("the current filesystem item cannot be inspected")]
+    SnapshotLivePathAccessDenied,
+    #[error("scan coverage detail request is invalid")]
+    InvalidScanCoverageDetailsRequest,
     #[error("durable store is read-only")]
     ReadOnlyStore,
     #[error("durable schema is incompatible")]
@@ -346,6 +387,62 @@ pub struct RecentScanHistoryPage {
     pub record_version: u32,
     pub scans: Vec<HistoricalScanSummary>,
     pub has_more: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum HistoricalScanIssueKind {
+    PermissionDenied,
+    TimedOut,
+    DifferentFilesystem,
+    NetworkOrVirtualFilesystem,
+    SymlinkSkipped,
+    FileChangedDuringScan,
+    MetadataError,
+    Cancelled,
+    PolicyExcluded,
+    DepthLimited,
+    ProbePoolExhausted,
+    FilesystemBoundaryUnknown,
+    IssueLimitReached,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum HistoricalScanIssueLocationScope {
+    Global,
+    ScanRoot,
+    Descendant,
+}
+
+/// One historical coverage observation. Location components are bounded,
+/// root-relative display context and never a live path or cleanup capability.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct HistoricalScanIssue {
+    pub record_version: u32,
+    pub ordinal: u16,
+    pub kind: HistoricalScanIssueKind,
+    pub occurrence_count: u32,
+    pub location_scope: HistoricalScanIssueLocationScope,
+    pub location_components: Vec<String>,
+    pub location_truncated: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct ScanCoverageDetailsPage {
+    pub record_version: u32,
+    pub scan_id: String,
+    pub coverage: ScanCoverageSummary,
+    pub offset: u16,
+    pub total_issue_records: u16,
+    pub total_issue_occurrences: u64,
+    pub has_more: bool,
+    pub issues: Vec<HistoricalScanIssue>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct ScanCoverageDetailsRequest {
+    pub record_version: u32,
+    pub offset: u16,
+    pub limit: u16,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
@@ -621,6 +718,180 @@ pub struct SnapshotReviewInfo {
     pub released: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum SnapshotNodeSort {
+    NameAscending,
+    LogicalBytesDescending,
+    AllocatedBytesDescending,
+    ModifiedNewest,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum SnapshotNodeKind {
+    Directory,
+    File,
+    Symlink,
+    Other,
+    Error,
+}
+
+/// Historical display classification only. This value carries no candidate,
+/// safety, action, reclaimability, planning, AI, or cleanup authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum SnapshotStorageCategory {
+    Unclassified,
+    DeveloperArtifact,
+    ApplicationCache,
+    BrowserCache,
+    LogAndDiagnostic,
+    InstallerAndDownload,
+    DeviceAndSimulatorData,
+    CloudFile,
+    LargeReviewItem,
+    ProtectedSystemData,
+    UnknownStorage,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum SnapshotNameEncoding {
+    UnixBytes,
+    WindowsUtf16LittleEndian,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct SnapshotNodeName {
+    pub encoding: SnapshotNameEncoding,
+    pub encoded_bytes: Vec<u8>,
+    pub display: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct SnapshotNodeTimestamp {
+    pub seconds_since_unix_epoch: u64,
+    pub nanoseconds: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct SnapshotNodeScanFlags {
+    pub inaccessible: bool,
+    pub timed_out: bool,
+    pub hard_link_duplicate: bool,
+    pub mount_boundary: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct SnapshotNode {
+    pub record_version: u32,
+    pub id: u64,
+    pub parent_id: Option<u64>,
+    pub depth: u32,
+    pub kind: SnapshotNodeKind,
+    pub category: SnapshotStorageCategory,
+    pub name: SnapshotNodeName,
+    pub logical_bytes: u64,
+    pub allocated_bytes: Option<u64>,
+    pub file_count: u64,
+    pub child_count: u64,
+    pub modified_at: Option<SnapshotNodeTimestamp>,
+    pub accessed_at: Option<SnapshotNodeTimestamp>,
+    pub scan_flags: SnapshotNodeScanFlags,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct SnapshotNodePage {
+    pub record_version: u32,
+    pub parent_id: u64,
+    pub offset: u64,
+    pub total_children: u64,
+    pub has_more: bool,
+    pub nodes: Vec<SnapshotNode>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct SnapshotTreemapCell {
+    pub record_version: u32,
+    pub node: SnapshotNode,
+    pub logical_rank: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct SnapshotTreemap {
+    pub record_version: u32,
+    pub parent_id: u64,
+    pub total_children: u64,
+    pub total_child_logical_bytes: u64,
+    pub other_child_count: u64,
+    pub other_logical_bytes: u64,
+    pub zero_logical_child_count: u64,
+    pub cells: Vec<SnapshotTreemapCell>,
+}
+
+/// Versioned, bounded historical large-file discovery input. It grants no
+/// cleanup authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct SnapshotLargeFileRequest {
+    pub record_version: u32,
+    pub minimum_logical_bytes: u64,
+    pub modified_before: Option<SnapshotNodeTimestamp>,
+    pub max_results: u16,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct SnapshotLargeFile {
+    pub record_version: u32,
+    pub node: SnapshotNode,
+    /// Root-to-parent historical name components, excluding the scan root.
+    pub parent_context: Vec<SnapshotNodeName>,
+    pub context_truncated: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct SnapshotLargeFilePage {
+    pub record_version: u32,
+    pub total_matching_files: u64,
+    pub total_matching_logical_bytes: u64,
+    pub has_more: bool,
+    pub files: Vec<SnapshotLargeFile>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum SnapshotLiveTargetPurpose {
+    Reveal,
+    CopyPath,
+    QuickLook,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum SnapshotLiveTargetKind {
+    Directory,
+    File,
+}
+
+/// Versioned request for one user-initiated, read-only macOS platform action.
+/// The snapshot-local node ID is not durable filesystem identity and no path
+/// may be supplied by Swift.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct SnapshotLiveTargetRequest {
+    pub record_version: u32,
+    pub node_id: u64,
+    pub purpose: SnapshotLiveTargetPurpose,
+}
+
+/// A freshly validated current path for one immediate presentation action.
+/// This value can become stale immediately, grants no cleanup authority, and
+/// must not be persisted, logged, sent to AI, or reconstructed from node names.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct SnapshotLiveTarget {
+    pub record_version: u32,
+    pub node_id: u64,
+    pub purpose: SnapshotLiveTargetPurpose,
+    pub kind: SnapshotLiveTargetKind,
+    pub path_encoding: SnapshotNameEncoding,
+    pub absolute_path_bytes: Vec<u8>,
+    pub display_path: String,
+    pub exact_text_path: Option<String>,
+}
+
 #[derive(uniffi::Object)]
 pub struct SnapshotReviewSession {
     inner: Mutex<CoreReviewSession>,
@@ -664,9 +935,98 @@ impl SnapshotReviewSession {
     pub fn release(&self) -> Result<ReviewReleaseOutcome, EngineError> {
         self.release_inner()
     }
+
+    pub fn root_node(&self) -> Result<SnapshotNode, EngineError> {
+        self.with_open_session(|session| {
+            session
+                .root_node()
+                .map(project_snapshot_node)
+                .map_err(map_review_error)
+        })
+    }
+
+    pub fn child_nodes(
+        &self,
+        parent_id: u64,
+        sort: SnapshotNodeSort,
+        offset: u64,
+        limit: u16,
+    ) -> Result<SnapshotNodePage, EngineError> {
+        self.with_open_session(|session| {
+            session
+                .child_nodes(parent_id, map_snapshot_node_sort(sort), offset, limit)
+                .map(project_snapshot_node_page)
+                .map_err(map_review_error)
+        })
+    }
+
+    pub fn treemap(&self, parent_id: u64, max_cells: u16) -> Result<SnapshotTreemap, EngineError> {
+        self.with_open_session(|session| {
+            session
+                .treemap(parent_id, max_cells)
+                .map(project_snapshot_treemap)
+                .map_err(map_review_error)
+        })
+    }
+
+    pub fn large_files(
+        &self,
+        request: SnapshotLargeFileRequest,
+    ) -> Result<SnapshotLargeFilePage, EngineError> {
+        if request.record_version != FFI_RECORD_VERSION {
+            return Err(EngineError::InvalidSnapshotLargeFileRequest);
+        }
+        self.with_open_session(|session| {
+            session
+                .large_files(
+                    request.minimum_logical_bytes,
+                    request
+                        .modified_before
+                        .map(|timestamp| CoreReviewTimestamp {
+                            seconds_since_unix_epoch: timestamp.seconds_since_unix_epoch,
+                            nanoseconds: timestamp.nanoseconds,
+                        }),
+                    request.max_results,
+                )
+                .map(project_snapshot_large_file_page)
+                .map_err(map_review_error)
+        })
+    }
+
+    pub fn resolve_live_target(
+        &self,
+        request: SnapshotLiveTargetRequest,
+    ) -> Result<SnapshotLiveTarget, EngineError> {
+        if request.record_version != FFI_RECORD_VERSION {
+            return Err(EngineError::InvalidSnapshotLiveTargetRequest);
+        }
+        self.with_open_session(|session| {
+            let target = session
+                .live_target(
+                    request.node_id,
+                    map_snapshot_live_target_purpose(request.purpose),
+                )
+                .map_err(map_review_error)?;
+            project_snapshot_live_target(target)
+        })
+    }
 }
 
 impl SnapshotReviewSession {
+    fn with_open_session<T>(
+        &self,
+        operation: impl FnOnce(&mut CoreReviewSession) -> Result<T, EngineError>,
+    ) -> Result<T, EngineError> {
+        if self.engine_closed.load(Ordering::Acquire) {
+            return Err(EngineError::Closed);
+        }
+        let mut session = self.inner.lock().map_err(|_| EngineError::InternalState)?;
+        if self.engine_closed.load(Ordering::Acquire) {
+            return Err(EngineError::Closed);
+        }
+        operation(&mut session)
+    }
+
     fn release_inner(&self) -> Result<ReviewReleaseOutcome, EngineError> {
         let mut session = self.inner.lock().map_err(|_| EngineError::InternalState)?;
         match session.release().map_err(map_review_error)? {
@@ -1054,6 +1414,46 @@ impl DuxEngine {
         })
     }
 
+    /// Return one exact, bounded page of durable coverage issues. This reads
+    /// history metadata only and remains available without a retained snapshot.
+    pub fn scan_coverage_details(
+        &self,
+        scan_id: String,
+        request: ScanCoverageDetailsRequest,
+    ) -> Result<ScanCoverageDetailsPage, EngineError> {
+        if request.record_version != FFI_RECORD_VERSION
+            || !(1..=SCAN_COVERAGE_DETAIL_PAGE_LIMIT).contains(&request.limit)
+        {
+            return Err(EngineError::InvalidScanCoverageDetailsRequest);
+        }
+        let scan_id = ScanId::new(scan_id).map_err(|_| EngineError::InvalidScanId)?;
+        self.with_engine(|engine| {
+            let page = engine
+                .scan_coverage_details(&scan_id, request.offset, request.limit)
+                .map_err(map_scan_coverage_details_error)?;
+            Ok(ScanCoverageDetailsPage {
+                record_version: FFI_RECORD_VERSION,
+                scan_id: page.scan_id().as_str().to_owned(),
+                coverage: ScanCoverageSummary {
+                    record_version: FFI_RECORD_VERSION,
+                    status: map_scan_coverage_status(page.status()),
+                    measured_permille: page.measured_permille().map(|value| value.get()),
+                    issue_record_count: u64::from(page.total_issue_records()),
+                    issue_occurrence_count: page.total_issue_occurrences(),
+                },
+                offset: page.offset(),
+                total_issue_records: page.total_issue_records(),
+                total_issue_occurrences: page.total_issue_occurrences(),
+                has_more: page.has_more(),
+                issues: page
+                    .issues()
+                    .iter()
+                    .map(historical_scan_issue)
+                    .collect::<Result<Vec<_>, _>>()?,
+            })
+        })
+    }
+
     pub fn acquire_explorer_snapshot_review(
         &self,
         scan_id: String,
@@ -1293,6 +1693,67 @@ fn historical_scan_summary(
             issue_occurrence_count: scan.coverage.issue_occurrence_count,
         },
         snapshot_recorded: scan.snapshot_recorded,
+    })
+}
+
+fn historical_scan_issue(
+    issue: &dux_core::engine::DurableScanIssue,
+) -> Result<HistoricalScanIssue, EngineError> {
+    let kind = map_historical_scan_issue_kind(issue.kind())?;
+    let (location_scope, location_components, location_truncated) = match issue.location() {
+        None => (HistoricalScanIssueLocationScope::Global, Vec::new(), false),
+        Some(location) if location.is_scan_root() => (
+            HistoricalScanIssueLocationScope::ScanRoot,
+            Vec::new(),
+            false,
+        ),
+        Some(location) => (
+            HistoricalScanIssueLocationScope::Descendant,
+            location
+                .components()
+                .iter()
+                .map(|component| component.as_ref().to_owned())
+                .collect(),
+            location.context_truncated(),
+        ),
+    };
+    Ok(HistoricalScanIssue {
+        record_version: FFI_RECORD_VERSION,
+        ordinal: issue.ordinal(),
+        kind,
+        occurrence_count: issue.occurrence_count(),
+        location_scope,
+        location_components,
+        location_truncated,
+    })
+}
+
+fn map_historical_scan_issue_kind(
+    kind: CoreDurableScanIssueKind,
+) -> Result<HistoricalScanIssueKind, EngineError> {
+    Ok(match kind {
+        CoreDurableScanIssueKind::PermissionDenied => HistoricalScanIssueKind::PermissionDenied,
+        CoreDurableScanIssueKind::TimedOut => HistoricalScanIssueKind::TimedOut,
+        CoreDurableScanIssueKind::DifferentFilesystem => {
+            HistoricalScanIssueKind::DifferentFilesystem
+        }
+        CoreDurableScanIssueKind::NetworkOrVirtualFilesystem => {
+            HistoricalScanIssueKind::NetworkOrVirtualFilesystem
+        }
+        CoreDurableScanIssueKind::SymlinkSkipped => HistoricalScanIssueKind::SymlinkSkipped,
+        CoreDurableScanIssueKind::FileChangedDuringScan => {
+            HistoricalScanIssueKind::FileChangedDuringScan
+        }
+        CoreDurableScanIssueKind::MetadataError => HistoricalScanIssueKind::MetadataError,
+        CoreDurableScanIssueKind::Cancelled => HistoricalScanIssueKind::Cancelled,
+        CoreDurableScanIssueKind::PolicyExcluded => HistoricalScanIssueKind::PolicyExcluded,
+        CoreDurableScanIssueKind::DepthLimited => HistoricalScanIssueKind::DepthLimited,
+        CoreDurableScanIssueKind::ProbePoolExhausted => HistoricalScanIssueKind::ProbePoolExhausted,
+        CoreDurableScanIssueKind::FilesystemBoundaryUnknown => {
+            HistoricalScanIssueKind::FilesystemBoundaryUnknown
+        }
+        CoreDurableScanIssueKind::IssueLimitReached => HistoricalScanIssueKind::IssueLimitReached,
+        _ => return Err(EngineError::InternalState),
     })
 }
 
@@ -1849,6 +2310,18 @@ fn map_review_error(error: CoreReviewError) -> EngineError {
         CoreReviewError::ScanNotFound => EngineError::ScanNotFound,
         CoreReviewError::SnapshotUnavailable => EngineError::SnapshotUnavailable,
         CoreReviewError::LeaseExpired => EngineError::ReviewExpired,
+        CoreReviewError::NodeNotFound => EngineError::SnapshotNodeNotFound,
+        CoreReviewError::NodeNotDirectory => EngineError::SnapshotNodeNotDirectory,
+        CoreReviewError::InvalidPage => EngineError::InvalidSnapshotNodePage,
+        CoreReviewError::InvalidTreemapBudget => EngineError::InvalidSnapshotTreemapBudget,
+        CoreReviewError::InvalidLargeFileRequest => EngineError::InvalidSnapshotLargeFileRequest,
+        CoreReviewError::LiveTargetUnsupported => EngineError::SnapshotLiveTargetUnsupported,
+        CoreReviewError::LivePathUnavailable => EngineError::SnapshotLivePathUnavailable,
+        CoreReviewError::LivePathMissing => EngineError::SnapshotLivePathMissing,
+        CoreReviewError::LivePathSymlink => EngineError::SnapshotLivePathSymlink,
+        CoreReviewError::LivePathCrossVolume => EngineError::SnapshotLivePathCrossVolume,
+        CoreReviewError::LivePathChanged => EngineError::SnapshotLivePathChanged,
+        CoreReviewError::LivePathAccessDenied => EngineError::SnapshotLivePathAccessDenied,
         CoreReviewError::ReadOnlyStore => EngineError::ReadOnlyStore,
         CoreReviewError::IncompatibleSchema => EngineError::IncompatibleSchema,
         CoreReviewError::Busy => EngineError::Busy,
@@ -1863,6 +2336,210 @@ fn map_review_error(error: CoreReviewError) -> EngineError {
     }
 }
 
+const fn map_snapshot_live_target_purpose(
+    purpose: SnapshotLiveTargetPurpose,
+) -> CoreReviewLiveTargetPurpose {
+    match purpose {
+        SnapshotLiveTargetPurpose::Reveal => CoreReviewLiveTargetPurpose::Reveal,
+        SnapshotLiveTargetPurpose::CopyPath => CoreReviewLiveTargetPurpose::CopyPath,
+        SnapshotLiveTargetPurpose::QuickLook => CoreReviewLiveTargetPurpose::QuickLook,
+    }
+}
+
+fn project_snapshot_live_target(
+    target: CoreReviewLiveTarget,
+) -> Result<SnapshotLiveTarget, EngineError> {
+    if !target.path.is_absolute() {
+        return Err(EngineError::InternalState);
+    }
+    let (path_encoding, absolute_path_bytes) = encode_snapshot_live_path(&target.path)?;
+    Ok(SnapshotLiveTarget {
+        record_version: FFI_RECORD_VERSION,
+        node_id: target.node_id,
+        purpose: match target.purpose {
+            CoreReviewLiveTargetPurpose::Reveal => SnapshotLiveTargetPurpose::Reveal,
+            CoreReviewLiveTargetPurpose::CopyPath => SnapshotLiveTargetPurpose::CopyPath,
+            CoreReviewLiveTargetPurpose::QuickLook => SnapshotLiveTargetPurpose::QuickLook,
+        },
+        kind: match target.kind {
+            CoreReviewLiveTargetKind::Directory => SnapshotLiveTargetKind::Directory,
+            CoreReviewLiveTargetKind::File => SnapshotLiveTargetKind::File,
+        },
+        display_path: target.path.to_string_lossy().into_owned(),
+        exact_text_path: target.path.to_str().map(str::to_owned),
+        path_encoding,
+        absolute_path_bytes,
+    })
+}
+
+#[cfg(unix)]
+fn encode_snapshot_live_path(path: &Path) -> Result<(SnapshotNameEncoding, Vec<u8>), EngineError> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let bytes = path.as_os_str().as_bytes();
+    if bytes.is_empty() || bytes.contains(&0) {
+        return Err(EngineError::InternalState);
+    }
+    Ok((SnapshotNameEncoding::UnixBytes, bytes.to_vec()))
+}
+
+#[cfg(windows)]
+fn encode_snapshot_live_path(path: &Path) -> Result<(SnapshotNameEncoding, Vec<u8>), EngineError> {
+    use std::os::windows::ffi::OsStrExt;
+
+    let units = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    if units.is_empty() || units.contains(&0) {
+        return Err(EngineError::InternalState);
+    }
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(units.len().saturating_mul(2))
+        .map_err(|_| EngineError::InternalState)?;
+    for unit in units {
+        bytes.extend_from_slice(&unit.to_le_bytes());
+    }
+    Ok((SnapshotNameEncoding::WindowsUtf16LittleEndian, bytes))
+}
+
+const fn map_snapshot_node_sort(sort: SnapshotNodeSort) -> CoreReviewNodeSort {
+    match sort {
+        SnapshotNodeSort::NameAscending => CoreReviewNodeSort::NameAscending,
+        SnapshotNodeSort::LogicalBytesDescending => CoreReviewNodeSort::LogicalBytesDescending,
+        SnapshotNodeSort::AllocatedBytesDescending => CoreReviewNodeSort::AllocatedBytesDescending,
+        SnapshotNodeSort::ModifiedNewest => CoreReviewNodeSort::ModifiedNewest,
+    }
+}
+
+fn project_snapshot_node_page(page: CoreReviewNodePage) -> SnapshotNodePage {
+    SnapshotNodePage {
+        record_version: FFI_RECORD_VERSION,
+        parent_id: page.parent_id,
+        offset: page.offset,
+        total_children: page.total_children,
+        has_more: page.has_more,
+        nodes: page.nodes.into_iter().map(project_snapshot_node).collect(),
+    }
+}
+
+fn project_snapshot_treemap(treemap: CoreReviewTreemap) -> SnapshotTreemap {
+    SnapshotTreemap {
+        record_version: FFI_RECORD_VERSION,
+        parent_id: treemap.parent_id,
+        total_children: treemap.total_children,
+        total_child_logical_bytes: treemap.total_child_logical_bytes,
+        other_child_count: treemap.other_child_count,
+        other_logical_bytes: treemap.other_logical_bytes,
+        zero_logical_child_count: treemap.zero_logical_child_count,
+        cells: treemap
+            .cells
+            .into_iter()
+            .map(project_snapshot_treemap_cell)
+            .collect(),
+    }
+}
+
+fn project_snapshot_treemap_cell(cell: CoreReviewTreemapCell) -> SnapshotTreemapCell {
+    SnapshotTreemapCell {
+        record_version: FFI_RECORD_VERSION,
+        node: project_snapshot_node(cell.node),
+        logical_rank: cell.logical_rank,
+    }
+}
+
+fn project_snapshot_large_file_page(page: CoreReviewLargeFilePage) -> SnapshotLargeFilePage {
+    SnapshotLargeFilePage {
+        record_version: FFI_RECORD_VERSION,
+        total_matching_files: page.total_matching_files,
+        total_matching_logical_bytes: page.total_matching_logical_bytes,
+        has_more: page.has_more,
+        files: page
+            .files
+            .into_iter()
+            .map(project_snapshot_large_file)
+            .collect(),
+    }
+}
+
+fn project_snapshot_large_file(file: CoreReviewLargeFile) -> SnapshotLargeFile {
+    SnapshotLargeFile {
+        record_version: FFI_RECORD_VERSION,
+        node: project_snapshot_node(file.node),
+        parent_context: file
+            .parent_context
+            .into_iter()
+            .map(project_snapshot_node_name)
+            .collect(),
+        context_truncated: file.context_truncated,
+    }
+}
+
+fn project_snapshot_node(node: CoreReviewNode) -> SnapshotNode {
+    SnapshotNode {
+        record_version: SNAPSHOT_NODE_RECORD_VERSION,
+        id: node.id,
+        parent_id: node.parent_id,
+        depth: node.depth,
+        kind: match node.kind {
+            CoreReviewNodeKind::Directory => SnapshotNodeKind::Directory,
+            CoreReviewNodeKind::File => SnapshotNodeKind::File,
+            CoreReviewNodeKind::Symlink => SnapshotNodeKind::Symlink,
+            CoreReviewNodeKind::Other => SnapshotNodeKind::Other,
+            CoreReviewNodeKind::Error => SnapshotNodeKind::Error,
+        },
+        category: project_snapshot_category(node.category),
+        name: project_snapshot_node_name(node.name),
+        logical_bytes: node.logical_bytes,
+        allocated_bytes: node.allocated_bytes,
+        file_count: node.file_count,
+        child_count: node.child_count,
+        modified_at: node.modified_at.map(|timestamp| SnapshotNodeTimestamp {
+            seconds_since_unix_epoch: timestamp.seconds_since_unix_epoch,
+            nanoseconds: timestamp.nanoseconds,
+        }),
+        accessed_at: node.accessed_at.map(|timestamp| SnapshotNodeTimestamp {
+            seconds_since_unix_epoch: timestamp.seconds_since_unix_epoch,
+            nanoseconds: timestamp.nanoseconds,
+        }),
+        scan_flags: SnapshotNodeScanFlags {
+            inaccessible: node.scan_flags.inaccessible,
+            timed_out: node.scan_flags.timed_out,
+            hard_link_duplicate: node.scan_flags.hard_link_duplicate,
+            mount_boundary: node.scan_flags.mount_boundary,
+        },
+    }
+}
+
+const fn project_snapshot_category(category: CoreReviewCategory) -> SnapshotStorageCategory {
+    match category {
+        CoreReviewCategory::Unclassified => SnapshotStorageCategory::Unclassified,
+        CoreReviewCategory::DeveloperArtifact => SnapshotStorageCategory::DeveloperArtifact,
+        CoreReviewCategory::ApplicationCache => SnapshotStorageCategory::ApplicationCache,
+        CoreReviewCategory::BrowserCache => SnapshotStorageCategory::BrowserCache,
+        CoreReviewCategory::LogAndDiagnostic => SnapshotStorageCategory::LogAndDiagnostic,
+        CoreReviewCategory::InstallerAndDownload => SnapshotStorageCategory::InstallerAndDownload,
+        CoreReviewCategory::DeviceAndSimulatorData => {
+            SnapshotStorageCategory::DeviceAndSimulatorData
+        }
+        CoreReviewCategory::CloudFile => SnapshotStorageCategory::CloudFile,
+        CoreReviewCategory::LargeReviewItem => SnapshotStorageCategory::LargeReviewItem,
+        CoreReviewCategory::ProtectedSystemData => SnapshotStorageCategory::ProtectedSystemData,
+        CoreReviewCategory::UnknownStorage => SnapshotStorageCategory::UnknownStorage,
+    }
+}
+
+fn project_snapshot_node_name(name: dux_core::engine::SnapshotReviewName) -> SnapshotNodeName {
+    SnapshotNodeName {
+        encoding: match name.encoding {
+            CoreReviewNameEncoding::UnixBytes => SnapshotNameEncoding::UnixBytes,
+            CoreReviewNameEncoding::WindowsUtf16LittleEndian => {
+                SnapshotNameEncoding::WindowsUtf16LittleEndian
+            }
+        },
+        encoded_bytes: name.encoded_bytes.as_ref().to_vec(),
+        display: name.display.as_ref().to_owned(),
+    }
+}
+
 fn map_scan_history_error(error: CoreScanHistoryError) -> EngineError {
     match error {
         CoreScanHistoryError::InvalidLimit { .. } => EngineError::BudgetExceeded,
@@ -1874,6 +2551,25 @@ fn map_scan_history_error(error: CoreScanHistoryError) -> EngineError {
         CoreScanHistoryError::CorruptData => EngineError::CorruptData,
         CoreScanHistoryError::Unavailable => EngineError::StorageUnavailable,
         CoreScanHistoryError::InternalState => EngineError::InternalState,
+        _ => EngineError::InternalState,
+    }
+}
+
+fn map_scan_coverage_details_error(error: CoreScanCoverageDetailsError) -> EngineError {
+    match error {
+        CoreScanCoverageDetailsError::InvalidLimit { .. }
+        | CoreScanCoverageDetailsError::InvalidOffset => {
+            EngineError::InvalidScanCoverageDetailsRequest
+        }
+        CoreScanCoverageDetailsError::Closed => EngineError::Closed,
+        CoreScanCoverageDetailsError::ScanNotFound => EngineError::ScanNotFound,
+        CoreScanCoverageDetailsError::IncompatibleSchema => EngineError::IncompatibleSchema,
+        CoreScanCoverageDetailsError::Busy => EngineError::Busy,
+        CoreScanCoverageDetailsError::UnsafeStorage => EngineError::UnsafeStorage,
+        CoreScanCoverageDetailsError::QueryLimitExceeded => EngineError::BudgetExceeded,
+        CoreScanCoverageDetailsError::CorruptData => EngineError::CorruptData,
+        CoreScanCoverageDetailsError::Unavailable => EngineError::StorageUnavailable,
+        CoreScanCoverageDetailsError::InternalState => EngineError::InternalState,
         _ => EngineError::InternalState,
     }
 }
@@ -2149,10 +2845,10 @@ mod tests {
     }
 
     #[test]
-    fn reports_contract_nine_and_preserves_legacy_formatting() {
+    fn reports_contract_fifteen_and_preserves_legacy_formatting() {
         let _guard = ENGINE_TEST_LOCK.lock().unwrap();
         let (_temp, engine) = engine();
-        assert_eq!(library_version().ffi_contract_version, 9);
+        assert_eq!(library_version().ffi_contract_version, 15);
         assert_eq!(engine.library_version().unwrap(), library_version());
         assert_eq!(engine.format_size(1536).unwrap().display, "1.5 KB");
         assert!(engine.close());
@@ -2405,6 +3101,24 @@ mod tests {
         );
         assert_eq!(historical.coverage, result.coverage);
         assert!(historical.snapshot_recorded);
+        let details = engine
+            .scan_coverage_details(
+                result.scan_id.clone(),
+                ScanCoverageDetailsRequest {
+                    record_version: FFI_RECORD_VERSION,
+                    offset: 0,
+                    limit: SCAN_COVERAGE_DETAIL_PAGE_LIMIT,
+                },
+            )
+            .unwrap();
+        assert_eq!(details.record_version, FFI_RECORD_VERSION);
+        assert_eq!(details.scan_id, result.scan_id);
+        assert_eq!(details.coverage, result.coverage);
+        assert_eq!(details.offset, 0);
+        assert_eq!(details.total_issue_records, 0);
+        assert_eq!(details.total_issue_occurrences, 0);
+        assert!(!details.has_more);
+        assert!(details.issues.is_empty());
         assert!(engine.close());
         assert_eq!(start.task.poll(), Err(ScanError::Closed));
     }
@@ -2429,6 +3143,114 @@ mod tests {
         }
         assert!(engine.close());
         assert_eq!(engine.recent_scan_history(1), Err(EngineError::Closed));
+    }
+
+    #[test]
+    fn scan_coverage_details_validate_request_identity_and_all_issue_mappings() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (_temp, engine) = engine();
+        for request in [
+            ScanCoverageDetailsRequest {
+                record_version: FFI_RECORD_VERSION + 1,
+                offset: 0,
+                limit: 1,
+            },
+            ScanCoverageDetailsRequest {
+                record_version: FFI_RECORD_VERSION,
+                offset: 0,
+                limit: 0,
+            },
+            ScanCoverageDetailsRequest {
+                record_version: FFI_RECORD_VERSION,
+                offset: 0,
+                limit: SCAN_COVERAGE_DETAIL_PAGE_LIMIT + 1,
+            },
+        ] {
+            assert_eq!(
+                engine.scan_coverage_details("scan:missing".to_owned(), request),
+                Err(EngineError::InvalidScanCoverageDetailsRequest)
+            );
+        }
+        assert_eq!(
+            engine.scan_coverage_details(
+                "bad scan".to_owned(),
+                ScanCoverageDetailsRequest {
+                    record_version: FFI_RECORD_VERSION,
+                    offset: 0,
+                    limit: 1,
+                },
+            ),
+            Err(EngineError::InvalidScanId)
+        );
+        assert_eq!(
+            engine.scan_coverage_details(
+                "scan:missing".to_owned(),
+                ScanCoverageDetailsRequest {
+                    record_version: FFI_RECORD_VERSION,
+                    offset: 0,
+                    limit: 1,
+                },
+            ),
+            Err(EngineError::ScanNotFound)
+        );
+
+        let mappings = [
+            (
+                CoreDurableScanIssueKind::PermissionDenied,
+                HistoricalScanIssueKind::PermissionDenied,
+            ),
+            (
+                CoreDurableScanIssueKind::TimedOut,
+                HistoricalScanIssueKind::TimedOut,
+            ),
+            (
+                CoreDurableScanIssueKind::DifferentFilesystem,
+                HistoricalScanIssueKind::DifferentFilesystem,
+            ),
+            (
+                CoreDurableScanIssueKind::NetworkOrVirtualFilesystem,
+                HistoricalScanIssueKind::NetworkOrVirtualFilesystem,
+            ),
+            (
+                CoreDurableScanIssueKind::SymlinkSkipped,
+                HistoricalScanIssueKind::SymlinkSkipped,
+            ),
+            (
+                CoreDurableScanIssueKind::FileChangedDuringScan,
+                HistoricalScanIssueKind::FileChangedDuringScan,
+            ),
+            (
+                CoreDurableScanIssueKind::MetadataError,
+                HistoricalScanIssueKind::MetadataError,
+            ),
+            (
+                CoreDurableScanIssueKind::Cancelled,
+                HistoricalScanIssueKind::Cancelled,
+            ),
+            (
+                CoreDurableScanIssueKind::PolicyExcluded,
+                HistoricalScanIssueKind::PolicyExcluded,
+            ),
+            (
+                CoreDurableScanIssueKind::DepthLimited,
+                HistoricalScanIssueKind::DepthLimited,
+            ),
+            (
+                CoreDurableScanIssueKind::ProbePoolExhausted,
+                HistoricalScanIssueKind::ProbePoolExhausted,
+            ),
+            (
+                CoreDurableScanIssueKind::FilesystemBoundaryUnknown,
+                HistoricalScanIssueKind::FilesystemBoundaryUnknown,
+            ),
+            (
+                CoreDurableScanIssueKind::IssueLimitReached,
+                HistoricalScanIssueKind::IssueLimitReached,
+            ),
+        ];
+        for (core, ffi) in mappings {
+            assert_eq!(map_historical_scan_issue_kind(core).unwrap(), ffi);
+        }
     }
 
     #[test]
@@ -2810,8 +3632,10 @@ mod tests {
         let root = temp.path().join("review-root");
         std::fs::create_dir(&root).unwrap();
         std::fs::write(root.join("payload"), b"ffi review").unwrap();
+        std::fs::write(root.join("larger"), b"ffi review paging").unwrap();
+        let canonical_root = std::fs::canonicalize(&root).unwrap();
         let task = engine
-            .with_engine(|core| core.start_scan(root).map_err(map_start_error))
+            .with_engine(|core| core.start_scan(root.clone()).map_err(map_start_error))
             .unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
         let scan_id = loop {
@@ -2842,6 +3666,152 @@ mod tests {
         assert_eq!(initial.scan_id, scan_id);
         assert!(!initial.released);
         assert!(initial.expires_at_unix_ms > 0);
+        let root_node = review.root_node().unwrap();
+        assert_eq!(root_node.record_version, SNAPSHOT_NODE_RECORD_VERSION);
+        assert_eq!(root_node.id, 0);
+        assert_eq!(root_node.kind, SnapshotNodeKind::Directory);
+        assert_eq!(root_node.category, SnapshotStorageCategory::Unclassified);
+        assert!(root_node.name.display.ends_with("/review-root"));
+        assert_eq!(root_node.child_count, 2);
+        let first = review
+            .child_nodes(0, SnapshotNodeSort::LogicalBytesDescending, 0, 1)
+            .unwrap();
+        assert_eq!(first.record_version, 1);
+        assert_eq!(first.total_children, 2);
+        assert!(first.has_more);
+        assert_eq!(first.nodes.len(), 1);
+        assert_eq!(first.nodes[0].name.display, "larger");
+        assert_eq!(
+            first.nodes[0].category,
+            SnapshotStorageCategory::Unclassified
+        );
+        let root_reveal = review
+            .resolve_live_target(SnapshotLiveTargetRequest {
+                record_version: FFI_RECORD_VERSION,
+                node_id: 0,
+                purpose: SnapshotLiveTargetPurpose::Reveal,
+            })
+            .unwrap();
+        assert_eq!(root_reveal.record_version, FFI_RECORD_VERSION);
+        assert_eq!(root_reveal.node_id, 0);
+        assert_eq!(root_reveal.purpose, SnapshotLiveTargetPurpose::Reveal);
+        assert_eq!(root_reveal.kind, SnapshotLiveTargetKind::Directory);
+        assert_eq!(root_reveal.path_encoding, SnapshotNameEncoding::UnixBytes);
+        assert!(!root_reveal.absolute_path_bytes.contains(&0));
+        assert_eq!(
+            root_reveal.exact_text_path.as_deref(),
+            Some(canonical_root.to_str().unwrap())
+        );
+        assert_eq!(
+            review.resolve_live_target(SnapshotLiveTargetRequest {
+                record_version: FFI_RECORD_VERSION,
+                node_id: 0,
+                purpose: SnapshotLiveTargetPurpose::QuickLook,
+            }),
+            Err(EngineError::SnapshotLiveTargetUnsupported)
+        );
+        let file_quick_look = review
+            .resolve_live_target(SnapshotLiveTargetRequest {
+                record_version: FFI_RECORD_VERSION,
+                node_id: first.nodes[0].id,
+                purpose: SnapshotLiveTargetPurpose::QuickLook,
+            })
+            .unwrap();
+        assert_eq!(file_quick_look.node_id, first.nodes[0].id);
+        assert_eq!(
+            file_quick_look.purpose,
+            SnapshotLiveTargetPurpose::QuickLook
+        );
+        assert_eq!(file_quick_look.kind, SnapshotLiveTargetKind::File);
+        assert!(!file_quick_look.absolute_path_bytes.contains(&0));
+        assert_eq!(
+            file_quick_look.exact_text_path.as_deref(),
+            Some(canonical_root.join("larger").to_str().unwrap())
+        );
+        assert_eq!(
+            review.resolve_live_target(SnapshotLiveTargetRequest {
+                record_version: FFI_RECORD_VERSION + 1,
+                node_id: first.nodes[0].id,
+                purpose: SnapshotLiveTargetPurpose::Reveal,
+            }),
+            Err(EngineError::InvalidSnapshotLiveTargetRequest)
+        );
+        let treemap = review.treemap(0, 1).unwrap();
+        assert_eq!(treemap.record_version, 1);
+        assert_eq!(treemap.parent_id, 0);
+        assert_eq!(treemap.total_children, 2);
+        assert_eq!(treemap.total_child_logical_bytes, 27);
+        assert_eq!(treemap.cells.len(), 1);
+        assert_eq!(treemap.cells[0].record_version, 1);
+        assert_eq!(treemap.cells[0].logical_rank, 0);
+        assert_eq!(treemap.cells[0].node.name.display, "larger");
+        assert_eq!(
+            treemap.cells[0].node.category,
+            SnapshotStorageCategory::Unclassified
+        );
+        assert_eq!(treemap.other_child_count, 1);
+        assert_eq!(treemap.other_logical_bytes, 10);
+        assert_eq!(treemap.zero_logical_child_count, 0);
+        let large_files = review
+            .large_files(SnapshotLargeFileRequest {
+                record_version: FFI_RECORD_VERSION,
+                minimum_logical_bytes: 1,
+                modified_before: None,
+                max_results: 1,
+            })
+            .unwrap();
+        assert_eq!(large_files.record_version, FFI_RECORD_VERSION);
+        assert_eq!(large_files.total_matching_files, 2);
+        assert_eq!(large_files.total_matching_logical_bytes, 27);
+        assert!(large_files.has_more);
+        assert_eq!(large_files.files.len(), 1);
+        assert_eq!(large_files.files[0].record_version, FFI_RECORD_VERSION);
+        assert_eq!(large_files.files[0].node.kind, SnapshotNodeKind::File);
+        assert_eq!(
+            large_files.files[0].node.category,
+            SnapshotStorageCategory::Unclassified
+        );
+        assert_eq!(large_files.files[0].node.name.display, "larger");
+        assert!(large_files.files[0].parent_context.is_empty());
+        assert!(!large_files.files[0].context_truncated);
+        assert_eq!(
+            review.large_files(SnapshotLargeFileRequest {
+                record_version: FFI_RECORD_VERSION + 1,
+                minimum_logical_bytes: 1,
+                modified_before: None,
+                max_results: 1,
+            }),
+            Err(EngineError::InvalidSnapshotLargeFileRequest)
+        );
+        assert_eq!(
+            review.large_files(SnapshotLargeFileRequest {
+                record_version: FFI_RECORD_VERSION,
+                minimum_logical_bytes: 0,
+                modified_before: None,
+                max_results: 1,
+            }),
+            Err(EngineError::InvalidSnapshotLargeFileRequest)
+        );
+        assert_eq!(
+            review.child_nodes(0, SnapshotNodeSort::NameAscending, 0, 0),
+            Err(EngineError::InvalidSnapshotNodePage)
+        );
+        assert_eq!(
+            review.treemap(0, 0),
+            Err(EngineError::InvalidSnapshotTreemapBudget)
+        );
+        assert_eq!(
+            review.treemap(0, 65),
+            Err(EngineError::InvalidSnapshotTreemapBudget)
+        );
+        assert_eq!(
+            review.child_nodes(u64::MAX, SnapshotNodeSort::NameAscending, 0, 1),
+            Err(EngineError::SnapshotNodeNotFound)
+        );
+        assert_eq!(
+            review.child_nodes(first.nodes[0].id, SnapshotNodeSort::NameAscending, 0, 1),
+            Err(EngineError::SnapshotNodeNotDirectory)
+        );
         let renewed = review.renew().unwrap();
         assert!(renewed.expires_at_unix_ms >= initial.expires_at_unix_ms);
         let latest = engine.acquire_latest_explorer_snapshot_review().unwrap();
@@ -2858,6 +3828,25 @@ mod tests {
         let ended = review.info().unwrap();
         assert!(ended.released);
         assert_eq!(ended.expires_at_unix_ms, 0);
+        assert_eq!(review.root_node(), Err(EngineError::ReviewExpired));
+        assert_eq!(review.treemap(0, 1), Err(EngineError::ReviewExpired));
+        assert_eq!(
+            review.resolve_live_target(SnapshotLiveTargetRequest {
+                record_version: FFI_RECORD_VERSION,
+                node_id: 0,
+                purpose: SnapshotLiveTargetPurpose::Reveal,
+            }),
+            Err(EngineError::ReviewExpired)
+        );
+        assert_eq!(
+            review.large_files(SnapshotLargeFileRequest {
+                record_version: FFI_RECORD_VERSION,
+                minimum_logical_bytes: 1,
+                modified_before: None,
+                max_results: 1,
+            }),
+            Err(EngineError::ReviewExpired)
+        );
         assert!(engine.close());
         assert_eq!(close_drained.renew(), Err(EngineError::Closed));
         assert!(close_drained.info().unwrap().released);
@@ -2865,6 +3854,95 @@ mod tests {
             close_drained.release().unwrap(),
             ReviewReleaseOutcome::AlreadyReleased
         );
+    }
+
+    #[test]
+    fn snapshot_live_path_failures_map_to_specific_path_free_errors() {
+        for (core, ffi) in [
+            (
+                CoreReviewError::LiveTargetUnsupported,
+                EngineError::SnapshotLiveTargetUnsupported,
+            ),
+            (
+                CoreReviewError::LivePathUnavailable,
+                EngineError::SnapshotLivePathUnavailable,
+            ),
+            (
+                CoreReviewError::LivePathMissing,
+                EngineError::SnapshotLivePathMissing,
+            ),
+            (
+                CoreReviewError::LivePathSymlink,
+                EngineError::SnapshotLivePathSymlink,
+            ),
+            (
+                CoreReviewError::LivePathCrossVolume,
+                EngineError::SnapshotLivePathCrossVolume,
+            ),
+            (
+                CoreReviewError::LivePathChanged,
+                EngineError::SnapshotLivePathChanged,
+            ),
+            (
+                CoreReviewError::LivePathAccessDenied,
+                EngineError::SnapshotLivePathAccessDenied,
+            ),
+        ] {
+            assert_eq!(map_review_error(core), ffi);
+            assert!(!ffi.to_string().contains('/'));
+        }
+    }
+
+    #[test]
+    fn every_core_snapshot_category_maps_to_one_stable_ffi_case() {
+        for (core, ffi) in [
+            (
+                CoreReviewCategory::Unclassified,
+                SnapshotStorageCategory::Unclassified,
+            ),
+            (
+                CoreReviewCategory::DeveloperArtifact,
+                SnapshotStorageCategory::DeveloperArtifact,
+            ),
+            (
+                CoreReviewCategory::ApplicationCache,
+                SnapshotStorageCategory::ApplicationCache,
+            ),
+            (
+                CoreReviewCategory::BrowserCache,
+                SnapshotStorageCategory::BrowserCache,
+            ),
+            (
+                CoreReviewCategory::LogAndDiagnostic,
+                SnapshotStorageCategory::LogAndDiagnostic,
+            ),
+            (
+                CoreReviewCategory::InstallerAndDownload,
+                SnapshotStorageCategory::InstallerAndDownload,
+            ),
+            (
+                CoreReviewCategory::DeviceAndSimulatorData,
+                SnapshotStorageCategory::DeviceAndSimulatorData,
+            ),
+            (
+                CoreReviewCategory::CloudFile,
+                SnapshotStorageCategory::CloudFile,
+            ),
+            (
+                CoreReviewCategory::LargeReviewItem,
+                SnapshotStorageCategory::LargeReviewItem,
+            ),
+            (
+                CoreReviewCategory::ProtectedSystemData,
+                SnapshotStorageCategory::ProtectedSystemData,
+            ),
+            (
+                CoreReviewCategory::UnknownStorage,
+                SnapshotStorageCategory::UnknownStorage,
+            ),
+        ] {
+            assert_eq!(project_snapshot_category(core), ffi);
+        }
     }
 
     #[test]

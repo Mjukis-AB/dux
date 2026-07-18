@@ -4,6 +4,7 @@ enum ExplorerAccessibility {
     static let root = "explorer"
     static let sidebar = "explorer-sidebar"
     static let overviewDestination = "explorer-destination-overview"
+    static let snapshotDestination = "explorer-destination-snapshot"
     static let settingsShortcut = "explorer-settings-shortcut"
     static let capacityCard = "explorer-capacity-card"
     static let capacityBar = "explorer-capacity-bar"
@@ -18,11 +19,43 @@ enum ExplorerAccessibility {
     static let refreshCapacity = "explorer-refresh-capacity"
     static let scanNow = "explorer-scan-now"
     static let cancelScan = "explorer-cancel-scan"
+    static let snapshotBrowser = "explorer-snapshot-browser"
+    static let snapshotBreadcrumbs = "explorer-snapshot-breadcrumbs"
+    static let snapshotBack = "explorer-snapshot-back"
+    static let snapshotSort = "explorer-snapshot-sort"
+    static let snapshotTable = "explorer-snapshot-table"
+    static let snapshotTreemap = "explorer-snapshot-treemap"
+    static let snapshotTreemapOther = "explorer-snapshot-treemap-other"
+    static let snapshotCategoryLegend = "explorer-snapshot-category-legend"
+    static let snapshotCategoryColumn = "explorer-snapshot-category-column"
+    static let snapshotInspectorCategory = "explorer-snapshot-inspector-category"
+    static let snapshotInspector = "explorer-snapshot-inspector"
+    static let snapshotPageStatus = "explorer-snapshot-page-status"
+    static let snapshotPreviousPage = "explorer-snapshot-previous-page"
+    static let snapshotNextPage = "explorer-snapshot-next-page"
+    static let snapshotReload = "explorer-snapshot-reload"
+    static let snapshotHistory = "explorer-snapshot-history"
+    static let snapshotHistoryStatus = "explorer-snapshot-history-status"
+    static let snapshotError = "explorer-snapshot-error"
+    static let snapshotContentMode = "explorer-snapshot-content-mode"
+    static let snapshotLargeFileThreshold = "explorer-snapshot-large-file-threshold"
+    static let snapshotLargeFileAge = "explorer-snapshot-large-file-age"
+    static let snapshotLargeFileTable = "explorer-snapshot-large-file-table"
+    static let snapshotLargeFileStatus = "explorer-snapshot-large-file-status"
+    static let snapshotCoverageView = "explorer-snapshot-coverage-view"
+    static let snapshotCoverageStatus = "explorer-snapshot-coverage-status"
+    static let snapshotCoverageBar = "explorer-snapshot-coverage-bar"
+    static let snapshotCoverageIssueList = "explorer-snapshot-coverage-issue-list"
+    static let snapshotRevealInFinder = "explorer-snapshot-reveal-in-finder"
+    static let snapshotCopyPath = "explorer-snapshot-copy-path"
+    static let snapshotQuickLook = "explorer-snapshot-quick-look"
+    static let snapshotLiveActionStatus = "explorer-snapshot-live-action-status"
 
     static let allIdentifiers = [
         root,
         sidebar,
         overviewDestination,
+        snapshotDestination,
         settingsShortcut,
         capacityCard,
         capacityBar,
@@ -37,11 +70,51 @@ enum ExplorerAccessibility {
         refreshCapacity,
         scanNow,
         cancelScan,
+        snapshotBrowser,
+        snapshotBreadcrumbs,
+        snapshotBack,
+        snapshotSort,
+        snapshotTable,
+        snapshotTreemap,
+        snapshotTreemapOther,
+        snapshotCategoryLegend,
+        snapshotCategoryColumn,
+        snapshotInspectorCategory,
+        snapshotInspector,
+        snapshotPageStatus,
+        snapshotPreviousPage,
+        snapshotNextPage,
+        snapshotReload,
+        snapshotHistory,
+        snapshotHistoryStatus,
+        snapshotError,
+        snapshotContentMode,
+        snapshotLargeFileThreshold,
+        snapshotLargeFileAge,
+        snapshotLargeFileTable,
+        snapshotLargeFileStatus,
+        snapshotCoverageView,
+        snapshotCoverageStatus,
+        snapshotCoverageBar,
+        snapshotCoverageIssueList,
+        snapshotRevealInFinder,
+        snapshotCopyPath,
+        snapshotQuickLook,
+        snapshotLiveActionStatus,
     ]
+
+    static func snapshotTreemapCell(nodeID: UInt64) -> String {
+        "explorer-snapshot-treemap-cell-\(nodeID)"
+    }
+
+    static func snapshotCategoryLegend(category: ExplorerStorageCategory) -> String {
+        "explorer-snapshot-category-legend-\(category.presentation.palette.rawValue)"
+    }
 }
 
 enum ExplorerDestination: String, CaseIterable, Identifiable, Sendable {
     case overview
+    case snapshot
 
     var id: Self { self }
 }

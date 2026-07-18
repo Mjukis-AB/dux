@@ -1,5 +1,17 @@
+import Darwin
+import Foundation
 import XCTest
 @testable import DUX
+
+private func canonicalTestPath(_ url: URL) -> String {
+    var buffer = [CChar](repeating: 0, count: Int(PATH_MAX))
+    let resolved = buffer.withUnsafeMutableBufferPointer { output in
+        url.path.withCString { realpath($0, output.baseAddress) }
+    }
+    precondition(resolved != nil)
+    let end = buffer.firstIndex(of: 0) ?? buffer.endIndex
+    return String(decoding: buffer[..<end].map(UInt8.init(bitPattern:)), as: UTF8.self)
+}
 
 final class EngineServiceTests: XCTestCase {
     @MainActor
@@ -45,7 +57,7 @@ final class EngineServiceTests: XCTestCase {
         // DUX-DESTRUCTIVE: allow=test-swift-retry-obstruction-remove -- remove only this test fixture's deliberate file obstruction
         try FileManager.default.removeItem(at: dataRoot)
         let status = try await service.loadStatus()
-        XCTAssertEqual(status.ffiContractVersion, 9)
+        XCTAssertEqual(status.ffiContractVersion, 15)
         let closed = await service.close()
         XCTAssertTrue(closed)
     }
@@ -55,7 +67,7 @@ final class EngineServiceTests: XCTestCase {
         let result = try await EngineService(engine: fixture.engine).loadStatus()
 
         XCTAssertEqual(result.libraryVersion, "0.5.0")
-        XCTAssertEqual(result.ffiContractVersion, 9)
+        XCTAssertEqual(result.ffiContractVersion, 15)
         XCTAssertTrue(result.executedOffMainThread)
     }
 
@@ -167,9 +179,11 @@ final class EngineServiceTests: XCTestCase {
             engine: fixture.engine,
             homeScanRoot: fixture.homeScanRoot
         )
-        // DUX-DESTRUCTIVE: allow=test-swift-home-scan-fixture-write -- write only one payload inside this UUID-named temporary scan root
+        let folder = fixture.homeScanRoot.appending(path: "folder", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+        // DUX-DESTRUCTIVE: allow=test-swift-home-scan-fixture-write -- write only one nested payload inside this UUID-named temporary scan root
         try Data("scan payload".utf8).write(
-            to: fixture.homeScanRoot.appending(path: "payload")
+            to: folder.appending(path: "nested.txt")
         )
 
         let start = try await service.startHomeScan()
@@ -197,7 +211,76 @@ final class EngineServiceTests: XCTestCase {
 
         let review = try await service.acquireLatestExplorerReview()
         XCTAssertEqual(review.scanID, result.scanID)
+        let rootNode = try await review.rootNode()
+        XCTAssertEqual(rootNode.id, 0)
+        XCTAssertEqual(rootNode.kind, .directory)
+        XCTAssertEqual(rootNode.childCount, 1)
+        let page = try await review.childNodes(
+            parentID: rootNode.id,
+            sort: .logicalBytesDescending,
+            offset: 0,
+            limit: 50
+        )
+        XCTAssertEqual(page.totalChildren, 1)
+        let folderNode = try XCTUnwrap(page.nodes.first)
+        XCTAssertEqual(folderNode.kind, .directory)
+        XCTAssertEqual(folderNode.name.display, "folder")
+        XCTAssertFalse(page.hasMore)
+        let rootTreemap = try await review.treemap(parentID: rootNode.id, maxCells: 48)
+        XCTAssertEqual(rootTreemap.parentID, rootNode.id)
+        XCTAssertEqual(rootTreemap.totalChildren, page.totalChildren)
+        XCTAssertEqual(rootTreemap.totalChildLogicalBytes, rootNode.logicalBytes)
+        XCTAssertEqual(rootTreemap.cells.map(\.node.id), [folderNode.id])
+        XCTAssertEqual(rootTreemap.otherChildCount, 0)
+        let nested = try await review.childNodes(
+            parentID: folderNode.id,
+            sort: .nameAscending,
+            offset: 0,
+            limit: 50
+        )
+        XCTAssertEqual(nested.totalChildren, 1)
+        XCTAssertEqual(nested.nodes.map(\.name.display), ["nested.txt"])
+        let nestedNode = try XCTUnwrap(nested.nodes.first)
+        let nestedTreemap = try await review.treemap(parentID: folderNode.id, maxCells: 48)
+        XCTAssertEqual(nestedTreemap.cells.map(\.node.name.display), ["nested.txt"])
+        XCTAssertEqual(nestedTreemap.totalChildLogicalBytes, folderNode.logicalBytes)
+        let rootLiveItem = try await review.resolveLiveItem(
+            nodeID: rootNode.id,
+            purpose: .reveal
+        )
+        XCTAssertEqual(rootLiveItem.kind, .directory)
+        XCTAssertEqual(
+            rootLiveItem.exactTextPath,
+            canonicalTestPath(fixture.homeScanRoot)
+        )
+        let nestedLiveItem = try await review.resolveLiveItem(
+            nodeID: nestedNode.id,
+            purpose: .quickLook
+        )
+        XCTAssertEqual(nestedLiveItem.kind, .file)
+        XCTAssertEqual(
+            nestedLiveItem.exactTextPath,
+            canonicalTestPath(folder.appending(path: "nested.txt"))
+        )
+        do {
+            _ = try await review.treemap(parentID: rootNode.id, maxCells: 0)
+            XCTFail("Expected an invalid treemap budget")
+        } catch {
+            XCTAssertEqual(error as? ExplorerSnapshotTreemapError, .invalidBudget)
+        }
         await review.release()
+        do {
+            _ = try await review.rootNode()
+            XCTFail("Expected released review navigation to expire")
+        } catch {
+            XCTAssertEqual(error as? ExplorerSnapshotNodeError, .reviewExpired)
+        }
+        do {
+            _ = try await review.resolveLiveItem(nodeID: nestedNode.id, purpose: .reveal)
+            XCTFail("Expected released live-path resolution to expire")
+        } catch {
+            XCTAssertEqual(error as? ExplorerSnapshotLivePathError, .reviewExpired)
+        }
     }
 
     func testHomeScanAdapterPassesOnlyResolvedHomeAndRunsAllFFIOffMain() async throws {
@@ -593,7 +676,7 @@ final class EngineServiceTests: XCTestCase {
             weakEngine = engine
 
             XCTAssertEqual(liveEngineInstanceCount(), baseline + 1)
-            XCTAssertEqual(try engine.libraryVersion().ffiContractVersion, 9)
+            XCTAssertEqual(try engine.libraryVersion().ffiContractVersion, 15)
             XCTAssertTrue(engine.close())
             XCTAssertTrue(engine.close())
             XCTAssertThrowsError(try engine.formatSize(bytes: 1_536)) { error in
@@ -826,7 +909,7 @@ private actor CountingEngineService: EngineServing {
         await Task.yield()
         return EngineStatus(
             libraryVersion: "test",
-            ffiContractVersion: 9,
+            ffiContractVersion: 12,
             executedOffMainThread: true
         )
     }
@@ -1169,7 +1252,7 @@ private actor FlakyEngineService: EngineServing {
         }
         return EngineStatus(
             libraryVersion: "test",
-            ffiContractVersion: 9,
+            ffiContractVersion: 12,
             executedOffMainThread: true
         )
     }
