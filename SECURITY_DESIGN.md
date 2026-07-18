@@ -333,16 +333,24 @@ path, identity, length, and SHA-256. Exact local-APFS manifest and complete
 ancestry-through-root vnode fences remain polled while an identical second
 command runs; a current-open-descriptor plus 128-slot reserve preflight rejects
 insufficient process limits instead of reducing coverage. Only that
-independently parsed second output is accepted. Resolution policy 5 retains
+independently parsed second output is accepted. Resolution policy 6 retains
 manifest policy 1, member/manifest counts, closure digest, launch evidence, and
 accepted-output digest together with configuration-policy-3 file/edge/byte and
-read-intent evidence. Cargo 1.96's exact `metadata --no-deps` path deliberately
+read-intent evidence. Before discovery, a separate policy-1 closure reproduces
+Cargo 1.96's at-most-64 ordered ancestor-manifest candidate namespace and
+binds candidate presence, directory identities, and full bounded hashes of
+present single-link manifests. Local-APFS manifest and candidate-directory
+delete/rename/revoke events are terminal; directory entry writes replay the
+exact observation, rejecting persistent changes without treating unrelated
+restored high-ancestor activity as a manifest change. Cargo 1.96's exact
+`metadata --no-deps` path deliberately
 does not load or create `Cargo.lock`; an executable malformed-lock regression
 pins that reviewed version-specific behavior. This remains path-based stability
-evidence for reported manifests, not proof of Cargo's complete reads or
-workspace-glob namespace generation. Excluded or external path-dependency
-manifests, ancestor workspace probes, target/glob namespaces, source/build
-files, and post-witness mutations remain outside the proof.
+evidence for reported and potential ancestor manifests, not proof of Cargo's
+complete reads or workspace-glob namespace generation. Transient absent
+ancestor create/remove, external path-dependency manifests and their ancestor
+probes, target/glob namespaces, source/build files, and post-witness mutations
+remain outside the proof.
 Those limits and the remaining authority grants keep `ProtectedPath` intact.
 Every rule remains unschedulable, and every emitted candidate retains
 `ProtectedPath` because kernel-level actual-read identity and complete Cargo

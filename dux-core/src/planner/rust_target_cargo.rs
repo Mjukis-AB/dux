@@ -25,6 +25,9 @@ use super::cargo_code_signature_macos::inspect_cargo_code_signature;
 use super::cargo_config::{
     CargoConfigurationError, CargoConfigurationEvidence, CargoConfigurationGuard,
 };
+use super::cargo_manifest_probes::{
+    CargoManifestProbeError, CargoManifestProbeEvidence, CargoManifestProbeGuard,
+};
 #[cfg(target_os = "macos")]
 use super::cargo_spawn_macos::{
     CargoSpawnError, CargoSpawnRequest, ExecutableMutationFence, SuspendedCargoChild,
@@ -53,7 +56,7 @@ const VERSION_TIMEOUT: Duration = Duration::from_secs(5);
 const METADATA_TIMEOUT: Duration = Duration::from_secs(10);
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(2);
 const MAX_CARGO_EXECUTABLE_BYTES: usize = 256 * 1024 * 1024;
-const CARGO_RESOLUTION_POLICY_REVISION: u32 = 5;
+const CARGO_RESOLUTION_POLICY_REVISION: u32 = 6;
 const MAX_PACKAGE_ID_BYTES: usize = 4 * 1024;
 const CARGO_ENROLLMENT_SUPPORTED_COMMIT: &str = "30a34c6821b57de0aaec83a901aca39f88f6778c";
 
@@ -124,6 +127,7 @@ struct CargoLaunchTarget<'a> {
 #[derive(Clone, Copy, Default)]
 struct CargoInputGuards<'a> {
     configuration: Option<&'a CargoConfigurationGuard>,
+    manifest_probes: Option<&'a CargoManifestProbeGuard>,
     workspace: Option<&'a CargoWorkspaceManifestGuard>,
 }
 
@@ -131,6 +135,9 @@ impl CargoInputGuards<'_> {
     fn poll(self) -> Result<(), CargoMetadataValidationError> {
         if let Some(configuration) = self.configuration {
             configuration.poll()?;
+        }
+        if let Some(manifest_probes) = self.manifest_probes {
+            manifest_probes.poll()?;
         }
         if let Some(workspace) = self.workspace {
             workspace.poll()?;
@@ -141,6 +148,9 @@ impl CargoInputGuards<'_> {
     fn revalidate(self) -> Result<(), CargoMetadataValidationError> {
         if let Some(configuration) = self.configuration {
             configuration.revalidate()?;
+        }
+        if let Some(manifest_probes) = self.manifest_probes {
+            manifest_probes.revalidate()?;
         }
         if let Some(workspace) = self.workspace {
             workspace.revalidate()?;
@@ -175,6 +185,7 @@ pub(crate) struct RustTargetCargoMetadataWitness {
     cargo: CargoExecutableEvidence,
     metadata_sha256: [u8; 32],
     configuration: CargoConfigurationEvidence,
+    manifest_probes: CargoManifestProbeEvidence,
     workspace: CargoWorkspaceManifestEvidence,
     launch_policy_revision: u32,
     running_code_directory_hash_sha256: [u8; 32],
@@ -249,6 +260,12 @@ pub(crate) enum CargoMetadataValidationError {
     WorkspaceManifestUnavailable,
     #[error("Cargo workspace manifests changed during metadata resolution")]
     WorkspaceManifestChanged,
+    #[error("Cargo ancestor manifest namespace is outside the bounded provenance profile")]
+    CargoManifestProbesUnsupported,
+    #[error("Cargo ancestor manifest namespace changed during metadata resolution")]
+    CargoManifestProbesChanged,
+    #[error("Cargo ancestor manifest namespace could not be bounded")]
+    CargoManifestProbesUnavailable,
     #[error("Cargo configuration is outside the bounded positive provenance profile")]
     CargoConfigurationUnsupported,
     #[error("Cargo configuration discovery state changed during resolution")]
@@ -295,6 +312,16 @@ impl From<CargoWorkspaceManifestError> for CargoMetadataValidationError {
             CargoWorkspaceManifestError::Invalid => Self::InvalidWorkspaceMembers,
             CargoWorkspaceManifestError::Changed => Self::WorkspaceManifestChanged,
             CargoWorkspaceManifestError::Unavailable => Self::WorkspaceManifestUnavailable,
+        }
+    }
+}
+
+impl From<CargoManifestProbeError> for CargoMetadataValidationError {
+    fn from(error: CargoManifestProbeError) -> Self {
+        match error {
+            CargoManifestProbeError::Unsupported => Self::CargoManifestProbesUnsupported,
+            CargoManifestProbeError::Changed => Self::CargoManifestProbesChanged,
+            CargoManifestProbeError::Unavailable => Self::CargoManifestProbesUnavailable,
         }
     }
 }
@@ -635,6 +662,19 @@ fn validate_cargo_metadata_with_limits(
             )?
         }
     };
+    let manifest_probes = match configuration_fence {
+        ConfigurationFenceMode::Armed => CargoManifestProbeGuard::capture(
+            project_directory.root(),
+            &cargo.environment.cargo_home,
+        )?,
+        #[cfg(test)]
+        ConfigurationFenceMode::UnarmedForParallelTest => {
+            CargoManifestProbeGuard::capture_unfenced_for_test(
+                project_directory.root(),
+                &cargo.environment.cargo_home,
+            )?
+        }
+    };
 
     let metadata_arguments = [
         OsStr::new("metadata"),
@@ -656,6 +696,7 @@ fn validate_cargo_metadata_with_limits(
         &cargo.environment,
         CargoInputGuards {
             configuration: Some(&configuration),
+            manifest_probes: Some(&manifest_probes),
             workspace: None,
         },
     )?;
@@ -684,6 +725,7 @@ fn validate_cargo_metadata_with_limits(
         &cargo.environment,
         CargoInputGuards {
             configuration: Some(&configuration),
+            manifest_probes: Some(&manifest_probes),
             workspace: Some(&workspace),
         },
     )?;
@@ -699,6 +741,7 @@ fn validate_cargo_metadata_with_limits(
     after_metadata();
     project_directory.revalidate()?;
     let configuration_evidence = configuration.evidence()?;
+    let manifest_probe_evidence = manifest_probes.evidence()?;
     let workspace_evidence = workspace.evidence()?;
 
     let after_version = cargo.read_version(limits.version)?;
@@ -711,6 +754,7 @@ fn validate_cargo_metadata_with_limits(
     }
     project_directory.revalidate()?;
     configuration.revalidate()?;
+    manifest_probes.revalidate()?;
     workspace.revalidate()?;
     live.revalidate_current()?;
 
@@ -723,6 +767,7 @@ fn validate_cargo_metadata_with_limits(
         ),
         metadata_sha256: sha256(&output.stdout),
         configuration: configuration_evidence,
+        manifest_probes: manifest_probe_evidence,
         workspace: workspace_evidence,
         launch_policy_revision: output.launch_policy_revision,
         running_code_directory_hash_sha256: output.running_code_directory_hash_sha256,
@@ -1773,6 +1818,26 @@ impl RustTargetCargoMetadataWitness {
 
     pub(super) fn workspace_manifest_policy_revision(&self) -> u32 {
         self.workspace.policy_revision
+    }
+
+    pub(super) fn manifest_probe_policy_revision(&self) -> u32 {
+        self.manifest_probes.policy_revision
+    }
+
+    pub(super) fn manifest_probe_count(&self) -> u32 {
+        self.manifest_probes.probe_count
+    }
+
+    pub(super) fn present_ancestor_manifest_count(&self) -> u32 {
+        self.manifest_probes.manifest_count
+    }
+
+    pub(super) fn ancestor_manifest_byte_count(&self) -> u64 {
+        self.manifest_probes.manifest_bytes
+    }
+
+    pub(super) fn manifest_probe_closure_sha256(&self) -> [u8; 32] {
+        self.manifest_probes.closure_sha256
     }
 
     pub(super) fn workspace_member_count(&self) -> u32 {

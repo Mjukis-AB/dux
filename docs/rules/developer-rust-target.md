@@ -222,17 +222,31 @@ app and launch; insufficient `RLIMIT_NOFILE` rejects rather than silently
 dropping coverage. Configuration and workspace guards are rechecked before
 spawn and resume, throughout bounded output, after exact-child reaping, and
 before evidence extraction. Only a byte-identical, independently parsed second
-result is accepted. Resolution-policy revision 5 records the manifest policy,
+result is accepted. Resolution-policy revision 6 records the manifest policy,
 member and retained-manifest counts, closure digest, accepted-output digest,
 and configuration root/file/edge/byte plus read-intent evidence.
+
+Before the discovery pass, DUX also captures Cargo 1.96's complete potential
+ancestor-manifest candidate list in nearest-to-farthest order, with the pinned
+`target/package` and Cargo-home stop behavior. Policy 1 admits at most 64
+canonical UTF-8 candidates and binds every directory identity plus each
+present direct `Cargo.toml`; present manifests must be single-link regular
+files and are fully hashed under 4 MiB per file, 64 MiB aggregate, and native-
+path bounds. On macOS, present manifest file events and candidate-directory
+delete/rename/revoke events are terminal, while directory entry writes trigger
+exact observation replay. Persistent entry changes and file write/restore
+reject; unchanged relevant state after unrelated high-ancestor directory
+activity may continue. Counts, present bytes, and the
+domain-separated ordered closure digest are retained in resolution policy 6.
 
 This proves the exact reported root/member manifest bytes remained stable
 under the reviewed path-based inference model. Cargo 1.96's exact
 `metadata --no-deps` code path deliberately does not load or create
 `Cargo.lock`; real-Cargo tests include a malformed lockfile to pin that
 version-specific behavior. DUX still does not prove Cargo's full read set,
-workspace-glob/target namespace generations, excluded ancestor workspace or
-external path-dependency manifests, or source/build files. It is not fd-based Cargo reads;
+workspace-glob/target namespace generations, transient absent ancestor
+create/remove, external path-dependency manifests or their ancestor probes, or
+source/build files. It is not fd-based Cargo reads;
 kqueue remains event inference and same-UID/post-witness changes still require
 later guards. `ProtectedPath` and every authority edge remain unchanged.
 

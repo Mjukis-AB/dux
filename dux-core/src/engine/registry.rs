@@ -4497,6 +4497,7 @@ fn map_direct_cargo_validation_error(
         | Error::CargoEnrollmentChanged
         | Error::CargoWorkingDirectoryChanged
         | Error::WorkspaceManifestChanged
+        | Error::CargoManifestProbesChanged
         | Error::CargoConfigurationChanged
         | Error::LiveEvidenceChanged
         | Error::Filesystem(_)
@@ -4509,6 +4510,8 @@ fn map_direct_cargo_validation_error(
         Error::Spawn { .. }
         | Error::PipeConfiguration
         | Error::OutputRead { .. }
+        | Error::CargoManifestProbesUnsupported
+        | Error::CargoManifestProbesUnavailable
         | Error::CargoConfigurationUnsupported
         | Error::CargoConfigurationUnavailable
         | Error::ProcessFailed => DirectCargoEnrollmentError::InspectionUnavailable,

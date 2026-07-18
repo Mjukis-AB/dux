@@ -5,6 +5,21 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Continued Milestone 5 with a bounded Cargo 1.96 ancestor-manifest probe
+  namespace captured before metadata discovery. DUX reproduces Cargo's exact
+  nearest-to-farthest candidate ordering plus `target/package` and Cargo-home
+  stop rules, binds every candidate directory and present `Cargo.toml`, and
+  captures present UTF-8 single-link regular manifests under 64-probe,
+  4-MiB/file, 64-MiB aggregate, and path bounds. On macOS, local-APFS file
+  fences make present-manifest write/restore and candidate-directory identity
+  events terminal; directory entry-write events cause exact namespace
+  revalidation so persistent create/remove is rejected without failing on
+  unrelated restored high-ancestor activity.
+  Resolution policy 6 records probe policy 1, counts, bytes, and a
+  domain-separated closure digest across both metadata passes. A transient
+  absent-entry create/remove remains unproven, as do external path-dependency
+  manifests and kernel-level Cargo read identity. No cleanup authority or
+  `ProtectedPath` change was added.
 - Continued Milestone 5 with positive, bounded Cargo 1.96 configuration and
   include provenance. DUX discovers accepted project/ancestor config roots,
   parses only their top-level include declarations with Cargo's exact TOML

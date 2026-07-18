@@ -4167,6 +4167,31 @@ Tasks:
       manifests, workspace/target/glob namespaces, source/build inputs, and
       post-witness changes remain outside the proof. No blocker, plan, FFI,
       scheduling, or effect authority was added.
+    - [x] 2026-07-18 slice: bind Cargo 1.96's bounded potential ancestor-
+      manifest probe namespace before the first metadata pass. DUX mirrors the
+      pinned `find_root_iter` order from the selected manifest's parent toward
+      the filesystem root, including its exact `target/package` and one-item
+      Cargo-home look-behind stops. At most 64 canonical UTF-8 candidates are
+      admitted; each directory identity and present direct `Cargo.toml` is
+      bound, and every present manifest must be a single-link regular file
+      captured by full SHA-256 under 4-MiB/file, 64-MiB aggregate, and native-
+      path bounds. The independent policy-1 digest binds ordinal, native path,
+      presence, directory/file identities, byte length, and content digest.
+      On macOS all retained objects must be local APFS. Exact manifest vnode
+      events are terminal, including write/restore, as are directory
+      delete/rename/revoke events. Candidate-directory entry writes trigger
+      complete observation replay, rejecting persistent create/remove while
+      tolerating unrelated high-ancestor activity whose relevant entry state
+      is unchanged. The guard brackets both metadata
+      passes and resolution policy 6 records its counts, bytes, and closure.
+      Real Cargo coverage includes a standalone package below an excluding
+      ancestor workspace; adversarial tests cover stop rules, aliases, bounds,
+      persistent namespace changes, and same-inode write/restore. This is a
+      conservative potential-probe closure, not proof of which manifest Cargo
+      read. Transient absent-candidate create/remove, external path-dependency
+      manifests and their ancestor probes, glob/target/source/build
+      namespaces, and post-witness changes remain open. No blocker, plan, FFI,
+      scheduling, or effect authority was added.
     Kernel-level Cargo read identity, complete remaining Cargo manifest and
     namespace provenance, and all remaining
     protected-root, volume, process, descendant, plan, and executor grants are

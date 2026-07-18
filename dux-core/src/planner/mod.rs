@@ -10,6 +10,8 @@ mod cargo_code_signature_macos;
 mod cargo_config;
 #[cfg(unix)]
 mod cargo_config_closure;
+#[cfg(unix)]
+mod cargo_manifest_probes;
 #[cfg(target_os = "macos")]
 mod cargo_spawn_macos;
 #[cfg(unix)]
