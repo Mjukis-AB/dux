@@ -90,6 +90,8 @@ fn review_captures_exact_live_identity_and_remains_non_actionable() {
     let review = review_exact_paths(&scan_root, &candidates, CleanupMode::DryRun).unwrap();
 
     assert_eq!(review.scan_root(), scan_root.requested_path());
+    assert_eq!(review.boundary().root_identity(), scan_root.identity());
+    assert_eq!(review.boundary().scan_root(), scan_root.canonical_path());
     assert_eq!(review.source_scan_id().as_str(), "scan:exact-review");
     assert_eq!(review.mode(), CleanupMode::DryRun);
     assert_eq!(review.estimated_bytes(), 7);
@@ -118,6 +120,42 @@ fn review_captures_exact_live_identity_and_remains_non_actionable() {
         ExactPathProtection::NoTextualMatch { .. }
     )));
     assert!(root_path.join("cache/file").exists());
+}
+
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test replaces only a TempDir-owned scan root to prove boundary identity rejection"
+)]
+fn retained_review_boundary_rejects_scan_root_replacement() {
+    let (_directory, root_path, scan_root) = root();
+    let target = root_path.join("cache/file");
+    let candidate = candidate(
+        "candidate:boundary",
+        "fixture.rule",
+        std::slice::from_ref(&target),
+        7,
+        Vec::new(),
+        SafetyTier::SafeRegenerable,
+        CandidateAction::RemoveKnownRegenerableContents,
+    );
+
+    let review = review_exact_paths(&scan_root, &[candidate], CleanupMode::DryRun).unwrap();
+    let replacement = tempfile::tempdir_in(root_path.parent().unwrap())
+        .unwrap()
+        .keep();
+    // DUX-DESTRUCTIVE: allow=test-exact-review-replacement-remove-temp -- remove only the empty TempDir-owned replacement directory for an identity-race fixture
+    fs::remove_dir(&replacement).unwrap();
+    // DUX-DESTRUCTIVE: allow=test-exact-review-replacement-rename-away -- rename only the TempDir-owned scan root to prove boundary replacement is rejected
+    fs::rename(&root_path, &replacement).unwrap();
+    fs::create_dir(&root_path).unwrap();
+
+    assert!(review.boundary().revalidate().is_err());
+
+    // DUX-DESTRUCTIVE: allow=test-exact-review-replacement-remove-root -- remove only the replacement fixture root created by this test
+    fs::remove_dir_all(&root_path).unwrap();
+    // DUX-DESTRUCTIVE: allow=test-exact-review-replacement-rename-back -- restore only the TempDir-owned scan root after the identity-race fixture
+    fs::rename(replacement, root_path).unwrap();
 }
 
 #[test]

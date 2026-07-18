@@ -15,9 +15,10 @@ use crate::domain::{
     CandidateOverlapReason, CleanupMode, Evidence, PlanWarning, RuleRef, SafetyTier, ScanId,
 };
 use crate::path_validation::{
-    CanonicalPathError, CanonicalPathSnapshot, CanonicalScanRoot, LexicalPathError,
-    ProtectedPathForm, ProtectedPathKind, ProtectedRootDisposition, ProtectedRootError,
-    ProtectedRootRegistry, validate_cleanup_path, validate_scan_root,
+    CanonicalPathError, CanonicalPathSnapshot, CanonicalScanRoot, FilesystemBoundarySnapshot,
+    LexicalPathError, ProtectedPathForm, ProtectedPathKind, ProtectedRootDisposition,
+    ProtectedRootError, ProtectedRootRegistry, capture_filesystem_boundary, validate_cleanup_path,
+    validate_scan_root,
 };
 
 pub(crate) const MAX_EXACT_REVIEW_CANDIDATES: usize = 64;
@@ -133,6 +134,7 @@ impl ExactPathReviewItem {
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct ExactPathReview {
     scan_root: PathBuf,
+    boundary: FilesystemBoundarySnapshot,
     source_scan_id: ScanId,
     mode: CleanupMode,
     items: Vec<ExactPathReviewItem>,
@@ -143,6 +145,13 @@ pub(crate) struct ExactPathReview {
 impl ExactPathReview {
     pub(crate) fn scan_root(&self) -> &Path {
         &self.scan_root
+    }
+
+    /// Repeated no-follow ancestry and mount evidence captured for the
+    /// planner-owned scan root. This remains observational until a separate
+    /// trusted volume/location grant is joined to it.
+    pub(crate) fn boundary(&self) -> &FilesystemBoundarySnapshot {
+        &self.boundary
     }
 
     pub(crate) fn source_scan_id(&self) -> &ScanId {
@@ -200,6 +209,10 @@ pub(crate) enum ExactPathReviewError {
     },
     #[error("scan root lexical validation failed: {0}")]
     ScanRootLexical(#[source] LexicalPathError),
+    #[error("scan root filesystem boundary could not be captured: {0}")]
+    ScanRootBoundary(#[source] CanonicalPathError),
+    #[error("scan root filesystem boundary changed during exact review: {0}")]
+    ScanRootBoundaryChanged(#[source] CanonicalPathError),
     #[error("candidate {candidate_index} path {path_index} lexical validation failed: {source}")]
     PathLexical {
         candidate_index: usize,
@@ -298,6 +311,8 @@ pub(crate) fn review_exact_paths(
 
     let lexical_root = validate_scan_root(scan_root.requested_path())
         .map_err(ExactPathReviewError::ScanRootLexical)?;
+    let boundary =
+        capture_filesystem_boundary(scan_root).map_err(ExactPathReviewError::ScanRootBoundary)?;
     #[cfg(test)]
     let protected_registry = ProtectedRootRegistry::for_exact_review_fixture();
     #[cfg(not(test))]
@@ -425,8 +440,13 @@ pub(crate) fn review_exact_paths(
         });
     }
 
+    boundary
+        .revalidate()
+        .map_err(ExactPathReviewError::ScanRootBoundaryChanged)?;
+
     Ok(ExactPathReview {
         scan_root: scan_root.requested_path().to_path_buf(),
+        boundary,
         source_scan_id: candidates[0].source_scan_id().clone(),
         mode,
         items,

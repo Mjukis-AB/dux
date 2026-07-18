@@ -9,6 +9,10 @@
   core-issued Unix path bytes before URL construction, maps malformed requests
   to `Failed`, maps Foundation throws to `OutcomeUnknown`, and remains
   unregistered until reviewed-plan approval exists.
+- Exact-path review now retains the repeated filesystem-boundary witness for
+  its scan root and revalidates ancestry and mount identity before publishing
+  review evidence. Boundary drift fails closed; this remains observational and
+  does not grant volume/location or cleanup authority.
 
 All notable changes to DUX will be documented in this file.
 

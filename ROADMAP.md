@@ -4404,6 +4404,14 @@ Tasks:
     namespace provenance, and all remaining
     protected-root, volume, process, descendant, plan, and executor grants are
     still open.
+    - [x] 2026-07-19 slice: bind the repeated filesystem-boundary observation
+      into exact-path review. The planner now captures the complete no-follow
+      scan-root ancestry and platform mount identity before selected-path
+      validation, retains it in the non-cloneable review evidence, and
+      revalidates the boundary before publication. Boundary capture or drift
+      fails closed; this remains observational and does not mint a trusted
+      volume/location grant, clear `ProtectedPath`, construct a plan, cross
+      FFI, schedule, or mutate.
 - [ ] Implement candidate groups and overlap resolution.
   - [x] 2026-07-18 slice: add the sealed, non-authoritative core grouping
     result. Candidates are grouped deterministically by category, safety, and

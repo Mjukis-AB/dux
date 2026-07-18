@@ -690,6 +690,14 @@ and retains specific-rule or no-textual-match dispositions as explicit
 non-authoritative metadata. Failure to construct or assess the registry fails
 the review closed; no textual result is an allow decision.
 
+Exact-path review also captures the boundary witness before selected-path
+validation and retains the complete no-follow ancestry and platform mount
+identity in its non-cloneable evidence. It revalidates that boundary before
+publishing the review, so ancestry or mount drift fails closed. This is still
+observation only: it does not establish a trusted volume/location grant,
+remove `ProtectedPath`, or create planning, approval, FFI, scheduling, or
+effect authority.
+
 Sensitive categories are a separate deny layer. Credentials, keychains,
 tokens, browser profiles, messages, mail, notes, password managers,
 security/management software, active VM/container disks, unknown cloud state,
