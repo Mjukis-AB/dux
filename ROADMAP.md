@@ -3809,8 +3809,10 @@ Tasks:
     versions, ranks, identities, counts, and overflow before publishing an
     app-owned projection. No live path, category, candidate, plan, AI input, or
     cleanup capability crosses.
-  - [x] 2026-07-18 slice: expose bounded candidate path and typed evidence
-    pages through FFI contract v17 on the exact retained snapshot review.
+  - [x] 2026-07-18 slice: expose bounded candidate summary, path, and typed
+    evidence pages through FFI contract v17 on the exact retained snapshot
+    review. The summary page lets Explorer enumerate candidates before
+    drilling into a selected candidate.
     Rust maps durable candidate observations without granting planning or
     cleanup authority; Swift validates record versions, candidate identity,
     paging cursors, counts, optional-field shapes, timestamps, path-byte
