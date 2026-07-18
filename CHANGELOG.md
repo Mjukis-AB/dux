@@ -11,6 +11,13 @@ All notable changes to DUX will be documented in this file.
   DUX when the popover is closed.
 
 ### Added
+- Continued Milestone 5 by binding code-owned protected-root policy into
+  exact-path review. Requested and canonical target forms are both assessed;
+  hard denies fail closed, specific-rule requirements remain explicit
+  non-actionable metadata, and no-textual-match retains its policy revision
+  without becoming an allow. Registry construction/assessment failure also
+  fails closed; no volume grant, approval, plan, FFI, or executor capability was
+  added.
 - Continued Milestone 5 with code-owned current-account home discovery for the
   protected-root text policy on Unix/macOS. The resolver uses the OS account
   database rather than mutable environment variables, rejects real/effective

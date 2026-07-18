@@ -194,6 +194,20 @@ impl ProtectedRootRegistry {
         Self::from_home_directory_evidence(home_directory)
     }
 
+    #[cfg(test)]
+    pub(crate) fn for_exact_review_fixture() -> Self {
+        let home_paths = vec![PolicyPath::unix(&["fixture", "home"])]
+            .into_iter()
+            .collect::<Vec<_>>();
+        Self {
+            policy: PlatformPolicy {
+                platform: PolicyPlatform::Linux,
+                profile_containers: profile_parents(&home_paths),
+                home_paths,
+            },
+        }
+    }
+
     /// Runs the requested spelling through the registry before filesystem
     /// probing. A later canonical assessment is still mandatory.
     pub(crate) fn preflight(

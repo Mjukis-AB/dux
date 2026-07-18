@@ -684,6 +684,12 @@ policy input rather than a trusted home/profile grant; APFS firmlink semantics,
 Windows known-folder/reparse evidence, and stable rule grants remain separate
 gates.
 
+Exact-path review now consumes this registry for every selected target. It
+assesses requested and canonical forms independently, rejects any hard deny,
+and retains specific-rule or no-textual-match dispositions as explicit
+non-authoritative metadata. Failure to construct or assess the registry fails
+the review closed; no textual result is an allow decision.
+
 Sensitive categories are a separate deny layer. Credentials, keychains,
 tokens, browser profiles, messages, mail, notes, password managers,
 security/management software, active VM/container disks, unknown cloud state,

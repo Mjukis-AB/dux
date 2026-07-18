@@ -113,12 +113,10 @@ fn review_captures_exact_live_identity_and_remains_non_actionable() {
         review.items()[0].paths()[1].snapshot().target_kind(),
         crate::path_validation::FilesystemEntryKind::Directory
     );
-    assert!(
-        review.items()[0]
-            .paths()
-            .iter()
-            .all(|path| path.protection() == ExactPathProtection::TrustedPolicyNotAvailable)
-    );
+    assert!(review.items()[0].paths().iter().all(|path| matches!(
+        path.protection(),
+        ExactPathProtection::NoTextualMatch { .. }
+    )));
     assert!(root_path.join("cache/file").exists());
 }
 

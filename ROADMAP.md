@@ -4453,6 +4453,14 @@ Tasks:
     grant a rule, authorize a plan, cross FFI, or enable cleanup. Windows
     known-folder/reparse evidence, firmlink semantics, profile-container and
     volume grants remain open.
+  - [x] 2026-07-18 slice: bind the code-owned protected-root classifier into
+    exact-path review. Requested and canonical forms are both assessed; hard
+    denies fail the review closed, specific-rule requirements remain explicit
+    non-actionable protection metadata, and no-textual-match retains the policy
+    revision without becoming an allow. Production review fails closed if
+    account-home discovery or policy assessment is unavailable. The review
+    still has no trusted volume/rule grant, approval, plan, FFI, or executor
+    capability.
 - [ ] Implement Trash executor for Explorer selections.
   - [x] 2026-07-18 slice: add a crate-private Unix/macOS no-follow final-link
     witness for future Trash admission. It keeps the requested and validated

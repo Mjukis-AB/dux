@@ -16,7 +16,8 @@ use crate::domain::{
 };
 use crate::path_validation::{
     CanonicalPathError, CanonicalPathSnapshot, CanonicalScanRoot, LexicalPathError,
-    validate_cleanup_path, validate_scan_root,
+    ProtectedPathForm, ProtectedPathKind, ProtectedRootDisposition, ProtectedRootError,
+    ProtectedRootRegistry, validate_cleanup_path, validate_scan_root,
 };
 
 pub(crate) const MAX_EXACT_REVIEW_CANDIDATES: usize = 64;
@@ -27,7 +28,19 @@ pub(crate) const MAX_EXACT_REVIEW_PATHS: usize = 256;
 /// permission to mutate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ExactPathProtection {
-    TrustedPolicyNotAvailable,
+    Denied {
+        form: ProtectedPathForm,
+        kind: ProtectedPathKind,
+        policy_revision: u32,
+    },
+    SpecificRuleRequired {
+        form: ProtectedPathForm,
+        kind: ProtectedPathKind,
+        policy_revision: u32,
+    },
+    NoTextualMatch {
+        policy_revision: u32,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -202,6 +215,22 @@ pub(crate) enum ExactPathReviewError {
         source: CanonicalPathError,
     },
     #[error(
+        "protected-root policy could not be evaluated for candidate {candidate_index} path {path_index}: {source}"
+    )]
+    ProtectedPolicyUnavailable {
+        candidate_index: usize,
+        path_index: usize,
+        #[source]
+        source: ProtectedRootError,
+    },
+    #[error("candidate {candidate_index} path {path_index} is denied by protected-root policy")]
+    ProtectedPathDenied {
+        candidate_index: usize,
+        path_index: usize,
+        form: ProtectedPathForm,
+        kind: ProtectedPathKind,
+    },
+    #[error(
         "candidate {candidate_index} path {path_index} is a multiply-linked regular file ({hard_link_count} links)"
     )]
     MultiplyLinkedRegularFile {
@@ -269,6 +298,16 @@ pub(crate) fn review_exact_paths(
 
     let lexical_root = validate_scan_root(scan_root.requested_path())
         .map_err(ExactPathReviewError::ScanRootLexical)?;
+    #[cfg(test)]
+    let protected_registry = ProtectedRootRegistry::for_exact_review_fixture();
+    #[cfg(not(test))]
+    let protected_registry = ProtectedRootRegistry::from_current_account().map_err(|source| {
+        ExactPathReviewError::ProtectedPolicyUnavailable {
+            candidate_index: 0,
+            path_index: 0,
+            source,
+        }
+    })?;
     let total_paths = candidates.iter().try_fold(0_usize, |total, candidate| {
         total
             .checked_add(candidate.paths().len())
@@ -317,12 +356,44 @@ pub(crate) fn review_exact_paths(
                     source,
                 }
             })?;
+            let requested_protection =
+                protected_registry
+                    .preflight(&lexical_path)
+                    .map_err(|source| ExactPathReviewError::ProtectedPolicyUnavailable {
+                        candidate_index,
+                        path_index,
+                        source,
+                    })?;
+            if let ProtectedRootDisposition::Denied { form, kind, .. } = requested_protection {
+                return Err(ExactPathReviewError::ProtectedPathDenied {
+                    candidate_index,
+                    path_index,
+                    form,
+                    kind,
+                });
+            }
             let snapshot = crate::path_validation::capture_path_snapshot(scan_root, lexical_path)
                 .map_err(|source| ExactPathReviewError::PathLive {
                 candidate_index,
                 path_index,
                 source,
             })?;
+            let canonical_protection =
+                protected_registry
+                    .assess(scan_root, &snapshot)
+                    .map_err(|source| ExactPathReviewError::ProtectedPolicyUnavailable {
+                        candidate_index,
+                        path_index,
+                        source,
+                    })?;
+            if let ProtectedRootDisposition::Denied { form, kind, .. } = canonical_protection {
+                return Err(ExactPathReviewError::ProtectedPathDenied {
+                    candidate_index,
+                    path_index,
+                    form,
+                    kind,
+                });
+            }
             if candidate.action().is_permanent_removal()
                 && snapshot.target_kind()
                     == crate::path_validation::FilesystemEntryKind::RegularFile
@@ -336,7 +407,7 @@ pub(crate) fn review_exact_paths(
             }
             paths.push(ExactPathReviewPath {
                 snapshot,
-                protection: ExactPathProtection::TrustedPolicyNotAvailable,
+                protection: combine_protection(requested_protection, canonical_protection),
             });
         }
 
@@ -362,6 +433,35 @@ pub(crate) fn review_exact_paths(
         estimated_bytes,
         warnings: derive_warnings(mode, candidates),
     })
+}
+
+fn combine_protection(
+    requested: ProtectedRootDisposition,
+    canonical: ProtectedRootDisposition,
+) -> ExactPathProtection {
+    let specific = |disposition| match disposition {
+        ProtectedRootDisposition::SpecificRuleRequired {
+            form,
+            kind,
+            policy_revision,
+        } => Some(ExactPathProtection::SpecificRuleRequired {
+            form,
+            kind,
+            policy_revision,
+        }),
+        _ => None,
+    };
+    specific(requested)
+        .or_else(|| specific(canonical))
+        .unwrap_or(match canonical {
+            ProtectedRootDisposition::NoTextualMatch { policy_revision }
+            | ProtectedRootDisposition::Denied {
+                policy_revision, ..
+            }
+            | ProtectedRootDisposition::SpecificRuleRequired {
+                policy_revision, ..
+            } => ExactPathProtection::NoTextualMatch { policy_revision },
+        })
 }
 
 fn mode_accepts(mode: CleanupMode, safety: SafetyTier, action: CandidateAction) -> bool {
