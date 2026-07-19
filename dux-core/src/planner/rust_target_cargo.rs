@@ -326,7 +326,7 @@ pub(crate) enum RustTargetCargoPlanningProvenanceError {
 pub(crate) struct RustTargetRuleBoundaryEvidence {
     provenance: RustTargetCargoPlanningProvenance,
     location: TrustedHomeMountWitness,
-    process_activity: Option<ProcessActivityWitness>,
+    process_activity: ProcessActivityWitness,
     descendant_policy: Option<DescendantPolicyWitness>,
     boundary_revision: u32,
     protected_path_still_unresolved: CargoProtectedPathStillUnresolved,
@@ -458,11 +458,10 @@ impl RustTargetCargoPlanningProvenance {
         )
     }
 
-    /// Consume provenance into the same boundary while retaining a separate
-    /// live process-activity witness.  The witness is optional because the
-    /// current Cargo rule has no declared activity guard yet; when supplied,
-    /// it is revalidated with every future boundary check and remains private
-    /// evidence rather than a blocker-removal or executor capability.
+    /// Consume provenance into the same boundary while retaining the
+    /// code-owned inactive Cargo/rustc witness. A caller-supplied witness is
+    /// accepted only when it contains exactly those guards; it remains
+    /// private evidence rather than blocker-removal or executor capability.
     pub(crate) fn into_rule_boundary_evidence_with_process_activity(
         self,
         location: TrustedHomeMountWitness,
@@ -489,11 +488,19 @@ impl RustTargetCargoPlanningProvenance {
         location
             .revalidate()
             .map_err(RustTargetRuleBoundaryError::Location)?;
-        if let Some(process_activity) = process_activity.as_ref() {
-            process_activity
-                .revalidate()
-                .map_err(RustTargetRuleBoundaryError::ProcessActivity)?;
-        }
+        let process_activity = match process_activity {
+            Some(process_activity) => {
+                process_activity
+                    .ensure_cargo_quiescence()
+                    .map_err(RustTargetRuleBoundaryError::ProcessActivity)?;
+                process_activity
+            }
+            None => ProcessActivityWitness::capture_cargo_quiescence()
+                .map_err(RustTargetRuleBoundaryError::ProcessActivity)?,
+        };
+        process_activity
+            .revalidate_cargo_quiescence()
+            .map_err(RustTargetRuleBoundaryError::ProcessActivity)?;
         if let Some(descendant_policy) = descendant_policy.as_ref() {
             descendant_policy
                 .revalidate()
@@ -566,11 +573,12 @@ impl RustTargetRuleBoundaryEvidence {
         self.location
             .revalidate()
             .map_err(RustTargetRuleBoundaryError::Location)?;
-        if let Some(process_activity) = self.process_activity.as_ref() {
-            process_activity
-                .revalidate()
-                .map_err(RustTargetRuleBoundaryError::ProcessActivity)?;
-        }
+        self.process_activity
+            .ensure_cargo_quiescence()
+            .map_err(RustTargetRuleBoundaryError::ProcessActivity)?;
+        self.process_activity
+            .revalidate_cargo_quiescence()
+            .map_err(RustTargetRuleBoundaryError::ProcessActivity)?;
         if let Some(descendant_policy) = self.descendant_policy.as_ref() {
             descendant_policy
                 .revalidate()

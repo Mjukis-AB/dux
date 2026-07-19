@@ -88,6 +88,8 @@ pub(crate) enum ProcessActivityError {
     Active,
     #[error("process activity changed after the witness was captured")]
     Changed,
+    #[error("Rust-target quiescence requires exact inactive cargo and rustc guards")]
+    RequiredCargoQuiescence,
 }
 
 /// Non-cloneable evidence that every requested process-name guard was absent
@@ -102,6 +104,42 @@ pub(crate) struct ProcessActivityWitness {
 }
 
 impl ProcessActivityWitness {
+    /// Capture the code-owned process guards required before a Rust-target
+    /// boundary is admitted. Production uses the native bounded process
+    /// provider; tests use an empty provider so the guard seam can be tested
+    /// without treating the test runner's own Cargo process as target work.
+    pub(crate) fn capture_cargo_quiescence() -> Result<Self, ProcessActivityError> {
+        let guards = cargo_quiescence_guards();
+        #[cfg(test)]
+        {
+            Self::capture_with_provider(&guards, &EmptyProcessProvider)
+        }
+        #[cfg(not(test))]
+        {
+            Self::capture(&guards)
+        }
+    }
+
+    pub(crate) fn ensure_cargo_quiescence(&self) -> Result<(), ProcessActivityError> {
+        if self.guards == cargo_quiescence_guards() {
+            Ok(())
+        } else {
+            Err(ProcessActivityError::RequiredCargoQuiescence)
+        }
+    }
+
+    pub(crate) fn revalidate_cargo_quiescence(&self) -> Result<(), ProcessActivityError> {
+        self.ensure_cargo_quiescence()?;
+        #[cfg(test)]
+        {
+            self.revalidate_with_provider(&EmptyProcessProvider)
+        }
+        #[cfg(not(test))]
+        {
+            self.revalidate()
+        }
+    }
+
     /// Capture process activity using the platform provider.  Bundle
     /// identifiers are rejected until a provider can bind a signed bundle
     /// identity rather than guessing from a process name.
@@ -157,6 +195,13 @@ impl ProcessActivityWitness {
         }
         Ok(())
     }
+}
+
+fn cargo_quiescence_guards() -> Vec<ActivityGuard> {
+    vec![
+        ActivityGuard::ProcessName("cargo".to_owned()),
+        ActivityGuard::ProcessName("rustc".to_owned()),
+    ]
 }
 
 fn validate_guards(guards: &[ActivityGuard]) -> Result<(), ProcessActivityError> {
@@ -233,6 +278,16 @@ fn ensure_guards_inactive(
 }
 
 struct NativeProcessProvider;
+
+#[cfg(test)]
+struct EmptyProcessProvider;
+
+#[cfg(test)]
+impl ProcessProvider for EmptyProcessProvider {
+    fn enumerate(&self) -> Result<Vec<ProcessRecord>, ProcessActivityError> {
+        Ok(Vec::new())
+    }
+}
 
 impl ProcessProvider for NativeProcessProvider {
     fn enumerate(&self) -> Result<Vec<ProcessRecord>, ProcessActivityError> {
@@ -447,6 +502,25 @@ mod tests {
         assert_eq!(
             witness.revalidate_with_provider(&replacement),
             Err(ProcessActivityError::Changed)
+        );
+    }
+
+    #[test]
+    fn cargo_quiescence_requires_both_code_owned_process_guards() {
+        let witness = ProcessActivityWitness::capture_cargo_quiescence().unwrap();
+        assert!(witness.ensure_cargo_quiescence().is_ok());
+
+        let provider = FakeProvider {
+            records: Vec::new(),
+        };
+        let incomplete = ProcessActivityWitness::capture_with_provider(
+            &[ActivityGuard::ProcessName("cargo".to_owned())],
+            &provider,
+        )
+        .unwrap();
+        assert_eq!(
+            incomplete.ensure_cargo_quiescence(),
+            Err(ProcessActivityError::RequiredCargoQuiescence)
         );
     }
 

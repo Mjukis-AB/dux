@@ -4538,6 +4538,15 @@ Tasks:
       target drift. Linux/Windows remain unsupported for this positive
       profile, and candidates retain `ProtectedPath`; no plan, approval,
       scheduling, FFI, or effect path was added.
+    - [x] 2026-07-19 slice: make Rust-target process quiescence a mandatory
+      private boundary input. The code-owned process witness uses the bounded
+      macOS libproc provider (never a shell) and requires exact inactive
+      `cargo` and `rustc` process-name guards. Incomplete, malformed, active,
+      PID-replaced, or wrong-guard observations fail closed; revalidation is
+      repeated at every Cargo boundary reuse. Test fixtures use an explicit
+      empty provider so the test runner's own Cargo process cannot weaken the
+      production rule. Candidates remain blocked and no plan, approval, FFI,
+      schedule, or effect authority was added.
 - [x] Implement candidate groups and overlap resolution. Completed 2026-07-19:
   deterministic grouping and conservative overlap resolution are now consumed
   by exact-path review. Equivalent observations coalesce by stable candidate

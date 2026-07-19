@@ -4,6 +4,10 @@
   private revisioned planner grants with stable rule-boundary keys. Grants
   revalidate exact policy, volume, and target evidence while `ProtectedPath`
   and all plan/effect authority remain closed.
+- Made exact inactive `cargo` and `rustc` process guards mandatory for the
+  private Rust-target boundary. The bounded libproc witness fails closed on
+  active, incomplete, malformed, replaced, or wrong-guard observations and is
+  revalidated at each reuse; no cleanup authority is exposed.
 - Added a private Cargo-bound Rust-target planning grant. It joins the exact
   Cargo/read-set witness, source candidate identity, target snapshot,
   current-account home/mount boundary, and protected-root no-textual-match

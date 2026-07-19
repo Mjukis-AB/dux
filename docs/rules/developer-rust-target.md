@@ -473,6 +473,14 @@ canonical `NoTextualMatch` policy revisions. These grants repeat their own
 evidence and fail closed on key, policy, volume, or target drift; they do not
 remove the candidate's `ProtectedPath` blocker.
 
+Before a Cargo boundary can be retained, DUX also captures exact inactive
+process-name guards for `cargo` and `rustc` through the bounded macOS libproc
+provider. The guard set is code-owned, never shell-derived, and is revalidated
+at every boundary reuse. Active, incomplete, malformed, PID-replaced, or
+wrong-guard observations fail closed. This prevents cleanup while the known
+writers are active but does not claim that an already-open descriptor cannot
+exist, and it does not clear `ProtectedPath`.
+
 ## Exact snapshot evaluator replay
 
 A fourth 2026-07-18 checkpoint now replays the complete current candidate batch

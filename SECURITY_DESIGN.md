@@ -767,6 +767,14 @@ scan-root/target identities, and both requested and canonical
 are still provenance and scope evidence only: `ProtectedPath` remains, and no
 plan, approval, FFI, scheduling, or effect conversion is available.
 
+Rust-target boundary admission also requires a code-owned process-quiescence
+witness. On macOS it enumerates the bounded libproc table directly and accepts
+only a complete observation with both `cargo` and `rustc` absent. Active,
+incomplete, malformed, PID-replaced, or wrong-guard observations fail closed;
+the exact guard set and fresh process table are revalidated on each reuse.
+This is a safety precondition, not proof that an already-open descriptor is
+gone, and it does not remove `ProtectedPath`.
+
 The process-activity seam is now staged as a private, non-cloneable witness.
 On macOS it reads the bounded libproc table directly, never through a shell,
 and retains only private PID, start-time, executable-path, and process-name
