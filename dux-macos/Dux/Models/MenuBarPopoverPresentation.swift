@@ -11,6 +11,8 @@ enum MenuBarPopoverAccessibility {
     static let freshness = "menu-popover-freshness"
     static let capacityStatus = "menu-popover-capacity-status"
     static let capacityRetry = "menu-popover-capacity-retry"
+    static let trend = "menu-popover-trend"
+    static let trendChart = "menu-popover-trend-chart"
     static let scanStatus = "menu-popover-scan-status"
     static let scanProgress = "menu-popover-scan-progress"
     static let scanCancel = "menu-popover-scan-cancel"
@@ -30,6 +32,8 @@ enum MenuBarPopoverAccessibility {
         freshness,
         capacityStatus,
         capacityRetry,
+        trend,
+        trendChart,
         scanStatus,
         scanProgress,
         scanCancel,
@@ -71,9 +75,17 @@ struct MenuBarPopoverSnapshotPresentation: Equatable, Sendable {
     let availabilityBasisText: String
     let availableFraction: Double
     let freshnessText: String
+    let trend: MenuBarPopoverTrendPresentation?
     let accessibilitySummary: String
 
     var isCritical: Bool { pressure == .critical }
+}
+
+struct MenuBarPopoverTrendPresentation: Equatable, Sendable {
+    let change24hText: String?
+    let change7dText: String?
+    let chartFractions: [Double]
+    let accessibilitySummary: String
 }
 
 enum MenuBarPopoverVolumePresentation: Equatable, Sendable {
@@ -154,12 +166,14 @@ extension MenuBarPopoverPresentation {
     static func make(
         volumeState: VolumeCapacityState,
         scanState: AppScanState,
+        trend: VolumeCapacityTrend? = nil,
         now: Date = .now,
         locale: Locale = .current
     ) -> Self {
         Self(
             volume: volumePresentation(
                 for: volumeState,
+                trend: trend,
                 now: now,
                 locale: locale
             ),
@@ -174,6 +188,7 @@ extension MenuBarPopoverPresentation {
 
     private static func volumePresentation(
         for state: VolumeCapacityState,
+        trend: VolumeCapacityTrend?,
         now: Date,
         locale: Locale
     ) -> MenuBarPopoverVolumePresentation {
@@ -184,12 +199,12 @@ extension MenuBarPopoverPresentation {
             )
         case let .loaded(snapshot):
             .snapshot(
-                snapshotPresentation(snapshot, now: now, locale: locale),
+                snapshotPresentation(snapshot, trend: trend, now: now, locale: locale),
                 status: nil
             )
         case let .refreshing(snapshot):
             .snapshot(
-                snapshotPresentation(snapshot, now: now, locale: locale),
+                snapshotPresentation(snapshot, trend: trend, now: now, locale: locale),
                 status: MenuBarPopoverCapacityStatus(
                     style: .refreshing,
                     message: String(localized: "Updating capacity…", locale: locale),
@@ -198,7 +213,7 @@ extension MenuBarPopoverPresentation {
             )
         case let .stale(snapshot, failure):
             .snapshot(
-                snapshotPresentation(snapshot, now: now, locale: locale),
+                snapshotPresentation(snapshot, trend: trend, now: now, locale: locale),
                 status: MenuBarPopoverCapacityStatus(
                     style: .stale,
                     message: staleCapacityMessage(for: failure, locale: locale),
@@ -215,6 +230,7 @@ extension MenuBarPopoverPresentation {
 
     private static func snapshotPresentation(
         _ snapshot: VolumeCapacitySnapshot,
+        trend: VolumeCapacityTrend?,
         now: Date,
         locale: Locale
     ) -> MenuBarPopoverSnapshotPresentation {
@@ -267,6 +283,7 @@ extension MenuBarPopoverPresentation {
                 freshness,
             ]
         }
+        let mappedTrend = trend.map { Self.trendPresentation($0, locale: locale) }
         return MenuBarPopoverSnapshotPresentation(
             volumeName: volumeName,
             pressure: snapshot.pressure,
@@ -278,8 +295,45 @@ extension MenuBarPopoverPresentation {
             availableFraction: Double(snapshot.effectiveAvailableBytes)
                 / Double(snapshot.totalBytes),
             freshnessText: freshness,
+            trend: mappedTrend,
             accessibilitySummary: summaryParts.joined(separator: ". ")
         )
+    }
+
+    private static func trendPresentation(
+        _ trend: VolumeCapacityTrend,
+        locale: Locale
+    ) -> MenuBarPopoverTrendPresentation {
+        let change24hText = trend.change24h.map {
+            signedCapacityText($0.availableBytes, locale: locale)
+        }
+        let change7dText = trend.change7d.map {
+            signedCapacityText($0.availableBytes, locale: locale)
+        }
+        let fractions = trend.points.map { point in
+            Double(point.availableBytes) / Double(point.totalBytes)
+        }
+        let summary = [
+            change24hText.map { String(localized: "24 hours \($0)", locale: locale) },
+            change7dText.map { String(localized: "7 days \($0)", locale: locale) },
+        ]
+        .compactMap { $0 }
+        .joined(separator: ", ")
+        return MenuBarPopoverTrendPresentation(
+            change24hText: change24hText,
+            change7dText: change7dText,
+            chartFractions: fractions,
+            accessibilitySummary: summary.isEmpty
+                ? String(localized: "Trend history is warming up", locale: locale)
+                : summary
+        )
+    }
+
+    private static func signedCapacityText(_ value: Int64, locale: Locale) -> String {
+        let magnitude = MenuBarCapacityFormatter.gib(value.magnitude, locale: locale)
+        if value > 0 { return "+\(magnitude)" }
+        if value < 0 { return "-\(magnitude)" }
+        return magnitude
     }
 
     private static func scanPresentation(

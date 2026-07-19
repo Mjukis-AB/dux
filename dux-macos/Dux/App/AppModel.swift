@@ -13,6 +13,7 @@ final class AppModel: DuxCapacitySampling {
             updateMenuBarVisibility()
         }
     }
+    private(set) var capacityTrend: VolumeCapacityTrend?
     var menuBarLabelMode: MenuBarLabelMode {
         didSet {
             guard menuBarLabelMode != oldValue else {
@@ -55,6 +56,10 @@ final class AppModel: DuxCapacitySampling {
     private var volumeStateBeforeRefresh = VolumeCapacityState.idle
     @ObservationIgnored
     private var volumeRefreshGeneration: UInt64 = 0
+    @ObservationIgnored
+    private var capacityTrendTask: Task<Void, Never>?
+    @ObservationIgnored
+    private var capacityTrendGeneration: UInt64 = 0
     @ObservationIgnored
     private var pressurePolicyTask: Task<Void, Never>?
     @ObservationIgnored
@@ -127,6 +132,7 @@ final class AppModel: DuxCapacitySampling {
         self.storageAccessIntroductionPreferenceStore =
             storageAccessIntroductionPreferenceStore
         self.storageAccessProbe = storageAccessProbe
+        capacityTrend = nil
         menuBarLabelMode = menuBarLabelPreferenceStore.load()
         menuBarVisibilityPreference = menuBarVisibilityPreferenceStore.load()
         showsStorageAccessIntroduction =
@@ -138,6 +144,7 @@ final class AppModel: DuxCapacitySampling {
         async let engineLoad: Void = loadEngineStatus()
         async let volumeLoad: Void = loadVolumeCapacity()
         _ = await (engineLoad, volumeLoad)
+        await loadCapacityTrend()
     }
 
     func loadEngineStatus() async {
@@ -206,6 +213,47 @@ final class AppModel: DuxCapacitySampling {
             self?.publishVolumeRefresh(result, generation: generation)
         }
         volumeRefreshTask = task
+        await task.value
+    }
+
+    func loadCapacityTrend() async {
+        guard
+            let snapshot = volumeState.snapshot,
+            let stableVolumeID = snapshot.stableVolumeID
+        else {
+            capacityTrend = nil
+            return
+        }
+        if let capacityTrendTask {
+            await capacityTrendTask.value
+            return
+        }
+        capacityTrendGeneration &+= 1
+        let generation = capacityTrendGeneration
+        let service = engineService
+        let task = Task { @MainActor [weak self] in
+            defer {
+                self?.capacityTrendTask = nil
+            }
+            do {
+                let trend = try await service.loadCapacityTrend(
+                    stableVolumeID: stableVolumeID,
+                    at: snapshot.sampledAt
+                )
+                guard let self,
+                      generation == self.capacityTrendGeneration,
+                      self.volumeState.snapshot?.stableVolumeID == stableVolumeID else {
+                    return
+                }
+                self.capacityTrend = trend
+            } catch is CancellationError {
+                return
+            } catch {
+                // Trend history is optional presentation context. Keep the
+                // last good chart while capacity status remains authoritative.
+            }
+        }
+        capacityTrendTask = task
         await task.value
     }
 
@@ -716,7 +764,14 @@ final class AppModel: DuxCapacitySampling {
         volumeRefreshTask = nil
         switch result {
         case let .success(snapshot):
+            if volumeState.snapshot?.stableVolumeID != snapshot.stableVolumeID {
+                capacityTrendGeneration &+= 1
+                capacityTrend = nil
+            }
             volumeState = .loaded(snapshot)
+            Task { @MainActor [weak self] in
+                await self?.loadCapacityTrend()
+            }
         case let .failure(error):
             if error is CancellationError {
                 volumeState = volumeStateBeforeRefresh

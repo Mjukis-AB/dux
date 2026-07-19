@@ -4716,6 +4716,17 @@ Tasks:
     byte relationships, and the 31-point bound off the main actor. The
     generated bindings and real Rust FFI round-trip tests pass; chart UI
     composition remains the next presentation slice.
+  - [x] 2026-07-19 slice: refresh the trend from the long-lived `AppModel`
+    after each accepted capacity snapshot, with generation fencing, identity
+    fencing, single-flight loading, and cancellation-safe task cleanup. The
+    menu-bar popover now shows signed 24-hour/7-day available-space changes
+    and a bounded 30-day sparkline when enough points exist. Missing history
+    stays visibly warming up; charts clamp only validated fractions and expose
+    stable accessibility identifiers/summary text. This is presentation-only
+    telemetry and grants no scan, plan, approval, notification, or cleanup
+    authority. The app target's universal Debug build is green; the linked
+    test target remains blocked by pre-existing generated/test-source symbol
+    mismatches and Observation macro-server failures.
 - [ ] Add transition-based notifications and cooldown.
 - [ ] Deep-link notifications to urgent Recommendations.
 - [ ] Add targeted reclaim scan on Warning/Critical.

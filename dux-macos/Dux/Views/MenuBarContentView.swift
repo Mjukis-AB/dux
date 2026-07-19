@@ -9,7 +9,8 @@ struct MenuBarContentView: View {
     var body: some View {
         let presentation = MenuBarPopoverPresentation.make(
             volumeState: model.volumeState,
-            scanState: model.scanState
+            scanState: model.scanState,
+            trend: model.capacityTrend
         )
 
         VStack(alignment: .leading, spacing: 14) {
@@ -180,6 +181,10 @@ struct MenuBarContentView: View {
                     .foregroundStyle(.secondary)
                     .accessibilityIdentifier(MenuBarPopoverAccessibility.freshness)
 
+                if let trend = snapshot.trend {
+                    trendSummary(trend)
+                }
+
                 if let status {
                     capacityStatus(status, actions: actions)
                 }
@@ -203,6 +208,36 @@ struct MenuBarContentView: View {
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier(MenuBarPopoverAccessibility.volumeSummary)
         }
+    }
+
+    private func trendSummary(_ trend: MenuBarPopoverTrendPresentation) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 12) {
+                if let change = trend.change24hText {
+                    Label("24h \(change)", systemImage: "arrow.left.arrow.right")
+                }
+                if let change = trend.change7dText {
+                    Label("7d \(change)", systemImage: "calendar")
+                }
+            }
+            .font(.caption.monospacedDigit())
+            .foregroundStyle(.secondary)
+
+            if trend.chartFractions.count >= 2 {
+                GeometryReader { _ in
+                    TrendSparkline(fractions: trend.chartFractions)
+                    .stroke(Color.accentColor, style: StrokeStyle(lineWidth: 1.5, lineCap: .round))
+                }
+                .frame(height: 28)
+                .accessibilityIdentifier(MenuBarPopoverAccessibility.trendChart)
+                .accessibilityLabel(Text("30-day available-space trend"))
+                .accessibilityValue(Text(verbatim: trend.accessibilitySummary))
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier(MenuBarPopoverAccessibility.trend)
+        .accessibilityLabel(Text("Capacity trend"))
+        .accessibilityValue(Text(verbatim: trend.accessibilitySummary))
     }
 
     private func capacityStatus(
@@ -309,5 +344,30 @@ struct MenuBarContentView: View {
                 .foregroundStyle(.red)
                 .accessibilityHidden(true)
         }
+    }
+}
+
+private struct TrendSparkline: Shape {
+    let fractions: [Double]
+
+    func path(in rect: CGRect) -> Path {
+        guard fractions.count >= 2 else { return Path() }
+        let width = rect.width
+        let height = rect.height
+        let step = width / CGFloat(fractions.count - 1)
+        var path = Path()
+        for (index, fraction) in fractions.enumerated() {
+            let clamped = max(0.0, min(1.0, fraction))
+            let point = CGPoint(
+                x: CGFloat(index) * step,
+                y: height * (1 - CGFloat(clamped))
+            )
+            if index == 0 {
+                path.move(to: point)
+            } else {
+                path.addLine(to: point)
+            }
+        }
+        return path
     }
 }

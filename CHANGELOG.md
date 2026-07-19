@@ -1,5 +1,12 @@
 # Changelog
 
+- Added the first native capacity trend presentation. The long-lived app
+  model refreshes the bounded trend after accepted capacity samples, fences
+  late or volume-mismatched responses, and clears completed/cancelled loads.
+  The menu-bar popover now shows signed 24-hour/7-day available-space changes
+  plus an accessible 30-day sparkline when history is ready; missing history
+  remains explicitly warming up. This remains telemetry-only and carries no
+  scan, plan, approval, notification, or cleanup authority.
 - Added schema v11 durable pressure episodes. Warning/Critical entries,
   Healthy recovery, escalation, and policy-revision boundaries are written
   atomically with raw capacity samples. Unknown pressure never opens or
