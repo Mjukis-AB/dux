@@ -4547,6 +4547,14 @@ Tasks:
       empty provider so the test runner's own Cargo process cannot weaken the
       production rule. Candidates remain blocked and no plan, approval, FFI,
       schedule, or effect authority was added.
+    - [x] 2026-07-19 slice: make descendant coverage explicit at the same
+      boundary. Rust-target admission now always carries a revalidated
+      `DescendantPolicyWitness`; when no selectors are declared, the witness
+      is an explicit code-owned empty selector set rather than absent evidence.
+      Non-empty selectors are rejected for this catalog revision until a rule
+      declares and binds them. Missing, overlapping, symlinked, multiply-linked,
+      changed, or malformed selector evidence remains fail closed; no blocker,
+      plan, approval, FFI, schedule, or effect authority was added.
 - [x] Implement candidate groups and overlap resolution. Completed 2026-07-19:
   deterministic grouping and conservative overlap resolution are now consumed
   by exact-path review. Equivalent observations coalesce by stable candidate

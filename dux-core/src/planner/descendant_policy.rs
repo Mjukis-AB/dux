@@ -59,6 +59,8 @@ pub(crate) enum DescendantPolicyError {
     MultiplyLinked,
     #[error("descendant policy evidence changed since capture")]
     ChangedSinceCapture,
+    #[error("the current deterministic rule does not declare descendant selectors")]
+    UnexpectedSelectors,
     #[error(transparent)]
     Lexical(#[from] LexicalPathError),
     #[error(transparent)]
@@ -173,6 +175,10 @@ impl DescendantPolicyWitness {
             let _ = entry.kind;
         }
         Ok(())
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.entries.is_empty()
     }
 
     pub(crate) fn release(self) {}

@@ -327,7 +327,7 @@ pub(crate) struct RustTargetRuleBoundaryEvidence {
     provenance: RustTargetCargoPlanningProvenance,
     location: TrustedHomeMountWitness,
     process_activity: ProcessActivityWitness,
-    descendant_policy: Option<DescendantPolicyWitness>,
+    descendant_policy: DescendantPolicyWitness,
     boundary_revision: u32,
     protected_path_still_unresolved: CargoProtectedPathStillUnresolved,
 }
@@ -501,10 +501,18 @@ impl RustTargetCargoPlanningProvenance {
         process_activity
             .revalidate_cargo_quiescence()
             .map_err(RustTargetRuleBoundaryError::ProcessActivity)?;
-        if let Some(descendant_policy) = descendant_policy.as_ref() {
-            descendant_policy
-                .revalidate()
-                .map_err(RustTargetRuleBoundaryError::DescendantPolicy)?;
+        let descendant_policy = match descendant_policy {
+            Some(descendant_policy) => descendant_policy,
+            None => DescendantPolicyWitness::capture(self.witness.live.scan_root(), &[], &[])
+                .map_err(RustTargetRuleBoundaryError::DescendantPolicy)?,
+        };
+        descendant_policy
+            .revalidate()
+            .map_err(RustTargetRuleBoundaryError::DescendantPolicy)?;
+        if !descendant_policy.is_empty() {
+            return Err(RustTargetRuleBoundaryError::DescendantPolicy(
+                DescendantPolicyError::UnexpectedSelectors,
+            ));
         }
         if !location.matches_scan_boundary(&self.witness.boundary) {
             return Err(RustTargetRuleBoundaryError::BoundaryMismatch);
@@ -579,10 +587,13 @@ impl RustTargetRuleBoundaryEvidence {
         self.process_activity
             .revalidate_cargo_quiescence()
             .map_err(RustTargetRuleBoundaryError::ProcessActivity)?;
-        if let Some(descendant_policy) = self.descendant_policy.as_ref() {
-            descendant_policy
-                .revalidate()
-                .map_err(RustTargetRuleBoundaryError::DescendantPolicy)?;
+        self.descendant_policy
+            .revalidate()
+            .map_err(RustTargetRuleBoundaryError::DescendantPolicy)?;
+        if !self.descendant_policy.is_empty() {
+            return Err(RustTargetRuleBoundaryError::DescendantPolicy(
+                DescendantPolicyError::UnexpectedSelectors,
+            ));
         }
         if !self
             .location

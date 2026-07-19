@@ -8,6 +8,10 @@
   private Rust-target boundary. The bounded libproc witness fails closed on
   active, incomplete, malformed, replaced, or wrong-guard observations and is
   revalidated at each reuse; no cleanup authority is exposed.
+- Added explicit descendant-policy coverage to the Rust-target boundary. The
+  current no-selector catalog carries a revalidated empty witness, while
+  non-empty selectors are rejected until they have rule-specific policy and
+  executor proof.
 - Added a private Cargo-bound Rust-target planning grant. It joins the exact
   Cargo/read-set witness, source candidate identity, target snapshot,
   current-account home/mount boundary, and protected-root no-textual-match

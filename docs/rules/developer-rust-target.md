@@ -481,6 +481,12 @@ wrong-guard observations fail closed. This prevents cleanup while the known
 writers are active but does not claim that an already-open descriptor cannot
 exist, and it does not clear `ProtectedPath`.
 
+The current rule declares no protected or excluded descendants, so the Cargo
+boundary still carries an explicit empty descendant-policy witness. A supplied
+non-empty selector set is rejected rather than silently ignored. Once a rule
+declares selectors, it will need its own code-owned selector policy and
+descriptor-relative executor proof before it can become actionable.
+
 ## Exact snapshot evaluator replay
 
 A fourth 2026-07-18 checkpoint now replays the complete current candidate batch

@@ -775,6 +775,12 @@ the exact guard set and fresh process table are revalidated on each reuse.
 This is a safety precondition, not proof that an already-open descriptor is
 gone, and it does not remove `ProtectedPath`.
 
+The same boundary always carries descendant-policy coverage. For the current
+Rust-target catalog this is an explicit revalidated empty selector witness;
+non-empty protected/excluded selectors are rejected until a rule-specific
+allowlist and matching executor semantics exist. Missing, overlapping,
+symlinked, multiply-linked, or changed selector evidence fails closed.
+
 The process-activity seam is now staged as a private, non-cloneable witness.
 On macOS it reads the bounded libproc table directly, never through a shell,
 and retains only private PID, start-time, executable-path, and process-name
