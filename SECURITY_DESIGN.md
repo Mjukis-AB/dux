@@ -1158,9 +1158,15 @@ phase; after the validation transition, a terminal prefix is allowed but the
 exact target must be `validating` and every later path must remain `planned`.
 A sub-millisecond start-time mismatch is canonicalized before persistence and
 claiming. This bridge is not exported through FFI, not registered with Swift,
-and has no production caller; trusted volume/protected-root grants, process
-and descendant policy, capacity verification, and user-facing execution
-remain required before any permanent-safe effect is reachable.
+and has no production caller. Its optional private capacity-aware variant
+captures one pre-effect and one post-settlement observation through a
+core-owned sampler; only matching stable-volume, timing, total-capacity,
+headline-source, and availability-shape evidence can persist a signed
+available-space delta. Missing or conflicting samples leave the delta null,
+and outcome-unknown sessions remain in recovery without terminalization.
+Trusted volume/protected-root grants, process and descendant policy, and
+user-facing execution remain required before any permanent-safe effect is
+reachable.
 
 Arbitrary-path advanced permanent removal is excluded from the first production
 authority graph. Adding it later requires a separate threat model and revision

@@ -8,6 +8,10 @@ use tempfile::TempDir;
 
 use super::*;
 use crate::cleanup::TrashEffectTargetKind;
+#[cfg(unix)]
+use crate::cleanup::capacity::{CleanupCapacityObservation, CleanupCapacitySampler};
+#[cfg(unix)]
+use crate::domain::{VolumeCapacity, VolumeId};
 use crate::engine::{
     MAX_SNAPSHOT_REVIEW_LARGE_FILE_RESULTS, MAX_SNAPSHOT_REVIEW_NODE_PAGE_LIMIT,
     MAX_SNAPSHOT_REVIEW_PARENT_CONTEXT_COMPONENTS, MAX_SNAPSHOT_REVIEW_TREEMAP_CELLS,
@@ -397,6 +401,52 @@ fn approved_rust_target_fixture(project_count: usize) -> ApprovedRustTargetFixtu
 }
 
 #[cfg(unix)]
+struct FixtureCapacitySampler {
+    observations: Vec<Option<CleanupCapacityObservation>>,
+    next: usize,
+}
+
+#[cfg(unix)]
+impl FixtureCapacitySampler {
+    fn new(observations: Vec<Option<CleanupCapacityObservation>>) -> Self {
+        Self {
+            observations,
+            next: 0,
+        }
+    }
+}
+
+#[cfg(unix)]
+impl CleanupCapacitySampler for FixtureCapacitySampler {
+    fn sample(&mut self) -> Option<CleanupCapacityObservation> {
+        let observation = self.observations.get(self.next).cloned().flatten();
+        self.next = self.next.saturating_add(1);
+        observation
+    }
+}
+
+#[cfg(unix)]
+fn fixture_capacity_observation(
+    temp: &TempDir,
+    volume_id: &VolumeId,
+    sampled_at: SystemTime,
+    available_bytes: u64,
+) -> CleanupCapacityObservation {
+    let observation = crate::engine::VolumeCapacityObservation::try_new(
+        Some(volume_id.clone()),
+        temp.path().to_path_buf(),
+        Some("Fixture volume".to_owned()),
+        Some("fixturefs".to_owned()),
+        Some(true),
+        Some(false),
+        sampled_at,
+        VolumeCapacity::new(1_000, Some(available_bytes), None).unwrap(),
+    )
+    .unwrap();
+    CleanupCapacityObservation::try_from_observation(&observation).unwrap()
+}
+
+#[cfg(unix)]
 #[test]
 fn engine_executes_all_paths_and_terminalizes_completed_session() {
     let mut fixture = approved_rust_target_fixture(2);
@@ -427,6 +477,88 @@ fn engine_executes_all_paths_and_terminalizes_completed_session() {
         history.summary().status(),
         crate::engine::DurableCleanupSessionStatus::Completed
     );
+    fixture.engine.close();
+    assert!(fixture.engine.wait_until_closed(TEST_TIMEOUT));
+}
+
+#[cfg(unix)]
+#[test]
+fn engine_persists_verified_capacity_delta_for_private_session() {
+    let mut fixture = approved_rust_target_fixture(1);
+    let now = SystemTime::now() + Duration::from_secs(1);
+    let volume_id = VolumeId::new("volume:fixture-capacity").unwrap();
+    let pre = fixture_capacity_observation(
+        &fixture._temp,
+        &volume_id,
+        now - Duration::from_secs(1),
+        400,
+    );
+    let post = fixture_capacity_observation(
+        &fixture._temp,
+        &volume_id,
+        now + Duration::from_secs(1),
+        550,
+    );
+    let mut sampler = FixtureCapacitySampler::new(vec![Some(pre), Some(post)]);
+    let summary = fixture
+        .engine
+        .execute_approved_permanent_safe_session_with_capacity(
+            &mut fixture.session,
+            now,
+            &|| false,
+            &mut sampler,
+        )
+        .unwrap();
+    assert_eq!(summary.verified_capacity_delta_bytes, Some(150));
+    let history_id = fixture
+        .engine
+        .recent_cleanup_history(None, 64)
+        .unwrap()
+        .records()
+        .iter()
+        .find(|record| record.id().as_str() == fixture.session_id.as_str())
+        .map(|record| record.id().clone())
+        .unwrap();
+    let history = fixture.engine.cleanup_session_history(&history_id).unwrap();
+    assert_eq!(history.summary().verified_capacity_delta_bytes(), Some(150));
+    fixture.engine.close();
+    assert!(fixture.engine.wait_until_closed(TEST_TIMEOUT));
+}
+
+#[cfg(unix)]
+#[test]
+fn engine_keeps_capacity_unknown_when_post_sample_is_missing() {
+    let mut fixture = approved_rust_target_fixture(1);
+    let now = SystemTime::now() + Duration::from_secs(1);
+    let volume_id = VolumeId::new("volume:fixture-capacity-missing").unwrap();
+    let pre = fixture_capacity_observation(
+        &fixture._temp,
+        &volume_id,
+        now - Duration::from_secs(1),
+        400,
+    );
+    let mut sampler = FixtureCapacitySampler::new(vec![Some(pre), None]);
+    let summary = fixture
+        .engine
+        .execute_approved_permanent_safe_session_with_capacity(
+            &mut fixture.session,
+            now,
+            &|| false,
+            &mut sampler,
+        )
+        .unwrap();
+    assert_eq!(summary.verified_capacity_delta_bytes, None);
+    let history_id = fixture
+        .engine
+        .recent_cleanup_history(None, 64)
+        .unwrap()
+        .records()
+        .iter()
+        .find(|record| record.id().as_str() == fixture.session_id.as_str())
+        .map(|record| record.id().clone())
+        .unwrap();
+    let history = fixture.engine.cleanup_session_history(&history_id).unwrap();
+    assert_eq!(history.summary().verified_capacity_delta_bytes(), None);
     fixture.engine.close();
     assert!(fixture.engine.wait_until_closed(TEST_TIMEOUT));
 }
@@ -591,16 +723,28 @@ fn engine_stops_on_unknown_partial_effect_and_leaves_recovery_fence() {
         .map(|payload| payload.parent().unwrap().join("second-object"))
         .collect::<Vec<_>>();
     let payloads = fixture.payloads.clone();
-    let result = fixture.engine.execute_approved_permanent_safe_session(
-        &mut fixture.session,
-        SystemTime::now() + Duration::from_secs(1),
-        &|| {
-            payloads
-                .iter()
-                .zip(&second_entries)
-                .any(|(payload, second)| payload.exists() != second.exists())
-        },
+    let now = SystemTime::now() + Duration::from_secs(1);
+    let volume_id = VolumeId::new("volume:fixture-capacity-unknown").unwrap();
+    let pre = fixture_capacity_observation(
+        &fixture._temp,
+        &volume_id,
+        now - Duration::from_secs(1),
+        400,
     );
+    let mut sampler = FixtureCapacitySampler::new(vec![Some(pre), None]);
+    let result = fixture
+        .engine
+        .execute_approved_permanent_safe_session_with_capacity(
+            &mut fixture.session,
+            now,
+            &|| {
+                payloads
+                    .iter()
+                    .zip(&second_entries)
+                    .any(|(payload, second)| payload.exists() != second.exists())
+            },
+            &mut sampler,
+        );
     assert_eq!(
         result,
         Err(
@@ -631,6 +775,8 @@ fn engine_stops_on_unknown_partial_effect_and_leaves_recovery_fence() {
         history.items()[1].status(),
         crate::engine::DurableCleanupItemStatus::Planned
     );
+    assert_eq!(sampler.next, 1);
+    assert_eq!(history.summary().verified_capacity_delta_bytes(), None);
     fixture.engine.close();
     assert!(fixture.engine.wait_until_closed(TEST_TIMEOUT));
 }

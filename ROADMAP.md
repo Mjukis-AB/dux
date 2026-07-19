@@ -4755,6 +4755,15 @@ Tasks:
     evidence remains unknown rather than becoming zero or an estimate. A
     private journal adapter accepts only this verified value. No executor, UI,
     FFI, or production cleanup session calls the boundary yet.
+  - [x] 2026-07-19 slice: integrate the verifier with the crate-private
+    permanent-safe session boundary. A core-owned sampler supplies one
+    pre-effect and one post-settlement observation; only stable, bounded,
+    matching evidence persists a signed available-space delta in cleanup
+    history. Missing, stale, changed-volume, source-shape, and unknown-outcome
+    cases retain a null delta, while outcome-unknown sessions remain in
+    recovery and are never terminalized. The sampler and capacity-aware bridge
+    remain private until trusted volume grants and production observation
+    wiring exist.
 - [ ] Implement exclusions and global permanent-cleanup disable setting.
   - [x] 2026-07-19 slice: add the revisioned global permanent-cleanup kill
     switch to the typed settings store. Missing state defaults to enabled;

@@ -7,13 +7,18 @@
 //! verified delta, and an unavailable verification is represented by `None`
 //! at the journal boundary.
 
+#![allow(
+    dead_code,
+    reason = "some capacity witness accessors remain private until trusted volume sampling is wired"
+)]
+
 use std::time::{Duration, SystemTime};
 
 use thiserror::Error;
 
 use crate::domain::{AvailableCapacitySource, VolumeCapacity, VolumeId};
 use crate::engine::VolumeCapacityObservation;
-use crate::persistence::{CleanupJournalClaim, HistoryError};
+use crate::persistence::{CleanupJournalClaim, HistoryError, TerminalSessionStatus};
 
 const MAX_SAMPLE_SKEW: Duration = Duration::from_secs(15 * 60);
 
@@ -27,6 +32,14 @@ pub(crate) struct CleanupCapacityObservation {
     volume_id: VolumeId,
     sampled_at: SystemTime,
     capacity: VolumeCapacity,
+}
+
+/// Synchronous, private sampling seam used only while a cleanup journal claim
+/// is held. Implementations return a bounded observation and must not retain
+/// cleanup authority; a missing observation is represented by `None` and
+/// prevents capacity from being reported as verified.
+pub(crate) trait CleanupCapacitySampler {
+    fn sample(&mut self) -> Option<CleanupCapacityObservation>;
 }
 
 impl CleanupCapacityObservation {
@@ -212,6 +225,19 @@ pub(crate) fn terminalize_with_capacity(
     verification: Option<&VerifiedCleanupCapacity>,
 ) -> Result<(), HistoryError> {
     claim.terminalize_for_capacity_verification(
+        completed_at,
+        verification.map(VerifiedCleanupCapacity::delta_bytes),
+    )
+}
+
+/// Terminalize through the same capability-restricted adapter while retaining
+/// the journal's bounded terminal status for the private session orchestrator.
+pub(crate) fn terminalize_with_capacity_with_status(
+    claim: &mut CleanupJournalClaim,
+    completed_at: SystemTime,
+    verification: Option<&VerifiedCleanupCapacity>,
+) -> Result<TerminalSessionStatus, HistoryError> {
+    claim.terminalize_for_capacity_verification_with_status(
         completed_at,
         verification.map(VerifiedCleanupCapacity::delta_bytes),
     )

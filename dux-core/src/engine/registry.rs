@@ -64,10 +64,11 @@ use super::task::{
     StartSubtreeScanError, StartTaskError, TaskAccessError, TaskEvent, TaskEventBatch,
     TaskEventKind, TaskFailureKind, TaskId, TaskKind, TaskPhase, TaskSnapshot,
 };
+use crate::cleanup::capacity::CleanupCapacitySampler;
 use crate::cleanup::permanent_safe::{
     DescriptorRelativePermanentSafeDriver, PermanentSafeExecutionError,
     PermanentSafeRemovalSummary, PermanentSafeSessionSummary, execute_rust_target_contents,
-    execute_rust_target_session,
+    execute_rust_target_session, execute_rust_target_session_with_capacity,
 };
 use crate::cleanup::{TrashEffectRequest, TrashPlatformResult, TrashSelectionError};
 use crate::domain::{
@@ -1354,6 +1355,35 @@ impl EngineHandle {
         }
         let mut driver = DescriptorRelativePermanentSafeDriver;
         execute_rust_target_session(session, now, &mut driver, cancelled)
+    }
+
+    /// Private capacity-aware variant used by the future core-owned volume
+    /// observation boundary. The sampler is not accepted by FFI, Swift, CLI,
+    /// AI, or production UI, and it cannot grant or alter cleanup authority.
+    #[allow(
+        dead_code,
+        reason = "capacity-aware execution is staged before volume-grant and UI wiring"
+    )]
+    pub(crate) fn execute_approved_permanent_safe_session_with_capacity(
+        &self,
+        session: &mut ApprovedCleanupSession,
+        now: SystemTime,
+        cancelled: &dyn Fn() -> bool,
+        capacity_sampler: &mut dyn CleanupCapacitySampler,
+    ) -> Result<PermanentSafeSessionSummary, PermanentSafeExecutionError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(PermanentSafeExecutionError::Admission(
+                HistoryErrorKind::InvalidTransition,
+            ));
+        }
+        let mut driver = DescriptorRelativePermanentSafeDriver;
+        execute_rust_target_session_with_capacity(
+            session,
+            now,
+            &mut driver,
+            cancelled,
+            Some(capacity_sampler),
+        )
     }
 
     /// Replace the bounded deny-only exclusion set. The core validates and

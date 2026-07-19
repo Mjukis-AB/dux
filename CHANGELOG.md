@@ -1,5 +1,9 @@
 # Changelog
 
+- Integrated the private bounded pre/post capacity verifier with approved
+  permanent-safe session orchestration. Verified signed available-space deltas
+  are persisted only for matching stable-volume evidence; missing or conflicting
+  telemetry stays unknown, and outcome-unknown sessions remain recoverable.
 - Added a crate-private multi-path permanent-safe session orchestrator. It
   keeps one journal owner/generation fence across ordered paths, continues
   after settled failures, stops conservatively for unknown outcomes, and

@@ -101,11 +101,7 @@ pub enum TrashSelectionError {
 
 pub(crate) use executor::execute_reviewed_trash_selection;
 
-#[allow(
-    dead_code,
-    reason = "bounded cleanup capacity verification is staged before journal/effect orchestration"
-)]
-mod capacity;
+pub(crate) mod capacity;
 
 #[allow(
     dead_code,

@@ -13,6 +13,10 @@ use std::time::SystemTime;
 
 use thiserror::Error;
 
+use super::capacity::{
+    CleanupCapacityObservation, CleanupCapacitySampler, VerifiedCleanupCapacity,
+    terminalize_with_capacity_with_status, verify_cleanup_capacity,
+};
 use crate::path_validation::FilesystemIdentity;
 use crate::persistence::{
     CleanupJournalClaim, EffectOutcome, EffectStartReceipt, HistoryErrorKind, TerminalSessionStatus,
@@ -35,6 +39,7 @@ pub(crate) struct PermanentSafeSessionSummary {
     pub(crate) removed_entries: u64,
     pub(crate) removed_logical_bytes: u64,
     pub(crate) terminal_status: TerminalSessionStatus,
+    pub(crate) verified_capacity_delta_bytes: Option<i64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
@@ -83,6 +88,23 @@ pub(crate) fn execute_rust_target_session(
     driver: &mut impl PermanentSafeContentsDriver,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<PermanentSafeSessionSummary, PermanentSafeExecutionError> {
+    execute_rust_target_session_with_capacity(session, now, driver, cancelled, None)
+}
+
+/// Ordered session execution with an optional private pre/post capacity
+/// sampler. The sampler is deliberately not part of the public engine/FFI
+/// surface; missing or mismatched observations only remove the telemetry
+/// delta and never change effect authority or terminal status.
+pub(crate) fn execute_rust_target_session_with_capacity(
+    session: &mut ApprovedCleanupSession,
+    now: SystemTime,
+    driver: &mut impl PermanentSafeContentsDriver,
+    cancelled: &dyn Fn() -> bool,
+    mut capacity_sampler: Option<&mut dyn CleanupCapacitySampler>,
+) -> Result<PermanentSafeSessionSummary, PermanentSafeExecutionError> {
+    let pre_capacity = capacity_sampler
+        .as_mut()
+        .and_then(|sampler| sampler.sample());
     let ordered_paths = session
         .plan()
         .items()
@@ -97,11 +119,17 @@ pub(crate) fn execute_rust_target_session(
 
     for (item_ordinal, path_ordinal) in ordered_paths {
         if cancelled() {
-            let terminal_status = cancel_and_terminalize(session, now)?;
+            let (terminal_status, verified_capacity_delta_bytes) = cancel_and_terminalize(
+                session,
+                now,
+                pre_capacity.as_ref(),
+                capacity_sampler.take(),
+            )?;
             return Ok(PermanentSafeSessionSummary {
                 removed_entries,
                 removed_logical_bytes,
                 terminal_status,
+                verified_capacity_delta_bytes,
             });
         }
         match execute_rust_target_contents_ordered(
@@ -119,11 +147,17 @@ pub(crate) fn execute_rust_target_session(
                     removed_logical_bytes.saturating_add(summary.removed_logical_bytes);
             }
             Err(PermanentSafeExecutionError::Platform(PermanentSafePlatformError::Cancelled)) => {
-                let terminal_status = cancel_and_terminalize(session, now)?;
+                let (terminal_status, verified_capacity_delta_bytes) = cancel_and_terminalize(
+                    session,
+                    now,
+                    pre_capacity.as_ref(),
+                    capacity_sampler.take(),
+                )?;
                 return Ok(PermanentSafeSessionSummary {
                     removed_entries,
                     removed_logical_bytes,
                     terminal_status,
+                    verified_capacity_delta_bytes,
                 });
             }
             Err(
@@ -150,21 +184,28 @@ pub(crate) fn execute_rust_target_session(
         }
     }
 
-    let terminal_status = session
-        .claim_mut()
-        .terminalize_for_capacity_verification_with_status(now, None)
-        .map_err(|error| PermanentSafeExecutionError::Admission(error.kind))?;
+    let verification =
+        capture_verified_capacity(pre_capacity.as_ref(), capacity_sampler.take(), now, now);
+    let verified_capacity_delta_bytes = verification
+        .as_ref()
+        .map(VerifiedCleanupCapacity::delta_bytes);
+    let terminal_status =
+        terminalize_with_capacity_with_status(session.claim_mut(), now, verification.as_ref())
+            .map_err(|error| PermanentSafeExecutionError::Admission(error.kind))?;
     Ok(PermanentSafeSessionSummary {
         removed_entries,
         removed_logical_bytes,
         terminal_status,
+        verified_capacity_delta_bytes,
     })
 }
 
 fn cancel_and_terminalize(
     session: &mut ApprovedCleanupSession,
     now: SystemTime,
-) -> Result<TerminalSessionStatus, PermanentSafeExecutionError> {
+    pre_capacity: Option<&CleanupCapacityObservation>,
+    capacity_sampler: Option<&mut dyn CleanupCapacitySampler>,
+) -> Result<(TerminalSessionStatus, Option<i64>), PermanentSafeExecutionError> {
     session
         .claim_mut()
         .request_cancellation()
@@ -173,10 +214,35 @@ fn cancel_and_terminalize(
         .claim_mut()
         .settle_cancellation(now)
         .map_err(|error| PermanentSafeExecutionError::Admission(error.kind))?;
-    session
-        .claim_mut()
-        .terminalize_for_capacity_verification_with_status(now, None)
-        .map_err(|error| PermanentSafeExecutionError::Admission(error.kind))
+    let verification = capture_verified_capacity(pre_capacity, capacity_sampler, now, now);
+    let verified_capacity_delta_bytes = verification
+        .as_ref()
+        .map(VerifiedCleanupCapacity::delta_bytes);
+    let terminal_status =
+        terminalize_with_capacity_with_status(session.claim_mut(), now, verification.as_ref())
+            .map_err(|error| PermanentSafeExecutionError::Admission(error.kind))?;
+    Ok((terminal_status, verified_capacity_delta_bytes))
+}
+
+fn capture_verified_capacity(
+    pre_capacity: Option<&CleanupCapacityObservation>,
+    mut capacity_sampler: Option<&mut dyn CleanupCapacitySampler>,
+    effect_started_at: SystemTime,
+    effect_completed_at: SystemTime,
+) -> Option<VerifiedCleanupCapacity> {
+    let post_capacity = capacity_sampler
+        .as_mut()
+        .and_then(|sampler| sampler.sample());
+    let pre_capacity = pre_capacity?;
+    let expected_volume_id = pre_capacity.volume_id();
+    verify_cleanup_capacity(
+        expected_volume_id,
+        Some(pre_capacity),
+        post_capacity.as_ref(),
+        effect_started_at,
+        effect_completed_at,
+    )
+    .ok()
 }
 
 /// Consume one approved journal path through the private deterministic rule
