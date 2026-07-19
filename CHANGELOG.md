@@ -26,6 +26,11 @@
   mount continuity. Account/home evidence and both boundaries are reread on
   revalidation; Linux and Windows fail closed for this profile. ProtectedPath,
   planning, FFI, scheduling, and effects are unchanged.
+- Added a consumed, path-private `RustTargetRuleBoundaryEvidence` join for
+  the Rust/Cargo rule. It binds retained Cargo provenance to the exact macOS
+  current-account home-mount boundary, revalidates both evidence chains, and
+  preserves the unresolved `ProtectedPath` marker. It cannot create a plan,
+  clear blockers, cross FFI, schedule, or invoke an effect.
 - Cargo metadata witnesses now retain every read-set guard, the descriptor-
   retained project directory, exact executable/version observation, optional
   enrollment guard, and filesystem boundary after publication. Private

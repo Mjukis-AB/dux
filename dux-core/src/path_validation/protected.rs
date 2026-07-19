@@ -261,6 +261,10 @@ impl TrustedHomeMountWitness {
         self.proof_revision
     }
 
+    pub(crate) fn matches_scan_boundary(&self, boundary: &FilesystemBoundarySnapshot) -> bool {
+        self.scan_boundary.matches_boundary(boundary)
+    }
+
     pub(crate) fn revalidate(&self) -> Result<(), TrustedHomeMountError> {
         if self.proof_revision != TRUSTED_HOME_MOUNT_PROOF_REVISION {
             return Err(TrustedHomeMountError::UnsupportedRevision);

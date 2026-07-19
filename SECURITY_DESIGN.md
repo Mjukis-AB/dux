@@ -734,6 +734,15 @@ evidence gap without making Cargo output authoritative: the witness remains
 path-private, non-cloneable, blocked by `ProtectedPath`, and unable to create
 a plan, approval, FFI transport, schedule, or effect.
 
+The retained Cargo provenance can now be consumed into a sealed
+`RustTargetRuleBoundaryEvidence` join with the macOS home-mount witness. The
+join compares the exact retained scan-root boundary, repeats all Cargo/read-set
+and account/home/mount revalidation, and carries the unresolved `ProtectedPath`
+marker forward. It has no path getter, blocker-removal operation, plan,
+approval, FFI, scheduling, or effect conversion. This is still provenance and
+scope evidence only; deterministic rule-scope grants, process/descendant
+guards, and executor-time revalidation remain separate gates.
+
 The next boundary consumes that fenced witness into a path-private planning-
 provenance token. Creation binds the exact source-scan and candidate IDs,
 witness and resolution-policy revisions, and the unresolved protected-path

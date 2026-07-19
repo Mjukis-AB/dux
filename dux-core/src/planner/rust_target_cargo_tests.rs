@@ -31,6 +31,9 @@ use super::rust_target_cargo::{
 use super::rust_target_tests::{CARGO_CACHE_TAG_SIGNATURE, Fixture};
 use crate::domain::BlockReason;
 
+#[cfg(target_os = "macos")]
+use crate::path_validation::{TrustedHomeMountWitness, capture_scan_root, validate_scan_root};
+
 const VALID_VERSION: &str = "cargo 1.96.0 (30a34c682 2026-05-25)\nrelease: 1.96.0\ncommit-hash: 30a34c6821b57de0aaec83a901aca39f88f6778c\ncommit-date: 2026-05-25\nhost: aarch64-apple-darwin\n";
 
 struct FakeCargo {
@@ -344,6 +347,28 @@ fn consumed_cargo_provenance_revalidates_without_exposing_cleanup_authority() {
     let provenance = witness.into_planning_provenance().unwrap();
     assert!(provenance.revalidate().is_ok());
     provenance.release().unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn cargo_provenance_can_bind_home_mount_without_clearing_protected_path() {
+    let Some(fixture) = Fixture::try_in_current_account_home(CARGO_CACHE_TAG_SIGNATURE) else {
+        eprintln!("skipping home-bound Cargo join: current home is not writable");
+        return;
+    };
+    let fake = FakeCargo::new(&valid_metadata_action(&fixture));
+    let witness = validate_cargo_metadata(
+        validate_live_rust_target_for_test(fixture.source(), &fixture.candidate()).unwrap(),
+        &fake.observe(),
+    )
+    .unwrap();
+    let provenance = witness.into_planning_provenance().unwrap();
+    let scan_root = capture_scan_root(validate_scan_root(&fixture.root).unwrap()).unwrap();
+    let location = TrustedHomeMountWitness::capture(&scan_root).unwrap();
+    let evidence = provenance.into_rule_boundary_evidence(location).unwrap();
+    assert!(evidence.protected_path_is_still_unresolved());
+    assert!(evidence.revalidate().is_ok());
+    evidence.release().unwrap();
 }
 
 #[test]

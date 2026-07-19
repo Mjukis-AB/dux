@@ -4459,6 +4459,14 @@ Tasks:
       filesystem/Cargo fence. The token has no path getter, plan conversion,
       approval, FFI, schedule, or effect method; it only supports further
       revalidation and explicit lease release.
+    - [x] 2026-07-19 slice: consume Cargo provenance into a sealed
+      `RustTargetRuleBoundaryEvidence` join with the macOS current-account
+      home-mount witness. The join requires exact retained scan-boundary
+      equality, revalidates both Cargo/read-set and account/home/mount fences,
+      preserves the unresolved `ProtectedPath` marker, and exposes only
+      revalidation and lease release. It has no path getter, blocker-removal,
+      plan, approval, FFI, scheduling, or effect operation; Linux/Windows
+      location authority and process/descendant/executor guards remain open.
 - [ ] Implement candidate groups and overlap resolution.
   - [x] 2026-07-18 slice: add the sealed, non-authoritative core grouping
     result. Candidates are grouped deterministically by category, safety, and

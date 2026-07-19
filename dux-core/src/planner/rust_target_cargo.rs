@@ -56,8 +56,9 @@ use super::rust_target_source::RustTargetSourceError;
 use crate::domain::{CandidateId, ScanId};
 use crate::path_validation::{
     CanonicalFileDigestError, CanonicalFileDigestSnapshot, CanonicalPathError, CanonicalScanRoot,
-    FilesystemBoundarySnapshot, FilesystemEntryKind, LexicalPathError, capture_filesystem_boundary,
-    capture_regular_file_sha256, capture_scan_root, validate_cleanup_path, validate_scan_root,
+    FilesystemBoundarySnapshot, FilesystemEntryKind, LexicalPathError, TrustedHomeMountError,
+    TrustedHomeMountWitness, capture_filesystem_boundary, capture_regular_file_sha256,
+    capture_scan_root, validate_cleanup_path, validate_scan_root,
 };
 use crate::persistence::{
     CARGO_ENROLLMENT_SUPPORTED_RELEASE, CargoEnrollmentSetting, CargoEnrollmentSettingUpdate,
@@ -73,6 +74,7 @@ const METADATA_TIMEOUT: Duration = Duration::from_secs(10);
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(2);
 const MAX_CARGO_EXECUTABLE_BYTES: usize = 256 * 1024 * 1024;
 const CARGO_RESOLUTION_POLICY_REVISION: u32 = 12;
+pub(crate) const RUST_TARGET_RULE_BOUNDARY_REVISION: u32 = 1;
 const MAX_PACKAGE_ID_BYTES: usize = 4 * 1024;
 const MAX_WORKSPACE_DEFAULT_MEMBER_ROWS: usize = MAX_WORKSPACE_MEMBERS * MAX_WORKSPACE_MEMBERS;
 const MAX_PACKAGE_DEPENDENCY_DECLARATIONS: usize = 4 * 1024;
@@ -311,6 +313,35 @@ pub(crate) enum RustTargetCargoPlanningProvenanceError {
     BindingChanged,
 }
 
+/// A consumed, path-private join between the exact Rust-target/Cargo
+/// provenance and the macOS current-account home mount observation.
+///
+/// This is deliberately still not a grant that can clear `ProtectedPath`.
+/// It carries the unresolved marker forward and exposes only revalidation and
+/// lease release; plan, approval, FFI, scheduling, and effect conversion are
+/// intentionally absent.
+#[must_use = "rule-boundary evidence must remain attached to its provenance"]
+pub(crate) struct RustTargetRuleBoundaryEvidence {
+    provenance: RustTargetCargoPlanningProvenance,
+    location: TrustedHomeMountWitness,
+    boundary_revision: u32,
+    protected_path_still_unresolved: CargoProtectedPathStillUnresolved,
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum RustTargetRuleBoundaryError {
+    #[error("Rust-target Cargo provenance could not be revalidated: {0}")]
+    Provenance(#[source] RustTargetCargoPlanningProvenanceError),
+    #[error("current-account home mount evidence could not be revalidated: {0}")]
+    Location(#[source] TrustedHomeMountError),
+    #[error("Rust-target Cargo provenance and home-mount evidence bind different boundaries")]
+    BoundaryMismatch,
+    #[error("Rust-target rule-boundary revision is unsupported")]
+    UnsupportedRevision,
+    #[error("Rust-target rule-boundary evidence lost the ProtectedPath blocker")]
+    ProtectedPathBlockerMissing,
+}
+
 impl RustTargetCargoMetadataWitness {
     /// Revalidate every retained Cargo input fence and the live Rust-target
     /// evidence. This remains an internal provenance check: it exposes no
@@ -394,6 +425,73 @@ impl RustTargetCargoPlanningProvenance {
 
     pub(crate) fn release(self) -> Result<(), RustTargetSourceError> {
         self.witness.release()
+    }
+
+    /// Consume provenance into a location-bound rule observation. The exact
+    /// scan-root boundary must match the Cargo witness; the unresolved
+    /// protected-path marker is retained rather than removed.
+    pub(crate) fn into_rule_boundary_evidence(
+        self,
+        location: TrustedHomeMountWitness,
+    ) -> Result<RustTargetRuleBoundaryEvidence, RustTargetRuleBoundaryError> {
+        self.revalidate()
+            .map_err(RustTargetRuleBoundaryError::Provenance)?;
+        location
+            .revalidate()
+            .map_err(RustTargetRuleBoundaryError::Location)?;
+        if !location.matches_scan_boundary(&self.witness.boundary) {
+            return Err(RustTargetRuleBoundaryError::BoundaryMismatch);
+        }
+        if !self.witness.live.protected_path_is_still_unresolved() {
+            return Err(RustTargetRuleBoundaryError::ProtectedPathBlockerMissing);
+        }
+        Ok(RustTargetRuleBoundaryEvidence {
+            provenance: self,
+            location,
+            boundary_revision: RUST_TARGET_RULE_BOUNDARY_REVISION,
+            protected_path_still_unresolved: CargoProtectedPathStillUnresolved,
+        })
+    }
+}
+
+impl RustTargetRuleBoundaryEvidence {
+    pub(crate) fn protected_path_is_still_unresolved(&self) -> bool {
+        let _ = &self.protected_path_still_unresolved;
+        true
+    }
+
+    pub(crate) fn revalidate(&self) -> Result<(), RustTargetRuleBoundaryError> {
+        if self.boundary_revision != RUST_TARGET_RULE_BOUNDARY_REVISION {
+            return Err(RustTargetRuleBoundaryError::UnsupportedRevision);
+        }
+        self.provenance
+            .revalidate()
+            .map_err(RustTargetRuleBoundaryError::Provenance)?;
+        self.location
+            .revalidate()
+            .map_err(RustTargetRuleBoundaryError::Location)?;
+        if !self
+            .location
+            .matches_scan_boundary(&self.provenance.witness.boundary)
+        {
+            return Err(RustTargetRuleBoundaryError::BoundaryMismatch);
+        }
+        if !self
+            .provenance
+            .witness
+            .live
+            .protected_path_is_still_unresolved()
+        {
+            return Err(RustTargetRuleBoundaryError::ProtectedPathBlockerMissing);
+        }
+        if !self.protected_path_is_still_unresolved() {
+            return Err(RustTargetRuleBoundaryError::ProtectedPathBlockerMissing);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn release(self) -> Result<(), RustTargetSourceError> {
+        self.provenance.release()
     }
 }
 

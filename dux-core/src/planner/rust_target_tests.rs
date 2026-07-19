@@ -5,6 +5,9 @@ use std::time::SystemTime;
 
 use tempfile::TempDir;
 
+#[cfg(target_os = "macos")]
+use nix::unistd::{User, geteuid};
+
 use super::rust_target::{
     RustTargetLiveValidationError, RustTargetValidationSource, validate_live_rust_target_for_test,
 };
@@ -32,6 +35,13 @@ impl Fixture {
         Self::with_manifest(tag_bytes, true)
     }
 
+    #[cfg(target_os = "macos")]
+    pub(super) fn try_in_current_account_home(tag_bytes: &[u8]) -> Option<Self> {
+        let home = User::from_uid(geteuid()).ok().flatten()?.dir;
+        let temp = TempDir::new_in(home).ok()?;
+        Some(Self::from_temp(temp, tag_bytes, true))
+    }
+
     fn with_symlinked_manifest(tag_bytes: &[u8]) -> Self {
         use std::os::unix::fs::symlink;
 
@@ -43,7 +53,18 @@ impl Fixture {
     }
 
     fn with_manifest(tag_bytes: &[u8], create_manifest: bool) -> Self {
-        let temp = TempDir::new().unwrap();
+        Self::with_manifest_in(tag_bytes, create_manifest, None)
+    }
+
+    fn with_manifest_in(tag_bytes: &[u8], create_manifest: bool, parent: Option<&Path>) -> Self {
+        let temp = match parent {
+            Some(parent) => TempDir::new_in(parent).unwrap(),
+            None => TempDir::new().unwrap(),
+        };
+        Self::from_temp(temp, tag_bytes, create_manifest)
+    }
+
+    fn from_temp(temp: TempDir, tag_bytes: &[u8], create_manifest: bool) -> Self {
         let root = temp.path().join("scan-root");
         let target = root.join("project/target");
         std::fs::create_dir_all(&target).unwrap();
