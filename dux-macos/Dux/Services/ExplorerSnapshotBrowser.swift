@@ -158,6 +158,7 @@ enum ExplorerTrashError: Error, Equatable, Sendable {
     case reviewNotAcquired
     case unavailable
     case invalidRequest
+    case changedSincePlan
     case busy
     case storageUnavailable
     case unsafeStorage
@@ -174,6 +175,7 @@ enum ExplorerTrashError: Error, Equatable, Sendable {
         self = switch error {
         case .Closed: .closed
         case .InvalidRequest: .invalidRequest
+        case .ChangedSincePlan: .changedSincePlan
         case .ReviewUnavailable: .unavailable
         case .Busy: .busy
         case .StorageUnavailable: .storageUnavailable
@@ -1743,11 +1745,12 @@ final class ExplorerSnapshotBrowserModel {
         return .invalidResponse
     }
 
-    private static func trashFailureMessage(_ error: ExplorerTrashError) -> String {
+    static func trashFailureMessage(_ error: ExplorerTrashError) -> String {
         switch error {
         case .closed: "DUX is closing. No Trash action was performed."
         case .reviewNotAcquired, .unavailable: "The retained snapshot review is unavailable. Reload Explorer before trying again."
         case .invalidRequest: "DUX rejected this Trash request. No action was performed."
+        case .changedSincePlan: "This item changed after it was reviewed. No Trash action was performed; scan again before retrying."
         case .busy: "Cleanup is busy. Try again when the current operation finishes."
         case .storageUnavailable, .unsafeStorage, .incompatibleSchema, .corruptData, .failed:
             "DUX could not safely record this Trash action. No retry was attempted."

@@ -2,6 +2,19 @@ import Darwin
 import XCTest
 @testable import DUX
 
+@MainActor
+final class ExplorerTrashErrorPresentationTests: XCTestCase {
+    func testChangedSincePlanRemainsDistinctAndExplainsRescan() {
+        let error = ExplorerTrashError(TrashExecutionError.ChangedSincePlan)
+
+        XCTAssertEqual(error, .changedSincePlan)
+        XCTAssertTrue(
+            ExplorerSnapshotBrowserModel.trashFailureMessageForTesting(error)
+                .contains("changed after it was reviewed")
+        )
+    }
+}
+
 private func liveTarget(
     bytes: Data,
     exactText: String?,

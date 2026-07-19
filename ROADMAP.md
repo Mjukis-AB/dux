@@ -4807,6 +4807,12 @@ Tasks:
     requires explicit confirmation before removing one or resetting all.
     Exclusions remain deny-only and never become plan or executor authority.
 - [ ] Add partial failure, retry, cancellation, and changed-since-plan UI.
+  - [x] 2026-07-19 slice: preserve changed-since-plan as a distinct typed
+    outcome for the reviewed Explorer Trash path. Core journal validation now
+    maps a target identity change to `ChangedSincePlan`; UniFFI contract v24
+    carries that bounded error without paths; Swift presents an explicit
+    rescan-before-retry message. Existing one-shot/unknown-outcome behavior
+    remains conservative: no automatic retry or effect is attempted.
 - [ ] Add bounded pending-evaluation discovery and snapshot-backed restart
   recovery; malformed or incompatible state fails closed.
 - [ ] Wire deterministic evaluator → reviewed plan → journal → executor through

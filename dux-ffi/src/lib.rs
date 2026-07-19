@@ -77,7 +77,7 @@ use dux_core::{
     VolumeCapacity, VolumeId,
 };
 
-const FFI_CONTRACT_VERSION: u32 = 23;
+const FFI_CONTRACT_VERSION: u32 = 24;
 const FFI_RECORD_VERSION: u32 = 1;
 const SNAPSHOT_NODE_RECORD_VERSION: u32 = 2;
 const SCAN_EVENT_PAGE_LIMIT: u16 = 64;
@@ -1457,6 +1457,8 @@ pub enum TrashExecutionError {
     Closed,
     #[error("the Explorer Trash request is invalid")]
     InvalidRequest,
+    #[error("the reviewed Explorer Trash target changed since the plan was created")]
+    ChangedSincePlan,
     #[error("the retained Explorer review cannot supply this Trash target")]
     ReviewUnavailable,
     #[error("the cleanup journal is temporarily busy")]
@@ -3381,6 +3383,7 @@ fn map_trash_selection_error(error: CoreTrashSelectionError) -> TrashExecutionEr
     match error {
         CoreTrashSelectionError::Review => TrashExecutionError::ReviewUnavailable,
         CoreTrashSelectionError::InvalidRequest => TrashExecutionError::InvalidRequest,
+        CoreTrashSelectionError::ChangedSincePlan => TrashExecutionError::ChangedSincePlan,
         CoreTrashSelectionError::Busy => TrashExecutionError::Busy,
         CoreTrashSelectionError::Unavailable => TrashExecutionError::StorageUnavailable,
         CoreTrashSelectionError::UnsafeStorage => TrashExecutionError::UnsafeStorage,
@@ -4518,10 +4521,10 @@ mod tests {
     }
 
     #[test]
-    fn reports_contract_twenty_three_and_preserves_legacy_formatting() {
+    fn reports_contract_twenty_four_and_preserves_legacy_formatting() {
         let _guard = ENGINE_TEST_LOCK.lock().unwrap();
         let (_temp, engine) = engine();
-        assert_eq!(library_version().ffi_contract_version, 23);
+        assert_eq!(library_version().ffi_contract_version, 24);
         assert_eq!(engine.library_version().unwrap(), library_version());
         assert_eq!(engine.format_size(1536).unwrap().display, "1.5 KB");
         assert!(engine.close());
@@ -4609,6 +4612,14 @@ mod tests {
         assert_eq!(
             request.record_version().unwrap_err(),
             TrashEffectRequestError::Consumed
+        );
+    }
+
+    #[test]
+    fn changed_since_plan_maps_to_a_distinct_trash_error() {
+        assert_eq!(
+            map_trash_selection_error(CoreTrashSelectionError::ChangedSincePlan),
+            TrashExecutionError::ChangedSincePlan
         );
     }
 

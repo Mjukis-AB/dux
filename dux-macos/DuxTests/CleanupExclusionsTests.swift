@@ -168,7 +168,7 @@ private actor CleanupExclusionsEngineSpy: EngineServing {
     }
 
     func loadStatus() async throws -> EngineStatus {
-        EngineStatus(libraryVersion: "test", ffiContractVersion: 23, executedOffMainThread: true)
+        EngineStatus(libraryVersion: "test", ffiContractVersion: 24, executedOffMainThread: true)
     }
 
     func observeVolumeCapacity(

@@ -1,5 +1,9 @@
 # Changelog
 
+- Preserved reviewed Explorer Trash changes as a distinct `ChangedSincePlan`
+  outcome through core, UniFFI contract v24, and the native UI. DUX now tells
+  the user to rescan before retrying instead of reporting a generic review
+  failure; no stale plan or effect is retried.
 - Added UniFFI contract v23 cleanup exclusions. The bounded deny-only path
   prefix set crosses the boundary as lossless encoded observations with typed
   validation and storage errors; Settings can add a local prefix and requires

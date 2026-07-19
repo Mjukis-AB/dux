@@ -145,10 +145,10 @@ fn map_selection_history_error(kind: HistoryErrorKind) -> TrashSelectionError {
 fn map_selection_admission_error(error: TrashAdmissionError) -> TrashSelectionError {
     match error {
         TrashAdmissionError::TargetUnavailable
-        | TrashAdmissionError::TargetChanged
         | TrashAdmissionError::UnsupportedTargetKind
         | TrashAdmissionError::UnsupportedEffectMode
         | TrashAdmissionError::TargetNotBound => TrashSelectionError::Review,
+        TrashAdmissionError::TargetChanged => TrashSelectionError::ChangedSincePlan,
         TrashAdmissionError::Journal(kind) => map_selection_history_error(kind),
     }
 }
@@ -504,6 +504,10 @@ mod tests {
         assert_eq!(
             revalidate_target(&target),
             Err(TrashAdmissionError::TargetChanged)
+        );
+        assert_eq!(
+            map_selection_admission_error(TrashAdmissionError::TargetChanged),
+            TrashSelectionError::ChangedSincePlan
         );
     }
 

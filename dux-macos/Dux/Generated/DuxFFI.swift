@@ -10158,6 +10158,7 @@ public enum TrashExecutionError: Swift.Error, Equatable, Hashable, Foundation.Lo
 
     case Closed
     case InvalidRequest
+    case ChangedSincePlan
     case ReviewUnavailable
     case Busy
     case StorageUnavailable
@@ -10197,14 +10198,15 @@ public struct FfiConverterTypeTrashExecutionError: FfiConverterRustBuffer {
 
         case 1: return .Closed
         case 2: return .InvalidRequest
-        case 3: return .ReviewUnavailable
-        case 4: return .Busy
-        case 5: return .StorageUnavailable
-        case 6: return .UnsafeStorage
-        case 7: return .IncompatibleSchema
-        case 8: return .CorruptData
-        case 9: return .OutcomeUnknown
-        case 10: return .InternalState
+        case 3: return .ChangedSincePlan
+        case 4: return .ReviewUnavailable
+        case 5: return .Busy
+        case 6: return .StorageUnavailable
+        case 7: return .UnsafeStorage
+        case 8: return .IncompatibleSchema
+        case 9: return .CorruptData
+        case 10: return .OutcomeUnknown
+        case 11: return .InternalState
 
          default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -10225,36 +10227,40 @@ public struct FfiConverterTypeTrashExecutionError: FfiConverterRustBuffer {
             writeInt(&buf, Int32(2))
 
 
-        case .ReviewUnavailable:
+        case .ChangedSincePlan:
             writeInt(&buf, Int32(3))
 
 
-        case .Busy:
+        case .ReviewUnavailable:
             writeInt(&buf, Int32(4))
 
 
-        case .StorageUnavailable:
+        case .Busy:
             writeInt(&buf, Int32(5))
 
 
-        case .UnsafeStorage:
+        case .StorageUnavailable:
             writeInt(&buf, Int32(6))
 
 
-        case .IncompatibleSchema:
+        case .UnsafeStorage:
             writeInt(&buf, Int32(7))
 
 
-        case .CorruptData:
+        case .IncompatibleSchema:
             writeInt(&buf, Int32(8))
 
 
-        case .OutcomeUnknown:
+        case .CorruptData:
             writeInt(&buf, Int32(9))
 
 
-        case .InternalState:
+        case .OutcomeUnknown:
             writeInt(&buf, Int32(10))
+
+
+        case .InternalState:
+            writeInt(&buf, Int32(11))
 
         }
     }

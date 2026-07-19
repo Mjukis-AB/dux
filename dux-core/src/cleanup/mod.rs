@@ -83,6 +83,8 @@ pub enum TrashSelectionError {
     Review,
     #[error("the Explorer Trash selection request is invalid")]
     InvalidRequest,
+    #[error("the reviewed Explorer Trash target changed since the plan was created")]
+    ChangedSincePlan,
     #[error("the cleanup journal is temporarily busy")]
     Busy,
     #[error("the cleanup store is unavailable")]
