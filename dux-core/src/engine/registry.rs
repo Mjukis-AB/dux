@@ -43,12 +43,13 @@ use super::snapshot_review::{
     category_path_bytes, map_repository_error as map_snapshot_review_error,
 };
 use super::task::{
-    CancelOutcome, CandidateEvaluationTaskFailureKind, CandidateEvaluationTaskStatus,
-    CandidateHistoryError, CloseOutcome, DurableCandidateEvaluation,
-    DurableCandidateEvaluationStatus, DurableCandidateStatus, DurableCandidateSummary,
-    DurableScanCounts, DurableScanCoverage, DurableScanStatus, DurableScanSummary, EngineLifecycle,
-    EngineOpenError, FormatSizeBatchResult, FormattedSizeEntry, HistoryMaintenanceFailureKind,
-    HistoryMaintenanceResult, HistoryMaintenanceStartOutcome, RecentScanHistory, ScanHistoryError,
+    CancelOutcome, CandidateEvaluationRecoveryError, CandidateEvaluationRecoveryOutcome,
+    CandidateEvaluationTaskFailureKind, CandidateEvaluationTaskStatus, CandidateHistoryError,
+    CloseOutcome, DurableCandidateEvaluation, DurableCandidateEvaluationStatus,
+    DurableCandidateStatus, DurableCandidateSummary, DurableScanCounts, DurableScanCoverage,
+    DurableScanStatus, DurableScanSummary, EngineLifecycle, EngineOpenError, FormatSizeBatchResult,
+    FormattedSizeEntry, HistoryMaintenanceFailureKind, HistoryMaintenanceResult,
+    HistoryMaintenanceStartOutcome, RecentScanHistory, ScanHistoryError,
     ScanRecoveryMaintenanceFailureKind, ScanRecoveryMaintenanceOutcome,
     ScanRecoveryMaintenanceResult, ScanRecoveryMaintenanceStartOutcome, ScanRootErrorKind,
     ScanTaskCounts, ScanTaskResult, ScanTaskStatus, SnapshotOrphanMaintenanceFailureKind,
@@ -73,9 +74,10 @@ use crate::cleanup::permanent_safe::{
 use crate::cleanup::{TrashEffectRequest, TrashPlatformResult, TrashSelectionError};
 use crate::domain::{
     CANDIDATE_CATALOG_SCHEMA_VERSION, CANDIDATE_CATALOG_SHA256, CANDIDATE_CONTEXT_FORMAT_VERSION,
-    CANDIDATE_EVALUATOR_REVISION, CandidateEvaluationError, CandidateId, Evidence, ScanCoverage,
-    ScanId, candidate_evaluation_context_digest_sha256, evaluate_completed_scan_candidates,
-    validate_bundled_candidate_catalog,
+    CANDIDATE_EVALUATOR_REVISION, CandidateEvaluationError, CandidateId,
+    CandidateSnapshotReplayError, Evidence, ScanCoverage, ScanId,
+    candidate_evaluation_context_digest_sha256, evaluate_completed_scan_candidates,
+    replay_snapshot_candidate_evaluation, validate_bundled_candidate_catalog,
 };
 use crate::path_validation::{FilesystemIdentity, capture_scan_root, validate_scan_root};
 use crate::persistence::snapshot::from_scan::prepare_completed_scan;
@@ -853,6 +855,132 @@ impl EngineHandle {
         &self,
     ) -> Result<DatabaseStatus, crate::persistence::DatabaseOpenErrorKind> {
         self.inner.store.status().map_err(|error| error.kind)
+    }
+
+    /// Replay at most one durable pending candidate evaluation from its exact
+    /// immutable snapshot. This is a bounded restart seam: it never scans the
+    /// live filesystem, accepts no caller path, and creates no plan or cleanup
+    /// capability. A later startup coordinator may call it again when the
+    /// returned `has_more` hint is true.
+    pub fn recover_pending_candidate_evaluation(
+        &self,
+        observed_at: SystemTime,
+    ) -> Result<CandidateEvaluationRecoveryOutcome, CandidateEvaluationRecoveryError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(CandidateEvaluationRecoveryError::Closed);
+        }
+        let Some((scan, pending)) = self
+            .inner
+            .store
+            .load_pending_candidate_evaluation()
+            .map_err(|error| map_candidate_recovery_error(error.kind))?
+        else {
+            return Ok(CandidateEvaluationRecoveryOutcome::NoPending);
+        };
+        let has_more = pending.has_more();
+        let record = pending.record();
+        let reference = scan
+            .snapshot()
+            .ok_or(HistoryErrorKind::CorruptData)
+            .map_err(map_candidate_recovery_error)?;
+        let request = record
+            .request_for_snapshot(reference)
+            .map_err(|error| map_candidate_recovery_error(error.kind))?;
+        let completed_at = canonical_recovery_evaluation_time(observed_at, record.scheduled_at())
+            .ok_or(HistoryErrorKind::InvalidInput)
+            .map_err(map_candidate_recovery_error)?;
+
+        let settle_failure = |kind: CandidateEvaluationFailureKind| {
+            let completion = CandidateEvaluationCompletion::failed(completed_at, kind)
+                .map_err(|error| map_candidate_recovery_error(error.kind))?;
+            self.inner
+                .store
+                .record_candidate_evaluation_completed_reconciled(&request, &completion)
+                .map_err(|error| map_candidate_recovery_error(error.kind))
+        };
+
+        // Identity drift is not a reason to reinterpret an old snapshot with
+        // new rules. Record a typed terminal discovery failure and leave all
+        // cleanup authority absent.
+        if !record.matches_current_scan_observation(&scan) {
+            settle_failure(CandidateEvaluationFailureKind::ContextInvalid)?;
+            return Ok(CandidateEvaluationRecoveryOutcome::Incompatible { has_more });
+        }
+
+        let document = self
+            .inner
+            .snapshots
+            .load_for_candidate_recovery(reference)
+            .map_err(|error| {
+                map_candidate_recovery_error(map_candidate_recovery_snapshot_error(error.kind))
+            })?;
+        if document.metadata.scan_id != *scan.id()
+            || !document.metadata.root.matches_path(scan.root())
+        {
+            return Err(map_candidate_recovery_error(HistoryErrorKind::CorruptData));
+        }
+
+        let batch = match replay_snapshot_candidate_evaluation(&document, scan.coverage()) {
+            Ok(batch) => batch,
+            Err(error) => {
+                settle_failure(candidate_replay_failure_kind(error))?;
+                return Ok(CandidateEvaluationRecoveryOutcome::Recovered {
+                    candidate_count: 0,
+                    has_more,
+                });
+            }
+        };
+        if batch.evaluator_revision() != CANDIDATE_EVALUATOR_REVISION
+            || batch.catalog_schema_version() != CANDIDATE_CATALOG_SCHEMA_VERSION
+            || batch.catalog_digest_sha256() != CANDIDATE_CATALOG_SHA256
+            || batch.context_format_version() != CANDIDATE_CONTEXT_FORMAT_VERSION
+            || batch.context_digest_sha256()
+                != crate::domain::candidate_evaluation_context_digest_for_observation(
+                    scan.id(),
+                    scan.root(),
+                    scan.coverage(),
+                )
+        {
+            settle_failure(CandidateEvaluationFailureKind::ContextInvalid)?;
+            return Ok(CandidateEvaluationRecoveryOutcome::Incompatible { has_more });
+        }
+
+        let candidates = batch
+            .into_candidates()
+            .iter()
+            .map(|candidate| NewCandidateRecord::try_from_candidate(candidate, completed_at))
+            .collect::<Result<Vec<_>, _>>();
+        let candidates = match candidates {
+            Ok(candidates) => candidates,
+            Err(_) => {
+                settle_failure(CandidateEvaluationFailureKind::CandidateInvalid)?;
+                return Ok(CandidateEvaluationRecoveryOutcome::Recovered {
+                    candidate_count: 0,
+                    has_more,
+                });
+            }
+        };
+        let candidate_count = u32::try_from(candidates.len())
+            .map_err(|_| map_candidate_recovery_error(HistoryErrorKind::QueryLimitExceeded))?;
+        if !CandidateEvaluationCompletion::batch_fits_materialization_budget(&candidates)
+            .map_err(|error| map_candidate_recovery_error(error.kind))?
+        {
+            settle_failure(CandidateEvaluationFailureKind::LimitExceeded)?;
+            return Ok(CandidateEvaluationRecoveryOutcome::Recovered {
+                candidate_count: 0,
+                has_more,
+            });
+        }
+        let completion = CandidateEvaluationCompletion::succeeded(completed_at, candidates)
+            .map_err(|error| map_candidate_recovery_error(error.kind))?;
+        self.inner
+            .store
+            .record_candidate_evaluation_completed_reconciled(&request, &completion)
+            .map_err(|error| map_candidate_recovery_error(error.kind))?;
+        Ok(CandidateEvaluationRecoveryOutcome::Recovered {
+            candidate_count,
+            has_more,
+        })
     }
 
     /// Evaluate one startup-volume capacity observation, retaining durable
@@ -4011,6 +4139,77 @@ const fn map_candidate_evaluation_error(
         CandidateEvaluationError::InvalidCandidate(_) => {
             CandidateEvaluationFailureKind::CandidateInvalid
         }
+    }
+}
+
+const fn candidate_replay_failure_kind(
+    error: CandidateSnapshotReplayError,
+) -> CandidateEvaluationFailureKind {
+    match error {
+        CandidateSnapshotReplayError::Evaluation(error) => map_candidate_evaluation_error(error),
+        CandidateSnapshotReplayError::ResourceLimit => {
+            CandidateEvaluationFailureKind::LimitExceeded
+        }
+        CandidateSnapshotReplayError::InvalidSnapshot
+        | CandidateSnapshotReplayError::BatchMismatch => {
+            CandidateEvaluationFailureKind::CandidateInvalid
+        }
+    }
+}
+
+fn map_candidate_recovery_snapshot_error(error: SnapshotRepositoryErrorKind) -> HistoryErrorKind {
+    match error {
+        SnapshotRepositoryErrorKind::History(kind) => kind,
+        SnapshotRepositoryErrorKind::Storage(SnapshotStorageErrorKind::Busy) => {
+            HistoryErrorKind::Busy
+        }
+        SnapshotRepositoryErrorKind::Storage(SnapshotStorageErrorKind::Unavailable)
+        | SnapshotRepositoryErrorKind::MissingStore
+        | SnapshotRepositoryErrorKind::MissingSnapshot => HistoryErrorKind::DatabaseUnavailable,
+        SnapshotRepositoryErrorKind::SnapshotUnavailable => HistoryErrorKind::NotFound,
+        SnapshotRepositoryErrorKind::ReadOnly => HistoryErrorKind::InvalidTransition,
+        SnapshotRepositoryErrorKind::IncompatibleVersion
+        | SnapshotRepositoryErrorKind::ReferenceMismatch
+        | SnapshotRepositoryErrorKind::Codec(_)
+        | SnapshotRepositoryErrorKind::Storage(
+            SnapshotStorageErrorKind::InvalidConfiguration
+            | SnapshotStorageErrorKind::UnsafeRoot
+            | SnapshotStorageErrorKind::UnsafeObject
+            | SnapshotStorageErrorKind::UnrecognizedStore
+            | SnapshotStorageErrorKind::InternalState,
+        )
+        | SnapshotRepositoryErrorKind::ReviewLeaseExpired => HistoryErrorKind::CorruptData,
+    }
+}
+
+fn canonical_recovery_evaluation_time(
+    observed_at: SystemTime,
+    scheduled_at: SystemTime,
+) -> Option<SystemTime> {
+    let observed = observed_at.max(scheduled_at);
+    let duration = observed.duration_since(UNIX_EPOCH).ok()?;
+    let millis = u64::try_from(duration.as_millis()).ok()?;
+    i64::try_from(millis).ok()?;
+    UNIX_EPOCH.checked_add(Duration::from_millis(millis))
+}
+
+const fn map_candidate_recovery_error(kind: HistoryErrorKind) -> CandidateEvaluationRecoveryError {
+    match kind {
+        HistoryErrorKind::InvalidInput | HistoryErrorKind::InvalidTransition => {
+            CandidateEvaluationRecoveryError::InternalState
+        }
+        HistoryErrorKind::NotFound => CandidateEvaluationRecoveryError::Unavailable,
+        HistoryErrorKind::IncompatibleSchema => {
+            CandidateEvaluationRecoveryError::IncompatibleSchema
+        }
+        HistoryErrorKind::QueryLimitExceeded => CandidateEvaluationRecoveryError::BudgetExceeded,
+        HistoryErrorKind::Busy => CandidateEvaluationRecoveryError::Busy,
+        HistoryErrorKind::UnsafeStorage => CandidateEvaluationRecoveryError::UnsafeStorage,
+        HistoryErrorKind::CorruptData => CandidateEvaluationRecoveryError::CorruptData,
+        HistoryErrorKind::DatabaseUnavailable => CandidateEvaluationRecoveryError::Unavailable,
+        HistoryErrorKind::InternalState => CandidateEvaluationRecoveryError::InternalState,
+        HistoryErrorKind::OutcomeUnknown => CandidateEvaluationRecoveryError::OutcomeUnknown,
+        HistoryErrorKind::AlreadyExists => CandidateEvaluationRecoveryError::InternalState,
     }
 }
 

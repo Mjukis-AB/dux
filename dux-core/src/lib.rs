@@ -46,10 +46,11 @@ pub use domain::{
     ScanIssue, ScanIssueKind, StableIdError, VolumeCapacity, VolumeCapacityError, VolumeId,
 };
 pub use engine::{
-    CancelOutcome, CandidateEvaluationTaskFailureKind, CandidateEvaluationTaskStatus,
-    CapacityHistoryDisposition, CleanupExclusionSource, CleanupExclusions, CleanupExclusionsError,
-    CleanupExclusionsUpdate, CloseOutcome, DiskPressurePolicy, DiskPressurePolicyError,
-    DiskPressurePolicySource, DiskPressurePolicyUpdate, DurableScanCounts, DurableScanCoverage,
+    CancelOutcome, CandidateEvaluationRecoveryError, CandidateEvaluationRecoveryOutcome,
+    CandidateEvaluationTaskFailureKind, CandidateEvaluationTaskStatus, CapacityHistoryDisposition,
+    CleanupExclusionSource, CleanupExclusions, CleanupExclusionsError, CleanupExclusionsUpdate,
+    CloseOutcome, DiskPressurePolicy, DiskPressurePolicyError, DiskPressurePolicySource,
+    DiskPressurePolicyUpdate, DurableScanCounts, DurableScanCoverage,
     DurableScanCoverageDetailsPage, DurableScanIssue, DurableScanIssueKind,
     DurableScanIssueLocation, DurableScanStatus, DurableScanSummary, EngineConfig,
     EngineConfigError, EngineConfigField, EngineConfigReason, EngineHandle, EngineLifecycle,

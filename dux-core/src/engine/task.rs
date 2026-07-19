@@ -1233,6 +1233,44 @@ pub enum CandidateEvaluationTaskStatus {
     },
 }
 
+/// Bounded result of one restart-time pending-evaluation recovery attempt.
+/// This is an internal orchestration observation, never cleanup authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CandidateEvaluationRecoveryOutcome {
+    NoPending,
+    Recovered {
+        candidate_count: u32,
+        has_more: bool,
+    },
+    Incompatible {
+        has_more: bool,
+    },
+}
+
+/// Path-free failures from one bounded restart-time evaluator recovery pass.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum CandidateEvaluationRecoveryError {
+    #[error("engine session is closed")]
+    Closed,
+    #[error("the durable engine schema is incompatible")]
+    IncompatibleSchema,
+    #[error("the durable evaluator state is busy")]
+    Busy,
+    #[error("the durable evaluator state is unsafe")]
+    UnsafeStorage,
+    #[error("the pending evaluator state exceeded its fixed budget")]
+    BudgetExceeded,
+    #[error("the pending evaluator state is corrupt")]
+    CorruptData,
+    #[error("the pending evaluator state is unavailable")]
+    Unavailable,
+    #[error("the pending evaluator completion outcome is unknown")]
+    OutcomeUnknown,
+    #[error("the pending evaluator state is internally inconsistent")]
+    InternalState,
+}
+
 /// Immutable, non-authoritative durable result for one engine scan task.
 /// Paths and tree nodes remain behind the paged snapshot APIs added later.
 #[derive(Clone, Debug, PartialEq, Eq)]

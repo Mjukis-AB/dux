@@ -1,5 +1,12 @@
 # Changelog
 
+- Added the first bounded restart-recovery seam for pending deterministic
+  candidate evaluation. Core selects at most one oldest pending row, replays
+  only its checksummed immutable snapshot, verifies evaluator/catalog/context
+  identity and materialization limits, and atomically records a terminal
+  result. Incompatible state fails closed; no path, plan, approval, or cleanup
+  effect crosses the seam. Startup scheduling and FFI/Swift wiring remain
+  intentionally separate.
 - Added the native Explorer Cleanup History destination. AppModel now
   generation-fences bounded history loading and pagination, while the UI shows
   honest lifecycle/mode/trigger/estimate summaries and accessible item-status

@@ -2,7 +2,7 @@
 
 Status: normative design and implementation gate
 
-Last reviewed: 2026-07-18
+Last reviewed: 2026-07-19
 
 Applies to: `dux-core`, `dux-cli`, `dux-ffi`, and the direct-download macOS app
 
@@ -1530,9 +1530,17 @@ ambiguous-commit adoption compare the
 full scan completion, request identity, normalized terminal time, failure kind,
 and candidate set. A standalone legacy candidate insert is rejected whenever
 the source scan already owns an evaluation, preventing post-terminal batch
-drift. Pending-only primitives remain sealed and reserved for a future recovery
-worker; no operational restart claim is made until a persisted snapshot can be
-reconstructed into bounded evaluator input and pending work can be queried.
+drift. Pending-only primitives remain sealed and are consumed only by the
+bounded recovery seam; startup scheduling and UI/FFI orchestration remain
+separate. The first bounded core recovery seam now selects at most one oldest
+pending row with a two-row sentinel, revalidates the exact succeeded scan and
+snapshot tuple, decodes the retained immutable snapshot into a bounded review
+index, and replays the deterministic evaluator without touching the live
+filesystem. Evaluator/catalog/context drift becomes a terminal typed discovery
+failure; malformed, missing, unavailable, or incompatible snapshot state never
+becomes replay authority. The seam returns only a candidate count and bounded
+`has_more` hint; startup scheduling and FFI/Swift wiring remain separate so no
+UI, AI, CLI, or cleanup caller can invoke it yet.
 
 The production engine exposes that ledger only through an exact-scan,
 path-free discovery-history projection. A missing scan is distinct from an

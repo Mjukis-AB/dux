@@ -2221,6 +2221,135 @@ fn completed_marker_candidate() -> (
     (temp, config, engine, scan_id, candidate_id, expected_target)
 }
 
+#[test]
+fn pending_candidate_evaluation_replays_exact_snapshot_after_restart_boundary() {
+    let (_temp, _config, engine, scan_id, _candidate_id, _target) = completed_marker_candidate();
+    engine.inner.store.with_connection(|connection| {
+        connection
+            .execute(
+                "DELETE FROM candidates WHERE scan_id = ?1",
+                [scan_id.as_str()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE candidate_evaluations
+                 SET status = 'pending', completed_at_unix_ms = NULL,
+                     candidate_count = NULL, failure_kind = NULL
+                 WHERE scan_id = ?1",
+                [scan_id.as_str()],
+            )
+            .unwrap();
+    });
+
+    assert_eq!(
+        engine
+            .recover_pending_candidate_evaluation(SystemTime::UNIX_EPOCH + Duration::from_secs(20))
+            .unwrap(),
+        super::super::task::CandidateEvaluationRecoveryOutcome::Recovered {
+            candidate_count: 1,
+            has_more: false,
+        }
+    );
+    assert!(matches!(
+        engine
+            .inner
+            .store
+            .load_candidate_evaluation(&scan_id)
+            .unwrap()
+            .unwrap()
+            .status(),
+        crate::persistence::CandidateEvaluationStatus::Succeeded { candidate_count: 1 }
+    ));
+}
+
+#[test]
+fn incompatible_pending_candidate_evaluation_fails_closed_without_replay() {
+    let (_temp, _config, engine, scan_id, _candidate_id, _target) = completed_marker_candidate();
+    engine.inner.store.with_connection(|connection| {
+        connection
+            .execute(
+                "DELETE FROM candidates WHERE scan_id = ?1",
+                [scan_id.as_str()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE candidate_evaluations
+                 SET status = 'pending', completed_at_unix_ms = NULL,
+                     candidate_count = NULL, failure_kind = NULL,
+                     context_sha256 = zeroblob(32)
+                 WHERE scan_id = ?1",
+                [scan_id.as_str()],
+            )
+            .unwrap();
+    });
+
+    assert_eq!(
+        engine
+            .recover_pending_candidate_evaluation(SystemTime::UNIX_EPOCH + Duration::from_secs(20))
+            .unwrap(),
+        super::super::task::CandidateEvaluationRecoveryOutcome::Incompatible { has_more: false }
+    );
+    assert_eq!(
+        engine
+            .inner
+            .store
+            .load_candidate_evaluation(&scan_id)
+            .unwrap()
+            .unwrap()
+            .status(),
+        crate::persistence::CandidateEvaluationStatus::Failed {
+            kind: crate::persistence::CandidateEvaluationFailureKind::ContextInvalid,
+        }
+    );
+}
+
+#[test]
+fn malformed_pending_candidate_evaluation_is_rejected_before_replay() {
+    let (_temp, _config, engine, scan_id, _candidate_id, _target) = completed_marker_candidate();
+    engine.inner.store.with_connection(|connection| {
+        connection
+            .pragma_update(None, "ignore_check_constraints", true)
+            .unwrap();
+        connection
+            .execute(
+                "DELETE FROM candidates WHERE scan_id = ?1",
+                [scan_id.as_str()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE candidate_evaluations
+                 SET status = 'pending', completed_at_unix_ms = NULL,
+                     candidate_count = NULL, failure_kind = NULL,
+                     context_sha256 = X'00'
+                 WHERE scan_id = ?1",
+                [scan_id.as_str()],
+            )
+            .unwrap();
+        connection
+            .pragma_update(None, "ignore_check_constraints", false)
+            .unwrap();
+    });
+
+    assert_eq!(
+        engine
+            .recover_pending_candidate_evaluation(SystemTime::UNIX_EPOCH + Duration::from_secs(20))
+            .unwrap_err(),
+        super::super::task::CandidateEvaluationRecoveryError::CorruptData
+    );
+    assert_eq!(
+        engine
+            .inner
+            .store
+            .load_candidate_evaluation(&scan_id)
+            .unwrap_err()
+            .kind,
+        HistoryErrorKind::CorruptData
+    );
+}
+
 fn make_marker_candidate_cleanup_reviewable(engine: &EngineHandle, scan_id: &ScanId) {
     engine.inner.store.with_connection(|connection| {
         connection

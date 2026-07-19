@@ -435,6 +435,26 @@ impl std::ops::Deref for SnapshotReviewDocument {
 }
 
 impl SnapshotReviewDocument {
+    /// Build the bounded child index needed by deterministic candidate replay
+    /// without creating a user-facing review lease. Recovery owns no paths or
+    /// action capability; it only replays immutable snapshot bytes.
+    pub(crate) fn from_document_for_recovery(
+        document: SnapshotDocument,
+    ) -> Result<Self, SnapshotRepositoryError> {
+        validate_snapshot_document(&document)
+            .map_err(|error| repository_error(SnapshotRepositoryErrorKind::Codec(error.kind)))?;
+        let decoded_slots = Arc::new(AtomicUsize::new(0));
+        let decoded_bytes = Arc::new(AtomicU64::new(0));
+        let slot = SnapshotReviewDecodedSlot::reserve(&decoded_slots, &decoded_bytes, 0)?;
+        let (child_offsets, child_indices) = build_review_child_index(&document)?;
+        Ok(Self {
+            document,
+            child_offsets,
+            child_indices,
+            _slot: slot,
+        })
+    }
+
     pub(crate) fn direct_child_indices(
         &self,
         parent_index: usize,
@@ -2191,6 +2211,13 @@ impl SnapshotRepository {
         let retained = self.open_available_with_guard(&database_guard, reference)?;
         drop(database_guard);
         decode_reference(&retained, reference)
+    }
+
+    pub(crate) fn load_for_candidate_recovery(
+        &self,
+        reference: &SnapshotReference,
+    ) -> Result<SnapshotReviewDocument, SnapshotRepositoryError> {
+        SnapshotReviewDocument::from_document_for_recovery(self.load(reference)?)
     }
 
     fn load_with_guard(

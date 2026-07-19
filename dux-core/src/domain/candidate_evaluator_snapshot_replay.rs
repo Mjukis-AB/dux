@@ -76,7 +76,7 @@ pub(crate) fn verify_snapshot_candidate_evaluation(
         .ok_or(CandidateSnapshotReplayError::BatchMismatch)
 }
 
-fn replay_snapshot_candidate_evaluation(
+pub(crate) fn replay_snapshot_candidate_evaluation(
     document: &SnapshotReviewDocument,
     coverage: &ScanCoverage,
 ) -> Result<CandidateBatch, CandidateSnapshotReplayError> {

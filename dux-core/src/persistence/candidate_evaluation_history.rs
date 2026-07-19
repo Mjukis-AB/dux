@@ -3,8 +3,9 @@
 //! A pending row binds one succeeded immutable snapshot to exact evaluator,
 //! catalog, and context identities. Current production completion writes the
 //! pending identity and terminal result in one transaction; pending-only state
-//! is reserved for a future recovery protocol. No owner, heartbeat, or durable
-//! running state exists. A successful terminal transition inserts the complete
+//! is consumed only by the bounded restart-recovery seam, while startup
+//! scheduling and UI/FFI orchestration remain separate. No owner, heartbeat,
+//! or durable running state exists. A successful terminal transition inserts the complete
 //! bounded candidate batch atomically.
 
 use std::collections::{HashMap, HashSet};
@@ -294,9 +295,50 @@ pub(crate) struct CandidateEvaluationRecord {
     candidates: Vec<CompleteCandidateRecord>,
 }
 
+/// One bounded pending evaluator row selected for restart recovery. The row is
+/// an immutable discovery request only; it contains no plan, approval, or
+/// effect capability. `has_more` is a keyset-free bounded hint for a future
+/// idle caller and must not be treated as permission to process unbounded
+/// work in one turn.
+pub(crate) struct PendingCandidateEvaluation {
+    record: CandidateEvaluationRecord,
+    has_more: bool,
+}
+
+impl PendingCandidateEvaluation {
+    pub(crate) fn record(&self) -> &CandidateEvaluationRecord {
+        &self.record
+    }
+
+    pub(crate) const fn has_more(&self) -> bool {
+        self.has_more
+    }
+
+    fn new(record: CandidateEvaluationRecord, has_more: bool) -> Self {
+        Self { record, has_more }
+    }
+}
+
 impl CandidateEvaluationRecord {
     pub(crate) fn scan_id(&self) -> &ScanId {
         &self.request.scan_id
+    }
+
+    pub(crate) fn request_for_snapshot(
+        &self,
+        reference: &SnapshotReference,
+    ) -> Result<NewCandidateEvaluation, HistoryError> {
+        if self.request.snapshot_version != reference.version()
+            || self.request.snapshot_sha256 != reference.digest().bytes()
+            || self.request.scan_id != *reference.scan_id()
+        {
+            return Err(corrupt());
+        }
+        NewCandidateEvaluation::try_new(
+            self.request.identity.clone(),
+            reference,
+            self.request.scheduled_at,
+        )
     }
 
     pub(crate) const fn scheduled_at(&self) -> SystemTime {
@@ -322,7 +364,7 @@ impl CandidateEvaluationRecord {
         &self.candidates
     }
 
-    fn matches_current_scan_observation(&self, scan: &ScanRecord) -> bool {
+    pub(crate) fn matches_current_scan_observation(&self, scan: &ScanRecord) -> bool {
         let Some(snapshot) = scan.snapshot() else {
             return false;
         };
@@ -565,6 +607,49 @@ pub(super) fn load_candidate_evaluation(
 ) -> Result<Option<CandidateEvaluationRecord>, HistoryError> {
     run_bounded_evaluation_query(connection, || {
         load_candidate_evaluation_within_budget(connection, scan_id)
+    })
+}
+
+/// Select at most one pending evaluation in deterministic schedule/ID order.
+/// The two-row sentinel keeps discovery bounded while allowing the caller to
+/// yield and request another recovery turn. Payload validation is delegated to
+/// the exact-row decoder, so malformed state fails closed before any replay.
+pub(super) fn load_pending_candidate_evaluation(
+    connection: &Connection,
+) -> Result<Option<PendingCandidateEvaluation>, HistoryError> {
+    run_bounded_evaluation_query(connection, || {
+        let mut statement = connection
+            .prepare(
+                "SELECT typeof(scan_id), length(CAST(scan_id AS BLOB)), scan_id
+                 FROM candidate_evaluations
+                 WHERE status = 'pending'
+                 ORDER BY scheduled_at_unix_ms ASC, scan_id ASC
+                 LIMIT 2",
+            )
+            .map_err(map_query_sql_error)?;
+        let mut rows = statement.query([]).map_err(map_query_sql_error)?;
+        let mut scan_ids = Vec::new();
+        while let Some(row) = rows.next().map_err(map_query_sql_error)? {
+            let storage_type: String = row.get(0).map_err(map_query_sql_error)?;
+            let length: i64 = row.get(1).map_err(map_query_sql_error)?;
+            if storage_type != "text" || !(1..=MAX_STORED_ID_BYTES).contains(&length) {
+                return Err(corrupt());
+            }
+            let value: String = row.get(2).map_err(map_query_sql_error)?;
+            scan_ids.push(ScanId::new(value).map_err(|_| corrupt())?);
+        }
+        let Some(scan_id) = scan_ids.first() else {
+            return Ok(None);
+        };
+        let record =
+            load_candidate_evaluation_within_budget(connection, scan_id)?.ok_or_else(corrupt)?;
+        if record.status != CandidateEvaluationStatus::Pending {
+            return Err(corrupt());
+        }
+        Ok(Some(PendingCandidateEvaluation::new(
+            record,
+            scan_ids.len() > 1,
+        )))
     })
 }
 

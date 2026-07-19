@@ -26,7 +26,10 @@ use crate::tree::DiskTree;
 
 #[path = "candidate_evaluator_snapshot_replay.rs"]
 mod candidate_evaluator_snapshot_replay;
-pub(crate) use candidate_evaluator_snapshot_replay::verify_snapshot_candidate_evaluation;
+pub(crate) use candidate_evaluator_snapshot_replay::{
+    CandidateSnapshotReplayError, replay_snapshot_candidate_evaluation,
+    verify_snapshot_candidate_evaluation,
+};
 
 const BUNDLED_CATALOG: &[u8] = include_bytes!("../../catalogs/candidate-rules-v1.json");
 static VALIDATED_BUNDLED_CATALOG: OnceLock<Result<RuleRegistry, CandidateEvaluationError>> =

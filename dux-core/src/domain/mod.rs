@@ -38,11 +38,11 @@ pub(crate) use candidate::CandidateInput;
 pub use candidate::{BlockReason, Candidate, CandidateValidationError, Evidence, EvidenceKind};
 pub(crate) use candidate_evaluator::{
     CANDIDATE_CATALOG_SCHEMA_VERSION, CANDIDATE_CATALOG_SHA256, CANDIDATE_CONTEXT_FORMAT_VERSION,
-    CANDIDATE_EVALUATOR_REVISION, CandidateEvaluationError, MAX_EVALUATED_CANDIDATES,
-    candidate_evaluation_context_digest_for_observation,
+    CANDIDATE_EVALUATOR_REVISION, CandidateEvaluationError, CandidateSnapshotReplayError,
+    MAX_EVALUATED_CANDIDATES, candidate_evaluation_context_digest_for_observation,
     candidate_evaluation_context_digest_sha256, current_rust_target_candidate_id,
-    evaluate_completed_scan_candidates, validate_bundled_candidate_catalog,
-    verify_snapshot_candidate_evaluation,
+    evaluate_completed_scan_candidates, replay_snapshot_candidate_evaluation,
+    validate_bundled_candidate_catalog, verify_snapshot_candidate_evaluation,
 };
 pub use cleanup_plan::{
     CLEANUP_PLAN_VALIDITY, CleanupMode, CleanupPlan, CleanupPlanItem, CleanupPlanValidationError,

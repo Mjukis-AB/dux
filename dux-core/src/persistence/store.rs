@@ -9,9 +9,10 @@ use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 
 use super::candidate_evaluation_history::{
     CandidateEvaluationCompletion, CandidateEvaluationObservation, CandidateEvaluationRecord,
-    NewCandidateEvaluation, PreparedCandidateEvaluation, insert_candidate_evaluation_pending,
-    load_candidate_evaluation, load_candidate_evaluation_for_scan,
-    load_candidate_evaluation_within_budget, load_candidate_validation_source,
+    NewCandidateEvaluation, PendingCandidateEvaluation, PreparedCandidateEvaluation,
+    insert_candidate_evaluation_pending, load_candidate_evaluation,
+    load_candidate_evaluation_for_scan, load_candidate_evaluation_within_budget,
+    load_candidate_validation_source, load_pending_candidate_evaluation,
 };
 use super::candidate_history::{
     CandidateEvaluationTransition, CandidateHistoryStatus, CandidateReviewTransition,
@@ -38,7 +39,7 @@ use super::cleanup_history_query::{
 };
 use super::history::{
     HistoryError, HistoryErrorKind, NewScanRecord, PreparedNewScan, PreparedScanCompletion,
-    RecentScanRecords, ScanCompletionRecord, ScanRecord, insert_scan_started,
+    RecentScanRecords, ScanCompletionRecord, ScanRecord, ScanStatus, insert_scan_started,
     load_latest_available_snapshot_scan_record, load_recent_scan_records, load_scan_record,
     map_write_sql_error, update_scan_finished,
 };
@@ -1494,6 +1495,31 @@ impl StoreCoordinator {
     ) -> Result<Option<CandidateEvaluationRecord>, HistoryError> {
         let guard = self.lock_current_history_connection()?;
         load_candidate_evaluation(&guard.connection, scan_id)
+    }
+
+    /// Select one bounded pending evaluator row together with its exact
+    /// succeeded scan. Snapshot identity and scan terminal shape are checked
+    /// before the row leaves persistence; malformed or incompatible state is
+    /// returned as a typed failure rather than becoming replay authority.
+    pub(crate) fn load_pending_candidate_evaluation(
+        &self,
+    ) -> Result<Option<(ScanRecord, PendingCandidateEvaluation)>, HistoryError> {
+        let guard = self.lock_current_history_connection()?;
+        let Some(pending) = load_pending_candidate_evaluation(&guard.connection)? else {
+            return Ok(None);
+        };
+        let scan = load_scan_record(&guard.connection, pending.record().scan_id())?
+            .ok_or_else(|| HistoryError::new(HistoryErrorKind::CorruptData))?;
+        let Some(snapshot) = scan.snapshot() else {
+            return Err(HistoryError::new(HistoryErrorKind::CorruptData));
+        };
+        if scan.status() != ScanStatus::Succeeded
+            || snapshot.scan_id() != scan.id()
+            || pending.record().request_for_snapshot(snapshot).is_err()
+        {
+            return Err(HistoryError::new(HistoryErrorKind::CorruptData));
+        }
+        Ok(Some((scan, pending)))
     }
 
     /// Load the complete candidate-evaluation observation for one exact scan.

@@ -4824,6 +4824,16 @@ Tasks:
     cleanup UI remain open.
 - [ ] Add bounded pending-evaluation discovery and snapshot-backed restart
   recovery; malformed or incompatible state fails closed.
+  - [x] 2026-07-19 slice: add a bounded oldest-first pending-evaluation
+    discovery sentinel and a core recovery seam that replays only the exact
+    retained immutable snapshot. The request rechecks scan/snapshot identity,
+    evaluator/catalog/context digests, snapshot metadata, replay identity, and
+    candidate materialization limits before atomically completing the pending
+    row. Catalog/context drift becomes a typed terminal discovery failure;
+    malformed, missing, or unavailable snapshot state never becomes replay or
+    cleanup authority. The result is path-free and reports only recovered count
+    plus a bounded `has_more` hint; startup scheduling and FFI/Swift wiring
+    remain the next orchestration slice.
 - [ ] Wire deterministic evaluator → reviewed plan → journal → executor through
   the core engine and FFI/Swift while preserving generation, cancellation,
   recovery, and outcome-unknown fencing.
