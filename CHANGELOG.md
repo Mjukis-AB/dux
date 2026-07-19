@@ -1,5 +1,9 @@
 # Changelog
 
+- Added UniFFI contract v22's path-free permanent-cleanup kill-switch
+  get/set/reset records and typed errors. Rust remains the only semantic
+  validator; the switch can deny effects but cannot create plans or carry
+  cleanup authority. Regenerated the universal Debug bindings.
 - Integrated the private bounded pre/post capacity verifier with approved
   permanent-safe session orchestration. Verified signed available-space deltas
   are persisted only for matching stable-volume evidence; missing or conflicting

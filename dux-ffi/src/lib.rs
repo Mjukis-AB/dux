@@ -23,7 +23,11 @@ use dux_core::engine::{
     DurableCandidateStatus as CoreCandidateStatus, DurableCandidateSummary as CoreCandidateSummary,
     DurableObservedPath as CoreObservedPath, DurableScanIssueKind as CoreDurableScanIssueKind,
     DurableScanStatus as CoreDurableScanStatus, EngineConfig, EngineHandle, EngineOpenError,
-    HistoryMaintenanceStartOutcome, ScanCoverageDetailsError as CoreScanCoverageDetailsError,
+    HistoryMaintenanceStartOutcome, PermanentCleanupPolicy as CorePermanentCleanupPolicy,
+    PermanentCleanupPolicyError as CorePermanentCleanupPolicyError,
+    PermanentCleanupPolicySource as CorePermanentCleanupPolicySource,
+    PermanentCleanupPolicyUpdate as CorePermanentCleanupPolicyUpdate,
+    ScanCoverageDetailsError as CoreScanCoverageDetailsError,
     ScanHistoryError as CoreScanHistoryError,
     ScanRecoveryMaintenanceOutcome as CoreScanRecoveryOutcome, ScanRecoveryMaintenanceStartOutcome,
     ScanRootErrorKind, ScanTaskResult as CoreScanTaskResult, ScanTaskStatus as CoreScanTaskStatus,
@@ -64,7 +68,7 @@ use dux_core::{
     VolumeCapacity, VolumeId,
 };
 
-const FFI_CONTRACT_VERSION: u32 = 21;
+const FFI_CONTRACT_VERSION: u32 = 22;
 const FFI_RECORD_VERSION: u32 = 1;
 const SNAPSHOT_NODE_RECORD_VERSION: u32 = 2;
 const SCAN_EVENT_PAGE_LIMIT: u16 = 64;
@@ -234,6 +238,56 @@ pub struct PressurePolicyUpdate {
     pub record_version: u32,
     pub policy: PressurePolicyStatus,
     pub changed: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum PermanentCleanupPolicySource {
+    Default,
+    Stored,
+}
+
+/// Versioned, path-free global permanent-cleanup kill switch. It never
+/// selects a target or grants execution authority.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct PermanentCleanupPolicyStatus {
+    pub record_version: u32,
+    pub enabled: bool,
+    pub source: PermanentCleanupPolicySource,
+    pub revision: u64,
+    pub updated_at_unix_ms: Option<i64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct PermanentCleanupPolicyUpdate {
+    pub record_version: u32,
+    pub policy: PermanentCleanupPolicyStatus,
+    pub changed: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error, uniffi::Error)]
+pub enum PermanentCleanupPolicyError {
+    #[error("engine session is closed")]
+    Closed,
+    #[error("permanent-cleanup settings are corrupt")]
+    CorruptData,
+    #[error("permanent-cleanup settings are unavailable")]
+    Unavailable,
+    #[error("the settings write outcome could not be proven")]
+    OutcomeUnknown,
+    #[error("the permanent-cleanup policy revision cannot advance")]
+    RevisionExhausted,
+    #[error("the system clock cannot be represented by the settings store")]
+    InvalidClock,
+    #[error("the durable store schema is newer than this engine")]
+    IncompatibleSchema,
+    #[error("the durable store is busy")]
+    Busy,
+    #[error("the durable store is unsafe")]
+    UnsafeStorage,
+    #[error("the settings query exceeded its fixed resource budget")]
+    BudgetExceeded,
+    #[error("engine settings state is unavailable")]
+    InternalState,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error, uniffi::Error)]
@@ -2022,6 +2076,42 @@ impl DuxEngine {
         })
     }
 
+    /// Load the path-free global permanent-cleanup kill switch. This setting
+    /// can only deny effects; it cannot create a plan or authorize a target.
+    pub fn get_permanent_cleanup_policy(
+        &self,
+    ) -> Result<PermanentCleanupPolicyStatus, PermanentCleanupPolicyError> {
+        self.with_permanent_cleanup_engine(|engine| {
+            engine
+                .permanent_cleanup_policy()
+                .map_err(map_permanent_cleanup_policy_error)
+                .and_then(permanent_cleanup_policy_status)
+        })
+    }
+
+    pub fn set_permanent_cleanup_enabled(
+        &self,
+        enabled: bool,
+    ) -> Result<PermanentCleanupPolicyUpdate, PermanentCleanupPolicyError> {
+        self.with_permanent_cleanup_engine(|engine| {
+            engine
+                .set_permanent_cleanup_enabled(enabled)
+                .map_err(map_permanent_cleanup_policy_error)
+                .and_then(permanent_cleanup_policy_update)
+        })
+    }
+
+    pub fn reset_permanent_cleanup(
+        &self,
+    ) -> Result<PermanentCleanupPolicyUpdate, PermanentCleanupPolicyError> {
+        self.with_permanent_cleanup_engine(|engine| {
+            engine
+                .reset_permanent_cleanup()
+                .map_err(map_permanent_cleanup_policy_error)
+                .and_then(permanent_cleanup_policy_update)
+        })
+    }
+
     pub fn start_scan(&self, request: ScanRequest) -> Result<ScanStart, ScanError> {
         if request.record_version != FFI_RECORD_VERSION {
             return Err(ScanError::InvalidRecordVersion);
@@ -2329,6 +2419,22 @@ impl DuxEngine {
         match &*state {
             EngineState::Open(engine) => operation(engine),
             EngineState::Closing | EngineState::Closed { .. } => Err(PressurePolicyError::Closed),
+        }
+    }
+
+    fn with_permanent_cleanup_engine<T>(
+        &self,
+        operation: impl FnOnce(&EngineHandle) -> Result<T, PermanentCleanupPolicyError>,
+    ) -> Result<T, PermanentCleanupPolicyError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| PermanentCleanupPolicyError::InternalState)?;
+        match &*state {
+            EngineState::Open(engine) => operation(engine),
+            EngineState::Closing | EngineState::Closed { .. } => {
+                Err(PermanentCleanupPolicyError::Closed)
+            }
         }
     }
 
@@ -3845,6 +3951,81 @@ fn pressure_policy_time_ms(value: SystemTime) -> Result<i64, PressurePolicyError
     .map_err(|_| PressurePolicyError::InternalState)
 }
 
+fn map_permanent_cleanup_policy_error(
+    error: CorePermanentCleanupPolicyError,
+) -> PermanentCleanupPolicyError {
+    match error {
+        CorePermanentCleanupPolicyError::Closed => PermanentCleanupPolicyError::Closed,
+        CorePermanentCleanupPolicyError::RevisionExhausted => {
+            PermanentCleanupPolicyError::RevisionExhausted
+        }
+        CorePermanentCleanupPolicyError::InvalidClock => PermanentCleanupPolicyError::InvalidClock,
+        CorePermanentCleanupPolicyError::IncompatibleSchema => {
+            PermanentCleanupPolicyError::IncompatibleSchema
+        }
+        CorePermanentCleanupPolicyError::Busy => PermanentCleanupPolicyError::Busy,
+        CorePermanentCleanupPolicyError::UnsafeStorage => {
+            PermanentCleanupPolicyError::UnsafeStorage
+        }
+        CorePermanentCleanupPolicyError::QueryLimitExceeded => {
+            PermanentCleanupPolicyError::BudgetExceeded
+        }
+        CorePermanentCleanupPolicyError::CorruptData => PermanentCleanupPolicyError::CorruptData,
+        CorePermanentCleanupPolicyError::Unavailable => PermanentCleanupPolicyError::Unavailable,
+        CorePermanentCleanupPolicyError::OutcomeUnknown => {
+            PermanentCleanupPolicyError::OutcomeUnknown
+        }
+        CorePermanentCleanupPolicyError::InternalState => {
+            PermanentCleanupPolicyError::InternalState
+        }
+        _ => PermanentCleanupPolicyError::InternalState,
+    }
+}
+
+fn permanent_cleanup_policy_status(
+    policy: CorePermanentCleanupPolicy,
+) -> Result<PermanentCleanupPolicyStatus, PermanentCleanupPolicyError> {
+    let updated_at_unix_ms = policy
+        .updated_at
+        .map(permanent_cleanup_policy_time_ms)
+        .transpose()?;
+    if (policy.revision == 0) != updated_at_unix_ms.is_none()
+        || (policy.revision == 0 && policy.source != CorePermanentCleanupPolicySource::Default)
+    {
+        return Err(PermanentCleanupPolicyError::InternalState);
+    }
+    Ok(PermanentCleanupPolicyStatus {
+        record_version: FFI_RECORD_VERSION,
+        enabled: policy.enabled,
+        source: match policy.source {
+            CorePermanentCleanupPolicySource::Default => PermanentCleanupPolicySource::Default,
+            CorePermanentCleanupPolicySource::Stored => PermanentCleanupPolicySource::Stored,
+        },
+        revision: policy.revision,
+        updated_at_unix_ms,
+    })
+}
+
+fn permanent_cleanup_policy_update(
+    update: CorePermanentCleanupPolicyUpdate,
+) -> Result<PermanentCleanupPolicyUpdate, PermanentCleanupPolicyError> {
+    Ok(PermanentCleanupPolicyUpdate {
+        record_version: FFI_RECORD_VERSION,
+        policy: permanent_cleanup_policy_status(update.policy)?,
+        changed: update.changed,
+    })
+}
+
+fn permanent_cleanup_policy_time_ms(value: SystemTime) -> Result<i64, PermanentCleanupPolicyError> {
+    i64::try_from(
+        value
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| PermanentCleanupPolicyError::InternalState)?
+            .as_millis(),
+    )
+    .map_err(|_| PermanentCleanupPolicyError::InternalState)
+}
+
 fn map_volume_pressure(pressure: CoreDiskPressure) -> VolumePressure {
     match pressure {
         CoreDiskPressure::Healthy => VolumePressure::Healthy,
@@ -3986,10 +4167,10 @@ mod tests {
     }
 
     #[test]
-    fn reports_contract_twenty_and_preserves_legacy_formatting() {
+    fn reports_contract_twenty_two_and_preserves_legacy_formatting() {
         let _guard = ENGINE_TEST_LOCK.lock().unwrap();
         let (_temp, engine) = engine();
-        assert_eq!(library_version().ffi_contract_version, 20);
+        assert_eq!(library_version().ffi_contract_version, 22);
         assert_eq!(engine.library_version().unwrap(), library_version());
         assert_eq!(engine.format_size(1536).unwrap().display, "1.5 KB");
         assert!(engine.close());
@@ -4863,6 +5044,57 @@ mod tests {
         assert_eq!(
             engine.reset_disk_pressure_policy(),
             Err(PressurePolicyError::Closed)
+        );
+    }
+
+    #[test]
+    fn permanent_cleanup_policy_get_set_reset_is_versioned_typed_and_path_free() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (_temp, engine) = engine();
+        let initial = engine.get_permanent_cleanup_policy().unwrap();
+        assert_eq!(initial.record_version, 1);
+        assert!(initial.enabled);
+        assert_eq!(initial.source, PermanentCleanupPolicySource::Default);
+        assert_eq!(initial.revision, 0);
+        assert_eq!(initial.updated_at_unix_ms, None);
+
+        let disabled = engine.set_permanent_cleanup_enabled(false).unwrap();
+        assert!(disabled.changed);
+        assert!(!disabled.policy.enabled);
+        assert_eq!(disabled.policy.source, PermanentCleanupPolicySource::Stored);
+        assert_eq!(disabled.policy.revision, 1);
+        assert!(disabled.policy.updated_at_unix_ms.is_some());
+        assert_eq!(
+            engine.get_permanent_cleanup_policy().unwrap(),
+            disabled.policy
+        );
+
+        let exact = engine.set_permanent_cleanup_enabled(false).unwrap();
+        assert!(!exact.changed);
+        assert_eq!(exact.policy, disabled.policy);
+
+        let reset = engine.reset_permanent_cleanup().unwrap();
+        assert!(reset.changed);
+        assert!(reset.policy.enabled);
+        assert_eq!(reset.policy.source, PermanentCleanupPolicySource::Default);
+        assert_eq!(reset.policy.revision, 2);
+        assert!(reset.policy.updated_at_unix_ms.is_some());
+        let exact_reset = engine.reset_permanent_cleanup().unwrap();
+        assert!(!exact_reset.changed);
+        assert_eq!(exact_reset.policy, reset.policy);
+
+        assert!(engine.close());
+        assert_eq!(
+            engine.get_permanent_cleanup_policy(),
+            Err(PermanentCleanupPolicyError::Closed)
+        );
+        assert_eq!(
+            engine.set_permanent_cleanup_enabled(false),
+            Err(PermanentCleanupPolicyError::Closed)
+        );
+        assert_eq!(
+            engine.reset_permanent_cleanup(),
+            Err(PermanentCleanupPolicyError::Closed)
         );
     }
 

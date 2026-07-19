@@ -609,6 +609,12 @@ public protocol DuxEngineProtocol: AnyObject, Sendable {
 
     func getDiskPressurePolicy() throws  -> PressurePolicyStatus
 
+    /**
+     * Load the path-free global permanent-cleanup kill switch. This setting
+     * can only deny effects; it cannot create a plan or authorize a target.
+     */
+    func getPermanentCleanupPolicy() throws  -> PermanentCleanupPolicyStatus
+
     func libraryVersion() throws  -> LibraryVersion
 
     func observeStartupVolume(observation: StartupVolumeObservation) throws  -> StartupVolumeStatus
@@ -622,6 +628,8 @@ public protocol DuxEngineProtocol: AnyObject, Sendable {
 
     func resetDiskPressurePolicy() throws  -> PressurePolicyUpdate
 
+    func resetPermanentCleanup() throws  -> PermanentCleanupPolicyUpdate
+
     /**
      * Return one exact, bounded page of durable coverage issues. This reads
      * history metadata only and remains available without a retained snapshot.
@@ -629,6 +637,8 @@ public protocol DuxEngineProtocol: AnyObject, Sendable {
     func scanCoverageDetails(scanId: String, request: ScanCoverageDetailsRequest) throws  -> ScanCoverageDetailsPage
 
     func setDiskPressurePolicy(input: PressurePolicyInput) throws  -> PressurePolicyUpdate
+
+    func setPermanentCleanupEnabled(enabled: Bool) throws  -> PermanentCleanupPolicyUpdate
 
     func startMaintenance(kind: MaintenanceKind) throws  -> MaintenanceStart
 
@@ -782,6 +792,18 @@ open func getDiskPressurePolicy()throws  -> PressurePolicyStatus  {
 })
 }
 
+    /**
+     * Load the path-free global permanent-cleanup kill switch. This setting
+     * can only deny effects; it cannot create a plan or authorize a target.
+     */
+open func getPermanentCleanupPolicy()throws  -> PermanentCleanupPolicyStatus  {
+    return try  FfiConverterTypePermanentCleanupPolicyStatus_lift(try rustCallWithError(FfiConverterTypePermanentCleanupPolicyError_lift) {
+    uniffi_dux_ffi_fn_method_duxengine_get_permanent_cleanup_policy(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
 open func libraryVersion()throws  -> LibraryVersion  {
     return try  FfiConverterTypeLibraryVersion_lift(try rustCallWithError(FfiConverterTypeEngineError_lift) {
     uniffi_dux_ffi_fn_method_duxengine_library_version(
@@ -821,6 +843,14 @@ open func resetDiskPressurePolicy()throws  -> PressurePolicyUpdate  {
 })
 }
 
+open func resetPermanentCleanup()throws  -> PermanentCleanupPolicyUpdate  {
+    return try  FfiConverterTypePermanentCleanupPolicyUpdate_lift(try rustCallWithError(FfiConverterTypePermanentCleanupPolicyError_lift) {
+    uniffi_dux_ffi_fn_method_duxengine_reset_permanent_cleanup(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
     /**
      * Return one exact, bounded page of durable coverage issues. This reads
      * history metadata only and remains available without a retained snapshot.
@@ -840,6 +870,15 @@ open func setDiskPressurePolicy(input: PressurePolicyInput)throws  -> PressurePo
     uniffi_dux_ffi_fn_method_duxengine_set_disk_pressure_policy(
             self.uniffiCloneHandle(),
         FfiConverterTypePressurePolicyInput_lower(input),$0
+    )
+})
+}
+
+open func setPermanentCleanupEnabled(enabled: Bool)throws  -> PermanentCleanupPolicyUpdate  {
+    return try  FfiConverterTypePermanentCleanupPolicyUpdate_lift(try rustCallWithError(FfiConverterTypePermanentCleanupPolicyError_lift) {
+    uniffi_dux_ffi_fn_method_duxengine_set_permanent_cleanup_enabled(
+            self.uniffiCloneHandle(),
+        FfiConverterBool.lower(enabled),$0
     )
 })
 }
@@ -3038,6 +3077,134 @@ public func FfiConverterTypeMaintenanceStart_lift(_ buf: RustBuffer) throws -> M
 #endif
 public func FfiConverterTypeMaintenanceStart_lower(_ value: MaintenanceStart) -> RustBuffer {
     return FfiConverterTypeMaintenanceStart.lower(value)
+}
+
+
+/**
+ * Versioned, path-free global permanent-cleanup kill switch. It never
+ * selects a target or grants execution authority.
+ */
+public struct PermanentCleanupPolicyStatus: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let enabled: Bool
+    public let source: PermanentCleanupPolicySource
+    public let revision: UInt64
+    public let updatedAtUnixMs: Int64?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, enabled: Bool, source: PermanentCleanupPolicySource, revision: UInt64, updatedAtUnixMs: Int64?) {
+        self.recordVersion = recordVersion
+        self.enabled = enabled
+        self.source = source
+        self.revision = revision
+        self.updatedAtUnixMs = updatedAtUnixMs
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension PermanentCleanupPolicyStatus: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePermanentCleanupPolicyStatus: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PermanentCleanupPolicyStatus {
+        return
+            try PermanentCleanupPolicyStatus(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                enabled: FfiConverterBool.read(from: &buf),
+                source: FfiConverterTypePermanentCleanupPolicySource.read(from: &buf),
+                revision: FfiConverterUInt64.read(from: &buf),
+                updatedAtUnixMs: FfiConverterOptionInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PermanentCleanupPolicyStatus, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterBool.write(value.enabled, into: &buf)
+        FfiConverterTypePermanentCleanupPolicySource.write(value.source, into: &buf)
+        FfiConverterUInt64.write(value.revision, into: &buf)
+        FfiConverterOptionInt64.write(value.updatedAtUnixMs, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePermanentCleanupPolicyStatus_lift(_ buf: RustBuffer) throws -> PermanentCleanupPolicyStatus {
+    return try FfiConverterTypePermanentCleanupPolicyStatus.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePermanentCleanupPolicyStatus_lower(_ value: PermanentCleanupPolicyStatus) -> RustBuffer {
+    return FfiConverterTypePermanentCleanupPolicyStatus.lower(value)
+}
+
+
+public struct PermanentCleanupPolicyUpdate: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let policy: PermanentCleanupPolicyStatus
+    public let changed: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, policy: PermanentCleanupPolicyStatus, changed: Bool) {
+        self.recordVersion = recordVersion
+        self.policy = policy
+        self.changed = changed
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension PermanentCleanupPolicyUpdate: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePermanentCleanupPolicyUpdate: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PermanentCleanupPolicyUpdate {
+        return
+            try PermanentCleanupPolicyUpdate(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                policy: FfiConverterTypePermanentCleanupPolicyStatus.read(from: &buf),
+                changed: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PermanentCleanupPolicyUpdate, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterTypePermanentCleanupPolicyStatus.write(value.policy, into: &buf)
+        FfiConverterBool.write(value.changed, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePermanentCleanupPolicyUpdate_lift(_ buf: RustBuffer) throws -> PermanentCleanupPolicyUpdate {
+    return try FfiConverterTypePermanentCleanupPolicyUpdate.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePermanentCleanupPolicyUpdate_lower(_ value: PermanentCleanupPolicyUpdate) -> RustBuffer {
+    return FfiConverterTypePermanentCleanupPolicyUpdate.lower(value)
 }
 
 
@@ -7173,6 +7340,203 @@ public func FfiConverterTypeMaintenanceStartDisposition_lower(_ value: Maintenan
 
 
 
+public enum PermanentCleanupPolicyError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
+
+
+
+    case Closed
+    case CorruptData
+    case Unavailable
+    case OutcomeUnknown
+    case RevisionExhausted
+    case InvalidClock
+    case IncompatibleSchema
+    case Busy
+    case UnsafeStorage
+    case BudgetExceeded
+    case InternalState
+
+
+
+
+
+
+    public var errorDescription: String? {
+        String(reflecting: self)
+    }
+
+}
+
+#if compiler(>=6)
+extension PermanentCleanupPolicyError: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePermanentCleanupPolicyError: FfiConverterRustBuffer {
+    typealias SwiftType = PermanentCleanupPolicyError
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PermanentCleanupPolicyError {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+
+
+
+        case 1: return .Closed
+        case 2: return .CorruptData
+        case 3: return .Unavailable
+        case 4: return .OutcomeUnknown
+        case 5: return .RevisionExhausted
+        case 6: return .InvalidClock
+        case 7: return .IncompatibleSchema
+        case 8: return .Busy
+        case 9: return .UnsafeStorage
+        case 10: return .BudgetExceeded
+        case 11: return .InternalState
+
+         default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: PermanentCleanupPolicyError, into buf: inout [UInt8]) {
+        switch value {
+
+
+
+
+
+        case .Closed:
+            writeInt(&buf, Int32(1))
+
+
+        case .CorruptData:
+            writeInt(&buf, Int32(2))
+
+
+        case .Unavailable:
+            writeInt(&buf, Int32(3))
+
+
+        case .OutcomeUnknown:
+            writeInt(&buf, Int32(4))
+
+
+        case .RevisionExhausted:
+            writeInt(&buf, Int32(5))
+
+
+        case .InvalidClock:
+            writeInt(&buf, Int32(6))
+
+
+        case .IncompatibleSchema:
+            writeInt(&buf, Int32(7))
+
+
+        case .Busy:
+            writeInt(&buf, Int32(8))
+
+
+        case .UnsafeStorage:
+            writeInt(&buf, Int32(9))
+
+
+        case .BudgetExceeded:
+            writeInt(&buf, Int32(10))
+
+
+        case .InternalState:
+            writeInt(&buf, Int32(11))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePermanentCleanupPolicyError_lift(_ buf: RustBuffer) throws -> PermanentCleanupPolicyError {
+    return try FfiConverterTypePermanentCleanupPolicyError.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePermanentCleanupPolicyError_lower(_ value: PermanentCleanupPolicyError) -> RustBuffer {
+    return FfiConverterTypePermanentCleanupPolicyError.lower(value)
+}
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum PermanentCleanupPolicySource: Equatable, Hashable {
+
+    case `default`
+    case stored
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension PermanentCleanupPolicySource: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePermanentCleanupPolicySource: FfiConverterRustBuffer {
+    typealias SwiftType = PermanentCleanupPolicySource
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PermanentCleanupPolicySource {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .`default`
+
+        case 2: return .stored
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: PermanentCleanupPolicySource, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .`default`:
+            writeInt(&buf, Int32(1))
+
+
+        case .stored:
+            writeInt(&buf, Int32(2))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePermanentCleanupPolicySource_lift(_ buf: RustBuffer) throws -> PermanentCleanupPolicySource {
+    return try FfiConverterTypePermanentCleanupPolicySource.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePermanentCleanupPolicySource_lower(_ value: PermanentCleanupPolicySource) -> RustBuffer {
+    return FfiConverterTypePermanentCleanupPolicySource.lower(value)
+}
+
+
+
 public enum PressurePolicyError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
 
 
@@ -10698,6 +11062,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_dux_ffi_checksum_method_duxengine_get_disk_pressure_policy() != 6278) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_dux_ffi_checksum_method_duxengine_get_permanent_cleanup_policy() != 39054) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_dux_ffi_checksum_method_duxengine_library_version() != 14309) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -10710,10 +11077,16 @@ private let initializationResult: InitializationResult = {
     if (uniffi_dux_ffi_checksum_method_duxengine_reset_disk_pressure_policy() != 23462) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_dux_ffi_checksum_method_duxengine_reset_permanent_cleanup() != 25182) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_dux_ffi_checksum_method_duxengine_scan_coverage_details() != 53756) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_set_disk_pressure_policy() != 62356) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_duxengine_set_permanent_cleanup_enabled() != 50449) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_start_maintenance() != 4775) {

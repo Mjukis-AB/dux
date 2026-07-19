@@ -4777,6 +4777,14 @@ Tasks:
     typed settings key; the journal rechecks it under the cleanup lock before
     `effect_started`, so it can only deny an effect. FFI/Swift settings control
     and richer exclusion presentation remain open.
+  - [x] 2026-07-19 slice: expose the path-free global permanent-cleanup kill
+    switch through UniFFI contract v22. Versioned get/set/reset records carry
+    only enabled state, Default/Stored provenance, monotonic revision, and
+    optional update time; Rust remains the semantic validator and the switch
+    can only deny effects. Closed engines, malformed state, storage failures,
+    and write uncertainty map to typed errors. The generated Swift bindings
+    were regenerated from the universal Debug XCFramework; exclusions and
+    Swift settings presentation remain separate follow-up work.
 - [ ] Add partial failure, retry, cancellation, and changed-since-plan UI.
 - [ ] Add bounded pending-evaluation discovery and snapshot-backed restart
   recovery; malformed or incompatible state fails closed.
