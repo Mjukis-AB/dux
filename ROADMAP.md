@@ -4537,7 +4537,13 @@ Tasks:
     duplicate-ID, and mixed-scan inputs fail closed. The result retains member
     and selected indices for a future planner but cannot construct a plan,
     persist state, cross FFI, approve, schedule, or mutate anything.
-- [ ] Implement exact-path plan review.
+- [x] Implement exact-path plan review. Completed 2026-07-19: the planner
+  captures bounded no-follow live evidence, binds deterministic grouping and
+  protected-policy witnesses, constructs only compatible domain plans with
+  matching rule-scope authorizations, and issues an expiry-bound approval
+  capability that revalidates every retained grant. The review and approval
+  types remain non-Clone, path-private, and cannot reach persistence, FFI,
+  scheduling, or filesystem mutation; those are separate executor boundaries.
   - [x] 2026-07-19 slice: add the sealed permanent-safe plan construction
     checkpoint. Exact review now retains the selected candidate facts and can
     consume exactly one matching trusted rule-scope authorization per live

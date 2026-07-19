@@ -178,6 +178,11 @@ All notable changes to DUX will be documented in this file.
   parent ownership coalesces only same-rule findings, and every ambiguous or
   malformed overlap remains unresolved with zero actionable bytes. The review
   retains the grouping witness instead of recomputing selections downstream.
+- Completed the exact-path plan-review boundary. Bounded no-follow evidence,
+  protected-policy observations, deterministic grouping, matching rule-scope
+  grants, frozen expiry, and explicit approval are now joined in private
+  planner capabilities. They remain non-Clone and cannot persist, cross FFI,
+  schedule, or mutate; those authorities stay in the executor milestones.
 - Exact-path reviews now retain the immutable candidate-grouping and overlap
   witness that selected their items, preventing downstream reconstruction from
   a reordered candidate slice while keeping approval and execution sealed.
