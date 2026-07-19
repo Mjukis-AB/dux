@@ -83,34 +83,43 @@ pub(crate) fn execute_rust_target_contents(
         .ok_or(PermanentSafeExecutionError::Admission(
             HistoryErrorKind::InvalidInput,
         ))?;
-    let witness = session
-        .revalidated_rust_target_effect(item_ordinal, path_ordinal, now)
-        .map_err(|error| {
-            PermanentSafeExecutionError::Admission(match error {
-                crate::planner::ExactPathHandoffError::Journal(error) => error.kind,
-                crate::planner::ExactPathHandoffError::Approval(_)
-                | crate::planner::ExactPathHandoffError::RuleEvidence(_) => {
-                    HistoryErrorKind::InvalidTransition
-                }
-            })
-        })?;
-    let claim = session.claim_mut();
-    claim
-        .validate_planned_path(item_ordinal, path_ordinal, &expected_path)
-        .map_err(|error| PermanentSafeExecutionError::Admission(error.kind))?;
-    claim
-        .begin_validation(item_ordinal, path_ordinal)
-        .map_err(|error| PermanentSafeExecutionError::Admission(error.kind))?;
-    if let Err(error) = claim.validate_permanent_safe_effect(item_ordinal, path_ordinal) {
-        let _ = claim.finish_validation(
-            item_ordinal,
-            path_ordinal,
-            crate::persistence::ValidationOutcome::Rejected,
-            Some("permanent_safe_effect_mode_mismatch"),
-            now,
-        );
-        return Err(PermanentSafeExecutionError::Admission(error.kind));
+    {
+        let claim = session.claim_mut();
+        claim
+            .validate_planned_path(item_ordinal, path_ordinal, &expected_path)
+            .map_err(|error| PermanentSafeExecutionError::Admission(error.kind))?;
+        claim
+            .begin_validation(item_ordinal, path_ordinal)
+            .map_err(|error| PermanentSafeExecutionError::Admission(error.kind))?;
+        if let Err(error) = claim.validate_permanent_safe_effect(item_ordinal, path_ordinal) {
+            let _ = claim.finish_validation(
+                item_ordinal,
+                path_ordinal,
+                crate::persistence::ValidationOutcome::Rejected,
+                Some("permanent_safe_effect_mode_mismatch"),
+                now,
+            );
+            return Err(PermanentSafeExecutionError::Admission(error.kind));
+        }
     }
+
+    // Validation is now durable before the live witness is rebuilt. This is
+    // important for changed/expired targets: a rejection must not leave a
+    // planned row looking executable on restart.
+    let witness = match session.revalidated_rust_target_effect(item_ordinal, path_ordinal, now) {
+        Ok(witness) => witness,
+        Err(error) => {
+            let (outcome, category) = validation_failure(&error);
+            let claim = session.claim_mut();
+            claim
+                .finish_validation(item_ordinal, path_ordinal, outcome, Some(category), now)
+                .map_err(|journal_error| {
+                    PermanentSafeExecutionError::Admission(journal_error.kind)
+                })?;
+            return Err(map_handoff_error(error));
+        }
+    };
+    let claim = session.claim_mut();
     if cancelled() {
         claim
             .finish_validation(
@@ -135,6 +144,35 @@ pub(crate) fn execute_rust_target_contents(
 
     let result = driver.remove_contents(&witness, cancelled);
     settle_effect(claim, receipt, result, now)
+}
+
+fn map_handoff_error(error: crate::planner::ExactPathHandoffError) -> PermanentSafeExecutionError {
+    PermanentSafeExecutionError::Admission(match error {
+        crate::planner::ExactPathHandoffError::Journal(error) => error.kind,
+        crate::planner::ExactPathHandoffError::Approval(_)
+        | crate::planner::ExactPathHandoffError::RuleEvidence(_) => {
+            HistoryErrorKind::InvalidTransition
+        }
+    })
+}
+
+fn validation_failure(
+    error: &crate::planner::ExactPathHandoffError,
+) -> (crate::persistence::ValidationOutcome, &'static str) {
+    match error {
+        crate::planner::ExactPathHandoffError::RuleEvidence(_) => (
+            crate::persistence::ValidationOutcome::ChangedSincePlan,
+            "permanent_safe_target_changed",
+        ),
+        crate::planner::ExactPathHandoffError::Approval(_) => (
+            crate::persistence::ValidationOutcome::Rejected,
+            "permanent_safe_approval_stale",
+        ),
+        crate::planner::ExactPathHandoffError::Journal(_) => (
+            crate::persistence::ValidationOutcome::Unavailable,
+            "permanent_safe_journal_unavailable",
+        ),
+    }
 }
 
 fn settle_effect(
@@ -504,6 +542,42 @@ mod tests {
         assert_eq!(PRESERVED_MARKER, b"CACHEDIR.TAG");
         assert_eq!(MAX_DESCENDANT_DEPTH, 64);
         assert_eq!(MAX_DESCENDANT_ENTRIES, 16_384);
+    }
+
+    #[test]
+    fn witness_failures_map_to_terminal_validation_outcomes() {
+        let changed = crate::planner::ExactPathHandoffError::RuleEvidence(
+            crate::planner::RustTargetLiveValidationError::ChangedDuringValidation,
+        );
+        assert_eq!(
+            validation_failure(&changed),
+            (
+                crate::persistence::ValidationOutcome::ChangedSincePlan,
+                "permanent_safe_target_changed",
+            )
+        );
+
+        let stale = crate::planner::ExactPathHandoffError::Approval(
+            crate::planner::ExactPathApprovalError::Expired,
+        );
+        assert_eq!(
+            validation_failure(&stale),
+            (
+                crate::persistence::ValidationOutcome::Rejected,
+                "permanent_safe_approval_stale",
+            )
+        );
+
+        let journal = crate::planner::ExactPathHandoffError::Journal(
+            crate::persistence::HistoryError::new(HistoryErrorKind::DatabaseUnavailable),
+        );
+        assert_eq!(
+            validation_failure(&journal),
+            (
+                crate::persistence::ValidationOutcome::Unavailable,
+                "permanent_safe_journal_unavailable",
+            )
+        );
     }
 
     #[cfg(unix)]

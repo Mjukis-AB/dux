@@ -4645,6 +4645,11 @@ Tasks:
     verifies exact URL delivery, one-shot consumption, malformed-path refusal,
     and no retry. `MacOSTrashPlatformDriver` is compiled but not registered.
 - [ ] Implement permanent-safe executor for approved rules.
+  - [x] 2026-07-19 slice: fence journal validation before rebuilding the
+    live Rust-target witness. Changed targets, stale approvals, and journal
+    revalidation failures now settle the path out of `Planned` with bounded
+    validation outcomes instead of leaving an apparently executable row for
+    recovery; no effect starts on those paths.
   - [x] 2026-07-19 slice: add the private descriptor-relative Rust-target
     contents executor boundary. It inventories descendants before mutation,
     preserves the direct `CACHEDIR.TAG` marker, rejects symlinks, special files,

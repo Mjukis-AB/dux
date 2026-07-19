@@ -1,5 +1,10 @@
 # Changelog
 
+- Hardened the permanent-safe executor admission lifecycle. Journal validation
+  is durable before live Rust-target evidence is rebuilt, and changed targets,
+  stale approvals, or journal failures now receive bounded terminal validation
+  outcomes instead of remaining in `Planned`; no filesystem effect starts on
+  those rejection paths.
 - Bounded interactive Home scans to 200,000 retained nodes and a single
   traversal worker. The scanner now limits children before they enter jwalk's
   queue and returns a truthful partial `IssueLimitReached` result at the bound,
