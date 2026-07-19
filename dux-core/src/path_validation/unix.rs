@@ -25,7 +25,9 @@ const REGULAR_FILE_FLAGS: OFlag = OFlag::O_RDONLY
     .union(OFlag::O_NONBLOCK)
     .union(OFlag::O_CLOEXEC);
 
-pub(super) fn capture_root(path: &Path) -> Result<PlatformRootSnapshot, CanonicalPathError> {
+fn capture_root_descriptor(
+    path: &Path,
+) -> Result<(PlatformRootSnapshot, OwnedFd), CanonicalPathError> {
     let mut directory = open(Path::new("/"), DIRECTORY_FLAGS, Mode::empty())
         .map_err(|error| map_nix_error(0, error))?;
     let mut final_stat = fstat(&directory).map_err(|error| map_nix_error(0, error))?;
@@ -61,24 +63,32 @@ pub(super) fn capture_root(path: &Path) -> Result<PlatformRootSnapshot, Canonica
         return Err(CanonicalPathError::ScanRootNotDirectory);
     }
 
-    Ok(PlatformRootSnapshot {
-        identity: identity(&final_stat),
-        ancestors,
-    })
+    Ok((
+        PlatformRootSnapshot {
+            identity: identity(&final_stat),
+            ancestors,
+            owner_uid: Some(final_stat.st_uid),
+        },
+        directory,
+    ))
+}
+
+pub(super) fn capture_root(path: &Path) -> Result<PlatformRootSnapshot, CanonicalPathError> {
+    capture_root_descriptor(path).map(|(root, _)| root)
 }
 
 pub(super) fn capture_boundary(
     path: &Path,
 ) -> Result<PlatformBoundarySnapshot, CanonicalPathError> {
-    let root = capture_root(path)?;
-    let mount = capture_mount(path)?;
+    let (root, directory) = capture_root_descriptor(path)?;
+    let mount = capture_mount_descriptor(&directory)?;
     Ok(PlatformBoundarySnapshot { root, mount })
 }
 
 #[cfg(target_os = "macos")]
-fn capture_mount(path: &Path) -> Result<FilesystemMountIdentity, CanonicalPathError> {
-    let directory =
-        open(path, DIRECTORY_FLAGS, Mode::empty()).map_err(|error| map_nix_error(0, error))?;
+fn capture_mount_descriptor(
+    directory: &OwnedFd,
+) -> Result<FilesystemMountIdentity, CanonicalPathError> {
     let mut stats = std::mem::MaybeUninit::<nix::libc::statfs>::uninit();
     // SAFETY: `directory` is a retained no-follow directory descriptor and
     // `stats` points to writable storage for the OS call.
@@ -136,9 +146,9 @@ fn macos_fsid_values(value: nix::libc::fsid_t) -> Result<[u64; 2], CanonicalPath
 }
 
 #[cfg(target_os = "linux")]
-fn capture_mount(path: &Path) -> Result<FilesystemMountIdentity, CanonicalPathError> {
-    let directory =
-        open(path, DIRECTORY_FLAGS, Mode::empty()).map_err(|error| map_nix_error(0, error))?;
+fn capture_mount_descriptor(
+    directory: &OwnedFd,
+) -> Result<FilesystemMountIdentity, CanonicalPathError> {
     let stats = nix::sys::statfs::fstatfs(&directory).map_err(|error| map_nix_error(0, error))?;
     let mount_id = capture_linux_mount_id(&directory)?;
     let filesystem_id = stats.filesystem_id();
@@ -182,7 +192,9 @@ fn capture_linux_mount_id(directory: &OwnedFd) -> Result<u64, CanonicalPathError
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn capture_mount(_path: &Path) -> Result<FilesystemMountIdentity, CanonicalPathError> {
+fn capture_mount_descriptor(
+    _directory: &OwnedFd,
+) -> Result<FilesystemMountIdentity, CanonicalPathError> {
     Err(CanonicalPathError::UnsupportedPlatform)
 }
 

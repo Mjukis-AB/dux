@@ -19,6 +19,13 @@
   spelling ambiguity and Linux device-only mount evidence, and fails closed on
   unsupported platforms. It remains observation-only and cannot clear
   `ProtectedPath` or authorize planning or effects.
+- Closed the current-account home/mount observation gap without adding
+  authority: Unix boundary capture now retains owner identity from the same
+  no-follow descriptor as ancestry and mount data, and macOS has a
+  non-cloneable `TrustedHomeMountWitness` requiring exact home ancestry and
+  mount continuity. Account/home evidence and both boundaries are reread on
+  revalidation; Linux and Windows fail closed for this profile. ProtectedPath,
+  planning, FFI, scheduling, and effects are unchanged.
 - Cargo metadata witnesses now retain every read-set guard, the descriptor-
   retained project directory, exact executable/version observation, optional
   enrollment guard, and filesystem boundary after publication. Private

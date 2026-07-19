@@ -50,6 +50,7 @@ pub(super) fn capture_root(path: &Path) -> Result<PlatformRootSnapshot, Canonica
     Ok(PlatformRootSnapshot {
         identity: snapshot.identity,
         ancestors,
+        owner_uid: None,
     })
 }
 

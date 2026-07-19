@@ -684,6 +684,18 @@ policy input rather than a trusted home/profile grant; APFS firmlink semantics,
 Windows known-folder/reparse evidence, and stable rule grants remain separate
 gates.
 
+The current-account home observation now retains a descriptor-bound owner and
+mount sample alongside the no-follow root ancestry. The macOS-only
+`TrustedHomeMountWitness` consumes that OS-account evidence and a canonical
+scan-root witness, requiring an equal-or-descendant path relationship, the home
+identity in the scan ancestry, and identical mount identity. Revalidation
+rereads the account record/home boundary and both retained boundaries, so an
+account relocation, owner change, root replacement, mount change, or ancestry
+drift fails closed. Linux bind-mount semantics and Windows handle/reparse
+evidence remain unsupported for this positive profile. This is still a
+location observation, not a trusted protected-root rule grant or cleanup
+capability.
+
 Exact-path review now consumes this registry for every selected target. It
 assesses requested and canonical forms independently, rejects any hard deny,
 and retains specific-rule or no-textual-match dispositions as explicit

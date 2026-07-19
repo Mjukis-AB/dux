@@ -349,6 +349,7 @@ pub(super) struct PlatformEntrySnapshot {
 pub(super) struct PlatformRootSnapshot {
     pub(super) identity: FilesystemIdentity,
     pub(super) ancestors: Vec<AncestorIdentity>,
+    pub(super) owner_uid: Option<u32>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -376,6 +377,7 @@ pub(super) struct FilesystemMountIdentity {
 pub(crate) struct FilesystemBoundarySnapshot {
     scan_root: PathBuf,
     root_identity: FilesystemIdentity,
+    root_owner_uid: Option<u32>,
     root_ancestors: Vec<AncestorIdentity>,
     mount: FilesystemMountIdentity,
 }
@@ -396,6 +398,10 @@ impl FilesystemBoundarySnapshot {
 
     pub(crate) fn root_identity(&self) -> FilesystemIdentity {
         self.root_identity
+    }
+
+    pub(crate) fn root_owner_uid(&self) -> Option<u32> {
+        self.root_owner_uid
     }
 
     pub(crate) fn root_ancestors(&self) -> &[AncestorIdentity] {
@@ -427,6 +433,7 @@ impl FilesystemBoundarySnapshot {
     pub(crate) fn revalidate(&self) -> Result<(), CanonicalPathError> {
         let current = platform::capture_boundary(&self.scan_root)?;
         if current.root.identity != self.root_identity
+            || current.root.owner_uid != self.root_owner_uid
             || current.root.ancestors != self.root_ancestors
             || current.mount != self.mount
         {
@@ -480,7 +487,7 @@ impl TrustedVolumeLocationWitness {
         Self::from_boundary(root, boundary)
     }
 
-    fn from_boundary(
+    pub(crate) fn from_boundary(
         root: &CanonicalScanRoot,
         boundary: FilesystemBoundarySnapshot,
     ) -> Result<Self, TrustedVolumeLocationError> {
@@ -554,6 +561,31 @@ impl TrustedVolumeLocationWitness {
     pub(crate) fn matches_boundary(&self, boundary: &FilesystemBoundarySnapshot) -> bool {
         self.proof_revision == TRUSTED_VOLUME_LOCATION_PROOF_REVISION && &self.boundary == boundary
     }
+
+    pub(crate) fn root_identity(&self) -> FilesystemIdentity {
+        self.boundary.root_identity
+    }
+
+    pub(crate) fn root_owner_uid(&self) -> Option<u32> {
+        self.boundary.root_owner_uid
+    }
+
+    pub(crate) fn root_ancestry_contains(&self, identity: FilesystemIdentity) -> bool {
+        self.boundary
+            .root_ancestors
+            .iter()
+            .any(|ancestor| ancestor.identity() == identity)
+    }
+
+    pub(crate) fn is_same_or_descendant_of(&self, ancestor: &Self) -> bool {
+        self.boundary
+            .scan_root
+            .starts_with(&ancestor.boundary.scan_root)
+    }
+
+    pub(crate) fn same_mount(&self, other: &Self) -> bool {
+        self.boundary.mount == other.boundary.mount
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -618,6 +650,7 @@ pub(crate) fn capture_filesystem_boundary(
     Ok(FilesystemBoundarySnapshot {
         scan_root: root.canonical_path().to_path_buf(),
         root_identity: first.root.identity,
+        root_owner_uid: first.root.owner_uid,
         root_ancestors: first.root.ancestors,
         mount: first.mount,
     })
@@ -974,6 +1007,7 @@ mod tests {
         first.revalidate().unwrap();
         assert_eq!(first.scan_root(), fixture.canonical_root.canonical_path());
         assert_eq!(first.root_identity(), fixture.canonical_root.identity());
+        assert!(first.root_owner_uid().is_some());
         assert!(!first.root_ancestors().is_empty());
         assert_eq!(
             first.root_ancestors().last().unwrap().identity(),

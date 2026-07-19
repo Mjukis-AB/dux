@@ -4428,6 +4428,18 @@ Tasks:
       platforms fail closed. This remains observation-only: it grants no
       volume/location or protected-root rule, does not clear `ProtectedPath`,
       and cannot construct a plan, cross FFI, schedule, or perform an effect.
+    - [x] 2026-07-19 slice: close the current-account home/mount observation
+      gap without granting authority. Unix root ancestry, final-directory
+      ownership, and platform mount identity now come from one retained
+      no-follow descriptor during boundary capture; repeated observations
+      include owner identity. `TrustedHomeMountWitness` is macOS-only,
+      non-cloneable, and built only from the OS account database plus a
+      canonical scan root. It requires the scan root to equal or descend from
+      the exact current home, retain the home identity in ancestry, and share
+      the exact mount; it rereads account/home evidence and both boundaries on
+      revalidation. Linux/Windows fail closed for this positive profile. The
+      witness remains location evidence only: no protected-root rule grant,
+      blocker removal, plan, FFI, schedule, or effect was added.
     - [x] 2026-07-19 slice: retain Cargo's complete read-set and enrollment
       fences after metadata publication. The non-cloneable Cargo witness now
       owns configuration, ancestor-manifest, workspace-glob, workspace,

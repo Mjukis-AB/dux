@@ -3,8 +3,9 @@ use std::path::{Component, Path};
 use thiserror::Error;
 
 use super::{
-    CanonicalPathSnapshot, CanonicalScanRoot, LexicalCleanupPath, capture_scan_root,
-    validate_scan_root,
+    CanonicalPathSnapshot, CanonicalScanRoot, FilesystemBoundarySnapshot, LexicalCleanupPath,
+    TrustedVolumeLocationError, TrustedVolumeLocationWitness, capture_filesystem_boundary,
+    capture_scan_root, validate_scan_root,
 };
 
 #[cfg(unix)]
@@ -12,6 +13,9 @@ use nix::unistd::{User, geteuid, getuid};
 
 /// Bump whenever a protected-root entry or its coverage changes.
 pub(crate) const PROTECTED_ROOT_POLICY_REVISION: u32 = 2;
+
+/// Revision of the current-account-home mount/location observation.
+pub(crate) const TRUSTED_HOME_MOUNT_PROOF_REVISION: u32 = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum ProtectedPathKind {
@@ -95,25 +99,17 @@ pub(crate) enum ProtectedRootError {
     MismatchedScanRootEvidence,
 }
 
-/// Versioned, crate-private textual deny registry.
-///
-/// The registry is textual policy only. Production construction derives the
-/// current account home from the OS account database, validates it as a live
-/// no-follow directory, and checks that its owner is the current account. It
-/// never reads HOME, USERPROFILE, or similar mutable environment values.
-#[derive(Clone, Debug)]
-pub(crate) struct ProtectedRootRegistry {
-    policy: PlatformPolicy,
+/// OS-account-derived home evidence retained only inside the path-validation
+/// layer. The root and owner are captured from the same no-follow boundary
+/// observation; callers cannot provide a path or UID to mint this value.
+pub(crate) struct CurrentAccountHomeEvidence {
+    root: CanonicalScanRoot,
+    boundary: FilesystemBoundarySnapshot,
+    uid: u32,
 }
 
-impl ProtectedRootRegistry {
-    /// Build policy from the current account's OS-owned home directory.
-    ///
-    /// This creates no cleanup authority. It only supplies a validated,
-    /// text-derived profile path to the protected-root classifier. Setuid
-    /// ambiguity, missing account records, non-absolute homes, symlinks,
-    /// replacement races, and ownership mismatches all fail closed.
-    pub(crate) fn from_current_account() -> Result<Self, ProtectedRootError> {
+impl CurrentAccountHomeEvidence {
+    pub(crate) fn capture() -> Result<Self, ProtectedRootError> {
         #[cfg(unix)]
         {
             let real_uid = getuid();
@@ -133,30 +129,193 @@ impl ProtectedRootRegistry {
             validate_account_home_path(&first.dir)?;
             let lexical = validate_scan_root(&first.dir)
                 .map_err(|_| ProtectedRootError::InvalidHomeDirectory)?;
-            let canonical =
+            let root =
                 capture_scan_root(lexical).map_err(|_| ProtectedRootError::InvalidHomeDirectory)?;
-            let owner = std::fs::symlink_metadata(canonical.canonical_path())
+            let boundary = capture_filesystem_boundary(&root)
                 .map_err(|_| ProtectedRootError::InvalidHomeDirectory)?;
-            use std::os::unix::fs::MetadataExt;
-            if owner.uid() != effective_uid.as_raw() {
+            if boundary.root_owner_uid() != Some(effective_uid.as_raw()) {
                 return Err(ProtectedRootError::InvalidHomeDirectory);
             }
             let recaptured = capture_scan_root(
-                validate_scan_root(canonical.requested_path())
+                validate_scan_root(root.requested_path())
                     .map_err(|_| ProtectedRootError::InvalidHomeDirectory)?,
             )
             .map_err(|_| ProtectedRootError::InvalidHomeDirectory)?;
-            if recaptured.identity() != canonical.identity()
-                || recaptured.canonical_path() != canonical.canonical_path()
+            if recaptured.identity() != root.identity()
+                || recaptured.canonical_path() != root.canonical_path()
             {
                 return Err(ProtectedRootError::CurrentAccountAmbiguous);
             }
-            Self::from_home_directory_evidence(&canonical)
+            let recaptured_boundary = capture_filesystem_boundary(&recaptured)
+                .map_err(|_| ProtectedRootError::InvalidHomeDirectory)?;
+            if recaptured_boundary != boundary {
+                return Err(ProtectedRootError::CurrentAccountAmbiguous);
+            }
+            Ok(Self {
+                root: recaptured,
+                boundary: recaptured_boundary,
+                uid: effective_uid.as_raw(),
+            })
         }
         #[cfg(not(unix))]
         {
             Err(ProtectedRootError::UnsupportedPlatform)
         }
+    }
+
+    fn root(&self) -> &CanonicalScanRoot {
+        &self.root
+    }
+
+    fn uid(&self) -> u32 {
+        self.uid
+    }
+
+    fn boundary(&self) -> &FilesystemBoundarySnapshot {
+        &self.boundary
+    }
+}
+
+/// A macOS-first, non-cloneable location witness for a scan root at or below
+/// the current account's OS-discovered home mount. This proves location only;
+/// it does not grant a protected-root rule, clear `ProtectedPath`, or create
+/// planning, approval, FFI, scheduling, or effect authority.
+pub(crate) struct TrustedHomeMountWitness {
+    home_root: CanonicalScanRoot,
+    home_boundary: TrustedVolumeLocationWitness,
+    scan_boundary: TrustedVolumeLocationWitness,
+    uid: u32,
+    proof_revision: u32,
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum TrustedHomeMountError {
+    #[error("current-account home mount proof is unsupported on this platform")]
+    UnsupportedPlatform,
+    #[error("current-account home evidence could not be captured: {0}")]
+    HomeEvidence(#[source] ProtectedRootError),
+    #[error("home filesystem boundary could not be captured: {0}")]
+    HomeBoundary(#[source] TrustedVolumeLocationError),
+    #[error("scan-root filesystem boundary could not be captured: {0}")]
+    ScanBoundary(#[source] TrustedVolumeLocationError),
+    #[error("scan root is outside the current account home")]
+    OutsideHome,
+    #[error("scan-root ancestry does not retain the current account home identity")]
+    MissingHomeAncestry,
+    #[error("scan root and current account home do not share the exact mount")]
+    DifferentMount,
+    #[error("current-account home mount boundary changed")]
+    Changed,
+    #[error("current-account home mount proof revision is unsupported")]
+    UnsupportedRevision,
+}
+
+impl TrustedHomeMountWitness {
+    pub(crate) fn capture(scan_root: &CanonicalScanRoot) -> Result<Self, TrustedHomeMountError> {
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = scan_root;
+            return Err(TrustedHomeMountError::UnsupportedPlatform);
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let home = CurrentAccountHomeEvidence::capture()
+                .map_err(TrustedHomeMountError::HomeEvidence)?;
+            let CurrentAccountHomeEvidence {
+                root: home_root,
+                boundary: home_boundary_snapshot,
+                uid: home_uid,
+            } = home;
+            let home_boundary =
+                TrustedVolumeLocationWitness::from_boundary(&home_root, home_boundary_snapshot)
+                    .map_err(TrustedHomeMountError::HomeBoundary)?;
+            let scan_boundary = TrustedVolumeLocationWitness::capture(scan_root)
+                .map_err(TrustedHomeMountError::ScanBoundary)?;
+            if !scan_boundary.is_same_or_descendant_of(&home_boundary) {
+                return Err(TrustedHomeMountError::OutsideHome);
+            }
+            if !scan_boundary.root_ancestry_contains(home_boundary.root_identity()) {
+                return Err(TrustedHomeMountError::MissingHomeAncestry);
+            }
+            if !scan_boundary.same_mount(&home_boundary) {
+                return Err(TrustedHomeMountError::DifferentMount);
+            }
+            if home_boundary.root_owner_uid() != Some(home_uid) {
+                return Err(TrustedHomeMountError::HomeEvidence(
+                    ProtectedRootError::InvalidHomeDirectory,
+                ));
+            }
+            let witness = Self {
+                home_root,
+                home_boundary,
+                scan_boundary,
+                uid: home_uid,
+                proof_revision: TRUSTED_HOME_MOUNT_PROOF_REVISION,
+            };
+            witness.revalidate()?;
+            Ok(witness)
+        }
+    }
+
+    pub(crate) const fn proof_revision(&self) -> u32 {
+        self.proof_revision
+    }
+
+    pub(crate) fn revalidate(&self) -> Result<(), TrustedHomeMountError> {
+        if self.proof_revision != TRUSTED_HOME_MOUNT_PROOF_REVISION {
+            return Err(TrustedHomeMountError::UnsupportedRevision);
+        }
+        let current_home =
+            CurrentAccountHomeEvidence::capture().map_err(TrustedHomeMountError::HomeEvidence)?;
+        if current_home.uid() != self.uid
+            || current_home.root().requested_path() != self.home_root.requested_path()
+            || current_home.root().canonical_path() != self.home_root.canonical_path()
+            || current_home.root().identity() != self.home_root.identity()
+        {
+            return Err(TrustedHomeMountError::Changed);
+        }
+        self.home_boundary
+            .revalidate()
+            .map_err(|_| TrustedHomeMountError::Changed)?;
+        self.scan_boundary
+            .revalidate()
+            .map_err(|_| TrustedHomeMountError::Changed)?;
+        if !self
+            .scan_boundary
+            .is_same_or_descendant_of(&self.home_boundary)
+            || !self
+                .scan_boundary
+                .root_ancestry_contains(self.home_boundary.root_identity())
+            || !self.scan_boundary.same_mount(&self.home_boundary)
+            || self.home_boundary.root_owner_uid() != Some(self.uid)
+        {
+            return Err(TrustedHomeMountError::Changed);
+        }
+        Ok(())
+    }
+}
+
+/// Versioned, crate-private textual deny registry.
+///
+/// The registry is textual policy only. Production construction derives the
+/// current account home from the OS account database, validates it as a live
+/// no-follow directory, and checks that its owner is the current account. It
+/// never reads HOME, USERPROFILE, or similar mutable environment values.
+#[derive(Clone, Debug)]
+pub(crate) struct ProtectedRootRegistry {
+    policy: PlatformPolicy,
+}
+
+impl ProtectedRootRegistry {
+    /// Build policy from the current account's OS-owned home directory.
+    ///
+    /// This creates no cleanup authority. It only supplies a validated,
+    /// text-derived profile path to the protected-root classifier. Setuid
+    /// ambiguity, missing account records, non-absolute homes, symlinks,
+    /// replacement races, and ownership mismatches all fail closed.
+    pub(crate) fn from_current_account() -> Result<Self, ProtectedRootError> {
+        let evidence = CurrentAccountHomeEvidence::capture()?;
+        Self::from_home_directory_evidence(evidence.root())
     }
 
     fn from_home_directory_evidence(
@@ -1934,6 +2093,33 @@ mod tests {
                 | ProtectedRootDisposition::SpecificRuleRequired { .. }
         ));
         assert!(!format!("{registry:?}").contains("HOME"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn trusted_home_mount_witness_is_current_account_bound_and_revalidatable() {
+        let home = CurrentAccountHomeEvidence::capture().unwrap();
+        let witness = TrustedHomeMountWitness::capture(home.root()).unwrap();
+        assert_eq!(witness.proof_revision(), TRUSTED_HOME_MOUNT_PROOF_REVISION);
+        witness.revalidate().unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn trusted_home_mount_witness_rejects_a_foreign_scan_root() {
+        let foreign = std::fs::canonicalize("/tmp").unwrap();
+        let root = capture_scan_root(validate_scan_root(&foreign).unwrap()).unwrap();
+        assert!(TrustedHomeMountWitness::capture(&root).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn trusted_home_mount_witness_fails_closed_outside_macos() {
+        let root = capture_scan_root(validate_scan_root(Path::new("/tmp")).unwrap()).unwrap();
+        assert!(matches!(
+            TrustedHomeMountWitness::capture(&root),
+            Err(TrustedHomeMountError::UnsupportedPlatform)
+        ));
     }
 
     #[cfg(unix)]
