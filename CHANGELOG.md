@@ -5,6 +5,10 @@
   the frozen plan before and after an owner/generation-fenced journal claim,
   and retains the approved capability with the non-cloneable claim. No path,
   callback, FFI, scheduling, or filesystem-effect authority is exposed.
+- Added a private pre-effect revalidation witness for the approved journal
+  session. It rechecks expiry, every retained trusted grant, and the exact
+  frozen plan under the owner claim, but returns no target or effect
+  capability; permanent execution remains unavailable.
 - Staged a private, bounded macOS process-activity witness for future rule
   guards. It reads libproc directly, retains PID/start-time/executable
   identity, rejects active/malformed/incomplete observations, refuses bundle

@@ -4639,6 +4639,12 @@ Tasks:
     and no retry. `MacOSTrashPlatformDriver` is compiled but not registered.
 - [ ] Implement permanent-safe executor for approved rules.
 - [ ] Implement execution-time revalidation.
+  - [x] 2026-07-19 slice: add a private pre-effect revalidation witness on
+    the approved journal session. It rechecks approval expiry, every retained
+    trusted rule-scope grant, and the exact frozen journal plan immediately
+    before a future permanent-safe driver boundary. It returns no target or
+    effect capability; per-path identity admission and the executor remain
+    open.
 - [ ] Implement cleanup session/item history.
   - [x] 2026-07-19 slice: join the approved trusted-plan boundary to the
     existing bounded planned-session persistence API. The capability

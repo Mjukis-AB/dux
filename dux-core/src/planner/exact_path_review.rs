@@ -346,6 +346,20 @@ impl ApprovedCleanupSession {
         &self.claim
     }
 
+    /// Last planner/journal check immediately before a future permanent-safe
+    /// driver is allowed to receive a reviewed target. This deliberately
+    /// returns only a unit witness: target-specific identity validation and
+    /// effect receipt admission must be added by the executor itself.
+    pub(crate) fn revalidate_for_effect(
+        &self,
+        now: std::time::SystemTime,
+    ) -> Result<(), ExactPathHandoffError> {
+        self.approved.revalidate(now)?;
+        self.claim
+            .validate_planned_plan(self.approved.plan())
+            .map_err(ExactPathHandoffError::Journal)
+    }
+
     pub(crate) fn release(self) {}
 }
 
