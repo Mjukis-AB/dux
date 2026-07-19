@@ -27,6 +27,8 @@ final class AppModel: DuxCapacitySampling {
     var diskPressurePolicyDraft = DiskPressurePolicyDraft.defaults
     private(set) var permanentCleanupPolicy: PermanentCleanupPolicy?
     private(set) var permanentCleanupPolicyState = PermanentCleanupPolicyState.idle
+    private(set) var cleanupExclusions: CleanupExclusionsPolicy?
+    private(set) var cleanupExclusionsState = CleanupExclusionsState.idle
     private(set) var scanState = AppScanState.idle
     private(set) var loginItemState = LoginItemState.idle
     private(set) var notificationAuthorizationState = NotificationAuthorizationState.idle
@@ -77,6 +79,12 @@ final class AppModel: DuxCapacitySampling {
     private var permanentCleanupPolicyGeneration: UInt64 = 0
     @ObservationIgnored
     private var permanentCleanupPolicyIsInvalidated = false
+    @ObservationIgnored
+    private var cleanupExclusionsTask: Task<Void, Never>?
+    @ObservationIgnored
+    private var cleanupExclusionsGeneration: UInt64 = 0
+    @ObservationIgnored
+    private var cleanupExclusionsIsInvalidated = false
     @ObservationIgnored
     private var homeScanDriverTask: Task<AppScanRunOutcome, Never>?
     @ObservationIgnored
@@ -151,6 +159,7 @@ final class AppModel: DuxCapacitySampling {
         self.storageAccessProbe = storageAccessProbe
         capacityTrend = nil
         permanentCleanupPolicy = nil
+        cleanupExclusions = nil
         menuBarLabelMode = menuBarLabelPreferenceStore.load()
         menuBarVisibilityPreference = menuBarVisibilityPreferenceStore.load()
         showsStorageAccessIntroduction =
@@ -438,6 +447,111 @@ final class AppModel: DuxCapacitySampling {
         permanentCleanupPolicyTask?.cancel()
         permanentCleanupPolicyTask = nil
         permanentCleanupPolicyState = permanentCleanupPolicy == nil ? .idle : .ready
+    }
+
+    func loadCleanupExclusions() async {
+        guard !cleanupExclusionsIsInvalidated else {
+            return
+        }
+        if let cleanupExclusionsTask {
+            await cleanupExclusionsTask.value
+            return
+        }
+
+        cleanupExclusionsGeneration &+= 1
+        let generation = cleanupExclusionsGeneration
+        cleanupExclusionsState = .loading
+        let service = engineService
+        let task = Task { @MainActor [weak self] in
+            let result: Result<CleanupExclusionsPolicy, Error>
+            do {
+                result = .success(try await service.loadCleanupExclusions())
+            } catch {
+                result = .failure(error)
+            }
+            guard !Task.isCancelled else {
+                return
+            }
+            self?.publishCleanupExclusionsLoad(result, generation: generation)
+        }
+        cleanupExclusionsTask = task
+        await task.value
+    }
+
+    func addCleanupExclusion(_ path: CleanupExclusionPathObservation) async {
+        guard
+            !cleanupExclusionsIsInvalidated,
+            cleanupExclusionsTask == nil,
+            !cleanupExclusionsState.isBusy,
+            let current = cleanupExclusions
+        else {
+            return
+        }
+        guard path.encoding == .unixBytes, !path.encodedBytes.isEmpty else {
+            cleanupExclusionsState = .failed(.invalidSelection)
+            return
+        }
+        guard !current.paths.contains(path) else {
+            cleanupExclusionsState = .ready
+            return
+        }
+        await mutateCleanupExclusions(state: .adding) { service in
+            try await service.setCleanupExclusions(current.paths + [path])
+        }
+    }
+
+    /// Removing a deny-only prefix weakens protection, so every removal must
+    /// arrive from an explicit confirmation action for the exact observed row.
+    func removeCleanupExclusion(
+        _ path: CleanupExclusionPathObservation,
+        confirmed: Bool = false
+    ) async {
+        guard
+            !cleanupExclusionsIsInvalidated,
+            cleanupExclusionsTask == nil,
+            !cleanupExclusionsState.isBusy,
+            let current = cleanupExclusions,
+            current.paths.contains(path)
+        else {
+            return
+        }
+        guard confirmed else {
+            cleanupExclusionsState = .failed(.confirmationRequired)
+            return
+        }
+        await mutateCleanupExclusions(state: .removing) { service in
+            try await service.setCleanupExclusions(current.paths.filter { $0 != path })
+        }
+    }
+
+    func resetCleanupExclusions(confirmed: Bool = false) async {
+        guard
+            !cleanupExclusionsIsInvalidated,
+            cleanupExclusionsTask == nil,
+            !cleanupExclusionsState.isBusy,
+            let current = cleanupExclusions
+        else {
+            return
+        }
+        guard !current.paths.isEmpty else {
+            cleanupExclusionsState = .ready
+            return
+        }
+        guard confirmed else {
+            cleanupExclusionsState = .failed(.confirmationRequired)
+            return
+        }
+        await mutateCleanupExclusions(state: .resetting) { service in
+            try await service.resetCleanupExclusions()
+        }
+    }
+
+    func invalidateCleanupExclusionsOperations() {
+        cleanupExclusionsIsInvalidated = true
+        cleanupExclusionsGeneration &+= 1
+        cleanupExclusionsTask?.cancel()
+        cleanupExclusionsTask = nil
+        cleanupExclusionsState = cleanupExclusions == nil ? .idle : .ready
     }
 
     func refreshLoginItemState() async {
@@ -1079,6 +1193,78 @@ final class AppModel: DuxCapacitySampling {
         for error: Error
     ) -> PermanentCleanupPolicyFailure {
         if let error = error as? PermanentCleanupPolicyServiceError {
+            return .service(error)
+        }
+        return .unexpected
+    }
+
+    private func publishCleanupExclusionsLoad(
+        _ result: Result<CleanupExclusionsPolicy, Error>,
+        generation: UInt64
+    ) {
+        guard generation == cleanupExclusionsGeneration else {
+            return
+        }
+        cleanupExclusionsTask = nil
+        switch result {
+        case let .success(exclusions):
+            cleanupExclusions = exclusions
+            cleanupExclusionsState = .ready
+        case let .failure(error):
+            if error is CancellationError {
+                cleanupExclusionsState = cleanupExclusions == nil ? .idle : .ready
+            } else {
+                cleanupExclusionsState = .failed(Self.cleanupExclusionsFailure(for: error))
+            }
+        }
+    }
+
+    private func mutateCleanupExclusions(
+        state: CleanupExclusionsState,
+        _ operation: @escaping @Sendable (
+            any DuxCleanupExclusionsServing
+        ) async throws -> CleanupExclusionsUpdateResult
+    ) async {
+        cleanupExclusionsGeneration &+= 1
+        let generation = cleanupExclusionsGeneration
+        precondition(state == .adding || state == .removing || state == .resetting)
+        cleanupExclusionsState = state
+        let service = engineService
+        let task = Task { @MainActor [weak self] in
+            let result: Result<CleanupExclusionsUpdateResult, Error>
+            do {
+                result = .success(try await operation(service))
+            } catch {
+                result = .failure(error)
+            }
+            guard !Task.isCancelled, let self,
+                  generation == self.cleanupExclusionsGeneration else {
+                return
+            }
+            switch result {
+            case let .success(update):
+                self.cleanupExclusions = update.exclusions
+                self.cleanupExclusionsState = .ready
+            case let .failure(error):
+                if error is CancellationError {
+                    self.cleanupExclusionsState =
+                        self.cleanupExclusions == nil ? .idle : .ready
+                } else {
+                    self.cleanupExclusionsState = .failed(
+                        Self.cleanupExclusionsFailure(for: error)
+                    )
+                }
+            }
+            self.cleanupExclusionsTask = nil
+        }
+        cleanupExclusionsTask = task
+        await task.value
+    }
+
+    private static func cleanupExclusionsFailure(
+        for error: Error
+    ) -> CleanupExclusionsFailure {
+        if let error = error as? CleanupExclusionsServiceError {
             return .service(error)
         }
         return .unexpected

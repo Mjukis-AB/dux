@@ -172,16 +172,16 @@ enum ExplorerTrashError: Error, Equatable, Sendable {
             return
         }
         self = switch error {
-        case .closed: .closed
-        case .invalidRequest: .invalidRequest
-        case .reviewUnavailable: .unavailable
-        case .busy: .busy
-        case .storageUnavailable: .storageUnavailable
-        case .unsafeStorage: .unsafeStorage
-        case .incompatibleSchema: .incompatibleSchema
-        case .corruptData: .corruptData
-        case .outcomeUnknown: .outcomeUnknown
-        case .internalState: .failed
+        case .Closed: .closed
+        case .InvalidRequest: .invalidRequest
+        case .ReviewUnavailable: .unavailable
+        case .Busy: .busy
+        case .StorageUnavailable: .storageUnavailable
+        case .UnsafeStorage: .unsafeStorage
+        case .IncompatibleSchema: .incompatibleSchema
+        case .CorruptData: .corruptData
+        case .OutcomeUnknown: .outcomeUnknown
+        case .InternalState: .failed
         }
     }
 }

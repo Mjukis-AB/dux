@@ -5,6 +5,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+#[cfg(unix)]
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
+#[cfg(windows)]
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
+
 use dux_core::engine::{
     CancelOutcome as CoreCancelOutcome, CandidateDetailError as CoreCandidateDetailError,
     CandidateEvaluationTaskFailureKind as CoreCandidateEvaluationFailure,
@@ -13,6 +18,10 @@ use dux_core::engine::{
     CapacityHistoryDisposition as CoreHistoryDisposition, CapacityTrend as CoreCapacityTrend,
     CapacityTrendChange as CoreCapacityTrendChange, CapacityTrendPoint as CoreCapacityTrendPoint,
     CapacityTrendPointSource as CoreCapacityTrendPointSource,
+    CleanupExclusionSource as CoreCleanupExclusionSource,
+    CleanupExclusions as CoreCleanupExclusions,
+    CleanupExclusionsError as CoreCleanupExclusionsError,
+    CleanupExclusionsUpdate as CoreCleanupExclusionsUpdate,
     DiskPressurePolicy as CorePressurePolicy, DiskPressurePolicyError as CorePressurePolicyError,
     DiskPressurePolicySource as CorePressurePolicySource,
     DiskPressurePolicyUpdate as CorePressurePolicyUpdate,
@@ -68,7 +77,7 @@ use dux_core::{
     VolumeCapacity, VolumeId,
 };
 
-const FFI_CONTRACT_VERSION: u32 = 22;
+const FFI_CONTRACT_VERSION: u32 = 23;
 const FFI_RECORD_VERSION: u32 = 1;
 const SNAPSHOT_NODE_RECORD_VERSION: u32 = 2;
 const SCAN_EVENT_PAGE_LIMIT: u16 = 64;
@@ -76,6 +85,8 @@ const RECENT_SCAN_HISTORY_PAGE_LIMIT: u16 = 200;
 const SCAN_COVERAGE_DETAIL_PAGE_LIMIT: u16 = 64;
 const CANDIDATE_DETAIL_PAGE_LIMIT: u16 = 64;
 const MAX_SCAN_ROOT_UTF8_BYTES: usize = 32 * 1_024;
+const MAX_CLEANUP_EXCLUSION_COUNT: usize = 64;
+const MAX_CLEANUP_EXCLUSION_PATH_BYTES: usize = 32 * 1_024;
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 static LIVE_ENGINE_INSTANCE_COUNT: AtomicU64 = AtomicU64::new(0);
 
@@ -286,6 +297,77 @@ pub enum PermanentCleanupPolicyError {
     UnsafeStorage,
     #[error("the settings query exceeded its fixed resource budget")]
     BudgetExceeded,
+    #[error("engine settings state is unavailable")]
+    InternalState,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum CleanupExclusionsSource {
+    Default,
+    Stored,
+}
+
+/// A lossless absolute lexical path prefix from the deny-only cleanup
+/// exclusion setting. The bytes are an observation payload only: they do not
+/// select a plan, grant access, or authorize a filesystem effect.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct CleanupExclusionPath {
+    pub encoding: SnapshotNameEncoding,
+    pub encoded_bytes: Vec<u8>,
+}
+
+/// Versioned input for replacing the bounded user exclusion set. Core owns
+/// absolute-path, component, ordering, and duplicate validation.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct CleanupExclusionsInput {
+    pub record_version: u32,
+    pub paths: Vec<CleanupExclusionPath>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct CleanupExclusionsStatus {
+    pub record_version: u32,
+    pub paths: Vec<CleanupExclusionPath>,
+    pub source: CleanupExclusionsSource,
+    pub revision: u64,
+    pub updated_at_unix_ms: Option<i64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct CleanupExclusionsUpdate {
+    pub record_version: u32,
+    pub exclusions: CleanupExclusionsStatus,
+    pub changed: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error, uniffi::Error)]
+pub enum CleanupExclusionsError {
+    #[error("engine session is closed")]
+    Closed,
+    #[error("cleanup-exclusion record version is unsupported")]
+    InvalidRecordVersion,
+    #[error("cleanup exclusion path bytes are invalid")]
+    InvalidPath,
+    #[error("the cleanup exclusion set exceeds its fixed bound")]
+    TooManyPaths,
+    #[error("the cleanup-exclusion revision cannot advance")]
+    RevisionExhausted,
+    #[error("the system clock cannot be represented by the settings store")]
+    InvalidClock,
+    #[error("the durable store schema is newer than this engine")]
+    IncompatibleSchema,
+    #[error("the durable store is busy")]
+    Busy,
+    #[error("the durable store is unsafe")]
+    UnsafeStorage,
+    #[error("the settings query exceeded its fixed resource budget")]
+    BudgetExceeded,
+    #[error("cleanup exclusions are corrupt")]
+    CorruptData,
+    #[error("cleanup exclusions are unavailable")]
+    Unavailable,
+    #[error("the settings write outcome could not be proven")]
+    OutcomeUnknown,
     #[error("engine settings state is unavailable")]
     InternalState,
 }
@@ -2112,6 +2194,48 @@ impl DuxEngine {
         })
     }
 
+    /// Load the bounded, losslessly encoded deny-only user exclusion set.
+    /// Returned paths are observations for settings presentation and never
+    /// become planner or executor authority.
+    pub fn get_cleanup_exclusions(
+        &self,
+    ) -> Result<CleanupExclusionsStatus, CleanupExclusionsError> {
+        self.with_cleanup_exclusions_engine(|engine| {
+            engine
+                .cleanup_exclusions()
+                .map_err(map_cleanup_exclusions_error)
+                .and_then(cleanup_exclusions_status)
+        })
+    }
+
+    /// Replace the bounded deny-only user exclusion set. Rust remains the
+    /// semantic validator and takes the store-wide cleanup exclusion before
+    /// persisting the exact lexical prefixes.
+    pub fn set_cleanup_exclusions(
+        &self,
+        input: CleanupExclusionsInput,
+    ) -> Result<CleanupExclusionsUpdate, CleanupExclusionsError> {
+        let paths = decode_cleanup_exclusion_input(input)?;
+        self.with_cleanup_exclusions_engine(|engine| {
+            engine
+                .set_cleanup_exclusions(paths)
+                .map_err(map_cleanup_exclusions_error)
+                .and_then(cleanup_exclusions_update)
+        })
+    }
+
+    /// Restore the empty, versioned default exclusion set.
+    pub fn reset_cleanup_exclusions(
+        &self,
+    ) -> Result<CleanupExclusionsUpdate, CleanupExclusionsError> {
+        self.with_cleanup_exclusions_engine(|engine| {
+            engine
+                .reset_cleanup_exclusions()
+                .map_err(map_cleanup_exclusions_error)
+                .and_then(cleanup_exclusions_update)
+        })
+    }
+
     pub fn start_scan(&self, request: ScanRequest) -> Result<ScanStart, ScanError> {
         if request.record_version != FFI_RECORD_VERSION {
             return Err(ScanError::InvalidRecordVersion);
@@ -2434,6 +2558,22 @@ impl DuxEngine {
             EngineState::Open(engine) => operation(engine),
             EngineState::Closing | EngineState::Closed { .. } => {
                 Err(PermanentCleanupPolicyError::Closed)
+            }
+        }
+    }
+
+    fn with_cleanup_exclusions_engine<T>(
+        &self,
+        operation: impl FnOnce(&EngineHandle) -> Result<T, CleanupExclusionsError>,
+    ) -> Result<T, CleanupExclusionsError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| CleanupExclusionsError::InternalState)?;
+        match &*state {
+            EngineState::Open(engine) => operation(engine),
+            EngineState::Closing | EngineState::Closed { .. } => {
+                Err(CleanupExclusionsError::Closed)
             }
         }
     }
@@ -3982,6 +4122,217 @@ fn map_permanent_cleanup_policy_error(
     }
 }
 
+fn map_cleanup_exclusions_error(error: CoreCleanupExclusionsError) -> CleanupExclusionsError {
+    match error {
+        CoreCleanupExclusionsError::Closed => CleanupExclusionsError::Closed,
+        CoreCleanupExclusionsError::InvalidInput => CleanupExclusionsError::InvalidPath,
+        CoreCleanupExclusionsError::RevisionExhausted => CleanupExclusionsError::RevisionExhausted,
+        CoreCleanupExclusionsError::IncompatibleSchema => {
+            CleanupExclusionsError::IncompatibleSchema
+        }
+        CoreCleanupExclusionsError::Busy => CleanupExclusionsError::Busy,
+        CoreCleanupExclusionsError::UnsafeStorage => CleanupExclusionsError::UnsafeStorage,
+        CoreCleanupExclusionsError::QueryLimitExceeded => CleanupExclusionsError::BudgetExceeded,
+        CoreCleanupExclusionsError::CorruptData => CleanupExclusionsError::CorruptData,
+        CoreCleanupExclusionsError::Unavailable => CleanupExclusionsError::Unavailable,
+        CoreCleanupExclusionsError::OutcomeUnknown => CleanupExclusionsError::OutcomeUnknown,
+        CoreCleanupExclusionsError::InternalState => CleanupExclusionsError::InternalState,
+        _ => CleanupExclusionsError::InternalState,
+    }
+}
+
+fn cleanup_exclusions_status(
+    exclusions: CoreCleanupExclusions,
+) -> Result<CleanupExclusionsStatus, CleanupExclusionsError> {
+    if exclusions.paths.len() > MAX_CLEANUP_EXCLUSION_COUNT {
+        return Err(CleanupExclusionsError::InternalState);
+    }
+    let updated_at_unix_ms = exclusions
+        .updated_at
+        .map(cleanup_exclusions_time_ms)
+        .transpose()?;
+    if (exclusions.revision == 0) != updated_at_unix_ms.is_none()
+        || (exclusions.revision == 0 && exclusions.source != CoreCleanupExclusionSource::Default)
+        || (exclusions.revision == 0 && !exclusions.paths.is_empty())
+        || (exclusions.revision > 0 && exclusions.source != CoreCleanupExclusionSource::Stored)
+    {
+        return Err(CleanupExclusionsError::InternalState);
+    }
+    let paths = exclusions
+        .paths
+        .iter()
+        .map(|path| cleanup_exclusion_path(path))
+        .collect::<Result<Vec<_>, _>>()?;
+    if paths.windows(2).any(|pair| {
+        cleanup_exclusion_path_order_key(&pair[0]) >= cleanup_exclusion_path_order_key(&pair[1])
+    }) {
+        return Err(CleanupExclusionsError::InternalState);
+    }
+    Ok(CleanupExclusionsStatus {
+        record_version: FFI_RECORD_VERSION,
+        paths,
+        source: match exclusions.source {
+            CoreCleanupExclusionSource::Default => CleanupExclusionsSource::Default,
+            CoreCleanupExclusionSource::Stored => CleanupExclusionsSource::Stored,
+        },
+        revision: exclusions.revision,
+        updated_at_unix_ms,
+    })
+}
+
+fn cleanup_exclusion_path_order_key(path: &CleanupExclusionPath) -> (u8, &[u8]) {
+    let encoding = match path.encoding {
+        SnapshotNameEncoding::UnixBytes => 0,
+        SnapshotNameEncoding::WindowsUtf16LittleEndian => 1,
+    };
+    (encoding, path.encoded_bytes.as_slice())
+}
+
+fn cleanup_exclusions_update(
+    update: CoreCleanupExclusionsUpdate,
+) -> Result<CleanupExclusionsUpdate, CleanupExclusionsError> {
+    Ok(CleanupExclusionsUpdate {
+        record_version: FFI_RECORD_VERSION,
+        exclusions: cleanup_exclusions_status(update.exclusions)?,
+        changed: update.changed,
+    })
+}
+
+fn cleanup_exclusions_time_ms(value: SystemTime) -> Result<i64, CleanupExclusionsError> {
+    i64::try_from(
+        value
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| CleanupExclusionsError::InternalState)?
+            .as_millis(),
+    )
+    .map_err(|_| CleanupExclusionsError::InternalState)
+}
+
+fn decode_cleanup_exclusion_input(
+    input: CleanupExclusionsInput,
+) -> Result<Vec<PathBuf>, CleanupExclusionsError> {
+    if input.record_version != FFI_RECORD_VERSION {
+        return Err(CleanupExclusionsError::InvalidRecordVersion);
+    }
+    if input.paths.len() > MAX_CLEANUP_EXCLUSION_COUNT {
+        return Err(CleanupExclusionsError::TooManyPaths);
+    }
+    input
+        .paths
+        .into_iter()
+        .map(decode_cleanup_exclusion_path)
+        .collect()
+}
+
+fn decode_cleanup_exclusion_path(
+    encoded: CleanupExclusionPath,
+) -> Result<PathBuf, CleanupExclusionsError> {
+    if encoded.encoded_bytes.is_empty()
+        || encoded.encoded_bytes.len() > MAX_CLEANUP_EXCLUSION_PATH_BYTES
+    {
+        return Err(CleanupExclusionsError::InvalidPath);
+    }
+    let path = match encoded.encoding {
+        SnapshotNameEncoding::UnixBytes => {
+            #[cfg(unix)]
+            {
+                if encoded.encoded_bytes.contains(&0)
+                    || std::str::from_utf8(&encoded.encoded_bytes).is_err()
+                {
+                    return Err(CleanupExclusionsError::InvalidPath);
+                }
+                PathBuf::from(std::ffi::OsString::from_vec(encoded.encoded_bytes))
+            }
+            #[cfg(not(unix))]
+            {
+                return Err(CleanupExclusionsError::InvalidPath);
+            }
+        }
+        SnapshotNameEncoding::WindowsUtf16LittleEndian => {
+            #[cfg(windows)]
+            {
+                if encoded.encoded_bytes.len() % 2 != 0 {
+                    return Err(CleanupExclusionsError::InvalidPath);
+                }
+                let units = encoded
+                    .encoded_bytes
+                    .chunks_exact(2)
+                    .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]))
+                    .collect::<Vec<_>>();
+                if units.contains(&0) || String::from_utf16(&units).is_err() {
+                    return Err(CleanupExclusionsError::InvalidPath);
+                }
+                PathBuf::from(std::ffi::OsString::from_wide(&units))
+            }
+            #[cfg(not(windows))]
+            {
+                return Err(CleanupExclusionsError::InvalidPath);
+            }
+        }
+    };
+    if !is_valid_cleanup_exclusion_shape(&path) {
+        return Err(CleanupExclusionsError::InvalidPath);
+    }
+    Ok(path)
+}
+
+fn cleanup_exclusion_path(path: &Path) -> Result<CleanupExclusionPath, CleanupExclusionsError> {
+    if !is_valid_cleanup_exclusion_shape(path) {
+        return Err(CleanupExclusionsError::InternalState);
+    }
+    let (encoding, encoded_bytes) = encode_cleanup_exclusion_path(path)?;
+    Ok(CleanupExclusionPath {
+        encoding,
+        encoded_bytes,
+    })
+}
+
+fn is_valid_cleanup_exclusion_shape(path: &Path) -> bool {
+    path.is_absolute()
+        && !path.as_os_str().is_empty()
+        && !path.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::CurDir | std::path::Component::ParentDir
+            )
+        })
+}
+
+fn encode_cleanup_exclusion_path(
+    path: &Path,
+) -> Result<(SnapshotNameEncoding, Vec<u8>), CleanupExclusionsError> {
+    #[cfg(unix)]
+    {
+        let bytes = path.as_os_str().as_bytes();
+        if bytes.is_empty()
+            || bytes.len() > MAX_CLEANUP_EXCLUSION_PATH_BYTES
+            || bytes.contains(&0)
+            || std::str::from_utf8(bytes).is_err()
+        {
+            return Err(CleanupExclusionsError::InternalState);
+        }
+        return Ok((SnapshotNameEncoding::UnixBytes, bytes.to_vec()));
+    }
+    #[cfg(windows)]
+    {
+        let units = path.as_os_str().encode_wide().collect::<Vec<_>>();
+        if units.is_empty()
+            || units.len().saturating_mul(2) > MAX_CLEANUP_EXCLUSION_PATH_BYTES
+            || units.contains(&0)
+            || String::from_utf16(&units).is_err()
+        {
+            return Err(CleanupExclusionsError::InternalState);
+        }
+        let mut bytes = Vec::with_capacity(units.len().saturating_mul(2));
+        for unit in units {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        return Ok((SnapshotNameEncoding::WindowsUtf16LittleEndian, bytes));
+    }
+    #[allow(unreachable_code)]
+    Err(CleanupExclusionsError::InternalState)
+}
+
 fn permanent_cleanup_policy_status(
     policy: CorePermanentCleanupPolicy,
 ) -> Result<PermanentCleanupPolicyStatus, PermanentCleanupPolicyError> {
@@ -4167,10 +4518,10 @@ mod tests {
     }
 
     #[test]
-    fn reports_contract_twenty_two_and_preserves_legacy_formatting() {
+    fn reports_contract_twenty_three_and_preserves_legacy_formatting() {
         let _guard = ENGINE_TEST_LOCK.lock().unwrap();
         let (_temp, engine) = engine();
-        assert_eq!(library_version().ffi_contract_version, 22);
+        assert_eq!(library_version().ffi_contract_version, 23);
         assert_eq!(engine.library_version().unwrap(), library_version());
         assert_eq!(engine.format_size(1536).unwrap().display, "1.5 KB");
         assert!(engine.close());
@@ -5095,6 +5446,217 @@ mod tests {
         assert_eq!(
             engine.reset_permanent_cleanup(),
             Err(PermanentCleanupPolicyError::Closed)
+        );
+    }
+
+    #[test]
+    fn cleanup_exclusions_get_set_reset_round_trip_is_lossless_and_deny_only() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (temp, engine) = engine();
+        let first = temp.path().join("excluded-first");
+        let second = temp.path().join("excluded-second");
+        let input_path = |path: &Path| CleanupExclusionPath {
+            encoding: SnapshotNameEncoding::UnixBytes,
+            encoded_bytes: path.to_str().unwrap().as_bytes().to_vec(),
+        };
+
+        let initial = engine.get_cleanup_exclusions().unwrap();
+        assert_eq!(initial.record_version, 1);
+        assert!(initial.paths.is_empty());
+        assert_eq!(initial.source, CleanupExclusionsSource::Default);
+        assert_eq!(initial.revision, 0);
+        assert_eq!(initial.updated_at_unix_ms, None);
+
+        let stored = engine
+            .set_cleanup_exclusions(CleanupExclusionsInput {
+                record_version: 1,
+                paths: vec![input_path(&second), input_path(&first)],
+            })
+            .unwrap();
+        assert!(stored.changed);
+        assert_eq!(stored.record_version, 1);
+        assert_eq!(stored.exclusions.source, CleanupExclusionsSource::Stored);
+        assert_eq!(stored.exclusions.revision, 1);
+        assert!(stored.exclusions.updated_at_unix_ms.is_some());
+        assert_eq!(
+            stored.exclusions.paths,
+            vec![input_path(&first), input_path(&second)]
+        );
+        assert_eq!(engine.get_cleanup_exclusions().unwrap(), stored.exclusions);
+
+        let exact = engine
+            .set_cleanup_exclusions(CleanupExclusionsInput {
+                record_version: 1,
+                paths: vec![input_path(&first), input_path(&second)],
+            })
+            .unwrap();
+        assert!(!exact.changed);
+        assert_eq!(exact.exclusions, stored.exclusions);
+
+        let reset = engine.reset_cleanup_exclusions().unwrap();
+        assert!(reset.changed);
+        assert_eq!(reset.exclusions.source, CleanupExclusionsSource::Default);
+        assert!(reset.exclusions.paths.is_empty());
+        assert_eq!(reset.exclusions.revision, 0);
+        assert_eq!(reset.exclusions.updated_at_unix_ms, None);
+        let exact_reset = engine.reset_cleanup_exclusions().unwrap();
+        assert!(!exact_reset.changed);
+        assert_eq!(exact_reset.exclusions, reset.exclusions);
+
+        assert!(engine.close());
+        assert_eq!(
+            engine.get_cleanup_exclusions(),
+            Err(CleanupExclusionsError::Closed)
+        );
+        assert_eq!(
+            engine.reset_cleanup_exclusions(),
+            Err(CleanupExclusionsError::Closed)
+        );
+    }
+
+    #[test]
+    fn cleanup_exclusions_rejects_malformed_inputs_before_core() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (_temp, engine) = engine();
+        let valid = || CleanupExclusionPath {
+            encoding: SnapshotNameEncoding::UnixBytes,
+            encoded_bytes: b"/private/tmp/dux-exclusion".to_vec(),
+        };
+
+        assert_eq!(
+            engine.set_cleanup_exclusions(CleanupExclusionsInput {
+                record_version: 2,
+                paths: Vec::new(),
+            }),
+            Err(CleanupExclusionsError::InvalidRecordVersion)
+        );
+        assert_eq!(
+            engine.set_cleanup_exclusions(CleanupExclusionsInput {
+                record_version: 1,
+                paths: vec![CleanupExclusionPath {
+                    encoding: SnapshotNameEncoding::UnixBytes,
+                    encoded_bytes: Vec::new(),
+                }],
+            }),
+            Err(CleanupExclusionsError::InvalidPath)
+        );
+        assert_eq!(
+            engine.set_cleanup_exclusions(CleanupExclusionsInput {
+                record_version: 1,
+                paths: vec![CleanupExclusionPath {
+                    encoding: SnapshotNameEncoding::UnixBytes,
+                    encoded_bytes: b"relative/path".to_vec(),
+                }],
+            }),
+            Err(CleanupExclusionsError::InvalidPath)
+        );
+        assert_eq!(
+            engine.set_cleanup_exclusions(CleanupExclusionsInput {
+                record_version: 1,
+                paths: vec![CleanupExclusionPath {
+                    encoding: SnapshotNameEncoding::UnixBytes,
+                    encoded_bytes: b"/private/tmp/with/../parent".to_vec(),
+                }],
+            }),
+            Err(CleanupExclusionsError::InvalidPath)
+        );
+        assert_eq!(
+            engine.set_cleanup_exclusions(CleanupExclusionsInput {
+                record_version: 1,
+                paths: vec![CleanupExclusionPath {
+                    encoding: SnapshotNameEncoding::WindowsUtf16LittleEndian,
+                    encoded_bytes: b"/private/tmp/dux-exclusion".to_vec(),
+                }],
+            }),
+            Err(CleanupExclusionsError::InvalidPath)
+        );
+
+        let too_many = (0..=MAX_CLEANUP_EXCLUSION_COUNT)
+            .map(|_| valid())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            engine.set_cleanup_exclusions(CleanupExclusionsInput {
+                record_version: 1,
+                paths: too_many,
+            }),
+            Err(CleanupExclusionsError::TooManyPaths)
+        );
+
+        let too_long = CleanupExclusionPath {
+            encoding: SnapshotNameEncoding::UnixBytes,
+            encoded_bytes: std::iter::once(b'/')
+                .chain(std::iter::repeat_n(b'x', MAX_CLEANUP_EXCLUSION_PATH_BYTES))
+                .collect(),
+        };
+        assert_eq!(
+            engine.set_cleanup_exclusions(CleanupExclusionsInput {
+                record_version: 1,
+                paths: vec![too_long],
+            }),
+            Err(CleanupExclusionsError::InvalidPath)
+        );
+    }
+
+    #[test]
+    fn cleanup_exclusions_projection_rejects_malformed_core_shapes_and_paths() {
+        let malformed_default = CoreCleanupExclusions {
+            paths: vec![PathBuf::from("/private/tmp/should-not-be-default")],
+            source: CoreCleanupExclusionSource::Default,
+            revision: 0,
+            updated_at: None,
+        };
+        assert_eq!(
+            cleanup_exclusions_status(malformed_default),
+            Err(CleanupExclusionsError::InternalState)
+        );
+
+        let malformed_revision = CoreCleanupExclusions {
+            paths: Vec::new(),
+            source: CoreCleanupExclusionSource::Stored,
+            revision: 0,
+            updated_at: None,
+        };
+        assert_eq!(
+            cleanup_exclusions_status(malformed_revision),
+            Err(CleanupExclusionsError::InternalState)
+        );
+
+        let malformed_path = CoreCleanupExclusions {
+            paths: vec![PathBuf::from("relative/path")],
+            source: CoreCleanupExclusionSource::Stored,
+            revision: 1,
+            updated_at: Some(UNIX_EPOCH),
+        };
+        assert_eq!(
+            cleanup_exclusions_status(malformed_path),
+            Err(CleanupExclusionsError::InternalState)
+        );
+
+        let too_many = CoreCleanupExclusions {
+            paths: (0..=MAX_CLEANUP_EXCLUSION_COUNT)
+                .map(|index| PathBuf::from(format!("/private/tmp/exclusion-{index:02}")))
+                .collect(),
+            source: CoreCleanupExclusionSource::Stored,
+            revision: 1,
+            updated_at: Some(UNIX_EPOCH),
+        };
+        assert_eq!(
+            cleanup_exclusions_status(too_many),
+            Err(CleanupExclusionsError::InternalState)
+        );
+
+        let oversized_path = CoreCleanupExclusions {
+            paths: vec![PathBuf::from(format!(
+                "/{}",
+                "x".repeat(MAX_CLEANUP_EXCLUSION_PATH_BYTES)
+            ))],
+            source: CoreCleanupExclusionSource::Stored,
+            revision: 1,
+            updated_at: Some(UNIX_EPOCH),
+        };
+        assert_eq!(
+            cleanup_exclusions_status(oversized_path),
+            Err(CleanupExclusionsError::InternalState)
         );
     }
 

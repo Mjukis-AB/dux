@@ -1,5 +1,10 @@
 # Changelog
 
+- Added UniFFI contract v23 cleanup exclusions. The bounded deny-only path
+  prefix set crosses the boundary as lossless encoded observations with typed
+  validation and storage errors; Settings can add a local prefix and requires
+  explicit confirmation before removing one or resetting the set. Exclusions
+  never grant cleanup authority.
 - Added the native Swift presentation for the contract-v22 permanent-cleanup
   kill switch. EngineService maps typed Rust errors and rejects malformed
   versioned status, AppModel generation-fences load/mutation/reset work and

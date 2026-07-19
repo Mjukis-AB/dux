@@ -4798,6 +4798,15 @@ Tasks:
     shutdown. Settings exposes the deny-only gate with VoiceOver identifiers and
     an exact typed confirmation for re-enable/reset. Exclusions remain a
     separate path-bearing presentation boundary.
+  - [x] 2026-07-19 slice: expose the bounded lexical exclusion set through
+    UniFFI contract v23. Get/set/reset carry exact path bytes with Unix or
+    UTF-16 encoding, source/revision/timestamp, and a changed flag. FFI
+    rejects wrong record versions, unsupported encodings, relative/control/
+    parent paths, oversized paths, oversized sets, malformed core shapes, and
+    non-canonical ordering. The native Settings surface presents the paths as
+    lossless observations, lets users add a local file/folder prefix, and
+    requires explicit confirmation before removing one or resetting all.
+    Exclusions remain deny-only and never become plan or executor authority.
 - [ ] Add partial failure, retry, cancellation, and changed-since-plan UI.
 - [ ] Add bounded pending-evaluation discovery and snapshot-backed restart
   recovery; malformed or incompatible state fails closed.

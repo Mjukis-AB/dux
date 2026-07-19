@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 enum MenuBarLabelAccessibility {
@@ -48,8 +49,36 @@ enum PermanentCleanupPolicyAccessibility {
     ]
 }
 
+enum CleanupExclusionsAccessibility {
+    static let add = "cleanup-exclusions-add"
+    static let reset = "cleanup-exclusions-reset"
+    static let list = "cleanup-exclusions-list"
+    static let removePrefix = "cleanup-exclusions-remove-"
+    static let error = "cleanup-exclusions-error"
+    static let progress = "cleanup-exclusions-progress"
+    static let status = "cleanup-exclusions-status"
+
+    static let allStaticControlIdentifiers = [
+        add,
+        reset,
+        list,
+        error,
+        progress,
+        status,
+    ]
+
+    static func remove(_ index: Int) -> String {
+        removePrefix + String(index)
+    }
+}
+
 private enum PermanentCleanupConfirmationAction {
     case enable
+    case reset
+}
+
+private enum CleanupExclusionConfirmationAction {
+    case remove(CleanupExclusionPathObservation)
     case reset
 }
 
@@ -59,6 +88,8 @@ struct DuxSettingsView: View {
     @State private var showingPermanentCleanupConfirmation = false
     @State private var permanentCleanupConfirmationAction:
         PermanentCleanupConfirmationAction = .enable
+    @State private var cleanupExclusionConfirmationAction:
+        CleanupExclusionConfirmationAction?
 
     let model: AppModel
 
@@ -402,6 +433,8 @@ struct DuxSettingsView: View {
                 }
             }
 
+            cleanupExclusionSettings(model: model)
+
             Section("Engine") {
                 switch model.engineState {
                 case .idle, .loading:
@@ -432,7 +465,51 @@ struct DuxSettingsView: View {
             await model.refreshNotificationAuthorizationState()
             await model.loadDiskPressurePolicy()
             await model.loadPermanentCleanupPolicy()
+            await model.loadCleanupExclusions()
             await model.loadInitialState()
+        }
+        .confirmationDialog(
+            cleanupExclusionConfirmationTitle,
+            isPresented: Binding(
+                get: { cleanupExclusionConfirmationAction != nil },
+                set: { presented in
+                    if !presented {
+                        cleanupExclusionConfirmationAction = nil
+                    }
+                }
+            ),
+            presenting: cleanupExclusionConfirmationAction
+        ) { action in
+            switch action {
+            case let .remove(path):
+                Button("Remove exclusion", role: .destructive) {
+                    cleanupExclusionConfirmationAction = nil
+                    Task {
+                        await model.removeCleanupExclusion(path, confirmed: true)
+                    }
+                }
+            case .reset:
+                Button("Remove all exclusions", role: .destructive) {
+                    cleanupExclusionConfirmationAction = nil
+                    Task { await model.resetCleanupExclusions(confirmed: true) }
+                }
+            }
+            Button("Cancel", role: .cancel) {
+                cleanupExclusionConfirmationAction = nil
+            }
+        } message: { action in
+            switch action {
+            case let .remove(path):
+                Text(
+                    "Removing this deny-only prefix may allow a future reviewed plan to "
+                        + "consider items under it:\n\(path.displayText)"
+                )
+            case .reset:
+                Text(
+                    "This removes every user exclusion and restores the empty DUX default. "
+                        + "It does not start cleanup."
+                )
+            }
         }
         .onChange(of: scenePhase) { _, phase in
             guard phase == .active else {
@@ -443,6 +520,120 @@ struct DuxSettingsView: View {
                 await model.refreshNotificationAuthorizationState()
             }
         }
+    }
+
+    @ViewBuilder
+    private func cleanupExclusionSettings(model: AppModel) -> some View {
+        Section("Cleanup exclusions") {
+            Text(
+                "These exact path prefixes can only block cleanup. They never approve a target, "
+                    + "start an effect, or let AI remove anything."
+            )
+            .foregroundStyle(.secondary)
+
+            if let exclusions = model.cleanupExclusions {
+                LabeledContent("Exclusion source") {
+                    Text(exclusions.source == .default ? "Empty DUX default" : "Stored choice")
+                }
+                LabeledContent("Exclusion revision") {
+                    Text(verbatim: String(exclusions.revision))
+                }
+                if let milliseconds = exclusions.updatedAtUnixMilliseconds {
+                    LabeledContent("Exclusions updated") {
+                        Text(
+                            Date(timeIntervalSince1970: Double(milliseconds) / 1_000),
+                            format: .dateTime
+                        )
+                    }
+                }
+
+                if exclusions.paths.isEmpty {
+                    Label("No user cleanup exclusions", systemImage: "checkmark.shield")
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier(CleanupExclusionsAccessibility.status)
+                } else {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(Array(exclusions.paths.enumerated()), id: \.element) { index, path in
+                            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                                Text(verbatim: path.displayText)
+                                    .font(.system(.body, design: .monospaced))
+                                    .textSelection(.enabled)
+                                    .lineLimit(2)
+                                    .truncationMode(.middle)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                Button("Remove…", role: .destructive) {
+                                    cleanupExclusionConfirmationAction = .remove(path)
+                                }
+                                .accessibilityIdentifier(CleanupExclusionsAccessibility.remove(index))
+                                .accessibilityLabel("Remove cleanup exclusion")
+                                .accessibilityHint(
+                                    "Asks for confirmation before removing \(path.displayText)"
+                                )
+                            }
+                        }
+                    }
+                    .accessibilityElement(children: .contain)
+                    .accessibilityIdentifier(CleanupExclusionsAccessibility.list)
+                }
+
+                HStack {
+                    Button("Add path…") {
+                        if let path = selectCleanupExclusionPath() {
+                            Task { await model.addCleanupExclusion(path) }
+                        }
+                    }
+                    .disabled(model.cleanupExclusionsState.isBusy || exclusions.paths.count >= 64)
+                    .accessibilityIdentifier(CleanupExclusionsAccessibility.add)
+                    .accessibilityHint("Selects a file or folder prefix that cleanup must avoid")
+
+                    Button("Restore empty default…") {
+                        cleanupExclusionConfirmationAction = .reset
+                    }
+                    .disabled(model.cleanupExclusionsState.isBusy || exclusions.paths.isEmpty)
+                    .accessibilityIdentifier(CleanupExclusionsAccessibility.reset)
+                    .accessibilityHint("Asks for confirmation before removing every exclusion")
+
+                    if model.cleanupExclusionsState.isBusy {
+                        ProgressView()
+                            .controlSize(.small)
+                            .accessibilityIdentifier(CleanupExclusionsAccessibility.progress)
+                            .accessibilityLabel("Updating cleanup exclusions")
+                    }
+                }
+            } else if model.cleanupExclusionsState.isBusy {
+                ProgressView("Loading cleanup exclusions")
+                    .accessibilityIdentifier(CleanupExclusionsAccessibility.progress)
+            }
+
+            if case let .failed(failure) = model.cleanupExclusionsState {
+                Label(Self.message(for: failure), systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.red)
+                    .accessibilityIdentifier(CleanupExclusionsAccessibility.error)
+            }
+        }
+    }
+
+    private var cleanupExclusionConfirmationTitle: String {
+        switch cleanupExclusionConfirmationAction {
+        case .remove: "Remove this cleanup exclusion?"
+        case .reset: "Remove all cleanup exclusions?"
+        case nil: "Confirm cleanup exclusion change"
+        }
+    }
+
+    private func selectCleanupExclusionPath() -> CleanupExclusionPathObservation? {
+        let panel = NSOpenPanel()
+        panel.title = "Choose a path DUX cleanup must avoid"
+        panel.prompt = "Exclude"
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = true
+        panel.canCreateDirectories = false
+        panel.resolvesAliases = false
+        guard panel.runModal() == .OK, let url = panel.url else {
+            return nil
+        }
+        return CleanupExclusionPathObservation(fileURL: url)
     }
 
     @ViewBuilder
@@ -688,6 +879,37 @@ struct DuxSettingsView: View {
             }
         case .unexpected:
             String(localized: "Cleanup-safety settings are unavailable. Your last choice is unchanged.")
+        }
+    }
+
+    static func message(for failure: CleanupExclusionsFailure) -> String {
+        switch failure {
+        case .confirmationRequired:
+            String(localized: "Confirm the removal before weakening cleanup protection.")
+        case .invalidSelection:
+            String(localized: "Choose an absolute local file or folder path.")
+        case let .service(error):
+            switch error {
+            case .closed:
+                String(localized: "The storage engine session is closed.")
+            case .invalidPath:
+                String(localized: "That path cannot be stored as a cleanup exclusion.")
+            case .tooManyPaths:
+                String(localized: "DUX supports at most 64 cleanup exclusions.")
+            case .invalidRecordVersion, .incompatibleSchema:
+                String(localized: "This cleanup-exclusion format is incompatible with this app.")
+            case .retryable, .invalidClock, .outcomeUnknown:
+                String(localized: "Cleanup exclusions could not be changed safely. Try again.")
+            case .revisionExhausted, .unsafeStorage, .budgetExceeded, .corruptData,
+                 .unavailable, .internalState, .invalidResponse:
+                String(
+                    localized: "Cleanup exclusions are unavailable. Your last saved exclusions are unchanged."
+                )
+            }
+        case .unexpected:
+            String(
+                localized: "Cleanup exclusions are unavailable. Your last saved exclusions are unchanged."
+            )
         }
     }
 

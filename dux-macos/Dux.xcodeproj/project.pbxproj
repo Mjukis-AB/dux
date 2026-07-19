@@ -68,6 +68,7 @@
 		C80CD6D9D30C598CBBE00B11 /* DiskPressurePolicyAppModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1477499EB80DB74A899DD2D /* DiskPressurePolicyAppModelTests.swift */; };
 		C80CD6D9D30C598CBBE00B12 /* PermanentCleanupPolicyAppModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1477499EB80DB74A899DD2E /* PermanentCleanupPolicyAppModelTests.swift */; };
 		C80CD6D9D30C598CBBE00B13 /* PermanentCleanupPolicyServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1477499EB80DB74A899DD2F /* PermanentCleanupPolicyServiceTests.swift */; };
+		C80CD6D9D30C598CBBE00B14 /* CleanupExclusionsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1477499EB80DB74A899DD30 /* CleanupExclusionsTests.swift */; };
 		D026D7FC625D6956F4293FF2 /* StorageAccessProbeService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6381B23B2DFA3EB7BE8CB06C /* StorageAccessProbeService.swift */; };
 		D1948288BB8C18A931312A59 /* AppScanState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9BFF59D4307552B1A1A571ED /* AppScanState.swift */; };
 		D1CDD0944327D2028E123D47 /* LoginItemState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 09BEEFC99984A8BEF618627B /* LoginItemState.swift */; };
@@ -162,6 +163,7 @@
 		F1477499EB80DB74A899DD2D /* DiskPressurePolicyAppModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiskPressurePolicyAppModelTests.swift; sourceTree = "<group>"; };
 		F1477499EB80DB74A899DD2E /* PermanentCleanupPolicyAppModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PermanentCleanupPolicyAppModelTests.swift; sourceTree = "<group>"; };
 		F1477499EB80DB74A899DD2F /* PermanentCleanupPolicyServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PermanentCleanupPolicyServiceTests.swift; sourceTree = "<group>"; };
+		F1477499EB80DB74A899DD30 /* CleanupExclusionsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CleanupExclusionsTests.swift; sourceTree = "<group>"; };
 		F237299D63EBE1AC54C52DC7 /* HomeScanService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeScanService.swift; sourceTree = "<group>"; };
 		F5E7867AEAC34A5EF08EF4A3 /* AppRuntime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppRuntime.swift; sourceTree = "<group>"; };
 		F65ABB13456CB4A703946FEE /* StorageAccessOnboarding.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StorageAccessOnboarding.swift; sourceTree = "<group>"; };
@@ -309,6 +311,7 @@
 				F1477499EB80DB74A899DD2D /* DiskPressurePolicyAppModelTests.swift */,
 				F1477499EB80DB74A899DD2E /* PermanentCleanupPolicyAppModelTests.swift */,
 				F1477499EB80DB74A899DD2F /* PermanentCleanupPolicyServiceTests.swift */,
+				F1477499EB80DB74A899DD30 /* CleanupExclusionsTests.swift */,
 				757D490EB8939DA31C6EF02D /* DiskPressurePolicyTests.swift */,
 				4E504B7A8AC2DDFCF50B5EBD /* DuxAppDelegateTests.swift */,
 				00371DEF2482E0BC47D1A5D0 /* EngineServiceTests.swift */,
@@ -431,6 +434,7 @@
 				C80CD6D9D30C598CBBE00B11 /* DiskPressurePolicyAppModelTests.swift in Sources */,
 				C80CD6D9D30C598CBBE00B12 /* PermanentCleanupPolicyAppModelTests.swift in Sources */,
 				C80CD6D9D30C598CBBE00B13 /* PermanentCleanupPolicyServiceTests.swift in Sources */,
+				C80CD6D9D30C598CBBE00B14 /* CleanupExclusionsTests.swift in Sources */,
 				73134C24BA6FC45B5017B336 /* DiskPressurePolicyTests.swift in Sources */,
 				B34BE4E0B8AE46D166283EC0 /* DuxAppDelegateTests.swift in Sources */,
 				9033D6BF38DA8C7EE5FC6710 /* EngineServiceTests.swift in Sources */,

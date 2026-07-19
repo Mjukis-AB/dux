@@ -607,6 +607,13 @@ public protocol DuxEngineProtocol: AnyObject, Sendable {
      */
     func getCapacityTrend(request: CapacityTrendRequest) throws  -> CapacityTrendStatus
 
+    /**
+     * Load the bounded, losslessly encoded deny-only user exclusion set.
+     * Returned paths are observations for settings presentation and never
+     * become planner or executor authority.
+     */
+    func getCleanupExclusions() throws  -> CleanupExclusionsStatus
+
     func getDiskPressurePolicy() throws  -> PressurePolicyStatus
 
     /**
@@ -626,6 +633,11 @@ public protocol DuxEngineProtocol: AnyObject, Sendable {
      */
     func recentScanHistory(limit: UInt16) throws  -> RecentScanHistoryPage
 
+    /**
+     * Restore the empty, versioned default exclusion set.
+     */
+    func resetCleanupExclusions() throws  -> CleanupExclusionsUpdate
+
     func resetDiskPressurePolicy() throws  -> PressurePolicyUpdate
 
     func resetPermanentCleanup() throws  -> PermanentCleanupPolicyUpdate
@@ -635,6 +647,13 @@ public protocol DuxEngineProtocol: AnyObject, Sendable {
      * history metadata only and remains available without a retained snapshot.
      */
     func scanCoverageDetails(scanId: String, request: ScanCoverageDetailsRequest) throws  -> ScanCoverageDetailsPage
+
+    /**
+     * Replace the bounded deny-only user exclusion set. Rust remains the
+     * semantic validator and takes the store-wide cleanup exclusion before
+     * persisting the exact lexical prefixes.
+     */
+    func setCleanupExclusions(input: CleanupExclusionsInput) throws  -> CleanupExclusionsUpdate
 
     func setDiskPressurePolicy(input: PressurePolicyInput) throws  -> PressurePolicyUpdate
 
@@ -784,6 +803,19 @@ open func getCapacityTrend(request: CapacityTrendRequest)throws  -> CapacityTren
 })
 }
 
+    /**
+     * Load the bounded, losslessly encoded deny-only user exclusion set.
+     * Returned paths are observations for settings presentation and never
+     * become planner or executor authority.
+     */
+open func getCleanupExclusions()throws  -> CleanupExclusionsStatus  {
+    return try  FfiConverterTypeCleanupExclusionsStatus_lift(try rustCallWithError(FfiConverterTypeCleanupExclusionsError_lift) {
+    uniffi_dux_ffi_fn_method_duxengine_get_cleanup_exclusions(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
 open func getDiskPressurePolicy()throws  -> PressurePolicyStatus  {
     return try  FfiConverterTypePressurePolicyStatus_lift(try rustCallWithError(FfiConverterTypePressurePolicyError_lift) {
     uniffi_dux_ffi_fn_method_duxengine_get_disk_pressure_policy(
@@ -835,6 +867,17 @@ open func recentScanHistory(limit: UInt16)throws  -> RecentScanHistoryPage  {
 })
 }
 
+    /**
+     * Restore the empty, versioned default exclusion set.
+     */
+open func resetCleanupExclusions()throws  -> CleanupExclusionsUpdate  {
+    return try  FfiConverterTypeCleanupExclusionsUpdate_lift(try rustCallWithError(FfiConverterTypeCleanupExclusionsError_lift) {
+    uniffi_dux_ffi_fn_method_duxengine_reset_cleanup_exclusions(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
 open func resetDiskPressurePolicy()throws  -> PressurePolicyUpdate  {
     return try  FfiConverterTypePressurePolicyUpdate_lift(try rustCallWithError(FfiConverterTypePressurePolicyError_lift) {
     uniffi_dux_ffi_fn_method_duxengine_reset_disk_pressure_policy(
@@ -861,6 +904,20 @@ open func scanCoverageDetails(scanId: String, request: ScanCoverageDetailsReques
             self.uniffiCloneHandle(),
         FfiConverterString.lower(scanId),
         FfiConverterTypeScanCoverageDetailsRequest_lower(request),$0
+    )
+})
+}
+
+    /**
+     * Replace the bounded deny-only user exclusion set. Rust remains the
+     * semantic validator and takes the store-wide cleanup exclusion before
+     * persisting the exact lexical prefixes.
+     */
+open func setCleanupExclusions(input: CleanupExclusionsInput)throws  -> CleanupExclusionsUpdate  {
+    return try  FfiConverterTypeCleanupExclusionsUpdate_lift(try rustCallWithError(FfiConverterTypeCleanupExclusionsError_lift) {
+    uniffi_dux_ffi_fn_method_duxengine_set_cleanup_exclusions(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeCleanupExclusionsInput_lower(input),$0
     )
 })
 }
@@ -2432,6 +2489,247 @@ public func FfiConverterTypeCapacityTrendStatus_lift(_ buf: RustBuffer) throws -
 #endif
 public func FfiConverterTypeCapacityTrendStatus_lower(_ value: CapacityTrendStatus) -> RustBuffer {
     return FfiConverterTypeCapacityTrendStatus.lower(value)
+}
+
+
+/**
+ * A lossless absolute lexical path prefix from the deny-only cleanup
+ * exclusion setting. The bytes are an observation payload only: they do not
+ * select a plan, grant access, or authorize a filesystem effect.
+ */
+public struct CleanupExclusionPath: Equatable, Hashable {
+    public let encoding: SnapshotNameEncoding
+    public let encodedBytes: Data
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(encoding: SnapshotNameEncoding, encodedBytes: Data) {
+        self.encoding = encoding
+        self.encodedBytes = encodedBytes
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension CleanupExclusionPath: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCleanupExclusionPath: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CleanupExclusionPath {
+        return
+            try CleanupExclusionPath(
+                encoding: FfiConverterTypeSnapshotNameEncoding.read(from: &buf),
+                encodedBytes: FfiConverterData.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: CleanupExclusionPath, into buf: inout [UInt8]) {
+        FfiConverterTypeSnapshotNameEncoding.write(value.encoding, into: &buf)
+        FfiConverterData.write(value.encodedBytes, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCleanupExclusionPath_lift(_ buf: RustBuffer) throws -> CleanupExclusionPath {
+    return try FfiConverterTypeCleanupExclusionPath.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCleanupExclusionPath_lower(_ value: CleanupExclusionPath) -> RustBuffer {
+    return FfiConverterTypeCleanupExclusionPath.lower(value)
+}
+
+
+/**
+ * Versioned input for replacing the bounded user exclusion set. Core owns
+ * absolute-path, component, ordering, and duplicate validation.
+ */
+public struct CleanupExclusionsInput: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let paths: [CleanupExclusionPath]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, paths: [CleanupExclusionPath]) {
+        self.recordVersion = recordVersion
+        self.paths = paths
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension CleanupExclusionsInput: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCleanupExclusionsInput: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CleanupExclusionsInput {
+        return
+            try CleanupExclusionsInput(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                paths: FfiConverterSequenceTypeCleanupExclusionPath.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: CleanupExclusionsInput, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterSequenceTypeCleanupExclusionPath.write(value.paths, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCleanupExclusionsInput_lift(_ buf: RustBuffer) throws -> CleanupExclusionsInput {
+    return try FfiConverterTypeCleanupExclusionsInput.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCleanupExclusionsInput_lower(_ value: CleanupExclusionsInput) -> RustBuffer {
+    return FfiConverterTypeCleanupExclusionsInput.lower(value)
+}
+
+
+public struct CleanupExclusionsStatus: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let paths: [CleanupExclusionPath]
+    public let source: CleanupExclusionsSource
+    public let revision: UInt64
+    public let updatedAtUnixMs: Int64?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, paths: [CleanupExclusionPath], source: CleanupExclusionsSource, revision: UInt64, updatedAtUnixMs: Int64?) {
+        self.recordVersion = recordVersion
+        self.paths = paths
+        self.source = source
+        self.revision = revision
+        self.updatedAtUnixMs = updatedAtUnixMs
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension CleanupExclusionsStatus: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCleanupExclusionsStatus: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CleanupExclusionsStatus {
+        return
+            try CleanupExclusionsStatus(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                paths: FfiConverterSequenceTypeCleanupExclusionPath.read(from: &buf),
+                source: FfiConverterTypeCleanupExclusionsSource.read(from: &buf),
+                revision: FfiConverterUInt64.read(from: &buf),
+                updatedAtUnixMs: FfiConverterOptionInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: CleanupExclusionsStatus, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterSequenceTypeCleanupExclusionPath.write(value.paths, into: &buf)
+        FfiConverterTypeCleanupExclusionsSource.write(value.source, into: &buf)
+        FfiConverterUInt64.write(value.revision, into: &buf)
+        FfiConverterOptionInt64.write(value.updatedAtUnixMs, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCleanupExclusionsStatus_lift(_ buf: RustBuffer) throws -> CleanupExclusionsStatus {
+    return try FfiConverterTypeCleanupExclusionsStatus.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCleanupExclusionsStatus_lower(_ value: CleanupExclusionsStatus) -> RustBuffer {
+    return FfiConverterTypeCleanupExclusionsStatus.lower(value)
+}
+
+
+public struct CleanupExclusionsUpdate: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let exclusions: CleanupExclusionsStatus
+    public let changed: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, exclusions: CleanupExclusionsStatus, changed: Bool) {
+        self.recordVersion = recordVersion
+        self.exclusions = exclusions
+        self.changed = changed
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension CleanupExclusionsUpdate: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCleanupExclusionsUpdate: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CleanupExclusionsUpdate {
+        return
+            try CleanupExclusionsUpdate(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                exclusions: FfiConverterTypeCleanupExclusionsStatus.read(from: &buf),
+                changed: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: CleanupExclusionsUpdate, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterTypeCleanupExclusionsStatus.write(value.exclusions, into: &buf)
+        FfiConverterBool.write(value.changed, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCleanupExclusionsUpdate_lift(_ buf: RustBuffer) throws -> CleanupExclusionsUpdate {
+    return try FfiConverterTypeCleanupExclusionsUpdate.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCleanupExclusionsUpdate_lower(_ value: CleanupExclusionsUpdate) -> RustBuffer {
+    return FfiConverterTypeCleanupExclusionsUpdate.lower(value)
 }
 
 
@@ -6137,6 +6435,221 @@ public func FfiConverterTypeCapacityTrendPointSource_lift(_ buf: RustBuffer) thr
 #endif
 public func FfiConverterTypeCapacityTrendPointSource_lower(_ value: CapacityTrendPointSource) -> RustBuffer {
     return FfiConverterTypeCapacityTrendPointSource.lower(value)
+}
+
+
+
+public enum CleanupExclusionsError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
+
+
+
+    case Closed
+    case InvalidRecordVersion
+    case InvalidPath
+    case TooManyPaths
+    case RevisionExhausted
+    case InvalidClock
+    case IncompatibleSchema
+    case Busy
+    case UnsafeStorage
+    case BudgetExceeded
+    case CorruptData
+    case Unavailable
+    case OutcomeUnknown
+    case InternalState
+
+
+
+
+
+
+    public var errorDescription: String? {
+        String(reflecting: self)
+    }
+
+}
+
+#if compiler(>=6)
+extension CleanupExclusionsError: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCleanupExclusionsError: FfiConverterRustBuffer {
+    typealias SwiftType = CleanupExclusionsError
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CleanupExclusionsError {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+
+
+
+        case 1: return .Closed
+        case 2: return .InvalidRecordVersion
+        case 3: return .InvalidPath
+        case 4: return .TooManyPaths
+        case 5: return .RevisionExhausted
+        case 6: return .InvalidClock
+        case 7: return .IncompatibleSchema
+        case 8: return .Busy
+        case 9: return .UnsafeStorage
+        case 10: return .BudgetExceeded
+        case 11: return .CorruptData
+        case 12: return .Unavailable
+        case 13: return .OutcomeUnknown
+        case 14: return .InternalState
+
+         default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: CleanupExclusionsError, into buf: inout [UInt8]) {
+        switch value {
+
+
+
+
+
+        case .Closed:
+            writeInt(&buf, Int32(1))
+
+
+        case .InvalidRecordVersion:
+            writeInt(&buf, Int32(2))
+
+
+        case .InvalidPath:
+            writeInt(&buf, Int32(3))
+
+
+        case .TooManyPaths:
+            writeInt(&buf, Int32(4))
+
+
+        case .RevisionExhausted:
+            writeInt(&buf, Int32(5))
+
+
+        case .InvalidClock:
+            writeInt(&buf, Int32(6))
+
+
+        case .IncompatibleSchema:
+            writeInt(&buf, Int32(7))
+
+
+        case .Busy:
+            writeInt(&buf, Int32(8))
+
+
+        case .UnsafeStorage:
+            writeInt(&buf, Int32(9))
+
+
+        case .BudgetExceeded:
+            writeInt(&buf, Int32(10))
+
+
+        case .CorruptData:
+            writeInt(&buf, Int32(11))
+
+
+        case .Unavailable:
+            writeInt(&buf, Int32(12))
+
+
+        case .OutcomeUnknown:
+            writeInt(&buf, Int32(13))
+
+
+        case .InternalState:
+            writeInt(&buf, Int32(14))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCleanupExclusionsError_lift(_ buf: RustBuffer) throws -> CleanupExclusionsError {
+    return try FfiConverterTypeCleanupExclusionsError.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCleanupExclusionsError_lower(_ value: CleanupExclusionsError) -> RustBuffer {
+    return FfiConverterTypeCleanupExclusionsError.lower(value)
+}
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum CleanupExclusionsSource: Equatable, Hashable {
+
+    case `default`
+    case stored
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension CleanupExclusionsSource: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCleanupExclusionsSource: FfiConverterRustBuffer {
+    typealias SwiftType = CleanupExclusionsSource
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CleanupExclusionsSource {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .`default`
+
+        case 2: return .stored
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: CleanupExclusionsSource, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .`default`:
+            writeInt(&buf, Int32(1))
+
+
+        case .stored:
+            writeInt(&buf, Int32(2))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCleanupExclusionsSource_lift(_ buf: RustBuffer) throws -> CleanupExclusionsSource {
+    return try FfiConverterTypeCleanupExclusionsSource.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCleanupExclusionsSource_lower(_ value: CleanupExclusionsSource) -> RustBuffer {
+    return FfiConverterTypeCleanupExclusionsSource.lower(value)
 }
 
 
@@ -10786,6 +11299,31 @@ fileprivate struct FfiConverterSequenceTypeCapacityTrendPoint: FfiConverterRustB
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeCleanupExclusionPath: FfiConverterRustBuffer {
+    typealias SwiftType = [CleanupExclusionPath]
+
+    public static func write(_ value: [CleanupExclusionPath], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeCleanupExclusionPath.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [CleanupExclusionPath] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [CleanupExclusionPath]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeCleanupExclusionPath.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeHistoricalScanIssue: FfiConverterRustBuffer {
     typealias SwiftType = [HistoricalScanIssue]
 
@@ -11059,6 +11597,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_dux_ffi_checksum_method_duxengine_get_capacity_trend() != 3415) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_dux_ffi_checksum_method_duxengine_get_cleanup_exclusions() != 17969) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_dux_ffi_checksum_method_duxengine_get_disk_pressure_policy() != 6278) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -11074,6 +11615,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_dux_ffi_checksum_method_duxengine_recent_scan_history() != 13010) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_dux_ffi_checksum_method_duxengine_reset_cleanup_exclusions() != 15740) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_dux_ffi_checksum_method_duxengine_reset_disk_pressure_policy() != 23462) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -11081,6 +11625,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_scan_coverage_details() != 53756) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_duxengine_set_cleanup_exclusions() != 35166) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_set_disk_pressure_policy() != 62356) {

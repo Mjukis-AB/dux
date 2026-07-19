@@ -7,10 +7,14 @@ final class PermanentCleanupPolicyAppModelTests: XCTestCase {
         let identifiers = PermanentCleanupPolicyAccessibility.allControlIdentifiers
         XCTAssertEqual(Set(identifiers).count, identifiers.count)
         XCTAssertFalse(
-            DuxSettingsView.message(for: .confirmationRequired).isEmpty
+            DuxSettingsView.message(
+                for: PermanentCleanupPolicyFailure.confirmationRequired
+            ).isEmpty
         )
         XCTAssertFalse(
-            DuxSettingsView.message(for: .service(.invalidResponse)).isEmpty
+            DuxSettingsView.message(
+                for: PermanentCleanupPolicyFailure.service(.invalidResponse)
+            ).isEmpty
         )
     }
 
@@ -92,13 +96,13 @@ private actor PermanentCleanupEngineSpy: EngineServing {
     )
     private var setCount = 0
     private var resetCount = 0
-    private var suspendNextLoad = false
+    private var shouldSuspendNextLoad = false
     private var loadStarted = false
     private var loadWaiter: CheckedContinuation<Void, Never>?
     private var suspendedLoad: CheckedContinuation<PermanentCleanupPolicy, Never>?
 
     func loadStatus() async throws -> EngineStatus {
-        EngineStatus(libraryVersion: "test", ffiContractVersion: 22, executedOffMainThread: true)
+        EngineStatus(libraryVersion: "test", ffiContractVersion: 23, executedOffMainThread: true)
     }
 
     func observeVolumeCapacity(
@@ -146,13 +150,13 @@ private actor PermanentCleanupEngineSpy: EngineServing {
         loadStarted = true
         loadWaiter?.resume()
         loadWaiter = nil
-        if suspendNextLoad {
-            suspendNextLoad = false
+        if shouldSuspendNextLoad {
+            shouldSuspendNextLoad = false
             return await withCheckedContinuation { continuation in
                 suspendedLoad = continuation
             }
         }
-        policy
+        return policy
     }
 
     func setPermanentCleanupEnabled(
@@ -183,7 +187,7 @@ private actor PermanentCleanupEngineSpy: EngineServing {
     func resetRequestCount() -> Int { resetCount }
 
     func suspendNextLoad() {
-        suspendNextLoad = true
+        shouldSuspendNextLoad = true
     }
 
     func waitForLoadRequest() async {

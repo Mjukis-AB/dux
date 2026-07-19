@@ -33,6 +33,30 @@ protocol DuxPermanentCleanupPolicyServing: Sendable {
     func resetPermanentCleanup() async throws -> PermanentCleanupPolicyUpdateResult
 }
 
+protocol DuxCleanupExclusionsServing: Sendable {
+    func loadCleanupExclusions() async throws -> CleanupExclusionsPolicy
+    func setCleanupExclusions(
+        _ paths: [CleanupExclusionPathObservation]
+    ) async throws -> CleanupExclusionsUpdateResult
+    func resetCleanupExclusions() async throws -> CleanupExclusionsUpdateResult
+}
+
+extension DuxCleanupExclusionsServing {
+    func loadCleanupExclusions() async throws -> CleanupExclusionsPolicy {
+        throw CleanupExclusionsServiceError.unavailable
+    }
+
+    func setCleanupExclusions(
+        _: [CleanupExclusionPathObservation]
+    ) async throws -> CleanupExclusionsUpdateResult {
+        throw CleanupExclusionsServiceError.unavailable
+    }
+
+    func resetCleanupExclusions() async throws -> CleanupExclusionsUpdateResult {
+        throw CleanupExclusionsServiceError.unavailable
+    }
+}
+
 extension DuxPermanentCleanupPolicyServing {
     func loadPermanentCleanupPolicy() async throws -> PermanentCleanupPolicy {
         throw PermanentCleanupPolicyServiceError.unavailable
@@ -50,7 +74,7 @@ extension DuxPermanentCleanupPolicyServing {
 }
 
 protocol EngineServing: DuxVolumeStatusServing, DuxCapacityTrendServing, DuxPressurePolicyServing,
-    DuxPermanentCleanupPolicyServing, Sendable
+    DuxPermanentCleanupPolicyServing, DuxCleanupExclusionsServing, Sendable
 {
     func loadStatus() async throws -> EngineStatus
 }
@@ -153,7 +177,7 @@ extension DuxSnapshotReviewLease {
 struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewServing,
     DuxSnapshotHistoryServing, DuxScanCoverageServing, HomeScanServing, Sendable
 {
-    fileprivate static let expectedFFIContractVersion: UInt32 = 22
+    fileprivate static let expectedFFIContractVersion: UInt32 = 23
     fileprivate static let expectedRecordVersion: UInt32 = 1
 
     private let state: EngineServiceState
@@ -395,6 +419,61 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
                 return update
             } catch let error as PermanentCleanupPolicyError {
                 throw Self.permanentCleanupPolicyError(error)
+            }
+        }
+    }
+
+    func loadCleanupExclusions() async throws -> CleanupExclusionsPolicy {
+        try await state.perform { state in
+            precondition(!Thread.isMainThread, "Blocking FFI work reached the main thread")
+            let engine = try Self.resolveCleanupExclusionsEngine(state)
+            do {
+                return try Self.cleanupExclusions(engine.getCleanupExclusions())
+            } catch let error as CleanupExclusionsError {
+                throw Self.cleanupExclusionsError(error)
+            }
+        }
+    }
+
+    func setCleanupExclusions(
+        _ paths: [CleanupExclusionPathObservation]
+    ) async throws -> CleanupExclusionsUpdateResult {
+        try await state.perform { state in
+            precondition(!Thread.isMainThread, "Blocking FFI work reached the main thread")
+            let engine = try Self.resolveCleanupExclusionsEngine(state)
+            do {
+                let input = CleanupExclusionsInput(
+                    recordVersion: Self.expectedRecordVersion,
+                    paths: paths.map(Self.cleanupExclusionPath)
+                )
+                let update = try Self.cleanupExclusionsUpdate(
+                    engine.setCleanupExclusions(input: input)
+                )
+                guard update.exclusions.paths == Self.canonicalCleanupExclusionPaths(paths) else {
+                    throw CleanupExclusionsServiceError.invalidResponse
+                }
+                return update
+            } catch let error as CleanupExclusionsError {
+                throw Self.cleanupExclusionsError(error)
+            }
+        }
+    }
+
+    func resetCleanupExclusions() async throws -> CleanupExclusionsUpdateResult {
+        try await state.perform { state in
+            precondition(!Thread.isMainThread, "Blocking FFI work reached the main thread")
+            let engine = try Self.resolveCleanupExclusionsEngine(state)
+            do {
+                let update = try Self.cleanupExclusionsUpdate(engine.resetCleanupExclusions())
+                guard
+                    update.exclusions.paths.isEmpty,
+                    update.exclusions.source == .default
+                else {
+                    throw CleanupExclusionsServiceError.invalidResponse
+                }
+                return update
+            } catch let error as CleanupExclusionsError {
+                throw Self.cleanupExclusionsError(error)
             }
         }
     }
@@ -807,6 +886,135 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         }
     }
 
+    private static func cleanupExclusions(
+        _ status: CleanupExclusionsStatus
+    ) throws -> CleanupExclusionsPolicy {
+        let source: CleanupExclusionsOrigin = switch status.source {
+        case .default: .default
+        case .stored: .stored
+        }
+        let paths = try status.paths.map(cleanupExclusionPathObservation)
+        guard
+            status.recordVersion == expectedRecordVersion,
+            paths.count <= 64,
+            Set(paths).count == paths.count,
+            paths == canonicalCleanupExclusionPaths(paths),
+            (status.revision == 0
+                && paths.isEmpty
+                && source == .default
+                && status.updatedAtUnixMs == nil)
+                || (status.revision > 0
+                    && source == .stored
+                    && status.updatedAtUnixMs.map { $0 >= 0 } == true)
+        else {
+            throw CleanupExclusionsServiceError.invalidResponse
+        }
+        return CleanupExclusionsPolicy(
+            paths: paths,
+            source: source,
+            revision: status.revision,
+            updatedAtUnixMilliseconds: status.updatedAtUnixMs
+        )
+    }
+
+    private static func cleanupExclusionsUpdate(
+        _ response: CleanupExclusionsUpdate
+    ) throws -> CleanupExclusionsUpdateResult {
+        guard response.recordVersion == expectedRecordVersion else {
+            throw CleanupExclusionsServiceError.invalidResponse
+        }
+        return CleanupExclusionsUpdateResult(
+            exclusions: try cleanupExclusions(response.exclusions),
+            changed: response.changed
+        )
+    }
+
+    private static func cleanupExclusionPathObservation(
+        _ path: CleanupExclusionPath
+    ) throws -> CleanupExclusionPathObservation {
+        guard
+            path.encoding == .unixBytes,
+            !path.encodedBytes.isEmpty,
+            path.encodedBytes.count <= 32 * 1_024,
+            path.encodedBytes.first == UInt8(ascii: "/"),
+            !path.encodedBytes.contains(0),
+            hasNormalizedUnixPathComponents(path.encodedBytes)
+        else {
+            throw CleanupExclusionsServiceError.invalidResponse
+        }
+        return CleanupExclusionPathObservation(
+            encoding: .unixBytes,
+            encodedBytes: path.encodedBytes
+        )
+    }
+
+    private static func cleanupExclusionPath(
+        _ path: CleanupExclusionPathObservation
+    ) -> CleanupExclusionPath {
+        let encoding: SnapshotNameEncoding = switch path.encoding {
+        case .unixBytes: .unixBytes
+        case .windowsUTF16LittleEndian: .windowsUtf16LittleEndian
+        }
+        return CleanupExclusionPath(
+            encoding: encoding,
+            encodedBytes: path.encodedBytes
+        )
+    }
+
+    private static func canonicalCleanupExclusionPaths(
+        _ paths: [CleanupExclusionPathObservation]
+    ) -> [CleanupExclusionPathObservation] {
+        paths.sorted { left, right in
+            let leftEncoding = left.encoding == .unixBytes ? UInt8(0) : UInt8(1)
+            let rightEncoding = right.encoding == .unixBytes ? UInt8(0) : UInt8(1)
+            if leftEncoding != rightEncoding {
+                return leftEncoding < rightEncoding
+            }
+            return left.encodedBytes.lexicographicallyPrecedes(right.encodedBytes)
+        }
+    }
+
+    private static func hasNormalizedUnixPathComponents(_ data: Data) -> Bool {
+        let bytes = [UInt8](data)
+        guard bytes.first == UInt8(ascii: "/") else {
+            return false
+        }
+        if bytes.count == 1 {
+            return true
+        }
+        guard bytes.last != UInt8(ascii: "/") else {
+            return false
+        }
+        return bytes.dropFirst()
+            .split(separator: UInt8(ascii: "/"), omittingEmptySubsequences: false)
+            .allSatisfy { component in
+                !component.isEmpty
+                    && component != [UInt8(ascii: ".")]
+                    && component != [UInt8(ascii: "."), UInt8(ascii: ".")]
+            }
+    }
+
+    private static func cleanupExclusionsError(
+        _ error: CleanupExclusionsError
+    ) -> CleanupExclusionsServiceError {
+        switch error {
+        case .Closed: .closed
+        case .InvalidRecordVersion: .invalidRecordVersion
+        case .InvalidPath: .invalidPath
+        case .TooManyPaths: .tooManyPaths
+        case .RevisionExhausted: .revisionExhausted
+        case .InvalidClock: .invalidClock
+        case .IncompatibleSchema: .incompatibleSchema
+        case .Busy: .retryable
+        case .UnsafeStorage: .unsafeStorage
+        case .BudgetExceeded: .budgetExceeded
+        case .CorruptData: .corruptData
+        case .Unavailable: .unavailable
+        case .OutcomeUnknown: .outcomeUnknown
+        case .InternalState: .internalState
+        }
+    }
+
     fileprivate static func homeScanServiceError(_ error: ScanError) -> HomeScanServiceError {
         switch error {
         case .Closed: .closed
@@ -880,6 +1088,23 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
             case .invalidCapacityObservation, .conflictingCapacityObservation,
                  .supersededCapacityObservation, .unexpected:
                 PermanentCleanupPolicyServiceError.invalidResponse
+            }
+        }
+    }
+
+    private static func resolveCleanupExclusionsEngine(
+        _ state: EngineServiceState
+    ) throws -> DuxEngine {
+        do {
+            return try state.resolveEngine()
+        } catch let error as EngineServiceError {
+            throw switch error {
+            case .closed: CleanupExclusionsServiceError.closed
+            case .retryable: CleanupExclusionsServiceError.retryable
+            case .unavailable: CleanupExclusionsServiceError.unavailable
+            case .invalidCapacityObservation, .conflictingCapacityObservation,
+                 .supersededCapacityObservation, .unexpected:
+                CleanupExclusionsServiceError.invalidResponse
             }
         }
     }

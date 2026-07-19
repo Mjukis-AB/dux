@@ -105,8 +105,12 @@ final class DiskPressurePolicyTests: XCTestCase {
         XCTAssertTrue(identifiers.allSatisfy { !$0.isEmpty })
         XCTAssertNotEqual(
             DuxSettingsView.message(for: .service(.warningBytesBelowCritical)),
-            DuxSettingsView.message(for: .service(.revisionExhausted))
+            DuxSettingsView.message(
+                for: DiskPressurePolicyFailure.service(.revisionExhausted)
+            )
         )
-        XCTAssertFalse(DuxSettingsView.message(for: .unexpected).isEmpty)
+        XCTAssertFalse(
+            DuxSettingsView.message(for: DiskPressurePolicyFailure.unexpected).isEmpty
+        )
     }
 }
