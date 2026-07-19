@@ -4701,6 +4701,15 @@ Tasks:
     private journal adapter accepts only this verified value. No executor, UI,
     FFI, or production cleanup session calls the boundary yet.
 - [ ] Implement exclusions and global permanent-cleanup disable setting.
+  - [x] 2026-07-19 slice: add the revisioned global permanent-cleanup kill
+    switch to the typed settings store. Missing state defaults to enabled;
+    explicit disable/enable/reset operations preserve provenance and monotonic
+    revisions, while malformed or newer values fail closed. Setting writes
+    take the store-wide cleanup exclusion, and the journal checks the effective
+    value while holding that same exclusion immediately before `effect_started`.
+    Existing rule-relative protected/excluded descendant evidence remains
+    private, bounded, identity-revalidated, and non-authoritative; no arbitrary
+    user-path exclusion list or FFI/Swift settings control is exposed yet.
 - [ ] Add partial failure, retry, cancellation, and changed-since-plan UI.
 - [ ] Add bounded pending-evaluation discovery and snapshot-backed restart
   recovery; malformed or incompatible state fails closed.

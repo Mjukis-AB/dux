@@ -31,8 +31,10 @@ use super::settings::{
     DirectCargoCodeSignature, DirectCargoEnrollmentError, DirectCargoEnrollmentPreview,
     DirectCargoEnrollmentState, DirectCargoEnrollmentStatus, DirectCargoEnrollmentUpdate,
     DirectCargoSignatureClass, DiskPressurePolicy, DiskPressurePolicyError,
-    DiskPressurePolicySource, DiskPressurePolicyUpdate, SnapshotRetentionCap,
-    SnapshotRetentionCapError, SnapshotRetentionCapSource, SnapshotRetentionCapUpdate,
+    DiskPressurePolicySource, DiskPressurePolicyUpdate, PermanentCleanupPolicy,
+    PermanentCleanupPolicyError, PermanentCleanupPolicySource, PermanentCleanupPolicyUpdate,
+    SnapshotRetentionCap, SnapshotRetentionCapError, SnapshotRetentionCapSource,
+    SnapshotRetentionCapUpdate,
 };
 use super::snapshot_review::{
     MAX_SNAPSHOT_REVIEW_CATEGORY_BYTES, MAX_SNAPSHOT_REVIEW_CATEGORY_ROOTS,
@@ -91,7 +93,8 @@ use crate::persistence::{
 use crate::persistence::{
     CargoCodeSignatureRecord, CargoEnrollmentSetting, CargoEnrollmentSettingUpdate,
     CargoEnrollmentState, CargoSignatureClass, DiskPressurePolicySetting,
-    DiskPressurePolicySettingSource, DiskPressurePolicySettingUpdate, SnapshotRetentionCapSetting,
+    DiskPressurePolicySettingSource, DiskPressurePolicySettingUpdate, PermanentCleanupSetting,
+    PermanentCleanupSettingSource, PermanentCleanupSettingUpdate, SnapshotRetentionCapSetting,
     SnapshotRetentionCapSettingSource, SnapshotRetentionCapSettingUpdate,
 };
 #[cfg(test)]
@@ -1202,6 +1205,53 @@ impl EngineHandle {
             .reset_disk_pressure_policy()
             .map(public_disk_pressure_policy_update)
             .map_err(|error| map_disk_pressure_policy_error(error.kind))
+    }
+
+    /// Load the effective global permanent-cleanup switch. This is a kill
+    /// switch only and carries no plan, target, or effect authority.
+    pub fn permanent_cleanup_policy(
+        &self,
+    ) -> Result<PermanentCleanupPolicy, PermanentCleanupPolicyError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(PermanentCleanupPolicyError::Closed);
+        }
+        self.inner
+            .store
+            .load_permanent_cleanup_setting()
+            .map(public_permanent_cleanup_policy)
+            .map_err(|error| map_permanent_cleanup_policy_error(error.kind))
+    }
+
+    /// Persist the global permanent-cleanup switch. Disabling takes the same
+    /// cleanup exclusion as the final journal gate and therefore cannot race
+    /// an already-admitted permanent effect.
+    pub fn set_permanent_cleanup_enabled(
+        &self,
+        enabled: bool,
+    ) -> Result<PermanentCleanupPolicyUpdate, PermanentCleanupPolicyError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(PermanentCleanupPolicyError::Closed);
+        }
+        self.inner
+            .store
+            .set_permanent_cleanup_enabled(enabled)
+            .map(public_permanent_cleanup_policy_update)
+            .map_err(|error| map_permanent_cleanup_policy_error(error.kind))
+    }
+
+    /// Restore the versioned default (enabled) while retaining a new durable
+    /// revision when an explicit switch value was active.
+    pub fn reset_permanent_cleanup(
+        &self,
+    ) -> Result<PermanentCleanupPolicyUpdate, PermanentCleanupPolicyError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(PermanentCleanupPolicyError::Closed);
+        }
+        self.inner
+            .store
+            .reset_permanent_cleanup()
+            .map(public_permanent_cleanup_policy_update)
+            .map_err(|error| map_permanent_cleanup_policy_error(error.kind))
     }
 
     /// Load a bounded, path-free page of durable scan observations. This reads
@@ -4597,6 +4647,44 @@ fn public_disk_pressure_policy_update(
     DiskPressurePolicyUpdate {
         settings: public_disk_pressure_policy(update.settings),
         changed: update.changed,
+    }
+}
+
+fn public_permanent_cleanup_policy(setting: PermanentCleanupSetting) -> PermanentCleanupPolicy {
+    PermanentCleanupPolicy {
+        enabled: setting.enabled,
+        source: match setting.source {
+            PermanentCleanupSettingSource::Default => PermanentCleanupPolicySource::Default,
+            PermanentCleanupSettingSource::Stored => PermanentCleanupPolicySource::Stored,
+        },
+        revision: setting.revision,
+        updated_at: setting.updated_at,
+    }
+}
+
+fn public_permanent_cleanup_policy_update(
+    update: PermanentCleanupSettingUpdate,
+) -> PermanentCleanupPolicyUpdate {
+    PermanentCleanupPolicyUpdate {
+        policy: public_permanent_cleanup_policy(update.settings),
+        changed: update.changed,
+    }
+}
+
+const fn map_permanent_cleanup_policy_error(kind: HistoryErrorKind) -> PermanentCleanupPolicyError {
+    match kind {
+        HistoryErrorKind::InvalidInput => PermanentCleanupPolicyError::InvalidClock,
+        HistoryErrorKind::InvalidTransition => PermanentCleanupPolicyError::RevisionExhausted,
+        HistoryErrorKind::IncompatibleSchema => PermanentCleanupPolicyError::IncompatibleSchema,
+        HistoryErrorKind::QueryLimitExceeded => PermanentCleanupPolicyError::QueryLimitExceeded,
+        HistoryErrorKind::Busy => PermanentCleanupPolicyError::Busy,
+        HistoryErrorKind::UnsafeStorage => PermanentCleanupPolicyError::UnsafeStorage,
+        HistoryErrorKind::CorruptData => PermanentCleanupPolicyError::CorruptData,
+        HistoryErrorKind::DatabaseUnavailable => PermanentCleanupPolicyError::Unavailable,
+        HistoryErrorKind::OutcomeUnknown => PermanentCleanupPolicyError::OutcomeUnknown,
+        HistoryErrorKind::AlreadyExists
+        | HistoryErrorKind::NotFound
+        | HistoryErrorKind::InternalState => PermanentCleanupPolicyError::InternalState,
     }
 }
 

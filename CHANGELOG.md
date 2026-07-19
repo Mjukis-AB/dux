@@ -1,5 +1,11 @@
 # Changelog
 
+- Added a revisioned global permanent-cleanup kill switch. Missing state is
+  enabled by default, explicit disable/enable/reset operations are serialized
+  with the store-wide cleanup exclusion, and the journal rechecks the switch
+  immediately before a permanent effect can enter `effect_started`. Corrupt or
+  newer settings fail closed; no arbitrary path exclusion or UI/FFI control is
+  exposed yet.
 - Added a private bounded pre/post cleanup-capacity verification boundary.
   Stable volume identity, sample timing, total capacity, headline source, and
   availability shape must agree before a signed available-space delta can be

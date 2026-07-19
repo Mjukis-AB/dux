@@ -674,6 +674,10 @@ impl CleanupJournalClaim {
         started_at: SystemTime,
     ) -> Result<EffectStartReceipt, HistoryError> {
         self.require_phase(ActivePhase::Running)?;
+        let journal = self.snapshot()?;
+        if journal.mode == crate::domain::CleanupMode::PermanentSafe {
+            self.ensure_permanent_cleanup_enabled()?;
+        }
         let pending = self.pending_effect_start.get();
         if pending.is_some_and(|pending| {
             pending.item_ordinal != item_ordinal || pending.path_ordinal != path_ordinal
@@ -718,6 +722,24 @@ impl CleanupJournalClaim {
                 }
             }
             Err(failure) => Err(failure.error),
+        }
+    }
+
+    /// The global permanent-cleanup switch is checked while this claim still
+    /// owns the store-wide cleanup exclusion. The settings writer takes the
+    /// same exclusion, so disabling cannot race this final pre-effect gate.
+    fn ensure_permanent_cleanup_enabled(&self) -> Result<(), HistoryError> {
+        self.lease
+            .store
+            .validate_cleanup_lock_for_journal(&self.lease.guard)?;
+        let connection = self.lease.store.lock_current_history_connection()?;
+        self.lease
+            .store
+            .validate_cleanup_lock_for_journal(&self.lease.guard)?;
+        if crate::persistence::load_permanent_cleanup_setting(&connection.connection)?.enabled {
+            Ok(())
+        } else {
+            Err(HistoryError::new(HistoryErrorKind::InvalidTransition))
         }
     }
 

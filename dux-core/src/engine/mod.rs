@@ -41,8 +41,10 @@ pub use settings::{
     DirectCargoCodeSignature, DirectCargoEnrollmentError, DirectCargoEnrollmentPreview,
     DirectCargoEnrollmentState, DirectCargoEnrollmentStatus, DirectCargoEnrollmentUpdate,
     DirectCargoSignatureClass, DiskPressurePolicy, DiskPressurePolicyError,
-    DiskPressurePolicySource, DiskPressurePolicyUpdate, SnapshotRetentionCap,
-    SnapshotRetentionCapError, SnapshotRetentionCapSource, SnapshotRetentionCapUpdate,
+    DiskPressurePolicySource, DiskPressurePolicyUpdate, PermanentCleanupPolicy,
+    PermanentCleanupPolicyError, PermanentCleanupPolicySource, PermanentCleanupPolicyUpdate,
+    SnapshotRetentionCap, SnapshotRetentionCapError, SnapshotRetentionCapSource,
+    SnapshotRetentionCapUpdate,
 };
 pub use snapshot_review::{
     MAX_SNAPSHOT_REVIEW_LARGE_FILE_RESULTS, MAX_SNAPSHOT_REVIEW_NODE_PAGE_LIMIT,

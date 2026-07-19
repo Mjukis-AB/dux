@@ -48,6 +48,7 @@ mod cleanup_journal;
 mod codec;
 mod history;
 mod migrations;
+mod permanent_cleanup;
 mod pressure_settings;
 #[cfg_attr(
     not(test),
@@ -112,6 +113,10 @@ pub(crate) use codec::{HostPathObservationEncoding, observe_host_path};
 pub(crate) use history::{
     HistoryError, HistoryErrorKind, MAX_RECENT_SCAN_HISTORY_LIMIT, NewScanRecord,
     ScanCompletionRecord, ScanCounts, ScanStatus, TerminalScanStatus,
+};
+pub(crate) use permanent_cleanup::{
+    PermanentCleanupSetting, PermanentCleanupSettingSource, PermanentCleanupSettingUpdate,
+    load_permanent_cleanup_setting,
 };
 pub(crate) use pressure_settings::{
     DiskPressurePolicySetting, DiskPressurePolicySettingSource, DiskPressurePolicySettingUpdate,

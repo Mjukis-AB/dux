@@ -1110,6 +1110,46 @@ fn effect_receipt_revalidates_and_only_the_compatible_outcome_completes() {
 }
 
 #[test]
+fn global_permanent_cleanup_disable_rejects_before_effect_started() {
+    let fixture = Fixture::new(
+        CleanupMode::PermanentSafe,
+        CandidateAction::RemoveKnownRegenerableContents,
+        1,
+    );
+    fixture.store.set_permanent_cleanup_enabled(false).unwrap();
+    let claim = fixture.claim();
+    claim.begin_validation(0, 0).unwrap();
+    assert_eq!(
+        claim
+            .mark_effect_started(0, 0, fixture.started_at + Duration::from_secs(2))
+            .unwrap_err()
+            .kind,
+        HistoryErrorKind::InvalidTransition
+    );
+    assert_eq!(
+        claim.snapshot().unwrap().items[0].paths[0].status,
+        PathStatus::Validating
+    );
+    drop(claim);
+
+    let fixture = Fixture::new(
+        CleanupMode::PermanentSafe,
+        CandidateAction::RemoveKnownRegenerableContents,
+        1,
+    );
+    let claim = fixture.claim();
+    claim.begin_validation(0, 0).unwrap();
+    let receipt = claim
+        .mark_effect_started(0, 0, fixture.started_at + Duration::from_secs(3))
+        .unwrap();
+    claim.revalidate_effect_receipt(&receipt).unwrap();
+    assert_eq!(
+        claim.snapshot().unwrap().items[0].paths[0].status,
+        PathStatus::EffectStarted
+    );
+}
+
+#[test]
 fn unknown_effect_atomically_enters_recovery_and_blocks_new_work() {
     let fixture = Fixture::new(
         CleanupMode::PermanentSafe,

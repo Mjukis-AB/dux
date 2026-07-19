@@ -1649,6 +1649,16 @@ native Windows handles deny delete sharing to prevent path replacement. No
 history, FFI, CLI, Swift, AI, plan, or effect API can obtain this guard; only
 the sealed mutable-journal lease couples it to an owner-generation claim.
 
+The global permanent-cleanup switch is a separate revisioned typed setting. A
+missing row means enabled by the versioned default; malformed or newer rows are
+errors, never an implicit enable or disable. Every write takes the same
+store-wide cleanup exclusion used by the journal. Immediately before a
+permanent effect records `effect_started`, the claim reloads the setting while
+holding that exclusion. Therefore a disable write cannot race an already
+admitted effect, and a disabled switch rejects the effect before any platform
+driver call. The setting is a kill switch only: it contains no target, path,
+plan, approval, or executor authority.
+
 The separate process-instance module supplies only the liveness evidence
 described in §6.7. Its native Unix subprocess regressions distinguish an exact
 live owner from both graceful and abrupt death in one reliable boot scope;

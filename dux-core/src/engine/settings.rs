@@ -173,6 +173,60 @@ pub struct DiskPressurePolicyUpdate {
     pub changed: bool,
 }
 
+/// Origin of the effective global permanent-cleanup switch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PermanentCleanupPolicySource {
+    /// Permanent cleanup is enabled by the versioned core default.
+    Default,
+    /// The user explicitly stored the switch value.
+    Stored,
+}
+
+/// Path-free global permanent-cleanup policy. This is a kill switch only; it
+/// never selects a target or turns a plan into an executable capability.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PermanentCleanupPolicy {
+    pub enabled: bool,
+    pub source: PermanentCleanupPolicySource,
+    pub revision: u64,
+    pub updated_at: Option<SystemTime>,
+}
+
+/// Result of changing the global permanent-cleanup switch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PermanentCleanupPolicyUpdate {
+    pub policy: PermanentCleanupPolicy,
+    pub changed: bool,
+}
+
+/// Stable, path-free failure taxonomy for the permanent-cleanup switch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum PermanentCleanupPolicyError {
+    #[error("engine session is closed")]
+    Closed,
+    #[error("the permanent-cleanup policy revision cannot advance")]
+    RevisionExhausted,
+    #[error("the system clock cannot be represented by the settings store")]
+    InvalidClock,
+    #[error("the durable store schema is newer than this engine")]
+    IncompatibleSchema,
+    #[error("the durable store is busy")]
+    Busy,
+    #[error("the durable store is unsafe")]
+    UnsafeStorage,
+    #[error("the settings query exceeded its fixed resource budget")]
+    QueryLimitExceeded,
+    #[error("permanent-cleanup settings are corrupt")]
+    CorruptData,
+    #[error("permanent-cleanup settings are unavailable")]
+    Unavailable,
+    #[error("the settings write outcome could not be proven")]
+    OutcomeUnknown,
+    #[error("engine settings state is unavailable")]
+    InternalState,
+}
+
 /// Stable, path-free failure taxonomy for pressure-policy settings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
