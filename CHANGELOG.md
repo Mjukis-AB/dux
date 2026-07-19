@@ -6,6 +6,11 @@
   claims recovery; exact retries remain idempotent; bounded readers reject
   malformed or overlapping history. Episodes are telemetry only and remain
   outside FFI, notifications, and cleanup authority.
+- Added a bounded core capacity trend contract with signed 24-hour and 7-day
+  changes plus one validated point per UTC day over a 30-day window. Daily
+  rollups are preferred for completed days, the current raw anchor wins for
+  today, missing baselines remain unknown, and important-usage deltas require
+  both endpoints. No trend data crosses FFI yet.
 - Added the first private approved-plan to cleanup-journal handoff. It
   revalidates the expiring approval, persists one planned session, compares
   the frozen plan before and after an owner/generation-fenced journal claim,

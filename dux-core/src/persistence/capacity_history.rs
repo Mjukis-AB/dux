@@ -28,6 +28,11 @@ const MAX_STORED_PRESSURE_BYTES: i64 = 16;
 const MAX_PAGE_SIZE: usize = 1_024;
 const MAX_PRESSURE_EPISODE_PAGE_SIZE: usize = 256;
 const UTC_HOUR_MS: i64 = 3_600_000;
+const UTC_DAY_MS: i64 = 86_400_000;
+const TREND_24_HOURS_MS: i64 = UTC_DAY_MS;
+const TREND_7_DAYS_MS: i64 = 7 * UTC_DAY_MS;
+const TREND_30_DAYS_MS: i64 = 30 * UTC_DAY_MS;
+const MAX_TREND_POINTS: usize = 31;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CapacityWriteReason {
@@ -317,6 +322,35 @@ impl CapacityPageCursor {
 pub(crate) struct CapacityPage {
     pub(crate) samples: Vec<StoredCapacitySample>,
     pub(crate) next_cursor: Option<CapacityPageCursor>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CapacityChange {
+    pub(crate) from: SystemTime,
+    pub(crate) to: SystemTime,
+    pub(crate) total_bytes: i64,
+    pub(crate) available_bytes: i64,
+    pub(crate) important_available_bytes: Option<i64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CapacityTrendPointSource {
+    Raw,
+    DailyRollup,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CapacityTrendPoint {
+    pub(crate) sample: StoredCapacitySample,
+    pub(crate) source: CapacityTrendPointSource,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CapacityTrend {
+    pub(crate) anchor: StoredCapacitySample,
+    pub(crate) change_24h: Option<CapacityChange>,
+    pub(crate) change_7d: Option<CapacityChange>,
+    pub(crate) points: Vec<CapacityTrendPoint>,
 }
 
 /// One durable warning/critical pressure episode. Episodes are telemetry
@@ -738,6 +772,195 @@ pub(super) fn load_raw_capacity_page(
             next_cursor,
         })
     })
+}
+
+/// Build a bounded, deterministic trend view from durable capacity facts.
+/// Changes compare the newest raw sample at or before each exact cutoff; chart
+/// points choose one sample per UTC day, preferring the exact daily rollup for
+/// completed days and the current raw anchor for the current day.
+pub(super) fn load_capacity_trend(
+    connection: &Connection,
+    volume_id: &VolumeId,
+    anchor_at: SystemTime,
+) -> Result<Option<CapacityTrend>, HistoryError> {
+    let anchor_at_ms = system_time_to_unix_ms(anchor_at, HistoryErrorKind::InvalidInput)?;
+    let Some(anchor) = load_raw_sample_at_or_before(connection, volume_id, anchor_at_ms)? else {
+        return Ok(None);
+    };
+    if !validate_capacity_volume(connection, volume_id, std::slice::from_ref(&anchor))? {
+        return Err(corrupt());
+    }
+    let anchor_ms = system_time_to_unix_ms(anchor.sampled_at, HistoryErrorKind::CorruptData)?;
+    let change_24h = load_capacity_change(
+        connection,
+        volume_id,
+        &anchor,
+        anchor_ms
+            .checked_sub(TREND_24_HOURS_MS)
+            .ok_or_else(corrupt)?,
+    )?;
+    let change_7d = load_capacity_change(
+        connection,
+        volume_id,
+        &anchor,
+        anchor_ms.checked_sub(TREND_7_DAYS_MS).ok_or_else(corrupt)?,
+    )?;
+
+    let chart_start = anchor_ms
+        .checked_sub(TREND_30_DAYS_MS)
+        .ok_or_else(corrupt)?;
+    let mut points = load_trend_points(connection, volume_id, chart_start, anchor_ms)?;
+    if points.len() > MAX_TREND_POINTS {
+        return Err(corrupt());
+    }
+    Ok(Some(CapacityTrend {
+        anchor,
+        change_24h,
+        change_7d,
+        points: std::mem::take(&mut points),
+    }))
+}
+
+fn load_capacity_change(
+    connection: &Connection,
+    volume_id: &VolumeId,
+    anchor: &StoredCapacitySample,
+    cutoff_ms: i64,
+) -> Result<Option<CapacityChange>, HistoryError> {
+    let Some(baseline) = load_raw_sample_at_or_before(connection, volume_id, cutoff_ms)? else {
+        return Ok(None);
+    };
+    if !validate_capacity_volume(connection, volume_id, std::slice::from_ref(&baseline))? {
+        return Err(corrupt());
+    }
+    let from = system_time_to_unix_ms(baseline.sampled_at, HistoryErrorKind::CorruptData)?;
+    let to = system_time_to_unix_ms(anchor.sampled_at, HistoryErrorKind::CorruptData)?;
+    if from > to {
+        return Err(corrupt());
+    }
+    Ok(Some(CapacityChange {
+        from: baseline.sampled_at,
+        to: anchor.sampled_at,
+        total_bytes: signed_delta(anchor.total_bytes, baseline.total_bytes)?,
+        available_bytes: signed_delta(anchor.available_bytes, baseline.available_bytes)?,
+        important_available_bytes: anchor
+            .important_available_bytes
+            .zip(baseline.important_available_bytes)
+            .map(|(current, previous)| signed_delta(current, previous))
+            .transpose()?,
+    }))
+}
+
+fn load_raw_sample_at_or_before(
+    connection: &Connection,
+    volume_id: &VolumeId,
+    at_or_before_ms: i64,
+) -> Result<Option<StoredCapacitySample>, HistoryError> {
+    run_bounded_query(connection, || {
+        connection
+            .query_row(
+                &format!(
+                    "{} WHERE volume_id = ?1 AND sample_kind = 'raw'
+                     AND sampled_at_unix_ms <= ?2
+                     ORDER BY sampled_at_unix_ms DESC LIMIT 1",
+                    sample_select()
+                ),
+                params![volume_id.as_str(), at_or_before_ms],
+                raw_sample_row,
+            )
+            .optional()
+            .map_err(map_query_sql_error)?
+            .map(decode_sample_row)
+            .transpose()
+    })
+}
+
+fn load_trend_points(
+    connection: &Connection,
+    volume_id: &VolumeId,
+    start_ms: i64,
+    end_ms: i64,
+) -> Result<Vec<CapacityTrendPoint>, HistoryError> {
+    let mut points = std::collections::BTreeMap::<i64, CapacityTrendPoint>::new();
+    for (kind, source) in [
+        ("daily_rollup", CapacityTrendPointSource::DailyRollup),
+        ("raw", CapacityTrendPointSource::Raw),
+    ] {
+        let rows = run_bounded_query(connection, || {
+            let sql = if kind == "raw" {
+                format!(
+                    "{} WHERE volume_id = ?1 AND sample_kind = 'raw'
+                     AND sampled_at_unix_ms >= ?2 AND sampled_at_unix_ms <= ?3
+                     AND sampled_at_unix_ms IN (
+                         SELECT MAX(sampled_at_unix_ms) FROM disk_samples
+                         WHERE volume_id = ?1 AND sample_kind = 'raw'
+                           AND sampled_at_unix_ms >= ?2 AND sampled_at_unix_ms <= ?3
+                         GROUP BY sampled_at_unix_ms / {UTC_DAY_MS}
+                     )
+                     ORDER BY sampled_at_unix_ms DESC LIMIT ?4",
+                    sample_select()
+                )
+            } else {
+                format!(
+                    "{} WHERE volume_id = ?1 AND sample_kind = 'daily_rollup'
+                     AND sampled_at_unix_ms >= ?2 AND sampled_at_unix_ms <= ?3
+                     ORDER BY sampled_at_unix_ms DESC LIMIT ?4",
+                    sample_select()
+                )
+            };
+            let mut statement = connection.prepare(&sql).map_err(map_query_sql_error)?;
+            let rows = statement
+                .query_map(
+                    params![
+                        volume_id.as_str(),
+                        start_ms,
+                        end_ms,
+                        MAX_TREND_POINTS as i64
+                    ],
+                    raw_sample_row,
+                )
+                .map_err(map_query_sql_error)?;
+            let mut decoded = Vec::with_capacity(MAX_TREND_POINTS);
+            for row in rows {
+                decoded.push(decode_sample_row_kind(
+                    row.map_err(map_query_sql_error)?,
+                    kind,
+                )?);
+            }
+            Ok(decoded)
+        })?;
+        for sample in rows {
+            if !validate_capacity_volume(connection, volume_id, std::slice::from_ref(&sample))? {
+                return Err(corrupt());
+            }
+            let sampled_ms =
+                system_time_to_unix_ms(sample.sampled_at, HistoryErrorKind::CorruptData)?;
+            let day = sampled_ms / UTC_DAY_MS;
+            let candidate = CapacityTrendPoint { sample, source };
+            let replace = match points.get(&day) {
+                None => true,
+                Some(existing) if day == end_ms / UTC_DAY_MS => {
+                    candidate.source == CapacityTrendPointSource::Raw
+                        && (existing.source != CapacityTrendPointSource::Raw
+                            || candidate.sample.sampled_at > existing.sample.sampled_at)
+                }
+                Some(existing) => {
+                    (candidate.source == CapacityTrendPointSource::DailyRollup
+                        && existing.source == CapacityTrendPointSource::Raw)
+                        || (candidate.source == existing.source
+                            && candidate.sample.sampled_at > existing.sample.sampled_at)
+                }
+            };
+            if replace {
+                points.insert(day, candidate);
+            }
+        }
+    }
+    Ok(points.into_values().collect())
+}
+
+fn signed_delta(current: u64, previous: u64) -> Result<i64, HistoryError> {
+    i64::try_from(i128::from(current) - i128::from(previous)).map_err(|_| corrupt())
 }
 
 /// Load a bounded newest-first page of pressure episodes for one volume. The
@@ -1165,7 +1388,14 @@ fn raw_sample_row(row: &Row<'_>) -> rusqlite::Result<RawSampleRow> {
 }
 
 fn decode_sample_row(raw: RawSampleRow) -> Result<StoredCapacitySample, HistoryError> {
-    if raw.sample_kind != "raw" {
+    decode_sample_row_kind(raw, "raw")
+}
+
+fn decode_sample_row_kind(
+    raw: RawSampleRow,
+    expected_kind: &str,
+) -> Result<StoredCapacitySample, HistoryError> {
+    if raw.sample_kind != expected_kind {
         return Err(corrupt());
     }
     let volume_id = VolumeId::new(raw.volume_id).map_err(|_| corrupt())?;
@@ -2062,6 +2292,119 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn trend_reports_signed_changes_and_prefers_daily_points() {
+        let temp = TempDir::new().unwrap();
+        let store = StoreCoordinator::open(&temp.path().join("store/dux.sqlite3")).unwrap();
+        let day = UTC_DAY_MS as u64;
+        let samples = [
+            sample_at(
+                "volume:trend",
+                BASE_HOUR_MS + 100,
+                900,
+                Some(800),
+                DiskPressure::Healthy,
+            ),
+            sample_at(
+                "volume:trend",
+                BASE_HOUR_MS + 2 * day + 100,
+                800,
+                Some(700),
+                DiskPressure::Healthy,
+            ),
+            sample_at(
+                "volume:trend",
+                BASE_HOUR_MS + 7 * day + 100,
+                700,
+                Some(600),
+                DiskPressure::Warning,
+            ),
+            sample_at(
+                "volume:trend",
+                BASE_HOUR_MS + 8 * day + 100,
+                650,
+                Some(550),
+                DiskPressure::Warning,
+            ),
+        ];
+        for (index, sample) in samples.iter().enumerate() {
+            let reason = if index == 2 {
+                CapacityWriteReason::PressureTransition
+            } else {
+                CapacityWriteReason::Routine
+            };
+            assert_eq!(
+                store.record_raw_capacity_sample(sample, reason).unwrap(),
+                CapacityWriteOutcome::Inserted
+            );
+        }
+        let day_two_start = i64::try_from(BASE_HOUR_MS + 2 * day).unwrap();
+        store.with_connection(|connection| {
+            connection
+                .execute(
+                    "INSERT INTO disk_samples (
+                        volume_id, sample_kind, sampled_at_unix_ms, total_bytes,
+                        available_bytes, important_available_bytes, pressure, policy_revision
+                     ) VALUES ('volume:trend', 'daily_rollup', ?1, 1000, 810, 710, 'healthy', 0)",
+                    [day_two_start],
+                )
+                .unwrap();
+        });
+
+        let anchor_at = UNIX_EPOCH + Duration::from_millis(BASE_HOUR_MS + 8 * day + 500);
+        let trend = store
+            .load_capacity_trend(&VolumeId::new("volume:trend").unwrap(), anchor_at)
+            .unwrap()
+            .unwrap();
+        assert_eq!(trend.anchor.available_bytes, 650);
+        let change_24h = trend.change_24h.unwrap();
+        assert_eq!(change_24h.available_bytes, -50);
+        assert_eq!(change_24h.important_available_bytes, Some(-50));
+        let change_7d = trend.change_7d.unwrap();
+        assert_eq!(change_7d.available_bytes, -250);
+        assert_eq!(change_7d.important_available_bytes, Some(-250));
+        assert_eq!(trend.points.len(), 4);
+        assert_eq!(trend.points[0].sample.available_bytes, 900);
+        assert_eq!(trend.points[1].sample.available_bytes, 810);
+        assert_eq!(
+            trend.points[1].source,
+            CapacityTrendPointSource::DailyRollup
+        );
+        assert_eq!(trend.points[2].sample.available_bytes, 700);
+        assert_eq!(trend.points[3].sample.available_bytes, 650);
+        assert_eq!(trend.points[3].source, CapacityTrendPointSource::Raw);
+    }
+
+    #[test]
+    fn trend_requires_a_baseline_and_returns_none_without_an_anchor() {
+        let temp = TempDir::new().unwrap();
+        let store = StoreCoordinator::open(&temp.path().join("store/dux.sqlite3")).unwrap();
+        let id = VolumeId::new("volume:trend-empty").unwrap();
+        assert!(
+            store
+                .load_capacity_trend(&id, UNIX_EPOCH + Duration::from_millis(BASE_HOUR_MS))
+                .unwrap()
+                .is_none()
+        );
+        let first = sample_at(
+            "volume:trend-empty",
+            BASE_HOUR_MS + 2 * UTC_DAY_MS as u64,
+            500,
+            None,
+            DiskPressure::Healthy,
+        );
+        store
+            .record_raw_capacity_sample(&first, CapacityWriteReason::Routine)
+            .unwrap();
+        let trend = store
+            .load_capacity_trend(&id, first.sampled_at())
+            .unwrap()
+            .unwrap();
+        assert!(trend.change_24h.is_none());
+        assert!(trend.change_7d.is_none());
+        assert_eq!(trend.points.len(), 1);
     }
 
     #[test]

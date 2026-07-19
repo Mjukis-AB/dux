@@ -21,11 +21,11 @@ use super::candidate_history::{
 };
 use super::capacity_history::{
     CapacityObservationOutcome, CapacityPage, CapacityPageCursor, CapacityPressureBaseline,
-    CapacityWriteOutcome, CapacityWriteReason, PreparedCapacitySample, RawCapacityObservation,
-    RawCapacitySample, StoredCapacitySample, StoredPressureEpisode, exact_raw_and_volume_match,
-    exact_volume_observation_match, load_latest_raw_capacity_sample, load_pressure_episode_page,
-    load_raw_capacity_page, validate_capacity_volume, validate_ephemeral_capacity_observation,
-    write_raw_capacity_sample,
+    CapacityTrend, CapacityWriteOutcome, CapacityWriteReason, PreparedCapacitySample,
+    RawCapacityObservation, RawCapacitySample, StoredCapacitySample, StoredPressureEpisode,
+    exact_raw_and_volume_match, exact_volume_observation_match, load_capacity_trend,
+    load_latest_raw_capacity_sample, load_pressure_episode_page, load_raw_capacity_page,
+    validate_capacity_volume, validate_ephemeral_capacity_observation, write_raw_capacity_sample,
 };
 use super::cleanup_history::{
     CleanupSessionId, NewCleanupSessionRecord, PreparedCleanupSession, StoredCleanupSessionRecord,
@@ -826,6 +826,23 @@ impl StoreCoordinator {
     ) -> Result<Vec<StoredPressureEpisode>, HistoryError> {
         let guard = self.lock_current_history_connection()?;
         load_pressure_episode_page(&guard.connection, volume_id, limit)
+    }
+
+    /// Build a bounded path-free trend view from durable capacity samples.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "capacity trend data integrates with the app history chart in a later slice"
+        )
+    )]
+    pub(crate) fn load_capacity_trend(
+        &self,
+        volume_id: &crate::domain::VolumeId,
+        anchor_at: SystemTime,
+    ) -> Result<Option<CapacityTrend>, HistoryError> {
+        let guard = self.lock_current_history_connection()?;
+        load_capacity_trend(&guard.connection, volume_id, anchor_at)
     }
 
     /// Test primitive for exercising non-reconciled scan-start behavior.

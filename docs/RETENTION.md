@@ -38,6 +38,14 @@ episode. Episode writes occur in the same transaction as the raw sample and
 bounded readers reject malformed or overlapping rows. A later retention slice
 will define the episode horizon separately from raw and daily samples.
 
+Trend readers use the newest raw sample at or before the requested observation
+time as the anchor. Twenty-four-hour and seven-day changes compare the newest
+raw sample at or before each exact cutoff; if no baseline exists, the change is
+unknown rather than extrapolated. The 30-day chart is bounded to one point per
+UTC day, prefers the exact daily representative for completed days, and uses
+the newest raw observation for the current day. These are presentation facts,
+not cleanup estimates or execution authority.
+
 Each maintenance invocation has fixed row and SQLite VM/deadline limits. It
 returns whether more eligible work remains so an idle background caller can
 schedule another batch. It never loops over an unbounded history in one writer

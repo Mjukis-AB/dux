@@ -4697,6 +4697,16 @@ Tasks:
     recovery; exact retries are idempotent; bounded readers reject malformed
     or overlapping history. `StoredPressureEpisode` remains path-free,
     telemetry-only, and is not exposed through FFI yet.
+- [x] 2026-07-19 slice: add the bounded core trend contract. `CapacityTrend`
+  anchors on the newest durable raw sample at or before the requested time,
+  reports signed total/available changes over exact 24-hour and 7-day cutoffs
+  using at-or-before baselines, and emits at most one validated point per UTC
+  day across the 30-day window. Completed-day points prefer exact daily
+  rollups; the current day prefers the newest raw anchor. Missing baselines
+  remain `None`, important-usage deltas remain unknown unless both endpoints
+  are present, and malformed volume/sample facts fail closed. The contract is
+  path-free telemetry and remains outside FFI/Swift until the chart adapter
+  slice.
 - [ ] Add 24-hour/7-day changes and 30-day chart.
 - [ ] Add transition-based notifications and cooldown.
 - [ ] Deep-link notifications to urgent Recommendations.
