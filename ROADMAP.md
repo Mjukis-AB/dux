@@ -4638,6 +4638,14 @@ Tasks:
     verifies exact URL delivery, one-shot consumption, malformed-path refusal,
     and no retry. `MacOSTrashPlatformDriver` is compiled but not registered.
 - [ ] Implement permanent-safe executor for approved rules.
+  - [x] 2026-07-19 slice: add the private descriptor-relative Rust-target
+    contents executor boundary. It inventories descendants before mutation,
+    preserves the direct `CACHEDIR.TAG` marker, rejects symlinks, special files,
+    multiply-linked regular files, changed identities, and boundedness
+    violations, and reopens each parent descriptor-relative while checking
+    ancestry before every unlink. Cancellation and partial effects map to
+    conservative journal outcomes. The driver is crate-private, has no FFI or
+    Swift caller, and is not yet reachable from production cleanup UI.
   - [x] 2026-07-19 slice: retain trusted rule authorizations in exact
     plan-item/path order and add a private Rust-target effect witness. The
     witness revalidates the target directory, Cargo manifest identity/content,

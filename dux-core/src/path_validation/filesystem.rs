@@ -21,7 +21,7 @@ impl FilesystemIdentity {
         self.object
     }
 
-    pub(super) fn new(volume: u64, object: u128) -> Self {
+    pub(crate) fn new(volume: u64, object: u128) -> Self {
         Self { volume, object }
     }
 }

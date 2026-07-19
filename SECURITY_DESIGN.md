@@ -1139,6 +1139,16 @@ evidence proves known regenerable contents and whose action is compatible with
 `SafeRegenerable`. It is disclosed as irreversible and reports only observed
 item removal until a capacity sample shows change.
 
+The current core contains a private, tested Rust-target contents driver staged
+behind the approved-plan and cleanup-journal witnesses. It inventories the
+entire target before mutation, preserves the direct `CACHEDIR.TAG` marker, uses
+descriptor-relative no-follow operations, rejects unsafe or multiply-linked
+descendants, and records cancellation or unknown outcomes conservatively. This
+driver is not exported through FFI, not registered with Swift, and has no
+production caller; trusted volume/protected-root grants, process and
+descendant policy, orchestration, capacity verification, and user-facing
+execution remain required before any permanent-safe effect is reachable.
+
 Arbitrary-path advanced permanent removal is excluded from the first production
 authority graph. Adding it later requires a separate threat model and revision
 of this design; it remains subject to protected roots, sensitive categories,

@@ -550,6 +550,32 @@ impl CleanupJournalClaim {
         Ok(())
     }
 
+    /// Confirm that the claimed journal row is the exact deterministic
+    /// permanent-safe effect admitted by the planner before it can reach the
+    /// private contents executor.
+    pub(crate) fn validate_permanent_safe_effect(
+        &self,
+        item_ordinal: usize,
+        path_ordinal: usize,
+    ) -> Result<(), HistoryError> {
+        let journal = self.snapshot()?;
+        let item = journal
+            .items
+            .get(item_ordinal)
+            .ok_or_else(|| HistoryError::new(HistoryErrorKind::InvalidInput))?;
+        item.paths
+            .get(path_ordinal)
+            .ok_or_else(|| HistoryError::new(HistoryErrorKind::InvalidInput))?;
+        if journal.mode != crate::domain::CleanupMode::PermanentSafe
+            || item.frozen.safety != crate::domain::SafetyTier::SafeRegenerable
+            || item.frozen.proposed_action
+                != crate::domain::CandidateAction::RemoveKnownRegenerableContents
+        {
+            return Err(HistoryError::new(HistoryErrorKind::InvalidTransition));
+        }
+        Ok(())
+    }
+
     pub(super) fn heartbeat(&self, heartbeat_at: SystemTime) -> Result<(), HistoryError> {
         let heartbeat_at = canonical_input_time(heartbeat_at)?;
         match self

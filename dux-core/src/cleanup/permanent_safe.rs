@@ -1,0 +1,570 @@
+//! Private, descriptor-relative executor boundary for deterministic
+//! permanent-safe rules.
+//!
+//! This module is intentionally not exported through the engine or UniFFI.
+//! It is a tested effect boundary only: the app cannot reach it until the
+//! remaining trusted-volume, protected-root, process, descendant, approval,
+//! and orchestration gates are complete.
+
+use std::ffi::OsStr;
+use std::fs::File;
+use std::path::Path;
+use std::time::SystemTime;
+
+use thiserror::Error;
+
+use crate::path_validation::FilesystemIdentity;
+use crate::persistence::{
+    CleanupJournalClaim, EffectOutcome, EffectStartReceipt, HistoryErrorKind,
+};
+use crate::planner::{ApprovedCleanupSession, RustTargetEffectWitness};
+
+const MAX_DESCENDANT_ENTRIES: usize = 16_384;
+const MAX_DESCENDANT_NAME_BYTES: usize = 4 * 1024 * 1024;
+const MAX_DESCENDANT_DEPTH: usize = 64;
+const PRESERVED_MARKER: &[u8] = b"CACHEDIR.TAG";
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PermanentSafeRemovalSummary {
+    pub(crate) removed_entries: u32,
+    pub(crate) removed_logical_bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
+pub(crate) enum PermanentSafePlatformError {
+    #[error("the permanent-safe executor is unsupported on this platform")]
+    Unsupported,
+    #[error("the reviewed permanent-safe target changed")]
+    Changed,
+    #[error("the permanent-safe target contains unsafe or unbounded descendants")]
+    Unsafe,
+    #[error("the permanent-safe operation was cancelled before mutation")]
+    Cancelled,
+    #[error("the permanent-safe operation failed before its outcome was known")]
+    Failed,
+    #[error("the permanent-safe operation outcome is unknown")]
+    OutcomeUnknown,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
+pub(crate) enum PermanentSafeExecutionError {
+    #[error("permanent-safe admission was rejected: {0:?}")]
+    Admission(HistoryErrorKind),
+    #[error("permanent-safe platform effect failed: {0}")]
+    Platform(PermanentSafePlatformError),
+}
+
+/// Synchronous, one-shot effect seam. Implementations must not retain the
+/// witness or retry after returning; the witness is stale outside this call.
+pub(crate) trait PermanentSafeContentsDriver {
+    fn remove_contents(
+        &mut self,
+        witness: &RustTargetEffectWitness,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<PermanentSafeRemovalSummary, PermanentSafePlatformError>;
+}
+
+/// Consume one approved journal path through the private deterministic rule
+/// boundary. This function is not called by the current app/FFI surface.
+pub(crate) fn execute_rust_target_contents(
+    session: &mut ApprovedCleanupSession,
+    item_ordinal: usize,
+    path_ordinal: usize,
+    now: SystemTime,
+    driver: &mut impl PermanentSafeContentsDriver,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<PermanentSafeRemovalSummary, PermanentSafeExecutionError> {
+    let expected_path = session
+        .plan()
+        .items()
+        .get(item_ordinal)
+        .and_then(|item| item.paths().get(path_ordinal))
+        .map(ToOwned::to_owned)
+        .ok_or(PermanentSafeExecutionError::Admission(
+            HistoryErrorKind::InvalidInput,
+        ))?;
+    let witness = session
+        .revalidated_rust_target_effect(item_ordinal, path_ordinal, now)
+        .map_err(|error| {
+            PermanentSafeExecutionError::Admission(match error {
+                crate::planner::ExactPathHandoffError::Journal(error) => error.kind,
+                crate::planner::ExactPathHandoffError::Approval(_)
+                | crate::planner::ExactPathHandoffError::RuleEvidence(_) => {
+                    HistoryErrorKind::InvalidTransition
+                }
+            })
+        })?;
+    let claim = session.claim_mut();
+    claim
+        .validate_planned_path(item_ordinal, path_ordinal, &expected_path)
+        .map_err(|error| PermanentSafeExecutionError::Admission(error.kind))?;
+    claim
+        .begin_validation(item_ordinal, path_ordinal)
+        .map_err(|error| PermanentSafeExecutionError::Admission(error.kind))?;
+    if let Err(error) = claim.validate_permanent_safe_effect(item_ordinal, path_ordinal) {
+        let _ = claim.finish_validation(
+            item_ordinal,
+            path_ordinal,
+            crate::persistence::ValidationOutcome::Rejected,
+            Some("permanent_safe_effect_mode_mismatch"),
+            now,
+        );
+        return Err(PermanentSafeExecutionError::Admission(error.kind));
+    }
+    if cancelled() {
+        claim
+            .finish_validation(
+                item_ordinal,
+                path_ordinal,
+                crate::persistence::ValidationOutcome::Interrupted,
+                Some("permanent_safe_cancelled_before_effect"),
+                now,
+            )
+            .map_err(|error| PermanentSafeExecutionError::Admission(error.kind))?;
+        return Err(PermanentSafeExecutionError::Platform(
+            PermanentSafePlatformError::Cancelled,
+        ));
+    }
+    let receipt = claim
+        .mark_effect_started(item_ordinal, path_ordinal, now)
+        .map_err(|error| PermanentSafeExecutionError::Admission(error.kind))?;
+    if let Err(error) = claim.revalidate_effect_receipt(&receipt) {
+        let _ = claim.cancel_effect_before_call(&receipt, now);
+        return Err(PermanentSafeExecutionError::Admission(error.kind));
+    }
+
+    let result = driver.remove_contents(&witness, cancelled);
+    settle_effect(claim, receipt, result, now)
+}
+
+fn settle_effect(
+    claim: &mut CleanupJournalClaim,
+    receipt: EffectStartReceipt,
+    result: Result<PermanentSafeRemovalSummary, PermanentSafePlatformError>,
+    completed_at: SystemTime,
+) -> Result<PermanentSafeRemovalSummary, PermanentSafeExecutionError> {
+    match result {
+        Ok(summary) => {
+            claim
+                .finish_effect(&receipt, EffectOutcome::Removed, None, completed_at)
+                .map_err(|error| PermanentSafeExecutionError::Admission(error.kind))?;
+            Ok(summary)
+        }
+        Err(PermanentSafePlatformError::Cancelled) => {
+            claim
+                .cancel_effect_before_call(&receipt, completed_at)
+                .map_err(|error| PermanentSafeExecutionError::Admission(error.kind))?;
+            Err(PermanentSafeExecutionError::Platform(
+                PermanentSafePlatformError::Cancelled,
+            ))
+        }
+        Err(error @ PermanentSafePlatformError::OutcomeUnknown) => {
+            claim
+                .finish_effect(
+                    &receipt,
+                    EffectOutcome::OutcomeUnknown,
+                    Some("permanent_safe_outcome_unknown"),
+                    completed_at,
+                )
+                .map_err(|journal| PermanentSafeExecutionError::Admission(journal.kind))?;
+            Err(PermanentSafeExecutionError::Platform(error))
+        }
+        Err(error) => {
+            claim
+                .finish_effect(
+                    &receipt,
+                    EffectOutcome::Failed,
+                    Some("permanent_safe_effect_failed"),
+                    completed_at,
+                )
+                .map_err(|journal| PermanentSafeExecutionError::Admission(journal.kind))?;
+            Err(PermanentSafeExecutionError::Platform(error))
+        }
+    }
+}
+
+/// The only concrete driver. It inventories the entire target before the
+/// first unlink, preserves Cargo's marker, rejects symlinks/special entries
+/// and multiply-linked regular files, then removes descendants relative to
+/// retained directory descriptors in deepest-first order.
+pub(crate) struct DescriptorRelativePermanentSafeDriver;
+
+impl PermanentSafeContentsDriver for DescriptorRelativePermanentSafeDriver {
+    fn remove_contents(
+        &mut self,
+        witness: &RustTargetEffectWitness,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<PermanentSafeRemovalSummary, PermanentSafePlatformError> {
+        #[cfg(not(unix))]
+        {
+            let _ = (witness, cancelled);
+            return Err(PermanentSafePlatformError::Unsupported);
+        }
+        #[cfg(unix)]
+        {
+            witness
+                .revalidate_current()
+                .map_err(|_| PermanentSafePlatformError::Changed)?;
+            let target = open_directory(witness.target_path())?;
+            if !same_directory_identity(&target, witness.target_identity())? {
+                return Err(PermanentSafePlatformError::Changed);
+            }
+            let mut entries = Vec::new();
+            let mut names = 0_usize;
+            inventory(
+                &target,
+                &[],
+                &[DirectoryObservation {
+                    relative: Vec::new(),
+                    identity: stat_identity(&target)?,
+                }],
+                &mut entries,
+                &mut names,
+                cancelled,
+            )?;
+            if cancelled() {
+                return Err(PermanentSafePlatformError::Cancelled);
+            }
+            witness
+                .revalidate_current()
+                .map_err(|_| PermanentSafePlatformError::Changed)?;
+            if !same_directory_identity(&target, witness.target_identity())? {
+                return Err(PermanentSafePlatformError::Changed);
+            }
+            entries.sort_by_key(|entry| std::cmp::Reverse(entry.relative.len()));
+            let mut summary = PermanentSafeRemovalSummary::default();
+            for entry in entries {
+                if cancelled() {
+                    return if summary.removed_entries == 0 {
+                        Err(PermanentSafePlatformError::Cancelled)
+                    } else {
+                        Err(PermanentSafePlatformError::OutcomeUnknown)
+                    };
+                }
+                let parent = open_parent(&target, &entry.parent, &entry.ancestors)?;
+                let live = stat_entry(&parent, &entry.name)?;
+                if !same_entry_observation(&live, &entry.observation) {
+                    return Err(if summary.removed_entries == 0 {
+                        PermanentSafePlatformError::Changed
+                    } else {
+                        PermanentSafePlatformError::OutcomeUnknown
+                    });
+                }
+                let flags = if entry.observation.is_directory {
+                    nix::unistd::UnlinkatFlags::RemoveDir
+                } else {
+                    nix::unistd::UnlinkatFlags::NoRemoveDir
+                };
+                // DUX-DESTRUCTIVE: allow=permanent-safe-rust-target-descriptor-contents --
+                // reviewed, journal-fenced, descriptor-relative contents only.
+                nix::unistd::unlinkat(&parent, entry.name.as_os_str(), flags).map_err(|_| {
+                    if summary.removed_entries == 0 {
+                        PermanentSafePlatformError::Failed
+                    } else {
+                        PermanentSafePlatformError::OutcomeUnknown
+                    }
+                })?;
+                summary.removed_entries = summary.removed_entries.saturating_add(1);
+                summary.removed_logical_bytes = summary
+                    .removed_logical_bytes
+                    .saturating_add(entry.observation.logical_bytes);
+            }
+            Ok(summary)
+        }
+    }
+}
+
+#[cfg(unix)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DirectoryObservation {
+    relative: Vec<Vec<u8>>,
+    identity: FilesystemIdentity,
+}
+
+#[cfg(unix)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct EntryObservation {
+    identity: FilesystemIdentity,
+    is_directory: bool,
+    hard_links: u64,
+    logical_bytes: u64,
+}
+
+#[cfg(unix)]
+struct RemovalEntry {
+    relative: Vec<Vec<u8>>,
+    parent: Vec<Vec<u8>>,
+    name: std::ffi::OsString,
+    ancestors: Vec<DirectoryObservation>,
+    observation: EntryObservation,
+}
+
+#[cfg(unix)]
+fn open_directory(path: &Path) -> Result<File, PermanentSafePlatformError> {
+    use nix::fcntl::{OFlag, open};
+    use nix::sys::stat::Mode;
+    open(
+        path,
+        OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+        Mode::empty(),
+    )
+    .map(File::from)
+    .map_err(|_| PermanentSafePlatformError::Failed)
+}
+
+#[cfg(unix)]
+fn stat_identity(file: &File) -> Result<FilesystemIdentity, PermanentSafePlatformError> {
+    let stat = nix::sys::stat::fstat(file).map_err(|_| PermanentSafePlatformError::Failed)?;
+    Ok(identity_from_stat(&stat))
+}
+
+#[cfg(unix)]
+fn same_directory_identity(
+    file: &File,
+    expected: FilesystemIdentity,
+) -> Result<bool, PermanentSafePlatformError> {
+    Ok(stat_identity(file)? == expected)
+}
+
+#[cfg(unix)]
+fn identity_from_stat(stat: &nix::libc::stat) -> FilesystemIdentity {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    let volume = stat.st_dev as u64;
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    let volume = stat.st_dev as u64;
+    FilesystemIdentity::new(volume, stat.st_ino as u128)
+}
+
+#[cfg(unix)]
+fn stat_entry(parent: &File, name: &OsStr) -> Result<EntryObservation, PermanentSafePlatformError> {
+    use nix::fcntl::AtFlags;
+    use nix::sys::stat::{SFlag, fstatat};
+    let stat = fstatat(parent, name, AtFlags::AT_SYMLINK_NOFOLLOW)
+        .map_err(|_| PermanentSafePlatformError::Changed)?;
+    let flags = SFlag::from_bits_truncate(stat.st_mode) & SFlag::S_IFMT;
+    let is_directory = flags == SFlag::S_IFDIR;
+    let is_regular = flags == SFlag::S_IFREG;
+    if !is_directory && !is_regular {
+        return Err(PermanentSafePlatformError::Unsafe);
+    }
+    if is_regular && stat.st_nlink != 1 {
+        return Err(PermanentSafePlatformError::Unsafe);
+    }
+    let logical_bytes = if is_regular {
+        u64::try_from(stat.st_size).map_err(|_| PermanentSafePlatformError::Unsafe)?
+    } else {
+        0
+    };
+    Ok(EntryObservation {
+        identity: identity_from_stat(&stat),
+        is_directory,
+        hard_links: stat.st_nlink as u64,
+        logical_bytes,
+    })
+}
+
+#[cfg(unix)]
+fn same_entry_observation(actual: &EntryObservation, expected: &EntryObservation) -> bool {
+    actual.identity == expected.identity
+        && actual.is_directory == expected.is_directory
+        && (actual.is_directory || actual.hard_links == expected.hard_links)
+}
+
+#[cfg(unix)]
+fn inventory(
+    directory: &File,
+    relative: &[Vec<u8>],
+    ancestors: &[DirectoryObservation],
+    entries: &mut Vec<RemovalEntry>,
+    name_bytes: &mut usize,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<(), PermanentSafePlatformError> {
+    use nix::dir::Dir;
+    use nix::fcntl::{OFlag, openat};
+    use nix::sys::stat::Mode;
+    use std::os::unix::ffi::OsStringExt;
+
+    if relative.len() > MAX_DESCENDANT_DEPTH {
+        return Err(PermanentSafePlatformError::Unsafe);
+    }
+    let clone = directory
+        .try_clone()
+        .map_err(|_| PermanentSafePlatformError::Failed)?;
+    let mut dir = Dir::from_fd(clone.into()).map_err(|_| PermanentSafePlatformError::Failed)?;
+    for item in dir.iter() {
+        if cancelled() {
+            return Err(PermanentSafePlatformError::Cancelled);
+        }
+        let item = item.map_err(|_| PermanentSafePlatformError::Failed)?;
+        let bytes = item.file_name().to_bytes();
+        if bytes == b"." || bytes == b".." {
+            continue;
+        }
+        if bytes.is_empty() || bytes.contains(&b'/') {
+            return Err(PermanentSafePlatformError::Unsafe);
+        }
+        *name_bytes = name_bytes
+            .checked_add(bytes.len())
+            .ok_or(PermanentSafePlatformError::Unsafe)?;
+        if *name_bytes > MAX_DESCENDANT_NAME_BYTES || entries.len() >= MAX_DESCENDANT_ENTRIES {
+            return Err(PermanentSafePlatformError::Unsafe);
+        }
+        let name = std::ffi::OsString::from_vec(bytes.to_vec());
+        let observation = stat_entry(directory, name.as_os_str())?;
+        if relative.is_empty() && bytes == PRESERVED_MARKER {
+            if observation.is_directory {
+                return Err(PermanentSafePlatformError::Unsafe);
+            }
+            continue;
+        }
+        let mut child_relative = relative.to_vec();
+        child_relative.push(bytes.to_vec());
+        if observation.is_directory {
+            let child = openat(
+                directory,
+                name.as_os_str(),
+                OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+                Mode::empty(),
+            )
+            .map(File::from)
+            .map_err(|_| PermanentSafePlatformError::Changed)?;
+            if stat_identity(&child)? != observation.identity {
+                return Err(PermanentSafePlatformError::Changed);
+            }
+            let mut child_ancestors = ancestors.to_vec();
+            child_ancestors.push(DirectoryObservation {
+                relative: child_relative.clone(),
+                identity: observation.identity,
+            });
+            inventory(
+                &child,
+                &child_relative,
+                &child_ancestors,
+                entries,
+                name_bytes,
+                cancelled,
+            )?;
+        }
+        entries.push(RemovalEntry {
+            relative: child_relative,
+            parent: relative.to_vec(),
+            name,
+            ancestors: ancestors.to_vec(),
+            observation,
+        });
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn open_parent(
+    root: &File,
+    relative: &[Vec<u8>],
+    ancestors: &[DirectoryObservation],
+) -> Result<File, PermanentSafePlatformError> {
+    use nix::fcntl::{OFlag, openat};
+    use nix::sys::stat::Mode;
+    use std::os::unix::ffi::OsStrExt;
+    let mut current = root
+        .try_clone()
+        .map_err(|_| PermanentSafePlatformError::Failed)?;
+    for (index, component) in relative.iter().enumerate() {
+        let name = OsStr::from_bytes(component);
+        let next = openat(
+            &current,
+            name,
+            OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+            Mode::empty(),
+        )
+        .map(File::from)
+        .map_err(|_| PermanentSafePlatformError::Changed)?;
+        let expected = ancestors
+            .iter()
+            .find(|entry| entry.relative.as_slice() == &relative[..=index])
+            .ok_or(PermanentSafePlatformError::Changed)?;
+        if stat_identity(&next)? != expected.identity {
+            return Err(PermanentSafePlatformError::Changed);
+        }
+        current = next;
+    }
+    Ok(current)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    use std::fs;
+    #[cfg(unix)]
+    use tempfile::TempDir;
+
+    #[test]
+    fn bounds_and_marker_are_explicit() {
+        assert_eq!(PRESERVED_MARKER, b"CACHEDIR.TAG");
+        assert_eq!(MAX_DESCENDANT_DEPTH, 64);
+        assert_eq!(MAX_DESCENDANT_ENTRIES, 16_384);
+    }
+
+    #[cfg(unix)]
+    fn witness_fixture() -> (TempDir, RustTargetEffectWitness) {
+        use crate::path_validation::{
+            capture_path_snapshot, capture_scan_root, validate_cleanup_path, validate_scan_root,
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let scan_root_path = fs::canonicalize(temp.path()).unwrap();
+        let project = scan_root_path.join("project");
+        let target = project.join("target");
+        fs::create_dir_all(target.join("debug/deps")).unwrap();
+        fs::write(
+            project.join("Cargo.toml"),
+            b"[package]\nname = \"fixture\"\n",
+        )
+        .unwrap();
+        fs::write(
+            target.join("CACHEDIR.TAG"),
+            b"Signature: 8a477f597d28d172789f06886806bc55\n",
+        )
+        .unwrap();
+        fs::write(target.join("debug/deps/libfixture.rlib"), b"artifact").unwrap();
+        fs::write(target.join("debug/.fingerprint"), b"artifact").unwrap();
+        let lexical_root = validate_scan_root(&scan_root_path).unwrap();
+        let scan_root = capture_scan_root(lexical_root.clone()).unwrap();
+        let lexical_target = validate_cleanup_path(&lexical_root, &target).unwrap();
+        let snapshot = capture_path_snapshot(&scan_root, lexical_target).unwrap();
+        let witness = crate::planner::validate_rust_target_effect(snapshot).unwrap();
+        (temp, witness)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn descriptor_driver_removes_only_descendants_and_preserves_marker() {
+        let (temp, witness) = witness_fixture();
+        let mut driver = DescriptorRelativePermanentSafeDriver;
+        let summary = driver
+            .remove_contents(&witness, &|| false)
+            .expect("fixture should be safe");
+        assert_eq!(summary.removed_entries, 4);
+        assert!(summary.removed_logical_bytes > 0);
+        assert!(temp.path().join("project/target/CACHEDIR.TAG").exists());
+        assert!(!temp.path().join("project/target/debug").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn descriptor_driver_rejects_symlink_before_mutation() {
+        use std::os::unix::fs::symlink;
+        let (temp, witness) = witness_fixture();
+        symlink("/tmp", temp.path().join("project/target/debug/link")).unwrap();
+        let mut driver = DescriptorRelativePermanentSafeDriver;
+        assert_eq!(
+            driver.remove_contents(&witness, &|| false),
+            Err(PermanentSafePlatformError::Unsafe)
+        );
+        assert!(
+            temp.path()
+                .join("project/target/debug/deps/libfixture.rlib")
+                .exists()
+        );
+    }
+}

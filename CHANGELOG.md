@@ -1,5 +1,11 @@
 # Changelog
 
+- Added a private, descriptor-relative permanent-safe contents driver for the
+  reviewed Rust-target rule. It inventories before mutation, preserves the
+  direct `CACHEDIR.TAG`, rejects unsafe descendants and hard links, rechecks
+  ancestor identities before each unlink, and maps cancellation/partial
+  failure to conservative journal outcomes. It remains unexported and has no
+  production UI, FFI, or real cleanup caller.
 - Added notification-response routing to the native Explorer. Only the exact
   bounded versioned Recommendations payload is accepted; valid responses open
   and focus the review-only Recommendations destination, while malformed or

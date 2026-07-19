@@ -368,6 +368,10 @@ impl ApprovedCleanupSession {
         &self.claim
     }
 
+    pub(crate) fn claim_mut(&mut self) -> &mut CleanupJournalClaim {
+        &mut self.claim
+    }
+
     /// Last planner/journal check immediately before a future permanent-safe
     /// driver is allowed to receive a reviewed target. This deliberately
     /// returns only a unit witness: target-specific identity validation and

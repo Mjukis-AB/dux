@@ -70,7 +70,7 @@ struct ProtectedPathStillUnresolved;
 /// manifest identity/content, and the exact cache-tag signature. It remains
 /// non-cloneable and has no mutation or path-export API.
 #[must_use = "the Rust-target effect witness must be consumed by the executor"]
-pub(super) struct RustTargetEffectWitness {
+pub(crate) struct RustTargetEffectWitness {
     target: CanonicalPathSnapshot,
     manifest: CanonicalFileDigestSnapshot,
     cache_tag: CanonicalFilePrefixSnapshot,
@@ -135,7 +135,7 @@ pub(crate) fn validate_live_rust_target(
 /// permanent-safe Rust-target operation. Unlike the discovery witness, this
 /// boundary accepts only the trusted exact target snapshot; it never clears a
 /// candidate blocker or creates a plan.
-pub(super) fn validate_rust_target_effect(
+pub(crate) fn validate_rust_target_effect(
     target: CanonicalPathSnapshot,
 ) -> Result<RustTargetEffectWitness, RustTargetLiveValidationError> {
     #[cfg(not(unix))]
@@ -472,7 +472,7 @@ impl RustTargetLiveWitness {
 }
 
 impl RustTargetEffectWitness {
-    pub(super) fn revalidate_current(&self) -> Result<(), RustTargetLiveValidationError> {
+    pub(crate) fn revalidate_current(&self) -> Result<(), RustTargetLiveValidationError> {
         let current = validate_rust_target_effect(self.target.clone())?;
         if current.target != self.target
             || current.manifest != self.manifest
@@ -483,8 +483,12 @@ impl RustTargetEffectWitness {
         Ok(())
     }
 
-    pub(super) fn target_path(&self) -> &Path {
+    pub(crate) fn target_path(&self) -> &Path {
         self.target.canonical_path()
+    }
+
+    pub(crate) fn target_identity(&self) -> crate::path_validation::FilesystemIdentity {
+        self.target.target_identity()
     }
 }
 

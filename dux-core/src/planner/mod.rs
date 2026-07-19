@@ -31,6 +31,11 @@ mod rust_target;
 mod rust_target_cargo;
 mod rust_target_source;
 
+pub(crate) use exact_path_review::{ApprovedCleanupSession, ExactPathHandoffError};
+pub(crate) use rust_target::RustTargetEffectWitness;
+#[cfg(test)]
+pub(crate) use rust_target::validate_rust_target_effect;
+
 #[cfg(target_os = "macos")]
 pub(crate) use rust_target_cargo::{
     CargoMetadataValidationError, DirectCargoEnrollmentCommitError, DirectCargoEnrollmentPreview,

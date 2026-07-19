@@ -6,5 +6,11 @@
 )]
 pub(crate) mod executor;
 
+#[allow(
+    dead_code,
+    reason = "the permanent-safe driver is deliberately not wired to app/FFI"
+)]
+pub(crate) mod permanent_safe;
+
 #[doc(hidden)]
 pub mod legacy_cli;
