@@ -756,6 +756,18 @@ descriptor or race after the check. The Cargo rule-boundary evidence may carry
 this witness and revalidate it, while the current catalog declares no activity
 guards, so no blocker, plan, schedule, approval, or effect authority changes.
 
+A bounded exact descendant-policy seam is also staged. It retains validated
+protected/excluded selector entries as no-follow path snapshots, including
+ancestor identities, entry kind, and regular-file link count. Selector paths
+are component-aware and duplicate/overlapping selectors are rejected so a
+future effect cannot infer precedence. Missing, symlinked, multiply-linked,
+replaced, removed, or otherwise changed entries fail closed on revalidation.
+This is deliberately not recursive ownership proof: arbitrary descendant
+enumeration, descriptor-relative child effects, and rule-specific protected
+subtree semantics remain open. The optional witness is path-private and does
+not clear `ProtectedPath`, create a plan, cross FFI, schedule, approve, or
+mutate.
+
 The next boundary consumes that fenced witness into a path-private planning-
 provenance token. Creation binds the exact source-scan and candidate IDs,
 witness and resolution-policy revisions, and the unresolved protected-path

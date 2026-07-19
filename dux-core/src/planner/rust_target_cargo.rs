@@ -49,6 +49,7 @@ use super::cargo_workspace_glob::{
     CargoWorkspaceGlobError, CargoWorkspaceGlobEvidence, CargoWorkspaceGlobExpansion,
     CargoWorkspaceGlobGuard,
 };
+use super::descendant_policy::{DescendantPolicyError, DescendantPolicyWitness};
 use super::process_activity::{ProcessActivityError, ProcessActivityWitness};
 use super::rust_target::{
     RUST_TARGET_WITNESS_REVISION, RustTargetLiveValidationError, RustTargetLiveWitness,
@@ -326,6 +327,7 @@ pub(crate) struct RustTargetRuleBoundaryEvidence {
     provenance: RustTargetCargoPlanningProvenance,
     location: TrustedHomeMountWitness,
     process_activity: Option<ProcessActivityWitness>,
+    descendant_policy: Option<DescendantPolicyWitness>,
     boundary_revision: u32,
     protected_path_still_unresolved: CargoProtectedPathStillUnresolved,
 }
@@ -338,6 +340,8 @@ pub(crate) enum RustTargetRuleBoundaryError {
     Location(#[source] TrustedHomeMountError),
     #[error("process activity evidence could not be revalidated: {0}")]
     ProcessActivity(#[source] ProcessActivityError),
+    #[error("descendant policy evidence could not be revalidated: {0}")]
+    DescendantPolicy(#[source] DescendantPolicyError),
     #[error("Rust-target Cargo provenance and home-mount evidence bind different boundaries")]
     BoundaryMismatch,
     #[error("Rust-target rule-boundary revision is unsupported")]
@@ -431,6 +435,17 @@ impl RustTargetCargoPlanningProvenance {
         self.witness.release()
     }
 
+    /// Capture exact rule-relative descendant selectors against the retained
+    /// code-owned scan root. This creates observation-only evidence; it does
+    /// not make the unresolved rule actionable.
+    pub(crate) fn capture_descendant_policy(
+        &self,
+        protected: &[String],
+        excluded: &[String],
+    ) -> Result<DescendantPolicyWitness, DescendantPolicyError> {
+        DescendantPolicyWitness::capture(self.witness.live.scan_root(), protected, excluded)
+    }
+
     /// Consume provenance into a location-bound rule observation. The exact
     /// scan-root boundary must match the Cargo witness; the unresolved
     /// protected-path marker is retained rather than removed.
@@ -438,7 +453,9 @@ impl RustTargetCargoPlanningProvenance {
         self,
         location: TrustedHomeMountWitness,
     ) -> Result<RustTargetRuleBoundaryEvidence, RustTargetRuleBoundaryError> {
-        self.into_rule_boundary_evidence_with_process_activity(location, None)
+        self.into_rule_boundary_evidence_with_process_activity_and_descendant_policy(
+            location, None, None,
+        )
     }
 
     /// Consume provenance into the same boundary while retaining a separate
@@ -451,6 +468,22 @@ impl RustTargetCargoPlanningProvenance {
         location: TrustedHomeMountWitness,
         process_activity: Option<ProcessActivityWitness>,
     ) -> Result<RustTargetRuleBoundaryEvidence, RustTargetRuleBoundaryError> {
+        self.into_rule_boundary_evidence_with_process_activity_and_descendant_policy(
+            location,
+            process_activity,
+            None,
+        )
+    }
+
+    /// Consume provenance while retaining exact protected/excluded descendant
+    /// observations. Current Cargo rules have no selectors, so this remains an
+    /// opt-in infrastructure seam and does not clear the ProtectedPath block.
+    pub(crate) fn into_rule_boundary_evidence_with_process_activity_and_descendant_policy(
+        self,
+        location: TrustedHomeMountWitness,
+        process_activity: Option<ProcessActivityWitness>,
+        descendant_policy: Option<DescendantPolicyWitness>,
+    ) -> Result<RustTargetRuleBoundaryEvidence, RustTargetRuleBoundaryError> {
         self.revalidate()
             .map_err(RustTargetRuleBoundaryError::Provenance)?;
         location
@@ -460,6 +493,11 @@ impl RustTargetCargoPlanningProvenance {
             process_activity
                 .revalidate()
                 .map_err(RustTargetRuleBoundaryError::ProcessActivity)?;
+        }
+        if let Some(descendant_policy) = descendant_policy.as_ref() {
+            descendant_policy
+                .revalidate()
+                .map_err(RustTargetRuleBoundaryError::DescendantPolicy)?;
         }
         if !location.matches_scan_boundary(&self.witness.boundary) {
             return Err(RustTargetRuleBoundaryError::BoundaryMismatch);
@@ -471,6 +509,7 @@ impl RustTargetCargoPlanningProvenance {
             provenance: self,
             location,
             process_activity,
+            descendant_policy,
             boundary_revision: RUST_TARGET_RULE_BOUNDARY_REVISION,
             protected_path_still_unresolved: CargoProtectedPathStillUnresolved,
         })
@@ -497,6 +536,11 @@ impl RustTargetRuleBoundaryEvidence {
             process_activity
                 .revalidate()
                 .map_err(RustTargetRuleBoundaryError::ProcessActivity)?;
+        }
+        if let Some(descendant_policy) = self.descendant_policy.as_ref() {
+            descendant_policy
+                .revalidate()
+                .map_err(RustTargetRuleBoundaryError::DescendantPolicy)?;
         }
         if !self
             .location

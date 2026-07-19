@@ -6,6 +6,12 @@
   guards without signed bundle identity, and revalidates before use. The
   current catalog has no activity guards, so no blocker, plan, schedule, or
   cleanup authority changed.
+- Staged a private, bounded exact descendant-policy witness. Protected and
+  excluded selectors are component-aware, no-follow, identity-bound, and
+  fail closed on missing, overlapping, multiply-linked, symlinked, replaced,
+  or removed entries. The optional rule-boundary join revalidates it, while
+  recursive ownership, plans, approvals, FFI, schedules, and cleanup effects
+  remain unavailable.
 - Staged UniFFI contract v19's core-issued, one-shot Trash callback request.
   The request has no public constructor, exposes only the exact ephemeral path
   bytes and target kind to a future synchronous platform callback, and can be

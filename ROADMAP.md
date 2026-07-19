@@ -4479,6 +4479,16 @@ Tasks:
       guard. The rule-boundary evidence can consume this witness and repeats
       it, but the current catalog has no activity guards, so no blocker is
       removed and no plan, schedule, approval, or effect authority is added.
+    - [x] 2026-07-19 slice: stage bounded exact descendant-policy evidence.
+      The private non-cloneable witness binds validated rule-relative
+      protected/excluded selectors to no-follow target identities, entry kinds,
+      ancestors, and regular-file link counts. Missing, malformed, overlapping,
+      multiply-linked, symlinked, or changed entries fail closed; selector
+      matching is component-aware (`.git` cannot match `.github`). The sealed
+      rule-boundary join can retain and revalidate this witness, but the
+      current catalog has no descendant selectors. Recursive enumeration,
+      retained descriptor-relative child effects, blocker removal, planning,
+      approval, FFI, scheduling, and cleanup effects remain explicitly open.
 - [ ] Implement candidate groups and overlap resolution.
   - [x] 2026-07-18 slice: add the sealed, non-authoritative core grouping
     result. Candidates are grouped deterministically by category, safety, and
