@@ -4638,6 +4638,14 @@ Tasks:
     verifies exact URL delivery, one-shot consumption, malformed-path refusal,
     and no retry. `MacOSTrashPlatformDriver` is compiled but not registered.
 - [ ] Implement permanent-safe executor for approved rules.
+  - [x] 2026-07-19 slice: retain trusted rule authorizations in exact
+    plan-item/path order and add a private Rust-target effect witness. The
+    witness revalidates the target directory, Cargo manifest identity/content,
+    standard cache-tag signature, hard-link policy, and no-follow ancestry
+    immediately before a future executor boundary. It performs no deletion,
+    does not clear `ProtectedPath`, and is not exposed to FFI or Swift; the
+    descriptor-relative contents executor and journal effect admission remain
+    open.
 - [ ] Implement execution-time revalidation.
   - [x] 2026-07-19 slice: add a private pre-effect revalidation witness on
     the approved journal session. It rechecks approval expiry, every retained

@@ -65,6 +65,17 @@ pub(crate) struct RustTargetLiveWitness {
 
 struct ProtectedPathStillUnresolved;
 
+/// Rule-specific evidence retained immediately before a future permanent-safe
+/// effect. This witness proves the default Cargo target layout, the regular
+/// manifest identity/content, and the exact cache-tag signature. It remains
+/// non-cloneable and has no mutation or path-export API.
+#[must_use = "the Rust-target effect witness must be consumed by the executor"]
+pub(super) struct RustTargetEffectWitness {
+    target: CanonicalPathSnapshot,
+    manifest: CanonicalFileDigestSnapshot,
+    cache_tag: CanonicalFilePrefixSnapshot,
+}
+
 #[derive(Debug, Error)]
 pub(crate) enum RustTargetLiveValidationError {
     #[error("candidate does not have the exact staged Rust target policy")]
@@ -118,6 +129,105 @@ pub(crate) fn validate_live_rust_target(
         Some(source),
         Some(bindings),
     )
+}
+
+/// Capture the rule-specific evidence required immediately before a
+/// permanent-safe Rust-target operation. Unlike the discovery witness, this
+/// boundary accepts only the trusted exact target snapshot; it never clears a
+/// candidate blocker or creates a plan.
+pub(super) fn validate_rust_target_effect(
+    target: CanonicalPathSnapshot,
+) -> Result<RustTargetEffectWitness, RustTargetLiveValidationError> {
+    #[cfg(not(unix))]
+    {
+        let _ = target;
+        return Err(RustTargetLiveValidationError::UnsupportedPlatform);
+    }
+
+    #[cfg(unix)]
+    {
+        let lexical_root = validate_scan_root(target.scan_root())?;
+        let scan_root = capture_scan_root(lexical_root.clone())?;
+        let lexical_target = validate_cleanup_path(&lexical_root, target.requested_path())?;
+        let current_target = capture_path_snapshot(&scan_root, lexical_target.clone())?;
+        if current_target != target {
+            return Err(RustTargetLiveValidationError::ChangedDuringValidation);
+        }
+        if target.target_kind() != FilesystemEntryKind::Directory
+            || target.canonical_path().file_name() != Some(OsStr::new("target"))
+        {
+            return Err(RustTargetLiveValidationError::LayoutMismatch);
+        }
+
+        let project_root = target
+            .canonical_path()
+            .parent()
+            .ok_or(RustTargetLiveValidationError::LayoutMismatch)?;
+        let manifest_path = project_root.join("Cargo.toml");
+        let cache_tag_path = target.canonical_path().join("CACHEDIR.TAG");
+        let lexical_manifest = validate_cleanup_path(&lexical_root, &manifest_path)?;
+        let lexical_cache_tag = validate_cleanup_path(&lexical_root, &cache_tag_path)?;
+        let manifest = capture_regular_file_sha256(
+            &scan_root,
+            lexical_manifest.clone(),
+            MAX_CARGO_MANIFEST_BYTES,
+        )?;
+        let cache_tag = capture_regular_file_prefix(
+            &scan_root,
+            lexical_cache_tag.clone(),
+            CARGO_CACHE_TAG_SIGNATURE.len(),
+        )?;
+        if manifest.path().hard_link_count() != 1 || cache_tag.path().hard_link_count() != 1 {
+            return Err(RustTargetLiveValidationError::MultiplyLinkedMarker);
+        }
+        if cache_tag.prefix() != CARGO_CACHE_TAG_SIGNATURE {
+            return Err(RustTargetLiveValidationError::InvalidCacheTagSignature);
+        }
+
+        let target_parent = target
+            .ancestors()
+            .last()
+            .ok_or(RustTargetLiveValidationError::LayoutMismatch)?
+            .identity();
+        let manifest_parent = manifest
+            .path()
+            .ancestors()
+            .last()
+            .ok_or(RustTargetLiveValidationError::LayoutMismatch)?
+            .identity();
+        let cache_tag_parent = cache_tag
+            .path()
+            .ancestors()
+            .last()
+            .ok_or(RustTargetLiveValidationError::LayoutMismatch)?
+            .identity();
+        if target_parent != manifest_parent || cache_tag_parent != target.target_identity() {
+            return Err(RustTargetLiveValidationError::LayoutMismatch);
+        }
+
+        let final_root = capture_scan_root(lexical_root)?;
+        let final_target = capture_path_snapshot(&final_root, lexical_target)?;
+        let final_manifest =
+            capture_regular_file_sha256(&final_root, lexical_manifest, MAX_CARGO_MANIFEST_BYTES)?;
+        let final_cache_tag = capture_regular_file_prefix(
+            &final_root,
+            lexical_cache_tag,
+            CARGO_CACHE_TAG_SIGNATURE.len(),
+        )?;
+        if final_root != scan_root
+            || final_target != target
+            || final_manifest != manifest
+            || final_cache_tag != cache_tag
+        {
+            return Err(RustTargetLiveValidationError::ChangedDuringValidation);
+        }
+
+        Ok(RustTargetEffectWitness {
+            target,
+            manifest,
+            cache_tag,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -358,6 +468,23 @@ impl RustTargetLiveWitness {
             Some(source) => source.release(),
             None => Ok(()),
         }
+    }
+}
+
+impl RustTargetEffectWitness {
+    pub(super) fn revalidate_current(&self) -> Result<(), RustTargetLiveValidationError> {
+        let current = validate_rust_target_effect(self.target.clone())?;
+        if current.target != self.target
+            || current.manifest != self.manifest
+            || current.cache_tag != self.cache_tag
+        {
+            return Err(RustTargetLiveValidationError::ChangedDuringValidation);
+        }
+        Ok(())
+    }
+
+    pub(super) fn target_path(&self) -> &Path {
+        self.target.canonical_path()
     }
 }
 

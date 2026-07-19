@@ -95,6 +95,16 @@ impl RuleScopeAuthorization {
         &self.rule == rule && &self.target == target
     }
 
+    /// Revalidate the exact trusted target and return its private snapshot for
+    /// the next rule-specific executor witness. The snapshot remains
+    /// crate-private and is never exposed through FFI or a public plan API.
+    pub(super) fn revalidated_target_snapshot(
+        &self,
+    ) -> Result<CanonicalPathSnapshot, RuleScopeGrantError> {
+        self.revalidate()?;
+        Ok(self.target.clone())
+    }
+
     fn validate_current(&self) -> Result<(), RuleScopeGrantError> {
         if self.revision != TRUSTED_RULE_SCOPE_GRANT_REVISION {
             return Err(RuleScopeGrantError::UnsupportedRevision);

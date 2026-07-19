@@ -1,5 +1,10 @@
 # Changelog
 
+- Added a private Rust-target permanent-safe evidence boundary. Approved
+  plan authorizations now retain deterministic item/path order, and the
+  executor-facing witness revalidates the exact target, Cargo manifest,
+  cache-tag signature, hard-link policy, and no-follow ancestry without
+  clearing the production `ProtectedPath` blocker or performing deletion.
 - Added the first native capacity trend presentation. The long-lived app
   model refreshes the bounded trend after accepted capacity samples, fences
   late or volume-mismatched responses, and clears completed/cancelled loads.

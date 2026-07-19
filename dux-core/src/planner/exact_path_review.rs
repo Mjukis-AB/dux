@@ -28,6 +28,9 @@ use crate::persistence::{
 };
 
 use super::rule_scope_grant::{RuleScopeAuthorization, RuleScopeGrantError};
+use super::rust_target::{
+    RustTargetEffectWitness, RustTargetLiveValidationError, validate_rust_target_effect,
+};
 
 pub(crate) const MAX_EXACT_REVIEW_CANDIDATES: usize = 64;
 pub(crate) const MAX_EXACT_REVIEW_PATHS: usize = 256;
@@ -188,6 +191,8 @@ pub(crate) enum ExactPathHandoffError {
     Approval(#[from] ExactPathApprovalError),
     #[error("cleanup journal handoff failed: {0}")]
     Journal(HistoryError),
+    #[error("rule-specific permanent-safe evidence failed: {0}")]
+    RuleEvidence(#[source] RustTargetLiveValidationError),
 }
 
 impl TrustedReviewedCleanupPlan {
@@ -202,6 +207,23 @@ impl TrustedReviewedCleanupPlan {
                 .map_err(ExactPathPlanError::Authorization)?;
         }
         Ok(())
+    }
+
+    fn authorization_for_path(
+        &self,
+        item_ordinal: usize,
+        path_ordinal: usize,
+    ) -> Option<&RuleScopeAuthorization> {
+        let offset = self
+            .plan
+            .items()
+            .iter()
+            .take(item_ordinal)
+            .try_fold(0_usize, |offset, item| {
+                offset.checked_add(item.paths().len())
+            })?
+            .checked_add(path_ordinal)?;
+        self.authorizations.get(offset)
     }
 
     pub(crate) fn release(self) {}
@@ -360,6 +382,64 @@ impl ApprovedCleanupSession {
             .map_err(ExactPathHandoffError::Journal)
     }
 
+    /// Revalidate one ordered trusted target and its deterministic Rust-target
+    /// markers immediately before a future permanent-safe effect. The witness
+    /// is private and inert; this method performs no journal transition or
+    /// filesystem mutation.
+    pub(crate) fn revalidated_rust_target_effect(
+        &self,
+        item_ordinal: usize,
+        path_ordinal: usize,
+        now: std::time::SystemTime,
+    ) -> Result<RustTargetEffectWitness, ExactPathHandoffError> {
+        self.revalidate_for_effect(now)?;
+        let item = self
+            .approved
+            .plan()
+            .items()
+            .get(item_ordinal)
+            .ok_or_else(|| {
+                ExactPathHandoffError::Journal(HistoryError::new(
+                    crate::persistence::HistoryErrorKind::InvalidInput,
+                ))
+            })?;
+        if item.rule().id().as_str() != "developer.rust.target"
+            || item.rule().revision().get() != 2
+            || item.safety() != SafetyTier::SafeRegenerable
+            || item.action() != CandidateAction::RemoveKnownRegenerableContents
+            || item.rule_marks_schedule_eligible()
+        {
+            return Err(ExactPathHandoffError::Journal(HistoryError::new(
+                crate::persistence::HistoryErrorKind::InvalidTransition,
+            )));
+        }
+        let expected_path = item.paths().get(path_ordinal).ok_or_else(|| {
+            ExactPathHandoffError::Journal(HistoryError::new(
+                crate::persistence::HistoryErrorKind::InvalidInput,
+            ))
+        })?;
+        let authorization = self
+            .approved
+            .reviewed
+            .authorization_for_path(item_ordinal, path_ordinal)
+            .ok_or_else(|| {
+                ExactPathHandoffError::Journal(HistoryError::new(
+                    crate::persistence::HistoryErrorKind::InvalidTransition,
+                ))
+            })?;
+        let target = authorization
+            .revalidated_target_snapshot()
+            .map_err(|error| {
+                ExactPathHandoffError::Approval(ExactPathApprovalError::Authorization(error))
+            })?;
+        if target.requested_path() != expected_path {
+            return Err(ExactPathHandoffError::Journal(HistoryError::new(
+                crate::persistence::HistoryErrorKind::InvalidTransition,
+            )));
+        }
+        validate_rust_target_effect(target).map_err(ExactPathHandoffError::RuleEvidence)
+    }
+
     pub(crate) fn release(self) {}
 }
 
@@ -434,36 +514,35 @@ impl ExactPathReview {
                 actual: authorizations.len(),
             });
         }
-        let mut matched = vec![false; authorizations.len()];
+        let mut available = authorizations.into_iter().map(Some).collect::<Vec<_>>();
+        let mut ordered_authorizations = Vec::with_capacity(expected);
         for item in &self.items {
             for path in &item.paths {
-                let Some(index) =
-                    authorizations
-                        .iter()
-                        .enumerate()
-                        .position(|(index, authorization)| {
-                            !matched[index] && authorization.matches(&item.rule, path.snapshot())
-                        })
-                else {
+                let Some(index) = available.iter().enumerate().position(|(_, authorization)| {
+                    authorization.as_ref().is_some_and(|authorization| {
+                        authorization.matches(&item.rule, path.snapshot())
+                    })
+                }) else {
                     return Err(ExactPathPlanError::AuthorizationMismatch);
                 };
-                matched[index] = true;
+                let authorization = available[index]
+                    .take()
+                    .expect("authorization position was available");
+                authorization
+                    .revalidate()
+                    .map_err(ExactPathPlanError::Authorization)?;
+                ordered_authorizations.push(authorization);
             }
         }
-        if matched.iter().any(|matched| !matched) {
+        if available.iter().any(Option::is_some) {
             return Err(ExactPathPlanError::AuthorizationMismatch);
-        }
-        for authorization in &authorizations {
-            authorization
-                .revalidate()
-                .map_err(ExactPathPlanError::Authorization)?;
         }
         let plan =
             CleanupPlan::try_from_candidates(plan_id, created_at, self.mode, &self.candidates)
                 .map_err(ExactPathPlanError::Plan)?;
         Ok(TrustedReviewedCleanupPlan {
             plan,
-            authorizations,
+            authorizations: ordered_authorizations,
         })
     }
 }

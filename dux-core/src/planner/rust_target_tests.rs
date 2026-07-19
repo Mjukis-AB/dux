@@ -10,6 +10,7 @@ use nix::unistd::{User, geteuid};
 
 use super::rust_target::{
     RustTargetLiveValidationError, RustTargetValidationSource, validate_live_rust_target_for_test,
+    validate_rust_target_effect,
 };
 use crate::domain::{
     BlockReason, Candidate, CandidateAction, CandidateCategory, CandidateId, CandidateInput,
@@ -17,7 +18,10 @@ use crate::domain::{
     LocalizedTextKey, ProvenanceUrl, Rule, RuleDefinition, RuleGuards, RuleId, RuleMatcher,
     RuleMatcherDefinition, RuleRef, RuleRevision, RuleScope, SafetyTier, ScanId,
 };
-use crate::path_validation::FilesystemEntryKind;
+use crate::path_validation::{
+    FilesystemEntryKind, capture_path_snapshot, capture_scan_root, validate_cleanup_path,
+    validate_scan_root,
+};
 
 pub(super) const CARGO_CACHE_TAG_SIGNATURE: &[u8] = b"Signature: 8a477f597d28d172789f06886806bc55";
 
@@ -289,4 +293,27 @@ fn witness_does_not_remove_blocker_or_unlock_plan_construction() {
         ),
         Err(CleanupPlanValidationError::BlockedCandidate { candidate_index: 0 })
     );
+}
+
+#[test]
+fn permanent_effect_witness_revalidates_markers_without_mutating_target() {
+    let fixture = Fixture::new(CARGO_CACHE_TAG_SIGNATURE);
+    let lexical_root = validate_scan_root(&fixture.root).unwrap();
+    let scan_root = capture_scan_root(lexical_root.clone()).unwrap();
+    let lexical_target = validate_cleanup_path(&lexical_root, &fixture.target).unwrap();
+    let target = capture_path_snapshot(&scan_root, lexical_target).unwrap();
+
+    let witness = validate_rust_target_effect(target).unwrap();
+    witness.revalidate_current().unwrap();
+    assert_eq!(witness.target_path(), fixture.target);
+    assert!(fixture.target.exists());
+
+    std::fs::write(&fixture.cache_tag, b"invalid").unwrap();
+    assert!(matches!(
+        witness.revalidate_current(),
+        Err(RustTargetLiveValidationError::InvalidCacheTagSignature)
+            | Err(RustTargetLiveValidationError::ChangedDuringValidation)
+            | Err(RustTargetLiveValidationError::FilePrefix(_))
+    ));
+    assert!(fixture.target.exists());
 }
