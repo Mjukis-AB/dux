@@ -32,7 +32,7 @@ final class DuxAppDelegateTests: XCTestCase {
         XCTAssertTrue(controller.events.isEmpty)
 
         lease.acquire()
-        controller.automaticTerminationSupportEnabled = true
+        controller.automaticTerminationSupportEnabled = false
         lease.reassert()
 
         XCTAssertEqual(
