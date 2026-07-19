@@ -37,6 +37,20 @@ struct DiskPressureNotificationPayload: Equatable, Sendable {
         self.urgency = urgency
     }
 
+    init?(userInfo: [AnyHashable: Any]) {
+        guard userInfo.count == 4 else {
+            return nil
+        }
+        var fields: [String: String] = [:]
+        for (key, value) in userInfo {
+            guard let key = key as? String, let value = value as? String else {
+                return nil
+            }
+            fields[key] = value
+        }
+        self.init(fields: fields)
+    }
+
     var fields: [String: String] {
         [
             "recordVersion": Self.recordVersion,

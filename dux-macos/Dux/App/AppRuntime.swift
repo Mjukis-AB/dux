@@ -59,6 +59,7 @@ final class AppRuntime {
     private var started = false
     private var shuttingDown = false
     private var shutdownTask: Task<Void, Never>?
+    private var explorerOpener: ((ExplorerDestination) -> Void)?
 
     private init() {
         let engineService = EngineService()
@@ -144,6 +145,16 @@ final class AppRuntime {
 
     func revealMenuBarItemForSession() {
         model.revealMenuBarItemForSession()
+    }
+
+    func installExplorerOpener(_ opener: @escaping (ExplorerDestination) -> Void) {
+        explorerOpener = opener
+    }
+
+    func handleUrgentRecommendations(_ payload: DiskPressureNotificationPayload) async {
+        _ = payload
+        model.requestExplorerDestination(.recommendations)
+        explorerOpener?(.recommendations)
     }
 
     func refreshStorageAccessEvidenceAfterActivation() async {

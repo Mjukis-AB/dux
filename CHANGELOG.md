@@ -1,5 +1,10 @@
 # Changelog
 
+- Added notification-response routing to the native Explorer. Only the exact
+  bounded versioned Recommendations payload is accepted; valid responses open
+  and focus the review-only Recommendations destination, while malformed or
+  unknown payloads fail closed. The surface makes clear that scans are
+  read-only and no AI or notification callback can delete files.
 - Added transition-gated low-disk notifications. Newly stored Warning/Critical
   pressure changes preserve the prior durable level, use a bounded versioned
   Recommendations payload, and respect independent 24-hour per-volume and

@@ -1,4 +1,5 @@
 import AppKit
+import UserNotifications
 
 @MainActor
 protocol DuxAutomaticTerminationControlling: AnyObject {
@@ -53,7 +54,14 @@ protocol DuxAppRuntimeServing: AnyObject {
     func signalCapacity(_ trigger: DuxCapacitySamplingTrigger) async
     func revealMenuBarItemForSession()
     func refreshStorageAccessEvidenceAfterActivation() async
+    func handleUrgentRecommendations(_ payload: DiskPressureNotificationPayload) async
     func shutdown() async
+}
+
+extension DuxAppRuntimeServing {
+    func handleUrgentRecommendations(_ payload: DiskPressureNotificationPayload) async {
+        _ = payload
+    }
 }
 
 enum DuxTerminationDisposition {
@@ -107,6 +115,7 @@ final class DuxAppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         _ = notification
         automaticTerminationLease.acquire()
+        UNUserNotificationCenter.current().delegate = self
         installObservers()
         Task {
             await runtime.start()
@@ -286,6 +295,26 @@ final class DuxAppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
         }
+    }
+}
+
+extension DuxAppDelegate: UNUserNotificationCenterDelegate {
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse,
+        withCompletionHandler completionHandler: @escaping () -> Void
+    ) {
+        _ = center
+        guard let payload = DiskPressureNotificationPayload(
+            userInfo: response.notification.request.content.userInfo
+        ) else {
+            completionHandler()
+            return
+        }
+        Task { @MainActor [weak self] in
+            await self?.runtime.handleUrgentRecommendations(payload)
+        }
+        completionHandler()
     }
 }
 

@@ -134,6 +134,14 @@ final class DiskPressureNotificationTests: XCTestCase {
             ]
         )
         XCTAssertEqual(DiskPressureNotificationPayload(fields: payload.fields), payload)
+        XCTAssertEqual(
+            DiskPressureNotificationPayload(
+                userInfo: payload.fields.reduce(into: [AnyHashable: Any]()) { result, entry in
+                    result[entry.key] = entry.value
+                }
+            ),
+            payload
+        )
     }
 
     func testPayloadRejectsMalformedUnknownAndOverBoundFields() {
@@ -147,6 +155,17 @@ final class DiskPressureNotificationTests: XCTestCase {
             DiskPressureNotificationPayload(
                 stableVolumeID: String(repeating: "a", count: 257),
                 urgency: .warning
+            )
+        )
+        XCTAssertNil(
+            DiskPressureNotificationPayload(
+                userInfo: [
+                    "recordVersion": "1",
+                    "route": "recommendations",
+                    "stableVolumeID": "volume:macos:test",
+                    "urgency": "warning",
+                    "unexpected": "field",
+                ]
             )
         )
         XCTAssertNil(

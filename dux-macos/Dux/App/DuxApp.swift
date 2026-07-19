@@ -6,8 +6,13 @@ struct DuxApp: App {
     @NSApplicationDelegateAdaptor(DuxAppDelegate.self) private var appDelegate
     @State private var model = AppRuntime.shared.model
     @State private var explorerSnapshotBrowser = AppRuntime.shared.explorerSnapshotBrowser
+    @Environment(\.openWindow) private var openWindow
 
     var body: some Scene {
+        let _ = AppRuntime.shared.installExplorerOpener { destination in
+            model.requestExplorerDestination(destination)
+            AppActivation.openExplorer(using: openWindow)
+        }
         MenuBarExtra(
             isInserted: Binding(
                 get: { model.isMenuBarItemInserted },

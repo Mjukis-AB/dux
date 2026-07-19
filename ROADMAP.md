@@ -4748,6 +4748,15 @@ Tasks:
     carried. Notification response routing to the Explorer Recommendations
     surface remains the next deep-link slice.
 - [ ] Deep-link notifications to urgent Recommendations.
+  - [x] 2026-07-19 slice: validate notification responses with the exact bounded
+    versioned payload before dispatching. Valid responses now route the
+    long-lived runtime to Explorer, select a Recommendations destination, and
+    open/focus the window through the SwiftUI scene action; malformed,
+    unknown-route, oversized, or non-string user-info values are ignored.
+    Recommendations is intentionally review-only: it explains that future
+    groups require a completed read-only scan and carries no deletion or AI
+    execution authority. The affected-volume identity is retained in the
+    validated payload but is never used as a filesystem path.
 - [ ] Add targeted reclaim scan on Warning/Critical.
 - [ ] Add emergency recovery ordering.
 - [ ] Add rule outcome/regrowth measurement.

@@ -30,6 +30,11 @@ struct ExplorerView: View {
                 }
                 .accessibilityIdentifier(ExplorerAccessibility.snapshotDestination)
 
+                NavigationLink(value: ExplorerDestination.recommendations) {
+                    Label("Recommendations", systemImage: "sparkles.rectangle.stack")
+                }
+                .accessibilityIdentifier(ExplorerAccessibility.recommendationsDestination)
+
                 Section {
                     Button {
                         AppActivation.openSettings(using: openSettings)
@@ -62,6 +67,9 @@ struct ExplorerView: View {
                     model: model
                 )
                 .navigationTitle("Explore Snapshot")
+            case .recommendations:
+                ExplorerRecommendationsView(model: model)
+                    .navigationTitle("Recommendations")
             }
         }
         .navigationSplitViewStyle(.balanced)
@@ -121,6 +129,48 @@ struct ExplorerView: View {
         .accessibilityIdentifier(ExplorerAccessibility.root)
         .task {
             await model.loadInitialState()
+            if let pending = model.pendingExplorerDestination {
+                selection = pending
+            }
+        }
+        .onChange(of: model.pendingExplorerDestination) { _, destination in
+            if let destination {
+                selection = destination
+            }
+        }
+    }
+}
+
+private struct ExplorerRecommendationsView: View {
+    let model: AppModel
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                Label("Safe ways to reclaim space", systemImage: "checkmark.shield")
+                    .font(.largeTitle.bold())
+                Text("DUX can explain storage and group reviewable cleanup ideas. It never lets an AI model delete files, and this view does not perform cleanup by itself.")
+                    .foregroundStyle(.secondary)
+
+                GroupBox {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Label("Review before changing anything", systemImage: "hand.raised")
+                            .font(.headline)
+                        Text("Recommendations will appear after a completed, read-only scan. Verify each item in Finder or the Explorer before taking action.")
+                            .foregroundStyle(.secondary)
+                        if model.volumeState.snapshot == nil {
+                            Text("Capacity is not available yet. Refresh the overview to continue.")
+                                .font(.callout)
+                                .foregroundStyle(.orange)
+                        }
+                    }
+                    .accessibilityElement(children: .combine)
+                }
+                .accessibilityIdentifier(ExplorerAccessibility.recommendations)
+            }
+            .padding(28)
+            .frame(maxWidth: 860, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 }

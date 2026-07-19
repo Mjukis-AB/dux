@@ -5,6 +5,8 @@ enum ExplorerAccessibility {
     static let sidebar = "explorer-sidebar"
     static let overviewDestination = "explorer-destination-overview"
     static let snapshotDestination = "explorer-destination-snapshot"
+    static let recommendationsDestination = "explorer-destination-recommendations"
+    static let recommendations = "explorer-recommendations"
     static let settingsShortcut = "explorer-settings-shortcut"
     static let capacityCard = "explorer-capacity-card"
     static let capacityBar = "explorer-capacity-bar"
@@ -60,6 +62,8 @@ enum ExplorerAccessibility {
         sidebar,
         overviewDestination,
         snapshotDestination,
+        recommendationsDestination,
+        recommendations,
         settingsShortcut,
         capacityCard,
         capacityBar,
@@ -123,6 +127,7 @@ enum ExplorerAccessibility {
 enum ExplorerDestination: String, CaseIterable, Identifiable, Sendable {
     case overview
     case snapshot
+    case recommendations
 
     var id: Self { self }
 }

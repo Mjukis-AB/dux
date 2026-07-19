@@ -283,7 +283,10 @@ final class ExplorerPresentationTests: XCTestCase {
     }
 
     func testAccessibilityAndShortcutContractsAreStableAndUnique() {
-        XCTAssertEqual(ExplorerDestination.allCases, [.overview, .snapshot])
+        XCTAssertEqual(
+            ExplorerDestination.allCases,
+            [.overview, .snapshot, .recommendations]
+        )
         XCTAssertEqual(ExplorerAccessibility.root, "explorer")
         XCTAssertEqual(
             ExplorerAccessibility.snapshotSubtreeRescan,

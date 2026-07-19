@@ -34,6 +34,7 @@ final class AppModel: DuxCapacitySampling {
     private(set) var broaderStorageAnalysisRequested = false
     private(set) var storageAccessProbeState = StorageAccessProbeState.idle
     private(set) var latestHomeScanEvents: [HomeScanEvent] = []
+    private(set) var pendingExplorerDestination: ExplorerDestination?
 
     private let engineService: any EngineServing
     private let volumeMonitor: any VolumeMonitoring
@@ -146,6 +147,11 @@ final class AppModel: DuxCapacitySampling {
         showsStorageAccessIntroduction =
             !storageAccessIntroductionPreferenceStore.loadAcknowledged()
         updateMenuBarVisibility()
+        pendingExplorerDestination = nil
+    }
+
+    func requestExplorerDestination(_ destination: ExplorerDestination) {
+        pendingExplorerDestination = destination
     }
 
     func loadInitialState() async {
