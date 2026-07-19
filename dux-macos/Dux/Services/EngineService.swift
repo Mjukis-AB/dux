@@ -7,6 +7,16 @@ protocol DuxVolumeStatusServing: Sendable {
         -> VolumeCapacitySnapshot
 }
 
+protocol DuxCapacityTrendServing: Sendable {
+    func loadCapacityTrend(stableVolumeID: String, at: Date) async throws -> VolumeCapacityTrend
+}
+
+extension DuxCapacityTrendServing {
+    func loadCapacityTrend(stableVolumeID _: String, at _: Date) async throws -> VolumeCapacityTrend {
+        throw EngineServiceError.unavailable
+    }
+}
+
 protocol DuxPressurePolicyServing: Sendable {
     func loadDiskPressurePolicy() async throws -> DiskPressurePolicy
     func setDiskPressurePolicy(
@@ -15,7 +25,9 @@ protocol DuxPressurePolicyServing: Sendable {
     func resetDiskPressurePolicy() async throws -> DiskPressurePolicyUpdateResult
 }
 
-protocol EngineServing: DuxVolumeStatusServing, DuxPressurePolicyServing, Sendable {
+protocol EngineServing: DuxVolumeStatusServing, DuxCapacityTrendServing, DuxPressurePolicyServing,
+    Sendable
+{
     func loadStatus() async throws -> EngineStatus
 }
 
@@ -112,7 +124,7 @@ extension DuxSnapshotReviewLease {
 struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewServing,
     DuxSnapshotHistoryServing, DuxScanCoverageServing, HomeScanServing, Sendable
 {
-    fileprivate static let expectedFFIContractVersion: UInt32 = 19
+    fileprivate static let expectedFFIContractVersion: UInt32 = 20
     fileprivate static let expectedRecordVersion: UInt32 = 1
 
     private let state: EngineServiceState
@@ -210,6 +222,36 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
                     sampledAt: Date(
                         timeIntervalSince1970: Double(status.sampledAtUnixMs) / 1_000
                     )
+                )
+            } catch let error as EngineError {
+                throw Self.serviceError(error)
+            }
+        }
+    }
+
+    func loadCapacityTrend(stableVolumeID: String, at: Date) async throws -> VolumeCapacityTrend {
+        try await state.perform { state in
+            precondition(!Thread.isMainThread, "Blocking FFI work reached the main thread")
+            guard let uuid = UUID(uuidString: stableVolumeID) else {
+                throw EngineServiceError.invalidCapacityObservation
+            }
+            let milliseconds = at.timeIntervalSince1970 * 1_000
+            guard milliseconds.isFinite, milliseconds >= 0, milliseconds <= Double(Int64.max) else {
+                throw EngineServiceError.invalidCapacityObservation
+            }
+            let anchorAtUnixMS = Int64(milliseconds.rounded(.towardZero))
+            let engine = try state.resolveEngine()
+            do {
+                let response = try engine.getCapacityTrend(
+                    request: CapacityTrendRequest(
+                        recordVersion: Self.expectedRecordVersion,
+                        stableVolumeId: stableVolumeID,
+                        anchorAtUnixMs: anchorAtUnixMS
+                    )
+                )
+                return try Self.capacityTrend(
+                    response,
+                    expectedStableVolumeID: "volume:macos:\(uuid.uuidString.lowercased())"
                 )
             } catch let error as EngineError {
                 throw Self.serviceError(error)
@@ -703,6 +745,73 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         case .critical: .critical
         case .unknown: .unknown
         }
+    }
+
+    private static func capacityTrend(
+        _ response: CapacityTrendStatus,
+        expectedStableVolumeID: String
+    ) throws -> VolumeCapacityTrend {
+        guard
+            response.recordVersion == expectedRecordVersion,
+            response.stableVolumeId == expectedStableVolumeID,
+            response.totalBytes > 0,
+            response.availableBytes <= response.totalBytes,
+            response.importantAvailableBytes.map({ $0 <= response.totalBytes }) ?? true,
+            response.points.count <= 31
+        else {
+            throw EngineServiceError.unexpected("invalid capacity trend record")
+        }
+        let points = try response.points.map { point in
+            guard
+                point.recordVersion == expectedRecordVersion,
+                point.totalBytes > 0,
+                point.availableBytes <= point.totalBytes,
+                point.importantAvailableBytes.map({ $0 <= point.totalBytes }) ?? true
+            else {
+                throw EngineServiceError.unexpected("invalid capacity trend point")
+            }
+            return VolumeCapacityTrendPoint(
+                sampledAt: Date(timeIntervalSince1970: Double(point.sampledAtUnixMs) / 1_000),
+                totalBytes: point.totalBytes,
+                availableBytes: point.availableBytes,
+                importantAvailableBytes: point.importantAvailableBytes,
+                pressure: pressure(point.pressure),
+                source: point.source == .raw ? .raw : .dailyRollup
+            )
+        }
+        guard zip(points, points.dropFirst()).allSatisfy({ $0.0.sampledAt < $0.1.sampledAt }) else {
+            throw EngineServiceError.unexpected("capacity trend points are not ordered")
+        }
+        return VolumeCapacityTrend(
+            stableVolumeID: response.stableVolumeId,
+            sampledAt: Date(timeIntervalSince1970: Double(response.sampledAtUnixMs) / 1_000),
+            totalBytes: response.totalBytes,
+            availableBytes: response.availableBytes,
+            importantAvailableBytes: response.importantAvailableBytes,
+            pressure: pressure(response.pressure),
+            change24h: try response.change24h.map(capacityTrendChange),
+            change7d: try response.change7d.map(capacityTrendChange),
+            points: points
+        )
+    }
+
+    private static func capacityTrendChange(
+        _ change: CapacityTrendChange
+    ) throws -> VolumeCapacityTrendChange {
+        guard
+            change.recordVersion == expectedRecordVersion,
+            change.fromUnixMs >= 0,
+            change.toUnixMs >= change.fromUnixMs
+        else {
+            throw EngineServiceError.unexpected("invalid capacity trend change")
+        }
+        return VolumeCapacityTrendChange(
+            from: Date(timeIntervalSince1970: Double(change.fromUnixMs) / 1_000),
+            to: Date(timeIntervalSince1970: Double(change.toUnixMs) / 1_000),
+            totalBytes: change.totalBytes,
+            availableBytes: change.availableBytes,
+            importantAvailableBytes: change.importantAvailableBytes
+        )
     }
 
     private static func historyDisposition(

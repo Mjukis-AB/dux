@@ -10,7 +10,12 @@
   changes plus one validated point per UTC day over a 30-day window. Daily
   rollups are preferred for completed days, the current raw anchor wins for
   today, missing baselines remain unknown, and important-usage deltas require
-  both endpoints. No trend data crosses FFI yet.
+  both endpoints. The core contract is path-free telemetry.
+- Exposed capacity trends through UniFFI contract v20 and the off-main-actor
+  Swift service adapter. Requests remain stable-ID/time-only; responses retain
+  optional baselines, signed deltas, source-labeled points, and bounded
+  ordering validation. Generated bindings and the real Rust FFI round trip are
+  covered; no cleanup authority is carried.
 - Added the first private approved-plan to cleanup-journal handoff. It
   revalidates the expiring approval, persists one planned session, compares
   the frozen plan before and after an owner/generation-fenced journal claim,

@@ -91,6 +91,40 @@ struct VolumeCapacitySnapshot: Equatable, Sendable {
     }
 }
 
+enum VolumeCapacityTrendPointSource: Equatable, Sendable {
+    case raw
+    case dailyRollup
+}
+
+struct VolumeCapacityTrendChange: Equatable, Sendable {
+    let from: Date
+    let to: Date
+    let totalBytes: Int64
+    let availableBytes: Int64
+    let importantAvailableBytes: Int64?
+}
+
+struct VolumeCapacityTrendPoint: Equatable, Sendable {
+    let sampledAt: Date
+    let totalBytes: UInt64
+    let availableBytes: UInt64
+    let importantAvailableBytes: UInt64?
+    let pressure: DiskPressureLevel
+    let source: VolumeCapacityTrendPointSource
+}
+
+struct VolumeCapacityTrend: Equatable, Sendable {
+    let stableVolumeID: String
+    let sampledAt: Date
+    let totalBytes: UInt64
+    let availableBytes: UInt64
+    let importantAvailableBytes: UInt64?
+    let pressure: DiskPressureLevel
+    let change24h: VolumeCapacityTrendChange?
+    let change7d: VolumeCapacityTrendChange?
+    let points: [VolumeCapacityTrendPoint]
+}
+
 enum VolumeCapacityState: Equatable {
     case idle
     case loading

@@ -4708,6 +4708,14 @@ Tasks:
   path-free telemetry and remains outside FFI/Swift until the chart adapter
   slice.
 - [ ] Add 24-hour/7-day changes and 30-day chart.
+  - [x] 2026-07-19 slice: expose the bounded trend contract through the
+    engine and FFI contract v20. `get_capacity_trend` accepts only a validated
+    stable macOS volume ID and nonnegative anchor time, returns signed
+    24-hour/7-day deltas, optional important-usage deltas, and source-labeled
+    UTC-day points. Swift validates record versions, identity, ordering,
+    byte relationships, and the 31-point bound off the main actor. The
+    generated bindings and real Rust FFI round-trip tests pass; chart UI
+    composition remains the next presentation slice.
 - [ ] Add transition-based notifications and cooldown.
 - [ ] Deep-link notifications to urgent Recommendations.
 - [ ] Add targeted reclaim scan on Warning/Critical.

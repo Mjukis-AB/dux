@@ -860,6 +860,20 @@ impl EngineHandle {
         )
     }
 
+    /// Load bounded path-free capacity changes and UTC-day chart points for a
+    /// stable volume. This is presentation telemetry only and grants no
+    /// cleanup authority.
+    pub fn capacity_trend(
+        &self,
+        volume_id: &crate::domain::VolumeId,
+        anchor_at: SystemTime,
+    ) -> Result<super::CapacityTrend, super::VolumeCapacityStatusError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(super::VolumeCapacityStatusError::Closed);
+        }
+        super::volume_status::load_capacity_trend(&self.inner.store, volume_id, anchor_at)
+    }
+
     /// Acquire one exact Explorer-only review lease by durable scan identity.
     ///
     /// The scan observation used to find the reference grants no authority:

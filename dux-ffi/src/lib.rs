@@ -10,8 +10,10 @@ use dux_core::engine::{
     CandidateEvaluationTaskFailureKind as CoreCandidateEvaluationFailure,
     CandidateEvaluationTaskStatus as CoreCandidateEvaluationStatus,
     CandidateHistoryError as CoreCandidateHistoryError,
-    CapacityHistoryDisposition as CoreHistoryDisposition, DiskPressurePolicy as CorePressurePolicy,
-    DiskPressurePolicyError as CorePressurePolicyError,
+    CapacityHistoryDisposition as CoreHistoryDisposition, CapacityTrend as CoreCapacityTrend,
+    CapacityTrendChange as CoreCapacityTrendChange, CapacityTrendPoint as CoreCapacityTrendPoint,
+    CapacityTrendPointSource as CoreCapacityTrendPointSource,
+    DiskPressurePolicy as CorePressurePolicy, DiskPressurePolicyError as CorePressurePolicyError,
     DiskPressurePolicySource as CorePressurePolicySource,
     DiskPressurePolicyUpdate as CorePressurePolicyUpdate,
     DurableCandidateEvaluationStatus as CoreDurableCandidateEvaluationStatus,
@@ -60,7 +62,7 @@ use dux_core::{
     VolumeId,
 };
 
-const FFI_CONTRACT_VERSION: u32 = 19;
+const FFI_CONTRACT_VERSION: u32 = 20;
 const FFI_RECORD_VERSION: u32 = 1;
 const SNAPSHOT_NODE_RECORD_VERSION: u32 = 2;
 const SCAN_EVENT_PAGE_LIMIT: u16 = 64;
@@ -140,6 +142,55 @@ pub struct StartupVolumeStatus {
     pub critical_boundary_bytes: u64,
     pub warning_boundary_bytes: u64,
     pub history_disposition: VolumeHistoryDisposition,
+}
+
+/// Path-free request for bounded capacity changes and UTC-day trend points.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct CapacityTrendRequest {
+    pub record_version: u32,
+    pub stable_volume_id: String,
+    pub anchor_at_unix_ms: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct CapacityTrendChange {
+    pub record_version: u32,
+    pub from_unix_ms: i64,
+    pub to_unix_ms: i64,
+    pub total_bytes: i64,
+    pub available_bytes: i64,
+    pub important_available_bytes: Option<i64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum CapacityTrendPointSource {
+    Raw,
+    DailyRollup,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct CapacityTrendPoint {
+    pub record_version: u32,
+    pub sampled_at_unix_ms: i64,
+    pub total_bytes: u64,
+    pub available_bytes: u64,
+    pub important_available_bytes: Option<u64>,
+    pub pressure: VolumePressure,
+    pub source: CapacityTrendPointSource,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct CapacityTrendStatus {
+    pub record_version: u32,
+    pub stable_volume_id: String,
+    pub sampled_at_unix_ms: i64,
+    pub total_bytes: u64,
+    pub available_bytes: u64,
+    pub important_available_bytes: Option<u64>,
+    pub pressure: VolumePressure,
+    pub change_24h: Option<CapacityTrendChange>,
+    pub change_7d: Option<CapacityTrendChange>,
+    pub points: Vec<CapacityTrendPoint>,
 }
 
 /// Exact integer policy input. Basis points retain two decimal percentage
@@ -1875,6 +1926,27 @@ impl DuxEngine {
         })
     }
 
+    /// Return bounded path-free capacity changes and chart points for one
+    /// stable volume. Missing historical baselines remain optional; no trend
+    /// value grants cleanup or scheduling authority.
+    pub fn get_capacity_trend(
+        &self,
+        request: CapacityTrendRequest,
+    ) -> Result<CapacityTrendStatus, EngineError> {
+        if request.record_version != FFI_RECORD_VERSION {
+            return Err(EngineError::InvalidCapacityObservation);
+        }
+        let stable_volume_id = parse_macos_volume_id(Some(request.stable_volume_id))?
+            .ok_or(EngineError::InvalidCapacityObservation)?;
+        let anchor_at = unix_ms_to_system_time(request.anchor_at_unix_ms)?;
+        self.with_engine(|engine| {
+            let trend = engine
+                .capacity_trend(&stable_volume_id, anchor_at)
+                .map_err(map_volume_status_error)?;
+            capacity_trend_status(trend)
+        })
+    }
+
     pub fn get_disk_pressure_policy(&self) -> Result<PressurePolicyStatus, PressurePolicyError> {
         self.with_pressure_engine(|engine| {
             engine
@@ -3505,6 +3577,53 @@ fn map_volume_status_error(error: CoreVolumeStatusError) -> EngineError {
     }
 }
 
+fn capacity_trend_status(trend: CoreCapacityTrend) -> Result<CapacityTrendStatus, EngineError> {
+    Ok(CapacityTrendStatus {
+        record_version: FFI_RECORD_VERSION,
+        stable_volume_id: trend.volume_id().to_string(),
+        sampled_at_unix_ms: system_time_ms(trend.sampled_at())?,
+        total_bytes: trend.total_bytes(),
+        available_bytes: trend.available_bytes(),
+        important_available_bytes: trend.important_available_bytes(),
+        pressure: map_volume_pressure(trend.pressure()),
+        change_24h: trend.change_24h().map(capacity_trend_change).transpose()?,
+        change_7d: trend.change_7d().map(capacity_trend_change).transpose()?,
+        points: trend
+            .points()
+            .iter()
+            .map(capacity_trend_point)
+            .collect::<Result<Vec<_>, _>>()?,
+    })
+}
+
+fn capacity_trend_change(
+    change: &CoreCapacityTrendChange,
+) -> Result<CapacityTrendChange, EngineError> {
+    Ok(CapacityTrendChange {
+        record_version: FFI_RECORD_VERSION,
+        from_unix_ms: system_time_ms(change.from())?,
+        to_unix_ms: system_time_ms(change.to())?,
+        total_bytes: change.total_bytes(),
+        available_bytes: change.available_bytes(),
+        important_available_bytes: change.important_available_bytes(),
+    })
+}
+
+fn capacity_trend_point(point: &CoreCapacityTrendPoint) -> Result<CapacityTrendPoint, EngineError> {
+    Ok(CapacityTrendPoint {
+        record_version: FFI_RECORD_VERSION,
+        sampled_at_unix_ms: system_time_ms(point.sampled_at())?,
+        total_bytes: point.total_bytes(),
+        available_bytes: point.available_bytes(),
+        important_available_bytes: point.important_available_bytes(),
+        pressure: map_volume_pressure(point.pressure()),
+        source: match point.source() {
+            CoreCapacityTrendPointSource::Raw => CapacityTrendPointSource::Raw,
+            CoreCapacityTrendPointSource::DailyRollup => CapacityTrendPointSource::DailyRollup,
+        },
+    })
+}
+
 fn pressure_policy_config(
     input: PressurePolicyInput,
 ) -> Result<DiskPressureConfig, PressurePolicyError> {
@@ -3756,14 +3875,61 @@ mod tests {
     }
 
     #[test]
-    fn reports_contract_nineteen_and_preserves_legacy_formatting() {
+    fn reports_contract_twenty_and_preserves_legacy_formatting() {
         let _guard = ENGINE_TEST_LOCK.lock().unwrap();
         let (_temp, engine) = engine();
-        assert_eq!(library_version().ffi_contract_version, 19);
+        assert_eq!(library_version().ffi_contract_version, 20);
         assert_eq!(engine.library_version().unwrap(), library_version());
         assert_eq!(engine.format_size(1536).unwrap().display, "1.5 KB");
         assert!(engine.close());
         assert_eq!(engine.format_size(1), Err(EngineError::Closed));
+    }
+
+    #[test]
+    fn capacity_trend_endpoint_preserves_signed_changes_and_bounds_points() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (_temp, engine) = engine();
+        let volume_id = "01234567-89AB-CDEF-0123-456789ABCDEF";
+        let day = 86_400_000_i64;
+        let base = 1_800_000_000_000_i64;
+        for (offset, available) in [(0, 900), (2 * day, 800), (7 * day, 700), (8 * day, 650)] {
+            engine
+                .observe_startup_volume(StartupVolumeObservation {
+                    record_version: FFI_RECORD_VERSION,
+                    stable_volume_id: Some(volume_id.to_owned()),
+                    display_name: Some("Macintosh HD".to_owned()),
+                    filesystem: Some("APFS".to_owned()),
+                    is_internal: Some(true),
+                    is_removable: Some(false),
+                    sampled_at_unix_ms: base + offset,
+                    total_bytes: 1_000,
+                    ordinary_available_bytes: Some(available),
+                    important_available_bytes: Some(available),
+                })
+                .unwrap();
+        }
+        let trend = engine
+            .get_capacity_trend(CapacityTrendRequest {
+                record_version: FFI_RECORD_VERSION,
+                stable_volume_id: volume_id.to_owned(),
+                anchor_at_unix_ms: base + 8 * day + 1,
+            })
+            .unwrap();
+        assert_eq!(
+            trend.stable_volume_id,
+            "volume:macos:01234567-89ab-cdef-0123-456789abcdef"
+        );
+        assert_eq!(trend.available_bytes, 650);
+        assert_eq!(trend.change_24h.unwrap().available_bytes, -50);
+        assert_eq!(trend.change_7d.unwrap().available_bytes, -250);
+        assert_eq!(trend.points.len(), 4);
+        assert!(
+            trend
+                .points
+                .windows(2)
+                .all(|pair| { pair[0].sampled_at_unix_ms < pair[1].sampled_at_unix_ms })
+        );
+        assert!(engine.close());
     }
 
     fn scan_request(root: &std::path::Path) -> ScanRequest {

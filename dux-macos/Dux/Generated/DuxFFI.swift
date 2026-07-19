@@ -592,6 +592,13 @@ public protocol DuxEngineProtocol: AnyObject, Sendable {
 
     func formatSize(bytes: UInt64) throws  -> FormattedSize
 
+    /**
+     * Return bounded path-free capacity changes and chart points for one
+     * stable volume. Missing historical baselines remain optional; no trend
+     * value grants cleanup or scheduling authority.
+     */
+    func getCapacityTrend(request: CapacityTrendRequest) throws  -> CapacityTrendStatus
+
     func getDiskPressurePolicy() throws  -> PressurePolicyStatus
 
     func libraryVersion() throws  -> LibraryVersion
@@ -724,6 +731,20 @@ open func formatSize(bytes: UInt64)throws  -> FormattedSize  {
     uniffi_dux_ffi_fn_method_duxengine_format_size(
             self.uniffiCloneHandle(),
         FfiConverterUInt64.lower(bytes),$0
+    )
+})
+}
+
+    /**
+     * Return bounded path-free capacity changes and chart points for one
+     * stable volume. Missing historical baselines remain optional; no trend
+     * value grants cleanup or scheduling authority.
+     */
+open func getCapacityTrend(request: CapacityTrendRequest)throws  -> CapacityTrendStatus  {
+    return try  FfiConverterTypeCapacityTrendStatus_lift(try rustCallWithError(FfiConverterTypeEngineError_lift) {
+    uniffi_dux_ffi_fn_method_duxengine_get_capacity_trend(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeCapacityTrendRequest_lower(request),$0
     )
 })
 }
@@ -2056,6 +2077,297 @@ public func FfiConverterTypeCandidateSummaryPage_lift(_ buf: RustBuffer) throws 
 #endif
 public func FfiConverterTypeCandidateSummaryPage_lower(_ value: CandidateSummaryPage) -> RustBuffer {
     return FfiConverterTypeCandidateSummaryPage.lower(value)
+}
+
+
+public struct CapacityTrendChange: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let fromUnixMs: Int64
+    public let toUnixMs: Int64
+    public let totalBytes: Int64
+    public let availableBytes: Int64
+    public let importantAvailableBytes: Int64?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, fromUnixMs: Int64, toUnixMs: Int64, totalBytes: Int64, availableBytes: Int64, importantAvailableBytes: Int64?) {
+        self.recordVersion = recordVersion
+        self.fromUnixMs = fromUnixMs
+        self.toUnixMs = toUnixMs
+        self.totalBytes = totalBytes
+        self.availableBytes = availableBytes
+        self.importantAvailableBytes = importantAvailableBytes
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension CapacityTrendChange: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCapacityTrendChange: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CapacityTrendChange {
+        return
+            try CapacityTrendChange(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                fromUnixMs: FfiConverterInt64.read(from: &buf),
+                toUnixMs: FfiConverterInt64.read(from: &buf),
+                totalBytes: FfiConverterInt64.read(from: &buf),
+                availableBytes: FfiConverterInt64.read(from: &buf),
+                importantAvailableBytes: FfiConverterOptionInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: CapacityTrendChange, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterInt64.write(value.fromUnixMs, into: &buf)
+        FfiConverterInt64.write(value.toUnixMs, into: &buf)
+        FfiConverterInt64.write(value.totalBytes, into: &buf)
+        FfiConverterInt64.write(value.availableBytes, into: &buf)
+        FfiConverterOptionInt64.write(value.importantAvailableBytes, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCapacityTrendChange_lift(_ buf: RustBuffer) throws -> CapacityTrendChange {
+    return try FfiConverterTypeCapacityTrendChange.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCapacityTrendChange_lower(_ value: CapacityTrendChange) -> RustBuffer {
+    return FfiConverterTypeCapacityTrendChange.lower(value)
+}
+
+
+public struct CapacityTrendPoint: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let sampledAtUnixMs: Int64
+    public let totalBytes: UInt64
+    public let availableBytes: UInt64
+    public let importantAvailableBytes: UInt64?
+    public let pressure: VolumePressure
+    public let source: CapacityTrendPointSource
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, sampledAtUnixMs: Int64, totalBytes: UInt64, availableBytes: UInt64, importantAvailableBytes: UInt64?, pressure: VolumePressure, source: CapacityTrendPointSource) {
+        self.recordVersion = recordVersion
+        self.sampledAtUnixMs = sampledAtUnixMs
+        self.totalBytes = totalBytes
+        self.availableBytes = availableBytes
+        self.importantAvailableBytes = importantAvailableBytes
+        self.pressure = pressure
+        self.source = source
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension CapacityTrendPoint: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCapacityTrendPoint: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CapacityTrendPoint {
+        return
+            try CapacityTrendPoint(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                sampledAtUnixMs: FfiConverterInt64.read(from: &buf),
+                totalBytes: FfiConverterUInt64.read(from: &buf),
+                availableBytes: FfiConverterUInt64.read(from: &buf),
+                importantAvailableBytes: FfiConverterOptionUInt64.read(from: &buf),
+                pressure: FfiConverterTypeVolumePressure.read(from: &buf),
+                source: FfiConverterTypeCapacityTrendPointSource.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: CapacityTrendPoint, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterInt64.write(value.sampledAtUnixMs, into: &buf)
+        FfiConverterUInt64.write(value.totalBytes, into: &buf)
+        FfiConverterUInt64.write(value.availableBytes, into: &buf)
+        FfiConverterOptionUInt64.write(value.importantAvailableBytes, into: &buf)
+        FfiConverterTypeVolumePressure.write(value.pressure, into: &buf)
+        FfiConverterTypeCapacityTrendPointSource.write(value.source, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCapacityTrendPoint_lift(_ buf: RustBuffer) throws -> CapacityTrendPoint {
+    return try FfiConverterTypeCapacityTrendPoint.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCapacityTrendPoint_lower(_ value: CapacityTrendPoint) -> RustBuffer {
+    return FfiConverterTypeCapacityTrendPoint.lower(value)
+}
+
+
+/**
+ * Path-free request for bounded capacity changes and UTC-day trend points.
+ */
+public struct CapacityTrendRequest: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let stableVolumeId: String
+    public let anchorAtUnixMs: Int64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, stableVolumeId: String, anchorAtUnixMs: Int64) {
+        self.recordVersion = recordVersion
+        self.stableVolumeId = stableVolumeId
+        self.anchorAtUnixMs = anchorAtUnixMs
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension CapacityTrendRequest: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCapacityTrendRequest: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CapacityTrendRequest {
+        return
+            try CapacityTrendRequest(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                stableVolumeId: FfiConverterString.read(from: &buf),
+                anchorAtUnixMs: FfiConverterInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: CapacityTrendRequest, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterString.write(value.stableVolumeId, into: &buf)
+        FfiConverterInt64.write(value.anchorAtUnixMs, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCapacityTrendRequest_lift(_ buf: RustBuffer) throws -> CapacityTrendRequest {
+    return try FfiConverterTypeCapacityTrendRequest.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCapacityTrendRequest_lower(_ value: CapacityTrendRequest) -> RustBuffer {
+    return FfiConverterTypeCapacityTrendRequest.lower(value)
+}
+
+
+public struct CapacityTrendStatus: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let stableVolumeId: String
+    public let sampledAtUnixMs: Int64
+    public let totalBytes: UInt64
+    public let availableBytes: UInt64
+    public let importantAvailableBytes: UInt64?
+    public let pressure: VolumePressure
+    public let change24h: CapacityTrendChange?
+    public let change7d: CapacityTrendChange?
+    public let points: [CapacityTrendPoint]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, stableVolumeId: String, sampledAtUnixMs: Int64, totalBytes: UInt64, availableBytes: UInt64, importantAvailableBytes: UInt64?, pressure: VolumePressure, change24h: CapacityTrendChange?, change7d: CapacityTrendChange?, points: [CapacityTrendPoint]) {
+        self.recordVersion = recordVersion
+        self.stableVolumeId = stableVolumeId
+        self.sampledAtUnixMs = sampledAtUnixMs
+        self.totalBytes = totalBytes
+        self.availableBytes = availableBytes
+        self.importantAvailableBytes = importantAvailableBytes
+        self.pressure = pressure
+        self.change24h = change24h
+        self.change7d = change7d
+        self.points = points
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension CapacityTrendStatus: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCapacityTrendStatus: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CapacityTrendStatus {
+        return
+            try CapacityTrendStatus(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                stableVolumeId: FfiConverterString.read(from: &buf),
+                sampledAtUnixMs: FfiConverterInt64.read(from: &buf),
+                totalBytes: FfiConverterUInt64.read(from: &buf),
+                availableBytes: FfiConverterUInt64.read(from: &buf),
+                importantAvailableBytes: FfiConverterOptionUInt64.read(from: &buf),
+                pressure: FfiConverterTypeVolumePressure.read(from: &buf),
+                change24h: FfiConverterOptionTypeCapacityTrendChange.read(from: &buf),
+                change7d: FfiConverterOptionTypeCapacityTrendChange.read(from: &buf),
+                points: FfiConverterSequenceTypeCapacityTrendPoint.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: CapacityTrendStatus, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterString.write(value.stableVolumeId, into: &buf)
+        FfiConverterInt64.write(value.sampledAtUnixMs, into: &buf)
+        FfiConverterUInt64.write(value.totalBytes, into: &buf)
+        FfiConverterUInt64.write(value.availableBytes, into: &buf)
+        FfiConverterOptionUInt64.write(value.importantAvailableBytes, into: &buf)
+        FfiConverterTypeVolumePressure.write(value.pressure, into: &buf)
+        FfiConverterOptionTypeCapacityTrendChange.write(value.change24h, into: &buf)
+        FfiConverterOptionTypeCapacityTrendChange.write(value.change7d, into: &buf)
+        FfiConverterSequenceTypeCapacityTrendPoint.write(value.points, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCapacityTrendStatus_lift(_ buf: RustBuffer) throws -> CapacityTrendStatus {
+    return try FfiConverterTypeCapacityTrendStatus.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCapacityTrendStatus_lower(_ value: CapacityTrendStatus) -> RustBuffer {
+    return FfiConverterTypeCapacityTrendStatus.lower(value)
 }
 
 
@@ -5566,6 +5878,73 @@ public func FfiConverterTypeCandidateStatus_lift(_ buf: RustBuffer) throws -> Ca
 #endif
 public func FfiConverterTypeCandidateStatus_lower(_ value: CandidateStatus) -> RustBuffer {
     return FfiConverterTypeCandidateStatus.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum CapacityTrendPointSource: Equatable, Hashable {
+
+    case raw
+    case dailyRollup
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension CapacityTrendPointSource: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCapacityTrendPointSource: FfiConverterRustBuffer {
+    typealias SwiftType = CapacityTrendPointSource
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CapacityTrendPointSource {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .raw
+
+        case 2: return .dailyRollup
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: CapacityTrendPointSource, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .raw:
+            writeInt(&buf, Int32(1))
+
+
+        case .dailyRollup:
+            writeInt(&buf, Int32(2))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCapacityTrendPointSource_lift(_ buf: RustBuffer) throws -> CapacityTrendPointSource {
+    return try FfiConverterTypeCapacityTrendPointSource.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCapacityTrendPointSource_lower(_ value: CapacityTrendPointSource) -> RustBuffer {
+    return FfiConverterTypeCapacityTrendPointSource.lower(value)
 }
 
 
@@ -9529,6 +9908,30 @@ fileprivate struct FfiConverterOptionTypeCandidateObservedPath: FfiConverterRust
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeCapacityTrendChange: FfiConverterRustBuffer {
+    typealias SwiftType = CapacityTrendChange?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeCapacityTrendChange.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeCapacityTrendChange.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeHistoricalScanCounts: FfiConverterRustBuffer {
     typealias SwiftType = HistoricalScanCounts?
 
@@ -9845,6 +10248,31 @@ fileprivate struct FfiConverterSequenceTypeCandidateSummary: FfiConverterRustBuf
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeCapacityTrendPoint: FfiConverterRustBuffer {
+    typealias SwiftType = [CapacityTrendPoint]
+
+    public static func write(_ value: [CapacityTrendPoint], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeCapacityTrendPoint.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [CapacityTrendPoint] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [CapacityTrendPoint]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeCapacityTrendPoint.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeHistoricalScanIssue: FfiConverterRustBuffer {
     typealias SwiftType = [HistoricalScanIssue]
 
@@ -10110,6 +10538,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_format_size() != 55932) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_duxengine_get_capacity_trend() != 3415) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_get_disk_pressure_policy() != 6278) {

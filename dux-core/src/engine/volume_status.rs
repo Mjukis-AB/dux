@@ -11,9 +11,173 @@ use thiserror::Error;
 
 use crate::domain::{AvailableCapacitySource, DiskPressure, VolumeCapacity, VolumeId};
 use crate::persistence::{
-    CapacityPressureBaseline, CapacityWriteOutcome, HistoryErrorKind, RawCapacityObservation,
-    StoreCoordinator,
+    CapacityChange, CapacityPressureBaseline, CapacityTrend as StoredCapacityTrend,
+    CapacityTrendPointSource as StoredTrendPointSource, CapacityWriteOutcome, HistoryErrorKind,
+    RawCapacityObservation, StoreCoordinator,
 };
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CapacityTrendChange {
+    from: SystemTime,
+    to: SystemTime,
+    total_bytes: i64,
+    available_bytes: i64,
+    important_available_bytes: Option<i64>,
+}
+
+impl CapacityTrendChange {
+    pub const fn from(&self) -> SystemTime {
+        self.from
+    }
+
+    pub const fn to(&self) -> SystemTime {
+        self.to
+    }
+
+    pub const fn total_bytes(&self) -> i64 {
+        self.total_bytes
+    }
+
+    pub const fn available_bytes(&self) -> i64 {
+        self.available_bytes
+    }
+
+    pub const fn important_available_bytes(&self) -> Option<i64> {
+        self.important_available_bytes
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CapacityTrendPointSource {
+    Raw,
+    DailyRollup,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CapacityTrendPoint {
+    sampled_at: SystemTime,
+    total_bytes: u64,
+    available_bytes: u64,
+    important_available_bytes: Option<u64>,
+    pressure: DiskPressure,
+    source: CapacityTrendPointSource,
+}
+
+impl CapacityTrendPoint {
+    pub const fn sampled_at(&self) -> SystemTime {
+        self.sampled_at
+    }
+
+    pub const fn total_bytes(&self) -> u64 {
+        self.total_bytes
+    }
+
+    pub const fn available_bytes(&self) -> u64 {
+        self.available_bytes
+    }
+
+    pub const fn important_available_bytes(&self) -> Option<u64> {
+        self.important_available_bytes
+    }
+
+    pub const fn pressure(&self) -> DiskPressure {
+        self.pressure
+    }
+
+    pub const fn source(&self) -> CapacityTrendPointSource {
+        self.source
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CapacityTrend {
+    volume_id: VolumeId,
+    sampled_at: SystemTime,
+    total_bytes: u64,
+    available_bytes: u64,
+    important_available_bytes: Option<u64>,
+    pressure: DiskPressure,
+    change_24h: Option<CapacityTrendChange>,
+    change_7d: Option<CapacityTrendChange>,
+    points: Vec<CapacityTrendPoint>,
+}
+
+impl CapacityTrend {
+    pub fn volume_id(&self) -> &VolumeId {
+        &self.volume_id
+    }
+
+    pub const fn sampled_at(&self) -> SystemTime {
+        self.sampled_at
+    }
+
+    pub const fn total_bytes(&self) -> u64 {
+        self.total_bytes
+    }
+
+    pub const fn available_bytes(&self) -> u64 {
+        self.available_bytes
+    }
+
+    pub const fn important_available_bytes(&self) -> Option<u64> {
+        self.important_available_bytes
+    }
+
+    pub const fn pressure(&self) -> DiskPressure {
+        self.pressure
+    }
+
+    pub fn change_24h(&self) -> Option<&CapacityTrendChange> {
+        self.change_24h.as_ref()
+    }
+
+    pub fn change_7d(&self) -> Option<&CapacityTrendChange> {
+        self.change_7d.as_ref()
+    }
+
+    pub fn points(&self) -> &[CapacityTrendPoint] {
+        &self.points
+    }
+}
+
+fn public_capacity_change(value: CapacityChange) -> CapacityTrendChange {
+    CapacityTrendChange {
+        from: value.from,
+        to: value.to,
+        total_bytes: value.total_bytes,
+        available_bytes: value.available_bytes,
+        important_available_bytes: value.important_available_bytes,
+    }
+}
+
+fn public_capacity_trend(value: StoredCapacityTrend) -> CapacityTrend {
+    let anchor = value.anchor;
+    CapacityTrend {
+        volume_id: anchor.volume_id,
+        sampled_at: anchor.sampled_at,
+        total_bytes: anchor.total_bytes,
+        available_bytes: anchor.available_bytes,
+        important_available_bytes: anchor.important_available_bytes,
+        pressure: anchor.pressure,
+        change_24h: value.change_24h.map(public_capacity_change),
+        change_7d: value.change_7d.map(public_capacity_change),
+        points: value
+            .points
+            .into_iter()
+            .map(|point| CapacityTrendPoint {
+                sampled_at: point.sample.sampled_at,
+                total_bytes: point.sample.total_bytes,
+                available_bytes: point.sample.available_bytes,
+                important_available_bytes: point.sample.important_available_bytes,
+                pressure: point.sample.pressure,
+                source: match point.source {
+                    StoredTrendPointSource::Raw => CapacityTrendPointSource::Raw,
+                    StoredTrendPointSource::DailyRollup => CapacityTrendPointSource::DailyRollup,
+                },
+            })
+            .collect(),
+    }
+}
 
 /// One platform capacity observation. Optional metadata remains optional so a
 /// truthful ephemeral result can be shown when Foundation cannot supply every
@@ -358,6 +522,18 @@ pub(super) fn observe_volume_capacity(
         warning_boundary_bytes: evaluation.warning_boundary_bytes(),
         history_disposition: disposition,
     })
+}
+
+pub(super) fn load_capacity_trend(
+    store: &StoreCoordinator,
+    volume_id: &VolumeId,
+    anchor_at: SystemTime,
+) -> Result<CapacityTrend, VolumeCapacityStatusError> {
+    store
+        .load_capacity_trend(volume_id, anchor_at)
+        .map_err(|error| map_history_error(error.kind))?
+        .map(public_capacity_trend)
+        .ok_or(VolumeCapacityStatusError::Unavailable)
 }
 
 fn normalize_optional_text(value: Option<String>) -> Option<String> {

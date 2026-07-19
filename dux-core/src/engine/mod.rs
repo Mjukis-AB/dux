@@ -77,6 +77,7 @@ pub use task::{
     TaskEventKind, TaskFailureKind, TaskId, TaskKind, TaskPhase, TaskSnapshot,
 };
 pub use volume_status::{
-    CapacityHistoryDisposition, VolumeCapacityObservation, VolumeCapacityStatus,
+    CapacityHistoryDisposition, CapacityTrend, CapacityTrendChange, CapacityTrendPoint,
+    CapacityTrendPointSource, VolumeCapacityObservation, VolumeCapacityStatus,
     VolumeCapacityStatusError,
 };

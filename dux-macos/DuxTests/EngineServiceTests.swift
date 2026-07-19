@@ -57,7 +57,7 @@ final class EngineServiceTests: XCTestCase {
         // DUX-DESTRUCTIVE: allow=test-swift-retry-obstruction-remove -- remove only this test fixture's deliberate file obstruction
         try FileManager.default.removeItem(at: dataRoot)
         let status = try await service.loadStatus()
-        XCTAssertEqual(status.ffiContractVersion, 19)
+        XCTAssertEqual(status.ffiContractVersion, 20)
         let closed = await service.close()
         XCTAssertTrue(closed)
     }
@@ -67,7 +67,7 @@ final class EngineServiceTests: XCTestCase {
         let result = try await EngineService(engine: fixture.engine).loadStatus()
 
         XCTAssertEqual(result.libraryVersion, "0.5.0")
-        XCTAssertEqual(result.ffiContractVersion, 19)
+        XCTAssertEqual(result.ffiContractVersion, 20)
         XCTAssertTrue(result.executedOffMainThread)
     }
 
@@ -749,6 +749,48 @@ final class EngineServiceTests: XCTestCase {
         )
     }
 
+    func testCapacityTrendRoundTripPreservesSignedChangesAndPointSources() async throws {
+        let fixture = try TestEngineFixture()
+        let service = EngineService(engine: fixture.engine)
+        let volumeID = "01234567-89AB-CDEF-0123-456789ABCDEF"
+        let day: TimeInterval = 86_400
+        let base: TimeInterval = 1_800_000_000
+        let available: [UInt64] = [900, 800, 700, 650]
+        let offsets: [TimeInterval] = [0, 2 * day, 7 * day, 8 * day]
+        for (offset, bytes) in zip(offsets, available) {
+            _ = try await service.observeVolumeCapacity(
+                VolumeCapacitySnapshot(
+                    stableVolumeID: volumeID,
+                    displayName: "Macintosh HD",
+                    filesystem: "APFS",
+                    isInternal: true,
+                    isRemovable: false,
+                    totalBytes: 1_000,
+                    filesystemAvailableBytes: bytes,
+                    importantAvailableBytes: bytes,
+                    effectiveAvailableBytes: bytes,
+                    availabilityBasis: .importantUsage,
+                    pressure: .unknown,
+                    criticalBoundaryBytes: nil,
+                    warningBoundaryBytes: nil,
+                    historyDisposition: nil,
+                    sampledAt: Date(timeIntervalSince1970: base + offset)
+                )
+            )
+        }
+
+        let trend = try await service.loadCapacityTrend(
+            stableVolumeID: volumeID,
+            at: Date(timeIntervalSince1970: base + 8 * day + 1)
+        )
+        XCTAssertEqual(trend.stableVolumeID, "volume:macos:01234567-89ab-cdef-0123-456789abcdef")
+        XCTAssertEqual(trend.availableBytes, 650)
+        XCTAssertEqual(trend.change24h?.availableBytes, -50)
+        XCTAssertEqual(trend.change7d?.availableBytes, -250)
+        XCTAssertEqual(trend.points.map(\.availableBytes), [900, 800, 700, 650])
+        XCTAssertEqual(trend.points.map(\.source), [.raw, .raw, .raw, .raw])
+    }
+
     func testRealEngineRejectsMalformedVolumeIdentityWithTypedError() async throws {
         let fixture = try TestEngineFixture()
         let service = EngineService(engine: fixture.engine)
@@ -868,7 +910,7 @@ final class EngineServiceTests: XCTestCase {
             weakEngine = engine
 
             XCTAssertEqual(liveEngineInstanceCount(), baseline + 1)
-            XCTAssertEqual(try engine.libraryVersion().ffiContractVersion, 19)
+            XCTAssertEqual(try engine.libraryVersion().ffiContractVersion, 20)
             XCTAssertTrue(engine.close())
             XCTAssertTrue(engine.close())
             XCTAssertThrowsError(try engine.formatSize(bytes: 1_536)) { error in
