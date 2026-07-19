@@ -1659,6 +1659,15 @@ admitted effect, and a disabled switch rejects the effect before any platform
 driver call. The setting is a kill switch only: it contains no target, path,
 plan, approval, or executor authority.
 
+User cleanup exclusions are a separate bounded, lossless settings value. Each
+entry is an absolute lexical host path with no `.` or `..` components; entries
+are sorted and deduplicated before canonical JSON storage, and malformed or
+newer values fail closed. The journal reloads the set while holding the
+store-wide cleanup exclusion and rejects a matching path prefix before writing
+`effect_started`. Exclusions are deny-only: they cannot authorize a path,
+weaken protected-root policy, replace live identity validation, or be supplied
+by AI as an execution instruction.
+
 The separate process-instance module supplies only the liveness evidence
 described in §6.7. Its native Unix subprocess regressions distinguish an exact
 live owner from both graceful and abrupt death in one reliable boot scope;

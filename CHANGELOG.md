@@ -6,6 +6,11 @@
   immediately before a permanent effect can enter `effect_started`. Corrupt or
   newer settings fail closed; no arbitrary path exclusion or UI/FFI control is
   exposed yet.
+- Added a bounded lossless user cleanup-exclusion set. Exact absolute lexical
+  prefixes are sorted, deduplicated, revisioned, and persisted without
+  canonicalization; the journal reloads them under the cleanup exclusion and
+  refuses matching targets before `effect_started`. Exclusions are deny-only
+  and do not bypass protected-path or live identity checks.
 - Added a private bounded pre/post cleanup-capacity verification boundary.
   Stable volume identity, sample timing, total capacity, headline source, and
   availability shape must agree before a signed available-space delta can be

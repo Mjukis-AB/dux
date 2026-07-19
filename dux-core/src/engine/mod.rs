@@ -38,6 +38,7 @@ pub use scan_coverage_details::{
     DurableScanIssueLocation, MAX_SCAN_COVERAGE_DETAIL_PAGE_LIMIT, ScanCoverageDetailsError,
 };
 pub use settings::{
+    CleanupExclusionSource, CleanupExclusions, CleanupExclusionsError, CleanupExclusionsUpdate,
     DirectCargoCodeSignature, DirectCargoEnrollmentError, DirectCargoEnrollmentPreview,
     DirectCargoEnrollmentState, DirectCargoEnrollmentStatus, DirectCargoEnrollmentUpdate,
     DirectCargoSignatureClass, DiskPressurePolicy, DiskPressurePolicyError,

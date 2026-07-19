@@ -28,6 +28,7 @@ use super::scan_coverage_details::{
     MAX_SCAN_COVERAGE_LOCATION_COMPONENTS, ScanCoverageDetailsError,
 };
 use super::settings::{
+    CleanupExclusionSource, CleanupExclusions, CleanupExclusionsError, CleanupExclusionsUpdate,
     DirectCargoCodeSignature, DirectCargoEnrollmentError, DirectCargoEnrollmentPreview,
     DirectCargoEnrollmentState, DirectCargoEnrollmentStatus, DirectCargoEnrollmentUpdate,
     DirectCargoSignatureClass, DiskPressurePolicy, DiskPressurePolicyError,
@@ -92,7 +93,8 @@ use crate::persistence::{
 };
 use crate::persistence::{
     CargoCodeSignatureRecord, CargoEnrollmentSetting, CargoEnrollmentSettingUpdate,
-    CargoEnrollmentState, CargoSignatureClass, DiskPressurePolicySetting,
+    CargoEnrollmentState, CargoSignatureClass, CleanupExclusionSetting,
+    CleanupExclusionSettingSource, CleanupExclusionSettingUpdate, DiskPressurePolicySetting,
     DiskPressurePolicySettingSource, DiskPressurePolicySettingUpdate, PermanentCleanupSetting,
     PermanentCleanupSettingSource, PermanentCleanupSettingUpdate, SnapshotRetentionCapSetting,
     SnapshotRetentionCapSettingSource, SnapshotRetentionCapSettingUpdate,
@@ -1252,6 +1254,49 @@ impl EngineHandle {
             .reset_permanent_cleanup()
             .map(public_permanent_cleanup_policy_update)
             .map_err(|error| map_permanent_cleanup_policy_error(error.kind))
+    }
+
+    /// Load the deny-only user exclusion set. Entries suppress matching
+    /// cleanup targets but never authorize arbitrary paths.
+    pub fn cleanup_exclusions(&self) -> Result<CleanupExclusions, CleanupExclusionsError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(CleanupExclusionsError::Closed);
+        }
+        self.inner
+            .store
+            .load_cleanup_exclusions()
+            .map(public_cleanup_exclusions)
+            .map_err(|error| map_cleanup_exclusions_error(error.kind))
+    }
+
+    /// Replace the bounded deny-only exclusion set. The core validates and
+    /// stores paths losslessly; the setting cannot create a plan or effect.
+    pub fn set_cleanup_exclusions(
+        &self,
+        paths: Vec<std::path::PathBuf>,
+    ) -> Result<CleanupExclusionsUpdate, CleanupExclusionsError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(CleanupExclusionsError::Closed);
+        }
+        self.inner
+            .store
+            .set_cleanup_exclusions(paths)
+            .map(public_cleanup_exclusions_update)
+            .map_err(|error| map_cleanup_exclusions_error(error.kind))
+    }
+
+    /// Remove all user exclusions and restore the empty versioned default.
+    pub fn reset_cleanup_exclusions(
+        &self,
+    ) -> Result<CleanupExclusionsUpdate, CleanupExclusionsError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(CleanupExclusionsError::Closed);
+        }
+        self.inner
+            .store
+            .reset_cleanup_exclusions()
+            .map(public_cleanup_exclusions_update)
+            .map_err(|error| map_cleanup_exclusions_error(error.kind))
     }
 
     /// Load a bounded, path-free page of durable scan observations. This reads
@@ -4668,6 +4713,44 @@ fn public_permanent_cleanup_policy_update(
     PermanentCleanupPolicyUpdate {
         policy: public_permanent_cleanup_policy(update.settings),
         changed: update.changed,
+    }
+}
+
+fn public_cleanup_exclusions(setting: CleanupExclusionSetting) -> CleanupExclusions {
+    CleanupExclusions {
+        paths: setting.paths,
+        source: match setting.source {
+            CleanupExclusionSettingSource::Default => CleanupExclusionSource::Default,
+            CleanupExclusionSettingSource::Stored => CleanupExclusionSource::Stored,
+        },
+        revision: setting.revision,
+        updated_at: setting.updated_at,
+    }
+}
+
+fn public_cleanup_exclusions_update(
+    update: CleanupExclusionSettingUpdate,
+) -> CleanupExclusionsUpdate {
+    CleanupExclusionsUpdate {
+        exclusions: public_cleanup_exclusions(update.settings),
+        changed: update.changed,
+    }
+}
+
+const fn map_cleanup_exclusions_error(kind: HistoryErrorKind) -> CleanupExclusionsError {
+    match kind {
+        HistoryErrorKind::InvalidInput => CleanupExclusionsError::InvalidInput,
+        HistoryErrorKind::InvalidTransition => CleanupExclusionsError::RevisionExhausted,
+        HistoryErrorKind::IncompatibleSchema => CleanupExclusionsError::IncompatibleSchema,
+        HistoryErrorKind::QueryLimitExceeded => CleanupExclusionsError::QueryLimitExceeded,
+        HistoryErrorKind::Busy => CleanupExclusionsError::Busy,
+        HistoryErrorKind::UnsafeStorage => CleanupExclusionsError::UnsafeStorage,
+        HistoryErrorKind::CorruptData => CleanupExclusionsError::CorruptData,
+        HistoryErrorKind::DatabaseUnavailable => CleanupExclusionsError::Unavailable,
+        HistoryErrorKind::OutcomeUnknown => CleanupExclusionsError::OutcomeUnknown,
+        HistoryErrorKind::AlreadyExists
+        | HistoryErrorKind::NotFound
+        | HistoryErrorKind::InternalState => CleanupExclusionsError::InternalState,
     }
 }
 

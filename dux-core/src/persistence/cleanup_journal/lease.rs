@@ -678,6 +678,7 @@ impl CleanupJournalClaim {
         if journal.mode == crate::domain::CleanupMode::PermanentSafe {
             self.ensure_permanent_cleanup_enabled()?;
         }
+        self.ensure_path_not_excluded(&journal, item_ordinal, path_ordinal)?;
         let pending = self.pending_effect_start.get();
         if pending.is_some_and(|pending| {
             pending.item_ordinal != item_ordinal || pending.path_ordinal != path_ordinal
@@ -740,6 +741,34 @@ impl CleanupJournalClaim {
             Ok(())
         } else {
             Err(HistoryError::new(HistoryErrorKind::InvalidTransition))
+        }
+    }
+
+    /// Re-read deny-only user exclusions while the claim owns the cleanup
+    /// exclusion. An excluded target is rejected before any effect receipt is
+    /// written; exclusions never grant access or weaken protected-path checks.
+    fn ensure_path_not_excluded(
+        &self,
+        journal: &CleanupJournal,
+        item_ordinal: usize,
+        path_ordinal: usize,
+    ) -> Result<(), HistoryError> {
+        let target = journal
+            .items
+            .get(item_ordinal)
+            .and_then(|item| item.paths.get(path_ordinal))
+            .map(|path| path.target.as_path())
+            .ok_or_else(|| HistoryError::new(HistoryErrorKind::InvalidInput))?;
+        let connection = self.lease.store.lock_current_history_connection()?;
+        self.lease
+            .store
+            .validate_cleanup_lock_for_journal(&self.lease.guard)?;
+        if crate::persistence::load_cleanup_exclusions(&connection.connection)?
+            .contains_path(target)
+        {
+            Err(HistoryError::new(HistoryErrorKind::InvalidTransition))
+        } else {
+            Ok(())
         }
     }
 

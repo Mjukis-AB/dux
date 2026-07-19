@@ -43,7 +43,8 @@ pub use domain::{
 };
 pub use engine::{
     CancelOutcome, CandidateEvaluationTaskFailureKind, CandidateEvaluationTaskStatus,
-    CapacityHistoryDisposition, CloseOutcome, DiskPressurePolicy, DiskPressurePolicyError,
+    CapacityHistoryDisposition, CleanupExclusionSource, CleanupExclusions, CleanupExclusionsError,
+    CleanupExclusionsUpdate, CloseOutcome, DiskPressurePolicy, DiskPressurePolicyError,
     DiskPressurePolicySource, DiskPressurePolicyUpdate, DurableScanCounts, DurableScanCoverage,
     DurableScanCoverageDetailsPage, DurableScanIssue, DurableScanIssueKind,
     DurableScanIssueLocation, DurableScanStatus, DurableScanSummary, EngineConfig,

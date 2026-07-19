@@ -21,6 +21,7 @@ mod candidate_history;
 )]
 mod capacity_history;
 mod cargo_enrollment;
+mod cleanup_exclusions;
 #[cfg_attr(
     not(test),
     allow(
@@ -97,6 +98,10 @@ pub(crate) use cargo_enrollment::{
     CARGO_SIGNATURE_POLICY_REVISION, CargoCodeSignatureRecord, CargoEnrollmentSetting,
     CargoEnrollmentSettingUpdate, CargoEnrollmentState, CargoExecutableEnrollmentIdentity,
     CargoSignatureClass,
+};
+pub(crate) use cleanup_exclusions::{
+    CleanupExclusionSetting, CleanupExclusionSettingSource, CleanupExclusionSettingUpdate,
+    load_cleanup_exclusions,
 };
 pub(crate) use cleanup_history::CleanupSessionId;
 pub(crate) use cleanup_history::{CleanupTrigger, NewCleanupSessionRecord};

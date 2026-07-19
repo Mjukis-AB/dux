@@ -227,6 +227,56 @@ pub enum PermanentCleanupPolicyError {
     InternalState,
 }
 
+/// Origin of the effective deny-only user exclusion set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CleanupExclusionSource {
+    Default,
+    Stored,
+}
+
+/// User exclusion observations. Entries suppress matching cleanup targets but
+/// do not authorize arbitrary paths or bypass protected-root validation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CleanupExclusions {
+    pub paths: Vec<std::path::PathBuf>,
+    pub source: CleanupExclusionSource,
+    pub revision: u64,
+    pub updated_at: Option<SystemTime>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CleanupExclusionsUpdate {
+    pub exclusions: CleanupExclusions,
+    pub changed: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum CleanupExclusionsError {
+    #[error("engine session is closed")]
+    Closed,
+    #[error("cleanup exclusions are invalid or exceed their fixed bound")]
+    InvalidInput,
+    #[error("the cleanup-exclusion revision cannot advance")]
+    RevisionExhausted,
+    #[error("the durable store schema is newer than this engine")]
+    IncompatibleSchema,
+    #[error("the durable store is busy")]
+    Busy,
+    #[error("the durable store is unsafe")]
+    UnsafeStorage,
+    #[error("the settings query exceeded its fixed resource budget")]
+    QueryLimitExceeded,
+    #[error("cleanup exclusions are corrupt")]
+    CorruptData,
+    #[error("cleanup exclusions are unavailable")]
+    Unavailable,
+    #[error("the settings write outcome could not be proven")]
+    OutcomeUnknown,
+    #[error("engine settings state is unavailable")]
+    InternalState,
+}
+
 /// Stable, path-free failure taxonomy for pressure-policy settings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]

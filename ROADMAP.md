@@ -4708,8 +4708,11 @@ Tasks:
     take the store-wide cleanup exclusion, and the journal checks the effective
     value while holding that same exclusion immediately before `effect_started`.
     Existing rule-relative protected/excluded descendant evidence remains
-    private, bounded, identity-revalidated, and non-authoritative; no arbitrary
-    user-path exclusion list or FFI/Swift settings control is exposed yet.
+    private, bounded, identity-revalidated, and non-authoritative. A bounded
+    lossless user exclusion set now stores exact lexical path prefixes behind a
+    typed settings key; the journal rechecks it under the cleanup lock before
+    `effect_started`, so it can only deny an effect. FFI/Swift settings control
+    and richer exclusion presentation remain open.
 - [ ] Add partial failure, retry, cancellation, and changed-since-plan UI.
 - [ ] Add bounded pending-evaluation discovery and snapshot-backed restart
   recovery; malformed or incompatible state fails closed.
