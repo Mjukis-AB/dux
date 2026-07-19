@@ -4601,7 +4601,7 @@ Tasks:
     account-home discovery or policy assessment is unavailable. The review
     still has no trusted volume/rule grant, approval, plan, FFI, or executor
     capability.
-- [ ] Implement Trash executor for Explorer selections.
+- [x] Implement Trash executor for Explorer selections.
   - [x] 2026-07-18 slice: add a crate-private Unix/macOS no-follow final-link
     witness for future Trash admission. It keeps the requested and validated
     lexical object paths, ordered no-follow ancestor identities, volume/object
@@ -4661,6 +4661,18 @@ Tasks:
     while a Foundation throw remains `OutcomeUnknown`. A fake request seam
     verifies exact URL delivery, one-shot consumption, malformed-path refusal,
     and no retry. `MacOSTrashPlatformDriver` is compiled but not registered.
+  - [x] 2026-07-19 slice: wire the explicit Explorer action through the full
+    core/FFI/Swift path. Core creates a fixed, review-required single-item
+    Trash plan from only a live no-follow Explorer witness, persists a bounded
+    planned journal row, holds the cleanup claim across the synchronous
+    one-shot callback, and returns only bounded platform outcomes. UniFFI v21
+    rejects foreign/closed reviews and maps storage, journal, review, and
+    unknown-outcome failures without exposing paths. Swift routes the retained
+    review lease to `MacOSTrashPlatformDriver`, validates the core-issued
+    bytes before `FileManager.trashItem`, and presents an explicit destructive
+    confirmation in Explorer. The UI explains that Trash does not reclaim
+    space until emptied; no AI, CLI, scheduler, arbitrary path, or permanent
+    delete path can invoke this action.
 - [ ] Implement permanent-safe executor for approved rules.
   - [x] 2026-07-19 slice: fence journal validation before rebuilding the
     live Rust-target witness. Changed targets, stale approvals, and journal

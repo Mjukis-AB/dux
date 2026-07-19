@@ -58,11 +58,13 @@ use dux_core::{
     CandidateId, DatabaseOpenErrorKind, DiskPressure as CoreDiskPressure, DiskPressureConfig,
     DiskPressureConfigError, DiskPressureRecoveryMargin, DiskPressureThreshold,
     EvidenceKind as CoreEvidenceKind, SafetyTier as CoreSafetyTier,
-    ScanCoverageStatus as CoreCoverageStatus, ScanId, SnapshotOpenErrorKind, VolumeCapacity,
-    VolumeId,
+    ScanCoverageStatus as CoreCoverageStatus, ScanId, SnapshotOpenErrorKind,
+    TrashEffectTargetKind as CoreTrashEffectTargetKind,
+    TrashPlatformResult as CoreTrashPlatformResult, TrashSelectionError as CoreTrashSelectionError,
+    VolumeCapacity, VolumeId,
 };
 
-const FFI_CONTRACT_VERSION: u32 = 20;
+const FFI_CONTRACT_VERSION: u32 = 21;
 const FFI_RECORD_VERSION: u32 = 1;
 const SNAPSHOT_NODE_RECORD_VERSION: u32 = 2;
 const SCAN_EVENT_PAGE_LIMIT: u16 = 64;
@@ -1250,6 +1252,24 @@ impl TrashEffectRequest {
 }
 
 impl TrashEffectRequest {
+    fn from_core(
+        target_kind: CoreTrashEffectTargetKind,
+        absolute_path_bytes: Vec<u8>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(Some(TrashEffectRequestState {
+                record_version: FFI_RECORD_VERSION,
+                target_kind: match target_kind {
+                    CoreTrashEffectTargetKind::Directory => TrashEffectTargetKind::Directory,
+                    CoreTrashEffectTargetKind::File => TrashEffectTargetKind::File,
+                    CoreTrashEffectTargetKind::Symlink => TrashEffectTargetKind::Symlink,
+                },
+                path_encoding: SnapshotNameEncoding::UnixBytes,
+                absolute_path_bytes,
+            })),
+        })
+    }
+
     fn with_state<T>(
         &self,
         operation: impl FnOnce(&TrashEffectRequestState) -> T,
@@ -1293,6 +1313,30 @@ pub enum TrashPlatformResult {
     Unsupported,
     Failed,
     OutcomeUnknown,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error, uniffi::Error)]
+pub enum TrashExecutionError {
+    #[error("the engine session is closed")]
+    Closed,
+    #[error("the Explorer Trash request is invalid")]
+    InvalidRequest,
+    #[error("the retained Explorer review cannot supply this Trash target")]
+    ReviewUnavailable,
+    #[error("the cleanup journal is temporarily busy")]
+    Busy,
+    #[error("the cleanup store is unavailable")]
+    StorageUnavailable,
+    #[error("the cleanup store is unsafe")]
+    UnsafeStorage,
+    #[error("the cleanup schema is incompatible")]
+    IncompatibleSchema,
+    #[error("the cleanup journal is corrupt")]
+    CorruptData,
+    #[error("the cleanup operation outcome is unknown")]
+    OutcomeUnknown,
+    #[error("the cleanup engine is internally unavailable")]
+    InternalState,
 }
 
 #[derive(uniffi::Object)]
@@ -2131,6 +2175,59 @@ impl DuxEngine {
             .acquire_latest_explorer_snapshot_review()
             .map_err(map_review_error)?;
         self.register_snapshot_review(engine, session)
+    }
+
+    /// Execute one explicit Explorer Trash selection. Rust resolves and
+    /// revalidates the retained node, creates the bounded journal row, and
+    /// fences the one-shot callback. Swift cannot supply a path or retry a
+    /// request; the callback is invoked synchronously while the claim is held.
+    pub fn execute_explorer_trash(
+        &self,
+        review: Arc<SnapshotReviewSession>,
+        node_id: u64,
+        driver: Box<dyn TrashPlatformDriver>,
+    ) -> Result<TrashPlatformResult, TrashExecutionError> {
+        if !Arc::ptr_eq(&review.engine_closed, &self.closed) {
+            return Err(TrashExecutionError::InvalidRequest);
+        }
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| TrashExecutionError::InternalState)?;
+        let EngineState::Open(engine) = &*state else {
+            return Err(TrashExecutionError::Closed);
+        };
+        if self.closed.load(Ordering::Acquire) {
+            return Err(TrashExecutionError::Closed);
+        }
+        let mut core_review = review
+            .inner
+            .lock()
+            .map_err(|_| TrashExecutionError::InternalState)?;
+        let result = engine
+            .execute_explorer_trash_selection(&mut core_review, node_id, move |request| {
+                let Ok((target_kind, absolute_path_bytes)) = request.into_parts() else {
+                    return CoreTrashPlatformResult::Failed;
+                };
+                let ffi_request = TrashEffectRequest::from_core(target_kind, absolute_path_bytes);
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    driver.trash(ffi_request)
+                }))
+                .unwrap_or(TrashPlatformResult::OutcomeUnknown)
+                {
+                    TrashPlatformResult::Completed => CoreTrashPlatformResult::Completed,
+                    TrashPlatformResult::Unsupported => CoreTrashPlatformResult::Unsupported,
+                    TrashPlatformResult::Failed => CoreTrashPlatformResult::Failed,
+                    TrashPlatformResult::OutcomeUnknown => CoreTrashPlatformResult::OutcomeUnknown,
+                }
+            })
+            .map_err(map_trash_selection_error)?;
+        Ok(match result {
+            CoreTrashPlatformResult::Completed => TrashPlatformResult::Completed,
+            CoreTrashPlatformResult::Unsupported => TrashPlatformResult::Unsupported,
+            CoreTrashPlatformResult::Failed => TrashPlatformResult::Failed,
+            CoreTrashPlatformResult::OutcomeUnknown => TrashPlatformResult::OutcomeUnknown,
+        })
     }
 
     pub fn start_maintenance(
@@ -3031,6 +3128,20 @@ fn map_review_error(error: CoreReviewError) -> EngineError {
         CoreReviewError::OutcomeUnknown => EngineError::OutcomeUnknown,
         CoreReviewError::InternalState => EngineError::InternalState,
         _ => EngineError::InternalState,
+    }
+}
+
+fn map_trash_selection_error(error: CoreTrashSelectionError) -> TrashExecutionError {
+    match error {
+        CoreTrashSelectionError::Review => TrashExecutionError::ReviewUnavailable,
+        CoreTrashSelectionError::InvalidRequest => TrashExecutionError::InvalidRequest,
+        CoreTrashSelectionError::Busy => TrashExecutionError::Busy,
+        CoreTrashSelectionError::Unavailable => TrashExecutionError::StorageUnavailable,
+        CoreTrashSelectionError::UnsafeStorage => TrashExecutionError::UnsafeStorage,
+        CoreTrashSelectionError::IncompatibleSchema => TrashExecutionError::IncompatibleSchema,
+        CoreTrashSelectionError::CorruptData => TrashExecutionError::CorruptData,
+        CoreTrashSelectionError::OutcomeUnknown => TrashExecutionError::OutcomeUnknown,
+        CoreTrashSelectionError::InternalState => TrashExecutionError::InternalState,
     }
 }
 

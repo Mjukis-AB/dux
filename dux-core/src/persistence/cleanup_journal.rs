@@ -362,7 +362,10 @@ fn claim_planned(
 ) -> Result<ExecutionFence, HistoryError> {
     let graph = load_cleanup_journal(transaction, session_id)?
         .ok_or_else(|| HistoryError::new(HistoryErrorKind::NotFound))?;
-    if graph.candidate_status_coupling != CandidateStatusCoupling::PlanClaimsV1
+    if (!matches!(
+        graph.candidate_status_coupling,
+        CandidateStatusCoupling::PlanClaimsV1
+    ) && !is_explicit_explorer_selection(&graph))
         || graph.lifecycle != JournalLifecycle::Planned
         || claimed_at < graph.started_at
         || graph.plan_expires_at <= claimed_at
@@ -391,6 +394,14 @@ fn claim_planned(
     })
 }
 
+fn is_explicit_explorer_selection(journal: &CleanupJournal) -> bool {
+    journal.candidate_status_coupling == CandidateStatusCoupling::LegacyUncoupled
+        && journal.mode == CleanupMode::Trash
+        && journal.items.len() == 1
+        && journal.items[0].frozen.rule.id().as_str() == "explorer.selection.trash"
+        && journal.items[0].frozen.rule.revision().get() == 1
+}
+
 /// Settle an exact pristine plan at or after expiry without granting effect
 /// authority. The cleanup lock still supplies exclusion, and generation one is
 /// retained only as terminal history provenance.
@@ -402,7 +413,10 @@ fn expire_planned(
 ) -> Result<ExecutionFence, HistoryError> {
     let journal = load_cleanup_journal(transaction, session_id)?
         .ok_or_else(|| HistoryError::new(HistoryErrorKind::NotFound))?;
-    if journal.candidate_status_coupling != CandidateStatusCoupling::PlanClaimsV1
+    if (!matches!(
+        journal.candidate_status_coupling,
+        CandidateStatusCoupling::PlanClaimsV1
+    ) && !is_explicit_explorer_selection(&journal))
         || journal.lifecycle != JournalLifecycle::Planned
         || observed_at < journal.plan_expires_at
     {
@@ -441,8 +455,15 @@ fn expire_planned(
     if changed_items != journal.items.len() {
         return Err(invalid_transition());
     }
-    for item in &journal.items {
-        settle_candidate_plan_claim(transaction, &journal, item, CandidatePlanSettlement::Failed)?;
+    if journal.candidate_status_coupling == CandidateStatusCoupling::PlanClaimsV1 {
+        for item in &journal.items {
+            settle_candidate_plan_claim(
+                transaction,
+                &journal,
+                item,
+                CandidatePlanSettlement::Failed,
+            )?;
+        }
     }
     let changed = transaction
         .execute(
@@ -451,12 +472,17 @@ fn expire_planned(
                  execution_owner_id = ?2, execution_generation = 1,
                  last_heartbeat_at_unix_ms = ?3
              WHERE session_id = ?1 AND record_format_version = 2
-               AND candidate_status_coupling_version = 2
+               AND candidate_status_coupling_version = ?4
                AND status = 'planned' AND completed_at_unix_ms IS NULL
                AND verified_capacity_delta_bytes IS NULL
                AND execution_owner_id IS NULL AND execution_generation IS NULL
                AND last_heartbeat_at_unix_ms IS NULL AND cancellation_requested = 0",
-            params![session_id.as_str(), owner.as_str(), completed],
+            params![
+                session_id.as_str(),
+                owner.as_str(),
+                completed,
+                journal.candidate_status_coupling.as_i64(),
+            ],
         )
         .map_err(map_write_sql_error)?;
     require_one(changed)?;

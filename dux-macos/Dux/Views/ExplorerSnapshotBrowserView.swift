@@ -4,6 +4,7 @@ struct ExplorerSnapshotBrowserView: View {
     @Bindable var browser: ExplorerSnapshotBrowserModel
     @State private var presentationID = UUID()
     @State private var inspectorPresented = true
+    @State private var trashConfirmationNode: ExplorerSnapshotNode?
     let model: AppModel
 
     var body: some View {
@@ -19,6 +20,23 @@ struct ExplorerSnapshotBrowserView: View {
         .onDisappear {
             let presentationID = presentationID
             Task { await browser.dismiss(id: presentationID) }
+        }
+        .confirmationDialog(
+            "Move item to Trash?",
+            isPresented: Binding(
+                get: { trashConfirmationNode != nil },
+                set: { if !$0 { trashConfirmationNode = nil } }
+            ),
+            presenting: trashConfirmationNode
+        ) { node in
+            Button("Move \(node.name.display) to Trash", role: .destructive) {
+                let nodeID = node.id
+                trashConfirmationNode = nil
+                Task { await browser.trashSelectedItem(nodeID: nodeID) }
+            }
+            Button("Cancel", role: .cancel) { trashConfirmationNode = nil }
+        } message: { _ in
+            Text("DUX will revalidate this reviewed item and record a one-shot operation. Empty Trash separately to reclaim disk space.")
         }
         .accessibilityIdentifier(ExplorerAccessibility.snapshotBrowser)
     }
@@ -220,6 +238,29 @@ struct ExplorerSnapshotBrowserView: View {
                     in: RoundedRectangle(cornerRadius: 8)
                 )
                 .accessibilityIdentifier(ExplorerAccessibility.snapshotLiveActionStatus)
+            }
+
+            if let notice = browser.trashNotice {
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: notice.isFailure ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+                        .foregroundStyle(notice.isFailure ? .orange : .green)
+                    Text(verbatim: notice.message)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button {
+                        browser.dismissTrashNotice()
+                    } label: {
+                        Label("Dismiss", systemImage: "xmark")
+                            .labelStyle(.iconOnly)
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(10)
+                .background(
+                    (notice.isFailure ? Color.orange : Color.green).opacity(0.10),
+                    in: RoundedRectangle(cornerRadius: 8)
+                )
+                .accessibilityIdentifier(ExplorerAccessibility.snapshotTrashStatus)
             }
 
             if let notice = browser.subtreeRefreshNotice {
@@ -829,7 +870,7 @@ struct ExplorerSnapshotBrowserView: View {
         node: ExplorerSnapshotNode,
         fromLargeFiles: Bool
     ) -> some View {
-        let supported = node.kind == .file || node.kind == .directory
+        let supported = node.kind == .file || node.kind == .directory || node.kind == .symlink
         Button("Reveal in Finder") {
             selectForLiveAction(node.id, fromLargeFiles: fromLargeFiles)
             Task { await browser.revealLiveItem(nodeID: node.id) }
@@ -845,6 +886,12 @@ struct ExplorerSnapshotBrowserView: View {
             Task { await browser.quickLookLiveItem(nodeID: node.id) }
         }
         .disabled(node.kind != .file)
+        Divider()
+        Button("Move to Trash…", role: .destructive) {
+            selectForLiveAction(node.id, fromLargeFiles: fromLargeFiles)
+            trashConfirmationNode = node
+        }
+        .disabled(!supported || browser.isTrashLoading)
     }
 
     private func selectForLiveAction(_ nodeID: UInt64, fromLargeFiles: Bool) {

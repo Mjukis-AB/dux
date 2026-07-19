@@ -590,6 +590,14 @@ public protocol DuxEngineProtocol: AnyObject, Sendable {
      */
     func close()  -> Bool
 
+    /**
+     * Execute one explicit Explorer Trash selection. Rust resolves and
+     * revalidates the retained node, creates the bounded journal row, and
+     * fences the one-shot callback. Swift cannot supply a path or retry a
+     * request; the callback is invoked synchronously while the claim is held.
+     */
+    func executeExplorerTrash(review: SnapshotReviewSession, nodeId: UInt64, driver: TrashPlatformDriver) throws  -> TrashPlatformResult
+
     func formatSize(bytes: UInt64) throws  -> FormattedSize
 
     /**
@@ -722,6 +730,23 @@ open func close() -> Bool  {
     return try!  FfiConverterBool.lift(try! rustCall() {
     uniffi_dux_ffi_fn_method_duxengine_close(
             self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+    /**
+     * Execute one explicit Explorer Trash selection. Rust resolves and
+     * revalidates the retained node, creates the bounded journal row, and
+     * fences the one-shot callback. Swift cannot supply a path or retry a
+     * request; the callback is invoked synchronously while the claim is held.
+     */
+open func executeExplorerTrash(review: SnapshotReviewSession, nodeId: UInt64, driver: TrashPlatformDriver)throws  -> TrashPlatformResult  {
+    return try  FfiConverterTypeTrashPlatformResult_lift(try rustCallWithError(FfiConverterTypeTrashExecutionError_lift) {
+    uniffi_dux_ffi_fn_method_duxengine_execute_explorer_trash(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeSnapshotReviewSession_lower(review),
+        FfiConverterUInt64.lower(nodeId),
+        FfiConverterCallbackInterfaceTrashPlatformDriver_lower(driver),$0
     )
 })
 }
@@ -9249,6 +9274,130 @@ public func FfiConverterTypeTrashEffectTargetKind_lower(_ value: TrashEffectTarg
 }
 
 
+
+public enum TrashExecutionError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
+
+
+
+    case Closed
+    case InvalidRequest
+    case ReviewUnavailable
+    case Busy
+    case StorageUnavailable
+    case UnsafeStorage
+    case IncompatibleSchema
+    case CorruptData
+    case OutcomeUnknown
+    case InternalState
+
+
+
+
+
+
+    public var errorDescription: String? {
+        String(reflecting: self)
+    }
+
+}
+
+#if compiler(>=6)
+extension TrashExecutionError: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTrashExecutionError: FfiConverterRustBuffer {
+    typealias SwiftType = TrashExecutionError
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TrashExecutionError {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+
+
+
+        case 1: return .Closed
+        case 2: return .InvalidRequest
+        case 3: return .ReviewUnavailable
+        case 4: return .Busy
+        case 5: return .StorageUnavailable
+        case 6: return .UnsafeStorage
+        case 7: return .IncompatibleSchema
+        case 8: return .CorruptData
+        case 9: return .OutcomeUnknown
+        case 10: return .InternalState
+
+         default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: TrashExecutionError, into buf: inout [UInt8]) {
+        switch value {
+
+
+
+
+
+        case .Closed:
+            writeInt(&buf, Int32(1))
+
+
+        case .InvalidRequest:
+            writeInt(&buf, Int32(2))
+
+
+        case .ReviewUnavailable:
+            writeInt(&buf, Int32(3))
+
+
+        case .Busy:
+            writeInt(&buf, Int32(4))
+
+
+        case .StorageUnavailable:
+            writeInt(&buf, Int32(5))
+
+
+        case .UnsafeStorage:
+            writeInt(&buf, Int32(6))
+
+
+        case .IncompatibleSchema:
+            writeInt(&buf, Int32(7))
+
+
+        case .CorruptData:
+            writeInt(&buf, Int32(8))
+
+
+        case .OutcomeUnknown:
+            writeInt(&buf, Int32(9))
+
+
+        case .InternalState:
+            writeInt(&buf, Int32(10))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTrashExecutionError_lift(_ buf: RustBuffer) throws -> TrashExecutionError {
+    return try FfiConverterTypeTrashExecutionError.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTrashExecutionError_lower(_ value: TrashExecutionError) -> RustBuffer {
+    return FfiConverterTypeTrashExecutionError.lower(value)
+}
+
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 
@@ -10535,6 +10684,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_close() != 17149) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_duxengine_execute_explorer_trash() != 27346) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_format_size() != 55932) {

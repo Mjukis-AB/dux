@@ -129,6 +129,64 @@ fn plan(mode: CleanupMode, candidates: &[Candidate]) -> CleanupPlan {
 }
 
 #[test]
+fn explorer_trash_selection_plan_is_fixed_review_only_and_path_bound() {
+    let plan = CleanupPlan::try_from_trash_selection(
+        CleanupPlanId::new("plan:explorer-trash-test").unwrap(),
+        UNIX_EPOCH + Duration::from_secs(100),
+        ScanId::new("scan:explorer").unwrap(),
+        CandidateId::new("candidate:explorer-trash-test").unwrap(),
+        PathBuf::from("/Users/example/Library/Caches/item"),
+    )
+    .unwrap();
+
+    assert_eq!(plan.mode(), CleanupMode::Trash);
+    assert_eq!(plan.estimated_bytes(), 0);
+    assert_eq!(plan.items().len(), 1);
+    let item = &plan.items()[0];
+    assert_eq!(item.action(), CandidateAction::MoveToTrash);
+    assert_eq!(item.safety(), SafetyTier::ReviewRequired);
+    assert!(!item.rule_marks_schedule_eligible());
+    assert_eq!(
+        item.paths(),
+        &[PathBuf::from("/Users/example/Library/Caches/item")]
+    );
+    assert!(
+        plan.warnings()
+            .contains(&PlanWarning::EstimatedBytesUnverified)
+    );
+    assert!(
+        plan.warnings()
+            .contains(&PlanWarning::TrashDoesNotFreeSpaceImmediately)
+    );
+}
+
+#[test]
+fn explorer_trash_selection_plan_rejects_roots_and_traversal() {
+    let make = |path| {
+        CleanupPlan::try_from_trash_selection(
+            CleanupPlanId::new("plan:explorer-trash-invalid").unwrap(),
+            UNIX_EPOCH,
+            ScanId::new("scan:explorer").unwrap(),
+            CandidateId::new("candidate:explorer-trash-invalid").unwrap(),
+            PathBuf::from(path),
+        )
+    };
+
+    assert_eq!(
+        make("/").unwrap_err(),
+        CleanupPlanValidationError::InvalidSelectionPath
+    );
+    assert_eq!(
+        make("/Users/example/../other").unwrap_err(),
+        CleanupPlanValidationError::InvalidSelectionPath
+    );
+    assert_eq!(
+        make("relative/item").unwrap_err(),
+        CleanupPlanValidationError::InvalidSelectionPath
+    );
+}
+
+#[test]
 fn plan_freezes_candidate_facts_totals_and_expiration() {
     let first = regenerable("candidate:first", "/fixture/first", 400);
     let second = regenerable("candidate:second", "/fixture/second", 600);

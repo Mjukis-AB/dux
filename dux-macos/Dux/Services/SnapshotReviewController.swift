@@ -351,6 +351,26 @@ actor DuxSnapshotReviewController {
         return item
     }
 
+    func executeTrash(scanID: String, nodeID: UInt64) async throws -> TrashPlatformResult {
+        guard !isShuttingDown else {
+            throw ExplorerTrashError.closed
+        }
+        guard let entry = leases[scanID] else {
+            throw ExplorerTrashError.reviewNotAcquired
+        }
+        let result: TrashPlatformResult
+        do {
+            result = try await entry.lease.executeTrash(nodeID: nodeID)
+        } catch {
+            await discardExpiredLeaseIfCurrent(error, scanID: scanID, entry: entry)
+            throw error
+        }
+        guard leases[scanID]?.generation == entry.generation else {
+            throw CancellationError()
+        }
+        return result
+    }
+
     func startSubtreeScan(
         sourceScanID: String,
         nodeID: UInt64

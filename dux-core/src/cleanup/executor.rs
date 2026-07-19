@@ -7,15 +7,151 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use crate::engine::SnapshotReviewTrashTarget;
+use super::{TrashEffectRequest, TrashPlatformResult, TrashSelectionError};
+use crate::domain::{CandidateId, CleanupPlan, CleanupPlanId};
+use crate::engine::{SnapshotReviewSession, SnapshotReviewTrashTarget};
 use crate::path_validation::{
     CanonicalPathError, capture_scan_root, capture_trash_path_snapshot, validate_cleanup_path,
     validate_scan_root,
 };
 use crate::persistence::{
-    CleanupJournalClaim, CleanupSessionId, EffectOutcome, EffectStartReceipt, HistoryErrorKind,
-    StoreCoordinator, ValidationOutcome,
+    CleanupJournalClaim, CleanupSessionId, CleanupTrigger, EffectOutcome, EffectStartReceipt,
+    HistoryErrorKind, NewCleanupSessionRecord, StoreCoordinator, ValidationOutcome,
 };
+
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static TRASH_SELECTION_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+/// Execute one explicit Explorer Trash selection. The review lease supplies
+/// the only target evidence; this function creates a one-item reviewed
+/// journal row, admits it through the existing receipt fence, and invokes the
+/// callback synchronously while the journal claim remains held.
+pub(crate) fn execute_reviewed_trash_selection<F>(
+    store: &Arc<StoreCoordinator>,
+    review: &mut SnapshotReviewSession,
+    node_id: u64,
+    driver: F,
+) -> Result<TrashPlatformResult, TrashSelectionError>
+where
+    F: FnOnce(TrashEffectRequest) -> TrashPlatformResult,
+{
+    let target = review
+        .trash_target(node_id)
+        .map_err(|_| TrashSelectionError::Review)?;
+    let sequence = TRASH_SELECTION_SEQUENCE
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            value.checked_add(1)
+        })
+        .map_err(|_| TrashSelectionError::InvalidRequest)?;
+    let plan_id = CleanupPlanId::new(format!("plan:explorer-trash-{sequence}"))
+        .map_err(|_| TrashSelectionError::InvalidRequest)?;
+    let session_id = CleanupSessionId::new(format!("cleanup:explorer-trash-{sequence}"))
+        .map_err(|_| TrashSelectionError::InvalidRequest)?;
+    let candidate_id = CandidateId::new(format!("candidate:explorer-trash-{sequence}"))
+        .map_err(|_| TrashSelectionError::InvalidRequest)?;
+    let started_at = SystemTime::now();
+    let plan = CleanupPlan::try_from_trash_selection(
+        plan_id,
+        started_at,
+        review.scan_id().clone(),
+        candidate_id,
+        target.snapshot.requested_path().to_path_buf(),
+    )
+    .map_err(|_| TrashSelectionError::InvalidRequest)?;
+    let record = NewCleanupSessionRecord::try_from_uncoupled_plan(
+        session_id.clone(),
+        &plan,
+        started_at,
+        CleanupTrigger::Manual,
+    )
+    .map_err(|error| map_selection_history_error(error.kind))?;
+    store
+        .record_cleanup_session_planned(&record)
+        .map_err(|error| map_selection_history_error(error.kind))?;
+
+    let admission_at = started_at
+        .checked_add(Duration::from_millis(1))
+        .ok_or(TrashSelectionError::InvalidRequest)?;
+
+    let admission = TrashExecutionAdmission::begin(
+        store,
+        &session_id,
+        target,
+        0,
+        0,
+        admission_at,
+        Duration::from_secs(5),
+    )
+    .map_err(map_selection_admission_error)?;
+    let mut platform = CallbackTrashPlatform {
+        driver: Some(driver),
+    };
+    match admission.execute_with(&mut platform, SystemTime::now()) {
+        Ok(()) => Ok(TrashPlatformResult::Completed),
+        Err(TrashExecutionError::Platform(TrashPlatformError::Unsupported)) => {
+            Ok(TrashPlatformResult::Unsupported)
+        }
+        Err(TrashExecutionError::Platform(TrashPlatformError::Failed)) => {
+            Ok(TrashPlatformResult::Failed)
+        }
+        Err(TrashExecutionError::Platform(TrashPlatformError::OutcomeUnknown)) => {
+            Ok(TrashPlatformResult::OutcomeUnknown)
+        }
+        Err(TrashExecutionError::Admission(error)) => Err(map_selection_admission_error(error)),
+    }
+}
+
+struct CallbackTrashPlatform<F> {
+    driver: Option<F>,
+}
+
+impl<F> TrashPlatformEffect for CallbackTrashPlatform<F>
+where
+    F: FnOnce(TrashEffectRequest) -> TrashPlatformResult,
+{
+    fn trash(
+        &mut self,
+        target: &crate::path_validation::TrashPathSnapshot,
+    ) -> Result<(), TrashPlatformError> {
+        let driver = self.driver.take().ok_or(TrashPlatformError::Failed)?;
+        let request = TrashEffectRequest::from_target(target.target_kind(), target.object_path());
+        match driver(request) {
+            TrashPlatformResult::Completed => Ok(()),
+            TrashPlatformResult::Unsupported => Err(TrashPlatformError::Unsupported),
+            TrashPlatformResult::Failed => Err(TrashPlatformError::Failed),
+            TrashPlatformResult::OutcomeUnknown => Err(TrashPlatformError::OutcomeUnknown),
+        }
+    }
+}
+
+fn map_selection_history_error(kind: HistoryErrorKind) -> TrashSelectionError {
+    match kind {
+        HistoryErrorKind::Busy => TrashSelectionError::Busy,
+        HistoryErrorKind::UnsafeStorage => TrashSelectionError::UnsafeStorage,
+        HistoryErrorKind::IncompatibleSchema => TrashSelectionError::IncompatibleSchema,
+        HistoryErrorKind::CorruptData => TrashSelectionError::CorruptData,
+        HistoryErrorKind::DatabaseUnavailable => TrashSelectionError::Unavailable,
+        HistoryErrorKind::OutcomeUnknown => TrashSelectionError::OutcomeUnknown,
+        HistoryErrorKind::InvalidInput => TrashSelectionError::InvalidRequest,
+        HistoryErrorKind::InvalidTransition
+        | HistoryErrorKind::AlreadyExists
+        | HistoryErrorKind::NotFound
+        | HistoryErrorKind::QueryLimitExceeded
+        | HistoryErrorKind::InternalState => TrashSelectionError::InternalState,
+    }
+}
+
+fn map_selection_admission_error(error: TrashAdmissionError) -> TrashSelectionError {
+    match error {
+        TrashAdmissionError::TargetUnavailable
+        | TrashAdmissionError::TargetChanged
+        | TrashAdmissionError::UnsupportedTargetKind
+        | TrashAdmissionError::UnsupportedEffectMode
+        | TrashAdmissionError::TargetNotBound => TrashSelectionError::Review,
+        TrashAdmissionError::Journal(kind) => map_selection_history_error(kind),
+    }
+}
 
 /// The only failures returned by the core Trash admission boundary. Paths are
 /// deliberately absent so a caller cannot treat an error string as an effect

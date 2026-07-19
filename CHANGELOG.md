@@ -6,6 +6,13 @@
   immediately before a permanent effect can enter `effect_started`. Corrupt or
   newer settings fail closed; no arbitrary path exclusion or UI/FFI control is
   exposed yet.
+- Completed the first user-facing Explorer Trash path. A retained snapshot
+  review now feeds a fixed review-required one-item plan, a journal-fenced
+  one-shot core callback, and the macOS Foundation adapter only after an
+  explicit confirmation. UniFFI contract v21 carries bounded target metadata
+  and outcomes; foreign reviews, stale identities, storage failures, and
+  unknown Foundation results fail closed. Trash is never emptied automatically,
+  and AI/CLI/scheduled paths cannot invoke this action.
 - Added a bounded lossless user cleanup-exclusion set. Exact absolute lexical
   prefixes are sorted, deduplicated, revisioned, and persisted without
   canonicalization; the journal reloads them under the cleanup exclusion and

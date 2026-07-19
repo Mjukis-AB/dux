@@ -78,6 +78,7 @@ pub(crate) struct NewCleanupSessionRecord {
     plan: CleanupPlan,
     started_at: SystemTime,
     trigger: CleanupTrigger,
+    candidate_status_coupling: CandidateStatusCoupling,
 }
 
 impl NewCleanupSessionRecord {
@@ -97,7 +98,19 @@ impl NewCleanupSessionRecord {
             plan: plan.clone(),
             started_at,
             trigger,
+            candidate_status_coupling: CandidateStatusCoupling::PlanClaimsV1,
         })
+    }
+
+    pub(crate) fn try_from_uncoupled_plan(
+        session_id: CleanupSessionId,
+        plan: &CleanupPlan,
+        started_at: SystemTime,
+        trigger: CleanupTrigger,
+    ) -> Result<Self, HistoryError> {
+        let mut record = Self::try_from_plan(session_id, plan, started_at, trigger)?;
+        record.candidate_status_coupling = CandidateStatusCoupling::LegacyUncoupled;
+        Ok(record)
     }
 }
 
@@ -197,6 +210,15 @@ pub(super) enum CandidateStatusCoupling {
     PlanClaimsV1,
 }
 
+impl CandidateStatusCoupling {
+    pub(super) fn as_i64(self) -> i64 {
+        match self {
+            Self::LegacyUncoupled => 1,
+            Self::PlanClaimsV1 => 2,
+        }
+    }
+}
+
 pub(super) struct PreparedCleanupSession {
     session_id: String,
     plan_id: String,
@@ -209,6 +231,7 @@ pub(super) struct PreparedCleanupSession {
     trigger: &'static str,
     items: Vec<PreparedCleanupItem>,
     warnings: Vec<&'static str>,
+    candidate_status_coupling: CandidateStatusCoupling,
 }
 
 struct PreparedCleanupItem {
@@ -290,6 +313,7 @@ impl PreparedCleanupSession {
                 .iter()
                 .map(warning_as_stored)
                 .collect(),
+            candidate_status_coupling: record.candidate_status_coupling,
         })
     }
 }
@@ -311,7 +335,11 @@ pub(super) fn insert_cleanup_session(
     if conflicts != 0 {
         return Err(HistoryError::new(HistoryErrorKind::AlreadyExists));
     }
-    let candidates = ensure_dependencies_match(transaction, session)?;
+    let candidates = if session.candidate_status_coupling == CandidateStatusCoupling::PlanClaimsV1 {
+        ensure_dependencies_match(transaction, session)?
+    } else {
+        Vec::new()
+    };
     let changed = transaction
         .execute(
             "INSERT INTO cleanup_sessions (
@@ -322,7 +350,7 @@ pub(super) fn insert_cleanup_session(
                  cancellation_requested, candidate_status_coupling_version
              ) VALUES (
                  ?1, ?2, ?3, ?4, ?5, ?6, 'planned', 2, ?7,
-                 ?8, ?9, ?10, ?11, 0, 2
+                 ?8, ?9, ?10, ?11, 0, ?12
              ) ON CONFLICT DO NOTHING",
             params![
                 session.session_id,
@@ -336,6 +364,7 @@ pub(super) fn insert_cleanup_session(
                 session.plan_created_at.nanoseconds,
                 session.plan_expires_at.seconds,
                 session.plan_expires_at.nanoseconds,
+                session.candidate_status_coupling.as_i64(),
             ],
         )
         .map_err(map_write_sql_error)?;
@@ -804,7 +833,8 @@ fn decode_frozen_session(
         candidate_status_coupling,
         &mut items,
     )?;
-    if require_candidate_match {
+    if require_candidate_match && candidate_status_coupling == CandidateStatusCoupling::PlanClaimsV1
+    {
         for item in &items {
             ensure_loaded_item_matches_candidate(connection, item, &source_scan_id)?;
         }

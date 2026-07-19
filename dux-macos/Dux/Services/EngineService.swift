@@ -81,6 +81,7 @@ protocol DuxSnapshotReviewLease: AnyObject, Sendable {
         nodeID: UInt64,
         purpose: ExplorerSnapshotLivePathPurpose
     ) async throws -> ExplorerResolvedLiveItem
+    func executeTrash(nodeID: UInt64) async throws -> TrashPlatformResult
     func startSubtreeScan(nodeID: UInt64) async throws -> HomeScanStartDisposition
     func release() async
 }
@@ -119,12 +120,16 @@ extension DuxSnapshotReviewLease {
     func startSubtreeScan(nodeID _: UInt64) async throws -> HomeScanStartDisposition {
         throw ExplorerSnapshotSubtreeScanError.unavailable
     }
+
+    func executeTrash(nodeID _: UInt64) async throws -> TrashPlatformResult {
+        throw ExplorerTrashError.unavailable
+    }
 }
 
 struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewServing,
     DuxSnapshotHistoryServing, DuxScanCoverageServing, HomeScanServing, Sendable
 {
-    fileprivate static let expectedFFIContractVersion: UInt32 = 20
+    fileprivate static let expectedFFIContractVersion: UInt32 = 21
     fileprivate static let expectedRecordVersion: UInt32 = 1
 
     private let state: EngineServiceState
@@ -1742,6 +1747,23 @@ private final class FFIDuxSnapshotReviewLease: DuxSnapshotReviewLease, @unchecke
                     requestedNodeID: nodeID,
                     requestedPurpose: purpose
                 )
+            } catch let error as EngineError {
+                throw Self.livePathError(error)
+            }
+        }
+    }
+
+    func executeTrash(nodeID: UInt64) async throws -> TrashPlatformResult {
+        try await state.perform { _ in
+            do {
+                let engine = try self.state.resolveEngine()
+                return try engine.executeExplorerTrash(
+                    review: self.lease,
+                    nodeId: nodeID,
+                    driver: MacOSTrashPlatformDriver()
+                )
+            } catch let error as TrashExecutionError {
+                throw ExplorerTrashError(error)
             } catch let error as EngineError {
                 throw Self.livePathError(error)
             }

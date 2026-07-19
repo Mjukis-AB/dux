@@ -12,8 +12,8 @@ use std::time::{Duration, SystemTime};
 use thiserror::Error;
 
 use super::{
-    Candidate, CandidateAction, CandidateCategory, CandidateId, CleanupPlanId, Evidence, RuleRef,
-    SafetyTier, ScanId,
+    Candidate, CandidateAction, CandidateCategory, CandidateId, CleanupPlanId, Evidence, RuleId,
+    RuleRef, RuleRevision, SafetyTier, ScanId,
 };
 
 pub const CLEANUP_PLAN_VALIDITY: Duration = Duration::from_secs(15 * 60);
@@ -111,6 +111,8 @@ pub enum CleanupPlanValidationError {
     },
     #[error("cleanup plan estimated byte total overflowed")]
     EstimatedBytesOverflow,
+    #[error("the Explorer Trash selection path is invalid")]
+    InvalidSelectionPath,
     #[error("cleanup plan expiration could not be represented")]
     ExpirationOverflow,
 }
@@ -187,6 +189,59 @@ impl CleanupPlan {
         })
     }
 
+    /// Build the single-item plan used by an explicit Explorer Trash action.
+    ///
+    /// This constructor is intentionally crate-private and accepts only the
+    /// already live-validated path supplied by the Explorer review boundary.
+    /// It does not accept a caller-provided rule, safety tier, or action; the
+    /// synthetic review-selection policy is fixed to `ReviewRequired` and
+    /// `MoveToTrash`, is never schedule eligible, and carries no reclaimable
+    /// byte estimate.
+    pub(crate) fn try_from_trash_selection(
+        id: CleanupPlanId,
+        created_at: SystemTime,
+        source_scan_id: ScanId,
+        candidate_id: CandidateId,
+        path: PathBuf,
+    ) -> Result<Self, CleanupPlanValidationError> {
+        if !is_absolute_clean_path(&path) {
+            return Err(CleanupPlanValidationError::InvalidSelectionPath);
+        }
+        let expires_at = created_at
+            .checked_add(CLEANUP_PLAN_VALIDITY)
+            .ok_or(CleanupPlanValidationError::ExpirationOverflow)?;
+        let rule = RuleRef::new(
+            RuleId::new("explorer.selection.trash")
+                .expect("the built-in Explorer Trash rule ID is valid"),
+            RuleRevision::new(1).expect("the built-in Explorer Trash rule revision is non-zero"),
+        );
+        let item = CleanupPlanItem {
+            candidate_id,
+            rule,
+            category: CandidateCategory::LargeReviewItem,
+            paths: vec![path.clone()],
+            estimated_bytes: 0,
+            newest_mtime: None,
+            evidence: vec![Evidence::MatchedPath { path }],
+            safety: SafetyTier::ReviewRequired,
+            action: CandidateAction::MoveToTrash,
+            rule_schedule_eligible: false,
+        };
+        Ok(Self {
+            id,
+            created_at,
+            source_scan_id,
+            mode: CleanupMode::Trash,
+            items: vec![item],
+            estimated_bytes: 0,
+            warnings: vec![
+                PlanWarning::EstimatedBytesUnverified,
+                PlanWarning::TrashDoesNotFreeSpaceImmediately,
+            ],
+            expires_at,
+        })
+    }
+
     #[cfg(test)]
     pub(crate) fn try_from_candidates_for_persistence_test(
         id: CleanupPlanId,
@@ -233,6 +288,18 @@ impl CleanupPlan {
     pub fn has_expired_at(&self, now: SystemTime) -> bool {
         now >= self.expires_at
     }
+}
+
+fn is_absolute_clean_path(path: &Path) -> bool {
+    path.is_absolute()
+        && !path.as_os_str().is_empty()
+        && !path.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::CurDir | std::path::Component::ParentDir
+            )
+        })
+        && path.components().count() != 1
 }
 
 impl CleanupPlanItem {

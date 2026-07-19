@@ -856,8 +856,8 @@ session. For every item it revalidates, in order:
    cloud-upload, and other live guards; and
 8. cancellation state immediately before the operating-system effect.
 
-The first staged Explorer Trash boundary implements only the admission half of
-this protocol. A non-cloneable core capability claims the store journal, checks
+The Explorer Trash boundary implements admission and the explicit platform-call
+half of this protocol. A non-cloneable core capability claims the store journal, checks
 that the reviewed lexical path equals the frozen journal row, repeats the
 no-follow root/ancestor/object witness, records a fenced `effect_started`
 receipt, and revalidates that receipt immediately before a future adapter call.
@@ -867,27 +867,28 @@ pre-effect-cancellation path and carries no FFI path or platform primitive. A
 private synchronous driver seam now repeats the target/receipt fence immediately
 before the call and settles `Trashed`, `Failed`, or `OutcomeUnknown` in the
 journal while the claim is held; its recording tests perform no filesystem
-mutation and cannot retry. `FileManager.trashItem`, approval binding, and the
-actual mutation remain later gates.
+mutation and cannot retry. The only production caller is the explicit,
+confirmation-gated Explorer action; permanent-safe, AI, CLI, and scheduled
+cleanup remain separate gates.
 
-The macOS side now has only an internal, dependency-injected adapter contract
-around `FileManager.trashItem(at:resultingItemURL:)`. It accepts no review IDs,
-plan state, or FFI input and is not called by the app; fake-only tests assert
-that a Foundation throw becomes `OutcomeUnknown` without a retry. A future
-core-owned synchronous callback must supply the exact already-revalidated
-one-shot target while the journal claim remains held.
+The macOS side has an internal, dependency-injected adapter contract around
+`FileManager.trashItem(at:resultingItemURL:)`. It accepts no caller path or
+plan state; production calls arrive only through the core-owned synchronous
+callback after the retained review lease, fixed Trash plan, journal claim,
+and final no-follow revalidation. Fake tests assert that a Foundation throw
+becomes `OutcomeUnknown` without a retry.
 
-The UniFFI v19 callback contract is staged but deliberately inert. Its
-core-issued `TrashEffectRequest` has no public constructor and is consumed only
-once; it carries a bounded target kind, encoding, and exact ephemeral path
-bytes, never a plan ID, approval, journal receipt, or arbitrary caller path.
-`TrashPlatformDriver` is synchronous and returns a bounded result enum. Until a
-reviewed-plan/approval capability exists, no engine method registers a driver
-or creates a request, so generated callback types cannot authorize cleanup.
-The compiled Swift side validates that request before constructing a URL and
-consumes target metadata before the one-shot bytes; malformed or non-round-
-tripping bytes never reach Foundation. Its driver maps only the bounded result
-enum and remains unregistered until the core owns reviewed-plan approval.
+The UniFFI v21 callback contract is active only for the explicit Explorer
+selection method. `TrashEffectRequest` still has no public constructor and is
+consumed only once; it carries a bounded target kind, encoding, and exact
+ephemeral path bytes, never a plan ID, approval, journal receipt, or arbitrary
+caller path. `TrashPlatformDriver` is synchronous and returns only bounded
+outcomes. The engine rejects foreign or closed review leases, creates the
+fixed review-required plan internally, and invokes the driver while its
+journal claim is held. Swift validates the request before constructing a URL
+and consumes target metadata before the one-shot bytes; malformed or
+non-round-tripping bytes never reach Foundation. AI, CLI, and scheduled
+cleanup code have no call path to this method.
 
 Any ambiguity returns a typed rejection, skip, or `ChangedSincePlan`. The
 executor MUST NOT silently refresh a target and proceed; changed evidence needs
@@ -2566,7 +2567,7 @@ coverage is labelled as Home-scoped and unknown coverage stays unknown.
 | Forbidden destructive-call lint | Implemented with compiler-resolved Rust denial, cross-language repository scan, scoped annotations, self-tests, and CI | Keep exception set exact; remove legacy baseline during executor migration |
 | Durable operation journal/history | Schema, typed immutable `planned` insert/load, permanent cleanup OS lock, tri-state process evidence, a private cleanup-lock-coupled owner/generation state machine, and bounded path-free recent-session plus exact-session/item history observations are implemented. It covers validation, durable effect intent, outcomes, cancellation, terminal derivation, same-scope death recovery, and explicit unknown reconciliation without performing an effect; history cannot become a planner witness | Windows host-scope proof, cross-reboot policy, planner/executor engine lifecycle and centralized-executor integration required before shared executor ships |
 | Private 0700/0600 stores | SQLite and application snapshot roots/controls/data enforce ownership, no-follow identity, links, and exact Unix modes; macOS rejects final-object ACLs but accepts deny-only publication-parent ACLs; Windows uses exact protected DACLs, handle-bound publication, retained identity, and rename guards; the legacy binary cache remains non-private | Extend equivalent guarantees to the legacy cache, logs, provider temp data, and bounded abandoned-stage/temp maintenance |
-| Trash executor | Absent | Platform-native implementation and integration tests |
+| Trash executor | Explorer explicit-selection executor implemented through the core journal fence, UniFFI v21 callback, and macOS adapter; permanent delete, AI, CLI, and scheduling remain excluded | Add broader integration coverage, capacity reconciliation, Linux/Windows adapters, and review the user-facing cleanup history before expanding authority |
 | Cloud eviction | Absent | Supported API plus fully-uploaded/no-local-change evidence |
 | Scheduled cleanup | Absent | Manual-history maturity and all automation gates in §10 |
 | Notification authorization | Settings reads authoritative macOS status and can explicitly request Alert/Sound permission from Not Determined; the adapter exposes no scheduling or delivery operation | Add reviewed pressure-transition episodes, cooldown, truthful content, and deep-link handling in Milestone 6 |

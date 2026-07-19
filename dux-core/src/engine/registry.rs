@@ -64,6 +64,7 @@ use super::task::{
     StartSubtreeScanError, StartTaskError, TaskAccessError, TaskEvent, TaskEventBatch,
     TaskEventKind, TaskFailureKind, TaskId, TaskKind, TaskPhase, TaskSnapshot,
 };
+use crate::cleanup::{TrashEffectRequest, TrashPlatformResult, TrashSelectionError};
 use crate::domain::{
     CANDIDATE_CATALOG_SCHEMA_VERSION, CANDIDATE_CATALOG_SHA256, CANDIDATE_CONTEXT_FORMAT_VERSION,
     CANDIDATE_EVALUATOR_REVISION, CandidateEvaluationError, CandidateId, Evidence, ScanCoverage,
@@ -1267,6 +1268,28 @@ impl EngineHandle {
             .load_cleanup_exclusions()
             .map(public_cleanup_exclusions)
             .map_err(|error| map_cleanup_exclusions_error(error.kind))
+    }
+
+    /// Execute one explicit Explorer Trash selection through the core-owned
+    /// journal fence. The callback receives only a one-shot request created
+    /// after the retained review target has been revalidated; it cannot choose
+    /// or retry a path.
+    pub fn execute_explorer_trash_selection<F>(
+        &self,
+        review: &mut SnapshotReviewSession,
+        node_id: u64,
+        driver: F,
+    ) -> Result<TrashPlatformResult, TrashSelectionError>
+    where
+        F: FnOnce(TrashEffectRequest) -> TrashPlatformResult,
+    {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(TrashSelectionError::InternalState);
+        }
+        if !review.belongs_to(&self.inner.snapshot_review_owner) {
+            return Err(TrashSelectionError::InvalidRequest);
+        }
+        crate::cleanup::execute_reviewed_trash_selection(&self.inner.store, review, node_id, driver)
     }
 
     /// Replace the bounded deny-only exclusion set. The core validates and

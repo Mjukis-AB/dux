@@ -30,6 +30,10 @@ pub use cache::{
     CACHE_MAGIC, CACHE_VERSION, CacheMetadata, CachedScanConfig, cache_path_for, get_mtime,
     is_cache_valid, load_cache, save_cache, spot_check_mtimes,
 };
+pub use cleanup::{
+    TrashEffectRequest, TrashEffectRequestError, TrashEffectTargetKind, TrashPlatformResult,
+    TrashSelectionError,
+};
 pub use domain::{
     ActivityGuard, AvailableCapacitySource, BlockReason, CLEANUP_PLAN_VALIDITY, Candidate,
     CandidateAction, CandidateCategory, CandidateId, CandidateValidationError, CleanupMode,

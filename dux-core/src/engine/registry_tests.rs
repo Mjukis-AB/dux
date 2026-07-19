@@ -7,6 +7,7 @@ use std::time::{Duration, Instant, SystemTime};
 use tempfile::TempDir;
 
 use super::*;
+use crate::cleanup::TrashEffectTargetKind;
 use crate::engine::{
     MAX_SNAPSHOT_REVIEW_LARGE_FILE_RESULTS, MAX_SNAPSHOT_REVIEW_NODE_PAGE_LIMIT,
     MAX_SNAPSHOT_REVIEW_PARENT_CONTEXT_COMPONENTS, MAX_SNAPSHOT_REVIEW_TREEMAP_CELLS,
@@ -881,6 +882,50 @@ fn explorer_review_trash_target_keeps_final_symlink_as_the_selected_object() {
     );
     assert!(root.join("selected-link").exists());
     assert!(root.join("nested/payload.bin").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn explorer_trash_selection_uses_journal_and_only_core_issued_callback_data() {
+    use std::os::unix::ffi::OsStringExt;
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("trash-execution-root");
+    std::fs::create_dir(&root).unwrap();
+    let item = root.join("selected.bin");
+    std::fs::write(&item, b"do not mutate in this test").unwrap();
+
+    let engine = EngineHandle::open(config(&temp)).unwrap();
+    let task = engine.start_scan(root.clone()).unwrap();
+    assert_eq!(wait_terminal(&engine, task).phase, TaskPhase::Succeeded);
+    let scan_id = engine.scan_result(task).unwrap().unwrap().scan_id().clone();
+    let mut review = engine.acquire_explorer_snapshot_review(&scan_id).unwrap();
+    let node_id = review
+        .child_nodes(0, SnapshotReviewNodeSort::NameAscending, 0, 10)
+        .unwrap()
+        .nodes
+        .into_iter()
+        .find(|node| node.name.display.as_ref() == "selected.bin")
+        .unwrap()
+        .id;
+
+    let callback_path = engine
+        .execute_explorer_trash_selection(&mut review, node_id, |request| {
+            assert_eq!(request.target_kind(), TrashEffectTargetKind::File);
+            let (kind, path) = request.into_parts().unwrap();
+            assert_eq!(kind, TrashEffectTargetKind::File);
+            assert_eq!(
+                PathBuf::from(std::ffi::OsString::from_vec(path)),
+                std::fs::canonicalize(&item).unwrap()
+            );
+            TrashPlatformResult::Completed
+        })
+        .unwrap();
+
+    assert_eq!(callback_path, TrashPlatformResult::Completed);
+    assert_eq!(std::fs::read(&item).unwrap(), b"do not mutate in this test");
+    review.release().unwrap();
+    engine.close();
+    assert!(engine.wait_until_closed(TEST_TIMEOUT));
 }
 
 #[cfg(unix)]

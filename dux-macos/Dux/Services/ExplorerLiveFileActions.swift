@@ -100,9 +100,9 @@ final class UnavailableExplorerLiveFileActionPresenter: ExplorerLiveFileActionPr
     func dismissQuickLook() {}
 }
 
-/// The only Foundation-facing Trash dependency. This remains an internal
-/// adapter contract until the core-owned one-shot callback is wired; UI and
-/// FFI code must not construct or pass arbitrary cleanup URLs here.
+/// The only Foundation-facing Trash dependency. UI and FFI code must not
+/// construct or pass arbitrary cleanup URLs here; the core-issued callback is
+/// the sole production entry point.
 protocol TrashFileManaging {
     func moveToTrash(at url: URL) throws
 }
@@ -142,9 +142,9 @@ struct MacOSTrashPlatformAdapter {
         self.fileManager = fileManager
     }
 
-    /// This is deliberately not called by the app yet. A future core-owned
-    /// callback supplies the exact reviewed target while holding its one-shot
-    /// journal admission; no caller may retry after this returns.
+    /// The core-owned callback supplies the exact reviewed target while
+    /// holding its one-shot journal admission; no caller may retry after this
+    /// returns.
     func trash(_ url: URL) -> Result<Void, MacOSTrashAdapterError> {
         do {
             try fileManager.moveToTrash(at: url)
@@ -186,8 +186,8 @@ struct MacOSTrashPlatformAdapter {
     }
 }
 
-/// Future UniFFI callback implementation. It is deliberately not registered
-/// with `DuxEngine` until reviewed-plan approval and journal admission exist.
+/// UniFFI callback implementation for the reviewed Explorer Trash path. The
+/// core owns review, journal admission, and one-shot request issuance.
 final class MacOSTrashPlatformDriver: TrashPlatformDriver, @unchecked Sendable {
     private let adapter: MacOSTrashPlatformAdapter
 

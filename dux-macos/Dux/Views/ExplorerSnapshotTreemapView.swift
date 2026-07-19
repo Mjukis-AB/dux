@@ -237,6 +237,7 @@ struct ExplorerSnapshotTreemapView: View {
 
 struct ExplorerSnapshotInspectorView: View {
     @Bindable var browser: ExplorerSnapshotBrowserModel
+    @State private var trashConfirmationNode: ExplorerSnapshotNode?
 
     var body: some View {
         GroupBox("Inspector") {
@@ -306,6 +307,14 @@ struct ExplorerSnapshotInspectorView: View {
                             }
                             .disabled(!browser.canQuickLookSelectedLiveItem)
                             .accessibilityIdentifier(ExplorerAccessibility.snapshotQuickLook)
+
+                            Button {
+                                trashConfirmationNode = node
+                            } label: {
+                                Label("Move to Trash…", systemImage: "trash")
+                            }
+                            .disabled(!browser.canTrashSelectedItem)
+                            .accessibilityIdentifier(ExplorerAccessibility.snapshotMoveToTrash)
                         }
                         if browser.isLiveActionLoading {
                             ProgressView("Validating current item…")
@@ -343,6 +352,23 @@ struct ExplorerSnapshotInspectorView: View {
             }
         }
         .frame(minWidth: 230, idealWidth: 270, maxWidth: 330, maxHeight: .infinity)
+        .confirmationDialog(
+            "Move item to Trash?",
+            isPresented: Binding(
+                get: { trashConfirmationNode != nil },
+                set: { if !$0 { trashConfirmationNode = nil } }
+            ),
+            presenting: trashConfirmationNode
+        ) { node in
+            Button("Move \(node.name.display) to Trash", role: .destructive) {
+                let nodeID = node.id
+                trashConfirmationNode = nil
+                Task { await browser.trashSelectedItem(nodeID: nodeID) }
+            }
+            Button("Cancel", role: .cancel) { trashConfirmationNode = nil }
+        } message: { _ in
+            Text("DUX will revalidate this reviewed item and record a one-shot operation. Empty Trash separately to reclaim disk space.")
+        }
         .accessibilityIdentifier(ExplorerAccessibility.snapshotInspector)
     }
 

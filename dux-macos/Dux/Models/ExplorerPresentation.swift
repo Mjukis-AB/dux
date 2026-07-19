@@ -55,6 +55,8 @@ enum ExplorerAccessibility {
     static let snapshotRevealInFinder = "explorer-snapshot-reveal-in-finder"
     static let snapshotCopyPath = "explorer-snapshot-copy-path"
     static let snapshotQuickLook = "explorer-snapshot-quick-look"
+    static let snapshotMoveToTrash = "explorer-snapshot-move-to-trash"
+    static let snapshotTrashStatus = "explorer-snapshot-trash-status"
     static let snapshotLiveActionStatus = "explorer-snapshot-live-action-status"
 
     static let allIdentifiers = [
@@ -112,6 +114,8 @@ enum ExplorerAccessibility {
         snapshotRevealInFinder,
         snapshotCopyPath,
         snapshotQuickLook,
+        snapshotMoveToTrash,
+        snapshotTrashStatus,
         snapshotLiveActionStatus,
     ]
 

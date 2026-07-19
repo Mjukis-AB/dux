@@ -46,6 +46,7 @@ protocol DuxSnapshotReviewBrowsing: Sendable {
         nodeID: UInt64,
         purpose: ExplorerSnapshotLivePathPurpose
     ) async throws -> ExplorerResolvedLiveItem
+    func executeTrash(scanID: String, nodeID: UInt64) async throws -> TrashPlatformResult
 }
 
 extension DuxSnapshotReviewBrowsing {
@@ -55,6 +56,10 @@ extension DuxSnapshotReviewBrowsing {
         purpose _: ExplorerSnapshotLivePathPurpose
     ) async throws -> ExplorerResolvedLiveItem {
         throw ExplorerSnapshotLivePathError.unavailable
+    }
+
+    func executeTrash(scanID _: String, nodeID _: UInt64) async throws -> TrashPlatformResult {
+        throw ExplorerTrashError.unavailable
     }
 }
 
@@ -146,6 +151,39 @@ enum ExplorerSnapshotSelection: Equatable, Sendable {
 struct ExplorerLiveActionNotice: Equatable, Sendable {
     let message: String
     let isFailure: Bool
+}
+
+enum ExplorerTrashError: Error, Equatable, Sendable {
+    case closed
+    case reviewNotAcquired
+    case unavailable
+    case invalidRequest
+    case busy
+    case storageUnavailable
+    case unsafeStorage
+    case incompatibleSchema
+    case corruptData
+    case outcomeUnknown
+    case failed
+
+    init(_ error: Error) {
+        guard let error = error as? TrashExecutionError else {
+            self = (error as? ExplorerTrashError) ?? .failed
+            return
+        }
+        self = switch error {
+        case .closed: .closed
+        case .invalidRequest: .invalidRequest
+        case .reviewUnavailable: .unavailable
+        case .busy: .busy
+        case .storageUnavailable: .storageUnavailable
+        case .unsafeStorage: .unsafeStorage
+        case .incompatibleSchema: .incompatibleSchema
+        case .corruptData: .corruptData
+        case .outcomeUnknown: .outcomeUnknown
+        case .internalState: .failed
+        }
+    }
 }
 
 private enum ExplorerSnapshotTreemapLoadResult: Sendable {
@@ -271,6 +309,8 @@ final class ExplorerSnapshotBrowserModel {
     private(set) var isCoverageLoading = false
     private(set) var isLiveActionLoading = false
     private(set) var liveActionNotice: ExplorerLiveActionNotice?
+    private(set) var isTrashLoading = false
+    private(set) var trashNotice: ExplorerLiveActionNotice?
     private(set) var isSubtreeRefreshRunning = false
     private(set) var subtreeRefreshNotice: ExplorerLiveActionNotice?
 
@@ -374,6 +414,15 @@ final class ExplorerSnapshotBrowserModel {
 
     var canQuickLookSelectedLiveItem: Bool {
         canUseLiveAction(selectedNode, requiresFile: true)
+    }
+
+    var canTrashSelectedItem: Bool {
+        phase == .ready
+            && selectedNode.map { $0.kind == .file || $0.kind == .directory || $0.kind == .symlink } == true
+            && !isTrashLoading
+            && !isSwitchingSnapshot
+            && !isNavigating
+            && !isPaging
     }
 
     var canRefreshCurrentSubtree: Bool {
@@ -989,8 +1038,45 @@ final class ExplorerSnapshotBrowserModel {
         await performLiveAction(.quickLook, requestedNodeID: nodeID)
     }
 
+    func trashSelectedItem(nodeID: UInt64? = nil) async {
+        guard
+            canTrashSelectedItem,
+            let scanID,
+            let node = liveActionNode(nodeID),
+            node.kind == .file || node.kind == .directory || node.kind == .symlink
+        else { return }
+        let snapshotOperation = generation
+        let nodeID = node.id
+        isTrashLoading = true
+        trashNotice = nil
+        do {
+            let result = try await reviews.executeTrash(scanID: scanID, nodeID: nodeID)
+            guard snapshotOperation == generation, self.scanID == scanID, !Task.isCancelled else { return }
+            isTrashLoading = false
+            trashNotice = switch result {
+            case .completed:
+                ExplorerLiveActionNotice(message: "Moved to Trash. Space is reclaimed after macOS empties Trash.", isFailure: false)
+            case .unsupported:
+                ExplorerLiveActionNotice(message: "This item cannot be moved to Trash on this volume.", isFailure: true)
+            case .failed:
+                ExplorerLiveActionNotice(message: "macOS could not move this item to Trash. No retry was attempted.", isFailure: true)
+            case .outcomeUnknown:
+                ExplorerLiveActionNotice(message: "The Trash result is unknown. Check Finder before trying anything else.", isFailure: true)
+            }
+        } catch {
+            guard snapshotOperation == generation, self.scanID == scanID, !Task.isCancelled else { return }
+            isTrashLoading = false
+            let mapped = ExplorerTrashError(error)
+            trashNotice = ExplorerLiveActionNotice(message: Self.trashFailureMessage(mapped), isFailure: true)
+        }
+    }
+
     func dismissLiveActionNotice() {
         liveActionNotice = nil
+    }
+
+    func dismissTrashNotice() {
+        trashNotice = nil
     }
 
     func close() async {
@@ -1542,6 +1628,8 @@ final class ExplorerSnapshotBrowserModel {
         isLiveActionLoading = false
         liveActionNotice = nil
         liveActions.dismissQuickLook()
+        isTrashLoading = false
+        trashNotice = nil
     }
 
     private static func liveActionFailureMessage(_ error: Error) -> String {
@@ -1653,6 +1741,19 @@ final class ExplorerSnapshotBrowserModel {
             }
         }
         return .invalidResponse
+    }
+
+    private static func trashFailureMessage(_ error: ExplorerTrashError) -> String {
+        switch error {
+        case .closed: "DUX is closing. No Trash action was performed."
+        case .reviewNotAcquired, .unavailable: "The retained snapshot review is unavailable. Reload Explorer before trying again."
+        case .invalidRequest: "DUX rejected this Trash request. No action was performed."
+        case .busy: "Cleanup is busy. Try again when the current operation finishes."
+        case .storageUnavailable, .unsafeStorage, .incompatibleSchema, .corruptData, .failed:
+            "DUX could not safely record this Trash action. No retry was attempted."
+        case .outcomeUnknown:
+            "The Trash result is unknown. Check Finder before trying anything else."
+        }
     }
 }
 
