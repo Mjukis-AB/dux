@@ -1,5 +1,10 @@
 # Changelog
 
+- Bounded interactive Home scans to 200,000 retained nodes and a single
+  traversal worker. The scanner now limits children before they enter jwalk's
+  queue and returns a truthful partial `IssueLimitReached` result at the bound,
+  preventing large Home scans from retaining unbounded tree/path state. CLI and
+  explicitly configured library scans keep their existing defaults.
 - Added a private, descriptor-relative permanent-safe contents driver for the
   reviewed Rust-target rule. It inventories before mutation, preserves the
   direct `CACHEDIR.TAG`, rejects unsafe descendants and hard links, rechecks

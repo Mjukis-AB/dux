@@ -100,6 +100,7 @@ fn run_app(
     let scan_config = ScanConfig {
         follow_symlinks: args.follow_symlinks,
         max_depth: args.max_depth,
+        max_nodes: None,
         same_filesystem: !args.cross_filesystems,
         num_threads: 0,
     };

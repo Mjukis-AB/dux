@@ -5204,6 +5204,11 @@ struct AdmittedScanRoot {
     expected_identity: Option<FilesystemIdentity>,
 }
 
+// Home scans feed a retained DiskTree and path index. Keep the interactive
+// app's default bounded so a large home directory cannot consume unbounded
+// memory; the resulting scan is marked partial through IssueLimitReached.
+const MAX_HOME_SCAN_NODES: usize = 200_000;
+
 fn run_scan_task(
     context: TaskContext,
     admitted: AdmittedScanRoot,
@@ -5238,8 +5243,11 @@ fn run_scan_task(
     let scanner = Scanner::new(ScanConfig {
         follow_symlinks: false,
         max_depth: None,
+        max_nodes: Some(MAX_HOME_SCAN_NODES),
         same_filesystem: true,
-        num_threads: 0,
+        // A single traversal worker avoids an additional unbounded jwalk
+        // prefetch queue while the main thread retains each node/path.
+        num_threads: 1,
     })
     .with_cancellation(cancellation);
     let (messages, scanner_handle) = scanner.scan(admitted_root.clone());

@@ -32,6 +32,12 @@ pub struct ScanConfig {
     pub follow_symlinks: bool,
     /// Maximum depth to scan (None = unlimited)
     pub max_depth: Option<usize>,
+    /// Maximum number of nodes to retain (None = unlimited).
+    ///
+    /// A bounded scan stops before adding another node and returns a truthful
+    /// partial-coverage result. This protects callers that scan large roots
+    /// from retaining an unbounded path/tree graph in memory.
+    pub max_nodes: Option<usize>,
     /// Stay on same filesystem (don't cross mount points)
     pub same_filesystem: bool,
     /// Number of parallel threads (0 = auto)
@@ -43,6 +49,7 @@ impl Default for ScanConfig {
         Self {
             follow_symlinks: false,
             max_depth: None,
+            max_nodes: None,
             same_filesystem: true,
             num_threads: 0, // auto
         }
@@ -428,15 +435,32 @@ impl Scanner {
         let same_fs = self.config.same_filesystem;
         let follow_symlinks = self.config.follow_symlinks;
         let max_depth = self.config.max_depth;
+        let max_nodes = self.config.max_nodes;
         let root_for_filter = root_path.clone();
         let cancel_for_filter = self.cancel_token.clone();
         let issues_for_filter = Arc::clone(&issues);
+        let node_limit_reached =
+            Arc::new(AtomicBool::new(max_nodes.is_some_and(|limit| limit <= 1)));
+        if node_limit_reached.load(Ordering::Relaxed) {
+            record_issue_once(&issues, ScanIssueKind::IssueLimitReached, None);
+        }
+        let node_limit_for_filter = Arc::clone(&node_limit_reached);
+        // Reserve node slots while read directories are being admitted. The
+        // callback can run ahead of the consumer (and in parallel), so an
+        // atomic reservation is needed to bound jwalk's queued entry graph.
+        let reserved_nodes = Arc::new(AtomicU64::new(1)); // root
+        let reserved_nodes_for_filter = Arc::clone(&reserved_nodes);
         let filesystem_cache = Arc::new(Mutex::new(HashMap::new()));
         let walker = WalkDir::new(&root_path)
             .skip_hidden(false)
             .follow_links(self.config.follow_symlinks)
             .sort(false) // We'll sort by size later
             .process_read_dir(move |_depth, path, _read_dir_state, children| {
+                if node_limit_for_filter.load(Ordering::Relaxed) {
+                    children.clear();
+                    children.shrink_to_fit();
+                    return;
+                }
                 if cancel_for_filter.is_cancelled() {
                     record_issue_once(&issues_for_filter, ScanIssueKind::Cancelled, None);
                     children.clear();
@@ -588,6 +612,22 @@ impl Scanner {
                     }
                     true
                 });
+
+                if let Some(limit) = max_nodes {
+                    let requested = children.len() as u64;
+                    let reserved =
+                        reserve_node_budget(&reserved_nodes_for_filter, limit, requested);
+                    if reserved < requested {
+                        children.truncate(reserved as usize);
+                        children.shrink_to_fit();
+                        node_limit_for_filter.store(true, Ordering::Relaxed);
+                        record_issue_once(
+                            &issues_for_filter,
+                            ScanIssueKind::IssueLimitReached,
+                            None,
+                        );
+                    }
+                }
             });
 
         let walker = if let Some(depth) = self.config.max_depth {
@@ -602,7 +642,11 @@ impl Scanner {
             walker
         };
 
+        let mut retained_nodes = 1usize; // the root is always retained
         for entry_result in walker {
+            if max_nodes.is_some_and(|limit| retained_nodes >= limit) {
+                break;
+            }
             // Check for cancellation
             if self.cancel_token.is_cancelled() {
                 record_issue_once(&issues, ScanIssueKind::Cancelled, None);
@@ -749,6 +793,12 @@ impl Scanner {
                 }
             }
 
+            retained_nodes = retained_nodes.saturating_add(1);
+            if max_nodes.is_some_and(|limit| retained_nodes >= limit) {
+                node_limit_reached.store(true, Ordering::Relaxed);
+                record_issue_once(&issues, ScanIssueKind::IssueLimitReached, None);
+            }
+
             // Track directory paths for parent lookups.
             if kind == NodeKind::Directory {
                 path_to_id.insert(path.clone(), node_id);
@@ -838,6 +888,26 @@ fn absolute_requested_path(requested_root: PathBuf) -> PathBuf {
         std::env::current_dir()
             .map(|current| current.join(&requested_root))
             .unwrap_or(requested_root)
+    }
+}
+
+fn reserve_node_budget(counter: &AtomicU64, limit: usize, requested: u64) -> u64 {
+    let limit = limit as u64;
+    loop {
+        let current = counter.load(Ordering::Relaxed);
+        let available = limit.saturating_sub(current);
+        let granted = requested.min(available);
+        if counter
+            .compare_exchange_weak(
+                current,
+                current.saturating_add(granted),
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            )
+            .is_ok()
+        {
+            return granted;
+        }
     }
 }
 
@@ -1270,6 +1340,32 @@ mod tests {
         assert_eq!(outcome.tree().len(), 1);
         assert!(outcome.coverage().issues().iter().any(|issue| {
             issue.kind() == ScanIssueKind::DepthLimited && issue.path() == Some(root.as_path())
+        }));
+    }
+
+    #[test]
+    fn max_nodes_returns_a_bounded_partial_tree() {
+        let temp = TempDir::new().unwrap();
+        for index in 0..8 {
+            fs::write(temp.path().join(format!("payload-{index}")), b"payload").unwrap();
+        }
+
+        let scanner = Scanner::new(ScanConfig {
+            max_nodes: Some(3),
+            ..ScanConfig::default()
+        });
+        let (rx, handle) = scanner.scan(temp.path().to_path_buf());
+        for _ in rx {}
+        let outcome = handle.join().unwrap();
+
+        assert_eq!(outcome.termination(), ScanTermination::Completed);
+        assert!(outcome.tree().len() <= 3);
+        assert_eq!(
+            outcome.coverage().status(),
+            crate::ScanCoverageStatus::Partial
+        );
+        assert!(outcome.coverage().issues().iter().any(|issue| {
+            issue.kind() == ScanIssueKind::IssueLimitReached && issue.path().is_none()
         }));
     }
 

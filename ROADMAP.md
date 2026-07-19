@@ -678,6 +678,13 @@ Use three cadences rather than one full-disk scan loop.
 - Probe slow mounts with a bounded prober pool, not one thread per directory.
 - Surface skipped and timed-out paths.
 
+Interactive Home scans now also admit a bounded retained-node budget (currently
+200,000 nodes) and one traversal worker. Once the budget is reached, jwalk is
+prevented from queuing more children, the scan finishes with a partial
+`IssueLimitReached` coverage fact instead of pretending the result is complete.
+CLI and explicitly configured library scans retain their current
+unbounded default until a caller opts into `ScanConfig.max_nodes`.
+
 M0 implementation note: the process-wide probe pool deliberately caps potentially wedged kernel calls at four threads. Filesystem syscalls cannot be cancelled in-process; if all four workers become permanently stuck, later probes time out until DUX restarts. The scan-coverage work must surface this as pool exhaustion and should add a circuit breaker or killable helper-process design so a long-running menu-bar session does not repeatedly spend the full deadline.
 
 ### 10.4 Incremental freshness
