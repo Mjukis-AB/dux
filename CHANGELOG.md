@@ -71,6 +71,9 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Fixed
+- Moved the initial engine and volume load out of the transient menu-bar
+  popover task and into the long-lived app runtime. Dismissing the popover no
+  longer cancels startup work or causes repeated opens to duplicate it.
 - Hardened popover teardown lifetime handling again: transient window close,
   key resignation, application resignation, last-window callbacks, and
   incidental termination requests now reassert the AppKit lifetime lease both

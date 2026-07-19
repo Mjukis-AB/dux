@@ -114,9 +114,14 @@ final class AppRuntime {
             return
         }
         started = true
+        // The menu-bar popover is a transient scene. Keep startup I/O owned by
+        // the app runtime rather than by a view task that is cancelled whenever
+        // the user dismisses the popover. This also prevents repeated opens
+        // from starting overlapping initial engine/volume loads.
+        async let initialState: Void = model.loadInitialState()
         async let maintenance: Void = scheduler.start()
         async let capacity: Void = capacityScheduler.start()
-        _ = await (maintenance, capacity)
+        _ = await (initialState, maintenance, capacity)
         await capacityResampleRouter?.attach(capacityScheduler)
     }
 

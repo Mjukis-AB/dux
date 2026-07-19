@@ -79,9 +79,6 @@ struct MenuBarContentView: View {
         .padding(16)
         .frame(width: 372)
         .accessibilityIdentifier(MenuBarPopoverAccessibility.root)
-        .task {
-            await model.loadInitialState()
-        }
     }
 
     private var storageAccessIntroduction: some View {
