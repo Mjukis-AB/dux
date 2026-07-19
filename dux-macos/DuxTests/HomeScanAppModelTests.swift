@@ -17,6 +17,61 @@ final class HomeScanAppModelTests: XCTestCase {
         let startCount = await service.startCount()
         XCTAssertEqual(startCount, 0)
         XCTAssertEqual(model.scanState, .idle)
+        XCTAssertEqual(model.cleanupHistoryState, .loaded)
+        XCTAssertTrue(model.cleanupHistoryRecords.isEmpty)
+    }
+
+    func testInitialLoadPublishesPathFreeCleanupHistory() async {
+        let counts = CleanupHistoryStatusCounts(
+            planned: 0,
+            validating: 0,
+            dryRun: 0,
+            effectStarted: 0,
+            trashed: 0,
+            removed: 1,
+            evicted: 0,
+            skipped: 0,
+            rejected: 0,
+            failed: 0,
+            changedSincePlan: 0,
+            interrupted: 0,
+            unavailable: 0,
+            outcomeUnknown: 0,
+            total: 1
+        )
+        let record = CleanupHistorySessionSummaryModel(
+            sessionID: "session:test",
+            planID: "plan:test",
+            format: .complete,
+            sourceScanID: "scan:test",
+            startedAt: Date(timeIntervalSince1970: 1),
+            completedAt: Date(timeIntervalSince1970: 2),
+            planCreatedAt: Date(timeIntervalSince1970: 1),
+            planExpiresAt: Date(timeIntervalSince1970: 3),
+            mode: .permanentSafe,
+            trigger: .manual,
+            status: .completed,
+            estimatedBytes: 512,
+            verifiedCapacityDeltaBytes: 512,
+            cancellationRequested: false,
+            itemTotal: 1,
+            pathTotal: 1,
+            evidenceTotal: 1,
+            itemStatusCounts: counts,
+            pathStatusCounts: counts
+        )
+        let service = HomeScanEngineStub(
+            cleanupHistoryPage: CleanupHistoryPageModel(records: [record], nextCursor: nil)
+        )
+        let model = AppModel(
+            engineService: service,
+            volumeMonitor: HomeScanVolumeMonitorStub()
+        )
+
+        await model.loadInitialState()
+
+        XCTAssertEqual(model.cleanupHistoryState, .loaded)
+        XCTAssertEqual(model.cleanupHistoryRecords, [record])
     }
 
     func testConcurrentStartsCoalesceAndPublishOnlyMeasuredProgressThenSuccess() async {
@@ -440,6 +495,17 @@ private actor ManualHomeScanClock: HomeScanPollingClock {
 }
 
 private actor HomeScanEngineStub: EngineServing {
+    private let cleanupHistoryPage: CleanupHistoryPageModel
+
+    init(
+        cleanupHistoryPage: CleanupHistoryPageModel = CleanupHistoryPageModel(
+            records: [],
+            nextCursor: nil
+        )
+    ) {
+        self.cleanupHistoryPage = cleanupHistoryPage
+    }
+
     func loadStatus() async throws -> EngineStatus {
         EngineStatus(libraryVersion: "test", ffiContractVersion: 12, executedOffMainThread: true)
     }
@@ -483,6 +549,13 @@ private actor HomeScanEngineStub: EngineServing {
             ),
             changed: true
         )
+    }
+
+    func loadRecentCleanupHistory(
+        cursor _: CleanupHistoryCursorModel?,
+        limit _: UInt16
+    ) async throws -> CleanupHistoryPageModel {
+        cleanupHistoryPage
     }
 }
 

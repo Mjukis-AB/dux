@@ -138,6 +138,13 @@ struct CleanupHistoryPageModel: Equatable, Sendable {
     let nextCursor: CleanupHistoryCursorModel?
 }
 
+enum CleanupHistoryLoadState: Equatable, Sendable {
+    case idle
+    case loading
+    case loaded
+    case failed(CleanupHistoryServiceError)
+}
+
 enum CleanupHistoryServiceError: Error, Equatable, Sendable {
     case closed
     case invalidLimit

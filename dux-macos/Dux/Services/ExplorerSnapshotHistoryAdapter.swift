@@ -203,8 +203,8 @@ enum CleanupHistoryAdapter {
               raw.itemTotal <= maximumSessionItems,
               raw.pathTotal <= maximumSessionPaths,
               raw.evidenceTotal <= maximumSessionEvidence,
-              raw.itemStatusCounts.total == raw.itemTotal,
-              raw.pathStatusCounts.total == raw.pathTotal,
+              validCounts(raw.itemStatusCounts, total: raw.itemTotal),
+              validCounts(raw.pathStatusCounts, total: raw.pathTotal),
               raw.sourceScanId.map(validStableToken) ?? true
         else {
             throw CleanupHistoryServiceError.invalidResponse
@@ -324,6 +324,27 @@ enum CleanupHistoryAdapter {
                     && (CharacterSet.alphanumerics.contains(scalar)
                         || "._-:".unicodeScalars.contains(scalar))
             }
+    }
+
+    private static func validCounts(
+        _ counts: CleanupStatusCounts,
+        total: UInt16
+    ) -> Bool {
+        let sum = Int(counts.planned)
+            + Int(counts.validating)
+            + Int(counts.dryRun)
+            + Int(counts.effectStarted)
+            + Int(counts.trashed)
+            + Int(counts.removed)
+            + Int(counts.evicted)
+            + Int(counts.skipped)
+            + Int(counts.rejected)
+            + Int(counts.failed)
+            + Int(counts.changedSincePlan)
+            + Int(counts.interrupted)
+            + Int(counts.unavailable)
+            + Int(counts.outcomeUnknown)
+        return counts.total == total && sum == Int(total)
     }
 
     private static func validUnixMilliseconds(_ value: Int64) -> Bool {

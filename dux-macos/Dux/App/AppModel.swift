@@ -29,6 +29,9 @@ final class AppModel: DuxCapacitySampling {
     private(set) var permanentCleanupPolicyState = PermanentCleanupPolicyState.idle
     private(set) var cleanupExclusions: CleanupExclusionsPolicy?
     private(set) var cleanupExclusionsState = CleanupExclusionsState.idle
+    private(set) var cleanupHistoryRecords: [CleanupHistorySessionSummaryModel] = []
+    private(set) var cleanupHistoryNextCursor: CleanupHistoryCursorModel?
+    private(set) var cleanupHistoryState = CleanupHistoryLoadState.idle
     private(set) var scanState = AppScanState.idle
     private(set) var loginItemState = LoginItemState.idle
     private(set) var notificationAuthorizationState = NotificationAuthorizationState.idle
@@ -85,6 +88,10 @@ final class AppModel: DuxCapacitySampling {
     private var cleanupExclusionsGeneration: UInt64 = 0
     @ObservationIgnored
     private var cleanupExclusionsIsInvalidated = false
+    @ObservationIgnored
+    private var cleanupHistoryTask: Task<Void, Never>?
+    @ObservationIgnored
+    private var cleanupHistoryGeneration: UInt64 = 0
     @ObservationIgnored
     private var homeScanDriverTask: Task<AppScanRunOutcome, Never>?
     @ObservationIgnored
@@ -175,7 +182,8 @@ final class AppModel: DuxCapacitySampling {
     func loadInitialState() async {
         async let engineLoad: Void = loadEngineStatus()
         async let volumeLoad: Void = loadVolumeCapacity()
-        _ = await (engineLoad, volumeLoad)
+        async let cleanupHistoryLoad: Void = loadCleanupHistory()
+        _ = await (engineLoad, volumeLoad, cleanupHistoryLoad)
         await loadCapacityTrend()
     }
 
@@ -552,6 +560,76 @@ final class AppModel: DuxCapacitySampling {
         cleanupExclusionsTask?.cancel()
         cleanupExclusionsTask = nil
         cleanupExclusionsState = cleanupExclusions == nil ? .idle : .ready
+    }
+
+    /// Loads only path-free durable cleanup outcome metadata. This operation
+    /// never creates a plan, approval, journal claim, or effect capability.
+    func loadCleanupHistory() async {
+        if case .loaded = cleanupHistoryState {
+            return
+        }
+        if let cleanupHistoryTask {
+            await cleanupHistoryTask.value
+            return
+        }
+
+        cleanupHistoryGeneration &+= 1
+        let generation = cleanupHistoryGeneration
+        cleanupHistoryState = .loading
+        let service = engineService
+        let task = Task { @MainActor [weak self] in
+            let result: Result<CleanupHistoryPageModel, Error>
+            do {
+                result = .success(
+                    try await service.loadRecentCleanupHistory(cursor: nil, limit: 64)
+                )
+            } catch {
+                result = .failure(error)
+            }
+            guard !Task.isCancelled, let self,
+                  generation == self.cleanupHistoryGeneration else {
+                return
+            }
+            self.publishCleanupHistory(result, appending: false, generation: generation)
+        }
+        cleanupHistoryTask = task
+        await task.value
+    }
+
+    func loadMoreCleanupHistory() async {
+        guard cleanupHistoryTask == nil,
+              let cursor = cleanupHistoryNextCursor else {
+            return
+        }
+
+        cleanupHistoryGeneration &+= 1
+        let generation = cleanupHistoryGeneration
+        cleanupHistoryState = .loading
+        let service = engineService
+        let task = Task { @MainActor [weak self] in
+            let result: Result<CleanupHistoryPageModel, Error>
+            do {
+                result = .success(
+                    try await service.loadRecentCleanupHistory(cursor: cursor, limit: 64)
+                )
+            } catch {
+                result = .failure(error)
+            }
+            guard !Task.isCancelled, let self,
+                  generation == self.cleanupHistoryGeneration else {
+                return
+            }
+            self.publishCleanupHistory(result, appending: true, generation: generation)
+        }
+        cleanupHistoryTask = task
+        await task.value
+    }
+
+    func invalidateCleanupHistoryOperations() {
+        cleanupHistoryGeneration &+= 1
+        cleanupHistoryTask?.cancel()
+        cleanupHistoryTask = nil
+        cleanupHistoryState = cleanupHistoryRecords.isEmpty ? .idle : .loaded
     }
 
     func refreshLoginItemState() async {
@@ -1215,6 +1293,38 @@ final class AppModel: DuxCapacitySampling {
                 cleanupExclusionsState = cleanupExclusions == nil ? .idle : .ready
             } else {
                 cleanupExclusionsState = .failed(Self.cleanupExclusionsFailure(for: error))
+            }
+        }
+    }
+
+    private func publishCleanupHistory(
+        _ result: Result<CleanupHistoryPageModel, Error>,
+        appending: Bool,
+        generation: UInt64
+    ) {
+        guard generation == cleanupHistoryGeneration else {
+            return
+        }
+        cleanupHistoryTask = nil
+        switch result {
+        case let .success(page):
+            if appending {
+                let existingIDs = Set(cleanupHistoryRecords.map(\.sessionID))
+                cleanupHistoryRecords.append(
+                    contentsOf: page.records.filter { !existingIDs.contains($0.sessionID) }
+                )
+            } else {
+                cleanupHistoryRecords = page.records
+            }
+            cleanupHistoryNextCursor = page.nextCursor
+            cleanupHistoryState = .loaded
+        case let .failure(error):
+            if error is CancellationError {
+                cleanupHistoryState = cleanupHistoryRecords.isEmpty ? .idle : .loaded
+            } else {
+                cleanupHistoryState = .failed(
+                    (error as? CleanupHistoryServiceError) ?? .invalidResponse
+                )
             }
         }
     }

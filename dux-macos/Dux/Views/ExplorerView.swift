@@ -1,4 +1,5 @@
 import SwiftUI
+import Foundation
 
 struct ExplorerView: View {
     @Environment(\.openSettings) private var openSettings
@@ -35,6 +36,11 @@ struct ExplorerView: View {
                 }
                 .accessibilityIdentifier(ExplorerAccessibility.recommendationsDestination)
 
+                NavigationLink(value: ExplorerDestination.cleanupHistory) {
+                    Label("Cleanup history", systemImage: "clock.arrow.circlepath")
+                }
+                .accessibilityIdentifier(ExplorerAccessibility.cleanupHistoryDestination)
+
                 Section {
                     Button {
                         AppActivation.openSettings(using: openSettings)
@@ -70,6 +76,9 @@ struct ExplorerView: View {
             case .recommendations:
                 ExplorerRecommendationsView(model: model)
                     .navigationTitle("Recommendations")
+            case .cleanupHistory:
+                ExplorerCleanupHistoryView(model: model)
+                    .navigationTitle("Cleanup history")
             }
         }
         .navigationSplitViewStyle(.balanced)
@@ -171,6 +180,213 @@ private struct ExplorerRecommendationsView: View {
             .padding(28)
             .frame(maxWidth: 860, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+}
+
+private struct ExplorerCleanupHistoryView: View {
+    let model: AppModel
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Cleanup history")
+                        .font(.largeTitle.bold())
+                    Text(
+                        "A read-only record of reviewed cleanup outcomes. DUX never treats history as permission to repeat an action."
+                    )
+                    .foregroundStyle(.secondary)
+                }
+
+                historyContent
+            }
+            .padding(28)
+            .frame(maxWidth: 860, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .accessibilityIdentifier(ExplorerAccessibility.cleanupHistory)
+        .task {
+            await model.loadCleanupHistory()
+        }
+    }
+
+    @ViewBuilder
+    private var historyContent: some View {
+        switch model.cleanupHistoryState {
+        case .idle, .loading where model.cleanupHistoryRecords.isEmpty:
+            ProgressView("Loading cleanup history…")
+                .accessibilityIdentifier(ExplorerAccessibility.cleanupHistoryStatus)
+        case let .failed(error):
+            GroupBox {
+                VStack(alignment: .leading, spacing: 10) {
+                    Label("History unavailable", systemImage: "exclamationmark.triangle")
+                        .font(.headline)
+                    Text(cleanupHistoryErrorMessage(error))
+                        .foregroundStyle(.secondary)
+                    Button("Try again") {
+                        Task { await model.loadCleanupHistory() }
+                    }
+                }
+                .accessibilityElement(children: .combine)
+            }
+            .accessibilityIdentifier(ExplorerAccessibility.cleanupHistoryStatus)
+        case .loaded, .loading:
+            if model.cleanupHistoryRecords.isEmpty {
+                ContentUnavailableView(
+                    "No cleanup sessions yet",
+                    systemImage: "clock.arrow.circlepath",
+                    description: Text(
+                        "Reviewed cleanup outcomes will appear here. Scanning and explanations never change files."
+                    )
+                )
+                .accessibilityIdentifier(ExplorerAccessibility.cleanupHistoryStatus)
+            } else {
+                VStack(alignment: .leading, spacing: 12) {
+                    ForEach(model.cleanupHistoryRecords) { record in
+                        CleanupHistoryRow(record: record)
+                    }
+                    if model.cleanupHistoryNextCursor != nil {
+                        Button {
+                            Task { await model.loadMoreCleanupHistory() }
+                        } label: {
+                            Label("Load more history", systemImage: "chevron.down")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .disabled(model.cleanupHistoryState == .loading)
+                        .accessibilityIdentifier(ExplorerAccessibility.cleanupHistoryLoadMore)
+                    }
+                }
+            }
+        }
+    }
+
+    private func cleanupHistoryErrorMessage(
+        _ error: CleanupHistoryServiceError
+    ) -> String {
+        switch error {
+        case .closed: "The storage engine is closed. Reopen Explorer to read history."
+        case .retryable: "The storage engine is busy. Try again shortly."
+        case .incompatibleSchema: "This history was written by a newer DUX version."
+        case .unsafeStorage, .corruptData, .internalState:
+            "History failed its safety checks and was not shown."
+        case .budgetExceeded: "History is temporarily too large to read safely."
+        case .invalidLimit, .invalidCursor, .sessionNotFound, .unavailable, .invalidResponse:
+            "History returned an invalid or unavailable response."
+        }
+    }
+}
+
+private struct CleanupHistoryRow: View {
+    let record: CleanupHistorySessionSummaryModel
+
+    var body: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(alignment: .firstTextBaseline) {
+                    Label(statusTitle, systemImage: statusSymbol)
+                        .font(.headline)
+                    Spacer()
+                    Text(ByteCountFormatter.string(fromByteCount: Int64(clamping: record.estimatedBytes), countStyle: .file))
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                }
+                HStack(spacing: 8) {
+                    Text(modeTitle)
+                    Text("·")
+                    Text(triggerTitle)
+                    Text("·")
+                    Text(record.startedAt.formatted(date: .abbreviated, time: .shortened))
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+                CleanupHistoryStatusBar(counts: record.itemStatusCounts)
+                    .accessibilityIdentifier(ExplorerAccessibility.cleanupHistoryChart)
+                    .accessibilityLabel(Text("Item outcome distribution"))
+                    .accessibilityValue(Text(statusSummary))
+            }
+            .accessibilityElement(children: .contain)
+        }
+        .accessibilityIdentifier("explorer-cleanup-history-row-\(record.sessionID)")
+    }
+
+    private var statusTitle: String {
+        switch record.status {
+        case .planned: "Planned"
+        case .running: "Running"
+        case .recovering: "Recovering"
+        case .completed: "Completed"
+        case .partiallyCompleted: "Partially completed"
+        case .failed: "Failed"
+        case .cancelled: "Cancelled"
+        case .interrupted: "Interrupted"
+        case .rejected: "Rejected"
+        case .dryRun: "Dry run"
+        }
+    }
+
+    private var statusSymbol: String {
+        switch record.status {
+        case .completed: "checkmark.circle.fill"
+        case .partiallyCompleted, .failed, .cancelled, .interrupted: "exclamationmark.circle.fill"
+        case .running, .recovering: "arrow.triangle.2.circlepath"
+        default: "clock"
+        }
+    }
+
+    private var modeTitle: String {
+        switch record.mode {
+        case .dryRun: "Dry run"
+        case .trash: "Trash"
+        case .permanentSafe: "Permanent-safe"
+        case .evictLocalCopy: "Evict local copy"
+        }
+    }
+
+    private var triggerTitle: String {
+        switch record.trigger {
+        case .manual: "Manual"
+        case .lowDisk: "Low disk"
+        case .scheduled: "Scheduled"
+        case .cli: "CLI"
+        }
+    }
+
+    private var statusSummary: String {
+        let counts = record.itemStatusCounts
+        return "\(counts.total) items; \(counts.removed + counts.trashed + counts.evicted) settled; \(counts.failed + counts.outcomeUnknown) uncertain or failed"
+    }
+}
+
+private struct CleanupHistoryStatusBar: View {
+    let counts: CleanupHistoryStatusCounts
+
+    var body: some View {
+        GeometryReader { geometry in
+            let total = max(CGFloat(counts.total), 1)
+            HStack(spacing: 1) {
+                segment(counts.removed + counts.trashed + counts.evicted, color: .green, total: total, width: geometry.size.width)
+                segment(counts.skipped + counts.rejected, color: .orange, total: total, width: geometry.size.width)
+                segment(counts.failed + counts.outcomeUnknown + counts.changedSincePlan, color: .red, total: total, width: geometry.size.width)
+                segment(counts.planned + counts.validating + counts.dryRun + counts.effectStarted + counts.interrupted + counts.unavailable, color: .gray, total: total, width: geometry.size.width)
+            }
+        }
+        .frame(height: 8)
+        .clipShape(Capsule())
+    }
+
+    @ViewBuilder
+    private func segment(
+        _ count: UInt16,
+        color: Color,
+        total: CGFloat,
+        width: CGFloat
+    ) -> some View {
+        if count > 0 {
+            Rectangle()
+                .fill(color)
+                .frame(width: max(2, width * CGFloat(count) / total))
         }
     }
 }

@@ -151,6 +151,53 @@ final class EngineServiceTests: XCTestCase {
         XCTAssertThrowsError(try CleanupHistoryAdapter.map(malformed)) { error in
             XCTAssertEqual(error as? CleanupHistoryServiceError, .invalidResponse)
         }
+
+        let inconsistentCounts = CleanupStatusCounts(
+            planned: 1,
+            validating: 0,
+            dryRun: 0,
+            effectStarted: 0,
+            trashed: 0,
+            removed: 0,
+            evicted: 0,
+            skipped: 0,
+            rejected: 0,
+            failed: 0,
+            changedSincePlan: 0,
+            interrupted: 0,
+            unavailable: 0,
+            outcomeUnknown: 0,
+            total: 0
+        )
+        let inconsistentSummary = CleanupSessionSummary(
+            recordVersion: 1,
+            sessionId: "session:test",
+            planId: "plan:test",
+            format: .legacyIncomplete,
+            sourceScanId: nil,
+            startedAtUnixMs: 1_000,
+            completedAtUnixMs: nil,
+            planCreatedAtUnixMs: nil,
+            planExpiresAtUnixMs: nil,
+            mode: .dryRun,
+            trigger: .manual,
+            status: .dryRun,
+            estimatedBytes: 0,
+            verifiedCapacityDeltaBytes: nil,
+            cancellationRequested: nil,
+            itemTotal: 0,
+            pathTotal: 0,
+            evidenceTotal: 0,
+            itemStatusCounts: inconsistentCounts,
+            pathStatusCounts: emptyCounts
+        )
+        XCTAssertThrowsError(
+            try CleanupHistoryAdapter.map(
+                CleanupHistoryPage(recordVersion: 1, records: [inconsistentSummary], nextCursor: nil)
+            )
+        ) { error in
+            XCTAssertEqual(error as? CleanupHistoryServiceError, .invalidResponse)
+        }
     }
 
     @MainActor

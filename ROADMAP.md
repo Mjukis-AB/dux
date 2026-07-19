@@ -4834,6 +4834,13 @@ Tasks:
     durable outcome metadata and returns typed errors; Swift rejects malformed
     records before they reach presentation. This is intentionally not an
     executor, planner, approval, or exact-session-detail API.
+  - [x] 2026-07-19 slice: consume that boundary in the native Explorer.
+    AppModel loads and generation-fences the history page, supports bounded
+    cursor pagination, and invalidates reads during shutdown. Explorer adds an
+    accessible Cleanup History destination with empty/error/loading states,
+    outcome rows, and a compact color-coded item-status distribution bar.
+    The screen is explicitly read-only: it offers no retry, approval, plan,
+    path, or cleanup action; exact-session detail remains a later slice.
 - [ ] Expand production cleanup session/item history with exact-session detail,
   verified capacity outcomes, and separately confirmed history clearing.
 - [ ] Define and test cross-reboot and Windows-unproven cleanup-journal recovery;

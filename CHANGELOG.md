@@ -1,5 +1,9 @@
 # Changelog
 
+- Added the native Explorer Cleanup History destination. AppModel now
+  generation-fences bounded history loading and pagination, while the UI shows
+  honest lifecycle/mode/trigger/estimate summaries and accessible item-status
+  distribution bars without exposing paths or offering repeat-cleanup actions.
 - Added UniFFI contract v25's bounded, newest-first cleanup-history summary
   feed. EngineService now exposes path-free lifecycle, mode/trigger, estimate,
   optional verified capacity delta, cancellation, and status-count observations
