@@ -15,6 +15,8 @@ use tempfile::TempDir;
 
 #[cfg(target_os = "macos")]
 use super::cargo_code_signature_macos::inspect_cargo_code_signature;
+#[cfg(target_os = "macos")]
+use super::rule_scope_grant::{RuleScopeGrantError, authorize_rust_target};
 use super::rust_target::validate_live_rust_target_for_test;
 use super::rust_target_cargo::{
     CargoMetadataValidationError, CargoOutputStream, observe_cargo_executable,
@@ -29,7 +31,7 @@ use super::rust_target_cargo::{
     validate_cargo_metadata_with_enrollment_hook_for_test,
 };
 use super::rust_target_tests::{CARGO_CACHE_TAG_SIGNATURE, Fixture};
-use crate::domain::BlockReason;
+use crate::domain::{BlockReason, CandidateId};
 
 #[cfg(target_os = "macos")]
 use crate::path_validation::{TrustedHomeMountWitness, capture_scan_root, validate_scan_root};
@@ -369,6 +371,89 @@ fn cargo_provenance_can_bind_home_mount_without_clearing_protected_path() {
     assert!(evidence.protected_path_is_still_unresolved());
     assert!(evidence.revalidate().is_ok());
     evidence.release().unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn cargo_boundary_join_requires_exact_candidate_target_and_read_set() {
+    let Some(fixture) = Fixture::try_in_current_account_home(CARGO_CACHE_TAG_SIGNATURE) else {
+        eprintln!("skipping home-bound Cargo planning grant: current home is not writable");
+        return;
+    };
+    let candidate = fixture.candidate();
+    let live = validate_live_rust_target_for_test(fixture.source(), &candidate).unwrap();
+    let target = live.target().clone();
+    let fake = FakeCargo::new(&valid_metadata_action(&fixture));
+    let witness = validate_cargo_metadata(live, &fake.observe()).unwrap();
+    let provenance = witness.into_planning_provenance().unwrap();
+    let scan_root = capture_scan_root(validate_scan_root(&fixture.root).unwrap()).unwrap();
+    let location = TrustedHomeMountWitness::capture(&scan_root).unwrap();
+    let boundary = provenance.into_rule_boundary_evidence(location).unwrap();
+
+    let grant = authorize_rust_target(
+        boundary,
+        candidate.source_scan_id(),
+        candidate.id(),
+        &scan_root,
+        target,
+        candidate.rule(),
+    )
+    .unwrap();
+    assert!(grant.revalidate().is_ok());
+    grant.release();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn cargo_boundary_join_rejects_foreign_candidate_and_read_set_drift() {
+    let Some(fixture) = Fixture::try_in_current_account_home(CARGO_CACHE_TAG_SIGNATURE) else {
+        eprintln!("skipping home-bound Cargo planning grant: current home is not writable");
+        return;
+    };
+    let candidate = fixture.candidate();
+    let live = validate_live_rust_target_for_test(fixture.source(), &candidate).unwrap();
+    let target = live.target().clone();
+    let fake = FakeCargo::new(&valid_metadata_action(&fixture));
+    let witness = validate_cargo_metadata(live, &fake.observe()).unwrap();
+    let provenance = witness.into_planning_provenance().unwrap();
+    let scan_root = capture_scan_root(validate_scan_root(&fixture.root).unwrap()).unwrap();
+    let location = TrustedHomeMountWitness::capture(&scan_root).unwrap();
+    let boundary = provenance.into_rule_boundary_evidence(location).unwrap();
+
+    let foreign_candidate = CandidateId::new("candidate:foreign").unwrap();
+    assert!(matches!(
+        authorize_rust_target(
+            boundary,
+            candidate.source_scan_id(),
+            &foreign_candidate,
+            &scan_root,
+            target,
+            candidate.rule(),
+        ),
+        Err(RuleScopeGrantError::CargoBoundaryMismatch)
+    ));
+
+    let live = validate_live_rust_target_for_test(fixture.source(), &candidate).unwrap();
+    let target = live.target().clone();
+    let witness = validate_cargo_metadata(live, &fake.observe()).unwrap();
+    let provenance = witness.into_planning_provenance().unwrap();
+    let location = TrustedHomeMountWitness::capture(&scan_root).unwrap();
+    let boundary = provenance.into_rule_boundary_evidence(location).unwrap();
+    let grant = authorize_rust_target(
+        boundary,
+        candidate.source_scan_id(),
+        candidate.id(),
+        &scan_root,
+        target,
+        candidate.rule(),
+    )
+    .unwrap();
+    fs::write(&fixture.manifest, "[package]\nname = \"changed\"\n").unwrap();
+    assert!(matches!(
+        grant.revalidate(),
+        Err(RuleScopeGrantError::CargoBoundary(_))
+    ));
+    grant.release();
 }
 
 #[test]

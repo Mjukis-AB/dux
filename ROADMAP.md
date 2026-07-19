@@ -4515,6 +4515,19 @@ Tasks:
       persistence, FFI, schedule, or effect method, so existing candidates
       still retain `ProtectedPath`; process/descendant coverage and the plan
       and executor joins remain open.
+    - [x] 2026-07-19 slice: bind the exact Cargo/read-set witness into a
+      private Rust-target planning grant. The grant consumes retained Cargo
+      boundary evidence, exact source-scan/candidate identity, current
+      home/mount boundary, target snapshot, and requested/canonical
+      `ProtectedRootRegistry::NoTextualMatch` policy evidence. Revalidation
+      repeats the Cargo read-set, executable, account, mount, boundary,
+      policy, and target checks; foreign candidates, target replacement,
+      policy drift, and manifest/read-set changes fail closed with path-free
+      errors. The grant remains non-Clone and exposes only revalidation and
+      release: it cannot clear `ProtectedPath`, construct a plan, approve,
+      schedule, cross FFI, or perform an effect. Generic no-Cargo fixtures
+      are explicitly test-only; production Rust-target authorization cannot
+      bypass the Cargo join.
 - [x] Implement candidate groups and overlap resolution. Completed 2026-07-19:
   deterministic grouping and conservative overlap resolution are now consumed
   by exact-path review. Equivalent observations coalesce by stable candidate

@@ -8,7 +8,11 @@
 
 use thiserror::Error;
 
+#[cfg(unix)]
+use super::rust_target_cargo::{RustTargetRuleBoundaryError, RustTargetRuleBoundaryEvidence};
 use crate::domain::RuleRef;
+#[cfg(unix)]
+use crate::domain::{CandidateId, ScanId};
 use crate::path_validation::{
     CanonicalPathError, CanonicalPathSnapshot, CanonicalScanRoot, ProtectedRootDisposition,
     ProtectedRootError, ProtectedRootRegistry, TrustedHomeMountError, TrustedHomeMountWitness,
@@ -33,6 +37,10 @@ pub(crate) struct RuleScopeAuthorization {
     target: CanonicalPathSnapshot,
     location: TrustedHomeMountWitness,
     registry: ProtectedRootRegistry,
+    #[cfg(unix)]
+    cargo_boundary: Option<RustTargetRuleBoundaryEvidence>,
+    #[cfg(test)]
+    test_only_without_cargo: bool,
 }
 
 #[derive(Debug, Error)]
@@ -49,6 +57,15 @@ pub(crate) enum RuleScopeGrantError {
     BoundaryMismatch,
     #[error("the target is not free of textual protected-root requirements")]
     ProtectedPath,
+    #[cfg(unix)]
+    #[error("the Rust-target grant requires the retained Cargo planning boundary")]
+    CargoProvenanceMissing,
+    #[cfg(unix)]
+    #[error("the retained Cargo planning boundary does not match the reviewed target")]
+    CargoBoundaryMismatch,
+    #[cfg(unix)]
+    #[error("the retained Cargo planning boundary could not be revalidated: {0}")]
+    CargoBoundary(#[source] RustTargetRuleBoundaryError),
     #[error("the authorized target changed before revalidation completed")]
     ChangedSinceAuthorization,
     #[error(transparent)]
@@ -58,6 +75,7 @@ pub(crate) enum RuleScopeGrantError {
 }
 
 /// Mint a grant for an exact target snapshot and a known production rule.
+#[cfg(test)]
 pub(crate) fn authorize_rule_target(
     scan_root: &CanonicalScanRoot,
     target: CanonicalPathSnapshot,
@@ -73,6 +91,48 @@ pub(crate) fn authorize_rule_target(
         target,
         location,
         registry,
+        #[cfg(unix)]
+        cargo_boundary: None,
+        #[cfg(test)]
+        test_only_without_cargo: true,
+    };
+    authorization.validate_current()?;
+    Ok(authorization)
+}
+
+/// Consume the exact Cargo/read-set rule-boundary evidence into the next
+/// private planning token. This join is still observational: it cannot clear
+/// `ProtectedPath`, create a plan, approve, schedule, cross FFI, or mutate.
+#[cfg(unix)]
+pub(crate) fn authorize_rust_target(
+    boundary: RustTargetRuleBoundaryEvidence,
+    source_scan_id: &ScanId,
+    candidate_id: &CandidateId,
+    scan_root: &CanonicalScanRoot,
+    target: CanonicalPathSnapshot,
+    rule: &RuleRef,
+) -> Result<RuleScopeAuthorization, RuleScopeGrantError> {
+    if rule.id().as_str() != RUST_TARGET_RULE || rule.revision().get() != SAFE_RULE_REVISION {
+        return Err(RuleScopeGrantError::UnsupportedRule);
+    }
+    boundary
+        .revalidate()
+        .map_err(RuleScopeGrantError::CargoBoundary)?;
+    if !boundary.matches_target_binding(source_scan_id, candidate_id, scan_root, &target) {
+        return Err(RuleScopeGrantError::CargoBoundaryMismatch);
+    }
+    let location = TrustedHomeMountWitness::capture(scan_root)?;
+    let registry = ProtectedRootRegistry::from_current_account()?;
+    let authorization = RuleScopeAuthorization {
+        revision: TRUSTED_RULE_SCOPE_GRANT_REVISION,
+        rule: rule.clone(),
+        scan_root: scan_root.clone(),
+        target,
+        location,
+        registry,
+        cargo_boundary: Some(boundary),
+        #[cfg(test)]
+        test_only_without_cargo: false,
     };
     authorization.validate_current()?;
     Ok(authorization)
@@ -110,6 +170,25 @@ impl RuleScopeAuthorization {
             return Err(RuleScopeGrantError::UnsupportedRevision);
         }
         validate_rule(&self.rule)?;
+        #[cfg(unix)]
+        if self.rule.id().as_str() == RUST_TARGET_RULE {
+            #[cfg(test)]
+            let test_only_without_cargo = self.test_only_without_cargo;
+            #[cfg(not(test))]
+            let test_only_without_cargo = false;
+            if !test_only_without_cargo {
+                let cargo_boundary = self
+                    .cargo_boundary
+                    .as_ref()
+                    .ok_or(RuleScopeGrantError::CargoProvenanceMissing)?;
+                cargo_boundary
+                    .revalidate()
+                    .map_err(RuleScopeGrantError::CargoBoundary)?;
+                if !cargo_boundary.matches_bound_target(&self.scan_root, &self.target) {
+                    return Err(RuleScopeGrantError::CargoBoundaryMismatch);
+                }
+            }
+        }
         self.location
             .revalidate()
             .map_err(RuleScopeGrantError::Location)?;

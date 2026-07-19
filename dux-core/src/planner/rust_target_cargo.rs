@@ -57,10 +57,10 @@ use super::rust_target::{
 use super::rust_target_source::RustTargetSourceError;
 use crate::domain::{CandidateId, ScanId};
 use crate::path_validation::{
-    CanonicalFileDigestError, CanonicalFileDigestSnapshot, CanonicalPathError, CanonicalScanRoot,
-    FilesystemBoundarySnapshot, FilesystemEntryKind, LexicalPathError, TrustedHomeMountError,
-    TrustedHomeMountWitness, capture_filesystem_boundary, capture_regular_file_sha256,
-    capture_scan_root, validate_cleanup_path, validate_scan_root,
+    CanonicalFileDigestError, CanonicalFileDigestSnapshot, CanonicalPathError,
+    CanonicalPathSnapshot, CanonicalScanRoot, FilesystemBoundarySnapshot, FilesystemEntryKind,
+    LexicalPathError, TrustedHomeMountError, TrustedHomeMountWitness, capture_filesystem_boundary,
+    capture_regular_file_sha256, capture_scan_root, validate_cleanup_path, validate_scan_root,
 };
 use crate::persistence::{
     CARGO_ENROLLMENT_SUPPORTED_RELEASE, CargoEnrollmentSetting, CargoEnrollmentSettingUpdate,
@@ -520,6 +520,40 @@ impl RustTargetRuleBoundaryEvidence {
     pub(crate) fn protected_path_is_still_unresolved(&self) -> bool {
         let _ = &self.protected_path_still_unresolved;
         true
+    }
+
+    /// Check that this consumed Cargo boundary still names the exact durable
+    /// candidate and live target selected by the planner. The path-bearing
+    /// values are accepted only at this private join and are never exposed by
+    /// the resulting grant.
+    pub(crate) fn matches_target_binding(
+        &self,
+        source_scan_id: &ScanId,
+        candidate_id: &CandidateId,
+        scan_root: &CanonicalScanRoot,
+        target: &CanonicalPathSnapshot,
+    ) -> bool {
+        let live = &self.provenance.witness.live;
+        live.source_scan_id() == source_scan_id
+            && live.candidate_id() == candidate_id
+            && live.scan_root() == scan_root
+            && live.target() == target
+            && self
+                .location
+                .matches_scan_boundary(&self.provenance.witness.boundary)
+    }
+
+    pub(crate) fn matches_bound_target(
+        &self,
+        scan_root: &CanonicalScanRoot,
+        target: &CanonicalPathSnapshot,
+    ) -> bool {
+        let live = &self.provenance.witness.live;
+        live.scan_root() == scan_root
+            && live.target() == target
+            && self
+                .location
+                .matches_scan_boundary(&self.provenance.witness.boundary)
     }
 
     pub(crate) fn revalidate(&self) -> Result<(), RustTargetRuleBoundaryError> {

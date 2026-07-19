@@ -1,5 +1,11 @@
 # Changelog
 
+- Added a private Cargo-bound Rust-target planning grant. It joins the exact
+  Cargo/read-set witness, source candidate identity, target snapshot,
+  current-account home/mount boundary, and protected-root no-textual-match
+  assessment with repeated fail-closed revalidation. The grant remains
+  non-actionable: it cannot clear `ProtectedPath`, create a plan, approve,
+  schedule, cross FFI, or perform cleanup.
 - Added the first bounded restart-recovery seam for pending deterministic
   candidate evaluation. Core selects at most one oldest pending row, replays
   only its checksummed immutable snapshot, verifies evaluator/catalog/context

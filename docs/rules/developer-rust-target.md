@@ -453,6 +453,18 @@ establish process inactivity, remove `ProtectedPath`, or expose a
 plan/FFI/execution conversion. Final authority still needs retained-handle or
 generation evidence strong enough to address inode reuse.
 
+## Cargo-bound planning grant
+
+The next private join consumes the complete Cargo/read-set boundary together
+with the exact source scan, candidate, target snapshot, current-account
+home/mount boundary, and requested/canonical protected-root assessment. The
+grant repeats every retained Cargo and filesystem fence and fails closed on
+foreign identities, target replacement, manifest/read-set drift, policy drift,
+or boundary changes. Production cannot mint a Rust-target scope token without
+this Cargo provenance. It remains non-actionable: the candidate retains its
+`ProtectedPath` blocker and the grant cannot create a plan, approval, schedule,
+FFI value, or cleanup effect.
+
 ## Exact snapshot evaluator replay
 
 A fourth 2026-07-18 checkpoint now replays the complete current candidate batch

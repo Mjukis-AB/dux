@@ -616,16 +616,17 @@ fn matches_snapshot_ancestors(
             .all(|(live, snapshot)| matches_snapshot_identity(live.identity(), *snapshot))
 }
 
-#[cfg(test)]
 impl RustTargetLiveWitness {
     pub(super) fn target(&self) -> &CanonicalPathSnapshot {
         &self.target
     }
 
+    #[cfg(test)]
     pub(super) fn manifest(&self) -> &CanonicalPathSnapshot {
         self.manifest.path()
     }
 
+    #[cfg(test)]
     pub(super) fn cache_tag(&self) -> &CanonicalFilePrefixSnapshot {
         &self.cache_tag
     }

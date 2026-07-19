@@ -660,6 +660,18 @@ closed. The resulting plan retains the authorization tokens for a future
 executor-time revalidation and exposes no approval, journal, FFI, scheduling,
 or effect operation.
 
+The Rust-target authorization path is now bound to the exact Cargo planning
+boundary rather than to location and textual policy alone. A private,
+non-cloneable grant consumes the retained Cargo/read-set witness, exact source
+scan and candidate identities, the canonical target snapshot, current-account
+home/mount evidence, and a fresh requested/canonical protected-root
+`NoTextualMatch` assessment. Its revalidation repeats those checks and rejects
+foreign candidates, target replacement, manifest/read-set drift, boundary
+changes, or policy changes with path-free errors. Production cannot mint a
+Rust-target scope token without this Cargo join. The grant remains observation
+only: `ProtectedPath` is retained, and no plan, approval, scheduling, FFI, or
+effect capability is added.
+
 ### 6.3 Protected-root and sensitive-category policy
 
 Denies override every allow or rule match. Protection evaluation covers the
