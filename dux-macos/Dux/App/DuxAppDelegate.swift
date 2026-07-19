@@ -16,14 +16,19 @@ final class DuxAutomaticTerminationLease {
 
     private let controller: any DuxAutomaticTerminationControlling
     private var isHeld = false
+    private var disableCount = 0
 
     init(controller: any DuxAutomaticTerminationControlling = ProcessInfo.processInfo) {
         self.controller = controller
     }
 
     func acquire() {
-        controller.automaticTerminationSupportEnabled = true
-        controller.disableAutomaticTermination(Self.reason)
+        // Do not opt this LSUIElement agent into automatic termination. The
+        // support flag is currently not a disable switch; setting it to true
+        // makes AppKit/TAL eligible to retire the process after the transient
+        // status-item window closes. The counter calls remain balanced below.
+        controller.automaticTerminationSupportEnabled = false
+        disableAutomaticTermination()
         isHeld = true
     }
 
@@ -31,19 +36,27 @@ final class DuxAutomaticTerminationLease {
         guard isHeld else {
             return
         }
-        // AppKit can reset the support flag while it tears down and restores
-        // MenuBarExtra's transient window. Restore that flag, but do not call
-        // disableAutomaticTermination again: ProcessInfo tracks disables as a
-        // counter and release() owns exactly one matching enable.
-        controller.automaticTerminationSupportEnabled = true
+        // AppKit can reset the automatic-termination opt-out while it tears
+        // down and restores MenuBarExtra's transient window. Reassert the
+        // opt-out after each scene turn. Every increment is paired in release.
+        controller.automaticTerminationSupportEnabled = false
+        disableAutomaticTermination()
     }
 
     func release() {
         guard isHeld else {
             return
         }
-        controller.enableAutomaticTermination(Self.reason)
+        while disableCount > 0 {
+            controller.enableAutomaticTermination(Self.reason)
+            disableCount -= 1
+        }
         isHeld = false
+    }
+
+    private func disableAutomaticTermination() {
+        controller.disableAutomaticTermination(Self.reason)
+        disableCount += 1
     }
 }
 

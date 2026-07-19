@@ -3,7 +3,7 @@ import XCTest
 
 @MainActor
 final class DuxAppDelegateTests: XCTestCase {
-    func testApplicationLifetimeDisablesAutomaticTerminationUntilShutdown() {
+    func testApplicationLifetimeOptsOutOfAutomaticTerminationUntilShutdown() {
         let controller = AutomaticTerminationControllerSpy()
         let lease = DuxAutomaticTerminationLease(controller: controller)
         let delegate = DuxAppDelegate(
@@ -14,15 +14,14 @@ final class DuxAppDelegateTests: XCTestCase {
         delegate.applicationDidFinishLaunching(
             Notification(name: NSApplication.didFinishLaunchingNotification)
         )
-        XCTAssertTrue(controller.automaticTerminationSupportEnabled)
-        XCTAssertEqual(controller.events, ["support:true", "disable"])
-        XCTAssertEqual(controller.disabledReasons.count, 1)
-        XCTAssertTrue(controller.enabledReasons.isEmpty)
+        XCTAssertFalse(controller.automaticTerminationSupportEnabled)
+        XCTAssertEqual(controller.events, ["support:false", "disable"])
 
         delegate.applicationWillTerminate(
             Notification(name: NSApplication.willTerminateNotification)
         )
-        XCTAssertEqual(controller.enabledReasons, controller.disabledReasons)
+        XCTAssertFalse(controller.automaticTerminationSupportEnabled)
+        XCTAssertEqual(controller.events, ["support:false", "disable", "enable"])
     }
 
     func testAutomaticTerminationLeaseCanBeReassertedAfterSceneRestoration() {
@@ -33,15 +32,34 @@ final class DuxAppDelegateTests: XCTestCase {
         XCTAssertTrue(controller.events.isEmpty)
 
         lease.acquire()
-        controller.automaticTerminationSupportEnabled = false
+        controller.automaticTerminationSupportEnabled = true
         lease.reassert()
 
         XCTAssertEqual(
             controller.events,
-            ["support:true", "disable", "support:false", "support:true"]
+            ["support:false", "disable", "support:true", "support:false", "disable"]
         )
-        XCTAssertTrue(controller.automaticTerminationSupportEnabled)
-        XCTAssertEqual(controller.disabledReasons.count, 1)
+        XCTAssertFalse(controller.automaticTerminationSupportEnabled)
+    }
+
+    func testRepeatedSceneReassertionsBalanceEveryTerminationOptOut() {
+        let controller = AutomaticTerminationControllerSpy()
+        let lease = DuxAutomaticTerminationLease(controller: controller)
+
+        lease.acquire()
+        lease.reassert()
+        lease.reassert()
+        lease.release()
+
+        XCTAssertEqual(
+            controller.events,
+            [
+                "support:false", "disable",
+                "support:false", "disable",
+                "support:false", "disable",
+                "enable", "enable", "enable",
+            ]
+        )
     }
 
     func testTerminationGateStartsExactlyOneShutdown() {
@@ -120,7 +138,7 @@ final class DuxAppDelegateTests: XCTestCase {
         )
         XCTAssertEqual(
             controller.events,
-            ["support:true", "disable", "support:true"]
+            ["support:false", "disable", "support:false", "disable"]
         )
     }
 
@@ -139,7 +157,7 @@ final class DuxAppDelegateTests: XCTestCase {
         )
         XCTAssertEqual(
             controller.events,
-            ["support:true", "disable", "support:true"]
+            ["support:false", "disable", "support:false", "disable"]
         )
     }
 
@@ -158,7 +176,7 @@ final class DuxAppDelegateTests: XCTestCase {
 
         XCTAssertEqual(
             controller.events,
-            ["support:true", "disable", "support:true"]
+            ["support:false", "disable", "support:false", "disable"]
         )
     }
 
@@ -228,16 +246,15 @@ private final class AutomaticTerminationControllerSpy: DuxAutomaticTerminationCo
         }
     }
     private(set) var events: [String] = []
-    private(set) var disabledReasons: [String] = []
-    private(set) var enabledReasons: [String] = []
 
     func disableAutomaticTermination(_ reason: String) {
+        _ = reason
         events.append("disable")
-        disabledReasons.append(reason)
     }
 
     func enableAutomaticTermination(_ reason: String) {
-        enabledReasons.append(reason)
+        _ = reason
+        events.append("enable")
     }
 }
 

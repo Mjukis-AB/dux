@@ -1,5 +1,9 @@
 # Changelog
 
+- Fixed menu-bar scene teardown eligibility. DUX no longer opts its agent process
+  into AppKit automatic termination, and its repeated scene reassertions keep
+  every counter-based opt-out balanced, so opening and closing the popover cannot
+  make DUX disappear as if it crashed.
 - Hardened the permanent-safe executor admission lifecycle. Journal validation
   is durable before live Rust-target evidence is rebuilt, and changed targets,
   stale approvals, or journal failures now receive bounded terminal validation
