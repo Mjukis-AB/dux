@@ -4527,7 +4527,13 @@ Tasks:
     missing/duplicate/mismatched authorizations, incompatible candidates, and
     all existing domain validation failures remain fail-closed. The resulting
     plan retains its authorization tokens for future executor-time
-    revalidation; it has no approval, journal, FFI, scheduling, or effect path.
+    revalidation; it has no journal, FFI, scheduling, or effect path.
+  - [x] 2026-07-19 slice: add a crate-private explicit approval capability for
+    trusted permanent-safe plans. Approval is rejected at or after the frozen
+    plan expiry and revalidates every retained rule-scope authorization before
+    issuing a non-cloneable approved wrapper. The wrapper can revalidate its
+    expiry and grants, but cannot create journal rows, cross FFI, schedule, or
+    invoke a filesystem effect.
   - [x] 2026-07-18 slice: add a sealed planner-owned evidence boundary that
     requires a code-owned canonical scan-root witness and runs every selected
     target through lossless lexical validation plus no-follow live identity

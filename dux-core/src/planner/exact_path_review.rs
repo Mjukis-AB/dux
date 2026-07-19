@@ -156,6 +156,16 @@ pub(crate) struct TrustedReviewedCleanupPlan {
     authorizations: Vec<RuleScopeAuthorization>,
 }
 
+/// An explicitly approved reviewed plan. This capability is still crate
+/// private and deliberately has no journal, FFI, scheduling, or effect method;
+/// it only proves that a caller opted in while the plan and its authorizations
+/// were current.
+#[must_use = "approved plans must be explicitly handed to a future execution boundary"]
+pub(crate) struct ApprovedTrustedReviewedCleanupPlan {
+    reviewed: TrustedReviewedCleanupPlan,
+    approved_at: std::time::SystemTime,
+}
+
 impl TrustedReviewedCleanupPlan {
     pub(crate) fn plan(&self) -> &CleanupPlan {
         &self.plan
@@ -168,6 +178,62 @@ impl TrustedReviewedCleanupPlan {
                 .map_err(ExactPathPlanError::Authorization)?;
         }
         Ok(())
+    }
+
+    pub(crate) fn release(self) {}
+
+    pub(crate) fn approve(
+        self,
+        approved_at: std::time::SystemTime,
+    ) -> Result<ApprovedTrustedReviewedCleanupPlan, ExactPathApprovalError> {
+        if self.plan.has_expired_at(approved_at) {
+            return Err(ExactPathApprovalError::Expired);
+        }
+        self.revalidate().map_err(|error| match error {
+            ExactPathPlanError::Authorization(source) => {
+                ExactPathApprovalError::Authorization(source)
+            }
+            ExactPathPlanError::UnsupportedMode
+            | ExactPathPlanError::AuthorizationCount { .. }
+            | ExactPathPlanError::AuthorizationMismatch
+            | ExactPathPlanError::Plan(_) => {
+                unreachable!("trusted plan already passed construction validation")
+            }
+        })?;
+        Ok(ApprovedTrustedReviewedCleanupPlan {
+            reviewed: self,
+            approved_at,
+        })
+    }
+}
+
+impl ApprovedTrustedReviewedCleanupPlan {
+    pub(crate) fn plan(&self) -> &CleanupPlan {
+        self.reviewed.plan()
+    }
+
+    pub(crate) fn approved_at(&self) -> std::time::SystemTime {
+        self.approved_at
+    }
+
+    pub(crate) fn revalidate(
+        &self,
+        now: std::time::SystemTime,
+    ) -> Result<(), ExactPathApprovalError> {
+        if self.plan().has_expired_at(now) {
+            return Err(ExactPathApprovalError::Expired);
+        }
+        self.reviewed.revalidate().map_err(|error| match error {
+            ExactPathPlanError::Authorization(source) => {
+                ExactPathApprovalError::Authorization(source)
+            }
+            ExactPathPlanError::UnsupportedMode
+            | ExactPathPlanError::AuthorizationCount { .. }
+            | ExactPathPlanError::AuthorizationMismatch
+            | ExactPathPlanError::Plan(_) => {
+                unreachable!("trusted plan already passed construction validation")
+            }
+        })
     }
 
     pub(crate) fn release(self) {}
@@ -364,6 +430,14 @@ pub(crate) enum ExactPathPlanError {
     Authorization(#[source] RuleScopeGrantError),
     #[error("domain cleanup plan validation failed: {0}")]
     Plan(#[source] CleanupPlanValidationError),
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum ExactPathApprovalError {
+    #[error("trusted cleanup plan has expired")]
+    Expired,
+    #[error("trusted rule-scope authorization failed: {0}")]
+    Authorization(#[source] RuleScopeGrantError),
 }
 
 /// Capture exact, current path evidence for a selected candidate set.

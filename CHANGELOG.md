@@ -91,6 +91,9 @@ All notable changes to DUX will be documented in this file.
 - Exact-path reviews now retain the immutable candidate-grouping and overlap
   witness that selected their items, preventing downstream reconstruction from
   a reordered candidate slice while keeping approval and execution sealed.
+- Added a crate-private, expiry-bound approval capability for trusted
+  permanent-safe plans. Approval revalidates retained rule-scope grants and
+  still cannot reach persistence, FFI, scheduling, or filesystem effects.
 - Continued Milestone 5 with journal-fenced, one-shot core Trash admission.
   The opaque Explorer witness must match the exact frozen journal path, then
   repeats no-follow identity checks, records and immediately revalidates an

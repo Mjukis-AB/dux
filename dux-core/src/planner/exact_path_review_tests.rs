@@ -388,7 +388,40 @@ fn trusted_plan_consumes_matching_scope_authorization_and_revalidates() {
         )
         .unwrap();
     assert_eq!(plan.plan().mode(), CleanupMode::PermanentSafe);
-    plan.revalidate().unwrap();
+    let approved = plan.approve(SystemTime::now()).unwrap();
+    assert_eq!(approved.plan().mode(), CleanupMode::PermanentSafe);
+    assert!(approved.approved_at() <= SystemTime::now());
+    approved.revalidate(SystemTime::now()).unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn trusted_plan_cannot_be_approved_after_expiration() {
+    let (_directory, root_path, scan_root) = root();
+    let candidate = trusted_candidate(root_path.join("cache/file"));
+    let review = review_exact_paths(
+        &scan_root,
+        std::slice::from_ref(&candidate),
+        CleanupMode::PermanentSafe,
+    )
+    .unwrap();
+    let authorization = authorize_rule_target(
+        &scan_root,
+        review.items()[0].paths()[0].snapshot().clone(),
+        review.items()[0].rule(),
+    )
+    .unwrap();
+    let plan = review
+        .into_trusted_permanent_plan(
+            crate::domain::CleanupPlanId::new("plan:expired").unwrap(),
+            UNIX_EPOCH,
+            vec![authorization],
+        )
+        .unwrap();
+    assert!(matches!(
+        plan.approve(UNIX_EPOCH + crate::domain::CLEANUP_PLAN_VALIDITY),
+        Err(ExactPathApprovalError::Expired)
+    ));
 }
 
 #[test]
