@@ -8,11 +8,27 @@ enum NotificationServiceError: Error, Equatable, Sendable {
 protocol NotificationServing: Sendable {
     func authorizationStatus() async -> NotificationAuthorizationStatus
     func requestAuthorization() async throws
+    func deliverDiskPressure(
+        _ delivery: DiskPressureNotificationDelivery
+    ) async throws
+}
+
+extension NotificationServing {
+    func deliverDiskPressure(
+        _: DiskPressureNotificationDelivery
+    ) async throws {
+        throw NotificationServiceError.unexpected
+    }
 }
 
 protocol UserNotificationCenterClient: Sendable {
     func authorizationStatus() async -> NotificationAuthorizationStatus
     func requestAuthorization(options: UNAuthorizationOptions) async throws
+    func deliver(_ delivery: DiskPressureNotificationDelivery) async throws
+}
+
+extension UserNotificationCenterClient {
+    func deliver(_: DiskPressureNotificationDelivery) async throws {}
 }
 
 actor NotificationService: NotificationServing {
@@ -36,6 +52,16 @@ actor NotificationService: NotificationServing {
             return
         }
         try await center.requestAuthorization(options: Self.authorizationOptions)
+    }
+
+    func deliverDiskPressure(
+        _ delivery: DiskPressureNotificationDelivery
+    ) async throws {
+        do {
+            try await center.deliver(delivery)
+        } catch {
+            throw Self.map(error)
+        }
     }
 
     nonisolated static func map(
@@ -80,6 +106,28 @@ private actor SystemUserNotificationCenterClient: UserNotificationCenterClient {
             ) { _, error in
                 if let error {
                     continuation.resume(throwing: NotificationService.map(error))
+                } else {
+                    continuation.resume(returning: ())
+                }
+            }
+        }
+    }
+
+    func deliver(_ delivery: DiskPressureNotificationDelivery) async throws {
+        let content = UNMutableNotificationContent()
+        content.title = delivery.title
+        content.body = delivery.body
+        content.userInfo = delivery.userInfo
+        let request = UNNotificationRequest(
+            identifier: delivery.identifier,
+            content: content,
+            trigger: nil
+        )
+        try await withCheckedThrowingContinuation {
+            (continuation: CheckedContinuation<Void, Error>) in
+            UNUserNotificationCenter.current().add(request) { error in
+                if let error {
+                    continuation.resume(throwing: error)
                 } else {
                     continuation.resume(returning: ())
                 }

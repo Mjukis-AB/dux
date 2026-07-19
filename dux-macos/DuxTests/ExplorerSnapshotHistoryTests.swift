@@ -404,7 +404,7 @@ final class MacOSTrashPlatformAdapterTests: XCTestCase {
     func testCoreIssuedRequestRejectsWrongEncodingBeforeFoundation() {
         let fileManager = RecordingTrashFileManager()
         let adapter = MacOSTrashPlatformAdapter(fileManager: fileManager)
-        let request = RecordingTrashEffectRequest(encoding: .windowsUTF16LittleEndian)
+        let request = RecordingTrashEffectRequest(encoding: .windowsUtf16LittleEndian)
 
         XCTAssertEqual(adapter.trash(request: request), .failed)
         XCTAssertEqual(fileManager.calls, 0)

@@ -89,6 +89,27 @@ final class NotificationAuthorizationTests: XCTestCase {
         )
     }
 
+    func testDiskPressureDeliveryPreservesRecommendationsPayload() async throws {
+        let center = UserNotificationCenterClientSpy(status: .authorized)
+        let service = NotificationService(center: center)
+        let delivery = DiskPressureNotificationDelivery(
+            identifier: "dux.disk-pressure.warning.volume:macos:test",
+            title: "Storage space is getting low",
+            body: "Open DUX Recommendations to review safe ways to reclaim space.",
+            userInfo: [
+                "recordVersion": "1",
+                "route": "recommendations",
+                "stableVolumeID": "volume:macos:test",
+                "urgency": "warning",
+            ]
+        )
+
+        try await service.deliverDiskPressure(delivery)
+
+        let deliveries = await center.deliveries()
+        XCTAssertEqual(deliveries, [delivery])
+    }
+
     func testEveryStatusHasHonestPresentationAndActions() {
         let cases:
             [(
@@ -414,6 +435,7 @@ private actor UserNotificationCenterClientSpy: UserNotificationCenterClient {
 
     private let currentStatus: NotificationAuthorizationStatus
     private var callCounts = CallCounts()
+    private var delivered: [DiskPressureNotificationDelivery] = []
 
     init(status: NotificationAuthorizationStatus) {
         currentStatus = status
@@ -427,6 +449,14 @@ private actor UserNotificationCenterClientSpy: UserNotificationCenterClient {
     func requestAuthorization(options: UNAuthorizationOptions) {
         callCounts.request += 1
         callCounts.optionsRawValue = options.rawValue
+    }
+
+    func deliver(_ delivery: DiskPressureNotificationDelivery) {
+        delivered.append(delivery)
+    }
+
+    func deliveries() -> [DiskPressureNotificationDelivery] {
+        delivered
     }
 
     func calls() -> CallCounts {

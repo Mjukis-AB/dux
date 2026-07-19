@@ -1,3 +1,4 @@
+@testable import DUX
 import XCTest
 
 final class ExplorerCandidateDetailTests: XCTestCase {

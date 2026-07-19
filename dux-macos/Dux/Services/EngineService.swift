@@ -216,6 +216,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
                 return snapshot.applying(
                     stableVolumeID: status.stableVolumeId,
                     pressure: Self.pressure(status.pressure),
+                    previousDurablePressure: status.previousDurablePressure.map(Self.pressure),
                     criticalBoundaryBytes: status.criticalBoundaryBytes,
                     warningBoundaryBytes: status.warningBoundaryBytes,
                     historyDisposition: Self.historyDisposition(status.historyDisposition),

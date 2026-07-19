@@ -39,10 +39,47 @@ struct VolumeCapacitySnapshot: Equatable, Sendable {
     let effectiveAvailableBytes: UInt64
     let availabilityBasis: VolumeCapacityBasis
     let pressure: DiskPressureLevel
+    let previousDurablePressure: DiskPressureLevel?
     let criticalBoundaryBytes: UInt64?
     let warningBoundaryBytes: UInt64?
     let historyDisposition: VolumeCapacityHistoryDisposition?
     let sampledAt: Date
+
+    init(
+        stableVolumeID: String?,
+        displayName: String?,
+        filesystem: String?,
+        isInternal: Bool?,
+        isRemovable: Bool?,
+        totalBytes: UInt64,
+        filesystemAvailableBytes: UInt64?,
+        importantAvailableBytes: UInt64?,
+        effectiveAvailableBytes: UInt64,
+        availabilityBasis: VolumeCapacityBasis,
+        pressure: DiskPressureLevel,
+        previousDurablePressure: DiskPressureLevel? = nil,
+        criticalBoundaryBytes: UInt64?,
+        warningBoundaryBytes: UInt64?,
+        historyDisposition: VolumeCapacityHistoryDisposition?,
+        sampledAt: Date
+    ) {
+        self.stableVolumeID = stableVolumeID
+        self.displayName = displayName
+        self.filesystem = filesystem
+        self.isInternal = isInternal
+        self.isRemovable = isRemovable
+        self.totalBytes = totalBytes
+        self.filesystemAvailableBytes = filesystemAvailableBytes
+        self.importantAvailableBytes = importantAvailableBytes
+        self.effectiveAvailableBytes = effectiveAvailableBytes
+        self.availabilityBasis = availabilityBasis
+        self.pressure = pressure
+        self.previousDurablePressure = previousDurablePressure
+        self.criticalBoundaryBytes = criticalBoundaryBytes
+        self.warningBoundaryBytes = warningBoundaryBytes
+        self.historyDisposition = historyDisposition
+        self.sampledAt = sampledAt
+    }
 
     /// Ordinary filesystem usage is unknown when only the important-use value
     /// exists; important-use capacity can include purgeable bytes and must not
@@ -66,6 +103,7 @@ struct VolumeCapacitySnapshot: Equatable, Sendable {
     func applying(
         stableVolumeID: String?,
         pressure: DiskPressureLevel,
+        previousDurablePressure: DiskPressureLevel?,
         criticalBoundaryBytes: UInt64,
         warningBoundaryBytes: UInt64,
         historyDisposition: VolumeCapacityHistoryDisposition,
@@ -83,6 +121,7 @@ struct VolumeCapacitySnapshot: Equatable, Sendable {
             effectiveAvailableBytes: effectiveAvailableBytes,
             availabilityBasis: availabilityBasis,
             pressure: pressure,
+            previousDurablePressure: previousDurablePressure,
             criticalBoundaryBytes: criticalBoundaryBytes,
             warningBoundaryBytes: warningBoundaryBytes,
             historyDisposition: historyDisposition,

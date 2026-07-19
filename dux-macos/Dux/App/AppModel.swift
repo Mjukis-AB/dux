@@ -43,6 +43,8 @@ final class AppModel: DuxCapacitySampling {
     private let homeScanClock: any HomeScanPollingClock
     private let loginItemService: any LoginItemServing
     private let notificationService: any NotificationServing
+    private let diskPressureNotificationCooldownStore:
+        any DiskPressureNotificationCooldownStoring
     private let menuBarVisibilityPreferenceStore: any MenuBarVisibilityPreferenceStoring
     private let storageAccessIntroductionPreferenceStore:
         any StorageAccessIntroductionPreferenceStoring
@@ -89,6 +91,8 @@ final class AppModel: DuxCapacitySampling {
     @ObservationIgnored
     private var notificationAuthorizationGeneration: UInt64 = 0
     @ObservationIgnored
+    private var diskPressureNotificationTask: Task<Void, Never>?
+    @ObservationIgnored
     private var menuBarRevealOverride = false
     @ObservationIgnored
     private var storageAccessProbeTask: Task<Void, Never>?
@@ -110,6 +114,9 @@ final class AppModel: DuxCapacitySampling {
         homeScanClock: any HomeScanPollingClock = ContinuousHomeScanPollingClock(),
         loginItemService: any LoginItemServing = LoginItemService(),
         notificationService: any NotificationServing = NotificationService(),
+        diskPressureNotificationCooldownStore:
+            any DiskPressureNotificationCooldownStoring =
+            UserDefaultsDiskPressureNotificationCooldownStore(),
         menuBarVisibilityPreferenceStore: any MenuBarVisibilityPreferenceStoring =
             UserDefaultsMenuBarVisibilityPreferenceStore(),
         storageAccessIntroductionPreferenceStore:
@@ -128,6 +135,7 @@ final class AppModel: DuxCapacitySampling {
         self.homeScanClock = homeScanClock
         self.loginItemService = loginItemService
         self.notificationService = notificationService
+        self.diskPressureNotificationCooldownStore = diskPressureNotificationCooldownStore
         self.menuBarVisibilityPreferenceStore = menuBarVisibilityPreferenceStore
         self.storageAccessIntroductionPreferenceStore =
             storageAccessIntroductionPreferenceStore
@@ -770,6 +778,9 @@ final class AppModel: DuxCapacitySampling {
             }
             volumeState = .loaded(snapshot)
             Task { @MainActor [weak self] in
+                await self?.deliverPressureNotificationIfNeeded(snapshot)
+            }
+            Task { @MainActor [weak self] in
                 await self?.loadCapacityTrend()
             }
         case let .failure(error):
@@ -780,6 +791,56 @@ final class AppModel: DuxCapacitySampling {
             } else {
                 volumeState = .failed(Self.volumeFailure(for: error))
             }
+        }
+    }
+
+    private func deliverPressureNotificationIfNeeded(
+        _ snapshot: VolumeCapacitySnapshot
+    ) async {
+        if let diskPressureNotificationTask {
+            await diskPressureNotificationTask.value
+            return
+        }
+        let service = notificationService
+        let cooldownStore = diskPressureNotificationCooldownStore
+        let task = Task { @MainActor [weak self] in
+            defer {
+                self?.diskPressureNotificationTask = nil
+            }
+            guard let volumeID = snapshot.stableVolumeID,
+                  let urgency = Self.notificationUrgency(for: snapshot),
+                  let candidate = DiskPressureNotificationGate.candidate(
+                      for: snapshot,
+                      lastAcceptedAtForUrgency: cooldownStore.lastAcceptedAt(
+                          volumeID: volumeID,
+                          urgency: urgency
+                      )
+                  ) else {
+                return
+            }
+            do {
+                try await service.deliverDiskPressure(candidate.delivery)
+                cooldownStore.recordAccepted(
+                    at: candidate.sampledAt,
+                    volumeID: volumeID,
+                    urgency: urgency
+                )
+            } catch {
+                // Delivery failure must not alter authoritative capacity state
+                // or consume the cooldown window.
+            }
+        }
+        diskPressureNotificationTask = task
+        await task.value
+    }
+
+    private static func notificationUrgency(
+        for snapshot: VolumeCapacitySnapshot
+    ) -> DiskPressureNotificationUrgency? {
+        switch snapshot.pressure {
+        case .warning: .warning
+        case .critical: .critical
+        case .healthy, .unknown: nil
         }
     }
 

@@ -1,5 +1,11 @@
 # Changelog
 
+- Added transition-gated low-disk notifications. Newly stored Warning/Critical
+  pressure changes preserve the prior durable level, use a bounded versioned
+  Recommendations payload, and respect independent 24-hour per-volume and
+  per-urgency cooldowns. Cooldowns are recorded only after delivery succeeds;
+  repeated samples and delivery failures do not alter authoritative capacity
+  state. The notification suggests safe review and carries no cleanup authority.
 - Added a private Rust-target permanent-safe evidence boundary. Approved
   plan authorizations now retain deterministic item/path order, and the
   executor-facing witness revalidates the exact target, Cargo manifest,

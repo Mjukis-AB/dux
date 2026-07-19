@@ -4736,6 +4736,17 @@ Tasks:
     test target remains blocked by pre-existing generated/test-source symbol
     mismatches and Observation macro-server failures.
 - [ ] Add transition-based notifications and cooldown.
+  - [x] 2026-07-19 slice: preserve the Rust-owned previous durable pressure
+    through the Swift capacity snapshot, then gate notifications only on newly
+    stored Warning/Critical transitions. A versioned, bounded Recommendations
+    payload carries stable volume identity and urgency without paths; separate
+    per-volume/per-urgency UserDefaults cooldowns suppress repeats for 24 hours
+    and are written only after the notification center accepts delivery.
+    Delivery failures leave capacity state and cooldown unchanged. The app now
+    submits a concise safe-recovery suggestion through the existing long-lived
+    notification service; no cleanup, approval, or executor authority is
+    carried. Notification response routing to the Explorer Recommendations
+    surface remains the next deep-link slice.
 - [ ] Deep-link notifications to urgent Recommendations.
 - [ ] Add targeted reclaim scan on Warning/Critical.
 - [ ] Add emergency recovery ordering.
