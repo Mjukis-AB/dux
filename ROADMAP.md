@@ -3632,11 +3632,10 @@ Tasks:
   launch, scene restoration, last-window close, incidental termination, and
   repeated acquire/reassert balancing.
   Corrected 2026-07-19 (bundle hardening): both Debug and Release targets now
-  use an explicit app plist declaring `NSSupportsAutomaticTermination`, removing
-  the launch-time gap in which AppKit could evaluate the transient menu-bar
-  scene before the delegate's runtime lease was installed. The generated plist
-  and source-level lifecycle tests must remain part of every release
-  verification pass.
+  use an explicit app plist with `NSSupportsAutomaticTermination=false`, so
+  closing the transient menu-bar scene cannot retire the agent app before the
+  delegate's runtime lease is installed. The generated plist and source-level
+  lifecycle tests must remain part of every release verification pass.
 - [x] Implement Explorer window shell and Overview. Completed 2026-07-17: one
   reusable `Window(id: "explorer")` opens after the menu-bar scene, shares the
   process-wide `AppModel`, activates only after the open request, and does not

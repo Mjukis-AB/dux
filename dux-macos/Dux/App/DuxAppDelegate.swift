@@ -26,11 +26,12 @@ final class DuxAutomaticTerminationLease {
         guard !isHeld else {
             return
         }
-        // The counter only participates when automatic-termination support is
-        // enabled. Keep one process-lifetime opt-out and balance that exact
-        // lease during ordered shutdown; scene callbacks only restore the
-        // support flag and must not increment the counter again.
-        controller.automaticTerminationSupportEnabled = true
+        // The bundle opts out of automatic termination. Keep that opt-out
+        // asserted in-process as well because AppKit can restore the
+        // ProcessInfo flag while it tears down and recreates MenuBarExtra's
+        // transient window. The counter remains one balanced process-lifetime
+        // assertion; scene callbacks never add another lease.
+        controller.automaticTerminationSupportEnabled = false
         controller.disableAutomaticTermination(Self.reason)
         disableCount = 1
         isHeld = true
@@ -41,9 +42,9 @@ final class DuxAutomaticTerminationLease {
             return
         }
         // AppKit can reset the support flag while it tears down and restores
-        // MenuBarExtra's transient window. Restore it, but do not touch the
-        // counter: release() owns exactly one matching enable call.
-        controller.automaticTerminationSupportEnabled = true
+        // MenuBarExtra's transient window. Restore the opt-out, but do not
+        // touch the counter: release() owns exactly one matching enable call.
+        controller.automaticTerminationSupportEnabled = false
     }
 
     func release() {

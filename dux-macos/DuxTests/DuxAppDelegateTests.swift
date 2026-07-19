@@ -14,14 +14,14 @@ final class DuxAppDelegateTests: XCTestCase {
         delegate.applicationDidFinishLaunching(
             Notification(name: NSApplication.didFinishLaunchingNotification)
         )
-        XCTAssertTrue(controller.automaticTerminationSupportEnabled)
-        XCTAssertEqual(controller.events, ["support:true", "disable"])
+        XCTAssertFalse(controller.automaticTerminationSupportEnabled)
+        XCTAssertEqual(controller.events, ["support:false", "disable"])
 
         delegate.applicationWillTerminate(
             Notification(name: NSApplication.willTerminateNotification)
         )
-        XCTAssertTrue(controller.automaticTerminationSupportEnabled)
-        XCTAssertEqual(controller.events, ["support:true", "disable", "enable"])
+        XCTAssertFalse(controller.automaticTerminationSupportEnabled)
+        XCTAssertEqual(controller.events, ["support:false", "disable", "enable"])
     }
 
     func testAutomaticTerminationLeaseCanBeReassertedAfterSceneRestoration() {
@@ -32,14 +32,15 @@ final class DuxAppDelegateTests: XCTestCase {
         XCTAssertTrue(controller.events.isEmpty)
 
         lease.acquire()
-        controller.automaticTerminationSupportEnabled = false
+        // Model AppKit resetting the opt-out during transient-scene teardown.
+        controller.automaticTerminationSupportEnabled = true
         lease.reassert()
 
         XCTAssertEqual(
             controller.events,
-            ["support:true", "disable", "support:false", "support:true"]
+            ["support:false", "disable", "support:true", "support:false"]
         )
-        XCTAssertTrue(controller.automaticTerminationSupportEnabled)
+        XCTAssertFalse(controller.automaticTerminationSupportEnabled)
     }
 
     func testRepeatedSceneReassertionsDoNotAccumulateTerminationLeases() {
@@ -53,7 +54,7 @@ final class DuxAppDelegateTests: XCTestCase {
 
         XCTAssertEqual(
             controller.events,
-            ["support:true", "disable", "support:true", "support:true", "enable"]
+            ["support:false", "disable", "support:false", "support:false", "enable"]
         )
     }
 
@@ -67,7 +68,7 @@ final class DuxAppDelegateTests: XCTestCase {
 
         XCTAssertEqual(
             controller.events,
-            ["support:true", "disable", "enable"]
+            ["support:false", "disable", "enable"]
         )
     }
 
@@ -147,7 +148,7 @@ final class DuxAppDelegateTests: XCTestCase {
         )
         XCTAssertEqual(
             controller.events,
-            ["support:true", "disable", "support:true"]
+            ["support:false", "disable", "support:false"]
         )
     }
 
@@ -166,7 +167,7 @@ final class DuxAppDelegateTests: XCTestCase {
         )
         XCTAssertEqual(
             controller.events,
-            ["support:true", "disable", "support:true"]
+            ["support:false", "disable", "support:false"]
         )
     }
 
@@ -185,7 +186,7 @@ final class DuxAppDelegateTests: XCTestCase {
 
         XCTAssertEqual(
             controller.events,
-            ["support:true", "disable", "support:true"]
+            ["support:false", "disable", "support:false"]
         )
     }
 
@@ -249,7 +250,7 @@ final class DuxAppDelegateTests: XCTestCase {
 
 @MainActor
 private final class AutomaticTerminationControllerSpy: DuxAutomaticTerminationControlling {
-    var automaticTerminationSupportEnabled = false {
+    var automaticTerminationSupportEnabled = true {
         didSet {
             events.append("support:\(automaticTerminationSupportEnabled)")
         }

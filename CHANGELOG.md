@@ -11,12 +11,10 @@
   invalidates it at shutdown, and Settings exposes an accessible deny-only
   control. Disabling is immediate; re-enable and reset require typing
   `ENABLE PERMANENT CLEANUP`. Path-bearing exclusions remain separate.
-- Hardened the menu-bar app's automatic-termination contract at the bundle level.
-  Both macOS configurations now use an explicit app plist containing
-  `NSSupportsAutomaticTermination`, so the one balanced launch lease remains
-  effective while SwiftUI tears down and restores the transient popover scene.
-  Corrected the scene-restoration regression test to model AppKit resetting the
-  support flag before reassertion.
+- Fixed menu-bar popover dismissal terminating DUX. The app bundle now opts out
+  of automatic termination, while the one balanced launch lease reasserts that
+  opt-out if AppKit resets the ProcessInfo flag while tearing down and restoring
+  the transient popover scene.
 - Added UniFFI contract v22's path-free permanent-cleanup kill-switch
   get/set/reset records and typed errors. Rust remains the only semantic
   validator; the switch can deny effects but cannot create plans or carry
