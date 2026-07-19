@@ -121,14 +121,7 @@ impl CleanupPlan {
     /// This intentionally remains private: candidates do not yet carry the
     /// canonical path-validation witness required by a real planner. Even a
     /// value produced here would remain review data, never executor authority.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "plan construction remains sealed until validated cleanup targets exist"
-        )
-    )]
-    fn try_from_candidates(
+    pub(crate) fn try_from_candidates(
         id: CleanupPlanId,
         created_at: SystemTime,
         mode: CleanupMode,

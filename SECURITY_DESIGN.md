@@ -651,6 +651,15 @@ construct a plan, clear blockers, persist, cross FFI, approve, schedule, or
 mutate; future planner work must revalidate it under authoritative policy and
 executor witnesses.
 
+Exact review can now consume one matching trusted rule-scope authorization for
+each selected target into a crate-private permanent-safe `CleanupPlan`. The
+candidate facts retained by review are the only plan input; mode, candidate
+policy, path overlap, and domain validation are rerun by the plan constructor.
+Dry-run/Trash modes and missing, duplicate, or mismatched authorizations fail
+closed. The resulting plan retains the authorization tokens for a future
+executor-time revalidation and exposes no approval, journal, FFI, scheduling,
+or effect operation.
+
 ### 6.3 Protected-root and sensitive-category policy
 
 Denies override every allow or rule match. Protection evaluation covers the

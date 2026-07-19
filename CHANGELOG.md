@@ -17,6 +17,12 @@
   rules, binds current-account home/mount and protected-root evidence, and
   revalidates one exact target identity. It remains path-private and cannot
   create plans, clear `ProtectedPath`, persist, cross FFI, schedule, or mutate.
+- Added the sealed permanent-safe plan-construction checkpoint. Exact review
+  now retains selected candidate facts and consumes one matching trusted scope
+  authorization per live target into a private domain `CleanupPlan`; mode,
+  overlap, and candidate validation remain fail-closed. The plan retains its
+  authorization tokens for future executor revalidation and has no approval,
+  journal, FFI, scheduling, or effect path.
 - Staged UniFFI contract v19's core-issued, one-shot Trash callback request.
   The request has no public constructor, exposes only the exact ephemeral path
   bytes and target kind to a future synchronous platform callback, and can be

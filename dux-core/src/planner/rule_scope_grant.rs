@@ -91,6 +91,10 @@ fn validate_rule(rule: &RuleRef) -> Result<(), RuleScopeGrantError> {
 }
 
 impl RuleScopeAuthorization {
+    pub(super) fn matches(&self, rule: &RuleRef, target: &CanonicalPathSnapshot) -> bool {
+        &self.rule == rule && &self.target == target
+    }
+
     fn validate_current(&self) -> Result<(), RuleScopeGrantError> {
         if self.revision != TRUSTED_RULE_SCOPE_GRANT_REVISION {
             return Err(RuleScopeGrantError::UnsupportedRevision);

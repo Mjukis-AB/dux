@@ -12,7 +12,8 @@ use thiserror::Error;
 
 use crate::domain::{
     Candidate, CandidateAction, CandidateCategory, CandidateGroupingError, CandidateId,
-    CandidateOverlapReason, CleanupMode, Evidence, PlanWarning, RuleRef, SafetyTier, ScanId,
+    CandidateOverlapReason, CleanupMode, CleanupPlan, CleanupPlanId, CleanupPlanValidationError,
+    Evidence, PlanWarning, RuleRef, SafetyTier, ScanId,
 };
 use crate::path_validation::{
     CanonicalPathError, CanonicalPathSnapshot, CanonicalScanRoot, FilesystemBoundarySnapshot,
@@ -20,6 +21,8 @@ use crate::path_validation::{
     ProtectedRootError, ProtectedRootRegistry, capture_filesystem_boundary, validate_cleanup_path,
     validate_scan_root,
 };
+
+use super::rule_scope_grant::{RuleScopeAuthorization, RuleScopeGrantError};
 
 pub(crate) const MAX_EXACT_REVIEW_CANDIDATES: usize = 64;
 pub(crate) const MAX_EXACT_REVIEW_PATHS: usize = 256;
@@ -140,6 +143,34 @@ pub(crate) struct ExactPathReview {
     items: Vec<ExactPathReviewItem>,
     estimated_bytes: u64,
     warnings: Vec<PlanWarning>,
+    candidates: Vec<Candidate>,
+}
+
+/// A domain plan paired with every exact trusted rule-scope authorization used
+/// to construct it. This remains crate-private and has no approval, journal,
+/// FFI, schedule, or effect method; the future executor must revalidate the
+/// retained authorizations immediately before any mutation.
+#[must_use = "reviewed plans must be explicitly consumed by the execution boundary"]
+pub(crate) struct TrustedReviewedCleanupPlan {
+    plan: CleanupPlan,
+    authorizations: Vec<RuleScopeAuthorization>,
+}
+
+impl TrustedReviewedCleanupPlan {
+    pub(crate) fn plan(&self) -> &CleanupPlan {
+        &self.plan
+    }
+
+    pub(crate) fn revalidate(&self) -> Result<(), ExactPathPlanError> {
+        for authorization in &self.authorizations {
+            authorization
+                .revalidate()
+                .map_err(ExactPathPlanError::Authorization)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn release(self) {}
 }
 
 impl ExactPathReview {
@@ -178,6 +209,63 @@ impl ExactPathReview {
     /// grants have not yet been bound to the planner-owned witness.
     pub(crate) const fn is_actionable(&self) -> bool {
         false
+    }
+
+    /// Consume exact review evidence plus one matching trusted authorization
+    /// per selected path into a permanent-safe domain plan. Only the known
+    /// deterministic rule grants can reach this boundary; no effect is
+    /// invoked and the plan remains unapproved and non-executable.
+    pub(crate) fn into_trusted_permanent_plan(
+        self,
+        plan_id: CleanupPlanId,
+        created_at: std::time::SystemTime,
+        authorizations: Vec<RuleScopeAuthorization>,
+    ) -> Result<TrustedReviewedCleanupPlan, ExactPathPlanError> {
+        if self.mode != CleanupMode::PermanentSafe {
+            return Err(ExactPathPlanError::UnsupportedMode);
+        }
+        let expected = self
+            .items
+            .iter()
+            .map(|item| item.paths.len())
+            .sum::<usize>();
+        if authorizations.len() != expected {
+            return Err(ExactPathPlanError::AuthorizationCount {
+                expected,
+                actual: authorizations.len(),
+            });
+        }
+        let mut matched = vec![false; authorizations.len()];
+        for item in &self.items {
+            for path in &item.paths {
+                let Some(index) =
+                    authorizations
+                        .iter()
+                        .enumerate()
+                        .position(|(index, authorization)| {
+                            !matched[index] && authorization.matches(&item.rule, path.snapshot())
+                        })
+                else {
+                    return Err(ExactPathPlanError::AuthorizationMismatch);
+                };
+                matched[index] = true;
+            }
+        }
+        if matched.iter().any(|matched| !matched) {
+            return Err(ExactPathPlanError::AuthorizationMismatch);
+        }
+        for authorization in &authorizations {
+            authorization
+                .revalidate()
+                .map_err(ExactPathPlanError::Authorization)?;
+        }
+        let plan =
+            CleanupPlan::try_from_candidates(plan_id, created_at, self.mode, &self.candidates)
+                .map_err(ExactPathPlanError::Plan)?;
+        Ok(TrustedReviewedCleanupPlan {
+            plan,
+            authorizations,
+        })
     }
 }
 
@@ -253,6 +341,20 @@ pub(crate) enum ExactPathReviewError {
     },
     #[error("exact-path review estimated byte total overflowed")]
     EstimatedBytesOverflow,
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum ExactPathPlanError {
+    #[error("trusted permanent-safe plan construction requires permanent-safe mode")]
+    UnsupportedMode,
+    #[error("trusted plan requires {expected} exact authorizations but received {actual}")]
+    AuthorizationCount { expected: usize, actual: usize },
+    #[error("a trusted authorization did not match the reviewed rule and target")]
+    AuthorizationMismatch,
+    #[error("trusted rule-scope authorization failed: {0}")]
+    Authorization(#[source] RuleScopeGrantError),
+    #[error("domain cleanup plan validation failed: {0}")]
+    Plan(#[source] CleanupPlanValidationError),
 }
 
 /// Capture exact, current path evidence for a selected candidate set.
@@ -351,9 +453,11 @@ pub(crate) fn review_exact_paths(
     });
 
     let mut items = Vec::with_capacity(selected_indices.len());
+    let mut selected_candidates = Vec::with_capacity(selected_indices.len());
     let mut estimated_bytes = 0_u64;
     for candidate_index in selected_indices {
         let candidate = &candidates[candidate_index];
+        selected_candidates.push(candidate.clone());
         estimated_bytes = estimated_bytes
             .checked_add(candidate.estimated_bytes())
             .ok_or(ExactPathReviewError::EstimatedBytesOverflow)?;
@@ -452,6 +556,7 @@ pub(crate) fn review_exact_paths(
         items,
         estimated_bytes,
         warnings: derive_warnings(mode, candidates),
+        candidates: selected_candidates,
     })
 }
 

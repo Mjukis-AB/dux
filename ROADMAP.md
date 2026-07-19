@@ -4514,6 +4514,14 @@ Tasks:
     and selected indices for a future planner but cannot construct a plan,
     persist state, cross FFI, approve, schedule, or mutate anything.
 - [ ] Implement exact-path plan review.
+  - [x] 2026-07-19 slice: add the sealed permanent-safe plan construction
+    checkpoint. Exact review now retains the selected candidate facts and can
+    consume exactly one matching trusted rule-scope authorization per live
+    target into a crate-private domain `CleanupPlan`. Dry-run and Trash modes,
+    missing/duplicate/mismatched authorizations, incompatible candidates, and
+    all existing domain validation failures remain fail-closed. The resulting
+    plan retains its authorization tokens for future executor-time
+    revalidation; it has no approval, journal, FFI, scheduling, or effect path.
   - [x] 2026-07-18 slice: add a sealed planner-owned evidence boundary that
     requires a code-owned canonical scan-root witness and runs every selected
     target through lossless lexical validation plus no-follow live identity

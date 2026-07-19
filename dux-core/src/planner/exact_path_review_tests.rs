@@ -1,7 +1,8 @@
 use std::fs;
 use std::path::PathBuf;
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use super::super::rule_scope_grant::authorize_rule_target;
 use super::*;
 use crate::domain::{
     BlockReason, CandidateCategory, CandidateInput, Evidence, LocalizedTextKey, ProvenanceUrl,
@@ -61,8 +62,53 @@ fn candidate(
     .unwrap()
 }
 
+#[cfg(target_os = "macos")]
+fn trusted_candidate(path: PathBuf) -> Candidate {
+    let rule = Rule::try_new(RuleDefinition {
+        reference: RuleRef::new(
+            RuleId::new("developer.rust.target").unwrap(),
+            RuleRevision::new(2).unwrap(),
+        ),
+        title_key: LocalizedTextKey::new("developer.rust.target.title").unwrap(),
+        category: CandidateCategory::DeveloperArtifact,
+        scope: RuleScope::SelectedScanRoot,
+        matcher: RuleMatcher::try_new(RuleMatcherDefinition {
+            path_component: Some("target".to_owned()),
+            required_ancestor_markers_any: Vec::new(),
+            required_markers_all: Vec::new(),
+            forbidden_markers_any: Vec::new(),
+            exact_bundle_identifiers: Vec::new(),
+            excluded_descendants: Vec::new(),
+            protected_descendants: Vec::new(),
+        })
+        .unwrap(),
+        guards: RuleGuards::try_new(None, 0, Vec::new(), false).unwrap(),
+        safety: SafetyTier::SafeRegenerable,
+        action: CandidateAction::RemoveKnownRegenerableContents,
+        schedule_eligible: false,
+        explanation_key: LocalizedTextKey::new("developer.rust.target.explanation").unwrap(),
+        provenance: vec![ProvenanceUrl::new("https://example.com/rust-target").unwrap()],
+    })
+    .unwrap();
+    Candidate::try_from_rule(
+        &rule,
+        CandidateInput::new(
+            CandidateId::new("candidate:trusted-plan").unwrap(),
+            vec![path],
+            7,
+            Some(UNIX_EPOCH + Duration::from_secs(7)),
+            vec![Evidence::RequiredMarker {
+                path: "/fixture/Cargo.toml".into(),
+            }],
+            Vec::new(),
+            ScanId::new("scan:exact-review").unwrap(),
+        ),
+    )
+    .unwrap()
+}
+
 fn root() -> (tempfile::TempDir, PathBuf, CanonicalScanRoot) {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
     let root_path = fs::canonicalize(directory.path()).unwrap();
     fs::create_dir(root_path.join("cache")).unwrap();
     fs::create_dir(root_path.join("other")).unwrap();
@@ -264,6 +310,83 @@ fn blockers_non_cleanup_and_mode_mismatch_are_rejected_before_capture() {
         review_exact_paths(&scan_root, &[mismatch], CleanupMode::Trash),
         Err(ExactPathReviewError::IncompatibleMode { .. })
     ));
+}
+
+#[test]
+fn trusted_plan_requires_permanent_mode_and_one_authorization_per_path() {
+    let (_directory, root_path, scan_root) = root();
+    let target = root_path.join("cache/file");
+    let candidate = candidate(
+        "candidate:plan-boundary",
+        "fixture.rule",
+        std::slice::from_ref(&target),
+        7,
+        Vec::new(),
+        SafetyTier::SafeRegenerable,
+        CandidateAction::RemoveKnownRegenerableContents,
+    );
+
+    let dry_run = review_exact_paths(
+        &scan_root,
+        std::slice::from_ref(&candidate),
+        CleanupMode::DryRun,
+    )
+    .unwrap();
+    assert!(matches!(
+        dry_run.into_trusted_permanent_plan(
+            crate::domain::CleanupPlanId::new("plan:dry-run").unwrap(),
+            UNIX_EPOCH,
+            Vec::new(),
+        ),
+        Err(ExactPathPlanError::UnsupportedMode)
+    ));
+
+    let permanent = review_exact_paths(
+        &scan_root,
+        std::slice::from_ref(&candidate),
+        CleanupMode::PermanentSafe,
+    )
+    .unwrap();
+    assert!(matches!(
+        permanent.into_trusted_permanent_plan(
+            crate::domain::CleanupPlanId::new("plan:missing-grant").unwrap(),
+            UNIX_EPOCH,
+            Vec::new(),
+        ),
+        Err(ExactPathPlanError::AuthorizationCount {
+            expected: 1,
+            actual: 0,
+        })
+    ));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn trusted_plan_consumes_matching_scope_authorization_and_revalidates() {
+    let (_directory, root_path, scan_root) = root();
+    let target = root_path.join("cache/file");
+    let candidate = trusted_candidate(target);
+    let review = review_exact_paths(
+        &scan_root,
+        std::slice::from_ref(&candidate),
+        CleanupMode::PermanentSafe,
+    )
+    .unwrap();
+    let authorization = authorize_rule_target(
+        &scan_root,
+        review.items()[0].paths()[0].snapshot().clone(),
+        review.items()[0].rule(),
+    )
+    .unwrap();
+    let plan = review
+        .into_trusted_permanent_plan(
+            crate::domain::CleanupPlanId::new("plan:trusted").unwrap(),
+            SystemTime::now(),
+            vec![authorization],
+        )
+        .unwrap();
+    assert_eq!(plan.plan().mode(), CleanupMode::PermanentSafe);
+    plan.revalidate().unwrap();
 }
 
 #[test]
