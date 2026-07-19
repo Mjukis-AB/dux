@@ -4528,6 +4528,16 @@ Tasks:
       schedule, cross FFI, or perform an effect. Generic no-Cargo fixtures
       are explicitly test-only; production Rust-target authorization cannot
       bypass the Cargo join.
+    - [x] 2026-07-19 slice: promote home/mount and textual policy observations
+      into private authoritative grants without widening cleanup authority.
+      A revisioned home-volume grant consumes the exact current-account
+      `TrustedHomeMountWitness`; a code-owned protected-rule grant binds the
+      allowlisted rule/revision, stable boundary key, exact scan root/target,
+      and both requested and canonical policy revisions. Each grant repeats
+      its evidence and fails closed on boundary-key, policy, volume, or
+      target drift. Linux/Windows remain unsupported for this positive
+      profile, and candidates retain `ProtectedPath`; no plan, approval,
+      scheduling, FFI, or effect path was added.
 - [x] Implement candidate groups and overlap resolution. Completed 2026-07-19:
   deterministic grouping and conservative overlap resolution are now consumed
   by exact-path review. Equivalent observations coalesce by stable candidate

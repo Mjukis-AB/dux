@@ -1,5 +1,9 @@
 # Changelog
 
+- Promoted current-account home/mount and protected-root observations into
+  private revisioned planner grants with stable rule-boundary keys. Grants
+  revalidate exact policy, volume, and target evidence while `ProtectedPath`
+  and all plan/effect authority remain closed.
 - Added a private Cargo-bound Rust-target planning grant. It joins the exact
   Cargo/read-set witness, source candidate identity, target snapshot,
   current-account home/mount boundary, and protected-root no-textual-match

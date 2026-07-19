@@ -465,6 +465,14 @@ this Cargo provenance. It remains non-actionable: the candidate retains its
 `ProtectedPath` blocker and the grant cannot create a plan, approval, schedule,
 FFI value, or cleanup effect.
 
+The scope token consumes two narrower private grants. The home-volume grant is
+revisioned and consumes the current-account `TrustedHomeMountWitness`. The
+protected-rule grant binds the exact rule/revision, a code-owned stable
+boundary key, the scan-root/target identities, and both requested and
+canonical `NoTextualMatch` policy revisions. These grants repeat their own
+evidence and fail closed on key, policy, volume, or target drift; they do not
+remove the candidate's `ProtectedPath` blocker.
+
 ## Exact snapshot evaluator replay
 
 A fourth 2026-07-18 checkpoint now replays the complete current candidate batch

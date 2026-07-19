@@ -20,6 +20,175 @@ use crate::path_validation::{
     validate_scan_root,
 };
 
+const TRUSTED_VOLUME_GRANT_REVISION: u32 = 1;
+const PROTECTED_RULE_GRANT_REVISION: u32 = 1;
+const RUST_TARGET_PROTECTED_GRANT_KEY: &str =
+    "dux:protected-rule:developer.rust.target:2:policy-2:volume-1";
+const PYTHON_PYCACHE_PROTECTED_GRANT_KEY: &str =
+    "dux:protected-rule:developer.python.pycache:2:policy-2:volume-1";
+
+/// A private authority-bearing wrapper around the current-account home/mount
+/// proof. The underlying observation is consumed at construction and can only
+/// be revalidated or used for an exact scan-boundary comparison.
+#[cfg(unix)]
+struct TrustedVolumeGrant {
+    witness: TrustedHomeMountWitness,
+    revision: u32,
+}
+
+#[cfg(unix)]
+#[derive(Debug, Error)]
+pub(crate) enum TrustedVolumeGrantError {
+    #[error("trusted volume grant revision is unsupported")]
+    UnsupportedRevision,
+    #[error("trusted volume grant changed")]
+    Changed,
+}
+
+#[cfg(unix)]
+impl TrustedVolumeGrant {
+    fn capture(witness: TrustedHomeMountWitness) -> Result<Self, TrustedVolumeGrantError> {
+        witness
+            .revalidate()
+            .map_err(|_| TrustedVolumeGrantError::Changed)?;
+        let grant = Self {
+            witness,
+            revision: TRUSTED_VOLUME_GRANT_REVISION,
+        };
+        grant.revalidate()?;
+        Ok(grant)
+    }
+
+    fn revalidate(&self) -> Result<(), TrustedVolumeGrantError> {
+        if self.revision != TRUSTED_VOLUME_GRANT_REVISION {
+            return Err(TrustedVolumeGrantError::UnsupportedRevision);
+        }
+        self.witness
+            .revalidate()
+            .map_err(|_| TrustedVolumeGrantError::Changed)
+    }
+
+    fn matches_scan_boundary(
+        &self,
+        boundary: &crate::path_validation::FilesystemBoundarySnapshot,
+    ) -> bool {
+        self.revision == TRUSTED_VOLUME_GRANT_REVISION
+            && self.witness.matches_scan_boundary(boundary)
+    }
+}
+
+/// A private grant for one exact rule target after both requested and
+/// canonical protected-root forms have produced the revisioned
+/// `NoTextualMatch` result. It is a policy grant, not a generic allow-list:
+/// target identity and policy revision are rechecked on every use.
+#[cfg(unix)]
+struct ProtectedRuleGrant {
+    rule: RuleRef,
+    boundary_key: &'static str,
+    registry: ProtectedRootRegistry,
+    scan_root: CanonicalScanRoot,
+    target: CanonicalPathSnapshot,
+    requested_policy_revision: u32,
+    canonical_policy_revision: u32,
+    revision: u32,
+}
+
+#[cfg(unix)]
+#[derive(Debug, Error)]
+pub(crate) enum ProtectedRuleGrantError {
+    #[error("protected rule grant revision is unsupported")]
+    UnsupportedRevision,
+    #[error("protected-root policy could not be evaluated: {0}")]
+    Policy(#[from] ProtectedRootError),
+    #[error("protected rule grant target does not match the reviewed scan")]
+    TargetMismatch,
+    #[error("protected rule grant requires a non-textually-protected target")]
+    ProtectedPath,
+}
+
+#[cfg(unix)]
+impl ProtectedRuleGrant {
+    fn capture(
+        registry: ProtectedRootRegistry,
+        scan_root: &CanonicalScanRoot,
+        target: &CanonicalPathSnapshot,
+        rule: &RuleRef,
+    ) -> Result<Self, ProtectedRuleGrantError> {
+        let boundary_key =
+            trusted_rule_boundary_key(rule).ok_or(ProtectedRuleGrantError::TargetMismatch)?;
+        let lexical_root = validate_scan_root(scan_root.requested_path())
+            .map_err(|_| ProtectedRuleGrantError::TargetMismatch)?;
+        let requested = validate_cleanup_path(&lexical_root, target.requested_path())
+            .map_err(|_| ProtectedRuleGrantError::TargetMismatch)?;
+        let requested = registry.preflight(&requested)?;
+        let canonical = registry.assess(scan_root, target)?;
+        let (requested_policy_revision, canonical_policy_revision) = match (requested, canonical) {
+            (
+                ProtectedRootDisposition::NoTextualMatch {
+                    policy_revision: requested_revision,
+                },
+                ProtectedRootDisposition::NoTextualMatch {
+                    policy_revision: canonical_revision,
+                },
+            ) if requested_revision == canonical_revision => {
+                (requested_revision, canonical_revision)
+            }
+            _ => return Err(ProtectedRuleGrantError::ProtectedPath),
+        };
+        let grant = Self {
+            rule: rule.clone(),
+            boundary_key,
+            registry,
+            scan_root: scan_root.clone(),
+            target: target.clone(),
+            requested_policy_revision,
+            canonical_policy_revision,
+            revision: PROTECTED_RULE_GRANT_REVISION,
+        };
+        grant.revalidate()?;
+        Ok(grant)
+    }
+
+    fn revalidate(&self) -> Result<(), ProtectedRuleGrantError> {
+        if self.revision != PROTECTED_RULE_GRANT_REVISION {
+            return Err(ProtectedRuleGrantError::UnsupportedRevision);
+        }
+        if trusted_rule_boundary_key(&self.rule) != Some(self.boundary_key) {
+            return Err(ProtectedRuleGrantError::TargetMismatch);
+        }
+        let lexical_root = validate_scan_root(self.scan_root.requested_path())
+            .map_err(|_| ProtectedRuleGrantError::TargetMismatch)?;
+        let requested = validate_cleanup_path(&lexical_root, self.target.requested_path())
+            .map_err(|_| ProtectedRuleGrantError::TargetMismatch)?;
+        let requested = self.registry.preflight(&requested)?;
+        let canonical = self.registry.assess(&self.scan_root, &self.target)?;
+        match (requested, canonical) {
+            (
+                ProtectedRootDisposition::NoTextualMatch {
+                    policy_revision: requested_revision,
+                },
+                ProtectedRootDisposition::NoTextualMatch {
+                    policy_revision: canonical_revision,
+                },
+            ) if requested_revision == self.requested_policy_revision
+                && canonical_revision == self.canonical_policy_revision =>
+            {
+                Ok(())
+            }
+            _ => Err(ProtectedRuleGrantError::ProtectedPath),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn trusted_rule_boundary_key(rule: &RuleRef) -> Option<&'static str> {
+    match (rule.id().as_str(), rule.revision().get()) {
+        ("developer.rust.target", 2) => Some(RUST_TARGET_PROTECTED_GRANT_KEY),
+        ("developer.python.pycache", 2) => Some(PYTHON_PYCACHE_PROTECTED_GRANT_KEY),
+        _ => None,
+    }
+}
+
 pub(crate) const TRUSTED_RULE_SCOPE_GRANT_REVISION: u32 = 1;
 const RUST_TARGET_RULE: &str = "developer.rust.target";
 const PYTHON_PYCACHE_RULE: &str = "developer.python.pycache";
@@ -35,7 +204,13 @@ pub(crate) struct RuleScopeAuthorization {
     rule: RuleRef,
     scan_root: CanonicalScanRoot,
     target: CanonicalPathSnapshot,
+    #[cfg(unix)]
+    volume: TrustedVolumeGrant,
+    #[cfg(unix)]
+    protected: ProtectedRuleGrant,
+    #[cfg(not(unix))]
     location: TrustedHomeMountWitness,
+    #[cfg(not(unix))]
     registry: ProtectedRootRegistry,
     #[cfg(unix)]
     cargo_boundary: Option<RustTargetRuleBoundaryEvidence>,
@@ -68,6 +243,12 @@ pub(crate) enum RuleScopeGrantError {
     CargoBoundary(#[source] RustTargetRuleBoundaryError),
     #[error("the authorized target changed before revalidation completed")]
     ChangedSinceAuthorization,
+    #[cfg(unix)]
+    #[error("trusted volume grant failed: {0}")]
+    VolumeGrant(#[source] TrustedVolumeGrantError),
+    #[cfg(unix)]
+    #[error("protected rule grant failed: {0}")]
+    ProtectedGrant(#[source] ProtectedRuleGrantError),
     #[error(transparent)]
     Filesystem(#[from] CanonicalPathError),
     #[error(transparent)]
@@ -88,8 +269,15 @@ pub(crate) fn authorize_rule_target(
         revision: TRUSTED_RULE_SCOPE_GRANT_REVISION,
         rule: rule.clone(),
         scan_root: scan_root.clone(),
-        target,
+        target: target.clone(),
+        #[cfg(unix)]
+        volume: TrustedVolumeGrant::capture(location).map_err(RuleScopeGrantError::VolumeGrant)?,
+        #[cfg(unix)]
+        protected: ProtectedRuleGrant::capture(registry, scan_root, &target, rule)
+            .map_err(RuleScopeGrantError::ProtectedGrant)?,
+        #[cfg(not(unix))]
         location,
+        #[cfg(not(unix))]
         registry,
         #[cfg(unix)]
         cargo_boundary: None,
@@ -127,9 +315,10 @@ pub(crate) fn authorize_rust_target(
         revision: TRUSTED_RULE_SCOPE_GRANT_REVISION,
         rule: rule.clone(),
         scan_root: scan_root.clone(),
-        target,
-        location,
-        registry,
+        target: target.clone(),
+        volume: TrustedVolumeGrant::capture(location).map_err(RuleScopeGrantError::VolumeGrant)?,
+        protected: ProtectedRuleGrant::capture(registry, scan_root, &target, rule)
+            .map_err(RuleScopeGrantError::ProtectedGrant)?,
         cargo_boundary: Some(boundary),
         #[cfg(test)]
         test_only_without_cargo: false,
@@ -189,11 +378,25 @@ impl RuleScopeAuthorization {
                 }
             }
         }
+        #[cfg(unix)]
+        {
+            self.volume
+                .revalidate()
+                .map_err(RuleScopeGrantError::VolumeGrant)?;
+            self.protected
+                .revalidate()
+                .map_err(RuleScopeGrantError::ProtectedGrant)?;
+        }
+        #[cfg(not(unix))]
         self.location
             .revalidate()
             .map_err(RuleScopeGrantError::Location)?;
         let boundary = capture_filesystem_boundary(&self.scan_root)?;
-        if !self.location.matches_scan_boundary(&boundary)
+        #[cfg(unix)]
+        let location_matches = self.volume.matches_scan_boundary(&boundary);
+        #[cfg(not(unix))]
+        let location_matches = self.location.matches_scan_boundary(&boundary);
+        if !location_matches
             || self.target.scan_root() != self.scan_root.canonical_path()
             || self
                 .target
@@ -204,9 +407,12 @@ impl RuleScopeAuthorization {
         {
             return Err(RuleScopeGrantError::BoundaryMismatch);
         }
-        let disposition = self.registry.assess(&self.scan_root, &self.target)?;
-        if !matches!(disposition, ProtectedRootDisposition::NoTextualMatch { .. }) {
-            return Err(RuleScopeGrantError::ProtectedPath);
+        #[cfg(not(unix))]
+        {
+            let disposition = self.registry.assess(&self.scan_root, &self.target)?;
+            if !matches!(disposition, ProtectedRootDisposition::NoTextualMatch { .. }) {
+                return Err(RuleScopeGrantError::ProtectedPath);
+            }
         }
         Ok(())
     }
@@ -301,6 +507,40 @@ mod tests {
             authorization.revalidate(),
             Err(RuleScopeGrantError::ChangedSinceAuthorization)
                 | Err(RuleScopeGrantError::Filesystem(_))
+        ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_grant_rejects_boundary_key_policy_and_volume_drift() {
+        let (_temp, root, target) = fixture();
+        let mut authorization = authorize_rule_target(&root, target, &rust_rule()).unwrap();
+
+        authorization.protected.boundary_key = "dux:foreign-boundary";
+        assert!(matches!(
+            authorization.revalidate(),
+            Err(RuleScopeGrantError::ProtectedGrant(
+                ProtectedRuleGrantError::TargetMismatch
+            ))
+        ));
+
+        authorization.protected.boundary_key = RUST_TARGET_PROTECTED_GRANT_KEY;
+        authorization.protected.requested_policy_revision += 1;
+        assert!(matches!(
+            authorization.revalidate(),
+            Err(RuleScopeGrantError::ProtectedGrant(
+                ProtectedRuleGrantError::ProtectedPath
+            ))
+        ));
+
+        authorization.protected.requested_policy_revision =
+            authorization.protected.canonical_policy_revision;
+        authorization.volume.revision += 1;
+        assert!(matches!(
+            authorization.revalidate(),
+            Err(RuleScopeGrantError::VolumeGrant(
+                TrustedVolumeGrantError::UnsupportedRevision
+            ))
         ));
     }
 

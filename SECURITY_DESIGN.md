@@ -759,10 +759,13 @@ The retained Cargo provenance can now be consumed into a sealed
 `RustTargetRuleBoundaryEvidence` join with the macOS home-mount witness. The
 join compares the exact retained scan-root boundary, repeats all Cargo/read-set
 and account/home/mount revalidation, and carries the unresolved `ProtectedPath`
-marker forward. It has no path getter, blocker-removal operation, plan,
-approval, FFI, scheduling, or effect conversion. This is still provenance and
-scope evidence only; deterministic rule-scope grants, process/descendant
-guards, and executor-time revalidation remain separate gates.
+marker forward. The next private rule-scope layer promotes those observations
+into a revisioned home-volume grant and a code-owned protected-rule grant. The
+protected grant binds an exact rule/revision and stable boundary key, the
+scan-root/target identities, and both requested and canonical
+`NoTextualMatch` policy revisions; every grant revalidates before reuse. These
+are still provenance and scope evidence only: `ProtectedPath` remains, and no
+plan, approval, FFI, scheduling, or effect conversion is available.
 
 The process-activity seam is now staged as a private, non-cloneable witness.
 On macOS it reads the bounded libproc table directly, never through a shell,
