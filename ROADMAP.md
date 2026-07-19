@@ -4489,6 +4489,17 @@ Tasks:
       current catalog has no descendant selectors. Recursive enumeration,
       retained descriptor-relative child effects, blocker removal, planning,
       approval, FFI, scheduling, and cleanup effects remain explicitly open.
+    - [x] 2026-07-19 slice: add the first trusted deterministic-rule scope
+      authorization. A private non-cloneable token allowlists only the
+      revision-2 Rust-target and Python-`__pycache__` rules, binds the exact
+      macOS current-account home/mount witness and protected-root registry,
+      and authorizes one fresh no-follow target only when requested and
+      canonical policy both produce `NoTextualMatch`. It repeats account,
+      mount, ancestry, boundary, policy, and target identity checks before
+      release. The token has no path getter, plan conversion, approval,
+      persistence, FFI, schedule, or effect method, so existing candidates
+      still retain `ProtectedPath`; process/descendant coverage and the plan
+      and executor joins remain open.
 - [ ] Implement candidate groups and overlap resolution.
   - [x] 2026-07-18 slice: add the sealed, non-authoritative core grouping
     result. Candidates are grouped deterministically by category, safety, and

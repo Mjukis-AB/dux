@@ -25,6 +25,7 @@ mod cargo_workspace_glob;
 mod descendant_policy;
 mod exact_path_review;
 mod process_activity;
+mod rule_scope_grant;
 mod rust_target;
 #[cfg(unix)]
 mod rust_target_cargo;

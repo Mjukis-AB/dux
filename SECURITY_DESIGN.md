@@ -768,6 +768,17 @@ subtree semantics remain open. The optional witness is path-private and does
 not clear `ProtectedPath`, create a plan, cross FFI, schedule, approve, or
 mutate.
 
+The first trusted deterministic-rule scope token is now staged as a separate
+planner boundary. It allowlists only the revision-2 Rust-target and Python
+`__pycache__` rules, consumes the macOS current-account home/mount witness and
+the code-owned protected-root registry, and binds one exact no-follow target
+whose requested and canonical assessments are both `NoTextualMatch`. The
+non-cloneable token repeats account, mount, ancestry, boundary, policy, and
+target identity evidence before release. It has no path getter, plan,
+approval, persistence, FFI, scheduling, or effect operation; current
+candidates therefore retain `ProtectedPath` until process/descendant,
+plan, and executor joins are complete.
+
 The next boundary consumes that fenced witness into a path-private planning-
 provenance token. Creation binds the exact source-scan and candidate IDs,
 witness and resolution-policy revisions, and the unresolved protected-path

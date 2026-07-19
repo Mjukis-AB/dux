@@ -12,6 +12,11 @@
   or removed entries. The optional rule-boundary join revalidates it, while
   recursive ownership, plans, approvals, FFI, schedules, and cleanup effects
   remain unavailable.
+- Added the first trusted deterministic-rule scope authorization. It is
+  macOS-only, allowlists only the revision-2 Rust-target and Python cache
+  rules, binds current-account home/mount and protected-root evidence, and
+  revalidates one exact target identity. It remains path-private and cannot
+  create plans, clear `ProtectedPath`, persist, cross FFI, schedule, or mutate.
 - Staged UniFFI contract v19's core-issued, one-shot Trash callback request.
   The request has no public constructor, exposes only the exact ephemeral path
   bytes and target kind to a future synchronous platform callback, and can be
