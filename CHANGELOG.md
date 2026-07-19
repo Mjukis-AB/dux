@@ -1,5 +1,11 @@
 # Changelog
 
+- Added schema v11 durable pressure episodes. Warning/Critical entries,
+  Healthy recovery, escalation, and policy-revision boundaries are written
+  atomically with raw capacity samples. Unknown pressure never opens or
+  claims recovery; exact retries remain idempotent; bounded readers reject
+  malformed or overlapping history. Episodes are telemetry only and remain
+  outside FFI, notifications, and cleanup authority.
 - Added the first private approved-plan to cleanup-journal handoff. It
   revalidates the expiring approval, persists one planned session, compares
   the frozen plan before and after an owner/generation-fenced journal claim,

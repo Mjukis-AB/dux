@@ -4690,6 +4690,13 @@ Goal: make DUX proactive and explain recurring disk pressure.
 Tasks:
 
 - [ ] Persist disk samples and pressure episodes.
+  - [x] 2026-07-19 slice: add schema v11 durable pressure episodes. Warning
+    and Critical entries, Healthy recovery, Warning→Critical escalation, and
+    policy-revision boundaries are updated in the same immediate transaction
+    as the raw capacity sample. Unknown pressure never opens or claims
+    recovery; exact retries are idempotent; bounded readers reject malformed
+    or overlapping history. `StoredPressureEpisode` remains path-free,
+    telemetry-only, and is not exposed through FFI yet.
 - [ ] Add 24-hour/7-day changes and 30-day chart.
 - [ ] Add transition-based notifications and cooldown.
 - [ ] Deep-link notifications to urgent Recommendations.

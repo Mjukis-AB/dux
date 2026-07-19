@@ -22,7 +22,7 @@ use super::migrations::{
     panic_with_test_budget, schema_fingerprint, test_migrations, test_v1_schema_fingerprint,
     test_v2_schema_fingerprint, test_v3_schema_fingerprint, test_v4_schema_fingerprint,
     test_v5_schema_fingerprint, test_v6_schema_fingerprint, test_v7_schema_fingerprint,
-    test_v8_schema_fingerprint, test_v9_schema_fingerprint, test_v10_schema_fingerprint,
+    test_v8_schema_fingerprint, test_v9_schema_fingerprint, test_v11_schema_fingerprint,
     validate_compiled_migrations,
 };
 use super::process_liveness::current_process_instance;
@@ -922,11 +922,11 @@ fn embedded_v9_schema_fingerprint_matches_complete_chain() {
 }
 
 #[test]
-fn embedded_v10_schema_fingerprint_matches_complete_chain() {
+fn embedded_v11_schema_fingerprint_matches_complete_chain() {
     let connection = fresh_current_schema();
     assert_eq!(
         schema_fingerprint(&connection).unwrap(),
-        test_v10_schema_fingerprint()
+        test_v11_schema_fingerprint()
     );
     assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
 }
@@ -1104,7 +1104,7 @@ fn populated_v7_upgrade_adds_empty_snapshot_temp_lease_relation() {
     assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
     assert_eq!(
         schema_fingerprint(&connection).unwrap(),
-        test_v10_schema_fingerprint()
+        test_v11_schema_fingerprint()
     );
     let lease_count: i64 = connection
         .query_row("SELECT count(*) FROM snapshot_temp_leases", [], |row| {
@@ -1143,7 +1143,7 @@ fn populated_v8_upgrade_preserves_running_rows_without_fabricating_claims() {
     assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
     assert_eq!(
         schema_fingerprint(&connection).unwrap(),
-        test_v10_schema_fingerprint()
+        test_v11_schema_fingerprint()
     );
     let scan: (String, Option<i64>, i64, i64) = connection
         .query_row(
@@ -1200,7 +1200,7 @@ fn populated_v6_upgrade_adds_snapshot_path_lookup_without_rewriting_scans() {
     assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
     assert_eq!(
         schema_fingerprint(&connection).unwrap(),
-        test_v10_schema_fingerprint()
+        test_v11_schema_fingerprint()
     );
     let scans: Vec<(String, Option<Vec<u8>>)> = connection
         .prepare("SELECT scan_id, snapshot_relative_path FROM scans ORDER BY scan_id")
@@ -1860,7 +1860,7 @@ fn populated_v1_upgrade_preserves_legacy_candidate_and_cleanup_observations() {
     assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
     assert_eq!(
         schema_fingerprint(&connection).unwrap(),
-        test_v10_schema_fingerprint()
+        test_v11_schema_fingerprint()
     );
     let candidate: (i64, Option<String>, Option<String>) = connection
         .query_row(
@@ -1914,7 +1914,7 @@ fn populated_v1_upgrade_preserves_legacy_candidate_and_cleanup_observations() {
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
-    assert_eq!(versions, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    assert_eq!(versions, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
 }
 
 #[test]

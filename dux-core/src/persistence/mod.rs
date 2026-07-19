@@ -83,8 +83,12 @@ pub(crate) use candidate_history::{
     CandidateBatchMaterializationBudget, CandidateHistoryStatus, CompleteCandidateRecord,
     NewCandidateRecord,
 };
+#[allow(
+    unused_imports,
+    reason = "pressure episode pages are consumed by later trend and notification slices"
+)]
 pub(crate) use capacity_history::{
-    CapacityPressureBaseline, CapacityWriteOutcome, RawCapacityObservation,
+    CapacityPressureBaseline, CapacityWriteOutcome, RawCapacityObservation, StoredPressureEpisode,
 };
 pub(crate) use cargo_enrollment::{
     CARGO_CODE_SIGN_ADHOC_FLAG, CARGO_ENROLLMENT_SUPPORTED_RELEASE,

@@ -29,6 +29,15 @@ maintenance rolls back instead of overwriting it. Raw observations older than
 the daily window may be removed without creating an immediately expired
 rollup.
 
+Pressure episodes are retained with the capacity history and are not rolled
+up or pruned by the raw-sample cadence. Each Warning or Critical episode keeps
+its entry time, optional Healthy-recovery time, and policy revision. A
+Warning→Critical change closes the Warning episode and opens a Critical one at
+the same observation time; Unknown observations never open or close an
+episode. Episode writes occur in the same transaction as the raw sample and
+bounded readers reject malformed or overlapping rows. A later retention slice
+will define the episode horizon separately from raw and daily samples.
+
 Each maintenance invocation has fixed row and SQLite VM/deadline limits. It
 returns whether more eligible work remains so an idle background caller can
 schedule another batch. It never loops over an unbounded history in one writer

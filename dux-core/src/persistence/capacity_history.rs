@@ -26,6 +26,7 @@ const MAX_STORED_FILESYSTEM_BYTES: i64 = MAX_FILESYSTEM_BYTES as i64;
 const MAX_STORED_KIND_BYTES: i64 = 16;
 const MAX_STORED_PRESSURE_BYTES: i64 = 16;
 const MAX_PAGE_SIZE: usize = 1_024;
+const MAX_PRESSURE_EPISODE_PAGE_SIZE: usize = 256;
 const UTC_HOUR_MS: i64 = 3_600_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -318,6 +319,18 @@ pub(crate) struct CapacityPage {
     pub(crate) next_cursor: Option<CapacityPageCursor>,
 }
 
+/// One durable warning/critical pressure episode. Episodes are telemetry
+/// history only; they never select a cleanup target or grant mutation
+/// authority.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct StoredPressureEpisode {
+    pub(crate) volume_id: VolumeId,
+    pub(crate) pressure: DiskPressure,
+    pub(crate) entered_at: SystemTime,
+    pub(crate) exited_at: Option<SystemTime>,
+    pub(crate) policy_revision: u64,
+}
+
 pub(super) struct PreparedCapacitySample {
     sample: RawCapacitySample,
     mount_path: EncodedBytes,
@@ -440,8 +453,148 @@ pub(super) fn write_raw_capacity_sample(
     upsert_volume_observation(transaction, prepared, volume.as_ref())?;
     if outcome == CapacityWriteOutcome::Inserted {
         insert_raw_capacity_sample(transaction, prepared)?;
+        update_pressure_episode(
+            transaction,
+            prepared,
+            latest.as_ref().map(|sample| sample.pressure),
+            reason,
+        )?;
     }
     Ok(outcome)
+}
+
+/// Update the durable pressure episode state in the same transaction as the
+/// raw sample. Unknown pressure never opens or closes an episode. A policy
+/// revision boundary is treated as a new observation boundary, so historical
+/// episodes retain the revision under which they were classified.
+fn update_pressure_episode(
+    transaction: &Transaction<'_>,
+    prepared: &PreparedCapacitySample,
+    previous_pressure: Option<DiskPressure>,
+    reason: CapacityWriteReason,
+) -> Result<(), HistoryError> {
+    let current = load_open_pressure_episode(transaction, prepared.sample.volume_id())?;
+    let new_pressure = prepared.sample.pressure;
+    let sampled_at = prepared.sampled_at_unix_ms;
+    let policy_revision = i64::try_from(prepared.sample.policy_revision)
+        .map_err(|_| HistoryError::new(HistoryErrorKind::InternalState))?;
+
+    match (current, new_pressure) {
+        (Some(open), DiskPressure::Healthy) => {
+            if sampled_at < open.entered_at_unix_ms {
+                return Err(HistoryError::new(HistoryErrorKind::InvalidTransition));
+            }
+            close_pressure_episode(transaction, open.episode_id, sampled_at)?;
+        }
+        (Some(open), DiskPressure::Warning | DiskPressure::Critical)
+            if pressure_as_stored(new_pressure) != open.pressure
+                || (reason == CapacityWriteReason::PolicyBaseline
+                    && open.policy_revision != policy_revision) =>
+        {
+            if sampled_at < open.entered_at_unix_ms {
+                return Err(HistoryError::new(HistoryErrorKind::InvalidTransition));
+            }
+            close_pressure_episode(transaction, open.episode_id, sampled_at)?;
+            insert_pressure_episode(
+                transaction,
+                prepared.sample.volume_id(),
+                new_pressure,
+                sampled_at,
+                policy_revision,
+            )?;
+        }
+        (None, DiskPressure::Warning | DiskPressure::Critical) => {
+            // A v11 store may be upgraded with older non-healthy samples but
+            // no episode rows. Start an honest episode at the first durable
+            // sample observed by the new schema rather than inventing history.
+            let _ = previous_pressure;
+            insert_pressure_episode(
+                transaction,
+                prepared.sample.volume_id(),
+                new_pressure,
+                sampled_at,
+                policy_revision,
+            )?;
+        }
+        (Some(_), DiskPressure::Unknown)
+        | (None, DiskPressure::Unknown)
+        | (None, DiskPressure::Healthy)
+        | (Some(_), DiskPressure::Warning | DiskPressure::Critical) => {}
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+struct OpenPressureEpisode {
+    episode_id: i64,
+    pressure: String,
+    entered_at_unix_ms: i64,
+    policy_revision: i64,
+}
+
+fn load_open_pressure_episode(
+    connection: &Connection,
+    volume_id: &VolumeId,
+) -> Result<Option<OpenPressureEpisode>, HistoryError> {
+    connection
+        .query_row(
+            "SELECT episode_id, pressure, entered_at_unix_ms, policy_revision
+             FROM disk_pressure_episodes
+             WHERE volume_id = ?1 AND exited_at_unix_ms IS NULL",
+            [volume_id.as_str()],
+            |row| {
+                Ok(OpenPressureEpisode {
+                    episode_id: row.get(0)?,
+                    pressure: row.get(1)?,
+                    entered_at_unix_ms: row.get(2)?,
+                    policy_revision: row.get(3)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(map_query_sql_error)
+}
+
+fn close_pressure_episode(
+    transaction: &Transaction<'_>,
+    episode_id: i64,
+    exited_at_unix_ms: i64,
+) -> Result<(), HistoryError> {
+    let changed = transaction
+        .execute(
+            "UPDATE disk_pressure_episodes
+             SET exited_at_unix_ms = ?2
+             WHERE episode_id = ?1 AND exited_at_unix_ms IS NULL",
+            params![episode_id, exited_at_unix_ms],
+        )
+        .map_err(map_write_sql_error)?;
+    if changed != 1 {
+        return Err(HistoryError::new(HistoryErrorKind::InvalidTransition));
+    }
+    Ok(())
+}
+
+fn insert_pressure_episode(
+    transaction: &Transaction<'_>,
+    volume_id: &VolumeId,
+    pressure: DiskPressure,
+    entered_at_unix_ms: i64,
+    policy_revision: i64,
+) -> Result<(), HistoryError> {
+    transaction
+        .execute(
+            "INSERT INTO disk_pressure_episodes (
+                volume_id, pressure, entered_at_unix_ms, policy_revision
+             ) VALUES (?1, ?2, ?3, ?4)",
+            params![
+                volume_id.as_str(),
+                pressure_as_stored(pressure),
+                entered_at_unix_ms,
+                policy_revision,
+            ],
+        )
+        .map_err(map_write_sql_error)?;
+    Ok(())
 }
 
 pub(super) fn load_exact_raw_capacity_sample(
@@ -584,6 +737,87 @@ pub(super) fn load_raw_capacity_page(
             samples,
             next_cursor,
         })
+    })
+}
+
+/// Load a bounded newest-first page of pressure episodes for one volume. The
+/// query validates every returned row and rejects overlapping or malformed
+/// state before exposing it to later trend/notification consumers.
+pub(super) fn load_pressure_episode_page(
+    connection: &Connection,
+    volume_id: &VolumeId,
+    limit: usize,
+) -> Result<Vec<StoredPressureEpisode>, HistoryError> {
+    if !(1..=MAX_PRESSURE_EPISODE_PAGE_SIZE).contains(&limit) {
+        return Err(invalid());
+    }
+    let sql_limit = i64::try_from(limit + 1).map_err(|_| invalid())?;
+    run_bounded_query(connection, || {
+        let mut statement = connection
+            .prepare(
+                "SELECT volume_id, pressure, entered_at_unix_ms, exited_at_unix_ms,
+                        policy_revision
+                 FROM disk_pressure_episodes
+                 WHERE volume_id = ?1
+                 ORDER BY entered_at_unix_ms DESC, episode_id DESC
+                 LIMIT ?2",
+            )
+            .map_err(map_query_sql_error)?;
+        let rows = statement
+            .query_map(params![volume_id.as_str(), sql_limit], |row| {
+                let volume_id_text: String = row.get(0)?;
+                let pressure: String = row.get(1)?;
+                let entered_at_unix_ms: i64 = row.get(2)?;
+                let exited_at_unix_ms: Option<i64> = row.get(3)?;
+                let policy_revision: i64 = row.get(4)?;
+                Ok((
+                    volume_id_text,
+                    pressure,
+                    entered_at_unix_ms,
+                    exited_at_unix_ms,
+                    policy_revision,
+                ))
+            })
+            .map_err(map_query_sql_error)?;
+        let mut episodes = Vec::with_capacity(limit.min(64));
+        for row in rows {
+            let (volume_id_text, pressure, entered_at_unix_ms, exited_at_unix_ms, policy_revision) =
+                row.map_err(map_query_sql_error)?;
+            let decoded_volume_id = VolumeId::new(volume_id_text).map_err(|_| corrupt())?;
+            if decoded_volume_id != *volume_id
+                || entered_at_unix_ms < 0
+                || policy_revision < 0
+                || exited_at_unix_ms.is_some_and(|value| value < entered_at_unix_ms)
+            {
+                return Err(corrupt());
+            }
+            episodes.push(StoredPressureEpisode {
+                volume_id: decoded_volume_id,
+                pressure: pressure_from_stored(&pressure)?,
+                entered_at: unix_ms_to_system_time(
+                    entered_at_unix_ms,
+                    HistoryErrorKind::CorruptData,
+                )?,
+                exited_at: exited_at_unix_ms
+                    .map(|value| unix_ms_to_system_time(value, HistoryErrorKind::CorruptData))
+                    .transpose()?,
+                policy_revision: u64::try_from(policy_revision).map_err(|_| corrupt())?,
+            });
+        }
+        if episodes.len() > limit {
+            episodes.pop();
+        }
+        // Newest-first rows must not overlap. The open uniqueness index covers
+        // simultaneous episodes, while this check covers malformed closed
+        // rows introduced by external corruption or an incomplete migration.
+        for pair in episodes.windows(2) {
+            if let Some(older_exit) = pair[1].exited_at
+                && older_exit > pair[0].entered_at
+            {
+                return Err(corrupt());
+            }
+        }
+        Ok(episodes)
     })
 }
 
@@ -1115,6 +1349,99 @@ mod tests {
                 .unwrap(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn pressure_episodes_are_atomic_idempotent_and_hysteresis_friendly() {
+        let temp = TempDir::new().unwrap();
+        let store = StoreCoordinator::open(&temp.path().join("store/dux.sqlite3")).unwrap();
+        let volume = "volume:observed";
+        let warning_at = BASE_HOUR_MS;
+        let critical_at = BASE_HOUR_MS + 60_000;
+        let healthy_at = BASE_HOUR_MS + 120_000;
+
+        let warning = sample_at(volume, warning_at, 100, None, DiskPressure::Warning);
+        assert_eq!(
+            store
+                .record_raw_capacity_sample(&warning, CapacityWriteReason::Routine)
+                .unwrap(),
+            CapacityWriteOutcome::Inserted
+        );
+        assert_eq!(
+            store
+                .record_raw_capacity_sample(&warning, CapacityWriteReason::Routine)
+                .unwrap(),
+            CapacityWriteOutcome::ExistingExact
+        );
+
+        let critical = sample_at(volume, critical_at, 50, None, DiskPressure::Critical);
+        store
+            .record_raw_capacity_sample(&critical, CapacityWriteReason::PressureTransition)
+            .unwrap();
+        let healthy = sample_at(volume, healthy_at, 900, None, DiskPressure::Healthy);
+        store
+            .record_raw_capacity_sample(&healthy, CapacityWriteReason::PressureTransition)
+            .unwrap();
+
+        let episodes = store
+            .load_pressure_episode_page(&VolumeId::new(volume).unwrap(), 10)
+            .unwrap();
+        assert_eq!(episodes.len(), 2);
+        assert_eq!(episodes[0].pressure, DiskPressure::Critical);
+        assert_eq!(
+            episodes[0].entered_at,
+            UNIX_EPOCH + Duration::from_millis(critical_at)
+        );
+        assert_eq!(
+            episodes[0].exited_at,
+            Some(UNIX_EPOCH + Duration::from_millis(healthy_at))
+        );
+        assert_eq!(episodes[1].pressure, DiskPressure::Warning);
+        assert_eq!(
+            episodes[1].exited_at,
+            Some(UNIX_EPOCH + Duration::from_millis(critical_at))
+        );
+    }
+
+    #[test]
+    fn pressure_episode_reader_rejects_overlapping_history() {
+        let temp = TempDir::new().unwrap();
+        let store = StoreCoordinator::open(&temp.path().join("store/dux.sqlite3")).unwrap();
+        let sample = sample_at(
+            "volume:overlap",
+            BASE_HOUR_MS,
+            100,
+            None,
+            DiskPressure::Healthy,
+        );
+        store
+            .record_raw_capacity_sample(&sample, CapacityWriteReason::Routine)
+            .unwrap();
+        store.with_connection(|connection| {
+            connection
+                .execute(
+                    "INSERT INTO disk_pressure_episodes (
+                         volume_id, pressure, entered_at_unix_ms, exited_at_unix_ms, policy_revision
+                     ) VALUES ('volume:overlap', 'warning', 100, 300, 0)",
+                    [],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO disk_pressure_episodes (
+                         volume_id, pressure, entered_at_unix_ms, exited_at_unix_ms, policy_revision
+                     ) VALUES ('volume:overlap', 'critical', 200, 400, 0)",
+                    [],
+                )
+                .unwrap();
+        });
+        assert_eq!(
+            store
+                .load_pressure_episode_page(&VolumeId::new("volume:overlap").unwrap(), 10)
+                .unwrap_err()
+                .kind,
+            HistoryErrorKind::CorruptData
+        );
     }
 
     #[test]

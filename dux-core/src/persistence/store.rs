@@ -22,9 +22,10 @@ use super::candidate_history::{
 use super::capacity_history::{
     CapacityObservationOutcome, CapacityPage, CapacityPageCursor, CapacityPressureBaseline,
     CapacityWriteOutcome, CapacityWriteReason, PreparedCapacitySample, RawCapacityObservation,
-    RawCapacitySample, StoredCapacitySample, exact_raw_and_volume_match,
-    exact_volume_observation_match, load_latest_raw_capacity_sample, load_raw_capacity_page,
-    validate_capacity_volume, validate_ephemeral_capacity_observation, write_raw_capacity_sample,
+    RawCapacitySample, StoredCapacitySample, StoredPressureEpisode, exact_raw_and_volume_match,
+    exact_volume_observation_match, load_latest_raw_capacity_sample, load_pressure_episode_page,
+    load_raw_capacity_page, validate_capacity_volume, validate_ephemeral_capacity_observation,
+    write_raw_capacity_sample,
 };
 use super::cleanup_history::{
     CleanupSessionId, NewCleanupSessionRecord, PreparedCleanupSession, StoredCleanupSessionRecord,
@@ -807,6 +808,24 @@ impl StoreCoordinator {
             return Err(HistoryError::new(HistoryErrorKind::CorruptData));
         }
         Ok(page)
+    }
+
+    /// Load a bounded newest-first pressure-episode page for trend and
+    /// notification consumers. The returned rows are telemetry only.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "pressure episode pages integrate with later trend and notification slices"
+        )
+    )]
+    pub(crate) fn load_pressure_episode_page(
+        &self,
+        volume_id: &crate::domain::VolumeId,
+        limit: usize,
+    ) -> Result<Vec<StoredPressureEpisode>, HistoryError> {
+        let guard = self.lock_current_history_connection()?;
+        load_pressure_episode_page(&guard.connection, volume_id, limit)
     }
 
     /// Test primitive for exercising non-reconciled scan-start behavior.
