@@ -1,5 +1,11 @@
 # Changelog
 
+- Staged a private, bounded macOS process-activity witness for future rule
+  guards. It reads libproc directly, retains PID/start-time/executable
+  identity, rejects active/malformed/incomplete observations, refuses bundle
+  guards without signed bundle identity, and revalidates before use. The
+  current catalog has no activity guards, so no blocker, plan, schedule, or
+  cleanup authority changed.
 - Staged UniFFI contract v19's core-issued, one-shot Trash callback request.
   The request has no public constructor, exposes only the exact ephemeral path
   bytes and target kind to a future synchronous platform callback, and can be

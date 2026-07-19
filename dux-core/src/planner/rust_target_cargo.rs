@@ -49,6 +49,7 @@ use super::cargo_workspace_glob::{
     CargoWorkspaceGlobError, CargoWorkspaceGlobEvidence, CargoWorkspaceGlobExpansion,
     CargoWorkspaceGlobGuard,
 };
+use super::process_activity::{ProcessActivityError, ProcessActivityWitness};
 use super::rust_target::{
     RUST_TARGET_WITNESS_REVISION, RustTargetLiveValidationError, RustTargetLiveWitness,
 };
@@ -324,6 +325,7 @@ pub(crate) enum RustTargetCargoPlanningProvenanceError {
 pub(crate) struct RustTargetRuleBoundaryEvidence {
     provenance: RustTargetCargoPlanningProvenance,
     location: TrustedHomeMountWitness,
+    process_activity: Option<ProcessActivityWitness>,
     boundary_revision: u32,
     protected_path_still_unresolved: CargoProtectedPathStillUnresolved,
 }
@@ -334,6 +336,8 @@ pub(crate) enum RustTargetRuleBoundaryError {
     Provenance(#[source] RustTargetCargoPlanningProvenanceError),
     #[error("current-account home mount evidence could not be revalidated: {0}")]
     Location(#[source] TrustedHomeMountError),
+    #[error("process activity evidence could not be revalidated: {0}")]
+    ProcessActivity(#[source] ProcessActivityError),
     #[error("Rust-target Cargo provenance and home-mount evidence bind different boundaries")]
     BoundaryMismatch,
     #[error("Rust-target rule-boundary revision is unsupported")]
@@ -434,11 +438,29 @@ impl RustTargetCargoPlanningProvenance {
         self,
         location: TrustedHomeMountWitness,
     ) -> Result<RustTargetRuleBoundaryEvidence, RustTargetRuleBoundaryError> {
+        self.into_rule_boundary_evidence_with_process_activity(location, None)
+    }
+
+    /// Consume provenance into the same boundary while retaining a separate
+    /// live process-activity witness.  The witness is optional because the
+    /// current Cargo rule has no declared activity guard yet; when supplied,
+    /// it is revalidated with every future boundary check and remains private
+    /// evidence rather than a blocker-removal or executor capability.
+    pub(crate) fn into_rule_boundary_evidence_with_process_activity(
+        self,
+        location: TrustedHomeMountWitness,
+        process_activity: Option<ProcessActivityWitness>,
+    ) -> Result<RustTargetRuleBoundaryEvidence, RustTargetRuleBoundaryError> {
         self.revalidate()
             .map_err(RustTargetRuleBoundaryError::Provenance)?;
         location
             .revalidate()
             .map_err(RustTargetRuleBoundaryError::Location)?;
+        if let Some(process_activity) = process_activity.as_ref() {
+            process_activity
+                .revalidate()
+                .map_err(RustTargetRuleBoundaryError::ProcessActivity)?;
+        }
         if !location.matches_scan_boundary(&self.witness.boundary) {
             return Err(RustTargetRuleBoundaryError::BoundaryMismatch);
         }
@@ -448,6 +470,7 @@ impl RustTargetCargoPlanningProvenance {
         Ok(RustTargetRuleBoundaryEvidence {
             provenance: self,
             location,
+            process_activity,
             boundary_revision: RUST_TARGET_RULE_BOUNDARY_REVISION,
             protected_path_still_unresolved: CargoProtectedPathStillUnresolved,
         })
@@ -470,6 +493,11 @@ impl RustTargetRuleBoundaryEvidence {
         self.location
             .revalidate()
             .map_err(RustTargetRuleBoundaryError::Location)?;
+        if let Some(process_activity) = self.process_activity.as_ref() {
+            process_activity
+                .revalidate()
+                .map_err(RustTargetRuleBoundaryError::ProcessActivity)?;
+        }
         if !self
             .location
             .matches_scan_boundary(&self.provenance.witness.boundary)

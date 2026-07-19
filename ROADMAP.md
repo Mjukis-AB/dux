@@ -4467,6 +4467,18 @@ Tasks:
       revalidation and lease release. It has no path getter, blocker-removal,
       plan, approval, FFI, scheduling, or effect operation; Linux/Windows
       location authority and process/descendant/executor guards remain open.
+    - [x] 2026-07-19 slice: stage the private process-activity witness seam.
+      macOS uses the read-only libproc table directly (never a shell), bounds
+      the PID list and executable-path/name records, and retains PID,
+      start-time, and executable identity without crossing persistence or FFI.
+      Exact process-name guards require a complete, duplicate-free observation;
+      active, malformed, truncated, inaccessible, or unsupported observations
+      fail closed. Bundle identifiers do not downgrade to process names and
+      remain unsupported until a signed bundle-identity provider exists. A
+      fresh revalidation rejects PID/image replacement and any newly active
+      guard. The rule-boundary evidence can consume this witness and repeats
+      it, but the current catalog has no activity guards, so no blocker is
+      removed and no plan, schedule, approval, or effect authority is added.
 - [ ] Implement candidate groups and overlap resolution.
   - [x] 2026-07-18 slice: add the sealed, non-authoritative core grouping
     result. Candidates are grouped deterministically by category, safety, and

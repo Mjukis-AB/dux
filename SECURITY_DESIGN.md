@@ -743,6 +743,19 @@ approval, FFI, scheduling, or effect conversion. This is still provenance and
 scope evidence only; deterministic rule-scope grants, process/descendant
 guards, and executor-time revalidation remain separate gates.
 
+The process-activity seam is now staged as a private, non-cloneable witness.
+On macOS it reads the bounded libproc table directly, never through a shell,
+and retains only private PID, start-time, executable-path, and process-name
+identity. Exact process-name guards require complete, duplicate-free records;
+active, malformed, truncated, inaccessible, and unsupported observations fail
+closed. Bundle-identifier guards do not fall back to process names and remain
+unsupported until a signed bundle-identity provider can be reviewed. A fresh
+revalidation rejects newly active guards and PID/image replacement, but it is
+still defense-in-depth: a same-user process can retain an already-open file
+descriptor or race after the check. The Cargo rule-boundary evidence may carry
+this witness and revalidate it, while the current catalog declares no activity
+guards, so no blocker, plan, schedule, approval, or effect authority changes.
+
 The next boundary consumes that fenced witness into a path-private planning-
 provenance token. Creation binds the exact source-scan and candidate IDs,
 witness and resolution-policy revisions, and the unresolved protected-path
