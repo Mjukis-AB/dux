@@ -57,7 +57,7 @@ final class EngineServiceTests: XCTestCase {
         // DUX-DESTRUCTIVE: allow=test-swift-retry-obstruction-remove -- remove only this test fixture's deliberate file obstruction
         try FileManager.default.removeItem(at: dataRoot)
         let status = try await service.loadStatus()
-        XCTAssertEqual(status.ffiContractVersion, 24)
+        XCTAssertEqual(status.ffiContractVersion, 25)
         let closed = await service.close()
         XCTAssertTrue(closed)
     }
@@ -67,8 +67,90 @@ final class EngineServiceTests: XCTestCase {
         let result = try await EngineService(engine: fixture.engine).loadStatus()
 
         XCTAssertEqual(result.libraryVersion, "0.5.0")
-        XCTAssertEqual(result.ffiContractVersion, 24)
+        XCTAssertEqual(result.ffiContractVersion, 25)
         XCTAssertTrue(result.executedOffMainThread)
+    }
+
+    func testCleanupHistorySummaryFeedIsBoundedAndReadOnly() async throws {
+        let fixture = try TestEngineFixture()
+        let service = EngineService(engine: fixture.engine)
+
+        let page = try await service.loadRecentCleanupHistory(cursor: nil, limit: 64)
+        XCTAssertTrue(page.records.isEmpty)
+        XCTAssertNil(page.nextCursor)
+
+        do {
+            _ = try await service.loadRecentCleanupHistory(cursor: nil, limit: 0)
+            XCTFail("Expected the history page limit to be rejected")
+        } catch let error as CleanupHistoryServiceError {
+            XCTAssertEqual(error, .invalidLimit)
+        }
+
+        let closed = await service.close()
+        XCTAssertTrue(closed)
+        do {
+            _ = try await service.loadRecentCleanupHistory(cursor: nil, limit: 1)
+            XCTFail("Expected the closed engine to reject history reads")
+        } catch let error as CleanupHistoryServiceError {
+            XCTAssertEqual(error, .closed)
+        }
+    }
+
+    func testCleanupHistoryAdapterRejectsMalformedSummaryBeforePresentation() throws {
+        let emptyCounts = CleanupStatusCounts(
+            planned: 0,
+            validating: 0,
+            dryRun: 0,
+            effectStarted: 0,
+            trashed: 0,
+            removed: 0,
+            evicted: 0,
+            skipped: 0,
+            rejected: 0,
+            failed: 0,
+            changedSincePlan: 0,
+            interrupted: 0,
+            unavailable: 0,
+            outcomeUnknown: 0,
+            total: 0
+        )
+        let summary = CleanupSessionSummary(
+            recordVersion: 1,
+            sessionId: "session:test",
+            planId: "plan:test",
+            format: .legacyIncomplete,
+            sourceScanId: nil,
+            startedAtUnixMs: 1_000,
+            completedAtUnixMs: nil,
+            planCreatedAtUnixMs: nil,
+            planExpiresAtUnixMs: nil,
+            mode: .dryRun,
+            trigger: .manual,
+            status: .dryRun,
+            estimatedBytes: 0,
+            verifiedCapacityDeltaBytes: nil,
+            cancellationRequested: nil,
+            itemTotal: 0,
+            pathTotal: 0,
+            evidenceTotal: 0,
+            itemStatusCounts: emptyCounts,
+            pathStatusCounts: emptyCounts
+        )
+        let validPage = CleanupHistoryPage(
+            recordVersion: 1,
+            records: [summary],
+            nextCursor: nil
+        )
+        XCTAssertEqual(try CleanupHistoryAdapter.map(validPage).records.count, 1)
+
+        let malformed = CleanupHistoryPage(
+            recordVersion: 2,
+            records: [summary],
+            nextCursor: nil
+        )
+        XCTAssertThrowsError(try CleanupHistoryAdapter.map(malformed)) { error in
+            XCTAssertEqual(error as? CleanupHistoryServiceError, .invalidResponse)
+        }
     }
 
     @MainActor
@@ -910,7 +992,7 @@ final class EngineServiceTests: XCTestCase {
             weakEngine = engine
 
             XCTAssertEqual(liveEngineInstanceCount(), baseline + 1)
-            XCTAssertEqual(try engine.libraryVersion().ffiContractVersion, 24)
+            XCTAssertEqual(try engine.libraryVersion().ffiContractVersion, 25)
             XCTAssertTrue(engine.close())
             XCTAssertTrue(engine.close())
             XCTAssertThrowsError(try engine.formatSize(bytes: 1_536)) { error in

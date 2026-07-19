@@ -134,6 +134,208 @@ enum ExplorerSnapshotHistoryAdapter {
     }
 }
 
+/// Converts the generated cleanup-history feed into bounded app observations.
+/// This boundary intentionally has no path, item, evidence, plan, or effect
+/// mapping, keeping history useful for charts and status without authority.
+enum CleanupHistoryAdapter {
+    private static let recordVersion: UInt32 = 1
+    private static let maximumUnixMilliseconds: Int64 = 253_402_300_799_999
+    private static let maximumPageSize = 64
+    private static let maximumSessionItems: UInt16 = 64
+    private static let maximumSessionPaths: UInt16 = 256
+    private static let maximumSessionEvidence: UInt16 = 512
+
+    static func map(
+        _ page: CleanupHistoryPage
+    ) throws -> CleanupHistoryPageModel {
+        guard page.recordVersion == recordVersion,
+              page.records.count <= maximumPageSize
+        else {
+            throw CleanupHistoryServiceError.invalidResponse
+        }
+
+        let records = try page.records.map(mapSummary)
+        for pair in zip(records, records.dropFirst()) {
+            let ordered = pair.0.startedAt > pair.1.startedAt
+                || (pair.0.startedAt == pair.1.startedAt && pair.0.sessionID < pair.1.sessionID)
+            guard ordered else {
+                throw CleanupHistoryServiceError.invalidResponse
+            }
+        }
+
+        let nextCursor = try page.nextCursor.map(mapCursor)
+        if let nextCursor, let last = records.last {
+            guard nextCursor.startedAt == last.startedAt,
+                  nextCursor.sessionID == last.sessionID
+            else {
+                throw CleanupHistoryServiceError.invalidResponse
+            }
+        } else if nextCursor != nil {
+            throw CleanupHistoryServiceError.invalidResponse
+        }
+        return CleanupHistoryPageModel(records: records, nextCursor: nextCursor)
+    }
+
+    static func mapCursor(_ raw: CleanupHistoryCursor) throws -> CleanupHistoryCursorModel {
+        guard raw.recordVersion == recordVersion,
+              validStableToken(raw.sessionId),
+              validUnixMilliseconds(raw.startedAtUnixMs)
+        else {
+            throw CleanupHistoryServiceError.invalidResponse
+        }
+        return CleanupHistoryCursorModel(
+            startedAt: date(raw.startedAtUnixMs),
+            sessionID: raw.sessionId
+        )
+    }
+
+    private static func mapSummary(
+        _ raw: CleanupSessionSummary
+    ) throws -> CleanupHistorySessionSummaryModel {
+        guard raw.recordVersion == recordVersion,
+              validStableToken(raw.sessionId),
+              validStableToken(raw.planId),
+              validUnixMilliseconds(raw.startedAtUnixMs),
+              raw.completedAtUnixMs.map(validUnixMilliseconds) ?? true,
+              raw.planCreatedAtUnixMs.map(validUnixMilliseconds) ?? true,
+              raw.planExpiresAtUnixMs.map(validUnixMilliseconds) ?? true,
+              raw.completedAtUnixMs.map({ $0 >= raw.startedAtUnixMs }) ?? true,
+              raw.itemTotal <= maximumSessionItems,
+              raw.pathTotal <= maximumSessionPaths,
+              raw.evidenceTotal <= maximumSessionEvidence,
+              raw.itemStatusCounts.total == raw.itemTotal,
+              raw.pathStatusCounts.total == raw.pathTotal,
+              raw.sourceScanId.map(validStableToken) ?? true
+        else {
+            throw CleanupHistoryServiceError.invalidResponse
+        }
+
+        if let expires = raw.planExpiresAtUnixMs {
+            guard let created = raw.planCreatedAtUnixMs, expires >= created else {
+                throw CleanupHistoryServiceError.invalidResponse
+            }
+        }
+
+        switch raw.format {
+        case .legacyIncomplete:
+            guard raw.sourceScanId == nil,
+                  raw.planCreatedAtUnixMs == nil,
+                  raw.planExpiresAtUnixMs == nil
+            else {
+                throw CleanupHistoryServiceError.invalidResponse
+            }
+        case .complete:
+            guard raw.sourceScanId != nil,
+                  raw.planCreatedAtUnixMs != nil,
+                  raw.planExpiresAtUnixMs != nil
+            else {
+                throw CleanupHistoryServiceError.invalidResponse
+            }
+        }
+
+        return CleanupHistorySessionSummaryModel(
+            sessionID: raw.sessionId,
+            planID: raw.planId,
+            format: map(raw.format),
+            sourceScanID: raw.sourceScanId,
+            startedAt: date(raw.startedAtUnixMs),
+            completedAt: raw.completedAtUnixMs.map(date),
+            planCreatedAt: raw.planCreatedAtUnixMs.map(date),
+            planExpiresAt: raw.planExpiresAtUnixMs.map(date),
+            mode: map(raw.mode),
+            trigger: map(raw.trigger),
+            status: map(raw.status),
+            estimatedBytes: raw.estimatedBytes,
+            verifiedCapacityDeltaBytes: raw.verifiedCapacityDeltaBytes,
+            cancellationRequested: raw.cancellationRequested,
+            itemTotal: raw.itemTotal,
+            pathTotal: raw.pathTotal,
+            evidenceTotal: raw.evidenceTotal,
+            itemStatusCounts: map(raw.itemStatusCounts),
+            pathStatusCounts: map(raw.pathStatusCounts)
+        )
+    }
+
+    private static func map(_ raw: CleanupRecordFormat) -> CleanupHistoryRecordFormat {
+        switch raw {
+        case .legacyIncomplete: .legacyIncomplete
+        case .complete: .complete
+        }
+    }
+
+    private static func map(_ raw: CleanupMode) -> CleanupHistoryMode {
+        switch raw {
+        case .dryRun: .dryRun
+        case .trash: .trash
+        case .permanentSafe: .permanentSafe
+        case .evictLocalCopy: .evictLocalCopy
+        }
+    }
+
+    private static func map(_ raw: CleanupTrigger) -> CleanupHistoryTrigger {
+        switch raw {
+        case .manual: .manual
+        case .lowDisk: .lowDisk
+        case .scheduled: .scheduled
+        case .cli: .cli
+        }
+    }
+
+    private static func map(_ raw: CleanupSessionStatus) -> CleanupHistorySessionStatus {
+        switch raw {
+        case .planned: .planned
+        case .running: .running
+        case .recovering: .recovering
+        case .completed: .completed
+        case .partiallyCompleted: .partiallyCompleted
+        case .failed: .failed
+        case .cancelled: .cancelled
+        case .interrupted: .interrupted
+        case .rejected: .rejected
+        case .dryRun: .dryRun
+        }
+    }
+
+    private static func map(_ raw: CleanupStatusCounts) -> CleanupHistoryStatusCounts {
+        CleanupHistoryStatusCounts(
+            planned: raw.planned,
+            validating: raw.validating,
+            dryRun: raw.dryRun,
+            effectStarted: raw.effectStarted,
+            trashed: raw.trashed,
+            removed: raw.removed,
+            evicted: raw.evicted,
+            skipped: raw.skipped,
+            rejected: raw.rejected,
+            failed: raw.failed,
+            changedSincePlan: raw.changedSincePlan,
+            interrupted: raw.interrupted,
+            unavailable: raw.unavailable,
+            outcomeUnknown: raw.outcomeUnknown,
+            total: raw.total
+        )
+    }
+
+    static func validStableToken(_ value: String) -> Bool {
+        value.utf8.count > 0
+            && value.utf8.count <= 128
+            && value.unicodeScalars.allSatisfy { scalar in
+                scalar.isASCII
+                    && (CharacterSet.alphanumerics.contains(scalar)
+                        || "._-:".unicodeScalars.contains(scalar))
+            }
+    }
+
+    private static func validUnixMilliseconds(_ value: Int64) -> Bool {
+        (0 ... maximumUnixMilliseconds).contains(value)
+    }
+
+    private static func date(_ unixMilliseconds: Int64) -> Date {
+        Date(timeIntervalSince1970: Double(unixMilliseconds) / 1_000)
+    }
+}
+
+
 /// The only conversion boundary between generated snapshot-node records and
 /// app-owned Explorer navigation models.
 enum ExplorerSnapshotNodeAdapter {

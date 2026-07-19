@@ -33,6 +33,13 @@ impl DurableCleanupSessionId {
         Some(Self(value.into()))
     }
 
+    /// Rebuild a bounded history cursor component supplied by a presentation
+    /// client. This creates an observation token only; it grants no session,
+    /// plan, approval, recovery, or effect authority.
+    pub fn from_stable_str(value: impl Into<String>) -> Option<Self> {
+        Self::new(value)
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -47,7 +54,7 @@ pub struct CleanupHistoryCursor {
 }
 
 impl CleanupHistoryCursor {
-    pub(super) const fn new(started_at: SystemTime, session_id: DurableCleanupSessionId) -> Self {
+    pub const fn new(started_at: SystemTime, session_id: DurableCleanupSessionId) -> Self {
         Self {
             started_at,
             session_id,

@@ -74,7 +74,7 @@ extension DuxPermanentCleanupPolicyServing {
 }
 
 protocol EngineServing: DuxVolumeStatusServing, DuxCapacityTrendServing, DuxPressurePolicyServing,
-    DuxPermanentCleanupPolicyServing, DuxCleanupExclusionsServing, Sendable
+    DuxPermanentCleanupPolicyServing, DuxCleanupExclusionsServing, DuxCleanupHistoryServing, Sendable
 {
     func loadStatus() async throws -> EngineStatus
 }
@@ -86,6 +86,22 @@ protocol DuxSnapshotReviewServing: Sendable {
 
 protocol DuxSnapshotHistoryServing: Sendable {
     func loadRecentSnapshotHistory(limit: UInt16) async throws -> ExplorerSnapshotHistoryPage
+}
+
+protocol DuxCleanupHistoryServing: Sendable {
+    func loadRecentCleanupHistory(
+        cursor: CleanupHistoryCursorModel?,
+        limit: UInt16
+    ) async throws -> CleanupHistoryPageModel
+}
+
+extension DuxCleanupHistoryServing {
+    func loadRecentCleanupHistory(
+        cursor _: CleanupHistoryCursorModel?,
+        limit _: UInt16
+    ) async throws -> CleanupHistoryPageModel {
+        throw CleanupHistoryServiceError.unavailable
+    }
 }
 
 protocol DuxScanCoverageServing: Sendable {
@@ -175,9 +191,10 @@ extension DuxSnapshotReviewLease {
 }
 
 struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewServing,
-    DuxSnapshotHistoryServing, DuxScanCoverageServing, HomeScanServing, Sendable
+    DuxSnapshotHistoryServing, DuxCleanupHistoryServing, DuxScanCoverageServing, HomeScanServing,
+    Sendable
 {
-    fileprivate static let expectedFFIContractVersion: UInt32 = 24
+    fileprivate static let expectedFFIContractVersion: UInt32 = 25
     fileprivate static let expectedRecordVersion: UInt32 = 1
 
     private let state: EngineServiceState
@@ -600,6 +617,36 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         }
     }
 
+    func loadRecentCleanupHistory(
+        cursor: CleanupHistoryCursorModel?,
+        limit: UInt16
+    ) async throws -> CleanupHistoryPageModel {
+        guard (1 ... 64).contains(limit) else {
+            throw CleanupHistoryServiceError.invalidLimit
+        }
+        return try await state.perform { state in
+            precondition(!Thread.isMainThread, "Blocking FFI work reached the main thread")
+            let engine = try state.resolveEngine()
+            let rawCursor = try cursor.map { observation in
+                guard let milliseconds = Self.unixMilliseconds(observation.startedAt) else {
+                    throw CleanupHistoryServiceError.invalidCursor
+                }
+                return CleanupHistoryCursor(
+                    recordVersion: Self.expectedRecordVersion,
+                    startedAtUnixMs: milliseconds,
+                    sessionId: observation.sessionID
+                )
+            }
+            do {
+                return try CleanupHistoryAdapter.map(
+                    engine.recentCleanupHistory(cursor: rawCursor, limit: limit)
+                )
+            } catch let error as CleanupHistoryError {
+                throw Self.cleanupHistoryError(error)
+            }
+        }
+    }
+
     func loadScanCoverageDetails(scanID: String) async throws -> ExplorerScanCoverageDetails {
         guard ExplorerSnapshotHistoryAdapter.validScanID(scanID) else {
             throw ExplorerScanCoverageError.invalidRequest
@@ -747,6 +794,32 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         default:
             .invalidResponse
         }
+    }
+
+    private static func cleanupHistoryError(
+        _ error: CleanupHistoryError
+    ) -> CleanupHistoryServiceError {
+        switch error {
+        case .Closed: .closed
+        case .InvalidLimit: .invalidLimit
+        case .InvalidCursor: .invalidCursor
+        case .SessionNotFound: .sessionNotFound
+        case .IncompatibleSchema: .incompatibleSchema
+        case .Busy: .retryable
+        case .UnsafeStorage: .unsafeStorage
+        case .BudgetExceeded: .budgetExceeded
+        case .CorruptData: .corruptData
+        case .Unavailable: .unavailable
+        case .InternalState: .internalState
+        }
+    }
+
+    private static func unixMilliseconds(_ date: Date) -> Int64? {
+        let value = date.timeIntervalSince1970 * 1_000
+        guard value.isFinite, value >= 0, value <= Double(Int64.max) else {
+            return nil
+        }
+        return Int64(value.rounded(.towardZero))
     }
 
     private static func policy(_ status: PressurePolicyStatus) throws -> DiskPressurePolicy {

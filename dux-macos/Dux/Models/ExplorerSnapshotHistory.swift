@@ -51,6 +51,108 @@ enum ExplorerSnapshotHistoryError: Error, Equatable, Sendable {
     case invalidResponse
 }
 
+/// Path-free, read-only cleanup outcome metadata. These values are display
+/// observations only; they do not contain a plan, approval, path, or effect
+/// authority.
+enum CleanupHistoryRecordFormat: Equatable, Sendable {
+    case legacyIncomplete
+    case complete
+}
+
+enum CleanupHistoryMode: Equatable, Sendable {
+    case dryRun
+    case trash
+    case permanentSafe
+    case evictLocalCopy
+}
+
+enum CleanupHistoryTrigger: Equatable, Sendable {
+    case manual
+    case lowDisk
+    case scheduled
+    case cli
+}
+
+enum CleanupHistorySessionStatus: Equatable, Sendable {
+    case planned
+    case running
+    case recovering
+    case completed
+    case partiallyCompleted
+    case failed
+    case cancelled
+    case interrupted
+    case rejected
+    case dryRun
+}
+
+struct CleanupHistoryStatusCounts: Equatable, Sendable {
+    let planned: UInt16
+    let validating: UInt16
+    let dryRun: UInt16
+    let effectStarted: UInt16
+    let trashed: UInt16
+    let removed: UInt16
+    let evicted: UInt16
+    let skipped: UInt16
+    let rejected: UInt16
+    let failed: UInt16
+    let changedSincePlan: UInt16
+    let interrupted: UInt16
+    let unavailable: UInt16
+    let outcomeUnknown: UInt16
+    let total: UInt16
+}
+
+struct CleanupHistoryCursorModel: Equatable, Sendable {
+    let startedAt: Date
+    let sessionID: String
+}
+
+struct CleanupHistorySessionSummaryModel: Equatable, Identifiable, Sendable {
+    var id: String { sessionID }
+
+    let sessionID: String
+    let planID: String
+    let format: CleanupHistoryRecordFormat
+    let sourceScanID: String?
+    let startedAt: Date
+    let completedAt: Date?
+    let planCreatedAt: Date?
+    let planExpiresAt: Date?
+    let mode: CleanupHistoryMode
+    let trigger: CleanupHistoryTrigger
+    let status: CleanupHistorySessionStatus
+    let estimatedBytes: UInt64
+    let verifiedCapacityDeltaBytes: Int64?
+    let cancellationRequested: Bool?
+    let itemTotal: UInt16
+    let pathTotal: UInt16
+    let evidenceTotal: UInt16
+    let itemStatusCounts: CleanupHistoryStatusCounts
+    let pathStatusCounts: CleanupHistoryStatusCounts
+}
+
+struct CleanupHistoryPageModel: Equatable, Sendable {
+    let records: [CleanupHistorySessionSummaryModel]
+    let nextCursor: CleanupHistoryCursorModel?
+}
+
+enum CleanupHistoryServiceError: Error, Equatable, Sendable {
+    case closed
+    case invalidLimit
+    case invalidCursor
+    case sessionNotFound
+    case incompatibleSchema
+    case retryable
+    case unsafeStorage
+    case budgetExceeded
+    case corruptData
+    case unavailable
+    case internalState
+    case invalidResponse
+}
+
 enum ExplorerSnapshotReviewAcquisitionError: Error, Equatable, Sendable {
     case closed
     case scanNotFound

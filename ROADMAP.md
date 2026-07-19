@@ -4813,6 +4813,15 @@ Tasks:
     carries that bounded error without paths; Swift presents an explicit
     rescan-before-retry message. Existing one-shot/unknown-outcome behavior
     remains conservative: no automatic retry or effect is attempted.
+  - [x] 2026-07-19 slice: expose a bounded read-only cleanup-history summary
+    feed through UniFFI contract v25 and `EngineService`. The newest-first
+    keyset cursor, session lifecycle, mode/trigger, estimates, optional
+    verified capacity delta, cancellation observation, and bounded item/path
+    status counts are mapped into strict Swift presentation models. Record,
+    token, time, ordering, count, and legacy/complete-shape validation fails
+    closed; no paths, evidence, plans, approvals, or executor authority cross
+    the boundary. Exact-session detail, live partial-progress controls, and
+    cleanup UI remain open.
 - [ ] Add bounded pending-evaluation discovery and snapshot-backed restart
   recovery; malformed or incompatible state fails closed.
 - [ ] Wire deterministic evaluator → reviewed plan → journal → executor through
@@ -4820,6 +4829,11 @@ Tasks:
   recovery, and outcome-unknown fencing.
 - [ ] Expose review intent, plan lifecycle, and path-free cleanup history through
   FFI/Swift UI without turning history into planner authority.
+  - [x] 2026-07-19 slice: add the first app-facing history boundary as a
+    bounded summary page and cursor. `EngineService` reads only path-free
+    durable outcome metadata and returns typed errors; Swift rejects malformed
+    records before they reach presentation. This is intentionally not an
+    executor, planner, approval, or exact-session-detail API.
 - [ ] Expand production cleanup session/item history with exact-session detail,
   verified capacity outcomes, and separately confirmed history clearing.
 - [ ] Define and test cross-reboot and Windows-unproven cleanup-journal recovery;

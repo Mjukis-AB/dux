@@ -22,7 +22,9 @@ use dux_core::engine::{
     CleanupExclusions as CoreCleanupExclusions,
     CleanupExclusionsError as CoreCleanupExclusionsError,
     CleanupExclusionsUpdate as CoreCleanupExclusionsUpdate,
-    DiskPressurePolicy as CorePressurePolicy, DiskPressurePolicyError as CorePressurePolicyError,
+    CleanupHistoryCursor as CoreCleanupHistoryCursor,
+    CleanupHistoryError as CoreCleanupHistoryError, DiskPressurePolicy as CorePressurePolicy,
+    DiskPressurePolicyError as CorePressurePolicyError,
     DiskPressurePolicySource as CorePressurePolicySource,
     DiskPressurePolicyUpdate as CorePressurePolicyUpdate,
     DurableCandidateEvaluationStatus as CoreDurableCandidateEvaluationStatus,
@@ -30,9 +32,15 @@ use dux_core::engine::{
     DurableCandidateEvidencePage as CoreCandidateEvidencePage,
     DurableCandidatePathPage as CoreCandidatePathPage,
     DurableCandidateStatus as CoreCandidateStatus, DurableCandidateSummary as CoreCandidateSummary,
-    DurableObservedPath as CoreObservedPath, DurableScanIssueKind as CoreDurableScanIssueKind,
-    DurableScanStatus as CoreDurableScanStatus, EngineConfig, EngineHandle, EngineOpenError,
-    HistoryMaintenanceStartOutcome, PermanentCleanupPolicy as CorePermanentCleanupPolicy,
+    DurableCleanupHistoryPage as CoreCleanupHistoryPage, DurableCleanupMode as CoreCleanupMode,
+    DurableCleanupRecordFormat as CoreCleanupRecordFormat,
+    DurableCleanupSessionId as CoreCleanupSessionId,
+    DurableCleanupSessionStatus as CoreCleanupSessionStatus,
+    DurableCleanupStatusCounts as CoreCleanupStatusCounts,
+    DurableCleanupTrigger as CoreCleanupTrigger, DurableObservedPath as CoreObservedPath,
+    DurableScanIssueKind as CoreDurableScanIssueKind, DurableScanStatus as CoreDurableScanStatus,
+    EngineConfig, EngineHandle, EngineOpenError, HistoryMaintenanceStartOutcome,
+    PermanentCleanupPolicy as CorePermanentCleanupPolicy,
     PermanentCleanupPolicyError as CorePermanentCleanupPolicyError,
     PermanentCleanupPolicySource as CorePermanentCleanupPolicySource,
     PermanentCleanupPolicyUpdate as CorePermanentCleanupPolicyUpdate,
@@ -77,7 +85,7 @@ use dux_core::{
     VolumeCapacity, VolumeId,
 };
 
-const FFI_CONTRACT_VERSION: u32 = 24;
+const FFI_CONTRACT_VERSION: u32 = 25;
 const FFI_RECORD_VERSION: u32 = 1;
 const SNAPSHOT_NODE_RECORD_VERSION: u32 = 2;
 const SCAN_EVENT_PAGE_LIMIT: u16 = 64;
@@ -641,6 +649,155 @@ pub struct RecentScanHistoryPage {
     pub record_version: u32,
     pub scans: Vec<HistoricalScanSummary>,
     pub has_more: bool,
+}
+
+/// Opaque keyset cursor for the path-free cleanup-history feed. It is a
+/// position observation only and cannot be used to resume or authorize a
+/// cleanup operation.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct CleanupHistoryCursor {
+    pub record_version: u32,
+    pub started_at_unix_ms: i64,
+    pub session_id: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum CleanupRecordFormat {
+    LegacyIncomplete,
+    Complete,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum CleanupMode {
+    DryRun,
+    Trash,
+    PermanentSafe,
+    EvictLocalCopy,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum CleanupTrigger {
+    Manual,
+    LowDisk,
+    Scheduled,
+    Cli,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum CleanupSessionStatus {
+    Planned,
+    Running,
+    Recovering,
+    Completed,
+    PartiallyCompleted,
+    Failed,
+    Cancelled,
+    Interrupted,
+    Rejected,
+    DryRun,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum CleanupItemStatus {
+    Planned,
+    Validating,
+    DryRun,
+    EffectStarted,
+    Trashed,
+    Removed,
+    Evicted,
+    Skipped,
+    Rejected,
+    Failed,
+    ChangedSincePlan,
+    Interrupted,
+    Unavailable,
+    OutcomeUnknown,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum CleanupWarning {
+    EstimatedBytesUnverified,
+    DryRunDoesNotMutate,
+    TrashDoesNotFreeSpaceImmediately,
+    PermanentRemovalCannotBeUndone,
+    CloudEvictionRequiresNetworkToRedownload,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct CleanupStatusCounts {
+    pub planned: u16,
+    pub validating: u16,
+    pub dry_run: u16,
+    pub effect_started: u16,
+    pub trashed: u16,
+    pub removed: u16,
+    pub evicted: u16,
+    pub skipped: u16,
+    pub rejected: u16,
+    pub failed: u16,
+    pub changed_since_plan: u16,
+    pub interrupted: u16,
+    pub unavailable: u16,
+    pub outcome_unknown: u16,
+    pub total: u16,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct CleanupSessionSummary {
+    pub record_version: u32,
+    pub session_id: String,
+    pub plan_id: String,
+    pub format: CleanupRecordFormat,
+    pub source_scan_id: Option<String>,
+    pub started_at_unix_ms: i64,
+    pub completed_at_unix_ms: Option<i64>,
+    pub plan_created_at_unix_ms: Option<i64>,
+    pub plan_expires_at_unix_ms: Option<i64>,
+    pub mode: CleanupMode,
+    pub trigger: CleanupTrigger,
+    pub status: CleanupSessionStatus,
+    pub estimated_bytes: u64,
+    pub verified_capacity_delta_bytes: Option<i64>,
+    pub cancellation_requested: Option<bool>,
+    pub item_total: u16,
+    pub path_total: u16,
+    pub evidence_total: u16,
+    pub item_status_counts: CleanupStatusCounts,
+    pub path_status_counts: CleanupStatusCounts,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct CleanupHistoryPage {
+    pub record_version: u32,
+    pub records: Vec<CleanupSessionSummary>,
+    pub next_cursor: Option<CleanupHistoryCursor>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error, uniffi::Error)]
+pub enum CleanupHistoryError {
+    #[error("engine session is closed")]
+    Closed,
+    #[error("cleanup history limit is outside its fixed bound")]
+    InvalidLimit,
+    #[error("cleanup history cursor is invalid")]
+    InvalidCursor,
+    #[error("the requested cleanup session does not exist")]
+    SessionNotFound,
+    #[error("the durable store schema is newer than this engine")]
+    IncompatibleSchema,
+    #[error("the durable store is busy")]
+    Busy,
+    #[error("the durable store is unsafe")]
+    UnsafeStorage,
+    #[error("the cleanup history query exceeded its fixed resource budget")]
+    BudgetExceeded,
+    #[error("durable cleanup history is corrupt")]
+    CorruptData,
+    #[error("durable cleanup history is unavailable")]
+    Unavailable,
+    #[error("cleanup history state is unavailable")]
+    InternalState,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
@@ -2304,6 +2461,27 @@ impl DuxEngine {
     /// Return a bounded, newest-first page of durable scan metadata for
     /// Explorer selection. Paths and snapshot contents remain sealed; a
     /// selected snapshot must still be opened through a review lease.
+    ///
+    /// Cleanup history is exposed separately from scan history so the app can
+    /// present prior outcomes without gaining a plan, approval, path, or
+    /// executor capability.
+    pub fn recent_cleanup_history(
+        &self,
+        cursor: Option<CleanupHistoryCursor>,
+        limit: u16,
+    ) -> Result<CleanupHistoryPage, CleanupHistoryError> {
+        if !(1..=64).contains(&limit) {
+            return Err(CleanupHistoryError::InvalidLimit);
+        }
+        let cursor = cursor.map(core_cleanup_history_cursor).transpose()?;
+        self.with_cleanup_history_engine(|engine| {
+            let page = engine
+                .recent_cleanup_history(cursor.as_ref(), limit)
+                .map_err(map_cleanup_history_error)?;
+            cleanup_history_page(page)
+        })
+    }
+
     pub fn recent_scan_history(&self, limit: u16) -> Result<RecentScanHistoryPage, EngineError> {
         if !(1..=RECENT_SCAN_HISTORY_PAGE_LIMIT).contains(&limit) {
             return Err(EngineError::BudgetExceeded);
@@ -2577,6 +2755,20 @@ impl DuxEngine {
             EngineState::Closing | EngineState::Closed { .. } => {
                 Err(CleanupExclusionsError::Closed)
             }
+        }
+    }
+
+    fn with_cleanup_history_engine<T>(
+        &self,
+        operation: impl FnOnce(&EngineHandle) -> Result<T, CleanupHistoryError>,
+    ) -> Result<T, CleanupHistoryError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| CleanupHistoryError::InternalState)?;
+        match &*state {
+            EngineState::Open(engine) => operation(engine),
+            EngineState::Closing | EngineState::Closed { .. } => Err(CleanupHistoryError::Closed),
         }
     }
 
@@ -3898,6 +4090,165 @@ fn map_scan_history_error(error: CoreScanHistoryError) -> EngineError {
     }
 }
 
+fn map_cleanup_history_error(error: CoreCleanupHistoryError) -> CleanupHistoryError {
+    match error {
+        CoreCleanupHistoryError::Closed => CleanupHistoryError::Closed,
+        CoreCleanupHistoryError::InvalidLimit { .. } => CleanupHistoryError::InvalidLimit,
+        CoreCleanupHistoryError::SessionNotFound => CleanupHistoryError::SessionNotFound,
+        CoreCleanupHistoryError::IncompatibleSchema => CleanupHistoryError::IncompatibleSchema,
+        CoreCleanupHistoryError::Busy => CleanupHistoryError::Busy,
+        CoreCleanupHistoryError::UnsafeStorage => CleanupHistoryError::UnsafeStorage,
+        CoreCleanupHistoryError::QueryLimitExceeded => CleanupHistoryError::BudgetExceeded,
+        CoreCleanupHistoryError::CorruptData => CleanupHistoryError::CorruptData,
+        CoreCleanupHistoryError::Unavailable => CleanupHistoryError::Unavailable,
+        CoreCleanupHistoryError::InternalState => CleanupHistoryError::InternalState,
+        _ => CleanupHistoryError::InternalState,
+    }
+}
+
+fn core_cleanup_history_cursor(
+    cursor: CleanupHistoryCursor,
+) -> Result<CoreCleanupHistoryCursor, CleanupHistoryError> {
+    if cursor.record_version != FFI_RECORD_VERSION {
+        return Err(CleanupHistoryError::InvalidCursor);
+    }
+    let started_at = cleanup_history_system_time(cursor.started_at_unix_ms)?;
+    let session_id = CoreCleanupSessionId::from_stable_str(cursor.session_id)
+        .ok_or(CleanupHistoryError::InvalidCursor)?;
+    Ok(CoreCleanupHistoryCursor::new(started_at, session_id))
+}
+
+fn cleanup_history_system_time(value: i64) -> Result<SystemTime, CleanupHistoryError> {
+    let milliseconds = u64::try_from(value).map_err(|_| CleanupHistoryError::InvalidCursor)?;
+    UNIX_EPOCH
+        .checked_add(Duration::from_millis(milliseconds))
+        .ok_or(CleanupHistoryError::InvalidCursor)
+}
+
+fn cleanup_history_time_ms(value: SystemTime) -> Result<i64, CleanupHistoryError> {
+    i64::try_from(
+        value
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| CleanupHistoryError::CorruptData)?
+            .as_millis(),
+    )
+    .map_err(|_| CleanupHistoryError::CorruptData)
+}
+
+fn cleanup_history_cursor(
+    cursor: &CoreCleanupHistoryCursor,
+) -> Result<CleanupHistoryCursor, CleanupHistoryError> {
+    Ok(CleanupHistoryCursor {
+        record_version: FFI_RECORD_VERSION,
+        started_at_unix_ms: cleanup_history_time_ms(cursor.started_at())?,
+        session_id: cursor.session_id().as_str().to_owned(),
+    })
+}
+
+fn cleanup_status_counts(counts: &CoreCleanupStatusCounts) -> CleanupStatusCounts {
+    CleanupStatusCounts {
+        planned: counts.planned(),
+        validating: counts.validating(),
+        dry_run: counts.dry_run(),
+        effect_started: counts.effect_started(),
+        trashed: counts.trashed(),
+        removed: counts.removed(),
+        evicted: counts.evicted(),
+        skipped: counts.skipped(),
+        rejected: counts.rejected(),
+        failed: counts.failed(),
+        changed_since_plan: counts.changed_since_plan(),
+        interrupted: counts.interrupted(),
+        unavailable: counts.unavailable(),
+        outcome_unknown: counts.outcome_unknown(),
+        total: counts.total(),
+    }
+}
+
+fn cleanup_session_summary(
+    summary: &dux_core::engine::DurableCleanupSessionSummary,
+) -> Result<CleanupSessionSummary, CleanupHistoryError> {
+    Ok(CleanupSessionSummary {
+        record_version: FFI_RECORD_VERSION,
+        session_id: summary.id().as_str().to_owned(),
+        plan_id: summary.plan_id().to_owned(),
+        format: match summary.format() {
+            CoreCleanupRecordFormat::LegacyIncomplete => CleanupRecordFormat::LegacyIncomplete,
+            CoreCleanupRecordFormat::Complete => CleanupRecordFormat::Complete,
+            _ => return Err(CleanupHistoryError::InternalState),
+        },
+        source_scan_id: summary.source_scan_id().map(|id| id.as_str().to_owned()),
+        started_at_unix_ms: cleanup_history_time_ms(summary.started_at())?,
+        completed_at_unix_ms: summary
+            .completed_at()
+            .map(cleanup_history_time_ms)
+            .transpose()?,
+        plan_created_at_unix_ms: summary
+            .plan_created_at()
+            .map(cleanup_history_time_ms)
+            .transpose()?,
+        plan_expires_at_unix_ms: summary
+            .plan_expires_at()
+            .map(cleanup_history_time_ms)
+            .transpose()?,
+        mode: match summary.mode() {
+            CoreCleanupMode::DryRun => CleanupMode::DryRun,
+            CoreCleanupMode::Trash => CleanupMode::Trash,
+            CoreCleanupMode::PermanentSafe => CleanupMode::PermanentSafe,
+            CoreCleanupMode::EvictLocalCopy => CleanupMode::EvictLocalCopy,
+            _ => return Err(CleanupHistoryError::InternalState),
+        },
+        trigger: match summary.trigger() {
+            CoreCleanupTrigger::Manual => CleanupTrigger::Manual,
+            CoreCleanupTrigger::LowDisk => CleanupTrigger::LowDisk,
+            CoreCleanupTrigger::Scheduled => CleanupTrigger::Scheduled,
+            CoreCleanupTrigger::Cli => CleanupTrigger::Cli,
+            _ => return Err(CleanupHistoryError::InternalState),
+        },
+        status: map_cleanup_session_status(summary.status())?,
+        estimated_bytes: summary.estimated_bytes(),
+        verified_capacity_delta_bytes: summary.verified_capacity_delta_bytes(),
+        cancellation_requested: summary.cancellation_requested(),
+        item_total: summary.item_total(),
+        path_total: summary.path_total(),
+        evidence_total: summary.evidence_total(),
+        item_status_counts: cleanup_status_counts(summary.item_status_counts()),
+        path_status_counts: cleanup_status_counts(summary.path_status_counts()),
+    })
+}
+
+fn map_cleanup_session_status(
+    status: CoreCleanupSessionStatus,
+) -> Result<CleanupSessionStatus, CleanupHistoryError> {
+    Ok(match status {
+        CoreCleanupSessionStatus::Planned => CleanupSessionStatus::Planned,
+        CoreCleanupSessionStatus::Running => CleanupSessionStatus::Running,
+        CoreCleanupSessionStatus::Recovering => CleanupSessionStatus::Recovering,
+        CoreCleanupSessionStatus::Completed => CleanupSessionStatus::Completed,
+        CoreCleanupSessionStatus::PartiallyCompleted => CleanupSessionStatus::PartiallyCompleted,
+        CoreCleanupSessionStatus::Failed => CleanupSessionStatus::Failed,
+        CoreCleanupSessionStatus::Cancelled => CleanupSessionStatus::Cancelled,
+        CoreCleanupSessionStatus::Interrupted => CleanupSessionStatus::Interrupted,
+        CoreCleanupSessionStatus::Rejected => CleanupSessionStatus::Rejected,
+        CoreCleanupSessionStatus::DryRun => CleanupSessionStatus::DryRun,
+        _ => return Err(CleanupHistoryError::InternalState),
+    })
+}
+
+fn cleanup_history_page(
+    page: CoreCleanupHistoryPage,
+) -> Result<CleanupHistoryPage, CleanupHistoryError> {
+    Ok(CleanupHistoryPage {
+        record_version: FFI_RECORD_VERSION,
+        records: page
+            .records()
+            .iter()
+            .map(cleanup_session_summary)
+            .collect::<Result<Vec<_>, _>>()?,
+        next_cursor: page.next_cursor().map(cleanup_history_cursor).transpose()?,
+    })
+}
+
 fn map_scan_coverage_details_error(error: CoreScanCoverageDetailsError) -> EngineError {
     match error {
         CoreScanCoverageDetailsError::InvalidLimit { .. }
@@ -4521,14 +4872,44 @@ mod tests {
     }
 
     #[test]
-    fn reports_contract_twenty_four_and_preserves_legacy_formatting() {
+    fn reports_contract_twenty_five_and_preserves_legacy_formatting() {
         let _guard = ENGINE_TEST_LOCK.lock().unwrap();
         let (_temp, engine) = engine();
-        assert_eq!(library_version().ffi_contract_version, 24);
+        assert_eq!(library_version().ffi_contract_version, 25);
         assert_eq!(engine.library_version().unwrap(), library_version());
         assert_eq!(engine.format_size(1536).unwrap().display, "1.5 KB");
         assert!(engine.close());
         assert_eq!(engine.format_size(1), Err(EngineError::Closed));
+    }
+
+    #[test]
+    fn cleanup_history_summary_feed_is_bounded_path_free_and_cursor_validated() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (_temp, engine) = engine();
+        let page = engine.recent_cleanup_history(None, 64).unwrap();
+        assert_eq!(page.record_version, FFI_RECORD_VERSION);
+        assert!(page.records.is_empty());
+        assert!(page.next_cursor.is_none());
+        assert_eq!(
+            engine.recent_cleanup_history(None, 0),
+            Err(CleanupHistoryError::InvalidLimit)
+        );
+        assert_eq!(
+            engine.recent_cleanup_history(
+                Some(CleanupHistoryCursor {
+                    record_version: FFI_RECORD_VERSION,
+                    started_at_unix_ms: -1,
+                    session_id: "session:invalid".to_owned(),
+                }),
+                1
+            ),
+            Err(CleanupHistoryError::InvalidCursor)
+        );
+        assert!(engine.close());
+        assert_eq!(
+            engine.recent_cleanup_history(None, 1),
+            Err(CleanupHistoryError::Closed)
+        );
     }
 
     #[test]

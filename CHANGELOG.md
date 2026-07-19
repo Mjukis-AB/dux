@@ -1,5 +1,10 @@
 # Changelog
 
+- Added UniFFI contract v25's bounded, newest-first cleanup-history summary
+  feed. EngineService now exposes path-free lifecycle, mode/trigger, estimate,
+  optional verified capacity delta, cancellation, and status-count observations
+  with strict cursor/record validation; paths, evidence, plans, approvals, and
+  executor authority remain sealed.
 - Preserved reviewed Explorer Trash changes as a distinct `ChangedSincePlan`
   outcome through core, UniFFI contract v24, and the native UI. DUX now tells
   the user to rescan before retrying instead of reporting a generic review
