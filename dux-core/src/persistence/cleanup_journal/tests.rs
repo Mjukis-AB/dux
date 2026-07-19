@@ -42,6 +42,7 @@ struct Fixture {
     session_id: CleanupSessionId,
     started_at: SystemTime,
     expires_at: SystemTime,
+    plan: CleanupPlan,
 }
 
 impl Fixture {
@@ -140,6 +141,7 @@ impl Fixture {
             session_id,
             started_at,
             expires_at,
+            plan,
         }
     }
 
@@ -217,6 +219,22 @@ impl Fixture {
             transaction.commit().unwrap();
         });
     }
+}
+
+#[test]
+fn claimed_journal_requires_exact_frozen_plan_witness() {
+    let fixture = Fixture::new(CleanupMode::Trash, CandidateAction::MoveToTrash, 1);
+    let lease = fixture.lease();
+    lease
+        .validate_planned_plan(&fixture.session_id, &fixture.plan)
+        .unwrap();
+    let claim = lease
+        .claim_planned(
+            &fixture.session_id,
+            fixture.started_at + Duration::from_secs(1),
+        )
+        .unwrap();
+    claim.validate_planned_plan(&fixture.plan).unwrap();
 }
 
 fn fixture_rule(action: CandidateAction) -> Rule {

@@ -4647,6 +4647,13 @@ Tasks:
     stored row does not retain approval authority and cannot invoke an effect;
     engine orchestration, terminal outcomes, capacity verification, and UI
     history remain open.
+  - [x] 2026-07-19 slice: add the private approved-plan → journal handoff.
+    The handoff revalidates the expiring approval, persists one bounded
+    planned session, holds the cleanup lock, compares the frozen plan before
+    claiming and again under the owner/generation fence, then returns a
+    non-cloneable session containing the approved capability and journal claim.
+    It exposes no path, callback, FFI, schedule, or filesystem effect; the
+    permanent-safe executor and terminal transitions remain open.
 - [ ] Implement pre/post capacity verification.
 - [ ] Implement exclusions and global permanent-cleanup disable setting.
 - [ ] Add partial failure, retry, cancellation, and changed-since-plan UI.

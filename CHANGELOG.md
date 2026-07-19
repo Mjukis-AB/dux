@@ -1,5 +1,10 @@
 # Changelog
 
+- Added the first private approved-plan to cleanup-journal handoff. It
+  revalidates the expiring approval, persists one planned session, compares
+  the frozen plan before and after an owner/generation-fenced journal claim,
+  and retains the approved capability with the non-cloneable claim. No path,
+  callback, FFI, scheduling, or filesystem-effect authority is exposed.
 - Staged a private, bounded macOS process-activity witness for future rule
   guards. It reads libproc directly, retains PID/start-time/executable
   identity, rejects active/malformed/incomplete observations, refuses bundle

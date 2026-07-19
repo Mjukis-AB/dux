@@ -21,6 +21,7 @@ use super::{
     mark_effect_started, reconcile_unknown_outcome, record_heartbeat, request_cancellation,
     resume_recovery, settle_cancellation, terminalize,
 };
+use crate::domain::CleanupPlan;
 use crate::persistence::cleanup_history::CleanupSessionId;
 use crate::persistence::history::{
     HistoryError, HistoryErrorKind, system_time_to_unix_ms, unix_ms_to_system_time,
@@ -150,6 +151,19 @@ impl StoreCoordinator {
 }
 
 impl CleanupJournalLease {
+    /// Compare a planned history observation before claiming it. The caller
+    /// still must claim and compare again under the journal owner fence.
+    pub(crate) fn validate_planned_plan(
+        &self,
+        session_id: &CleanupSessionId,
+        expected: &CleanupPlan,
+    ) -> Result<(), HistoryError> {
+        let journal = self
+            .load(session_id)?
+            .ok_or_else(|| HistoryError::new(HistoryErrorKind::NotFound))?;
+        validate_journal_plan(&journal, expected)
+    }
+
     #[cfg(test)]
     pub(super) fn fail_next_write_after_commit_and_reconcile_read_for_test(&self) {
         LEASE_TEST_FAULT.with(|fault| {
@@ -408,7 +422,63 @@ impl CleanupJournalLease {
     }
 }
 
+/// Shared exact-plan comparison used both before and after claiming. Keeping
+/// this comparison path-free and journal-owned prevents callers from
+/// substituting a row with the same session ID but different content.
+fn validate_journal_plan(
+    journal: &CleanupJournal,
+    expected: &CleanupPlan,
+) -> Result<(), HistoryError> {
+    if journal.plan_id != *expected.id()
+        || journal.source_scan_id != *expected.source_scan_id()
+        || journal.plan_created_at != expected.created_at()
+        || journal.plan_expires_at != expected.expires_at()
+        || journal.mode != expected.mode()
+        || journal.estimated_bytes != expected.estimated_bytes()
+        || journal.warnings != expected.warnings()
+        || journal.items.len() != expected.items().len()
+    {
+        return Err(HistoryError::new(HistoryErrorKind::InvalidTransition));
+    }
+    for (ordinal, (journal_item, expected_item)) in
+        journal.items.iter().zip(expected.items()).enumerate()
+    {
+        let frozen = &journal_item.frozen;
+        if frozen.ordinal != ordinal
+            || frozen.candidate_id != *expected_item.candidate_id()
+            || frozen.rule != *expected_item.rule()
+            || frozen.category != expected_item.category()
+            || frozen.paths != expected_item.paths()
+            || frozen.estimated_bytes != expected_item.estimated_bytes()
+            || frozen.newest_mtime != expected_item.newest_mtime()
+            || frozen.evidence != expected_item.evidence()
+            || frozen.safety != expected_item.safety()
+            || frozen.proposed_action != expected_item.action()
+            || frozen.rule_schedule_eligible != expected_item.rule_marks_schedule_eligible()
+            || journal_item.paths.len() != expected_item.paths().len()
+        {
+            return Err(HistoryError::new(HistoryErrorKind::InvalidTransition));
+        }
+        for (path, expected_path) in journal_item.paths.iter().zip(expected_item.paths()) {
+            if path.target != *expected_path || path.status != PathStatus::Planned {
+                return Err(HistoryError::new(HistoryErrorKind::InvalidTransition));
+            }
+        }
+    }
+    Ok(())
+}
+
 impl CleanupJournalClaim {
+    /// Verify that the active journal is the exact frozen observation owned by
+    /// the approved planner capability. This is deliberately a comparison
+    /// witness only; it does not grant permission to perform an effect.
+    pub(crate) fn validate_planned_plan(&self, expected: &CleanupPlan) -> Result<(), HistoryError> {
+        self.require_phase(ActivePhase::Running)?;
+        let journal = self.snapshot()?;
+        ensure_active(&journal, &self.fence, self.phase)?;
+        validate_journal_plan(&journal, expected)
+    }
+
     #[cfg(test)]
     pub(super) fn fail_next_write_after_commit_and_reconcile_read_for_test(&self) {
         assert_eq!(self.test_fault.get(), TestJournalFault::None);

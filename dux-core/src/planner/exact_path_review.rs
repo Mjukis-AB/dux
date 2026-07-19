@@ -6,6 +6,8 @@
 //! stops before approval or an executor capability exists.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
 
 use thiserror::Error;
 
@@ -21,7 +23,8 @@ use crate::path_validation::{
     validate_scan_root,
 };
 use crate::persistence::{
-    CleanupSessionId, CleanupTrigger, HistoryError, NewCleanupSessionRecord, StoreCoordinator,
+    CleanupJournalClaim, CleanupSessionId, CleanupTrigger, HistoryError, NewCleanupSessionRecord,
+    StoreCoordinator,
 };
 
 use super::rule_scope_grant::{RuleScopeAuthorization, RuleScopeGrantError};
@@ -169,6 +172,24 @@ pub(crate) struct ApprovedTrustedReviewedCleanupPlan {
     approved_at: std::time::SystemTime,
 }
 
+/// The first private planner-to-journal handoff. It retains the approved
+/// capability and the exact owner-fenced claim together, while intentionally
+/// exposing no path, callback, FFI, or filesystem-effect operation.
+#[must_use = "an approved cleanup session must be consumed by the engine executor"]
+pub(crate) struct ApprovedCleanupSession {
+    approved: ApprovedTrustedReviewedCleanupPlan,
+    claim: CleanupJournalClaim,
+    session_id: CleanupSessionId,
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum ExactPathHandoffError {
+    #[error("approved cleanup plan is expired or its rule authorization changed")]
+    Approval(#[from] ExactPathApprovalError),
+    #[error("cleanup journal handoff failed: {0}")]
+    Journal(HistoryError),
+}
+
 impl TrustedReviewedCleanupPlan {
     pub(crate) fn plan(&self) -> &CleanupPlan {
         &self.plan
@@ -264,6 +285,65 @@ impl ApprovedTrustedReviewedCleanupPlan {
         store
             .record_cleanup_session_planned(&record)
             .map_err(ExactPathApprovalError::Persistence)
+    }
+
+    /// Revalidate, persist, and claim one exact planned session. The journal
+    /// row is compared before and after the owner claim so a same-ID row
+    /// substitution cannot become an execution input. The returned type is
+    /// crate-private and still requires a later effect-specific executor.
+    pub(crate) fn begin_cleanup_session(
+        self,
+        store: &Arc<StoreCoordinator>,
+        session_id: CleanupSessionId,
+        started_at: std::time::SystemTime,
+        trigger: CleanupTrigger,
+        lock_timeout: Duration,
+    ) -> Result<ApprovedCleanupSession, ExactPathHandoffError> {
+        self.revalidate(started_at)?;
+        let record = NewCleanupSessionRecord::try_from_plan(
+            session_id.clone(),
+            self.plan(),
+            started_at,
+            trigger,
+        )
+        .map_err(ExactPathApprovalError::Persistence)?;
+        store
+            .record_cleanup_session_planned(&record)
+            .map_err(ExactPathApprovalError::Persistence)?;
+
+        let lease = store
+            .acquire_cleanup_journal_lease(lock_timeout)
+            .map_err(ExactPathHandoffError::Journal)?;
+        lease
+            .validate_planned_plan(&session_id, self.plan())
+            .map_err(ExactPathHandoffError::Journal)?;
+        let claim = lease
+            .claim_planned(&session_id, started_at)
+            .map_err(|failure| ExactPathHandoffError::Journal(HistoryError::new(failure.kind())))?;
+        claim
+            .validate_planned_plan(self.plan())
+            .map_err(ExactPathHandoffError::Journal)?;
+        Ok(ApprovedCleanupSession {
+            approved: self,
+            claim,
+            session_id,
+        })
+    }
+
+    pub(crate) fn release(self) {}
+}
+
+impl ApprovedCleanupSession {
+    pub(crate) fn plan(&self) -> &CleanupPlan {
+        self.approved.plan()
+    }
+
+    pub(crate) fn session_id(&self) -> &CleanupSessionId {
+        &self.session_id
+    }
+
+    pub(crate) fn claim(&self) -> &CleanupJournalClaim {
+        &self.claim
     }
 
     pub(crate) fn release(self) {}
