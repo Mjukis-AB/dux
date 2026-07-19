@@ -4501,6 +4501,12 @@ Tasks:
       still retain `ProtectedPath`; process/descendant coverage and the plan
       and executor joins remain open.
 - [ ] Implement candidate groups and overlap resolution.
+  - [x] 2026-07-19 slice: bind the deterministic grouping result to the
+    planner-owned exact review. The review now retains the immutable group and
+    overlap witness that selected its items, so later callers cannot recreate
+    selections from a reordered candidate slice. This promotes grouping to the
+    reviewed planning boundary without granting approval, persistence, FFI,
+    scheduling, or mutation authority; unresolved overlaps still fail closed.
   - [x] 2026-07-18 slice: add the sealed, non-authoritative core grouping
     result. Candidates are grouped deterministically by category, safety, and
     proposed action. Exact duplicate observations coalesce only when every

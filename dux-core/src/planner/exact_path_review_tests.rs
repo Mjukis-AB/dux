@@ -142,6 +142,8 @@ fn review_captures_exact_live_identity_and_remains_non_actionable() {
     assert_eq!(review.mode(), CleanupMode::DryRun);
     assert_eq!(review.estimated_bytes(), 7);
     assert!(!review.is_actionable());
+    assert_eq!(review.candidate_groups().groups().len(), 1);
+    assert!(!review.candidate_groups().has_unresolved_overlaps());
     assert_eq!(review.items().len(), 1);
     assert_eq!(
         review.items()[0].category(),

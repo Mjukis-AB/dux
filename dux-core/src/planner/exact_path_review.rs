@@ -1,19 +1,18 @@
 //! Sealed exact-path review evidence for a future cleanup planner.
 //!
-//! This boundary joins a deterministic candidate selection to one code-owned
+//! This boundary joins deterministic candidate grouping to one code-owned
 //! canonical scan-root observation. It performs lexical validation and a
 //! no-follow live identity capture for every selected path, but it deliberately
-//! stops before protected-root grants, approval, plan construction, or an
-//! executor capability exist.
+//! stops before approval or an executor capability exists.
 
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
 use crate::domain::{
-    Candidate, CandidateAction, CandidateCategory, CandidateGroupingError, CandidateId,
-    CandidateOverlapReason, CleanupMode, CleanupPlan, CleanupPlanId, CleanupPlanValidationError,
-    Evidence, PlanWarning, RuleRef, SafetyTier, ScanId,
+    Candidate, CandidateAction, CandidateCategory, CandidateGroupSet, CandidateGroupingError,
+    CandidateId, CandidateOverlapReason, CleanupMode, CleanupPlan, CleanupPlanId,
+    CleanupPlanValidationError, Evidence, PlanWarning, RuleRef, SafetyTier, ScanId,
 };
 use crate::path_validation::{
     CanonicalPathError, CanonicalPathSnapshot, CanonicalScanRoot, FilesystemBoundarySnapshot,
@@ -143,6 +142,7 @@ pub(crate) struct ExactPathReview {
     items: Vec<ExactPathReviewItem>,
     estimated_bytes: u64,
     warnings: Vec<PlanWarning>,
+    groups: CandidateGroupSet,
     candidates: Vec<Candidate>,
 }
 
@@ -203,6 +203,15 @@ impl ExactPathReview {
 
     pub(crate) fn warnings(&self) -> &[PlanWarning] {
         &self.warnings
+    }
+
+    /// The immutable, planner-owned grouping witness used to select `items`.
+    /// Keeping it with the review prevents later callers from reconstructing
+    /// overlap decisions from a reordered or otherwise different candidate
+    /// slice. It remains descriptive only; approval and execution are separate
+    /// authority boundaries.
+    pub(crate) fn candidate_groups(&self) -> &CandidateGroupSet {
+        &self.groups
     }
 
     /// No current review can be actionable because protected-root and volume
@@ -556,6 +565,7 @@ pub(crate) fn review_exact_paths(
         items,
         estimated_bytes,
         warnings: derive_warnings(mode, candidates),
+        groups,
         candidates: selected_candidates,
     })
 }

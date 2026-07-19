@@ -15,7 +15,7 @@ mod candidate_evaluator;
 )]
 mod candidate_groups;
 pub(crate) use candidate_groups::{
-    CandidateGroupingError, CandidateOverlapReason, CandidateOverlapResolution,
+    CandidateGroupSet, CandidateGroupingError, CandidateOverlapReason, CandidateOverlapResolution,
     group_candidates as group_candidates_for_review,
 };
 mod cleanup_plan;

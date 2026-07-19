@@ -88,6 +88,9 @@ All notable changes to DUX will be documented in this file.
   DUX when the popover is closed.
 
 ### Added
+- Exact-path reviews now retain the immutable candidate-grouping and overlap
+  witness that selected their items, preventing downstream reconstruction from
+  a reordered candidate slice while keeping approval and execution sealed.
 - Continued Milestone 5 with journal-fenced, one-shot core Trash admission.
   The opaque Explorer witness must match the exact frozen journal path, then
   repeats no-follow identity checks, records and immediately revalidates an
