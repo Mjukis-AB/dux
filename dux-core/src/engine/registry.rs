@@ -66,7 +66,8 @@ use super::task::{
 };
 use crate::cleanup::permanent_safe::{
     DescriptorRelativePermanentSafeDriver, PermanentSafeExecutionError,
-    PermanentSafeRemovalSummary, execute_rust_target_contents,
+    PermanentSafeRemovalSummary, PermanentSafeSessionSummary, execute_rust_target_contents,
+    execute_rust_target_session,
 };
 use crate::cleanup::{TrashEffectRequest, TrashPlatformResult, TrashSelectionError};
 use crate::domain::{
@@ -1330,6 +1331,29 @@ impl EngineHandle {
             &mut driver,
             cancelled,
         )
+    }
+
+    /// Execute every path in one approved permanent-safe session in planner
+    /// order. The session remains crate-private until trusted protected-root
+    /// and volume grants, centralized orchestration, and user-facing review
+    /// are complete.
+    #[allow(
+        dead_code,
+        reason = "the multi-path permanent-safe orchestrator is staged before FFI/UI wiring"
+    )]
+    pub(crate) fn execute_approved_permanent_safe_session(
+        &self,
+        session: &mut ApprovedCleanupSession,
+        now: SystemTime,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<PermanentSafeSessionSummary, PermanentSafeExecutionError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(PermanentSafeExecutionError::Admission(
+                HistoryErrorKind::InvalidTransition,
+            ));
+        }
+        let mut driver = DescriptorRelativePermanentSafeDriver;
+        execute_rust_target_session(session, now, &mut driver, cancelled)
     }
 
     /// Replace the bounded deny-only exclusion set. The core validates and

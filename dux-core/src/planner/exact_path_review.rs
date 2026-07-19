@@ -283,6 +283,30 @@ impl ApprovedTrustedReviewedCleanupPlan {
         })
     }
 
+    /// Revalidate only the next ordered authorization in a multi-path
+    /// execution. Earlier targets may have been deliberately mutated by the
+    /// same approved session, so rechecking their historical identity would
+    /// incorrectly reject unrelated future paths. Plan expiry remains global;
+    /// the selected path's grant is still revalidated immediately before its
+    /// live witness is rebuilt.
+    pub(crate) fn revalidated_target_for_path(
+        &self,
+        item_ordinal: usize,
+        path_ordinal: usize,
+        now: std::time::SystemTime,
+    ) -> Result<crate::path_validation::CanonicalPathSnapshot, ExactPathApprovalError> {
+        if self.plan().has_expired_at(now) {
+            return Err(ExactPathApprovalError::Expired);
+        }
+        let authorization = self
+            .reviewed
+            .authorization_for_path(item_ordinal, path_ordinal)
+            .ok_or(ExactPathApprovalError::AuthorizationMismatch)?;
+        authorization
+            .revalidated_target_snapshot()
+            .map_err(ExactPathApprovalError::Authorization)
+    }
+
     /// Persist a planned cleanup session only after the approved capability has
     /// been revalidated at the persistence boundary. The stored session is a
     /// bounded history/journal observation; it does not retain this capability
@@ -401,6 +425,28 @@ impl ApprovedCleanupSession {
         now: std::time::SystemTime,
     ) -> Result<RustTargetEffectWitness, ExactPathHandoffError> {
         self.approved.revalidate(now)?;
+        self.revalidated_rust_target_effect_path(item_ordinal, path_ordinal, now)
+    }
+
+    /// Revalidate one ordered target after earlier paths in the same approved
+    /// session have already settled. The plan expiry and this path's grant
+    /// are checked, while settled earlier targets are intentionally not
+    /// revalidated as if they were still pending work.
+    pub(crate) fn revalidated_rust_target_effect_for_ordered_session(
+        &self,
+        item_ordinal: usize,
+        path_ordinal: usize,
+        now: std::time::SystemTime,
+    ) -> Result<RustTargetEffectWitness, ExactPathHandoffError> {
+        self.revalidated_rust_target_effect_path(item_ordinal, path_ordinal, now)
+    }
+
+    fn revalidated_rust_target_effect_path(
+        &self,
+        item_ordinal: usize,
+        path_ordinal: usize,
+        now: std::time::SystemTime,
+    ) -> Result<RustTargetEffectWitness, ExactPathHandoffError> {
         self.claim
             .validate_validating_path(item_ordinal, path_ordinal)
             .map_err(ExactPathHandoffError::Journal)?;
@@ -429,20 +475,10 @@ impl ApprovedCleanupSession {
                 crate::persistence::HistoryErrorKind::InvalidInput,
             ))
         })?;
-        let authorization = self
+        let target = self
             .approved
-            .reviewed
-            .authorization_for_path(item_ordinal, path_ordinal)
-            .ok_or_else(|| {
-                ExactPathHandoffError::Journal(HistoryError::new(
-                    crate::persistence::HistoryErrorKind::InvalidTransition,
-                ))
-            })?;
-        let target = authorization
-            .revalidated_target_snapshot()
-            .map_err(|error| {
-                ExactPathHandoffError::Approval(ExactPathApprovalError::Authorization(error))
-            })?;
+            .revalidated_target_for_path(item_ordinal, path_ordinal, now)
+            .map_err(ExactPathHandoffError::Approval)?;
         if target.requested_path() != expected_path {
             return Err(ExactPathHandoffError::Journal(HistoryError::new(
                 crate::persistence::HistoryErrorKind::InvalidTransition,
@@ -650,6 +686,8 @@ pub(crate) enum ExactPathPlanError {
 pub(crate) enum ExactPathApprovalError {
     #[error("trusted cleanup plan has expired")]
     Expired,
+    #[error("trusted cleanup plan has no authorization for the requested path")]
+    AuthorizationMismatch,
     #[error("trusted rule-scope authorization failed: {0}")]
     Authorization(#[source] RuleScopeGrantError),
     #[error("planned cleanup history could not be persisted: {0}")]

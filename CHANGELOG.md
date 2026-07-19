@@ -1,5 +1,12 @@
 # Changelog
 
+- Added a crate-private multi-path permanent-safe session orchestrator. It
+  keeps one journal owner/generation fence across ordered paths, continues
+  after settled failures, stops conservatively for unknown outcomes, and
+  records cancellation/partial terminal states only after remaining paths are
+  settled. Prefix validation prevents switching to a different target between
+  durable validation and live witness capture; no FFI, Swift, CLI, AI, or
+  production cleanup caller can reach this boundary.
 - Added the first crate-private engine bridge for approved permanent-safe
   sessions. It accepts only the non-cloneable journal capability, selects the
   descriptor-relative Rust driver, preserves Cargo cache markers, and records

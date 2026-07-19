@@ -1226,6 +1226,32 @@ fn unknown_effect_atomically_enters_recovery_and_blocks_new_work() {
 }
 
 #[test]
+fn sequential_validation_accepts_terminal_prefix_and_rejects_target_switching() {
+    let fixture = Fixture::new(
+        CleanupMode::PermanentSafe,
+        CandidateAction::RemoveKnownRegenerableContents,
+        2,
+    );
+    let claim = fixture.claim();
+    claim.begin_validation(0, 0).unwrap();
+    claim
+        .finish_validation(
+            0,
+            0,
+            ValidationOutcome::ChangedSincePlan,
+            Some("target_changed"),
+            fixture.started_at + Duration::from_secs(2),
+        )
+        .unwrap();
+    claim.begin_validation(1, 0).unwrap();
+    assert!(claim.validate_validating_path(1, 0).is_ok());
+    assert_eq!(
+        claim.validate_validating_path(0, 0).unwrap_err().kind,
+        HistoryErrorKind::InvalidTransition
+    );
+}
+
+#[test]
 fn cancellation_settlement_interrupts_remaining_work_and_terminalizes_cancelled() {
     let fixture = Fixture::new_with_selected(
         CleanupMode::PermanentSafe,

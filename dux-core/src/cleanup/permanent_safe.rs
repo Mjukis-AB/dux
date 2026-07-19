@@ -15,7 +15,7 @@ use thiserror::Error;
 
 use crate::path_validation::FilesystemIdentity;
 use crate::persistence::{
-    CleanupJournalClaim, EffectOutcome, EffectStartReceipt, HistoryErrorKind,
+    CleanupJournalClaim, EffectOutcome, EffectStartReceipt, HistoryErrorKind, TerminalSessionStatus,
 };
 use crate::planner::{ApprovedCleanupSession, RustTargetEffectWitness};
 
@@ -28,6 +28,13 @@ const PRESERVED_MARKER: &[u8] = b"CACHEDIR.TAG";
 pub(crate) struct PermanentSafeRemovalSummary {
     pub(crate) removed_entries: u32,
     pub(crate) removed_logical_bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PermanentSafeSessionSummary {
+    pub(crate) removed_entries: u64,
+    pub(crate) removed_logical_bytes: u64,
+    pub(crate) terminal_status: TerminalSessionStatus,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
@@ -64,6 +71,114 @@ pub(crate) trait PermanentSafeContentsDriver {
     ) -> Result<PermanentSafeRemovalSummary, PermanentSafePlatformError>;
 }
 
+/// Consume every ordered path in one approved permanent-safe session and
+/// terminalize the journal only after all paths have a durable outcome. This
+/// remains crate-private: it accepts no paths, callbacks, AI output, FFI
+/// values, or CLI requests. A platform failure settles its path and allows
+/// later paths to be attempted; an unknown outcome leaves the journal in
+/// recovery and stops immediately.
+pub(crate) fn execute_rust_target_session(
+    session: &mut ApprovedCleanupSession,
+    now: SystemTime,
+    driver: &mut impl PermanentSafeContentsDriver,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<PermanentSafeSessionSummary, PermanentSafeExecutionError> {
+    let ordered_paths = session
+        .plan()
+        .items()
+        .iter()
+        .enumerate()
+        .flat_map(|(item_ordinal, item)| {
+            (0..item.paths().len()).map(move |path_ordinal| (item_ordinal, path_ordinal))
+        })
+        .collect::<Vec<_>>();
+    let mut removed_entries = 0_u64;
+    let mut removed_logical_bytes = 0_u64;
+
+    for (item_ordinal, path_ordinal) in ordered_paths {
+        if cancelled() {
+            let terminal_status = cancel_and_terminalize(session, now)?;
+            return Ok(PermanentSafeSessionSummary {
+                removed_entries,
+                removed_logical_bytes,
+                terminal_status,
+            });
+        }
+        match execute_rust_target_contents_ordered(
+            session,
+            item_ordinal,
+            path_ordinal,
+            now,
+            driver,
+            cancelled,
+        ) {
+            Ok(summary) => {
+                removed_entries =
+                    removed_entries.saturating_add(u64::from(summary.removed_entries));
+                removed_logical_bytes =
+                    removed_logical_bytes.saturating_add(summary.removed_logical_bytes);
+            }
+            Err(PermanentSafeExecutionError::Platform(PermanentSafePlatformError::Cancelled)) => {
+                let terminal_status = cancel_and_terminalize(session, now)?;
+                return Ok(PermanentSafeSessionSummary {
+                    removed_entries,
+                    removed_logical_bytes,
+                    terminal_status,
+                });
+            }
+            Err(
+                error @ PermanentSafeExecutionError::Platform(
+                    PermanentSafePlatformError::OutcomeUnknown,
+                ),
+            ) => return Err(error),
+            Err(PermanentSafeExecutionError::Platform(_)) => {
+                // The path executor durably settled failures before returning.
+                // Continue in plan order so a bad target cannot strand later
+                // independent paths in `planned`.
+                continue;
+            }
+            Err(error @ PermanentSafeExecutionError::Admission(_)) => {
+                let terminal = session
+                    .claim()
+                    .path_is_terminal(item_ordinal, path_ordinal)
+                    .map_err(|journal| PermanentSafeExecutionError::Admission(journal.kind))?;
+                if terminal {
+                    continue;
+                }
+                return Err(error);
+            }
+        }
+    }
+
+    let terminal_status = session
+        .claim_mut()
+        .terminalize_for_capacity_verification_with_status(now, None)
+        .map_err(|error| PermanentSafeExecutionError::Admission(error.kind))?;
+    Ok(PermanentSafeSessionSummary {
+        removed_entries,
+        removed_logical_bytes,
+        terminal_status,
+    })
+}
+
+fn cancel_and_terminalize(
+    session: &mut ApprovedCleanupSession,
+    now: SystemTime,
+) -> Result<TerminalSessionStatus, PermanentSafeExecutionError> {
+    session
+        .claim_mut()
+        .request_cancellation()
+        .map_err(|error| PermanentSafeExecutionError::Admission(error.kind))?;
+    session
+        .claim_mut()
+        .settle_cancellation(now)
+        .map_err(|error| PermanentSafeExecutionError::Admission(error.kind))?;
+    session
+        .claim_mut()
+        .terminalize_for_capacity_verification_with_status(now, None)
+        .map_err(|error| PermanentSafeExecutionError::Admission(error.kind))
+}
+
 /// Consume one approved journal path through the private deterministic rule
 /// boundary. This function is not called by the current app/FFI surface.
 pub(crate) fn execute_rust_target_contents(
@@ -73,6 +188,45 @@ pub(crate) fn execute_rust_target_contents(
     now: SystemTime,
     driver: &mut impl PermanentSafeContentsDriver,
     cancelled: &dyn Fn() -> bool,
+) -> Result<PermanentSafeRemovalSummary, PermanentSafeExecutionError> {
+    execute_rust_target_contents_inner(
+        session,
+        item_ordinal,
+        path_ordinal,
+        now,
+        driver,
+        cancelled,
+        false,
+    )
+}
+
+fn execute_rust_target_contents_ordered(
+    session: &mut ApprovedCleanupSession,
+    item_ordinal: usize,
+    path_ordinal: usize,
+    now: SystemTime,
+    driver: &mut impl PermanentSafeContentsDriver,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<PermanentSafeRemovalSummary, PermanentSafeExecutionError> {
+    execute_rust_target_contents_inner(
+        session,
+        item_ordinal,
+        path_ordinal,
+        now,
+        driver,
+        cancelled,
+        true,
+    )
+}
+
+fn execute_rust_target_contents_inner(
+    session: &mut ApprovedCleanupSession,
+    item_ordinal: usize,
+    path_ordinal: usize,
+    now: SystemTime,
+    driver: &mut impl PermanentSafeContentsDriver,
+    cancelled: &dyn Fn() -> bool,
+    ordered_session: bool,
 ) -> Result<PermanentSafeRemovalSummary, PermanentSafeExecutionError> {
     let expected_path = session
         .plan()
@@ -106,7 +260,12 @@ pub(crate) fn execute_rust_target_contents(
     // Validation is now durable before the live witness is rebuilt. This is
     // important for changed/expired targets: a rejection must not leave a
     // planned row looking executable on restart.
-    let witness = match session.revalidated_rust_target_effect(item_ordinal, path_ordinal, now) {
+    let witness_result = if ordered_session {
+        session.revalidated_rust_target_effect_for_ordered_session(item_ordinal, path_ordinal, now)
+    } else {
+        session.revalidated_rust_target_effect(item_ordinal, path_ordinal, now)
+    };
+    let witness = match witness_result {
         Ok(witness) => witness,
         Err(error) => {
             let (outcome, category) = validation_failure(&error);

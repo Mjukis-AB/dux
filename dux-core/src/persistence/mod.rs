@@ -112,7 +112,8 @@ pub(crate) use cleanup_history_query::{
     StoredCleanupStatusCounts, StoredCleanupTrigger,
 };
 pub(crate) use cleanup_journal::{
-    CleanupJournalClaim, EffectOutcome, EffectStartReceipt, ValidationOutcome,
+    CleanupJournalClaim, EffectOutcome, EffectStartReceipt, TerminalSessionStatus,
+    ValidationOutcome,
 };
 pub(crate) use codec::{HostPathObservationEncoding, observe_host_path};
 pub(crate) use history::{

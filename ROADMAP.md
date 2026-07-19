@@ -4675,6 +4675,17 @@ Tasks:
     space until emptied; no AI, CLI, scheduler, arbitrary path, or permanent
     delete path can invoke this action.
 - [ ] Implement permanent-safe executor for approved rules.
+  - [x] 2026-07-19 slice: add the crate-private multi-path session
+    orchestrator. It consumes only the non-cloneable approved session,
+    iterates item/path order under the same owner-generation fence, continues
+    after durably settled failures, stops on outcome-unknown recovery, and
+    terminalizes only after every path is settled. Cancellation requests and
+    interrupts only the remaining work; the bounded result reports removed
+    entries/bytes and the journal terminal status. Prefix-terminal journal
+    validation now permits settled earlier paths while requiring the exact
+    current path to be `validating` and all later paths to remain `planned`.
+    The bridge remains crate-private and unreachable from FFI, Swift, CLI, AI,
+    or production cleanup UI.
   - [x] 2026-07-19 slice: add the first crate-private engine execution bridge.
     `EngineHandle` now accepts only the non-cloneable `ApprovedCleanupSession`,
     enforces an open engine lifecycle, and selects the concrete

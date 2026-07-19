@@ -218,6 +218,423 @@ fn engine_executes_only_an_approved_permanent_safe_session() {
     assert!(engine.wait_until_closed(TEST_TIMEOUT));
 }
 
+#[cfg(unix)]
+struct ApprovedRustTargetFixture {
+    _temp: TempDir,
+    engine: EngineHandle,
+    session: crate::planner::ApprovedCleanupSession,
+    payloads: Vec<PathBuf>,
+    manifests: Vec<PathBuf>,
+    session_id: crate::persistence::CleanupSessionId,
+}
+
+#[cfg(unix)]
+fn approved_rust_target_fixture(project_count: usize) -> ApprovedRustTargetFixture {
+    use crate::domain::{
+        Candidate, CandidateInput, CleanupMode, CleanupPlanId, LocalizedTextKey, ProvenanceUrl,
+        Rule, RuleDefinition, RuleGuards, RuleMatcher, RuleMatcherDefinition, RuleScope,
+    };
+    use crate::persistence::{CleanupSessionId, CleanupTrigger, StoredCandidateRecord};
+
+    assert!(project_count > 0);
+    let temp = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let config = EngineConfig::new(
+        temp.path().join("data/dux.sqlite3"),
+        temp.path().join("data/snapshots"),
+        temp.path().join("cache"),
+    )
+    .unwrap();
+    let root = temp.path().join("scan-root");
+    let mut payloads = Vec::with_capacity(project_count);
+    let mut manifests = Vec::with_capacity(project_count);
+    for index in 0..project_count {
+        let project = root.join(format!("project-{index}"));
+        let target = project.join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        let manifest = project.join("Cargo.toml");
+        std::fs::write(&manifest, b"[package]\nname='fixture'\n").unwrap();
+        write_cargo_cache_tag(&target);
+        payloads.push(target.join("object"));
+        manifests.push(manifest);
+        std::fs::write(payloads.last().unwrap(), b"temporary build output").unwrap();
+        std::fs::write(
+            target.join("second-object"),
+            b"another temporary build output",
+        )
+        .unwrap();
+    }
+
+    let engine = EngineHandle::open(config).unwrap();
+    let task = engine.start_scan(root).unwrap();
+    assert_eq!(wait_terminal(&engine, task).phase, TaskPhase::Succeeded);
+    let scan_id = engine.scan_result(task).unwrap().unwrap().scan_id().clone();
+    let candidate_ids = engine
+        .candidate_history_for_scan(&scan_id)
+        .unwrap()
+        .candidates()
+        .iter()
+        .filter(|candidate| candidate.rule().id().as_str() == "developer.rust.target")
+        .map(|candidate| candidate.id().clone())
+        .collect::<Vec<_>>();
+    assert_eq!(candidate_ids.len(), project_count);
+
+    // DUX-DESTRUCTIVE: allow=test-approved-session-blocker-fixture -- remove only
+    // persisted discovery blockers in this temporary, test-owned candidate rows.
+    engine.inner.store.with_connection(|connection| {
+        for candidate_id in &candidate_ids {
+            connection
+                .execute(
+                    "DELETE FROM candidate_blockers WHERE candidate_id = ?1",
+                    [candidate_id.as_str()],
+                )
+                .unwrap();
+        }
+    });
+
+    let mut candidates = Vec::with_capacity(candidate_ids.len());
+    for candidate_id in candidate_ids {
+        let StoredCandidateRecord::Complete(stored) = engine
+            .inner
+            .store
+            .load_candidate(&candidate_id)
+            .unwrap()
+            .unwrap()
+        else {
+            panic!("expected complete candidate history");
+        };
+        let rule = Rule::try_new(RuleDefinition {
+            reference: stored.rule().clone(),
+            title_key: LocalizedTextKey::new("fixture.rust_target.title").unwrap(),
+            category: stored.category(),
+            scope: RuleScope::SelectedScanRoot,
+            matcher: RuleMatcher::try_new(RuleMatcherDefinition {
+                path_component: Some("target".to_owned()),
+                required_ancestor_markers_any: Vec::new(),
+                required_markers_all: Vec::new(),
+                forbidden_markers_any: Vec::new(),
+                exact_bundle_identifiers: Vec::new(),
+                excluded_descendants: Vec::new(),
+                protected_descendants: Vec::new(),
+            })
+            .unwrap(),
+            guards: RuleGuards::try_new(None, 0, Vec::new(), false).unwrap(),
+            safety: stored.safety(),
+            action: stored.action(),
+            schedule_eligible: false,
+            explanation_key: LocalizedTextKey::new("fixture.rust_target.explanation").unwrap(),
+            provenance: vec![
+                ProvenanceUrl::new("https://example.com/fixture-rust-target").unwrap(),
+            ],
+        })
+        .unwrap();
+        candidates.push(
+            Candidate::try_from_rule(
+                &rule,
+                CandidateInput::new(
+                    stored.id().clone(),
+                    stored.paths().to_vec(),
+                    stored.estimated_bytes(),
+                    stored.newest_mtime(),
+                    stored.evidence().to_vec(),
+                    stored.blockers().to_vec(),
+                    stored.source_scan_id().clone(),
+                ),
+            )
+            .unwrap(),
+        );
+    }
+    let scan = engine.inner.store.load_scan(&scan_id).unwrap().unwrap();
+    let lexical_root = crate::path_validation::validate_scan_root(scan.root()).unwrap();
+    let scan_root = crate::path_validation::capture_scan_root(lexical_root).unwrap();
+    let review =
+        crate::planner::review_exact_paths(&scan_root, &candidates, CleanupMode::PermanentSafe)
+            .unwrap();
+    let authorizations = review
+        .items()
+        .iter()
+        .flat_map(|item| {
+            item.paths().iter().map(|path| {
+                crate::planner::authorize_rule_target(
+                    &scan_root,
+                    path.snapshot().clone(),
+                    item.rule(),
+                )
+                .unwrap()
+            })
+        })
+        .collect::<Vec<_>>();
+    let started_at = SystemTime::now();
+    let plan = review
+        .into_trusted_permanent_plan(
+            CleanupPlanId::new("plan:engine-approved-rust-target-session").unwrap(),
+            started_at,
+            authorizations,
+        )
+        .unwrap()
+        .approve(started_at)
+        .unwrap();
+    let session_id = CleanupSessionId::new(format!(
+        "cleanup:engine-approved-rust-target-session-{project_count}"
+    ))
+    .unwrap();
+    let session = plan
+        .begin_cleanup_session(
+            &engine.inner.store,
+            session_id.clone(),
+            started_at,
+            CleanupTrigger::Manual,
+            TEST_TIMEOUT,
+        )
+        .unwrap();
+    ApprovedRustTargetFixture {
+        _temp: temp,
+        engine,
+        session,
+        payloads,
+        manifests,
+        session_id,
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn engine_executes_all_paths_and_terminalizes_completed_session() {
+    let mut fixture = approved_rust_target_fixture(2);
+    let summary = fixture
+        .engine
+        .execute_approved_permanent_safe_session(
+            &mut fixture.session,
+            SystemTime::now() + Duration::from_secs(1),
+            &|| false,
+        )
+        .unwrap();
+    let history_id = fixture
+        .engine
+        .recent_cleanup_history(None, 64)
+        .unwrap()
+        .records()
+        .iter()
+        .find(|record| record.id().as_str() == fixture.session_id.as_str())
+        .map(|record| record.id().clone())
+        .unwrap();
+    let history = fixture.engine.cleanup_session_history(&history_id).unwrap();
+    assert_eq!(
+        summary.terminal_status,
+        crate::persistence::TerminalSessionStatus::Completed
+    );
+    assert!(fixture.payloads.iter().all(|payload| !payload.exists()));
+    assert_eq!(
+        history.summary().status(),
+        crate::engine::DurableCleanupSessionStatus::Completed
+    );
+    fixture.engine.close();
+    assert!(fixture.engine.wait_until_closed(TEST_TIMEOUT));
+}
+
+#[cfg(unix)]
+#[test]
+#[allow(clippy::disallowed_methods)]
+fn engine_executes_ordered_permanent_safe_session_and_records_partial_outcome() {
+    let mut fixture = approved_rust_target_fixture(2);
+    // DUX-DESTRUCTIVE: allow=test-approved-session-target-change -- remove only
+    // the manifest in this temporary, test-owned fixture to simulate drift.
+    std::fs::remove_file(&fixture.manifests[1]).unwrap();
+    let started = SystemTime::now();
+    let summary = fixture
+        .engine
+        .execute_approved_permanent_safe_session(
+            &mut fixture.session,
+            started + Duration::from_secs(1),
+            &|| false,
+        )
+        .unwrap();
+    assert_eq!(
+        summary.terminal_status,
+        crate::persistence::TerminalSessionStatus::PartiallyCompleted
+    );
+    assert!(summary.removed_entries > 0);
+    assert_eq!(
+        fixture
+            .payloads
+            .iter()
+            .filter(|payload| !payload.exists())
+            .count(),
+        1
+    );
+    assert_eq!(
+        fixture
+            .payloads
+            .iter()
+            .filter(|payload| payload.exists())
+            .count(),
+        1
+    );
+    let history_id = fixture
+        .engine
+        .recent_cleanup_history(None, 64)
+        .unwrap()
+        .records()
+        .iter()
+        .find(|record| record.id().as_str() == fixture.session_id.as_str())
+        .map(|record| record.id().clone())
+        .unwrap();
+    let history = fixture.engine.cleanup_session_history(&history_id).unwrap();
+    assert_eq!(
+        history.summary().status(),
+        crate::engine::DurableCleanupSessionStatus::PartiallyCompleted
+    );
+    assert_eq!(
+        history
+            .items()
+            .iter()
+            .filter(|item| item.status() == crate::engine::DurableCleanupItemStatus::Removed)
+            .count(),
+        1
+    );
+    assert_eq!(
+        history
+            .items()
+            .iter()
+            .filter(|item| {
+                item.status() == crate::engine::DurableCleanupItemStatus::ChangedSincePlan
+            })
+            .count(),
+        1
+    );
+    fixture.engine.close();
+    assert!(fixture.engine.wait_until_closed(TEST_TIMEOUT));
+}
+
+#[cfg(unix)]
+#[test]
+fn engine_cancels_ordered_permanent_safe_session_before_next_path() {
+    let mut fixture = approved_rust_target_fixture(2);
+    let payloads = fixture.payloads.clone();
+    let second_entries = payloads
+        .iter()
+        .map(|payload| payload.parent().unwrap().join("second-object"))
+        .collect::<Vec<_>>();
+    let summary = fixture
+        .engine
+        .execute_approved_permanent_safe_session(
+            &mut fixture.session,
+            SystemTime::now() + Duration::from_secs(1),
+            &|| {
+                payloads
+                    .iter()
+                    .zip(&second_entries)
+                    .any(|(payload, second)| !payload.exists() && !second.exists())
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        summary.terminal_status,
+        crate::persistence::TerminalSessionStatus::PartiallyCompleted
+    );
+    assert_eq!(
+        fixture
+            .payloads
+            .iter()
+            .filter(|payload| !payload.exists())
+            .count(),
+        1
+    );
+    assert_eq!(
+        fixture
+            .payloads
+            .iter()
+            .filter(|payload| payload.exists())
+            .count(),
+        1
+    );
+    let history_id = fixture
+        .engine
+        .recent_cleanup_history(None, 64)
+        .unwrap()
+        .records()
+        .iter()
+        .find(|record| record.id().as_str() == fixture.session_id.as_str())
+        .map(|record| record.id().clone())
+        .unwrap();
+    let history = fixture.engine.cleanup_session_history(&history_id).unwrap();
+    assert_eq!(
+        history.summary().status(),
+        crate::engine::DurableCleanupSessionStatus::PartiallyCompleted
+    );
+    assert_eq!(
+        history
+            .items()
+            .iter()
+            .filter(|item| item.status() == crate::engine::DurableCleanupItemStatus::Removed)
+            .count(),
+        1
+    );
+    assert_eq!(
+        history
+            .items()
+            .iter()
+            .filter(|item| item.status() == crate::engine::DurableCleanupItemStatus::Interrupted)
+            .count(),
+        1
+    );
+    fixture.engine.close();
+    assert!(fixture.engine.wait_until_closed(TEST_TIMEOUT));
+}
+
+#[cfg(unix)]
+#[test]
+fn engine_stops_on_unknown_partial_effect_and_leaves_recovery_fence() {
+    let mut fixture = approved_rust_target_fixture(2);
+    let second_entries = fixture
+        .payloads
+        .iter()
+        .map(|payload| payload.parent().unwrap().join("second-object"))
+        .collect::<Vec<_>>();
+    let payloads = fixture.payloads.clone();
+    let result = fixture.engine.execute_approved_permanent_safe_session(
+        &mut fixture.session,
+        SystemTime::now() + Duration::from_secs(1),
+        &|| {
+            payloads
+                .iter()
+                .zip(&second_entries)
+                .any(|(payload, second)| payload.exists() != second.exists())
+        },
+    );
+    assert_eq!(
+        result,
+        Err(
+            crate::cleanup::permanent_safe::PermanentSafeExecutionError::Platform(
+                crate::cleanup::permanent_safe::PermanentSafePlatformError::OutcomeUnknown,
+            )
+        )
+    );
+    let history_id = fixture
+        .engine
+        .recent_cleanup_history(None, 64)
+        .unwrap()
+        .records()
+        .iter()
+        .find(|record| record.id().as_str() == fixture.session_id.as_str())
+        .map(|record| record.id().clone())
+        .unwrap();
+    let history = fixture.engine.cleanup_session_history(&history_id).unwrap();
+    assert_eq!(
+        history.summary().status(),
+        crate::engine::DurableCleanupSessionStatus::Recovering
+    );
+    assert_eq!(
+        history.items()[0].status(),
+        crate::engine::DurableCleanupItemStatus::OutcomeUnknown
+    );
+    assert_eq!(
+        history.items()[1].status(),
+        crate::engine::DurableCleanupItemStatus::Planned
+    );
+    fixture.engine.close();
+    assert!(fixture.engine.wait_until_closed(TEST_TIMEOUT));
+}
+
 #[cfg(target_os = "macos")]
 fn direct_toolchain_cargo() -> PathBuf {
     let rustup_home = std::env::var_os("RUSTUP_HOME")

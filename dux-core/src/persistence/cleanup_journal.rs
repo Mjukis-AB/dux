@@ -69,7 +69,7 @@ impl ActivePhase {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum TerminalSessionStatus {
+pub(crate) enum TerminalSessionStatus {
     Completed,
     PartiallyCompleted,
     Failed,

@@ -1147,16 +1147,20 @@ descriptor-relative no-follow operations, rejects unsafe or multiply-linked
 descendants, and records cancellation or unknown outcomes conservatively. A
 crate-private engine bridge now accepts only the non-cloneable approved
 session, selects that driver, and proves journal settlement and cleanup history
-in a project-local fixture. Its journal validation is durable before live
-evidence is rebuilt, so changed, stale, or unavailable targets leave `Planned`
-only through an explicit bounded validation outcome and never enter the effect
-phase; after the validation transition, the journal also requires the exact
-target to be `validating` while every other path remains `planned`. A
-sub-millisecond start-time mismatch is canonicalized before persistence and
+in a project-local fixture. A private session orchestrator now consumes the
+same capability in deterministic item/path order, continues after durably
+settled failures, stops on outcome-unknown recovery, and terminalizes only
+after all paths settle. Cancellation requests interrupt only the remaining
+planned work. Its journal validation is durable before live evidence is
+rebuilt, so changed, stale, or unavailable targets leave `Planned` only
+through an explicit bounded validation outcome and never enter the effect
+phase; after the validation transition, a terminal prefix is allowed but the
+exact target must be `validating` and every later path must remain `planned`.
+A sub-millisecond start-time mismatch is canonicalized before persistence and
 claiming. This bridge is not exported through FFI, not registered with Swift,
-and has no production caller; trusted volume/protected-root grants, process and
-descendant policy, orchestration, capacity verification, and user-facing
-execution remain required before any permanent-safe effect is reachable.
+and has no production caller; trusted volume/protected-root grants, process
+and descendant policy, capacity verification, and user-facing execution
+remain required before any permanent-safe effect is reachable.
 
 Arbitrary-path advanced permanent removal is excluded from the first production
 authority graph. Adding it later requires a separate threat model and revision

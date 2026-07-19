@@ -577,9 +577,10 @@ impl CleanupJournalClaim {
     }
 
     /// Re-check the journal-owned path transition after durable validation has
-    /// moved one path from `planned` to `validating`. Every other path must
-    /// remain pristine so a caller cannot switch the effect target between
-    /// the validation write and live witness capture.
+    /// moved one path from `planned` to `validating`. A sequential session may
+    /// have a terminal prefix, but every later path must remain pristine and
+    /// no sibling may be active. This prevents target switching between the
+    /// validation write and live witness capture.
     pub(crate) fn validate_validating_path(
         &self,
         item_ordinal: usize,
@@ -588,21 +589,54 @@ impl CleanupJournalClaim {
         self.require_phase(ActivePhase::Running)?;
         let journal = self.snapshot()?;
         ensure_active(&journal, &self.fence, self.phase)?;
+        let target_offset = journal
+            .items
+            .iter()
+            .take(item_ordinal)
+            .try_fold(0_usize, |offset, item| offset.checked_add(item.paths.len()))
+            .ok_or_else(|| HistoryError::new(HistoryErrorKind::InvalidInput))?
+            .checked_add(path_ordinal)
+            .ok_or_else(|| HistoryError::new(HistoryErrorKind::InvalidInput))?;
+        let mut ordinal = 0_usize;
         for (current_item_ordinal, item) in journal.items.iter().enumerate() {
             for (current_path_ordinal, path) in item.paths.iter().enumerate() {
-                let expected = if current_item_ordinal == item_ordinal
+                if (current_item_ordinal == item_ordinal
                     && current_path_ordinal == path_ordinal
+                    && path.status != PathStatus::Validating)
+                    || (ordinal == target_offset
+                        && !(current_item_ordinal == item_ordinal
+                            && current_path_ordinal == path_ordinal
+                            && path.status == PathStatus::Validating))
+                    || (ordinal < target_offset && !path.status.is_terminal())
+                    || (ordinal > target_offset && path.status != PathStatus::Planned)
                 {
-                    PathStatus::Validating
-                } else {
-                    PathStatus::Planned
-                };
-                if path.status != expected {
                     return Err(HistoryError::new(HistoryErrorKind::InvalidTransition));
                 }
+                ordinal = ordinal
+                    .checked_add(1)
+                    .ok_or_else(|| HistoryError::new(HistoryErrorKind::InvalidInput))?;
             }
         }
+        if ordinal <= target_offset {
+            return Err(HistoryError::new(HistoryErrorKind::InvalidInput));
+        }
         Ok(())
+    }
+
+    /// Determine whether a path has already settled to a terminal status
+    /// under this owner fence. This lets orchestration distinguish a durable
+    /// changed/failed path from an ambiguous journal write.
+    pub(crate) fn path_is_terminal(
+        &self,
+        item_ordinal: usize,
+        path_ordinal: usize,
+    ) -> Result<bool, HistoryError> {
+        self.require_phase(ActivePhase::Running)?;
+        let journal = self.snapshot()?;
+        ensure_active(&journal, &self.fence, self.phase)?;
+        Ok(journal_path(&journal, item_ordinal, path_ordinal)?
+            .status
+            .is_terminal())
     }
 
     pub(super) fn heartbeat(&self, heartbeat_at: SystemTime) -> Result<(), HistoryError> {
@@ -622,7 +656,7 @@ impl CleanupJournalClaim {
         }
     }
 
-    pub(super) fn request_cancellation(&self) -> Result<(), HistoryError> {
+    pub(crate) fn request_cancellation(&self) -> Result<(), HistoryError> {
         match self.write_active(|transaction| request_cancellation(transaction, &self.fence)) {
             Ok(()) => Ok(()),
             Err(_)
@@ -996,7 +1030,7 @@ impl CleanupJournalClaim {
         )
     }
 
-    pub(super) fn settle_cancellation(&self, completed_at: SystemTime) -> Result<(), HistoryError> {
+    pub(crate) fn settle_cancellation(&self, completed_at: SystemTime) -> Result<(), HistoryError> {
         let completed_at = canonical_input_time(completed_at)?;
         match self
             .write_active(|transaction| settle_cancellation(transaction, &self.fence, completed_at))
@@ -1100,6 +1134,16 @@ impl CleanupJournalClaim {
     ) -> Result<(), HistoryError> {
         self.terminalize(completed_at, verified_capacity_delta_bytes)
             .map(|_| ())
+    }
+
+    /// Terminalize through the same private capacity-verification gate while
+    /// retaining the bounded journal outcome for the engine orchestrator.
+    pub(crate) fn terminalize_for_capacity_verification_with_status(
+        &mut self,
+        completed_at: SystemTime,
+        verified_capacity_delta_bytes: Option<i64>,
+    ) -> Result<TerminalSessionStatus, HistoryError> {
+        self.terminalize(completed_at, verified_capacity_delta_bytes)
     }
 
     fn write_active<T>(
