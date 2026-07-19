@@ -1639,7 +1639,7 @@ fn item_status_from_stored(value: &str) -> Result<LegacyItemStatus, HistoryError
     }
 }
 
-fn canonical_started_at(value: SystemTime) -> Result<SystemTime, HistoryError> {
+pub(crate) fn canonical_started_at(value: SystemTime) -> Result<SystemTime, HistoryError> {
     let elapsed = value.duration_since(UNIX_EPOCH).map_err(|_| invalid())?;
     let floor_milliseconds = elapsed.as_millis();
     let has_sub_millisecond = elapsed.subsec_nanos() % 1_000_000 != 0;

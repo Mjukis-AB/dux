@@ -33,7 +33,11 @@ mod rust_target_source;
 
 #[cfg(test)]
 pub(crate) use exact_path_review::ExactPathApprovalError;
+#[cfg(test)]
+pub(crate) use exact_path_review::review_exact_paths;
 pub(crate) use exact_path_review::{ApprovedCleanupSession, ExactPathHandoffError};
+#[cfg(test)]
+pub(crate) use rule_scope_grant::authorize_rule_target;
 pub(crate) use rust_target::RustTargetEffectWitness;
 #[cfg(test)]
 pub(crate) use rust_target::{RustTargetLiveValidationError, validate_rust_target_effect};

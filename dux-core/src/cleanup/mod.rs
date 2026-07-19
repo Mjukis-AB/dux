@@ -115,7 +115,7 @@ pub(crate) mod executor;
 
 #[allow(
     dead_code,
-    reason = "the permanent-safe driver is deliberately not wired to app/FFI"
+    reason = "the permanent-safe driver is reachable only through the crate-private approved-session engine bridge"
 )]
 pub(crate) mod permanent_safe;
 

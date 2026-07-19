@@ -103,7 +103,7 @@ pub(crate) use cleanup_exclusions::{
     CleanupExclusionSetting, CleanupExclusionSettingSource, CleanupExclusionSettingUpdate,
     load_cleanup_exclusions,
 };
-pub(crate) use cleanup_history::CleanupSessionId;
+pub(crate) use cleanup_history::{CleanupSessionId, canonical_started_at};
 pub(crate) use cleanup_history::{CleanupTrigger, NewCleanupSessionRecord};
 pub(crate) use cleanup_history_query::{
     StoredCleanupErrorCategory, StoredCleanupHistoryCursor, StoredCleanupHistoryObservation,

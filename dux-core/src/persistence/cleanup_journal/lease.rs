@@ -576,6 +576,35 @@ impl CleanupJournalClaim {
         Ok(())
     }
 
+    /// Re-check the journal-owned path transition after durable validation has
+    /// moved one path from `planned` to `validating`. Every other path must
+    /// remain pristine so a caller cannot switch the effect target between
+    /// the validation write and live witness capture.
+    pub(crate) fn validate_validating_path(
+        &self,
+        item_ordinal: usize,
+        path_ordinal: usize,
+    ) -> Result<(), HistoryError> {
+        self.require_phase(ActivePhase::Running)?;
+        let journal = self.snapshot()?;
+        ensure_active(&journal, &self.fence, self.phase)?;
+        for (current_item_ordinal, item) in journal.items.iter().enumerate() {
+            for (current_path_ordinal, path) in item.paths.iter().enumerate() {
+                let expected = if current_item_ordinal == item_ordinal
+                    && current_path_ordinal == path_ordinal
+                {
+                    PathStatus::Validating
+                } else {
+                    PathStatus::Planned
+                };
+                if path.status != expected {
+                    return Err(HistoryError::new(HistoryErrorKind::InvalidTransition));
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn heartbeat(&self, heartbeat_at: SystemTime) -> Result<(), HistoryError> {
         let heartbeat_at = canonical_input_time(heartbeat_at)?;
         match self

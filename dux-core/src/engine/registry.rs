@@ -64,6 +64,10 @@ use super::task::{
     StartSubtreeScanError, StartTaskError, TaskAccessError, TaskEvent, TaskEventBatch,
     TaskEventKind, TaskFailureKind, TaskId, TaskKind, TaskPhase, TaskSnapshot,
 };
+use crate::cleanup::permanent_safe::{
+    DescriptorRelativePermanentSafeDriver, PermanentSafeExecutionError,
+    PermanentSafeRemovalSummary, execute_rust_target_contents,
+};
 use crate::cleanup::{TrashEffectRequest, TrashPlatformResult, TrashSelectionError};
 use crate::domain::{
     CANDIDATE_CATALOG_SCHEMA_VERSION, CANDIDATE_CATALOG_SHA256, CANDIDATE_CONTEXT_FORMAT_VERSION,
@@ -103,6 +107,7 @@ use crate::persistence::{
 #[cfg(test)]
 use crate::persistence::{CleanupTrigger, NewCleanupSessionRecord, StoredCandidateRecord};
 use crate::persistence::{DatabaseStatus, StoreCoordinator};
+use crate::planner::ApprovedCleanupSession;
 use crate::scanner::{
     CancellationToken, ScanConfig, ScanMessage, ScanObjectIdentity, ScanTermination, Scanner,
 };
@@ -1290,6 +1295,41 @@ impl EngineHandle {
             return Err(TrashSelectionError::InvalidRequest);
         }
         crate::cleanup::execute_reviewed_trash_selection(&self.inner.store, review, node_id, driver)
+    }
+
+    /// Execute one path from a planner-owned, approved permanent-safe session.
+    ///
+    /// This is intentionally crate-private: callers must first construct the
+    /// non-cloneable approved session through the future deterministic planner
+    /// join. The engine supplies the only concrete descriptor-relative driver;
+    /// no caller path, callback, FFI handle, AI result, or CLI request can
+    /// reach this boundary.
+    #[allow(
+        dead_code,
+        reason = "the deterministic planner-to-engine bridge is staged before FFI/UI orchestration"
+    )]
+    pub(crate) fn execute_approved_permanent_safe(
+        &self,
+        session: &mut ApprovedCleanupSession,
+        item_ordinal: usize,
+        path_ordinal: usize,
+        now: SystemTime,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<PermanentSafeRemovalSummary, PermanentSafeExecutionError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(PermanentSafeExecutionError::Admission(
+                HistoryErrorKind::InvalidTransition,
+            ));
+        }
+        let mut driver = DescriptorRelativePermanentSafeDriver;
+        execute_rust_target_contents(
+            session,
+            item_ordinal,
+            path_ordinal,
+            now,
+            &mut driver,
+            cancelled,
+        )
     }
 
     /// Replace the bounded deny-only exclusion set. The core validates and

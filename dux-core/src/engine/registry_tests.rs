@@ -53,6 +53,172 @@ fn wait_terminal(engine: &EngineHandle, id: TaskId) -> TaskSnapshot {
 }
 
 #[cfg(target_os = "macos")]
+#[test]
+fn engine_executes_only_an_approved_permanent_safe_session() {
+    use crate::domain::{
+        Candidate, CandidateInput, CleanupMode, CleanupPlanId, LocalizedTextKey, ProvenanceUrl,
+        Rule, RuleDefinition, RuleGuards, RuleMatcher, RuleMatcherDefinition, RuleScope,
+    };
+    use crate::persistence::{CleanupSessionId, CleanupTrigger, StoredCandidateRecord};
+
+    let temp = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let config = EngineConfig::new(
+        temp.path().join("data/dux.sqlite3"),
+        temp.path().join("data/snapshots"),
+        temp.path().join("cache"),
+    )
+    .unwrap();
+    let root = temp.path().join("scan-root");
+    let project = root.join("project");
+    let target = project.join("target");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::write(project.join("Cargo.toml"), b"[package]\nname='fixture'\n").unwrap();
+    write_cargo_cache_tag(&target);
+    let payload = target.join("object");
+    std::fs::write(&payload, b"temporary build output").unwrap();
+
+    let engine = EngineHandle::open(config).unwrap();
+    let task = engine.start_scan(root.clone()).unwrap();
+    assert_eq!(wait_terminal(&engine, task).phase, TaskPhase::Succeeded);
+    let scan_id = engine.scan_result(task).unwrap().unwrap().scan_id().clone();
+    let candidate_id = engine
+        .candidate_history_for_scan(&scan_id)
+        .unwrap()
+        .candidates()[0]
+        .id()
+        .clone();
+
+    // DUX-DESTRUCTIVE: allow=test-approved-session-blocker-fixture -- remove only the
+    // persisted discovery blocker in this temporary, test-owned candidate row.
+    engine.inner.store.with_connection(|connection| {
+        connection
+            .execute(
+                "DELETE FROM candidate_blockers WHERE candidate_id = ?1",
+                [candidate_id.as_str()],
+            )
+            .unwrap();
+    });
+    let StoredCandidateRecord::Complete(stored) = engine
+        .inner
+        .store
+        .load_candidate(&candidate_id)
+        .unwrap()
+        .unwrap()
+    else {
+        panic!("expected complete candidate history");
+    };
+    let rule = Rule::try_new(RuleDefinition {
+        reference: stored.rule().clone(),
+        title_key: LocalizedTextKey::new("fixture.rust_target.title").unwrap(),
+        category: stored.category(),
+        scope: RuleScope::SelectedScanRoot,
+        matcher: RuleMatcher::try_new(RuleMatcherDefinition {
+            path_component: Some("target".to_owned()),
+            required_ancestor_markers_any: Vec::new(),
+            required_markers_all: Vec::new(),
+            forbidden_markers_any: Vec::new(),
+            exact_bundle_identifiers: Vec::new(),
+            excluded_descendants: Vec::new(),
+            protected_descendants: Vec::new(),
+        })
+        .unwrap(),
+        guards: RuleGuards::try_new(None, 0, Vec::new(), false).unwrap(),
+        safety: stored.safety(),
+        action: stored.action(),
+        schedule_eligible: false,
+        explanation_key: LocalizedTextKey::new("fixture.rust_target.explanation").unwrap(),
+        provenance: vec![ProvenanceUrl::new("https://example.com/fixture-rust-target").unwrap()],
+    })
+    .unwrap();
+    let candidate = Candidate::try_from_rule(
+        &rule,
+        CandidateInput::new(
+            stored.id().clone(),
+            stored.paths().to_vec(),
+            stored.estimated_bytes(),
+            stored.newest_mtime(),
+            stored.evidence().to_vec(),
+            stored.blockers().to_vec(),
+            stored.source_scan_id().clone(),
+        ),
+    )
+    .unwrap();
+    let scan = engine.inner.store.load_scan(&scan_id).unwrap().unwrap();
+    let lexical_root = crate::path_validation::validate_scan_root(scan.root()).unwrap();
+    let scan_root = crate::path_validation::capture_scan_root(lexical_root).unwrap();
+    let review = crate::planner::review_exact_paths(
+        &scan_root,
+        std::slice::from_ref(&candidate),
+        CleanupMode::PermanentSafe,
+    )
+    .unwrap();
+    let authorization = crate::planner::authorize_rule_target(
+        &scan_root,
+        review.items()[0].paths()[0].snapshot().clone(),
+        review.items()[0].rule(),
+    )
+    .unwrap();
+    let started_at = SystemTime::now();
+    let plan = review
+        .into_trusted_permanent_plan(
+            CleanupPlanId::new("plan:engine-approved-rust-target").unwrap(),
+            started_at,
+            vec![authorization],
+        )
+        .unwrap()
+        .approve(started_at)
+        .unwrap();
+    let session_id = CleanupSessionId::new("cleanup:engine-approved-rust-target").unwrap();
+    let mut session = plan
+        .begin_cleanup_session(
+            &engine.inner.store,
+            session_id.clone(),
+            started_at,
+            CleanupTrigger::Manual,
+            TEST_TIMEOUT,
+        )
+        .unwrap();
+
+    assert!(payload.exists());
+    let summary = engine
+        .execute_approved_permanent_safe(
+            &mut session,
+            0,
+            0,
+            started_at + Duration::from_secs(1),
+            &|| false,
+        )
+        .unwrap();
+    assert_eq!(summary.removed_entries, 1);
+    assert!(!payload.exists());
+    assert!(target.join("CACHEDIR.TAG").exists());
+
+    session
+        .claim_mut()
+        .terminalize_for_capacity_verification(started_at + Duration::from_secs(2), None)
+        .unwrap();
+    let history_id = engine
+        .recent_cleanup_history(None, 64)
+        .unwrap()
+        .records()
+        .iter()
+        .find(|record| record.id().as_str() == session_id.as_str())
+        .map(|record| record.id().clone())
+        .expect("approved session should be visible in cleanup history");
+    let history = engine.cleanup_session_history(&history_id).unwrap();
+    assert_eq!(
+        history.summary().status(),
+        crate::engine::DurableCleanupSessionStatus::Completed
+    );
+    assert_eq!(
+        history.items()[0].status(),
+        crate::engine::DurableCleanupItemStatus::Removed
+    );
+    engine.close();
+    assert!(engine.wait_until_closed(TEST_TIMEOUT));
+}
+
+#[cfg(target_os = "macos")]
 fn direct_toolchain_cargo() -> PathBuf {
     let rustup_home = std::env::var_os("RUSTUP_HOME")
         .map(PathBuf::from)

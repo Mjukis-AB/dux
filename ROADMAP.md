@@ -4675,6 +4675,16 @@ Tasks:
     space until emptied; no AI, CLI, scheduler, arbitrary path, or permanent
     delete path can invoke this action.
 - [ ] Implement permanent-safe executor for approved rules.
+  - [x] 2026-07-19 slice: add the first crate-private engine execution bridge.
+    `EngineHandle` now accepts only the non-cloneable `ApprovedCleanupSession`,
+    enforces an open engine lifecycle, and selects the concrete
+    descriptor-relative Rust driver without accepting caller paths, callbacks,
+    AI output, CLI requests, or FFI values. The bridge is proven end to end in
+    a project-local Cargo fixture: it removes only the approved target
+    contents, preserves `CACHEDIR.TAG`, settles the journal item, and exposes
+    completed cleanup history. It remains unreachable from production UI/FFI
+    until protected-root/volume grants and the centralized orchestration are
+    complete.
   - [x] 2026-07-19 slice: fence journal validation before rebuilding the
     live Rust-target witness. Changed targets, stale approvals, and journal
     revalidation failures now settle the path out of `Planned` with bounded
@@ -4697,6 +4707,12 @@ Tasks:
     descriptor-relative contents executor and journal effect admission remain
     open.
 - [ ] Implement execution-time revalidation.
+  - [x] 2026-07-19 slice: make the approved-session handoff use one canonical
+    millisecond start time for persistence and journal claiming, and recheck
+    the journal-owned `validating` path after durable validation while every
+    other path remains `planned`. This closes the sub-millisecond claim gap
+    and prevents target switching between the validation write and live
+    witness capture; broader production orchestration remains open.
   - [x] 2026-07-19 slice: add a private pre-effect revalidation witness on
     the approved journal session. It rechecks approval expiry, every retained
     trusted rule-scope grant, and the exact frozen journal plan immediately

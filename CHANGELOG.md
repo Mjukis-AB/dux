@@ -1,5 +1,12 @@
 # Changelog
 
+- Added the first crate-private engine bridge for approved permanent-safe
+  sessions. It accepts only the non-cloneable journal capability, selects the
+  descriptor-relative Rust driver, preserves Cargo cache markers, and records
+  terminal cleanup history in a project-local end-to-end fixture; no FFI, Swift,
+  CLI, AI, or production UI caller can reach it. The handoff now canonicalizes
+  millisecond start times and verifies the exact `validating` path before live
+  witness capture, closing a sub-millisecond journal-claim gap.
 - Added a revisioned global permanent-cleanup kill switch. Missing state is
   enabled by default, explicit disable/enable/reset operations are serialized
   with the store-wide cleanup exclusion, and the journal rechecks the switch

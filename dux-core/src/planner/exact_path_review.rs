@@ -22,6 +22,7 @@ use crate::path_validation::{
     ProtectedRootError, ProtectedRootRegistry, capture_filesystem_boundary, validate_cleanup_path,
     validate_scan_root,
 };
+use crate::persistence::canonical_started_at;
 use crate::persistence::{
     CleanupJournalClaim, CleanupSessionId, CleanupTrigger, HistoryError, NewCleanupSessionRecord,
     StoreCoordinator,
@@ -321,6 +322,9 @@ impl ApprovedTrustedReviewedCleanupPlan {
         trigger: CleanupTrigger,
         lock_timeout: Duration,
     ) -> Result<ApprovedCleanupSession, ExactPathHandoffError> {
+        let started_at = canonical_started_at(started_at)
+            .map_err(ExactPathApprovalError::Persistence)
+            .map_err(ExactPathHandoffError::Approval)?;
         self.revalidate(started_at)?;
         let record = NewCleanupSessionRecord::try_from_plan(
             session_id.clone(),
@@ -396,7 +400,10 @@ impl ApprovedCleanupSession {
         path_ordinal: usize,
         now: std::time::SystemTime,
     ) -> Result<RustTargetEffectWitness, ExactPathHandoffError> {
-        self.revalidate_for_effect(now)?;
+        self.approved.revalidate(now)?;
+        self.claim
+            .validate_validating_path(item_ordinal, path_ordinal)
+            .map_err(ExactPathHandoffError::Journal)?;
         let item = self
             .approved
             .plan()
