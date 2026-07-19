@@ -3622,14 +3622,15 @@ Tasks:
   slice reasserts the lease after SwiftUI restores the transient scene and at
   AppKit's last-window/termination callbacks, because scene restoration can
   otherwise re-enable automatic termination after the initial launch lease.
-  Corrected 2026-07-19: the lifetime guard no longer opts the agent process into
-  automatic termination (Apple documents setting the support flag to `false` as
-  having no effect). Close/resignation callbacks reassert the counter-based
-  opt-out across the AppKit scene teardown turn, and each repeated increment is
-  balanced during ordered release. This prevents the process from becoming
-  TAL-eligible after the popover closes; explicit Quit remains the only normal
-  termination path. Delegate tests cover launch, scene restoration, last-window
-  close, incidental termination, and repeated-counter release.
+  Corrected 2026-07-19: the lifetime guard enables AppKit automatic-termination
+  support before taking one process-lifetime opt-out, because Apple's contract
+  makes the counter ineffective when support is disabled. Close/resignation
+  callbacks only restore the support flag across the AppKit scene teardown
+  turn; they never acquire additional counter leases. This prevents the
+  process from becoming TAL-eligible after the popover closes while keeping
+  explicit Quit as the only normal termination path. Delegate tests cover
+  launch, scene restoration, last-window close, incidental termination, and
+  repeated acquire/reassert balancing.
 - [x] Implement Explorer window shell and Overview. Completed 2026-07-17: one
   reusable `Window(id: "explorer")` opens after the menu-bar scene, shares the
   process-wide `AppModel`, activates only after the open request, and does not

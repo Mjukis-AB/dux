@@ -23,12 +23,16 @@ final class DuxAutomaticTerminationLease {
     }
 
     func acquire() {
-        // Do not opt this LSUIElement agent into automatic termination. The
-        // support flag is currently not a disable switch; setting it to true
-        // makes AppKit/TAL eligible to retire the process after the transient
-        // status-item window closes. The counter calls remain balanced below.
-        controller.automaticTerminationSupportEnabled = false
-        disableAutomaticTermination()
+        guard !isHeld else {
+            return
+        }
+        // The counter only participates when automatic-termination support is
+        // enabled. Keep one process-lifetime opt-out and balance that exact
+        // lease during ordered shutdown; scene callbacks only restore the
+        // support flag and must not increment the counter again.
+        controller.automaticTerminationSupportEnabled = true
+        controller.disableAutomaticTermination(Self.reason)
+        disableCount = 1
         isHeld = true
     }
 
@@ -36,11 +40,10 @@ final class DuxAutomaticTerminationLease {
         guard isHeld else {
             return
         }
-        // AppKit can reset the automatic-termination opt-out while it tears
-        // down and restores MenuBarExtra's transient window. Reassert the
-        // opt-out after each scene turn. Every increment is paired in release.
-        controller.automaticTerminationSupportEnabled = false
-        disableAutomaticTermination()
+        // AppKit can reset the support flag while it tears down and restores
+        // MenuBarExtra's transient window. Restore it, but do not touch the
+        // counter: release() owns exactly one matching enable call.
+        controller.automaticTerminationSupportEnabled = true
     }
 
     func release() {
@@ -54,10 +57,6 @@ final class DuxAutomaticTerminationLease {
         isHeld = false
     }
 
-    private func disableAutomaticTermination() {
-        controller.disableAutomaticTermination(Self.reason)
-        disableCount += 1
-    }
 }
 
 @MainActor

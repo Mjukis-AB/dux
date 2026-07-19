@@ -163,6 +163,11 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Fixed
+- Restored the documented automatic-termination contract for the menu-bar
+  agent. The lifetime lease now enables support before taking one balanced
+  opt-out, while repeated popover-close notifications only restore that flag;
+  closing the transient popover cannot retire the process or accumulate
+  unbalanced termination leases.
 - Made menu-bar lifetime reassertion idempotent. Repeated popover close and
   scene-resignation notifications now restore AppKit support without leaking
   automatic-termination disable leases.
