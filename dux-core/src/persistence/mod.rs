@@ -93,7 +93,6 @@ pub(crate) use cargo_enrollment::{
     CargoSignatureClass,
 };
 pub(crate) use cleanup_history::CleanupSessionId;
-#[cfg(test)]
 pub(crate) use cleanup_history::{CleanupTrigger, NewCleanupSessionRecord};
 pub(crate) use cleanup_history_query::{
     StoredCleanupErrorCategory, StoredCleanupHistoryCursor, StoredCleanupHistoryObservation,
@@ -106,8 +105,8 @@ pub(crate) use cleanup_journal::{
 };
 pub(crate) use codec::{HostPathObservationEncoding, observe_host_path};
 pub(crate) use history::{
-    HistoryErrorKind, MAX_RECENT_SCAN_HISTORY_LIMIT, NewScanRecord, ScanCompletionRecord,
-    ScanCounts, ScanStatus, TerminalScanStatus,
+    HistoryError, HistoryErrorKind, MAX_RECENT_SCAN_HISTORY_LIMIT, NewScanRecord,
+    ScanCompletionRecord, ScanCounts, ScanStatus, TerminalScanStatus,
 };
 pub(crate) use pressure_settings::{
     DiskPressurePolicySetting, DiskPressurePolicySettingSource, DiskPressurePolicySettingUpdate,

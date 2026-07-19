@@ -4640,6 +4640,13 @@ Tasks:
 - [ ] Implement permanent-safe executor for approved rules.
 - [ ] Implement execution-time revalidation.
 - [ ] Implement cleanup session/item history.
+  - [x] 2026-07-19 slice: join the approved trusted-plan boundary to the
+    existing bounded planned-session persistence API. The capability
+    revalidates expiry and every retained rule-scope grant immediately before
+    writing the session, then persists only frozen history/journal data. The
+    stored row does not retain approval authority and cannot invoke an effect;
+    engine orchestration, terminal outcomes, capacity verification, and UI
+    history remain open.
 - [ ] Implement pre/post capacity verification.
 - [ ] Implement exclusions and global permanent-cleanup disable setting.
 - [ ] Add partial failure, retry, cancellation, and changed-since-plan UI.

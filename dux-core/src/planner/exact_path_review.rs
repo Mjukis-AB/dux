@@ -20,6 +20,9 @@ use crate::path_validation::{
     ProtectedRootError, ProtectedRootRegistry, capture_filesystem_boundary, validate_cleanup_path,
     validate_scan_root,
 };
+use crate::persistence::{
+    CleanupSessionId, CleanupTrigger, HistoryError, NewCleanupSessionRecord, StoreCoordinator,
+};
 
 use super::rule_scope_grant::{RuleScopeAuthorization, RuleScopeGrantError};
 
@@ -236,6 +239,33 @@ impl ApprovedTrustedReviewedCleanupPlan {
         })
     }
 
+    /// Persist a planned cleanup session only after the approved capability has
+    /// been revalidated at the persistence boundary. The stored session is a
+    /// bounded history/journal observation; it does not retain this capability
+    /// and cannot authorize a filesystem effect.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "planned-session persistence is consumed by the later engine executor join"
+        )
+    )]
+    pub(crate) fn persist_planned(
+        &self,
+        store: &StoreCoordinator,
+        session_id: CleanupSessionId,
+        started_at: std::time::SystemTime,
+        trigger: CleanupTrigger,
+    ) -> Result<(), ExactPathApprovalError> {
+        self.revalidate(started_at)?;
+        let record =
+            NewCleanupSessionRecord::try_from_plan(session_id, self.plan(), started_at, trigger)
+                .map_err(ExactPathApprovalError::Persistence)?;
+        store
+            .record_cleanup_session_planned(&record)
+            .map_err(ExactPathApprovalError::Persistence)
+    }
+
     pub(crate) fn release(self) {}
 }
 
@@ -438,6 +468,8 @@ pub(crate) enum ExactPathApprovalError {
     Expired,
     #[error("trusted rule-scope authorization failed: {0}")]
     Authorization(#[source] RuleScopeGrantError),
+    #[error("planned cleanup history could not be persisted: {0}")]
+    Persistence(#[source] HistoryError),
 }
 
 /// Capture exact, current path evidence for a selected candidate set.

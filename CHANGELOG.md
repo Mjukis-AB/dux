@@ -94,6 +94,9 @@ All notable changes to DUX will be documented in this file.
 - Added a crate-private, expiry-bound approval capability for trusted
   permanent-safe plans. Approval revalidates retained rule-scope grants and
   still cannot reach persistence, FFI, scheduling, or filesystem effects.
+- Approved plans can now persist a bounded planned cleanup session/item history
+  record after a final expiry and grant revalidation. The stored observation
+  carries no approval or execution authority.
 - Continued Milestone 5 with journal-fenced, one-shot core Trash admission.
   The opaque Explorer witness must match the exact frozen journal path, then
   repeats no-follow identity checks, records and immediately revalidates an
