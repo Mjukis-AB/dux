@@ -1010,6 +1010,18 @@ impl CleanupJournalClaim {
         }
     }
 
+    /// Terminalize through the cleanup capacity-verification adapter. The
+    /// adapter accepts only a delta produced by the private pre/post witness;
+    /// raw callers remain on the existing journal test/recovery path.
+    pub(crate) fn terminalize_for_capacity_verification(
+        &mut self,
+        completed_at: SystemTime,
+        verified_capacity_delta_bytes: Option<i64>,
+    ) -> Result<(), HistoryError> {
+        self.terminalize(completed_at, verified_capacity_delta_bytes)
+            .map(|_| ())
+    }
+
     fn write_active<T>(
         &self,
         operation: impl FnOnce(&Transaction<'_>) -> Result<T, HistoryError>,

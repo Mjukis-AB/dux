@@ -1,5 +1,11 @@
 # Changelog
 
+- Added a private bounded pre/post cleanup-capacity verification boundary.
+  Stable volume identity, sample timing, total capacity, headline source, and
+  availability shape must agree before a signed available-space delta can be
+  journaled; unknown evidence stays unknown and never becomes an estimate.
+  The boundary is staged for later executor/UI/FFI integration and has no
+  filesystem authority.
 - Fixed menu-bar scene teardown eligibility. DUX no longer opts its agent process
   into AppKit automatic termination, and its repeated scene reassertions keep
   every counter-based opt-out balanced, so opening and closing the popover cannot

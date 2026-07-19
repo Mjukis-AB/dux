@@ -4691,6 +4691,15 @@ Tasks:
     It exposes no path, callback, FFI, schedule, or filesystem effect; the
     permanent-safe executor and terminal transitions remain open.
 - [ ] Implement pre/post capacity verification.
+  - [x] 2026-07-19 slice: add a private bounded verifier for cleanup capacity
+    witnesses. It requires a stable volume identity, ordered effect window,
+    pre/post samples inside a 15-minute skew bound, unchanged total capacity,
+    unchanged headline source, and unchanged ordinary/important availability
+    shape. It records only a signed headline-available delta (positive means
+    more available space); missing, stale, mismatched, or unrepresentable
+    evidence remains unknown rather than becoming zero or an estimate. A
+    private journal adapter accepts only this verified value. No executor, UI,
+    FFI, or production cleanup session calls the boundary yet.
 - [ ] Implement exclusions and global permanent-cleanup disable setting.
 - [ ] Add partial failure, retry, cancellation, and changed-since-plan UI.
 - [ ] Add bounded pending-evaluation discovery and snapshot-backed restart

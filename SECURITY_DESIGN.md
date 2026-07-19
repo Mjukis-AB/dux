@@ -2445,7 +2445,12 @@ Before app cleanup ships, CI covers:
   failure, retry, cancellation, process interruption, and journal recovery;
 - macOS Trash on an isolated account or temporary volume and refusal/fallback
   tests on other platforms;
-- pre/post capacity reporting that never substitutes estimated sizes;
+- pre/post capacity reporting that never substitutes estimated sizes. The
+  cleanup boundary accepts a signed available-space delta only when stable
+  volume identity, ordered effect timing, bounded pre/post sample skew, total
+  capacity, headline source, and ordinary/important availability shape all
+  match. Missing or conflicting telemetry produces no verified delta and cannot
+  authorize, imply, or substitute for a filesystem effect;
 - private storage permissions, symlinked store roots, migrations, corruption,
   unsupported versions, and concurrent clients;
 - FFI panic/error/lifetime/callback/cancellation tests and bounded payloads;

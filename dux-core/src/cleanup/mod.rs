@@ -2,6 +2,12 @@
 
 #[allow(
     dead_code,
+    reason = "bounded cleanup capacity verification is staged before journal/effect orchestration"
+)]
+mod capacity;
+
+#[allow(
+    dead_code,
     reason = "journal-fenced Trash admission is consumed by the platform adapter slice"
 )]
 pub(crate) mod executor;
