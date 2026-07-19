@@ -4509,7 +4509,16 @@ Tasks:
       persistence, FFI, schedule, or effect method, so existing candidates
       still retain `ProtectedPath`; process/descendant coverage and the plan
       and executor joins remain open.
-- [ ] Implement candidate groups and overlap resolution.
+- [x] Implement candidate groups and overlap resolution. Completed 2026-07-19:
+  deterministic grouping and conservative overlap resolution are now consumed
+  by exact-path review. Equivalent observations coalesce by stable candidate
+  identity, same-rule parent ownership is component-aware, and blocked,
+  conflicting, mixed-policy, mixed-rule, and internally overlapping findings
+  remain unresolved with zero actionable bytes. Malformed paths, duplicate
+  IDs, mixed scans, and byte overflow fail closed. The review retains the
+  immutable grouping witness, so downstream callers cannot reconstruct a
+  selection from reordered candidate input. Presentation/FFI projections and
+  cleanup execution remain covered by their later roadmap boundaries.
   - [x] 2026-07-19 slice: bind the deterministic grouping result to the
     planner-owned exact review. The review now retains the immutable group and
     overlap witness that selected its items, so later callers cannot recreate

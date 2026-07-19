@@ -173,6 +173,11 @@ All notable changes to DUX will be documented in this file.
   DUX when the popover is closed.
 
 ### Added
+- Completed the deterministic candidate-grouping boundary used by exact-path
+  review. Stable candidate IDs select equivalent duplicates, component-aware
+  parent ownership coalesces only same-rule findings, and every ambiguous or
+  malformed overlap remains unresolved with zero actionable bytes. The review
+  retains the grouping witness instead of recomputing selections downstream.
 - Exact-path reviews now retain the immutable candidate-grouping and overlap
   witness that selected their items, preventing downstream reconstruction from
   a reordered candidate slice while keeping approval and execution sealed.
