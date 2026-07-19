@@ -25,6 +25,8 @@ final class AppModel: DuxCapacitySampling {
     private(set) var diskPressurePolicy: DiskPressurePolicy?
     private(set) var diskPressurePolicyState = DiskPressurePolicyState.idle
     var diskPressurePolicyDraft = DiskPressurePolicyDraft.defaults
+    private(set) var permanentCleanupPolicy: PermanentCleanupPolicy?
+    private(set) var permanentCleanupPolicyState = PermanentCleanupPolicyState.idle
     private(set) var scanState = AppScanState.idle
     private(set) var loginItemState = LoginItemState.idle
     private(set) var notificationAuthorizationState = NotificationAuthorizationState.idle
@@ -69,6 +71,12 @@ final class AppModel: DuxCapacitySampling {
     private var pressurePolicyGeneration: UInt64 = 0
     @ObservationIgnored
     private var pressurePolicyIsInvalidated = false
+    @ObservationIgnored
+    private var permanentCleanupPolicyTask: Task<Void, Never>?
+    @ObservationIgnored
+    private var permanentCleanupPolicyGeneration: UInt64 = 0
+    @ObservationIgnored
+    private var permanentCleanupPolicyIsInvalidated = false
     @ObservationIgnored
     private var homeScanDriverTask: Task<AppScanRunOutcome, Never>?
     @ObservationIgnored
@@ -142,6 +150,7 @@ final class AppModel: DuxCapacitySampling {
             storageAccessIntroductionPreferenceStore
         self.storageAccessProbe = storageAccessProbe
         capacityTrend = nil
+        permanentCleanupPolicy = nil
         menuBarLabelMode = menuBarLabelPreferenceStore.load()
         menuBarVisibilityPreference = menuBarVisibilityPreferenceStore.load()
         showsStorageAccessIntroduction =
@@ -352,6 +361,83 @@ final class AppModel: DuxCapacitySampling {
         pressurePolicyTask?.cancel()
         pressurePolicyTask = nil
         diskPressurePolicyState = diskPressurePolicy == nil ? .idle : .ready
+    }
+
+    static let permanentCleanupReenableConfirmation = "ENABLE PERMANENT CLEANUP"
+
+    func loadPermanentCleanupPolicy() async {
+        guard !permanentCleanupPolicyIsInvalidated else {
+            return
+        }
+        if let permanentCleanupPolicyTask {
+            await permanentCleanupPolicyTask.value
+            return
+        }
+
+        permanentCleanupPolicyGeneration &+= 1
+        let generation = permanentCleanupPolicyGeneration
+        permanentCleanupPolicyState = .loading
+        let service = engineService
+        let task = Task { @MainActor [weak self] in
+            let result: Result<PermanentCleanupPolicy, Error>
+            do {
+                result = .success(try await service.loadPermanentCleanupPolicy())
+            } catch {
+                result = .failure(error)
+            }
+            guard !Task.isCancelled else {
+                return
+            }
+            self?.publishPermanentCleanupPolicyLoad(result, generation: generation)
+        }
+        permanentCleanupPolicyTask = task
+        await task.value
+    }
+
+    /// Changes the global kill switch. Re-enabling requires the exact phrase so
+    /// the UI cannot accidentally turn permanent cleanup back on.
+    func setPermanentCleanupEnabled(
+        _ enabled: Bool,
+        confirmation: String? = nil
+    ) async {
+        guard !permanentCleanupPolicyIsInvalidated,
+              permanentCleanupPolicyTask == nil,
+              !permanentCleanupPolicyState.isBusy else {
+            return
+        }
+        guard !enabled || confirmation == Self.permanentCleanupReenableConfirmation else {
+            permanentCleanupPolicyState = .failed(.confirmationRequired)
+            return
+        }
+        await mutatePermanentCleanupPolicy(state: enabled ? .enabling : .disabling) { service in
+            try await service.setPermanentCleanupEnabled(enabled)
+        }
+    }
+
+    func resetPermanentCleanup(confirmation: String? = nil) async {
+        guard !permanentCleanupPolicyIsInvalidated,
+              permanentCleanupPolicyTask == nil,
+              !permanentCleanupPolicyState.isBusy else {
+            return
+        }
+        // The core default is enabled. Treat reset as a re-enable whenever the
+        // current authoritative state is disabled.
+        if permanentCleanupPolicy?.enabled == false,
+           confirmation != Self.permanentCleanupReenableConfirmation {
+            permanentCleanupPolicyState = .failed(.confirmationRequired)
+            return
+        }
+        await mutatePermanentCleanupPolicy(state: .resetting) { service in
+            try await service.resetPermanentCleanup()
+        }
+    }
+
+    func invalidatePermanentCleanupPolicyOperations() {
+        permanentCleanupPolicyIsInvalidated = true
+        permanentCleanupPolicyGeneration &+= 1
+        permanentCleanupPolicyTask?.cancel()
+        permanentCleanupPolicyTask = nil
+        permanentCleanupPolicyState = permanentCleanupPolicy == nil ? .idle : .ready
     }
 
     func refreshLoginItemState() async {
@@ -924,6 +1010,78 @@ final class AppModel: DuxCapacitySampling {
         }
         pressurePolicyTask = task
         await task.value
+    }
+
+    private func publishPermanentCleanupPolicyLoad(
+        _ result: Result<PermanentCleanupPolicy, Error>,
+        generation: UInt64
+    ) {
+        guard generation == permanentCleanupPolicyGeneration else {
+            return
+        }
+        permanentCleanupPolicyTask = nil
+        switch result {
+        case let .success(policy):
+            permanentCleanupPolicy = policy
+            permanentCleanupPolicyState = .ready
+        case let .failure(error):
+            if error is CancellationError {
+                permanentCleanupPolicyState = permanentCleanupPolicy == nil ? .idle : .ready
+            } else {
+                permanentCleanupPolicyState = .failed(Self.permanentCleanupFailure(for: error))
+            }
+        }
+    }
+
+    private func mutatePermanentCleanupPolicy(
+        state: PermanentCleanupPolicyState,
+        _ operation: @escaping @Sendable (
+            any DuxPermanentCleanupPolicyServing
+        ) async throws -> PermanentCleanupPolicyUpdateResult
+    ) async {
+        permanentCleanupPolicyGeneration &+= 1
+        let generation = permanentCleanupPolicyGeneration
+        precondition(state == .enabling || state == .disabling || state == .resetting)
+        permanentCleanupPolicyState = state
+        let service = engineService
+        let task = Task { @MainActor [weak self] in
+            let result: Result<PermanentCleanupPolicyUpdateResult, Error>
+            do {
+                result = .success(try await operation(service))
+            } catch {
+                result = .failure(error)
+            }
+            guard !Task.isCancelled, let self,
+                  generation == self.permanentCleanupPolicyGeneration else {
+                return
+            }
+            switch result {
+            case let .success(update):
+                self.permanentCleanupPolicy = update.policy
+                self.permanentCleanupPolicyState = .ready
+            case let .failure(error):
+                if error is CancellationError {
+                    self.permanentCleanupPolicyState =
+                        self.permanentCleanupPolicy == nil ? .idle : .ready
+                } else {
+                    self.permanentCleanupPolicyState = .failed(
+                        Self.permanentCleanupFailure(for: error)
+                    )
+                }
+            }
+            self.permanentCleanupPolicyTask = nil
+        }
+        permanentCleanupPolicyTask = task
+        await task.value
+    }
+
+    private static func permanentCleanupFailure(
+        for error: Error
+    ) -> PermanentCleanupPolicyFailure {
+        if let error = error as? PermanentCleanupPolicyServiceError {
+            return .service(error)
+        }
+        return .unexpected
     }
 
     private static func pressurePolicyFailure(for error: Error) -> DiskPressurePolicyFailure {

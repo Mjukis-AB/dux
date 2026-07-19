@@ -4781,16 +4781,23 @@ Tasks:
     private, bounded, identity-revalidated, and non-authoritative. A bounded
     lossless user exclusion set now stores exact lexical path prefixes behind a
     typed settings key; the journal rechecks it under the cleanup lock before
-    `effect_started`, so it can only deny an effect. FFI/Swift settings control
-    and richer exclusion presentation remain open.
+    `effect_started`, so it can only deny an effect. The Swift settings surface
+    now loads and presents this path-free state through EngineService/AppModel,
+    applies disable immediately, and requires the exact phrase
+    `ENABLE PERMANENT CLEANUP` before re-enable or reset can restore the enabled
+    default. Path-bearing exclusion presentation remains separate and open.
   - [x] 2026-07-19 slice: expose the path-free global permanent-cleanup kill
     switch through UniFFI contract v22. Versioned get/set/reset records carry
     only enabled state, Default/Stored provenance, monotonic revision, and
     optional update time; Rust remains the semantic validator and the switch
     can only deny effects. Closed engines, malformed state, storage failures,
     and write uncertainty map to typed errors. The generated Swift bindings
-    were regenerated from the universal Debug XCFramework; exclusions and
-    Swift settings presentation remain separate follow-up work.
+    were regenerated from the universal Debug XCFramework. Swift EngineService
+    maps every typed error and rejects malformed status shapes; AppModel
+    generation-fences load/mutation/reset work and invalidates it during ordered
+    shutdown. Settings exposes the deny-only gate with VoiceOver identifiers and
+    an exact typed confirmation for re-enable/reset. Exclusions remain a
+    separate path-bearing presentation boundary.
 - [ ] Add partial failure, retry, cancellation, and changed-since-plan UI.
 - [ ] Add bounded pending-evaluation discovery and snapshot-backed restart
   recovery; malformed or incompatible state fails closed.

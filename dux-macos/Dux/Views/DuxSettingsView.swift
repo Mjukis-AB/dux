@@ -28,8 +28,37 @@ enum DiskPressurePolicyAccessibility {
     static let allControlIdentifiers = fieldIdentifiers + [save, reset, error, progress]
 }
 
+enum PermanentCleanupPolicyAccessibility {
+    static let toggle = "permanent-cleanup-toggle"
+    static let reset = "permanent-cleanup-reset"
+    static let confirmation = "permanent-cleanup-confirmation"
+    static let confirm = "permanent-cleanup-confirm"
+    static let error = "permanent-cleanup-error"
+    static let progress = "permanent-cleanup-progress"
+    static let status = "permanent-cleanup-status"
+
+    static let allControlIdentifiers = [
+        toggle,
+        reset,
+        confirmation,
+        confirm,
+        error,
+        progress,
+        status,
+    ]
+}
+
+private enum PermanentCleanupConfirmationAction {
+    case enable
+    case reset
+}
+
 struct DuxSettingsView: View {
     @Environment(\.scenePhase) private var scenePhase
+    @State private var permanentCleanupConfirmation = ""
+    @State private var showingPermanentCleanupConfirmation = false
+    @State private var permanentCleanupConfirmationAction:
+        PermanentCleanupConfirmationAction = .enable
 
     let model: AppModel
 
@@ -226,6 +255,153 @@ struct DuxSettingsView: View {
                 }
             }
 
+            Section("Cleanup safety") {
+                Text(
+                    "The DUX default permits reviewed permanent-cleanup effects to run. "
+                        + "This switch is only a global safety gate; it never selects or "
+                        + "approves a target, and DUX never lets AI approve or execute cleanup."
+                )
+                .foregroundStyle(.secondary)
+
+                if let policy = model.permanentCleanupPolicy {
+                    LabeledContent("Policy source") {
+                        Text(policy.source == .default ? "DUX default" : "Stored choice")
+                    }
+                    LabeledContent("Policy revision") {
+                        Text(verbatim: String(policy.revision))
+                    }
+                    if let milliseconds = policy.updatedAtUnixMilliseconds {
+                        LabeledContent("Policy updated") {
+                            Text(
+                                Date(timeIntervalSince1970: Double(milliseconds) / 1_000),
+                                format: .dateTime
+                            )
+                        }
+                    }
+                }
+
+                Toggle(
+                    "Allow permanent-cleanup effects",
+                    isOn: Binding(
+                        get: { model.permanentCleanupPolicy?.enabled ?? false },
+                        set: { requested in
+                            if requested {
+                                permanentCleanupConfirmationAction = .enable
+                                permanentCleanupConfirmation = ""
+                                showingPermanentCleanupConfirmation = true
+                            } else {
+                                Task { await model.setPermanentCleanupEnabled(false) }
+                            }
+                        }
+                    )
+                )
+                .disabled(
+                    model.permanentCleanupPolicy == nil
+                        || model.permanentCleanupPolicyState.isBusy
+                )
+                .accessibilityIdentifier(PermanentCleanupPolicyAccessibility.toggle)
+                .accessibilityHint(
+                    "Disabling is immediate; re-enabling requires typing the confirmation phrase"
+                )
+
+                if model.permanentCleanupPolicy?.enabled == false {
+                    Label(
+                        "Permanent-cleanup effects are currently blocked",
+                        systemImage: "hand.raised.fill"
+                    )
+                    .foregroundStyle(.orange)
+                    .accessibilityElement(children: .combine)
+                }
+
+                if showingPermanentCleanupConfirmation {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(
+                            "To continue, type “"
+                                + AppModel.permanentCleanupReenableConfirmation
+                                + "” exactly."
+                        )
+                        .font(.callout)
+                        TextField(
+                            AppModel.permanentCleanupReenableConfirmation,
+                            text: $permanentCleanupConfirmation
+                        )
+                        .textFieldStyle(.roundedBorder)
+                        .accessibilityIdentifier(PermanentCleanupPolicyAccessibility.confirmation)
+                        HStack {
+                            Button("Cancel") {
+                                showingPermanentCleanupConfirmation = false
+                                permanentCleanupConfirmation = ""
+                            }
+                            Button(
+                                permanentCleanupConfirmationAction == .reset
+                                    ? "Restore default"
+                                    : "Confirm re-enable"
+                            ) {
+                                let phrase = permanentCleanupConfirmation
+                                showingPermanentCleanupConfirmation = false
+                                permanentCleanupConfirmation = ""
+                                Task {
+                                    switch permanentCleanupConfirmationAction {
+                                    case .enable:
+                                        await model.setPermanentCleanupEnabled(
+                                            true,
+                                            confirmation: phrase
+                                        )
+                                    case .reset:
+                                        await model.resetPermanentCleanup(confirmation: phrase)
+                                    }
+                                }
+                            }
+                            .disabled(
+                                permanentCleanupConfirmation
+                                    != AppModel.permanentCleanupReenableConfirmation
+                            )
+                            .keyboardShortcut(.defaultAction)
+                            .accessibilityIdentifier(PermanentCleanupPolicyAccessibility.confirm)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+
+                HStack {
+                    Button("Restore DUX default") {
+                        if model.permanentCleanupPolicy?.enabled == false {
+                            permanentCleanupConfirmationAction = .reset
+                            permanentCleanupConfirmation = ""
+                            showingPermanentCleanupConfirmation = true
+                        } else {
+                            Task { await model.resetPermanentCleanup() }
+                        }
+                    }
+                    .disabled(
+                        model.permanentCleanupPolicy == nil
+                            || model.permanentCleanupPolicyState.isBusy
+                    )
+                    .accessibilityIdentifier(PermanentCleanupPolicyAccessibility.reset)
+                    .accessibilityHint(
+                        "Restores the enabled DUX default and may require typed confirmation"
+                    )
+
+                    if model.permanentCleanupPolicyState.isBusy {
+                        ProgressView()
+                            .controlSize(.small)
+                            .accessibilityIdentifier(PermanentCleanupPolicyAccessibility.progress)
+                            .accessibilityLabel(
+                                model.permanentCleanupPolicyState == .loading
+                                    ? "Loading cleanup safety setting"
+                                    : "Updating cleanup safety setting"
+                            )
+                    }
+                }
+                .accessibilityElement(children: .contain)
+
+                if case let .failed(failure) = model.permanentCleanupPolicyState {
+                    Label(Self.message(for: failure), systemImage: "exclamationmark.triangle")
+                        .foregroundStyle(.red)
+                        .accessibilityIdentifier(PermanentCleanupPolicyAccessibility.error)
+                }
+            }
+
             Section("Engine") {
                 switch model.engineState {
                 case .idle, .loading:
@@ -255,6 +431,7 @@ struct DuxSettingsView: View {
             await model.refreshLoginItemState()
             await model.refreshNotificationAuthorizationState()
             await model.loadDiskPressurePolicy()
+            await model.loadPermanentCleanupPolicy()
             await model.loadInitialState()
         }
         .onChange(of: scenePhase) { _, phase in
@@ -490,6 +667,27 @@ struct DuxSettingsView: View {
             String(
                 localized: "Disk pressure settings are unavailable. Your last saved policy is unchanged."
             )
+        }
+    }
+
+    static func message(for failure: PermanentCleanupPolicyFailure) -> String {
+        switch failure {
+        case .confirmationRequired:
+            String(localized: "Type ENABLE PERMANENT CLEANUP exactly to re-enable this setting.")
+        case let .service(error):
+            switch error {
+            case .closed:
+                String(localized: "The storage engine session is closed.")
+            case .retryable, .invalidClock, .outcomeUnknown:
+                String(localized: "The setting could not be changed safely. Try again.")
+            case .incompatibleSchema:
+                String(localized: "This cleanup-safety setting is incompatible with this app.")
+            case .unsafeStorage, .corruptData, .unavailable, .budgetExceeded, .internalState,
+                 .invalidResponse, .revisionExhausted:
+                String(localized: "Cleanup-safety settings are unavailable. Your last choice is unchanged.")
+            }
+        case .unexpected:
+            String(localized: "Cleanup-safety settings are unavailable. Your last choice is unchanged.")
         }
     }
 

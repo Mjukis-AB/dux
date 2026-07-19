@@ -168,6 +168,7 @@ final class AppRuntime {
         }
         shuttingDown = true
         model.invalidatePressurePolicyOperations()
+        model.invalidatePermanentCleanupPolicyOperations()
         model.invalidateStorageAccessProbeOperations()
         let capacityScheduler = capacityScheduler
         let capacityResampleRouter = capacityResampleRouter

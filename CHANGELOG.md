@@ -1,5 +1,11 @@
 # Changelog
 
+- Added the native Swift presentation for the contract-v22 permanent-cleanup
+  kill switch. EngineService maps typed Rust errors and rejects malformed
+  versioned status, AppModel generation-fences load/mutation/reset work and
+  invalidates it at shutdown, and Settings exposes an accessible deny-only
+  control. Disabling is immediate; re-enable and reset require typing
+  `ENABLE PERMANENT CLEANUP`. Path-bearing exclusions remain separate.
 - Hardened the menu-bar app's automatic-termination contract at the bundle level.
   Both macOS configurations now use an explicit app plist containing
   `NSSupportsAutomaticTermination`, so the one balanced launch lease remains

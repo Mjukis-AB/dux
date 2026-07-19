@@ -25,8 +25,32 @@ protocol DuxPressurePolicyServing: Sendable {
     func resetDiskPressurePolicy() async throws -> DiskPressurePolicyUpdateResult
 }
 
+protocol DuxPermanentCleanupPolicyServing: Sendable {
+    func loadPermanentCleanupPolicy() async throws -> PermanentCleanupPolicy
+    func setPermanentCleanupEnabled(
+        _ enabled: Bool
+    ) async throws -> PermanentCleanupPolicyUpdateResult
+    func resetPermanentCleanup() async throws -> PermanentCleanupPolicyUpdateResult
+}
+
+extension DuxPermanentCleanupPolicyServing {
+    func loadPermanentCleanupPolicy() async throws -> PermanentCleanupPolicy {
+        throw PermanentCleanupPolicyServiceError.unavailable
+    }
+
+    func setPermanentCleanupEnabled(
+        _: Bool
+    ) async throws -> PermanentCleanupPolicyUpdateResult {
+        throw PermanentCleanupPolicyServiceError.unavailable
+    }
+
+    func resetPermanentCleanup() async throws -> PermanentCleanupPolicyUpdateResult {
+        throw PermanentCleanupPolicyServiceError.unavailable
+    }
+}
+
 protocol EngineServing: DuxVolumeStatusServing, DuxCapacityTrendServing, DuxPressurePolicyServing,
-    Sendable
+    DuxPermanentCleanupPolicyServing, Sendable
 {
     func loadStatus() async throws -> EngineStatus
 }
@@ -321,6 +345,56 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
                 return update
             } catch let error as PressurePolicyError {
                 throw Self.pressurePolicyError(error)
+            }
+        }
+    }
+
+    func loadPermanentCleanupPolicy() async throws -> PermanentCleanupPolicy {
+        try await state.perform { state in
+            precondition(!Thread.isMainThread, "Blocking FFI work reached the main thread")
+            let engine = try Self.resolvePermanentCleanupEngine(state)
+            do {
+                return try Self.permanentCleanupPolicy(engine.getPermanentCleanupPolicy())
+            } catch let error as PermanentCleanupPolicyError {
+                throw Self.permanentCleanupPolicyError(error)
+            }
+        }
+    }
+
+    func setPermanentCleanupEnabled(
+        _ enabled: Bool
+    ) async throws -> PermanentCleanupPolicyUpdateResult {
+        try await state.perform { state in
+            precondition(!Thread.isMainThread, "Blocking FFI work reached the main thread")
+            let engine = try Self.resolvePermanentCleanupEngine(state)
+            do {
+                let update = try Self.permanentCleanupPolicyUpdate(
+                    engine.setPermanentCleanupEnabled(enabled: enabled)
+                )
+                guard update.policy.enabled == enabled else {
+                    throw PermanentCleanupPolicyServiceError.invalidResponse
+                }
+                return update
+            } catch let error as PermanentCleanupPolicyError {
+                throw Self.permanentCleanupPolicyError(error)
+            }
+        }
+    }
+
+    func resetPermanentCleanup() async throws -> PermanentCleanupPolicyUpdateResult {
+        try await state.perform { state in
+            precondition(!Thread.isMainThread, "Blocking FFI work reached the main thread")
+            let engine = try Self.resolvePermanentCleanupEngine(state)
+            do {
+                let update = try Self.permanentCleanupPolicyUpdate(
+                    engine.resetPermanentCleanup()
+                )
+                guard update.policy.source == .default, update.policy.enabled else {
+                    throw PermanentCleanupPolicyServiceError.invalidResponse
+                }
+                return update
+            } catch let error as PermanentCleanupPolicyError {
+                throw Self.permanentCleanupPolicyError(error)
             }
         }
     }
@@ -677,6 +751,62 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         }
     }
 
+    private static func permanentCleanupPolicy(
+        _ status: PermanentCleanupPolicyStatus
+    ) throws -> PermanentCleanupPolicy {
+        let source: PermanentCleanupPolicyOrigin = switch status.source {
+        case .default: .default
+        case .stored: .stored
+        }
+        guard
+            status.recordVersion == expectedRecordVersion,
+            (status.revision == 0
+                && status.enabled
+                && source == .default
+                && status.updatedAtUnixMs == nil)
+                || (status.revision > 0
+                    && status.updatedAtUnixMs.map { $0 >= 0 } == true
+                    && (source == .stored || (source == .default && status.enabled)))
+        else {
+            throw PermanentCleanupPolicyServiceError.invalidResponse
+        }
+        return PermanentCleanupPolicy(
+            enabled: status.enabled,
+            source: source,
+            revision: status.revision,
+            updatedAtUnixMilliseconds: status.updatedAtUnixMs
+        )
+    }
+
+    private static func permanentCleanupPolicyUpdate(
+        _ response: PermanentCleanupPolicyUpdate
+    ) throws -> PermanentCleanupPolicyUpdateResult {
+        guard response.recordVersion == expectedRecordVersion else {
+            throw PermanentCleanupPolicyServiceError.invalidResponse
+        }
+        return PermanentCleanupPolicyUpdateResult(
+            policy: try permanentCleanupPolicy(response.policy),
+            changed: response.changed
+        )
+    }
+
+    private static func permanentCleanupPolicyError(
+        _ error: PermanentCleanupPolicyError
+    ) -> PermanentCleanupPolicyServiceError {
+        switch error {
+        case .Closed: .closed
+        case .CorruptData: .corruptData
+        case .Unavailable: .unavailable
+        case .OutcomeUnknown: .outcomeUnknown
+        case .RevisionExhausted: .revisionExhausted
+        case .InvalidClock: .invalidClock
+        case .IncompatibleSchema: .incompatibleSchema
+        case .Busy, .BudgetExceeded: .retryable
+        case .UnsafeStorage: .unsafeStorage
+        case .InternalState: .internalState
+        }
+    }
+
     fileprivate static func homeScanServiceError(_ error: ScanError) -> HomeScanServiceError {
         switch error {
         case .Closed: .closed
@@ -733,6 +863,23 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
             case .invalidCapacityObservation, .conflictingCapacityObservation,
                  .supersededCapacityObservation, .unexpected:
                 DiskPressurePolicyServiceError.invalidResponse
+            }
+        }
+    }
+
+    private static func resolvePermanentCleanupEngine(
+        _ state: EngineServiceState
+    ) throws -> DuxEngine {
+        do {
+            return try state.resolveEngine()
+        } catch let error as EngineServiceError {
+            throw switch error {
+            case .closed: PermanentCleanupPolicyServiceError.closed
+            case .retryable: PermanentCleanupPolicyServiceError.retryable
+            case .unavailable: PermanentCleanupPolicyServiceError.unavailable
+            case .invalidCapacityObservation, .conflictingCapacityObservation,
+                 .supersededCapacityObservation, .unexpected:
+                PermanentCleanupPolicyServiceError.invalidResponse
             }
         }
     }
