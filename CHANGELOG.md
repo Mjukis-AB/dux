@@ -71,6 +71,9 @@ All notable changes to DUX will be documented in this file.
 ## [Unreleased]
 
 ### Fixed
+- Made menu-bar lifetime reassertion idempotent. Repeated popover close and
+  scene-resignation notifications now restore AppKit support without leaking
+  automatic-termination disable leases.
 - Moved the initial engine and volume load out of the transient menu-bar
   popover task and into the long-lived app runtime. Dismissing the popover no
   longer cancels startup work or causes repeated opens to duplicate it.

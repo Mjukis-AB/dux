@@ -38,10 +38,10 @@ final class DuxAppDelegateTests: XCTestCase {
 
         XCTAssertEqual(
             controller.events,
-            ["support:true", "disable", "support:false", "support:true", "disable"]
+            ["support:true", "disable", "support:false", "support:true"]
         )
         XCTAssertTrue(controller.automaticTerminationSupportEnabled)
-        XCTAssertEqual(controller.disabledReasons.count, 2)
+        XCTAssertEqual(controller.disabledReasons.count, 1)
     }
 
     func testTerminationGateStartsExactlyOneShutdown() {
@@ -120,7 +120,7 @@ final class DuxAppDelegateTests: XCTestCase {
         )
         XCTAssertEqual(
             controller.events,
-            ["support:true", "disable", "support:true", "disable"]
+            ["support:true", "disable", "support:true"]
         )
     }
 
@@ -139,7 +139,7 @@ final class DuxAppDelegateTests: XCTestCase {
         )
         XCTAssertEqual(
             controller.events,
-            ["support:true", "disable", "support:true", "disable"]
+            ["support:true", "disable", "support:true"]
         )
     }
 
@@ -158,7 +158,7 @@ final class DuxAppDelegateTests: XCTestCase {
 
         XCTAssertEqual(
             controller.events,
-            ["support:true", "disable", "disable"]
+            ["support:true", "disable", "support:true"]
         )
     }
 
