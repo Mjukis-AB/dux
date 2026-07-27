@@ -13,6 +13,9 @@
   plan only from `RustTargetPlanFacts`, repeats mode/source/overlap/byte
   validation, and returns the retained authorization alongside the plan. It is
   not yet connected to review, approval, journal, FFI, scheduling, or effects.
+- Added a private Rust-target plan handoff into `TrustedReviewedCleanupPlan`.
+  It requires one exact item/path, revalidates the retained grant again, and
+  remains unreachable from UI, FFI, scheduling, journal, and filesystem effects.
 - Promoted current-account home/mount and protected-root observations into
   private revisioned planner grants with stable rule-boundary keys. Grants
   revalidate exact policy, volume, and target evidence while `ProtectedPath`

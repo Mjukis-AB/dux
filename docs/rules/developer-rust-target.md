@@ -103,7 +103,10 @@ witnesses and still cannot construct a cleanup plan. The next boundary must
 join these typed facts to a plan without exposing blocker removal to callers.
 That private facts-to-plan join now produces a permanent-safe domain plan plus
 the retained authorization after repeating plan-shape validation. It is not
-yet wired to exact review, approval, journal, scheduling, FFI, or effects.
+yet wired to exact review, approval, journal, scheduling, FFI, or effects. A
+private handoff can now pair that plan with its retained authorization in the
+existing reviewed-plan wrapper only after exact item/path matching and another
+grant revalidation.
 
 ## Live default-layout witness
 

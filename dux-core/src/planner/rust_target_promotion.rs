@@ -39,14 +39,14 @@ pub(super) struct RustTargetPromotion {
 /// it is not a plan, approval, journal claim, schedule, FFI value, or effect
 /// witness.
 #[must_use = "Rust-target plan facts must be consumed by the next planner boundary"]
-pub(super) struct RustTargetPlanFacts {
+pub(crate) struct RustTargetPlanFacts {
     promotion: RustTargetPromotion,
     scan_root: CanonicalScanRoot,
     target: CanonicalPathSnapshot,
 }
 
 #[derive(Debug, Error)]
-pub(super) enum RustTargetPromotionError {
+pub(crate) enum RustTargetPromotionError {
     #[error("candidate is not the exact staged Rust-target policy")]
     CandidatePolicy,
     #[error("candidate source scan does not match the supplied scan")]
@@ -195,7 +195,7 @@ impl RustTargetPlanFacts {
     /// The returned authorization remains paired with the plan for the later
     /// reviewed/approved executor handoff; this method still performs no
     /// journal write, FFI call, scheduling, or filesystem effect.
-    pub(super) fn into_trusted_permanent_plan(
+    pub(crate) fn into_trusted_permanent_plan(
         self,
         plan_id: CleanupPlanId,
         created_at: std::time::SystemTime,

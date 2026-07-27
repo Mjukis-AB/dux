@@ -4573,9 +4573,13 @@ Tasks:
       constructs a permanent-safe domain plan only from that typed capability,
       re-running mode, duplicate, source-scan, overlap, and byte validation
       while returning the authorization alongside the plan. It still performs
-      no journal, approval, FFI, scheduling, or effect operation. The next
-      slice must wire this pair into exact review/approval without allowing
-      arbitrary callers to supply plan facts.
+      no journal, approval, FFI, scheduling, or effect operation. A private
+      Rust-target handoff now pairs this plan with its authorization inside
+      the existing `TrustedReviewedCleanupPlan` wrapper after exact item/path
+      matching and another grant revalidation. It is still not exposed to
+      arbitrary callers, exact-review UI, journal, FFI, scheduling, or effects;
+      the next slice must connect this wrapper to the existing approval/journal
+      lifecycle under the same generation fence.
 - [x] Implement candidate groups and overlap resolution. Completed 2026-07-19:
   deterministic grouping and conservative overlap resolution are now consumed
   by exact-path review. Equivalent observations coalesce by stable candidate

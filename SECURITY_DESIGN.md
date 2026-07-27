@@ -692,7 +692,11 @@ boundary now builds the permanent-safe domain plan from an internal facts
 projection and returns the retained authorization as a pair; it repeats mode,
 duplicate, source-scan, overlap, and byte validation. It remains disconnected
 from exact review, approval, journal, FFI, scheduling, and effects until the
-next orchestration join.
+next orchestration join. A private Rust-target handoff now verifies the single
+plan item and exact requested target against the retained grant, revalidates
+again, and stores the pair in the existing `TrustedReviewedCleanupPlan`
+wrapper. It remains disconnected from approval, journal, FFI, scheduling, and
+effects until the generation-fenced orchestration join.
 
 ### 6.3 Protected-root and sensitive-category policy
 

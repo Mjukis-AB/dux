@@ -32,6 +32,8 @@ use super::rule_scope_grant::{RuleScopeAuthorization, RuleScopeGrantError};
 use super::rust_target::{
     RustTargetEffectWitness, RustTargetLiveValidationError, validate_rust_target_effect,
 };
+#[cfg(unix)]
+use super::rust_target_promotion::{RustTargetPlanFacts, RustTargetPromotionError};
 
 pub(crate) const MAX_EXACT_REVIEW_CANDIDATES: usize = 64;
 pub(crate) const MAX_EXACT_REVIEW_PATHS: usize = 256;
@@ -246,6 +248,10 @@ impl TrustedReviewedCleanupPlan {
             | ExactPathPlanError::Plan(_) => {
                 unreachable!("trusted plan already passed construction validation")
             }
+            #[cfg(unix)]
+            ExactPathPlanError::RustTargetPromotion(_) => {
+                unreachable!("trusted plan already passed construction validation")
+            }
         })?;
         Ok(ApprovedTrustedReviewedCleanupPlan {
             reviewed: self,
@@ -278,6 +284,10 @@ impl ApprovedTrustedReviewedCleanupPlan {
             | ExactPathPlanError::AuthorizationCount { .. }
             | ExactPathPlanError::AuthorizationMismatch
             | ExactPathPlanError::Plan(_) => {
+                unreachable!("trusted plan already passed construction validation")
+            }
+            #[cfg(unix)]
+            ExactPathPlanError::RustTargetPromotion(_) => {
                 unreachable!("trusted plan already passed construction validation")
             }
         })
@@ -594,6 +604,54 @@ impl ExactPathReview {
     }
 }
 
+#[cfg(unix)]
+impl ExactPathReview {
+    /// Consume one fully admitted Rust-target facts capability into the same
+    /// reviewed-plan wrapper used by the later approval/journal boundary.
+    /// This private handoff is intentionally not reachable from generic exact
+    /// review, FFI, Swift, CLI, scheduling, or filesystem effects.
+    pub(crate) fn trusted_reviewed_plan_from_rust_target_facts(
+        facts: RustTargetPlanFacts,
+        plan_id: CleanupPlanId,
+        created_at: std::time::SystemTime,
+    ) -> Result<TrustedReviewedCleanupPlan, ExactPathPlanError> {
+        let (plan, authorization) = facts
+            .into_trusted_permanent_plan(plan_id, created_at, CleanupMode::PermanentSafe)
+            .map_err(ExactPathPlanError::RustTargetPromotion)?;
+        let [item] = plan.items() else {
+            return Err(ExactPathPlanError::AuthorizationMismatch);
+        };
+        let [path] = item.paths() else {
+            return Err(ExactPathPlanError::AuthorizationMismatch);
+        };
+        let target = canonical_target_for_plan(&authorization, path)?;
+        if !authorization.matches(item.rule(), &target) {
+            return Err(ExactPathPlanError::AuthorizationMismatch);
+        }
+        authorization
+            .revalidate()
+            .map_err(ExactPathPlanError::Authorization)?;
+        Ok(TrustedReviewedCleanupPlan {
+            plan,
+            authorizations: vec![authorization],
+        })
+    }
+}
+
+#[cfg(unix)]
+fn canonical_target_for_plan(
+    authorization: &RuleScopeAuthorization,
+    path: &Path,
+) -> Result<CanonicalPathSnapshot, ExactPathPlanError> {
+    let target = authorization
+        .revalidated_target_snapshot()
+        .map_err(ExactPathPlanError::Authorization)?;
+    if target.requested_path() != path {
+        return Err(ExactPathPlanError::AuthorizationMismatch);
+    }
+    Ok(target)
+}
+
 #[derive(Debug, Error)]
 pub(crate) enum ExactPathReviewError {
     #[error("exact-path review requires at least one candidate")]
@@ -678,6 +736,9 @@ pub(crate) enum ExactPathPlanError {
     AuthorizationMismatch,
     #[error("trusted rule-scope authorization failed: {0}")]
     Authorization(#[source] RuleScopeGrantError),
+    #[cfg(unix)]
+    #[error("Rust-target promotion failed: {0}")]
+    RustTargetPromotion(#[source] RustTargetPromotionError),
     #[error("domain cleanup plan validation failed: {0}")]
     Plan(#[source] CleanupPlanValidationError),
 }
