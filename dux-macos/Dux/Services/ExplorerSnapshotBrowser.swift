@@ -322,6 +322,10 @@ final class ExplorerSnapshotBrowserModel {
     private(set) var unavailableHistoricalScanIDs: Set<String> = []
     private(set) var isSwitchingSnapshot = false
     private(set) var contentMode = ExplorerSnapshotContentMode.browse
+    private(set) var candidatePage: ExplorerCandidateSummaryPage?
+    private(set) var candidateFailure: ExplorerSnapshotBrowserFailure?
+    private(set) var isCandidateLoading = false
+    private(set) var candidateNotice: ExplorerLiveActionNotice?
     private(set) var largeFileThreshold = ExplorerSnapshotLargeFileThreshold.gibibyte1
     private(set) var largeFileAge = ExplorerSnapshotLargeFileAge.any
     private(set) var largeFilesPage: ExplorerSnapshotLargeFilesPage?
@@ -352,6 +356,8 @@ final class ExplorerSnapshotBrowserModel {
     private var historyGeneration: UInt64 = 0
     @ObservationIgnored
     private var largeFilesGeneration: UInt64 = 0
+    @ObservationIgnored
+    private var candidateGeneration: UInt64 = 0
     @ObservationIgnored
     private var coverageGeneration: UInt64 = 0
     @ObservationIgnored
@@ -572,6 +578,7 @@ final class ExplorerSnapshotBrowserModel {
                 return
             }
 
+            clearCandidates()
             clearLargeFiles()
             clearCoverage()
             scanID = requestedScanID
@@ -589,7 +596,9 @@ final class ExplorerSnapshotBrowserModel {
                 return
             }
             isSwitchingSnapshot = false
-            if contentMode == .largeFiles {
+            if contentMode == .candidates {
+                await reloadCandidates()
+            } else if contentMode == .largeFiles {
                 await reloadLargeFiles()
             } else if contentMode == .coverage {
                 await reloadCoverage()
@@ -659,7 +668,9 @@ final class ExplorerSnapshotBrowserModel {
             publishPage(page)
             publishTreemap(treemapResult, directory: root, page: page)
             phase = .ready
-            if contentMode == .largeFiles {
+            if contentMode == .candidates {
+                await reloadCandidates()
+            } else if contentMode == .largeFiles {
                 await reloadLargeFiles()
             } else if contentMode == .coverage {
                 await reloadCoverage()
@@ -767,11 +778,16 @@ final class ExplorerSnapshotBrowserModel {
         selectedNodeSnapshot = nil
         largeFilesGeneration &+= 1
         isLargeFilesLoading = false
+        clearCandidates()
         coverageGeneration &+= 1
         isCoverageLoading = false
         switch mode {
         case .browse:
             return
+        case .candidates:
+            if candidatePage == nil {
+                await reloadCandidates()
+            }
         case .largeFiles:
             if largeFilesPage == nil {
                 await reloadLargeFiles()
@@ -781,6 +797,127 @@ final class ExplorerSnapshotBrowserModel {
                 await reloadCoverage()
             }
         }
+    }
+
+    func reloadCandidates() async {
+        guard
+            phase == .ready,
+            contentMode == .candidates,
+            let scanID,
+            !isSwitchingSnapshot
+        else { return }
+        candidateGeneration &+= 1
+        let operation = candidateGeneration
+        let snapshotGeneration = generation
+        candidatePage = nil
+        candidateFailure = nil
+        isCandidateLoading = true
+        do {
+            let page = try await reviews.candidateSummaries(
+                scanID: scanID,
+                cursor: 0,
+                limit: ExplorerCandidateDetailAdapter.maximumPageLimit
+            )
+            guard
+                operation == candidateGeneration,
+                snapshotGeneration == generation,
+                self.scanID == scanID,
+                contentMode == .candidates,
+                page.scanID == scanID,
+                page.cursor == 0,
+                !Task.isCancelled
+            else { return }
+            candidatePage = page
+            isCandidateLoading = false
+        } catch {
+            guard
+                operation == candidateGeneration,
+                snapshotGeneration == generation,
+                self.scanID == scanID,
+                contentMode == .candidates,
+                !Task.isCancelled
+            else { return }
+            isCandidateLoading = false
+            let failure = Self.failure(for: error)
+            if failure == .expired {
+                await reviews.release(scanID: scanID)
+                guard operation == candidateGeneration, self.scanID == scanID else { return }
+                clearContent()
+                phase = .failed(.expired)
+            } else {
+                candidateFailure = failure
+            }
+        }
+    }
+
+    func reviewCandidate(
+        candidateID: String,
+        command: ExplorerCandidateReviewCommand
+    ) async {
+        guard
+            phase == .ready,
+            contentMode == .candidates,
+            let scanID,
+            candidatePage?.candidates.contains(where: { $0.candidateID == candidateID }) == true,
+            !isSwitchingSnapshot,
+            !isCandidateLoading
+        else { return }
+        let operation = candidateGeneration
+        do {
+            let result = try await reviews.reviewCandidate(
+                scanID: scanID,
+                candidateID: candidateID,
+                command: command
+            )
+            guard
+                operation == candidateGeneration,
+                self.scanID == scanID,
+                contentMode == .candidates,
+                result.candidateID == candidateID
+            else { return }
+            if let page = candidatePage,
+               let index = page.candidates.firstIndex(where: { $0.candidateID == candidateID })
+            {
+                var candidates = page.candidates
+                let current = candidates[index]
+                candidates[index] = ExplorerCandidateSummary(
+                    candidateID: current.candidateID,
+                    ruleID: current.ruleID,
+                    ruleRevision: current.ruleRevision,
+                    category: current.category,
+                    estimatedBytes: current.estimatedBytes,
+                    newestMtime: current.newestMtime,
+                    safety: current.safety,
+                    action: current.action,
+                    ruleScheduleEligible: current.ruleScheduleEligible,
+                    pathCount: current.pathCount,
+                    evidenceKinds: current.evidenceKinds,
+                    blockers: current.blockers,
+                    createdAt: current.createdAt,
+                    status: result.status
+                )
+                candidatePage = ExplorerCandidateSummaryPage(
+                    scanID: page.scanID,
+                    cursor: page.cursor,
+                    nextCursor: page.nextCursor,
+                    totalCandidates: page.totalCandidates,
+                    candidates: candidates
+                )
+            }
+            candidateNotice = ExplorerLiveActionNotice(
+                message: "Review status updated. No cleanup action was performed.",
+                isFailure: false
+            )
+        } catch {
+            candidateNotice = ExplorerLiveActionNotice(
+                message: "DUX could not record that review decision. No cleanup action was performed.",
+                isFailure: true
+            )
+        }
+    }
+
+    func dismissCandidateNotice() {
+        candidateNotice = nil
     }
 
     func reloadCoverage() async {
@@ -1603,8 +1740,17 @@ final class ExplorerSnapshotBrowserModel {
         isSwitchingSnapshot = false
         selection = nil
         selectedNodeSnapshot = nil
+        clearCandidates()
         clearLargeFiles()
         clearCoverage()
+    }
+
+    private func clearCandidates() {
+        candidateGeneration &+= 1
+        candidatePage = nil
+        candidateFailure = nil
+        isCandidateLoading = false
+        candidateNotice = nil
     }
 
     private func clearLargeFiles() {
@@ -1742,7 +1888,7 @@ final class ExplorerSnapshotBrowserModel {
             case .reviewExpired, .reviewNotAcquired: .expired
             case .budgetExceeded: .budgetExceeded
             case .invalidLimit, .invalidRequest, .evaluationUnavailable,
-                 .candidateNotFound, .invalidResponse:
+                 .candidateNotFound, .notReviewable, .invalidResponse:
                 .invalidResponse
             case .unavailable: .unavailable
             }

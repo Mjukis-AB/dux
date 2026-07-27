@@ -4966,6 +4966,14 @@ Tasks:
     outcome rows, and a compact color-coded item-status distribution bar.
     The screen is explicitly read-only: it offers no retry, approval, plan,
     path, or cleanup action; exact-session detail remains a later slice.
+  - [x] 2026-07-27 slice: add the native Explorer Candidates view. The view
+    loads one bounded page through the retained exact review lease, shows
+    deterministic rule/category/observed-size/safety/status facts without
+    paths, and generation-fences reloads and review transitions. Select,
+    clear-selection, dismiss, and restore are explicit review intent only;
+    blocked candidates remain typed failures and every confirmation states
+    that no cleanup action was performed. Plan lifecycle, exact candidate
+    detail, and effect controls remain separate gates.
 - [ ] Expand production cleanup session/item history with exact-session detail,
   verified capacity outcomes, and separately confirmed history clearing.
 - [ ] Define and test cross-reboot and Windows-unproven cleanup-journal recovery;

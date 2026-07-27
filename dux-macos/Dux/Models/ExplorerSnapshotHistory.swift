@@ -322,6 +322,7 @@ struct ExplorerSnapshotLargeFilesPage: Equatable, Sendable {
 
 enum ExplorerSnapshotContentMode: String, CaseIterable, Equatable, Sendable {
     case browse
+    case candidates
     case largeFiles
     case coverage
 }

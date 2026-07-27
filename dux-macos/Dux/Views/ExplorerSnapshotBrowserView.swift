@@ -1,3 +1,4 @@
+import Foundation
 import SwiftUI
 
 struct ExplorerSnapshotBrowserView: View {
@@ -209,6 +210,7 @@ struct ExplorerSnapshotBrowserView: View {
                 )
             ) {
                 Text("Browse").tag(ExplorerSnapshotContentMode.browse)
+                Text("Candidates").tag(ExplorerSnapshotContentMode.candidates)
                 Text("Large Files").tag(ExplorerSnapshotContentMode.largeFiles)
                 Text("Coverage").tag(ExplorerSnapshotContentMode.coverage)
             }
@@ -287,8 +289,33 @@ struct ExplorerSnapshotBrowserView: View {
                 .accessibilityIdentifier(ExplorerAccessibility.snapshotSubtreeScanNotice)
             }
 
+            if let notice = browser.candidateNotice {
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: notice.isFailure ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+                        .foregroundStyle(notice.isFailure ? .orange : .green)
+                    Text(verbatim: notice.message)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button {
+                        browser.dismissCandidateNotice()
+                    } label: {
+                        Label("Dismiss", systemImage: "xmark")
+                            .labelStyle(.iconOnly)
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(10)
+                .background(
+                    (notice.isFailure ? Color.orange : Color.green).opacity(0.10),
+                    in: RoundedRectangle(cornerRadius: 8)
+                )
+                .accessibilityIdentifier(ExplorerAccessibility.snapshotCandidateStatus)
+            }
+
             if browser.contentMode == .browse {
                 browseContent
+            } else if browser.contentMode == .candidates {
+                candidatesContent
             } else if browser.contentMode == .largeFiles {
                 largeFilesContent
             } else {
@@ -316,6 +343,96 @@ struct ExplorerSnapshotBrowserView: View {
                 }
             }
         }
+    }
+
+    private var candidatesContent: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Label(
+                    "Review-only suggestions. These statuses do not create plans or remove files.",
+                    systemImage: "checkmark.shield"
+                )
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                Spacer()
+                Button {
+                    Task { await browser.reloadCandidates() }
+                } label: {
+                    Label("Refresh candidates", systemImage: "arrow.clockwise")
+                }
+                .disabled(browser.isCandidateLoading || browser.isSwitchingSnapshot)
+            }
+
+            if let failure = browser.candidateFailure {
+                ContentUnavailableView {
+                    Label(failure.title, systemImage: "exclamationmark.triangle")
+                } description: {
+                    Text(verbatim: failure.detail)
+                } actions: {
+                    Button("Try Again") {
+                        Task { await browser.reloadCandidates() }
+                    }
+                }
+            } else if browser.isCandidateLoading {
+                ProgressView("Loading review candidates…")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if let page = browser.candidatePage {
+                if page.candidates.isEmpty {
+                    ContentUnavailableView(
+                        "No candidates found",
+                        systemImage: "checkmark.circle",
+                        description: Text("This snapshot has no deterministic review candidates.")
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    candidatesTable(page.candidates)
+                }
+            }
+        }
+        .accessibilityIdentifier(ExplorerAccessibility.snapshotCandidates)
+    }
+
+    private func candidatesTable(_ candidates: [ExplorerCandidateSummary]) -> some View {
+        Table(candidates) {
+            TableColumn("Rule") { candidate in
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(verbatim: candidate.ruleID)
+                        .font(.headline)
+                    Text(verbatim: "Revision (candidate.ruleRevision) · (candidate.category.displayName)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            TableColumn("Observed size") { candidate in
+                Text(ByteCountFormatter.string(fromByteCount: Int64(min(candidate.estimatedBytes, UInt64(Int64.max))), countStyle: .file))
+                    .monospacedDigit()
+            }
+            TableColumn("Safety") { candidate in
+                Text(verbatim: candidate.safety.displayName)
+            }
+            TableColumn("Status") { candidate in
+                Text(verbatim: candidate.status.displayName)
+            }
+            TableColumn("Review") { candidate in
+                Menu("Review") {
+                    Button("Select") {
+                        Task { await browser.reviewCandidate(candidateID: candidate.candidateID, command: .select) }
+                    }
+                    .disabled(!candidate.blockers.isEmpty)
+                    Button("Clear selection") {
+                        Task { await browser.reviewCandidate(candidateID: candidate.candidateID, command: .clearSelection) }
+                    }
+                    Button("Dismiss") {
+                        Task { await browser.reviewCandidate(candidateID: candidate.candidateID, command: .dismiss) }
+                    }
+                    Button("Restore") {
+                        Task { await browser.reviewCandidate(candidateID: candidate.candidateID, command: .restore) }
+                    }
+                }
+                .disabled(browser.isCandidateLoading)
+            }
+        }
+        .accessibilityIdentifier(ExplorerAccessibility.snapshotCandidateTable)
     }
 
     private var browseContent: some View {

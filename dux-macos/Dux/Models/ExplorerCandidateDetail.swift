@@ -18,6 +18,21 @@ enum ExplorerCandidateCategory: Equatable, Hashable, Sendable {
     case largeReviewItem
     case protectedSystemData
     case unknownStorage
+
+    var displayName: String {
+        switch self {
+        case .developerArtifact: "Developer artifact"
+        case .applicationCache: "Application cache"
+        case .browserCache: "Browser cache"
+        case .logAndDiagnostic: "Logs and diagnostics"
+        case .installerAndDownload: "Installer or download"
+        case .deviceAndSimulatorData: "Device or simulator data"
+        case .cloudFile: "Cloud file"
+        case .largeReviewItem: "Large review item"
+        case .protectedSystemData: "Protected system data"
+        case .unknownStorage: "Unknown storage"
+        }
+    }
 }
 
 enum ExplorerCandidateSafety: Equatable, Sendable {
@@ -26,6 +41,16 @@ enum ExplorerCandidateSafety: Equatable, Sendable {
     case reviewRequired
     case informational
     case protected
+
+    var displayName: String {
+        switch self {
+        case .safeRegenerable: "Safe to regenerate"
+        case .safeEvictable: "Safe to evict"
+        case .reviewRequired: "Review required"
+        case .informational: "Informational"
+        case .protected: "Protected"
+        }
+    }
 }
 
 enum ExplorerCandidateAction: Equatable, Sendable {
@@ -45,6 +70,19 @@ enum ExplorerCandidateStatus: Equatable, Sendable {
     case completed
     case failed
     case unavailable
+
+    var displayName: String {
+        switch self {
+        case .discovered: "Discovered"
+        case .selected: "Selected"
+        case .dismissed: "Dismissed"
+        case .stale: "Stale"
+        case .planned: "Planned"
+        case .completed: "Completed"
+        case .failed: "Failed"
+        case .unavailable: "Unavailable"
+        }
+    }
 }
 
 /// A review-only candidate state transition. These commands never create a

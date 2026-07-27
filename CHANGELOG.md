@@ -1,5 +1,10 @@
 # Changelog
 
+- Added a read-only Explorer Candidates view backed by the exact snapshot
+  review lease. It presents bounded deterministic candidates with category,
+  observed size, safety, and status, and exposes only Select/Clear/Dismiss/
+  Restore review intent. Every decision is generation-fenced and explicitly
+  states that no cleanup action was performed.
 - Added UniFFI contract v26's bounded candidate review-intent endpoint. Swift can
   select, clear selection, dismiss, or restore one candidate inside an exact
   retained scan review; Rust validates the scan/candidate binding and returns

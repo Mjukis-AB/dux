@@ -49,6 +49,9 @@ enum ExplorerAccessibility {
     static let snapshotHistoryStatus = "explorer-snapshot-history-status"
     static let snapshotError = "explorer-snapshot-error"
     static let snapshotContentMode = "explorer-snapshot-content-mode"
+    static let snapshotCandidates = "explorer-snapshot-candidates"
+    static let snapshotCandidateTable = "explorer-snapshot-candidate-table"
+    static let snapshotCandidateStatus = "explorer-snapshot-candidate-status"
     static let snapshotLargeFileThreshold = "explorer-snapshot-large-file-threshold"
     static let snapshotLargeFileAge = "explorer-snapshot-large-file-age"
     static let snapshotLargeFileTable = "explorer-snapshot-large-file-table"
@@ -113,6 +116,9 @@ enum ExplorerAccessibility {
         snapshotHistoryStatus,
         snapshotError,
         snapshotContentMode,
+        snapshotCandidates,
+        snapshotCandidateTable,
+        snapshotCandidateStatus,
         snapshotLargeFileThreshold,
         snapshotLargeFileAge,
         snapshotLargeFileTable,
