@@ -1,5 +1,10 @@
 # Changelog
 
+- Added a private Rust-target promotion checkpoint that binds the blocked
+  candidate to the full retained durable discovery body and a revalidated
+  Cargo/home/protected-rule grant. The non-Clone token remains non-actionable:
+  it cannot clear `ProtectedPath`, construct or approve a plan, persist,
+  schedule, cross FFI, or mutate; generic exact review still fails closed.
 - Promoted current-account home/mount and protected-root observations into
   private revisioned planner grants with stable rule-boundary keys. Grants
   revalidate exact policy, volume, and target evidence while `ProtectedPath`

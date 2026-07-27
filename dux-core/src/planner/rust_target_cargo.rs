@@ -55,7 +55,7 @@ use super::rust_target::{
     RUST_TARGET_WITNESS_REVISION, RustTargetLiveValidationError, RustTargetLiveWitness,
 };
 use super::rust_target_source::RustTargetSourceError;
-use crate::domain::{CandidateId, ScanId};
+use crate::domain::{Candidate, CandidateId, ScanId};
 use crate::path_validation::{
     CanonicalFileDigestError, CanonicalFileDigestSnapshot, CanonicalPathError,
     CanonicalPathSnapshot, CanonicalScanRoot, FilesystemBoundarySnapshot, FilesystemEntryKind,
@@ -556,6 +556,13 @@ impl RustTargetRuleBoundaryEvidence {
             && self
                 .location
                 .matches_scan_boundary(&self.provenance.witness.boundary)
+    }
+
+    pub(crate) fn matches_durable_candidate(&self, candidate: &Candidate) -> bool {
+        self.provenance
+            .witness
+            .live
+            .matches_durable_candidate(candidate)
     }
 
     pub(crate) fn matches_bound_target(

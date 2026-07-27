@@ -214,6 +214,10 @@ pub(crate) struct RuleScopeAuthorization {
     registry: ProtectedRootRegistry,
     #[cfg(unix)]
     cargo_boundary: Option<RustTargetRuleBoundaryEvidence>,
+    #[cfg(unix)]
+    source_scan_id: Option<ScanId>,
+    #[cfg(unix)]
+    candidate_id: Option<CandidateId>,
     #[cfg(test)]
     test_only_without_cargo: bool,
 }
@@ -281,6 +285,10 @@ pub(crate) fn authorize_rule_target(
         registry,
         #[cfg(unix)]
         cargo_boundary: None,
+        #[cfg(unix)]
+        source_scan_id: None,
+        #[cfg(unix)]
+        candidate_id: None,
         #[cfg(test)]
         test_only_without_cargo: true,
     };
@@ -320,6 +328,8 @@ pub(crate) fn authorize_rust_target(
         protected: ProtectedRuleGrant::capture(registry, scan_root, &target, rule)
             .map_err(RuleScopeGrantError::ProtectedGrant)?,
         cargo_boundary: Some(boundary),
+        source_scan_id: Some(source_scan_id.clone()),
+        candidate_id: Some(candidate_id.clone()),
         #[cfg(test)]
         test_only_without_cargo: false,
     };
@@ -342,6 +352,50 @@ fn validate_rule(rule: &RuleRef) -> Result<(), RuleScopeGrantError> {
 impl RuleScopeAuthorization {
     pub(super) fn matches(&self, rule: &RuleRef, target: &CanonicalPathSnapshot) -> bool {
         &self.rule == rule && &self.target == target
+    }
+
+    /// Revalidate this grant while retaining the exact source-scan and
+    /// candidate binding supplied by the Cargo boundary. This is the only
+    /// planner join allowed to admit a protected-path candidate; it does not
+    /// expose a path or create a plan.
+    #[cfg(unix)]
+    pub(crate) fn revalidate_for_candidate_binding(
+        &self,
+        source_scan_id: &ScanId,
+        candidate_id: &CandidateId,
+        scan_root: &CanonicalScanRoot,
+        target: &CanonicalPathSnapshot,
+    ) -> Result<(), RuleScopeGrantError> {
+        self.revalidate()?;
+        let Some(bound_source_scan_id) = self.source_scan_id.as_ref() else {
+            return Err(RuleScopeGrantError::CargoBoundaryMismatch);
+        };
+        let Some(bound_candidate_id) = self.candidate_id.as_ref() else {
+            return Err(RuleScopeGrantError::CargoBoundaryMismatch);
+        };
+        if bound_source_scan_id != source_scan_id
+            || bound_candidate_id != candidate_id
+            || !self.matches(&self.rule, target)
+        {
+            return Err(RuleScopeGrantError::CargoBoundaryMismatch);
+        }
+        let Some(boundary) = self.cargo_boundary.as_ref() else {
+            return Err(RuleScopeGrantError::CargoProvenanceMissing);
+        };
+        if !boundary.matches_target_binding(source_scan_id, candidate_id, scan_root, target) {
+            return Err(RuleScopeGrantError::CargoBoundaryMismatch);
+        }
+        if self.scan_root != *scan_root || self.target != *target {
+            return Err(RuleScopeGrantError::CargoBoundaryMismatch);
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn matches_durable_candidate(&self, candidate: &crate::domain::Candidate) -> bool {
+        self.cargo_boundary
+            .as_ref()
+            .is_some_and(|boundary| boundary.matches_durable_candidate(candidate))
     }
 
     /// Revalidate the exact trusted target and return its private snapshot for
@@ -541,6 +595,21 @@ mod tests {
             Err(RuleScopeGrantError::VolumeGrant(
                 TrustedVolumeGrantError::UnsupportedRevision
             ))
+        ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn generic_fixture_grant_cannot_bind_a_candidate_without_cargo_provenance() {
+        let (_temp, root, target) = fixture();
+        let authorization = authorize_rule_target(&root, target.clone(), &rust_rule()).unwrap();
+        let scan_id = ScanId::new("scan:fixture").unwrap();
+        let candidate_id = CandidateId::new("candidate:fixture").unwrap();
+        assert!(matches!(
+            authorization
+                .revalidate_for_candidate_binding(&scan_id, &candidate_id, &root, &target,),
+            Err(RuleScopeGrantError::CargoBoundaryMismatch)
+                | Err(RuleScopeGrantError::CargoProvenanceMissing)
         ));
     }
 

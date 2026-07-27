@@ -29,6 +29,8 @@ mod rule_scope_grant;
 mod rust_target;
 #[cfg(unix)]
 mod rust_target_cargo;
+#[cfg(unix)]
+mod rust_target_promotion;
 mod rust_target_source;
 
 #[cfg(test)]

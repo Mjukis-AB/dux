@@ -672,6 +672,18 @@ Rust-target scope token without this Cargo join. The grant remains observation
 only: `ProtectedPath` is retained, and no plan, approval, scheduling, FFI, or
 effect capability is added.
 
+A separate private `RustTargetPromotion` checkpoint now consumes that grant
+only after validating the exact revision-2 rule policy, unscheduled action,
+sole `ProtectedPath` blocker, three required marker facts, deterministic
+candidate ID, source scan, and live target. The Cargo boundary compares every
+immutable candidate fact (including estimates, modification time, evidence,
+and blockers) with the retained durable discovery record; an ID/path match
+alone is insufficient. The non-Clone token retains the original blocked
+candidate and exposes only a later revalidation/release seam. Generic exact
+review and `CleanupPlan` still reject blocked candidates, and this checkpoint
+cannot clear blockers, create plans, approve, persist, cross FFI, schedule, or
+mutate.
+
 ### 6.3 Protected-root and sensitive-category policy
 
 Denies override every allow or rule match. Protection evaluation covers the

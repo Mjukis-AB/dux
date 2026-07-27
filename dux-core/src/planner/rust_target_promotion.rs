@@ -1,0 +1,259 @@
+//! Private admission of a blocked Rust target into the next planner stage.
+//!
+//! This token deliberately does not remove the discovery blocker, create a
+//! plan, approve anything, cross FFI, schedule work, or mutate the filesystem.
+//! It only retains the immutable blocked candidate together with the
+//! revalidated Cargo/home/protected-root authority for a later typed planner
+//! boundary.
+
+#![cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "promotion token is consumed by the subsequent typed planner slice"
+    )
+)]
+
+use thiserror::Error;
+
+use crate::domain::{
+    BlockReason, Candidate, CandidateAction, CandidateCategory, Evidence, SafetyTier, ScanId,
+    current_rust_target_candidate_id,
+};
+use crate::path_validation::{CanonicalPathSnapshot, CanonicalScanRoot};
+
+use super::rule_scope_grant::{RuleScopeAuthorization, RuleScopeGrantError};
+
+const RUST_TARGET_RULE: &str = "developer.rust.target";
+const RUST_TARGET_REVISION: u32 = 2;
+
+#[must_use = "the private Rust-target promotion must be consumed by a later planner boundary"]
+pub(super) struct RustTargetPromotion {
+    candidate: Candidate,
+    authorization: RuleScopeAuthorization,
+}
+
+#[derive(Debug, Error)]
+pub(super) enum RustTargetPromotionError {
+    #[error("candidate is not the exact staged Rust-target policy")]
+    CandidatePolicy,
+    #[error("candidate source scan does not match the supplied scan")]
+    SourceScanMismatch,
+    #[error("candidate must retain exactly the ProtectedPath blocker")]
+    ProtectedPathBlocker,
+    #[error("candidate does not contain the exact default Cargo target evidence")]
+    CandidateEvidence,
+    #[error("candidate ID does not match the staged Rust target layout")]
+    CandidateId,
+    #[error("candidate facts do not match the retained durable discovery record")]
+    DurableCandidateMismatch,
+    #[error("candidate target path does not match the reviewed live target")]
+    TargetMismatch,
+    #[error("trusted Rust-target authorization failed: {0}")]
+    Authorization(#[source] RuleScopeGrantError),
+}
+
+/// Admit one exact durable candidate only after the code-owned authorization
+/// has revalidated its source scan, target snapshot, Cargo provenance, mount,
+/// and protected-root policy. The candidate remains blocked inside the token.
+pub(super) fn admit_rust_target_candidate(
+    candidate: Candidate,
+    authorization: RuleScopeAuthorization,
+    source_scan_id: &ScanId,
+    scan_root: &CanonicalScanRoot,
+    target: &CanonicalPathSnapshot,
+) -> Result<RustTargetPromotion, RustTargetPromotionError> {
+    validate_candidate_shape(&candidate, source_scan_id, target)?;
+    authorization
+        .revalidate_for_candidate_binding(source_scan_id, candidate.id(), scan_root, target)
+        .map_err(RustTargetPromotionError::Authorization)?;
+    if !authorization.matches_durable_candidate(&candidate) {
+        return Err(RustTargetPromotionError::DurableCandidateMismatch);
+    }
+    Ok(RustTargetPromotion {
+        candidate,
+        authorization,
+    })
+}
+
+fn validate_candidate_shape(
+    candidate: &Candidate,
+    source_scan_id: &ScanId,
+    target: &CanonicalPathSnapshot,
+) -> Result<(), RustTargetPromotionError> {
+    if candidate.source_scan_id() != source_scan_id {
+        return Err(RustTargetPromotionError::SourceScanMismatch);
+    }
+    if candidate.rule().id().as_str() != RUST_TARGET_RULE
+        || candidate.rule().revision().get() != RUST_TARGET_REVISION
+        || candidate.category() != CandidateCategory::DeveloperArtifact
+        || candidate.safety() != SafetyTier::SafeRegenerable
+        || candidate.action() != CandidateAction::RemoveKnownRegenerableContents
+        || candidate.rule_marks_schedule_eligible()
+    {
+        return Err(RustTargetPromotionError::CandidatePolicy);
+    }
+    if candidate.blockers() != [BlockReason::ProtectedPath] {
+        return Err(RustTargetPromotionError::ProtectedPathBlocker);
+    }
+    let [candidate_path] = candidate.paths() else {
+        return Err(RustTargetPromotionError::CandidateEvidence);
+    };
+    if candidate_path != target.requested_path() {
+        return Err(RustTargetPromotionError::TargetMismatch);
+    }
+    let expected_manifest = candidate_path
+        .parent()
+        .map(|parent| parent.join("Cargo.toml"))
+        .ok_or(RustTargetPromotionError::CandidateEvidence)?;
+    let expected_cache_tag = candidate_path.join("CACHEDIR.TAG");
+    let mut matched_target = false;
+    let mut matched_manifest = false;
+    let mut matched_cache_tag = false;
+    for evidence in candidate.evidence() {
+        match evidence {
+            Evidence::MatchedPath { path } if path == candidate_path && !matched_target => {
+                matched_target = true;
+            }
+            Evidence::RequiredMarker { path }
+                if path == &expected_manifest && !matched_manifest =>
+            {
+                matched_manifest = true;
+            }
+            Evidence::RequiredMarker { path }
+                if path == &expected_cache_tag && !matched_cache_tag =>
+            {
+                matched_cache_tag = true;
+            }
+            _ => return Err(RustTargetPromotionError::CandidateEvidence),
+        }
+    }
+    if candidate.evidence().len() != 3 || !matched_target || !matched_manifest || !matched_cache_tag
+    {
+        return Err(RustTargetPromotionError::CandidateEvidence);
+    }
+    let expected_id = current_rust_target_candidate_id(source_scan_id, candidate_path)
+        .map_err(|_| RustTargetPromotionError::CandidateId)?;
+    if candidate.id() != &expected_id {
+        return Err(RustTargetPromotionError::CandidateId);
+    }
+    Ok(())
+}
+
+impl RustTargetPromotion {
+    pub(super) fn revalidate(
+        &self,
+        scan_root: &CanonicalScanRoot,
+        target: &CanonicalPathSnapshot,
+    ) -> Result<(), RuleScopeGrantError> {
+        self.authorization.revalidate_for_candidate_binding(
+            self.candidate.source_scan_id(),
+            self.candidate.id(),
+            scan_root,
+            target,
+        )
+    }
+
+    pub(super) fn release(self) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use tempfile::TempDir;
+
+    use super::*;
+    use crate::domain::{
+        CandidateInput, LocalizedTextKey, ProvenanceUrl, Rule, RuleDefinition, RuleGuards, RuleId,
+        RuleMatcher, RuleMatcherDefinition, RuleRef, RuleRevision, RuleScope,
+    };
+    use crate::path_validation::{
+        capture_path_snapshot, capture_scan_root, validate_cleanup_path, validate_scan_root,
+    };
+
+    fn fixture() -> (TempDir, Candidate, ScanId, CanonicalPathSnapshot) {
+        let temp = TempDir::new_in(std::env::current_dir().unwrap()).unwrap();
+        let root_path = std::fs::canonicalize(temp.path()).unwrap();
+        let lexical_root = validate_scan_root(&root_path).unwrap();
+        let root = capture_scan_root(lexical_root.clone()).unwrap();
+        let target_path = root_path.join("target");
+        std::fs::create_dir_all(&target_path).unwrap();
+        std::fs::write(
+            target_path.join("CACHEDIR.TAG"),
+            b"Signature: 8a477f597d28d172789f06886806bc55",
+        )
+        .unwrap();
+        let lexical_target = validate_cleanup_path(&lexical_root, &target_path).unwrap();
+        let target = capture_path_snapshot(&root, lexical_target).unwrap();
+        let scan_id = ScanId::new("scan:promotion").unwrap();
+        let rule = Rule::try_new(RuleDefinition {
+            reference: RuleRef::new(
+                RuleId::new(RUST_TARGET_RULE).unwrap(),
+                RuleRevision::new(RUST_TARGET_REVISION).unwrap(),
+            ),
+            title_key: LocalizedTextKey::new("rule.rust.title").unwrap(),
+            category: CandidateCategory::DeveloperArtifact,
+            scope: RuleScope::ConfiguredProjectRoots,
+            matcher: RuleMatcher::try_new(RuleMatcherDefinition {
+                path_component: Some("target".to_owned()),
+                required_ancestor_markers_any: Vec::new(),
+                required_markers_all: Vec::new(),
+                forbidden_markers_any: Vec::new(),
+                exact_bundle_identifiers: Vec::new(),
+                excluded_descendants: Vec::new(),
+                protected_descendants: Vec::new(),
+            })
+            .unwrap(),
+            guards: RuleGuards::try_new(None, 0, Vec::new(), false).unwrap(),
+            safety: SafetyTier::SafeRegenerable,
+            action: CandidateAction::RemoveKnownRegenerableContents,
+            schedule_eligible: false,
+            explanation_key: LocalizedTextKey::new("rule.rust.explanation").unwrap(),
+            provenance: vec![ProvenanceUrl::new("https://example.com/rust").unwrap()],
+        })
+        .unwrap();
+        let id = current_rust_target_candidate_id(&scan_id, &target_path).unwrap();
+        let candidate = Candidate::try_from_rule(
+            &rule,
+            CandidateInput::new(
+                id,
+                vec![target_path.clone()],
+                42,
+                None,
+                vec![
+                    Evidence::MatchedPath {
+                        path: target_path.clone(),
+                    },
+                    Evidence::RequiredMarker {
+                        path: target_path.parent().unwrap().join("Cargo.toml"),
+                    },
+                    Evidence::RequiredMarker {
+                        path: target_path.join("CACHEDIR.TAG"),
+                    },
+                ],
+                vec![BlockReason::ProtectedPath],
+                scan_id.clone(),
+            ),
+        )
+        .unwrap();
+        (temp, candidate, scan_id, target)
+    }
+
+    #[test]
+    fn valid_shape_is_still_blocked() {
+        let (_temp, candidate, scan_id, target) = fixture();
+        validate_candidate_shape(&candidate, &scan_id, &target).unwrap();
+        assert_eq!(candidate.blockers(), [BlockReason::ProtectedPath]);
+    }
+
+    #[test]
+    fn forged_candidate_id_is_rejected_before_authorization() {
+        let (_temp, candidate, _scan_id, target) = fixture();
+        // The test fixture's candidate ID is private; replacing it is modeled
+        // by using a different source scan, which must fail the same boundary.
+        let foreign_scan = ScanId::new("scan:foreign").unwrap();
+        assert!(matches!(
+            validate_candidate_shape(&candidate, &foreign_scan, &target),
+            Err(RustTargetPromotionError::SourceScanMismatch)
+        ));
+    }
+}

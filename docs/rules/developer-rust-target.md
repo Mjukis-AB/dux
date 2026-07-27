@@ -82,6 +82,22 @@ revision 2 rule, may carry the safe-regenerable action pair; the other bundled
 rules remain informational and reveal-only. Both proposed safe rules remain
 blocked by `ProtectedPath` and unschedulable.
 
+## Private promotion checkpoint
+
+The planner now has a private, non-Clone `RustTargetPromotion` token as an
+intermediate authority join. Admission requires the exact revision-2 policy,
+one target path, the three immutable marker facts, the deterministic candidate
+ID, the source scan and live target, and a complete immutable-body comparison
+against the retained durable candidate record. A candidate-bound Cargo grant
+must also revalidate its Cargo/read-set, process-quiescence,
+descendant-policy, home-volume, protected-rule, and target evidence.
+
+The token deliberately keeps the original `ProtectedPath` blocker and has no
+blocker-removal, plan, approval, journal, FFI, scheduling, or filesystem-effect
+method. Generic exact review and cleanup-plan construction continue to reject
+blocked candidates. A later typed plan-facts boundary must consume this token
+before any actionable representation can exist.
+
 ## Live default-layout witness
 
 A later 2026-07-18 checkpoint adds a sealed, crate-private Unix planner witness

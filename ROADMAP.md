@@ -4555,6 +4555,19 @@ Tasks:
       declares and binds them. Missing, overlapping, symlinked, multiply-linked,
       changed, or malformed selector evidence remains fail closed; no blocker,
       plan, approval, FFI, schedule, or effect authority was added.
+    - [x] 2026-07-27 slice: add a private Rust-target promotion checkpoint
+      without weakening discovery or exact review. The non-Clone
+      `RustTargetPromotion` token admits only the exact revision-2,
+      unscheduled, sole-`ProtectedPath` candidate with the canonical three
+      marker facts, deterministic ID, exact live target, and a full immutable
+      body match against the retained durable candidate record. It consumes
+      the candidate-bound Cargo/home-volume/protected-rule authorization and
+      revalidates that grant before admission. The token retains the blocker
+      and has only private revalidation/release methods: it cannot clear a
+      blocker, construct a plan, approve, persist, cross FFI, schedule, or
+      mutate. The next slice must add a typed plan-facts constructor that
+      consumes this token; generic exact review and `CleanupPlan` continue to
+      reject blocked candidates.
 - [x] Implement candidate groups and overlap resolution. Completed 2026-07-19:
   deterministic grouping and conservative overlap resolution are now consumed
   by exact-path review. Equivalent observations coalesce by stable candidate

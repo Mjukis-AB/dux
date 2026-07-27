@@ -392,6 +392,28 @@ impl RustTargetLiveWitness {
         &self.candidate_id
     }
 
+    /// Compare every immutable discovery fact against the retained durable
+    /// source record. Candidate IDs intentionally do not cover byte totals,
+    /// timestamps, or evidence, so promotion must use this full-body join.
+    pub(super) fn matches_durable_candidate(&self, candidate: &crate::domain::Candidate) -> bool {
+        let Some(source) = self.durable_source.as_ref() else {
+            return false;
+        };
+        let record = source.candidate();
+        candidate.id() == record.id()
+            && candidate.source_scan_id() == record.source_scan_id()
+            && candidate.rule() == record.rule()
+            && candidate.category() == record.category()
+            && candidate.paths() == record.paths()
+            && candidate.estimated_bytes() == record.estimated_bytes()
+            && candidate.newest_mtime() == record.newest_mtime()
+            && candidate.evidence() == record.evidence()
+            && candidate.safety() == record.safety()
+            && candidate.action() == record.action()
+            && candidate.rule_marks_schedule_eligible() == record.rule_schedule_eligible()
+            && candidate.blockers() == record.blockers()
+    }
+
     pub(super) fn protected_path_is_still_unresolved(&self) -> bool {
         let _ = &self.protected_path_still_unresolved;
         true
