@@ -15,6 +15,8 @@ use dux_core::engine::{
     CandidateEvaluationTaskFailureKind as CoreCandidateEvaluationFailure,
     CandidateEvaluationTaskStatus as CoreCandidateEvaluationStatus,
     CandidateHistoryError as CoreCandidateHistoryError,
+    CandidateReviewCommand as CoreCandidateReviewCommand,
+    CandidateReviewError as CoreCandidateReviewError,
     CapacityHistoryDisposition as CoreHistoryDisposition, CapacityTrend as CoreCapacityTrend,
     CapacityTrendChange as CoreCapacityTrendChange, CapacityTrendPoint as CoreCapacityTrendPoint,
     CapacityTrendPointSource as CoreCapacityTrendPointSource,
@@ -85,7 +87,7 @@ use dux_core::{
     VolumeCapacity, VolumeId,
 };
 
-const FFI_CONTRACT_VERSION: u32 = 25;
+const FFI_CONTRACT_VERSION: u32 = 26;
 const FFI_RECORD_VERSION: u32 = 1;
 const SNAPSHOT_NODE_RECORD_VERSION: u32 = 2;
 const SCAN_EVENT_PAGE_LIMIT: u16 = 64;
@@ -489,6 +491,8 @@ pub enum EngineError {
     CandidateNotFound,
     #[error("the candidate detail cursor is outside the immutable observation")]
     CandidateCursorOutOfRange,
+    #[error("the requested candidate review command is not valid")]
+    CandidateReviewNotReviewable,
     #[error("durable store is read-only")]
     ReadOnlyStore,
     #[error("durable schema is incompatible")]
@@ -960,6 +964,24 @@ pub enum CandidateBlockReason {
     ChangedSinceScan,
     UnsupportedPlatform,
     CloudUploadUnconfirmed,
+}
+
+/// Review intent is a bounded, scan-bound selection observation. It cannot
+/// create a plan or authorize an effect.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum CandidateReviewCommand {
+    Select,
+    ClearSelection,
+    Dismiss,
+    Restore,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct CandidateReviewResult {
+    pub record_version: u32,
+    pub scan_id: String,
+    pub candidate_id: String,
+    pub status: CandidateStatus,
 }
 
 /// A historical candidate path/evidence observation. It is intentionally
@@ -1800,6 +1822,34 @@ impl SnapshotReviewSession {
                 next_cursor,
                 total_candidates,
                 candidates,
+            })
+        })
+    }
+
+    /// Persist one semantic review-intent transition for a candidate belonging
+    /// to this retained snapshot review. The result is status-only and cannot
+    /// become a plan, approval, journal claim, or filesystem effect.
+    pub fn review_candidate(
+        &self,
+        candidate_id: String,
+        command: CandidateReviewCommand,
+    ) -> Result<CandidateReviewResult, EngineError> {
+        let candidate_id = CandidateId::new(candidate_id)
+            .map_err(|_| EngineError::InvalidCandidateDetailRequest)?;
+        self.with_open_session(|session| {
+            let result = self
+                .engine
+                .review_candidate(
+                    session.scan_id(),
+                    &candidate_id,
+                    map_candidate_review_command(command),
+                )
+                .map_err(map_candidate_review_error)?;
+            Ok(CandidateReviewResult {
+                record_version: FFI_RECORD_VERSION,
+                scan_id: result.scan_id().as_str().to_owned(),
+                candidate_id: result.candidate_id().as_str().to_owned(),
+                status: map_candidate_status(result.status()),
             })
         })
     }
@@ -3607,6 +3657,34 @@ fn map_candidate_detail_error(error: CoreCandidateDetailError) -> EngineError {
     }
 }
 
+const fn map_candidate_review_command(
+    command: CandidateReviewCommand,
+) -> CoreCandidateReviewCommand {
+    match command {
+        CandidateReviewCommand::Select => CoreCandidateReviewCommand::Select,
+        CandidateReviewCommand::ClearSelection => CoreCandidateReviewCommand::ClearSelection,
+        CandidateReviewCommand::Dismiss => CoreCandidateReviewCommand::Dismiss,
+        CandidateReviewCommand::Restore => CoreCandidateReviewCommand::Restore,
+    }
+}
+
+fn map_candidate_review_error(error: CoreCandidateReviewError) -> EngineError {
+    match error {
+        CoreCandidateReviewError::Closed => EngineError::Closed,
+        CoreCandidateReviewError::CandidateNotFound => EngineError::CandidateNotFound,
+        CoreCandidateReviewError::NotReviewable => EngineError::CandidateReviewNotReviewable,
+        CoreCandidateReviewError::IncompatibleSchema => EngineError::IncompatibleSchema,
+        CoreCandidateReviewError::Busy => EngineError::Busy,
+        CoreCandidateReviewError::UnsafeStorage => EngineError::UnsafeStorage,
+        CoreCandidateReviewError::QueryLimitExceeded => EngineError::BudgetExceeded,
+        CoreCandidateReviewError::CorruptData => EngineError::CorruptData,
+        CoreCandidateReviewError::OutcomeUnknown => EngineError::OutcomeUnknown,
+        CoreCandidateReviewError::Unavailable => EngineError::StorageUnavailable,
+        CoreCandidateReviewError::InternalState => EngineError::InternalState,
+        _ => EngineError::InternalState,
+    }
+}
+
 fn map_candidate_history_error(error: CoreCandidateHistoryError) -> EngineError {
     match error {
         CoreCandidateHistoryError::Closed => EngineError::Closed,
@@ -4872,14 +4950,38 @@ mod tests {
     }
 
     #[test]
-    fn reports_contract_twenty_five_and_preserves_legacy_formatting() {
+    fn reports_contract_twenty_six_and_preserves_legacy_formatting() {
         let _guard = ENGINE_TEST_LOCK.lock().unwrap();
         let (_temp, engine) = engine();
-        assert_eq!(library_version().ffi_contract_version, 25);
+        assert_eq!(library_version().ffi_contract_version, 26);
         assert_eq!(engine.library_version().unwrap(), library_version());
         assert_eq!(engine.format_size(1536).unwrap().display, "1.5 KB");
         assert!(engine.close());
         assert_eq!(engine.format_size(1), Err(EngineError::Closed));
+    }
+
+    #[test]
+    fn candidate_review_intent_maps_without_effect_authority() {
+        assert_eq!(
+            map_candidate_review_command(CandidateReviewCommand::Select),
+            CoreCandidateReviewCommand::Select
+        );
+        assert_eq!(
+            map_candidate_review_command(CandidateReviewCommand::ClearSelection),
+            CoreCandidateReviewCommand::ClearSelection
+        );
+        assert_eq!(
+            map_candidate_review_command(CandidateReviewCommand::Dismiss),
+            CoreCandidateReviewCommand::Dismiss
+        );
+        assert_eq!(
+            map_candidate_review_command(CandidateReviewCommand::Restore),
+            CoreCandidateReviewCommand::Restore
+        );
+        assert_eq!(
+            map_candidate_review_error(CoreCandidateReviewError::NotReviewable),
+            EngineError::CandidateReviewNotReviewable
+        );
     }
 
     #[test]

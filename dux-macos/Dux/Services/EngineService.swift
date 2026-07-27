@@ -116,6 +116,10 @@ protocol DuxSnapshotReviewLease: AnyObject, Sendable {
         cursor: UInt16,
         limit: UInt16
     ) async throws -> ExplorerCandidateSummaryPage
+    func reviewCandidate(
+        candidateID: String,
+        command: ExplorerCandidateReviewCommand
+    ) async throws -> ExplorerCandidateReviewResult
     func childNodes(
         parentID: UInt64,
         sort: ExplorerSnapshotNodeSort,
@@ -155,6 +159,13 @@ extension DuxSnapshotReviewLease {
         cursor _: UInt16,
         limit _: UInt16
     ) async throws -> ExplorerCandidateSummaryPage {
+        throw ExplorerCandidateDetailError.unavailable
+    }
+
+    func reviewCandidate(
+        candidateID _: String,
+        command _: ExplorerCandidateReviewCommand
+    ) async throws -> ExplorerCandidateReviewResult {
         throw ExplorerCandidateDetailError.unavailable
     }
 
@@ -2151,6 +2162,27 @@ private final class FFIDuxSnapshotReviewLease: DuxSnapshotReviewLease, @unchecke
         }
     }
 
+    func reviewCandidate(
+        candidateID: String,
+        command: ExplorerCandidateReviewCommand
+    ) async throws -> ExplorerCandidateReviewResult {
+        return try await state.perform { _ in
+            do {
+                let raw = try self.lease.reviewCandidate(
+                    candidateId: candidateID,
+                    command: ExplorerCandidateDetailAdapter.ffiCommand(command)
+                )
+                return try ExplorerCandidateDetailAdapter.mapReviewResult(
+                    raw,
+                    expectedScanID: self.scanID,
+                    expectedCandidateID: candidateID
+                )
+            } catch let error as EngineError {
+                throw Self.candidateDetailError(error)
+            }
+        }
+    }
+
     func candidateEvidence(
         candidateID: String,
         cursor: UInt16,
@@ -2288,6 +2320,7 @@ private final class FFIDuxSnapshotReviewLease: DuxSnapshotReviewLease, @unchecke
         case .InvalidCandidateDetailRequest: ExplorerCandidateDetailError.invalidRequest
         case .CandidateEvaluationNotSucceeded: ExplorerCandidateDetailError.evaluationUnavailable
         case .CandidateNotFound: ExplorerCandidateDetailError.candidateNotFound
+        case .CandidateReviewNotReviewable: ExplorerCandidateDetailError.notReviewable
         case .BudgetExceeded: ExplorerCandidateDetailError.budgetExceeded
         default: EngineService.serviceError(error)
         }

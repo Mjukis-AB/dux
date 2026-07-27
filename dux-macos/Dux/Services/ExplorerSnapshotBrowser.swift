@@ -11,6 +11,11 @@ protocol DuxSnapshotReviewBrowsing: Sendable {
         cursor: UInt16,
         limit: UInt16
     ) async throws -> ExplorerCandidateSummaryPage
+    func reviewCandidate(
+        scanID: String,
+        candidateID: String,
+        command: ExplorerCandidateReviewCommand
+    ) async throws -> ExplorerCandidateReviewResult
     func childNodes(
         scanID: String,
         parentID: UInt64,
@@ -50,6 +55,14 @@ protocol DuxSnapshotReviewBrowsing: Sendable {
 }
 
 extension DuxSnapshotReviewBrowsing {
+    func reviewCandidate(
+        scanID _: String,
+        candidateID _: String,
+        command _: ExplorerCandidateReviewCommand
+    ) async throws -> ExplorerCandidateReviewResult {
+        throw ExplorerCandidateDetailError.unavailable
+    }
+
     func resolveLiveItem(
         scanID _: String,
         nodeID _: UInt64,
@@ -213,6 +226,14 @@ struct UnavailableDuxSnapshotReviewBrowser: DuxSnapshotReviewBrowsing {
         cursor _: UInt16,
         limit _: UInt16
     ) async throws -> ExplorerCandidateSummaryPage {
+        throw ExplorerCandidateDetailError.reviewNotAcquired
+    }
+
+    func reviewCandidate(
+        scanID _: String,
+        candidateID _: String,
+        command _: ExplorerCandidateReviewCommand
+    ) async throws -> ExplorerCandidateReviewResult {
         throw ExplorerCandidateDetailError.reviewNotAcquired
     }
 

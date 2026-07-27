@@ -1330,6 +1330,13 @@ public protocol SnapshotReviewSessionProtocol: AnyObject, Sendable {
 
     func resolveLiveTarget(request: SnapshotLiveTargetRequest) throws  -> SnapshotLiveTarget
 
+    /**
+     * Persist one semantic review-intent transition for a candidate belonging
+     * to this retained snapshot review. The result is status-only and cannot
+     * become a plan, approval, journal claim, or filesystem effect.
+     */
+    func reviewCandidate(candidateId: String, command: CandidateReviewCommand) throws  -> CandidateReviewResult
+
     func rootNode() throws  -> SnapshotNode
 
     func treemap(parentId: UInt64, maxCells: UInt16) throws  -> SnapshotTreemap
@@ -1484,6 +1491,21 @@ open func resolveLiveTarget(request: SnapshotLiveTargetRequest)throws  -> Snapsh
     uniffi_dux_ffi_fn_method_snapshotreviewsession_resolve_live_target(
             self.uniffiCloneHandle(),
         FfiConverterTypeSnapshotLiveTargetRequest_lower(request),$0
+    )
+})
+}
+
+    /**
+     * Persist one semantic review-intent transition for a candidate belonging
+     * to this retained snapshot review. The result is status-only and cannot
+     * become a plan, approval, journal claim, or filesystem effect.
+     */
+open func reviewCandidate(candidateId: String, command: CandidateReviewCommand)throws  -> CandidateReviewResult  {
+    return try  FfiConverterTypeCandidateReviewResult_lift(try rustCallWithError(FfiConverterTypeEngineError_lift) {
+    uniffi_dux_ffi_fn_method_snapshotreviewsession_review_candidate(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(candidateId),
+        FfiConverterTypeCandidateReviewCommand_lower(command),$0
     )
 })
 }
@@ -2042,6 +2064,68 @@ public func FfiConverterTypeCandidatePathPage_lift(_ buf: RustBuffer) throws -> 
 #endif
 public func FfiConverterTypeCandidatePathPage_lower(_ value: CandidatePathPage) -> RustBuffer {
     return FfiConverterTypeCandidatePathPage.lower(value)
+}
+
+
+public struct CandidateReviewResult: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let scanId: String
+    public let candidateId: String
+    public let status: CandidateStatus
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, scanId: String, candidateId: String, status: CandidateStatus) {
+        self.recordVersion = recordVersion
+        self.scanId = scanId
+        self.candidateId = candidateId
+        self.status = status
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension CandidateReviewResult: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCandidateReviewResult: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CandidateReviewResult {
+        return
+            try CandidateReviewResult(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                scanId: FfiConverterString.read(from: &buf),
+                candidateId: FfiConverterString.read(from: &buf),
+                status: FfiConverterTypeCandidateStatus.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: CandidateReviewResult, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterString.write(value.scanId, into: &buf)
+        FfiConverterString.write(value.candidateId, into: &buf)
+        FfiConverterTypeCandidateStatus.write(value.status, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCandidateReviewResult_lift(_ buf: RustBuffer) throws -> CandidateReviewResult {
+    return try FfiConverterTypeCandidateReviewResult.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCandidateReviewResult_lower(_ value: CandidateReviewResult) -> RustBuffer {
+    return FfiConverterTypeCandidateReviewResult.lower(value)
 }
 
 
@@ -6549,6 +6633,91 @@ public func FfiConverterTypeCandidatePathEncoding_lower(_ value: CandidatePathEn
 
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * Review intent is a bounded, scan-bound selection observation. It cannot
+ * create a plan or authorize an effect.
+ */
+
+public enum CandidateReviewCommand: Equatable, Hashable {
+
+    case select
+    case clearSelection
+    case dismiss
+    case restore
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension CandidateReviewCommand: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCandidateReviewCommand: FfiConverterRustBuffer {
+    typealias SwiftType = CandidateReviewCommand
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CandidateReviewCommand {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .select
+
+        case 2: return .clearSelection
+
+        case 3: return .dismiss
+
+        case 4: return .restore
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: CandidateReviewCommand, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .select:
+            writeInt(&buf, Int32(1))
+
+
+        case .clearSelection:
+            writeInt(&buf, Int32(2))
+
+
+        case .dismiss:
+            writeInt(&buf, Int32(3))
+
+
+        case .restore:
+            writeInt(&buf, Int32(4))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCandidateReviewCommand_lift(_ buf: RustBuffer) throws -> CandidateReviewCommand {
+    return try FfiConverterTypeCandidateReviewCommand.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCandidateReviewCommand_lower(_ value: CandidateReviewCommand) -> RustBuffer {
+    return FfiConverterTypeCandidateReviewCommand.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 
 public enum CandidateSafety: Equatable, Hashable {
 
@@ -7781,6 +7950,7 @@ public enum EngineError: Swift.Error, Equatable, Hashable, Foundation.LocalizedE
     case CandidateEvaluationNotSucceeded
     case CandidateNotFound
     case CandidateCursorOutOfRange
+    case CandidateReviewNotReviewable
     case ReadOnlyStore
     case IncompatibleSchema
     case Busy
@@ -7848,15 +8018,16 @@ public struct FfiConverterTypeEngineError: FfiConverterRustBuffer {
         case 27: return .CandidateEvaluationNotSucceeded
         case 28: return .CandidateNotFound
         case 29: return .CandidateCursorOutOfRange
-        case 30: return .ReadOnlyStore
-        case 31: return .IncompatibleSchema
-        case 32: return .Busy
-        case 33: return .UnsafeStorage
-        case 34: return .BudgetExceeded
-        case 35: return .CorruptData
-        case 36: return .IncompatibleSnapshot
-        case 37: return .OutcomeUnknown
-        case 38: return .InternalState
+        case 30: return .CandidateReviewNotReviewable
+        case 31: return .ReadOnlyStore
+        case 32: return .IncompatibleSchema
+        case 33: return .Busy
+        case 34: return .UnsafeStorage
+        case 35: return .BudgetExceeded
+        case 36: return .CorruptData
+        case 37: return .IncompatibleSnapshot
+        case 38: return .OutcomeUnknown
+        case 39: return .InternalState
 
          default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -7985,40 +8156,44 @@ public struct FfiConverterTypeEngineError: FfiConverterRustBuffer {
             writeInt(&buf, Int32(29))
 
 
-        case .ReadOnlyStore:
+        case .CandidateReviewNotReviewable:
             writeInt(&buf, Int32(30))
 
 
-        case .IncompatibleSchema:
+        case .ReadOnlyStore:
             writeInt(&buf, Int32(31))
 
 
-        case .Busy:
+        case .IncompatibleSchema:
             writeInt(&buf, Int32(32))
 
 
-        case .UnsafeStorage:
+        case .Busy:
             writeInt(&buf, Int32(33))
 
 
-        case .BudgetExceeded:
+        case .UnsafeStorage:
             writeInt(&buf, Int32(34))
 
 
-        case .CorruptData:
+        case .BudgetExceeded:
             writeInt(&buf, Int32(35))
 
 
-        case .IncompatibleSnapshot:
+        case .CorruptData:
             writeInt(&buf, Int32(36))
 
 
-        case .OutcomeUnknown:
+        case .IncompatibleSnapshot:
             writeInt(&buf, Int32(37))
 
 
-        case .InternalState:
+        case .OutcomeUnknown:
             writeInt(&buf, Int32(38))
+
+
+        case .InternalState:
+            writeInt(&buf, Int32(39))
 
         }
     }
@@ -12834,6 +13009,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_snapshotreviewsession_resolve_live_target() != 43607) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_snapshotreviewsession_review_candidate() != 16110) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_snapshotreviewsession_root_node() != 18544) {

@@ -185,6 +185,33 @@ actor DuxSnapshotReviewController {
         return page
     }
 
+    func reviewCandidate(
+        scanID: String,
+        candidateID: String,
+        command: ExplorerCandidateReviewCommand
+    ) async throws -> ExplorerCandidateReviewResult {
+        guard !isShuttingDown else {
+            throw EngineServiceError.closed
+        }
+        guard let entry = leases[scanID] else {
+            throw ExplorerCandidateDetailError.reviewNotAcquired
+        }
+        let result: ExplorerCandidateReviewResult
+        do {
+            result = try await entry.lease.reviewCandidate(
+                candidateID: candidateID,
+                command: command
+            )
+        } catch {
+            await discardExpiredLeaseIfCurrent(error, scanID: scanID, entry: entry)
+            throw error
+        }
+        guard leases[scanID]?.generation == entry.generation else {
+            throw CancellationError()
+        }
+        return result
+    }
+
     func childNodes(
         scanID: String,
         parentID: UInt64,

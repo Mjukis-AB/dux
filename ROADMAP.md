@@ -1365,6 +1365,14 @@ status, reclaimability, plan, AI input, or cleanup capability. Swift maps the
 enum without filename or display-string inference and renders redundant color,
 symbol, visible text, legend, inspector, and VoiceOver alternatives.
 
+Contract v26 adds one review-only candidate status transition under an already
+acquired exact snapshot lease. The command is one of four fixed enum values and
+the result is only a versioned scan ID, candidate ID, and status. Rust performs
+the complete durable candidate/source binding and transactional review-state
+transition; Swift rejects malformed or cross-review results. This endpoint is
+not a planner input and cannot create a plan, approval, journal claim, schedule,
+AI request, or filesystem effect.
+
 Requirements:
 
 - DTOs are immutable/versioned at the boundary.
@@ -4901,6 +4909,15 @@ Tasks:
     closed; no paths, evidence, plans, approvals, or executor authority cross
     the boundary. Exact-session detail, live partial-progress controls, and
     cleanup UI remain open.
+  - [x] 2026-07-27 slice: expose scan-bound candidate review intent through
+    UniFFI contract v26 and the native EngineService boundary. The four
+    commands (`Select`, `ClearSelection`, `Dismiss`, `Restore`) accept only a
+    candidate ID already held by an exact review lease; Swift validates record
+    version, scan ID, and candidate ID before publishing the returned status.
+    Not-reviewable candidates remain typed failures. No path, plan, approval,
+    schedule, AI input, or executor capability crosses this endpoint; the
+    candidate presentation controls and plan lifecycle remain the next UI
+    slice.
 - [ ] Add bounded pending-evaluation discovery and snapshot-backed restart
   recovery; malformed or incompatible state fails closed.
   - [x] 2026-07-19 slice: add a bounded oldest-first pending-evaluation

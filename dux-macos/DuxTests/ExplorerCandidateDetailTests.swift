@@ -2,6 +2,43 @@
 import XCTest
 
 final class ExplorerCandidateDetailTests: XCTestCase {
+    func testReviewIntentMapsOnlyTheBoundCandidateAndScan() throws {
+        let raw = CandidateReviewResult(
+            recordVersion: 1,
+            scanId: "scan:example",
+            candidateId: "candidate:example",
+            status: .selected
+        )
+
+        let mapped = try ExplorerCandidateDetailAdapter.mapReviewResult(
+            raw,
+            expectedScanID: "scan:example",
+            expectedCandidateID: "candidate:example"
+        )
+        XCTAssertEqual(
+            mapped,
+            ExplorerCandidateReviewResult(
+                scanID: "scan:example",
+                candidateID: "candidate:example",
+                status: .selected
+            )
+        )
+        XCTAssertEqual(
+            ExplorerCandidateDetailAdapter.ffiCommand(.dismiss),
+            .dismiss
+        )
+
+        XCTAssertThrowsError(
+            try ExplorerCandidateDetailAdapter.mapReviewResult(
+                raw,
+                expectedScanID: "scan:other",
+                expectedCandidateID: "candidate:example"
+            )
+        ) { error in
+            XCTAssertEqual(error as? ExplorerCandidateDetailError, .invalidResponse)
+        }
+    }
+
     func testPathPageMapsBoundedHistoricalCandidateDisclosure() throws {
         let timestamp = SnapshotNodeTimestamp(secondsSinceUnixEpoch: 1_700_000_000, nanoseconds: 0)
         let path = CandidateObservedPath(

@@ -1,5 +1,10 @@
 # Changelog
 
+- Added UniFFI contract v26's bounded candidate review-intent endpoint. Swift can
+  select, clear selection, dismiss, or restore one candidate inside an exact
+  retained scan review; Rust validates the scan/candidate binding and returns
+  only the resulting status. This remains observation state: it cannot create
+  a plan, approve cleanup, disclose paths, or authorize an effect.
 - Added the private promotion-to-`RustTargetPlanFacts` handoff. It repeats
   grant validation while retaining canonical scan-root/target witnesses and
   the unresolved `ProtectedPath` blocker; plan IDs, review, approval, journal,

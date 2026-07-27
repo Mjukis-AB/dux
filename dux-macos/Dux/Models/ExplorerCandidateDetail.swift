@@ -47,6 +47,21 @@ enum ExplorerCandidateStatus: Equatable, Sendable {
     case unavailable
 }
 
+/// A review-only candidate state transition. These commands never create a
+/// cleanup plan and never authorize filesystem effects.
+enum ExplorerCandidateReviewCommand: Equatable, Sendable {
+    case select
+    case clearSelection
+    case dismiss
+    case restore
+}
+
+struct ExplorerCandidateReviewResult: Equatable, Sendable {
+    let scanID: String
+    let candidateID: String
+    let status: ExplorerCandidateStatus
+}
+
 enum ExplorerCandidateEvidenceKind: Equatable, Sendable {
     case matchedPath
     case requiredMarker
@@ -145,6 +160,7 @@ enum ExplorerCandidateDetailError: Error, Equatable, Sendable {
     case invalidRequest
     case evaluationUnavailable
     case candidateNotFound
+    case notReviewable
     case budgetExceeded
     case unavailable
     case invalidResponse
@@ -159,6 +175,15 @@ enum ExplorerCandidateDetailAdapter {
     private static let maximumIdentifierBytes = 4_096
     private static let maximumCandidateCount: UInt16 = 4_096
     private static let maximumUnixSeconds: UInt64 = 253_402_300_799
+
+    static func ffiCommand(_ command: ExplorerCandidateReviewCommand) -> CandidateReviewCommand {
+        switch command {
+        case .select: .select
+        case .clearSelection: .clearSelection
+        case .dismiss: .dismiss
+        case .restore: .restore
+        }
+    }
 
     static func mapPaths(
         _ raw: CandidatePathPage,
@@ -271,6 +296,27 @@ enum ExplorerCandidateDetailAdapter {
             nextCursor: raw.nextCursor,
             totalEvidence: raw.totalEvidence,
             evidence: evidence
+        )
+    }
+
+    static func mapReviewResult(
+        _ raw: CandidateReviewResult,
+        expectedScanID: String,
+        expectedCandidateID: String
+    ) throws -> ExplorerCandidateReviewResult {
+        guard
+            raw.recordVersion == recordVersion,
+            validScanID(raw.scanId),
+            raw.scanId == expectedScanID,
+            validCandidateID(raw.candidateId),
+            raw.candidateId == expectedCandidateID
+        else {
+            throw ExplorerCandidateDetailError.invalidResponse
+        }
+        return ExplorerCandidateReviewResult(
+            scanID: raw.scanId,
+            candidateID: raw.candidateId,
+            status: map(raw.status)
         )
     }
 
