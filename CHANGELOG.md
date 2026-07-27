@@ -16,6 +16,9 @@
 - Added a private Rust-target plan handoff into `TrustedReviewedCleanupPlan`.
   It requires one exact item/path, revalidates the retained grant again, and
   remains unreachable from UI, FFI, scheduling, journal, and filesystem effects.
+- Added a private expiry-checked approval handoff for Rust-target facts. It
+  reuses the reviewed-plan approval capability and still stops before journal
+  claims, FFI, scheduling, and filesystem effects.
 - Promoted current-account home/mount and protected-root observations into
   private revisioned planner grants with stable rule-boundary keys. Grants
   revalidate exact policy, volume, and target evidence while `ProtectedPath`

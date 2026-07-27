@@ -605,6 +605,26 @@ impl ExactPathReview {
 }
 
 #[cfg(unix)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "Rust-target approval handoff is consumed by the next journal slice"
+    )
+)]
+pub(crate) fn approve_rust_target_plan_facts(
+    facts: RustTargetPlanFacts,
+    plan_id: CleanupPlanId,
+    created_at: std::time::SystemTime,
+    approved_at: std::time::SystemTime,
+) -> Result<ApprovedTrustedReviewedCleanupPlan, ExactPathApprovalError> {
+    let reviewed =
+        ExactPathReview::trusted_reviewed_plan_from_rust_target_facts(facts, plan_id, created_at)
+            .map_err(ExactPathApprovalError::Plan)?;
+    reviewed.approve(approved_at)
+}
+
+#[cfg(unix)]
 impl ExactPathReview {
     /// Consume one fully admitted Rust-target facts capability into the same
     /// reviewed-plan wrapper used by the later approval/journal boundary.
@@ -751,6 +771,8 @@ pub(crate) enum ExactPathApprovalError {
     AuthorizationMismatch,
     #[error("trusted rule-scope authorization failed: {0}")]
     Authorization(#[source] RuleScopeGrantError),
+    #[error("trusted Rust-target plan construction failed: {0}")]
+    Plan(#[source] ExactPathPlanError),
     #[error("planned cleanup history could not be persisted: {0}")]
     Persistence(#[source] HistoryError),
 }

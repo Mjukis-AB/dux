@@ -697,6 +697,9 @@ plan item and exact requested target against the retained grant, revalidates
 again, and stores the pair in the existing `TrustedReviewedCleanupPlan`
 wrapper. It remains disconnected from approval, journal, FFI, scheduling, and
 effects until the generation-fenced orchestration join.
+The same private path now passes through the existing expiry-checked approval
+capability; approval revalidates the retained plan and grant and still exposes
+no journal claim, FFI, schedule, or effect.
 
 ### 6.3 Protected-root and sensitive-category policy
 
