@@ -33,6 +33,17 @@ pub(super) struct RustTargetPromotion {
     authorization: RuleScopeAuthorization,
 }
 
+/// Planner-owned, path-private facts for a future Rust-target plan
+/// constructor. This capability still retains the original blocked candidate;
+/// it is not a plan, approval, journal claim, schedule, FFI value, or effect
+/// witness.
+#[must_use = "Rust-target plan facts must be consumed by the next planner boundary"]
+pub(super) struct RustTargetPlanFacts {
+    promotion: RustTargetPromotion,
+    scan_root: CanonicalScanRoot,
+    target: CanonicalPathSnapshot,
+}
+
 #[derive(Debug, Error)]
 pub(super) enum RustTargetPromotionError {
     #[error("candidate is not the exact staged Rust-target policy")]
@@ -141,6 +152,23 @@ fn validate_candidate_shape(
 }
 
 impl RustTargetPromotion {
+    /// Consume the promotion token into typed plan facts after one immediate
+    /// grant revalidation. The candidate remains blocked inside the retained
+    /// promotion and cannot be converted to a domain plan by this operation.
+    pub(super) fn into_plan_facts(
+        self,
+        scan_root: CanonicalScanRoot,
+        target: CanonicalPathSnapshot,
+    ) -> Result<RustTargetPlanFacts, RustTargetPromotionError> {
+        self.revalidate(&scan_root, &target)
+            .map_err(RustTargetPromotionError::Authorization)?;
+        Ok(RustTargetPlanFacts {
+            promotion: self,
+            scan_root,
+            target,
+        })
+    }
+
     pub(super) fn revalidate(
         &self,
         scan_root: &CanonicalScanRoot,
@@ -157,10 +185,24 @@ impl RustTargetPromotion {
     pub(super) fn release(self) {}
 }
 
+impl RustTargetPlanFacts {
+    pub(super) fn revalidate(&self) -> Result<(), RustTargetPromotionError> {
+        self.promotion
+            .revalidate(&self.scan_root, &self.target)
+            .map_err(RustTargetPromotionError::Authorization)
+    }
+
+    pub(super) fn release(self) {
+        self.promotion.release();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use tempfile::TempDir;
 
+    #[cfg(target_os = "macos")]
+    use super::super::rule_scope_grant::authorize_rule_target;
     use super::*;
     use crate::domain::{
         CandidateInput, LocalizedTextKey, ProvenanceUrl, Rule, RuleDefinition, RuleGuards, RuleId,
@@ -254,6 +296,51 @@ mod tests {
         assert!(matches!(
             validate_candidate_shape(&candidate, &foreign_scan, &target),
             Err(RustTargetPromotionError::SourceScanMismatch)
+        ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_only_no_cargo_authorization_cannot_admit_candidate() {
+        let Some(fixture) = super::super::rust_target_tests::Fixture::try_in_current_account_home(
+            super::super::rust_target_tests::CARGO_CACHE_TAG_SIGNATURE,
+        ) else {
+            eprintln!("skipping home-bound promotion test: current home is not writable");
+            return;
+        };
+        let lexical_root = validate_scan_root(&fixture.root).unwrap();
+        let scan_root = capture_scan_root(lexical_root.clone()).unwrap();
+        let lexical_target = validate_cleanup_path(&lexical_root, &fixture.target).unwrap();
+        let target = capture_path_snapshot(&scan_root, lexical_target).unwrap();
+        let id = current_rust_target_candidate_id(&fixture.scan_id, &fixture.target).unwrap();
+        let candidate = Candidate::try_from_rule(
+            &super::super::rust_target_tests::rust_rule(false),
+            CandidateInput::new(
+                id,
+                vec![fixture.target.clone()],
+                4_096,
+                None,
+                super::super::rust_target_tests::exact_evidence(&fixture.target),
+                vec![BlockReason::ProtectedPath],
+                fixture.scan_id.clone(),
+            ),
+        )
+        .unwrap();
+        assert_eq!(candidate.blockers(), [BlockReason::ProtectedPath]);
+        let authorization =
+            authorize_rule_target(&scan_root, target.clone(), candidate.rule()).unwrap();
+
+        assert!(matches!(
+            admit_rust_target_candidate(
+                candidate,
+                authorization,
+                &fixture.scan_id,
+                &scan_root,
+                &target,
+            ),
+            Err(RustTargetPromotionError::Authorization(
+                RuleScopeGrantError::CargoBoundaryMismatch
+            ))
         ));
     }
 }

@@ -5,6 +5,10 @@
   Cargo/home/protected-rule grant. The non-Clone token remains non-actionable:
   it cannot clear `ProtectedPath`, construct or approve a plan, persist,
   schedule, cross FFI, or mutate; generic exact review still fails closed.
+- Added the next private Rust-target `RustTargetPlanFacts` capability. It
+  consumes promotion only after immediate grant revalidation and retains the
+  original blocked candidate plus canonical scan-root/target witnesses; no
+  plan, approval, journal, FFI, schedule, or effect authority is exposed.
 - Promoted current-account home/mount and protected-root observations into
   private revisioned planner grants with stable rule-boundary keys. Grants
   revalidate exact policy, volume, and target evidence while `ProtectedPath`

@@ -682,7 +682,12 @@ alone is insufficient. The non-Clone token retains the original blocked
 candidate and exposes only a later revalidation/release seam. Generic exact
 review and `CleanupPlan` still reject blocked candidates, and this checkpoint
 cannot clear blockers, create plans, approve, persist, cross FFI, schedule, or
-mutate.
+mutate. The promotion token can now be consumed into a private
+`RustTargetPlanFacts` capability only after an immediate grant revalidation;
+the facts retain the original blocked candidate and canonical scan-root/target
+witnesses. This capability still has no plan, approval, journal, FFI,
+scheduling, or effect API. The next join must construct plan facts through a
+typed authority boundary rather than a caller-controlled blocker flag.
 
 ### 6.3 Protected-root and sensitive-category policy
 

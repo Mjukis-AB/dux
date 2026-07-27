@@ -96,7 +96,11 @@ The token deliberately keeps the original `ProtectedPath` blocker and has no
 blocker-removal, plan, approval, journal, FFI, scheduling, or filesystem-effect
 method. Generic exact review and cleanup-plan construction continue to reject
 blocked candidates. A later typed plan-facts boundary must consume this token
-before any actionable representation can exist.
+before any actionable representation can exist. The promotion can now be
+consumed into a private `RustTargetPlanFacts` capability after immediate grant
+revalidation; it retains the blocked candidate and canonical scan-root/target
+witnesses and still cannot construct a cleanup plan. The next boundary must
+join these typed facts to a plan without exposing blocker removal to callers.
 
 ## Live default-layout witness
 

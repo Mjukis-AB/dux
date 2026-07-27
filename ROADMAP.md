@@ -4565,9 +4565,13 @@ Tasks:
       revalidates that grant before admission. The token retains the blocker
       and has only private revalidation/release methods: it cannot clear a
       blocker, construct a plan, approve, persist, cross FFI, schedule, or
-      mutate. The next slice must add a typed plan-facts constructor that
-      consumes this token; generic exact review and `CleanupPlan` continue to
-      reject blocked candidates.
+      mutate. A typed `RustTargetPlanFacts` capability now consumes this token
+      only after immediate grant revalidation and retains the canonical
+      scan-root/target witnesses for the next boundary. It still exposes only
+      private revalidation/release; generic exact review and `CleanupPlan`
+      continue to reject blocked candidates. The next slice must define the
+      typed plan-facts-to-plan join without exposing blocker removal as a
+      caller-controlled operation.
 - [x] Implement candidate groups and overlap resolution. Completed 2026-07-19:
   deterministic grouping and conservative overlap resolution are now consumed
   by exact-path review. Equivalent observations coalesce by stable candidate
