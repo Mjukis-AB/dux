@@ -19,6 +19,9 @@
 - Added a private expiry-checked approval handoff for Rust-target facts. It
   reuses the reviewed-plan approval capability and still stops before journal
   claims, FFI, scheduling, and filesystem effects.
+- Added a private approved Rust-target → journal handoff using the existing
+  canonical-time planned-session persistence and owner-fenced claim path. It
+  still stops before executor effect admission.
 - Promoted current-account home/mount and protected-root observations into
   private revisioned planner grants with stable rule-boundary keys. Grants
   revalidate exact policy, volume, and target evidence while `ProtectedPath`

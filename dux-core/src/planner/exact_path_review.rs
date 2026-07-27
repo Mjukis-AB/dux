@@ -605,13 +605,6 @@ impl ExactPathReview {
 }
 
 #[cfg(unix)]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Rust-target approval handoff is consumed by the next journal slice"
-    )
-)]
 pub(crate) fn approve_rust_target_plan_facts(
     facts: RustTargetPlanFacts,
     plan_id: CleanupPlanId,
@@ -622,6 +615,46 @@ pub(crate) fn approve_rust_target_plan_facts(
         ExactPathReview::trusted_reviewed_plan_from_rust_target_facts(facts, plan_id, created_at)
             .map_err(ExactPathApprovalError::Plan)?;
     reviewed.approve(approved_at)
+}
+
+#[cfg(unix)]
+pub(crate) struct RustTargetJournalRequest {
+    pub(crate) plan_id: CleanupPlanId,
+    pub(crate) created_at: std::time::SystemTime,
+    pub(crate) approved_at: std::time::SystemTime,
+    pub(crate) session_id: CleanupSessionId,
+    pub(crate) started_at: std::time::SystemTime,
+    pub(crate) trigger: CleanupTrigger,
+    pub(crate) lock_timeout: Duration,
+}
+
+#[cfg(unix)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "Rust-target journal handoff is consumed by the next executor orchestration slice"
+    )
+)]
+pub(crate) fn begin_rust_target_cleanup_session(
+    facts: RustTargetPlanFacts,
+    request: RustTargetJournalRequest,
+    store: &Arc<StoreCoordinator>,
+) -> Result<ApprovedCleanupSession, ExactPathHandoffError> {
+    let approved = approve_rust_target_plan_facts(
+        facts,
+        request.plan_id,
+        request.created_at,
+        request.approved_at,
+    )
+    .map_err(ExactPathHandoffError::Approval)?;
+    approved.begin_cleanup_session(
+        store,
+        request.session_id,
+        request.started_at,
+        request.trigger,
+        request.lock_timeout,
+    )
 }
 
 #[cfg(unix)]

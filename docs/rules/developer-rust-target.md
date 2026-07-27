@@ -109,7 +109,9 @@ existing reviewed-plan wrapper only after exact item/path matching and another
 grant revalidation.
 The private handoff can also pass through the existing expiry-checked approval
 capability, which revalidates the plan and grant again while remaining before
-journal, FFI, scheduling, and effects.
+journal, FFI, scheduling, and effects. The approved private handoff can now
+persist and claim the planned session through the existing owner/generation
+fence with canonical timestamps, but it still cannot start an executor effect.
 
 ## Live default-layout witness
 

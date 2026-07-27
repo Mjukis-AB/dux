@@ -696,7 +696,10 @@ next orchestration join. A private Rust-target handoff now verifies the single
 plan item and exact requested target against the retained grant, revalidates
 again, and stores the pair in the existing `TrustedReviewedCleanupPlan`
 wrapper. It remains disconnected from approval, journal, FFI, scheduling, and
-effects until the generation-fenced orchestration join.
+effects until the generation-fenced orchestration join. A private Rust-target
+entry now passes the approved capability through the existing canonical-time
+planned-session persistence and owner-fenced journal claim path; no executor
+effect is started by this handoff.
 The same private path now passes through the existing expiry-checked approval
 capability; approval revalidates the retained plan and grant and still exposes
 no journal claim, FFI, schedule, or effect.

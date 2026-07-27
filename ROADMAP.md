@@ -4581,7 +4581,12 @@ Tasks:
       a private approval handoff now consumes the wrapper through the existing
       expiry-checked approval capability. The next slice must connect that
       approved capability to the existing journal claim lifecycle under the
-      same generation fence.
+      same generation fence. A private Rust-target handoff now feeds the
+      approved capability into the existing planned-session persistence and
+      owner-fenced journal claim path with the same canonical timestamps and
+      lock timeout. It still exposes no executor effect; the next slice must
+      connect only the claimed session to the already private executor bridge
+      after final effect admission.
 - [x] Implement candidate groups and overlap resolution. Completed 2026-07-19:
   deterministic grouping and conservative overlap resolution are now consumed
   by exact-path review. Equivalent observations coalesce by stable candidate
