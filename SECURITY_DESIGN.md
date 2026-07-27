@@ -1238,7 +1238,16 @@ and has no production caller. The typed Rust-target facts and journal request
 now have one additional crate-private engine bridge into this same executor;
 it accepts no paths, callbacks, AI output, CLI request, FFI value, or UI input,
 and performs no effect outside the already-claimed session capability. Its
-optional private capacity-aware variant
+macOS regression fixture traverses the complete test-owned trusted-rule
+facts-to-claim path and verifies marker preservation plus completed history;
+the production Cargo/home/protected-root/process/descendant chain remains
+covered by dedicated planner tests. A companion target read-set drift fixture
+fails during the planner/journal handoff before the planned row is written,
+with the target left untouched. Cargo manifest revalidation remains covered by
+the production planner tests. These tests prove the lifecycle wiring
+only; they do not make the private bridge a production caller or clear the
+`ProtectedPath` blocker. The optional private
+capacity-aware variant
 captures one pre-effect and one post-settlement observation through a
 core-owned sampler; only matching stable-volume, timing, total-capacity,
 headline-source, and availability-shape evidence can persist a signed

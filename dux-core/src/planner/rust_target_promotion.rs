@@ -43,6 +43,8 @@ pub(crate) struct RustTargetPlanFacts {
     promotion: RustTargetPromotion,
     scan_root: CanonicalScanRoot,
     target: CanonicalPathSnapshot,
+    #[cfg(test)]
+    test_only_without_cargo: bool,
 }
 
 #[derive(Debug, Error)]
@@ -171,6 +173,8 @@ impl RustTargetPromotion {
             promotion: self,
             scan_root,
             target,
+            #[cfg(test)]
+            test_only_without_cargo: false,
         })
     }
 
@@ -236,6 +240,14 @@ impl RustTargetPlanFacts {
     }
 
     pub(super) fn revalidate(&self) -> Result<(), RustTargetPromotionError> {
+        #[cfg(test)]
+        if self.test_only_without_cargo {
+            return self
+                .promotion
+                .authorization
+                .revalidate()
+                .map_err(RustTargetPromotionError::Authorization);
+        }
         self.promotion
             .revalidate(&self.scan_root, &self.target)
             .map_err(RustTargetPromotionError::Authorization)
@@ -243,6 +255,24 @@ impl RustTargetPlanFacts {
 
     pub(super) fn release(self) {
         self.promotion.release();
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn rust_target_plan_facts_for_test(
+    candidate: Candidate,
+    authorization: RuleScopeAuthorization,
+    scan_root: CanonicalScanRoot,
+    target: CanonicalPathSnapshot,
+) -> RustTargetPlanFacts {
+    RustTargetPlanFacts {
+        promotion: RustTargetPromotion {
+            candidate,
+            authorization,
+        },
+        scan_root,
+        target,
+        test_only_without_cargo: true,
     }
 }
 

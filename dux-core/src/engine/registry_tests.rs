@@ -803,6 +803,213 @@ fn direct_toolchain_cargo() -> PathBuf {
 }
 
 #[cfg(target_os = "macos")]
+struct RustTargetFactsFixture {
+    _temp: TempDir,
+    engine: EngineHandle,
+    facts: crate::planner::RustTargetPlanFacts,
+    target: PathBuf,
+    payload: PathBuf,
+}
+
+#[cfg(target_os = "macos")]
+fn rust_target_facts_fixture() -> RustTargetFactsFixture {
+    let temp = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let root = temp.path().join("scan-root");
+    let project = root.join("project");
+    let target = project.join("target");
+    let manifest = project.join("Cargo.toml");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::write(
+        &manifest,
+        b"[package]\nname = 'fixture'\nversion = '0.1.0'\nedition = '2021'\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    std::fs::write(project.join("src/lib.rs"), b"pub fn fixture() {}\n").unwrap();
+    write_cargo_cache_tag(&target);
+    let payload = target.join("object");
+    std::fs::write(&payload, b"temporary build output").unwrap();
+
+    let engine = EngineHandle::open(config(&temp)).unwrap();
+    let task = engine.start_scan(root).unwrap();
+    assert_eq!(wait_terminal(&engine, task).phase, TaskPhase::Succeeded);
+    let scan_id = engine.scan_result(task).unwrap().unwrap().scan_id().clone();
+    let candidate_history = engine.candidate_history_for_scan(&scan_id).unwrap();
+    let candidates = candidate_history.candidates();
+    let candidate_id = candidates
+        .iter()
+        .find(|candidate| candidate.rule().id().as_str() == "developer.rust.target")
+        .expect("the fixture scan should discover one Rust target")
+        .id()
+        .clone();
+
+    let crate::persistence::StoredCandidateRecord::Complete(stored) = engine
+        .inner
+        .store
+        .load_candidate(&candidate_id)
+        .unwrap()
+        .unwrap()
+    else {
+        panic!("expected complete Rust-target candidate history");
+    };
+    let candidate = crate::domain::candidate_from_complete_record(&stored).unwrap();
+    // DUX-DESTRUCTIVE: allow=test-rust-target-facts-reviewable-fixture -- keep the
+    // planner facts' protected-path blocker, but make the durable candidate row
+    // reviewable so the plan-claims persistence coupling can be exercised.
+    engine.inner.store.with_connection(|connection| {
+        connection
+            .execute(
+                "UPDATE candidates
+                 SET safety_tier = 'safe_regenerable',
+                     proposed_action = 'remove_known_regenerable_contents'
+                 WHERE candidate_id = ?1",
+                [candidate_id.as_str()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "DELETE FROM candidate_blockers WHERE candidate_id = ?1",
+                [candidate_id.as_str()],
+            )
+            .unwrap();
+    });
+    let scan = engine.inner.store.load_scan(&scan_id).unwrap().unwrap();
+    let lexical_root = crate::path_validation::validate_scan_root(scan.root()).unwrap();
+    let scan_root = crate::path_validation::capture_scan_root(lexical_root.clone()).unwrap();
+    let lexical_target =
+        crate::path_validation::validate_cleanup_path(&lexical_root, &target).unwrap();
+    let target_snapshot =
+        crate::path_validation::capture_path_snapshot(&scan_root, lexical_target).unwrap();
+    let authorization = crate::planner::authorize_rule_target(
+        &scan_root,
+        target_snapshot.clone(),
+        candidate.rule(),
+    )
+    .unwrap();
+    let facts = crate::planner::rust_target_plan_facts_for_test(
+        candidate,
+        authorization,
+        scan_root,
+        target_snapshot,
+    );
+
+    RustTargetFactsFixture {
+        _temp: temp,
+        engine,
+        facts,
+        target,
+        payload,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn rust_target_journal_request(
+    plan: &str,
+    session: &str,
+    now: SystemTime,
+) -> crate::planner::RustTargetJournalRequest {
+    crate::planner::RustTargetJournalRequest {
+        plan_id: crate::domain::CleanupPlanId::new(plan).unwrap(),
+        created_at: now,
+        approved_at: now,
+        session_id: crate::persistence::CleanupSessionId::new(session).unwrap(),
+        started_at: now,
+        trigger: crate::persistence::CleanupTrigger::Manual,
+        lock_timeout: TEST_TIMEOUT,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn current_rust_target_test_time() -> SystemTime {
+    SystemTime::now() - Duration::from_secs(1)
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn rust_target_facts_bridge_claims_and_executes_one_reviewed_session() {
+    let fixture = rust_target_facts_fixture();
+    let facts = fixture.facts;
+    let now = current_rust_target_test_time();
+    let request = rust_target_journal_request(
+        "plan:rust-target-facts-bridge",
+        "cleanup:rust-target-facts-bridge",
+        now,
+    );
+    let summary = fixture
+        .engine
+        .execute_rust_target_plan_facts(facts, request, &|| false)
+        .unwrap();
+
+    assert_eq!(
+        summary.terminal_status,
+        crate::persistence::TerminalSessionStatus::Completed
+    );
+    assert!(!fixture.payload.exists());
+    assert!(fixture.target.join("CACHEDIR.TAG").exists());
+    let history_id = fixture
+        .engine
+        .recent_cleanup_history(None, 64)
+        .unwrap()
+        .records()
+        .iter()
+        .find(|record| record.id().as_str() == "cleanup:rust-target-facts-bridge")
+        .map(|record| record.id().clone())
+        .expect("claimed Rust-target session should be in cleanup history");
+    let history = fixture.engine.cleanup_session_history(&history_id).unwrap();
+    assert_eq!(
+        history.summary().status(),
+        crate::engine::DurableCleanupSessionStatus::Completed
+    );
+    assert_eq!(
+        history.items()[0].status(),
+        crate::engine::DurableCleanupItemStatus::Removed
+    );
+    fixture.engine.close();
+    assert!(fixture.engine.wait_until_closed(TEST_TIMEOUT));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn rust_target_facts_bridge_rejects_target_drift_before_journal_claim() {
+    let fixture = rust_target_facts_fixture();
+    let facts = fixture.facts;
+    // DUX-DESTRUCTIVE: allow=test-rust-target-facts-target-drift -- mutate only
+    // this temporary fixture's target to prove planner read-set fencing.
+    std::fs::write(
+        fixture.target.join("drift-marker"),
+        b"target changed after review",
+    )
+    .unwrap();
+    let result = fixture.engine.execute_rust_target_plan_facts(
+        facts,
+        rust_target_journal_request(
+            "plan:rust-target-facts-drift",
+            "cleanup:rust-target-facts-drift",
+            current_rust_target_test_time(),
+        ),
+        &|| false,
+    );
+
+    assert!(matches!(
+        result,
+        Err(RustTargetPlanExecutionError::Handoff(_))
+    ));
+    assert!(fixture.payload.exists());
+    assert!(fixture.target.join("CACHEDIR.TAG").exists());
+    assert!(
+        fixture
+            .engine
+            .recent_cleanup_history(None, 64)
+            .unwrap()
+            .records()
+            .iter()
+            .all(|record| record.id().as_str() != "cleanup:rust-target-facts-drift")
+    );
+    fixture.engine.close();
+    assert!(fixture.engine.wait_until_closed(TEST_TIMEOUT));
+}
+
+#[cfg(target_os = "macos")]
 #[test]
 fn direct_cargo_enrollment_is_explicit_engine_bound_revisioned_and_revocable() {
     let first_temp = TempDir::new().unwrap();

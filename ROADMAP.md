@@ -4837,6 +4837,19 @@ Tasks:
     claimed session to the descriptor-relative executor. No caller path,
     callback, AI output, CLI request, FFI value, or UI route can enter this
     bridge; production evaluator acquisition and orchestration remain next.
+  - [x] 2026-07-27 slice: add macOS end-to-end regression coverage for the
+    private facts-to-executor bridge. A temporary, test-owned trusted-rule
+    fixture now traverses durable candidate acquisition, a planner-owned
+    `RustTargetPlanFacts` capability, approval, planned-session persistence,
+    owner/generation-fenced claim, and descriptor-relative execution; the
+    payload is removed, `CACHEDIR.TAG` is retained, and completed history is
+    observed. The production Cargo/home/protected-root/process/descendant grant
+    chain remains covered by its dedicated planner tests. A second fixture
+    mutates the target contents after facts acquisition and proves the handoff
+    rejects the path read-set drift before writing a planned journal row or
+    touching the target. Cargo manifest revalidation remains in the production
+    planner tests. This remains private test evidence: no FFI, Swift, CLI,
+    scheduler, AI, or production cleanup route is enabled.
 - [ ] Implement pre/post capacity verification.
   - [x] 2026-07-19 slice: add a private bounded verifier for cleanup capacity
     witnesses. It requires a stable volume identity, ordered effect window,

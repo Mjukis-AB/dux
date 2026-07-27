@@ -1,5 +1,15 @@
 # Changelog
 
+- Added macOS regression coverage for the private Rust-target facts-to-executor
+  lifecycle. A test-owned trusted-rule fixture proves the complete candidate →
+  planner facts → approval → owner-fenced journal claim → descriptor-relative
+  execution path, including marker preservation and completed history. The
+  production Cargo/home/protected-root/process/descendant grant chain remains
+  covered by dedicated planner tests. Target read-set drift is rejected before
+  journal persistence or filesystem mutation, while Cargo manifest revalidation
+  remains covered by the production planner tests; the bridge remains
+  private and cannot be reached by FFI, Swift, CLI, scheduling, AI, or
+  production UI.
 - Added a read-only Explorer Candidates view backed by the exact snapshot
   review lease. It presents bounded deterministic candidates with category,
   observed size, safety, and status, and exposes only Select/Clear/Dismiss/
