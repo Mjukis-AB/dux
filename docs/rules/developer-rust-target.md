@@ -130,6 +130,10 @@ current-account home/mount, protected-root, process-quiescence, and
 empty-descendant-policy joins. The resulting private promotion token retains
 the unresolved `ProtectedPath` blocker and has no plan, approval, journal, FFI,
 UI, scheduling, AI, or filesystem-effect operation.
+The promotion can now be consumed with its canonical scan-root/target witnesses
+into `RustTargetPlanFacts`; this repeats grant validation but still does not
+create a plan ID, review, approval, journal claim, FFI value, schedule, AI
+request, or effect.
 
 ## Live default-layout witness
 

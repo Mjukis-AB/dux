@@ -121,7 +121,9 @@ use crate::planner::{
     prepare_rust_target_live_input,
 };
 #[cfg(target_os = "macos")]
-use crate::planner::{RustTargetPromotion, prepare_rust_target_promotion};
+use crate::planner::{
+    RustTargetPromotion, prepare_rust_target_plan_facts, prepare_rust_target_promotion,
+};
 use crate::scanner::{
     CancellationToken, ScanConfig, ScanMessage, ScanObjectIdentity, ScanTermination, Scanner,
 };
@@ -1580,6 +1582,31 @@ impl EngineHandle {
             return Err(RustTargetPipelineError::Closed);
         }
         prepare_rust_target_promotion(
+            Arc::clone(&self.inner.store),
+            &self.inner.snapshots,
+            scan_id,
+            candidate_id,
+        )
+    }
+
+    /// Consume the private macOS Rust-target promotion into typed
+    /// permanent-safe plan facts. The facts remain crate-private, retain the
+    /// unresolved `ProtectedPath` candidate blocker, and cannot cross into
+    /// review, approval, journal, FFI, scheduling, AI, or effects here.
+    #[cfg(target_os = "macos")]
+    #[allow(
+        dead_code,
+        reason = "typed Rust-target facts are staged before reviewed-plan/UI orchestration"
+    )]
+    pub(crate) fn prepare_rust_target_plan_facts(
+        &self,
+        scan_id: &ScanId,
+        candidate_id: &CandidateId,
+    ) -> Result<RustTargetPlanFacts, RustTargetPipelineError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(RustTargetPipelineError::Closed);
+        }
+        prepare_rust_target_plan_facts(
             Arc::clone(&self.inner.store),
             &self.inner.snapshots,
             scan_id,

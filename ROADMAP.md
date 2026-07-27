@@ -4930,6 +4930,11 @@ Tasks:
     returns only the non-cloneable Rust-target promotion token, which retains
     the unresolved `ProtectedPath` blocker and still cannot construct a plan,
     approve, claim a journal, cross FFI, schedule, invoke AI, or mutate.
+  - [x] 2026-07-19 slice: consume the private promotion with its retained
+    canonical scan-root/target witnesses into `RustTargetPlanFacts`. The
+    facts capability repeats grant validation and remains path-private and
+    non-cloneable; plan IDs, review, approval, journal, FFI, UI, scheduling,
+    AI, and filesystem effects are still handled only by later boundaries.
 - [ ] Expose review intent, plan lifecycle, and path-free cleanup history through
   FFI/Swift UI without turning history into planner authority.
   - [x] 2026-07-19 slice: add the first app-facing history boundary as a

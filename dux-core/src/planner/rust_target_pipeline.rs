@@ -14,6 +14,7 @@ use thiserror::Error;
 
 use crate::domain::{Candidate, CandidateId, ScanId};
 use crate::path_validation::TrustedHomeMountWitness;
+use crate::path_validation::{CanonicalPathSnapshot, CanonicalScanRoot};
 use crate::persistence::StoreCoordinator;
 use crate::persistence::snapshot::SnapshotRepository;
 
@@ -93,6 +94,25 @@ pub(crate) fn prepare_rust_target_promotion(
     scan_id: &ScanId,
     candidate_id: &CandidateId,
 ) -> Result<RustTargetPromotion, RustTargetPipelineError> {
+    let (promotion, _, _) =
+        prepare_rust_target_promotion_with_witness(store, snapshots, scan_id, candidate_id)?;
+    Ok(promotion)
+}
+
+#[cfg(target_os = "macos")]
+fn prepare_rust_target_promotion_with_witness(
+    store: Arc<StoreCoordinator>,
+    snapshots: &SnapshotRepository,
+    scan_id: &ScanId,
+    candidate_id: &CandidateId,
+) -> Result<
+    (
+        RustTargetPromotion,
+        CanonicalScanRoot,
+        CanonicalPathSnapshot,
+    ),
+    RustTargetPipelineError,
+> {
     let (candidate, live) =
         prepare_rust_target_live_input(store, snapshots, scan_id, candidate_id)?;
     let scan_root = live.scan_root().clone();
@@ -115,6 +135,27 @@ pub(crate) fn prepare_rust_target_promotion(
         candidate.rule(),
     )
     .map_err(RustTargetPipelineError::Authorization)?;
-    admit_rust_target_candidate(candidate, authorization, scan_id, &scan_root, &target)
+    let promotion =
+        admit_rust_target_candidate(candidate, authorization, scan_id, &scan_root, &target)
+            .map_err(RustTargetPipelineError::Promotion)?;
+    Ok((promotion, scan_root, target))
+}
+
+/// Consume the private promotion token into the typed permanent-safe facts
+/// boundary. This repeats grant validation and plan-shape checks while
+/// retaining the original blocked candidate; it still creates no reviewed
+/// plan, approval, journal claim, FFI value, schedule, AI request, or effect.
+#[cfg(target_os = "macos")]
+#[must_use = "Rust-target plan facts must be consumed by the reviewed planner boundary"]
+pub(crate) fn prepare_rust_target_plan_facts(
+    store: Arc<StoreCoordinator>,
+    snapshots: &SnapshotRepository,
+    scan_id: &ScanId,
+    candidate_id: &CandidateId,
+) -> Result<super::rust_target_promotion::RustTargetPlanFacts, RustTargetPipelineError> {
+    let (promotion, scan_root, target) =
+        prepare_rust_target_promotion_with_witness(store, snapshots, scan_id, candidate_id)?;
+    promotion
+        .into_plan_facts(scan_root, target)
         .map_err(RustTargetPipelineError::Promotion)
 }

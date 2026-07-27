@@ -1,5 +1,9 @@
 # Changelog
 
+- Added the private promotion-to-`RustTargetPlanFacts` handoff. It repeats
+  grant validation while retaining canonical scan-root/target witnesses and
+  the unresolved `ProtectedPath` blocker; plan IDs, review, approval, journal,
+  FFI, UI, scheduling, AI, and effects remain outside the boundary.
 - Added the private live-input-to-promotion join for macOS. It consumes
   enrolled-Cargo metadata plus current-account home/mount, protected-root,
   process-quiescence, and empty-descendant-policy evidence, then returns only

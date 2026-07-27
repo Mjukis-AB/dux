@@ -1215,6 +1215,10 @@ subsequent private authority join consumes that witness through enrolled Cargo
 metadata, current-account home/mount, protected-root, process-quiescence, and
 empty-descendant-policy evidence, returning only a non-cloneable promotion
 token that retains `ProtectedPath` and still cannot form a plan or effect. A
+private facts handoff now consumes that token with its canonical scan-root and
+target witnesses, repeats grant validation, and retains the unresolved blocker
+without creating a plan ID, review, approval, journal claim, or external
+authority. A
 crate-private engine bridge now accepts only the non-cloneable approved
 session, selects that driver, and proves journal settlement and cleanup history
 in a project-local fixture. A private session orchestrator now consumes the
