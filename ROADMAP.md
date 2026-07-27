@@ -4924,6 +4924,12 @@ Tasks:
     witness. The EngineHandle entry point is crate-private and stops before
     Cargo/protected-root grants, plans, approval, journal, FFI, UI, scheduling,
     AI, or effects.
+  - [x] 2026-07-19 slice: consume that live input through the enrolled-Cargo
+    metadata, current-account home/mount, protected-root, process-quiescence,
+    and empty-descendant-policy boundaries. The private EngineHandle join
+    returns only the non-cloneable Rust-target promotion token, which retains
+    the unresolved `ProtectedPath` blocker and still cannot construct a plan,
+    approve, claim a journal, cross FFI, schedule, invoke AI, or mutate.
 - [ ] Expose review intent, plan lifecycle, and path-free cleanup history through
   FFI/Swift UI without turning history into planner authority.
   - [x] 2026-07-19 slice: add the first app-facing history boundary as a

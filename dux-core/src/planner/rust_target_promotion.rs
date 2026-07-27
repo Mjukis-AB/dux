@@ -29,7 +29,7 @@ const RUST_TARGET_RULE: &str = "developer.rust.target";
 const RUST_TARGET_REVISION: u32 = 2;
 
 #[must_use = "the private Rust-target promotion must be consumed by a later planner boundary"]
-pub(super) struct RustTargetPromotion {
+pub(crate) struct RustTargetPromotion {
     candidate: Candidate,
     authorization: RuleScopeAuthorization,
 }

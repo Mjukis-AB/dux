@@ -47,10 +47,12 @@ pub(crate) use rule_scope_grant::authorize_rule_target;
 pub(crate) use rust_target::{RustTargetEffectWitness, RustTargetLiveWitness};
 #[cfg(test)]
 pub(crate) use rust_target::{RustTargetLiveValidationError, validate_rust_target_effect};
+#[cfg(target_os = "macos")]
+pub(crate) use rust_target_pipeline::prepare_rust_target_promotion;
 #[cfg(unix)]
 pub(crate) use rust_target_pipeline::{RustTargetPipelineError, prepare_rust_target_live_input};
 #[cfg(unix)]
-pub(crate) use rust_target_promotion::RustTargetPlanFacts;
+pub(crate) use rust_target_promotion::{RustTargetPlanFacts, RustTargetPromotion};
 
 #[cfg(target_os = "macos")]
 pub(crate) use rust_target_cargo::{

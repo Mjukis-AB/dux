@@ -125,6 +125,12 @@ candidate. The EngineHandle entry point remains crate-private and stops before
 Cargo/protected-root grants, plans, approval, journal, FFI, UI, scheduling,
 AI, or effects.
 
+That live input can now be consumed by the enrolled-Cargo metadata,
+current-account home/mount, protected-root, process-quiescence, and
+empty-descendant-policy joins. The resulting private promotion token retains
+the unresolved `ProtectedPath` blocker and has no plan, approval, journal, FFI,
+UI, scheduling, AI, or filesystem-effect operation.
+
 ## Live default-layout witness
 
 A later 2026-07-18 checkpoint adds a sealed, crate-private Unix planner witness

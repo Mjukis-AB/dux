@@ -120,6 +120,8 @@ use crate::planner::{
     RustTargetPipelineError, RustTargetPlanFacts, begin_rust_target_cleanup_session,
     prepare_rust_target_live_input,
 };
+#[cfg(target_os = "macos")]
+use crate::planner::{RustTargetPromotion, prepare_rust_target_promotion};
 use crate::scanner::{
     CancellationToken, ScanConfig, ScanMessage, ScanObjectIdentity, ScanTermination, Scanner,
 };
@@ -1553,6 +1555,31 @@ impl EngineHandle {
             return Err(RustTargetPipelineError::Closed);
         }
         prepare_rust_target_live_input(
+            Arc::clone(&self.inner.store),
+            &self.inner.snapshots,
+            scan_id,
+            candidate_id,
+        )
+    }
+
+    /// Join the private live Rust-target input to enrolled Cargo and trusted
+    /// rule-scope evidence. The returned token still retains `ProtectedPath`
+    /// and cannot construct a plan, claim a journal, cross FFI, schedule, or
+    /// perform an effect.
+    #[cfg(target_os = "macos")]
+    #[allow(
+        dead_code,
+        reason = "production Rust-target authority join is staged before plan/UI orchestration"
+    )]
+    pub(crate) fn prepare_rust_target_promotion(
+        &self,
+        scan_id: &ScanId,
+        candidate_id: &CandidateId,
+    ) -> Result<RustTargetPromotion, RustTargetPipelineError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(RustTargetPipelineError::Closed);
+        }
+        prepare_rust_target_promotion(
             Arc::clone(&self.inner.store),
             &self.inner.snapshots,
             scan_id,

@@ -1,5 +1,10 @@
 # Changelog
 
+- Added the private live-input-to-promotion join for macOS. It consumes
+  enrolled-Cargo metadata plus current-account home/mount, protected-root,
+  process-quiescence, and empty-descendant-policy evidence, then returns only
+  a non-cloneable promotion token that retains `ProtectedPath`; plans,
+  approvals, journals, FFI, UI, scheduling, AI, and effects remain closed.
 - Added the first private production-core evaluator-to-planner pipeline for
   the staged Rust-target rule. It acquires only an exact succeeded
   scan/evaluation source, rehydrates the domain candidate from the current
