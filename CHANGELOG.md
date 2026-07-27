@@ -9,6 +9,10 @@
   consumes promotion only after immediate grant revalidation and retains the
   original blocked candidate plus canonical scan-root/target witnesses; no
   plan, approval, journal, FFI, schedule, or effect authority is exposed.
+- Added a private facts-to-plan join that constructs a permanent-safe domain
+  plan only from `RustTargetPlanFacts`, repeats mode/source/overlap/byte
+  validation, and returns the retained authorization alongside the plan. It is
+  not yet connected to review, approval, journal, FFI, scheduling, or effects.
 - Promoted current-account home/mount and protected-root observations into
   private revisioned planner grants with stable rule-boundary keys. Grants
   revalidate exact policy, volume, and target evidence while `ProtectedPath`

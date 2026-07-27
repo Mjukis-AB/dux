@@ -128,6 +128,22 @@ fn plan(mode: CleanupMode, candidates: &[Candidate]) -> CleanupPlan {
     .unwrap()
 }
 
+fn trusted_facts(candidate: &Candidate) -> CleanupPlanCandidateFacts {
+    CleanupPlanCandidateFacts {
+        candidate_id: candidate.id().clone(),
+        source_scan_id: candidate.source_scan_id().clone(),
+        rule: candidate.rule().clone(),
+        category: candidate.category(),
+        paths: candidate.paths().to_vec(),
+        estimated_bytes: candidate.estimated_bytes(),
+        newest_mtime: candidate.newest_mtime(),
+        evidence: candidate.evidence().to_vec(),
+        safety: candidate.safety(),
+        action: candidate.action(),
+        rule_schedule_eligible: candidate.rule_marks_schedule_eligible(),
+    }
+}
+
 #[test]
 fn explorer_trash_selection_plan_is_fixed_review_only_and_path_bound() {
     let plan = CleanupPlan::try_from_trash_selection(
@@ -216,6 +232,64 @@ fn plan_freezes_candidate_facts_totals_and_expiration() {
     assert_eq!(
         item.rule_marks_schedule_eligible(),
         first.rule_marks_schedule_eligible()
+    );
+}
+
+#[test]
+fn trusted_candidate_facts_construct_the_same_bounded_plan_shape() {
+    let candidate = regenerable("candidate:trusted-facts", "/fixture/trusted", 321);
+    let plan = CleanupPlan::try_from_trusted_candidate_facts(
+        CleanupPlanId::new("plan:trusted-facts").unwrap(),
+        UNIX_EPOCH + Duration::from_secs(100),
+        CleanupMode::PermanentSafe,
+        &[trusted_facts(&candidate)],
+    )
+    .unwrap();
+
+    assert_eq!(plan.source_scan_id(), candidate.source_scan_id());
+    assert_eq!(plan.estimated_bytes(), candidate.estimated_bytes());
+    assert_eq!(plan.items().len(), 1);
+    assert_eq!(plan.items()[0].candidate_id(), candidate.id());
+    assert_eq!(plan.items()[0].paths(), candidate.paths());
+    assert_eq!(plan.items()[0].evidence(), candidate.evidence());
+    assert!(
+        plan.warnings()
+            .contains(&PlanWarning::PermanentRemovalCannotBeUndone)
+    );
+}
+
+#[test]
+fn trusted_candidate_facts_repeat_mode_and_overlap_validation() {
+    let first = regenerable("candidate:trusted-first", "/fixture/parent", 1);
+    let second = regenerable("candidate:trusted-second", "/fixture/parent/child", 1);
+    assert_eq!(
+        CleanupPlan::try_from_trusted_candidate_facts(
+            CleanupPlanId::new("plan:trusted-overlap").unwrap(),
+            UNIX_EPOCH,
+            CleanupMode::Trash,
+            &[trusted_facts(&first)],
+        )
+        .unwrap_err(),
+        CleanupPlanValidationError::IncompatibleMode {
+            candidate_index: 0,
+            mode: CleanupMode::Trash,
+            action: CandidateAction::RemoveKnownRegenerableContents,
+        }
+    );
+    assert_eq!(
+        CleanupPlan::try_from_trusted_candidate_facts(
+            CleanupPlanId::new("plan:trusted-overlap").unwrap(),
+            UNIX_EPOCH,
+            CleanupMode::PermanentSafe,
+            &[trusted_facts(&first), trusted_facts(&second)],
+        )
+        .unwrap_err(),
+        CleanupPlanValidationError::OverlappingPaths {
+            first_candidate_index: 0,
+            first_path_index: 0,
+            second_candidate_index: 1,
+            second_path_index: 0,
+        }
     );
 }
 

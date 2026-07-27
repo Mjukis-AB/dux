@@ -17,8 +17,9 @@
 use thiserror::Error;
 
 use crate::domain::{
-    BlockReason, Candidate, CandidateAction, CandidateCategory, Evidence, SafetyTier, ScanId,
-    current_rust_target_candidate_id,
+    BlockReason, Candidate, CandidateAction, CandidateCategory, CleanupMode, CleanupPlan,
+    CleanupPlanCandidateFacts, CleanupPlanId, CleanupPlanValidationError, Evidence, SafetyTier,
+    ScanId, current_rust_target_candidate_id,
 };
 use crate::path_validation::{CanonicalPathSnapshot, CanonicalScanRoot};
 
@@ -62,6 +63,10 @@ pub(super) enum RustTargetPromotionError {
     TargetMismatch,
     #[error("trusted Rust-target authorization failed: {0}")]
     Authorization(#[source] RuleScopeGrantError),
+    #[error("trusted Rust-target plan construction failed: {0}")]
+    Plan(#[source] CleanupPlanValidationError),
+    #[error("Rust-target plan facts require permanent-safe mode")]
+    UnsupportedPlanMode,
 }
 
 /// Admit one exact durable candidate only after the code-owned authorization
@@ -186,6 +191,50 @@ impl RustTargetPromotion {
 }
 
 impl RustTargetPlanFacts {
+    /// Consume typed facts into the first domain cleanup plan representation.
+    /// The returned authorization remains paired with the plan for the later
+    /// reviewed/approved executor handoff; this method still performs no
+    /// journal write, FFI call, scheduling, or filesystem effect.
+    pub(super) fn into_trusted_permanent_plan(
+        self,
+        plan_id: CleanupPlanId,
+        created_at: std::time::SystemTime,
+        mode: CleanupMode,
+    ) -> Result<(CleanupPlan, RuleScopeAuthorization), RustTargetPromotionError> {
+        if mode != CleanupMode::PermanentSafe {
+            return Err(RustTargetPromotionError::UnsupportedPlanMode);
+        }
+        self.revalidate()?;
+        let RustTargetPlanFacts {
+            promotion:
+                RustTargetPromotion {
+                    candidate,
+                    authorization,
+                },
+            ..
+        } = self;
+        if candidate.blockers() != [BlockReason::ProtectedPath] {
+            return Err(RustTargetPromotionError::ProtectedPathBlocker);
+        }
+        let facts = CleanupPlanCandidateFacts {
+            candidate_id: candidate.id().clone(),
+            source_scan_id: candidate.source_scan_id().clone(),
+            rule: candidate.rule().clone(),
+            category: candidate.category(),
+            paths: candidate.paths().to_vec(),
+            estimated_bytes: candidate.estimated_bytes(),
+            newest_mtime: candidate.newest_mtime(),
+            evidence: candidate.evidence().to_vec(),
+            safety: candidate.safety(),
+            action: candidate.action(),
+            rule_schedule_eligible: candidate.rule_marks_schedule_eligible(),
+        };
+        let plan =
+            CleanupPlan::try_from_trusted_candidate_facts(plan_id, created_at, mode, &[facts])
+                .map_err(RustTargetPromotionError::Plan)?;
+        Ok((plan, authorization))
+    }
+
     pub(super) fn revalidate(&self) -> Result<(), RustTargetPromotionError> {
         self.promotion
             .revalidate(&self.scan_root, &self.target)

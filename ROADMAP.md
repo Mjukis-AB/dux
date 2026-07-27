@@ -4569,9 +4569,13 @@ Tasks:
       only after immediate grant revalidation and retains the canonical
       scan-root/target witnesses for the next boundary. It still exposes only
       private revalidation/release; generic exact review and `CleanupPlan`
-      continue to reject blocked candidates. The next slice must define the
-      typed plan-facts-to-plan join without exposing blocker removal as a
-      caller-controlled operation.
+      continue to reject blocked candidates. A private facts-to-plan join now
+      constructs a permanent-safe domain plan only from that typed capability,
+      re-running mode, duplicate, source-scan, overlap, and byte validation
+      while returning the authorization alongside the plan. It still performs
+      no journal, approval, FFI, scheduling, or effect operation. The next
+      slice must wire this pair into exact review/approval without allowing
+      arbitrary callers to supply plan facts.
 - [x] Implement candidate groups and overlap resolution. Completed 2026-07-19:
   deterministic grouping and conservative overlap resolution are now consumed
   by exact-path review. Equivalent observations coalesce by stable candidate

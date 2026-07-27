@@ -44,6 +44,7 @@ pub(crate) use candidate_evaluator::{
     evaluate_completed_scan_candidates, replay_snapshot_candidate_evaluation,
     validate_bundled_candidate_catalog, verify_snapshot_candidate_evaluation,
 };
+pub(crate) use cleanup_plan::CleanupPlanCandidateFacts;
 pub use cleanup_plan::{
     CLEANUP_PLAN_VALIDITY, CleanupMode, CleanupPlan, CleanupPlanItem, CleanupPlanValidationError,
     OperationStatus, PlanWarning,

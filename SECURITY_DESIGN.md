@@ -687,7 +687,12 @@ mutate. The promotion token can now be consumed into a private
 the facts retain the original blocked candidate and canonical scan-root/target
 witnesses. This capability still has no plan, approval, journal, FFI,
 scheduling, or effect API. The next join must construct plan facts through a
-typed authority boundary rather than a caller-controlled blocker flag.
+typed authority boundary rather than a caller-controlled blocker flag. That
+boundary now builds the permanent-safe domain plan from an internal facts
+projection and returns the retained authorization as a pair; it repeats mode,
+duplicate, source-scan, overlap, and byte validation. It remains disconnected
+from exact review, approval, journal, FFI, scheduling, and effects until the
+next orchestration join.
 
 ### 6.3 Protected-root and sensitive-category policy
 

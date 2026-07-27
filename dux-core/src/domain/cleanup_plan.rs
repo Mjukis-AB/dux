@@ -44,6 +44,25 @@ pub struct CleanupPlanItem {
     rule_schedule_eligible: bool,
 }
 
+/// Internal planner projection for a candidate whose authority was already
+/// joined by a typed, crate-private facts capability. It intentionally has no
+/// blocker field: callers cannot construct this projection from a raw
+/// `Candidate`; only the planner facts boundary can produce it.
+#[derive(Debug)]
+pub(crate) struct CleanupPlanCandidateFacts {
+    pub(crate) candidate_id: CandidateId,
+    pub(crate) source_scan_id: ScanId,
+    pub(crate) rule: RuleRef,
+    pub(crate) category: CandidateCategory,
+    pub(crate) paths: Vec<PathBuf>,
+    pub(crate) estimated_bytes: u64,
+    pub(crate) newest_mtime: Option<SystemTime>,
+    pub(crate) evidence: Vec<Evidence>,
+    pub(crate) safety: SafetyTier,
+    pub(crate) action: CandidateAction,
+    pub(crate) rule_schedule_eligible: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CleanupMode {
     DryRun,
@@ -118,6 +137,67 @@ pub enum CleanupPlanValidationError {
 }
 
 impl CleanupPlan {
+    /// Construct a plan from a typed planner projection. This boundary repeats
+    /// all plan-shape validation but accepts no raw candidate or blocker flag.
+    /// The projection type is crate-private and is produced only by the
+    /// planner's trusted facts capability.
+    pub(crate) fn try_from_trusted_candidate_facts(
+        id: CleanupPlanId,
+        created_at: SystemTime,
+        mode: CleanupMode,
+        facts: &[CleanupPlanCandidateFacts],
+    ) -> Result<Self, CleanupPlanValidationError> {
+        let Some(first) = facts.first() else {
+            return Err(CleanupPlanValidationError::MissingCandidates);
+        };
+        let expires_at = created_at
+            .checked_add(CLEANUP_PLAN_VALIDITY)
+            .ok_or(CleanupPlanValidationError::ExpirationOverflow)?;
+        let source_scan_id = first.source_scan_id.clone();
+        let mut first_seen = HashMap::<&CandidateId, usize>::new();
+        let mut estimated_bytes = 0_u64;
+        for (candidate_index, fact) in facts.iter().enumerate() {
+            if let Some(first_index) = first_seen.insert(&fact.candidate_id, candidate_index) {
+                return Err(CleanupPlanValidationError::DuplicateCandidate {
+                    first_index,
+                    duplicate_index: candidate_index,
+                });
+            }
+            if fact.source_scan_id != source_scan_id {
+                return Err(CleanupPlanValidationError::MixedSourceScans {
+                    first_index: 0,
+                    conflicting_index: candidate_index,
+                });
+            }
+            if !fact.action.is_cleanup_operation() {
+                return Err(CleanupPlanValidationError::NonCleanupCandidate { candidate_index });
+            }
+            if !mode_accepts(mode, fact.safety, fact.action) {
+                return Err(CleanupPlanValidationError::IncompatibleMode {
+                    candidate_index,
+                    mode,
+                    action: fact.action,
+                });
+            }
+            estimated_bytes = estimated_bytes
+                .checked_add(fact.estimated_bytes)
+                .ok_or(CleanupPlanValidationError::EstimatedBytesOverflow)?;
+        }
+        reject_fact_path_overlaps(facts)?;
+        let warnings = derive_fact_warnings(mode, facts);
+        let items = facts.iter().map(CleanupPlanItem::from_facts).collect();
+        Ok(Self {
+            id,
+            created_at,
+            source_scan_id,
+            mode,
+            items,
+            estimated_bytes,
+            warnings,
+            expires_at,
+        })
+    }
+
     /// Freeze candidate facts for a future reviewed planner.
     ///
     /// This intentionally remains private: candidates do not yet carry the
@@ -318,6 +398,21 @@ impl CleanupPlanItem {
         }
     }
 
+    fn from_facts(facts: &CleanupPlanCandidateFacts) -> Self {
+        Self {
+            candidate_id: facts.candidate_id.clone(),
+            rule: facts.rule.clone(),
+            category: facts.category,
+            paths: facts.paths.clone(),
+            estimated_bytes: facts.estimated_bytes,
+            newest_mtime: facts.newest_mtime,
+            evidence: facts.evidence.clone(),
+            safety: facts.safety,
+            action: facts.action,
+            rule_schedule_eligible: facts.rule_schedule_eligible,
+        }
+    }
+
     pub fn candidate_id(&self) -> &CandidateId {
         &self.candidate_id
     }
@@ -404,6 +499,35 @@ fn reject_path_overlaps(candidates: &[Candidate]) -> Result<(), CleanupPlanValid
     Ok(())
 }
 
+fn reject_fact_path_overlaps(
+    facts: &[CleanupPlanCandidateFacts],
+) -> Result<(), CleanupPlanValidationError> {
+    let mut paths = facts
+        .iter()
+        .enumerate()
+        .flat_map(|(candidate_index, fact)| {
+            fact.paths
+                .iter()
+                .enumerate()
+                .map(move |(path_index, path)| (path.as_path(), candidate_index, path_index))
+        })
+        .collect::<Vec<_>>();
+    paths.sort_unstable_by(|left, right| left.0.cmp(right.0));
+    for pair in paths.windows(2) {
+        let (first_path, first_candidate_index, first_path_index) = pair[0];
+        let (second_path, second_candidate_index, second_path_index) = pair[1];
+        if paths_overlap(first_path, second_path) {
+            return Err(CleanupPlanValidationError::OverlappingPaths {
+                first_candidate_index,
+                first_path_index,
+                second_candidate_index,
+                second_path_index,
+            });
+        }
+    }
+    Ok(())
+}
+
 fn paths_overlap(first: &Path, second: &Path) -> bool {
     first == second || first.starts_with(second) || second.starts_with(first)
 }
@@ -422,6 +546,34 @@ fn derive_warnings(mode: CleanupMode, candidates: &[Candidate]) -> Vec<PlanWarni
     let warn_eviction = mode == CleanupMode::EvictLocalCopy
         || (dry_run && has_action(CandidateAction::EvictLocalCopy));
 
+    let mut warnings = vec![PlanWarning::EstimatedBytesUnverified];
+    if dry_run {
+        warnings.push(PlanWarning::DryRunDoesNotMutate);
+    }
+    if warn_trash {
+        warnings.push(PlanWarning::TrashDoesNotFreeSpaceImmediately);
+    }
+    if warn_permanent {
+        warnings.push(PlanWarning::PermanentRemovalCannotBeUndone);
+    }
+    if warn_eviction {
+        warnings.push(PlanWarning::CloudEvictionRequiresNetworkToRedownload);
+    }
+    warnings
+}
+
+fn derive_fact_warnings(
+    mode: CleanupMode,
+    facts: &[CleanupPlanCandidateFacts],
+) -> Vec<PlanWarning> {
+    let dry_run = mode == CleanupMode::DryRun;
+    let has_action = |action| facts.iter().any(|fact| fact.action == action);
+    let warn_trash =
+        mode == CleanupMode::Trash || (dry_run && has_action(CandidateAction::MoveToTrash));
+    let warn_permanent = mode == CleanupMode::PermanentSafe
+        || (dry_run && has_action(CandidateAction::RemoveKnownRegenerableContents));
+    let warn_eviction = mode == CleanupMode::EvictLocalCopy
+        || (dry_run && has_action(CandidateAction::EvictLocalCopy));
     let mut warnings = vec![PlanWarning::EstimatedBytesUnverified];
     if dry_run {
         warnings.push(PlanWarning::DryRunDoesNotMutate);

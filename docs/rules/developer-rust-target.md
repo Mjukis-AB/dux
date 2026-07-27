@@ -101,6 +101,9 @@ consumed into a private `RustTargetPlanFacts` capability after immediate grant
 revalidation; it retains the blocked candidate and canonical scan-root/target
 witnesses and still cannot construct a cleanup plan. The next boundary must
 join these typed facts to a plan without exposing blocker removal to callers.
+That private facts-to-plan join now produces a permanent-safe domain plan plus
+the retained authorization after repeating plan-shape validation. It is not
+yet wired to exact review, approval, journal, scheduling, FFI, or effects.
 
 ## Live default-layout witness
 
