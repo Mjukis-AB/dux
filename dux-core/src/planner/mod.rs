@@ -38,11 +38,15 @@ pub(crate) use exact_path_review::ExactPathApprovalError;
 #[cfg(test)]
 pub(crate) use exact_path_review::review_exact_paths;
 pub(crate) use exact_path_review::{ApprovedCleanupSession, ExactPathHandoffError};
+#[cfg(unix)]
+pub(crate) use exact_path_review::{RustTargetJournalRequest, begin_rust_target_cleanup_session};
 #[cfg(test)]
 pub(crate) use rule_scope_grant::authorize_rule_target;
 pub(crate) use rust_target::RustTargetEffectWitness;
 #[cfg(test)]
 pub(crate) use rust_target::{RustTargetLiveValidationError, validate_rust_target_effect};
+#[cfg(unix)]
+pub(crate) use rust_target_promotion::RustTargetPlanFacts;
 
 #[cfg(target_os = "macos")]
 pub(crate) use rust_target_cargo::{

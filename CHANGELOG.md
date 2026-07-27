@@ -1,5 +1,11 @@
 # Changelog
 
+- Added the private Rust-target facts-to-executor bridge. It performs the
+  final open-engine check, uses the canonical approved-plan/journal handoff,
+  and passes only the non-cloneable claimed session to the existing
+  descriptor-relative permanent-safe executor. No paths, callbacks, AI/CLI
+  input, FFI values, or UI route can reach it; production orchestration remains
+  gated.
 - Added a private Rust-target promotion checkpoint that binds the blocked
   candidate to the full retained durable discovery body and a revalidated
   Cargo/home/protected-rule grant. The non-Clone token remains non-actionable:

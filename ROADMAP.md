@@ -4822,6 +4822,13 @@ Tasks:
     non-cloneable session containing the approved capability and journal claim.
     It exposes no path, callback, FFI, schedule, or filesystem effect; the
     permanent-safe executor and terminal transitions remain open.
+  - [x] 2026-07-19 slice: bridge the typed Rust-target facts and journal
+    request into the existing private permanent-safe session executor. The
+    engine performs the final open-lifecycle check, claims the planned session
+    through the canonical journal handoff, and passes only that non-cloneable
+    claimed session to the descriptor-relative executor. No caller path,
+    callback, AI output, CLI request, FFI value, or UI route can enter this
+    bridge; production evaluator acquisition and orchestration remain next.
 - [ ] Implement pre/post capacity verification.
   - [x] 2026-07-19 slice: add a private bounded verifier for cleanup capacity
     witnesses. It requires a stable volume identity, ordered effect window,

@@ -629,13 +629,6 @@ pub(crate) struct RustTargetJournalRequest {
 }
 
 #[cfg(unix)]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Rust-target journal handoff is consumed by the next executor orchestration slice"
-    )
-)]
 pub(crate) fn begin_rust_target_cleanup_session(
     facts: RustTargetPlanFacts,
     request: RustTargetJournalRequest,

@@ -7,6 +7,8 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use thiserror::Error;
+
 use super::candidate_history::{
     CandidateDetailError, CandidateReviewCommand, CandidateReviewError, CandidateReviewResult,
     DurableCandidateEvidence, DurableCandidateEvidenceItem, DurableCandidateEvidencePage,
@@ -112,6 +114,11 @@ use crate::persistence::{
 use crate::persistence::{CleanupTrigger, NewCleanupSessionRecord, StoredCandidateRecord};
 use crate::persistence::{DatabaseStatus, StoreCoordinator};
 use crate::planner::ApprovedCleanupSession;
+#[cfg(unix)]
+use crate::planner::{
+    ExactPathHandoffError, RustTargetJournalRequest, RustTargetPlanFacts,
+    begin_rust_target_cleanup_session,
+};
 use crate::scanner::{
     CancellationToken, ScanConfig, ScanMessage, ScanObjectIdentity, ScanTermination, Scanner,
 };
@@ -761,6 +768,19 @@ impl Drop for EngineInner {
 #[derive(Clone)]
 pub struct EngineHandle {
     inner: Arc<EngineInner>,
+}
+
+#[cfg(unix)]
+#[derive(Debug, Error)]
+#[allow(
+    dead_code,
+    reason = "the private Rust-target planner-to-executor bridge is staged before UI orchestration"
+)]
+pub(crate) enum RustTargetPlanExecutionError {
+    #[error("Rust-target planner/journal handoff failed: {0}")]
+    Handoff(#[source] ExactPathHandoffError),
+    #[error("Rust-target execution failed: {0}")]
+    Execution(#[source] PermanentSafeExecutionError),
 }
 
 impl EngineHandle {
@@ -1483,6 +1503,35 @@ impl EngineHandle {
         }
         let mut driver = DescriptorRelativePermanentSafeDriver;
         execute_rust_target_session(session, now, &mut driver, cancelled)
+    }
+
+    /// Consume the private Rust-target facts and journal request through the
+    /// same claimed-session executor used by every permanent-safe effect.
+    ///
+    /// This remains crate-private: callers cannot provide paths, callbacks,
+    /// AI output, FFI values, or CLI requests. The journal handoff owns the
+    /// final plan/authorization checks; the executor owns descriptor-relative
+    /// identity checks, effect receipts, cancellation, and terminalization.
+    #[cfg(unix)]
+    #[allow(
+        dead_code,
+        reason = "the Rust-target facts-to-executor bridge is staged before FFI/UI orchestration"
+    )]
+    pub(crate) fn execute_rust_target_plan_facts(
+        &self,
+        facts: RustTargetPlanFacts,
+        request: RustTargetJournalRequest,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<PermanentSafeSessionSummary, RustTargetPlanExecutionError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(RustTargetPlanExecutionError::Execution(
+                PermanentSafeExecutionError::Admission(HistoryErrorKind::InvalidTransition),
+            ));
+        }
+        let mut session = begin_rust_target_cleanup_session(facts, request, &self.inner.store)
+            .map_err(RustTargetPlanExecutionError::Handoff)?;
+        self.execute_approved_permanent_safe_session(&mut session, SystemTime::now(), cancelled)
+            .map_err(RustTargetPlanExecutionError::Execution)
     }
 
     /// Private capacity-aware variant used by the future core-owned volume

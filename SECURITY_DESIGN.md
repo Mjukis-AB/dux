@@ -1219,7 +1219,11 @@ phase; after the validation transition, a terminal prefix is allowed but the
 exact target must be `validating` and every later path must remain `planned`.
 A sub-millisecond start-time mismatch is canonicalized before persistence and
 claiming. This bridge is not exported through FFI, not registered with Swift,
-and has no production caller. Its optional private capacity-aware variant
+and has no production caller. The typed Rust-target facts and journal request
+now have one additional crate-private engine bridge into this same executor;
+it accepts no paths, callbacks, AI output, CLI request, FFI value, or UI input,
+and performs no effect outside the already-claimed session capability. Its
+optional private capacity-aware variant
 captures one pre-effect and one post-settlement observation through a
 core-owned sampler; only matching stable-volume, timing, total-capacity,
 headline-source, and availability-shape evidence can persist a signed

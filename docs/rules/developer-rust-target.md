@@ -111,7 +111,11 @@ The private handoff can also pass through the existing expiry-checked approval
 capability, which revalidates the plan and grant again while remaining before
 journal, FFI, scheduling, and effects. The approved private handoff can now
 persist and claim the planned session through the existing owner/generation
-fence with canonical timestamps, but it still cannot start an executor effect.
+fence with canonical timestamps. The engine now consumes that claimed session
+through the existing descriptor-relative executor, including its journal,
+identity, cancellation, and terminalization fences. This bridge remains
+crate-private and has no production evaluator, FFI, UI, scheduler, AI, or CLI
+caller.
 
 ## Live default-layout witness
 
