@@ -1,5 +1,12 @@
 # Changelog
 
+- Added the first private production-core evaluator-to-planner pipeline for
+  the staged Rust-target rule. It acquires only an exact succeeded
+  scan/evaluation source, rehydrates the domain candidate from the current
+  bundled catalog, compares every immutable body field with durable history,
+  and returns a lease-backed live witness plus candidate. It stops before
+  Cargo/protected-root grants, plans, approval, journal, FFI, UI, scheduling,
+  AI, or effects.
 - Added the private Rust-target facts-to-executor bridge. It performs the
   final open-engine check, uses the canonical approved-plan/journal handoff,
   and passes only the non-cloneable claimed session to the existing

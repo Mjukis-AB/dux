@@ -40,9 +40,10 @@ pub(crate) use candidate_evaluator::{
     CANDIDATE_CATALOG_SCHEMA_VERSION, CANDIDATE_CATALOG_SHA256, CANDIDATE_CONTEXT_FORMAT_VERSION,
     CANDIDATE_EVALUATOR_REVISION, CandidateEvaluationError, CandidateSnapshotReplayError,
     MAX_EVALUATED_CANDIDATES, candidate_evaluation_context_digest_for_observation,
-    candidate_evaluation_context_digest_sha256, current_rust_target_candidate_id,
-    evaluate_completed_scan_candidates, replay_snapshot_candidate_evaluation,
-    validate_bundled_candidate_catalog, verify_snapshot_candidate_evaluation,
+    candidate_evaluation_context_digest_sha256, candidate_from_complete_record,
+    current_rust_target_candidate_id, evaluate_completed_scan_candidates,
+    replay_snapshot_candidate_evaluation, validate_bundled_candidate_catalog,
+    verify_snapshot_candidate_evaluation,
 };
 pub(crate) use cleanup_plan::CleanupPlanCandidateFacts;
 pub use cleanup_plan::{

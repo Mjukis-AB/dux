@@ -8,7 +8,7 @@ use thiserror::Error;
 
 #[cfg(unix)]
 use crate::domain::verify_snapshot_candidate_evaluation;
-use crate::domain::{CandidateId, ScanId};
+use crate::domain::{Candidate, CandidateId, ScanId, candidate_from_complete_record};
 #[cfg(unix)]
 use crate::persistence::snapshot::{
     HostValue, SnapshotNode, SnapshotNodeKind, SnapshotReviewDocument,
@@ -211,6 +211,14 @@ impl RustTargetDurableSource {
 
     pub(super) fn candidate(&self) -> &CompleteCandidateRecord {
         self.record.candidate()
+    }
+
+    /// Rehydrate the exact domain candidate for the next planner join. The
+    /// current bundled catalog supplies policy fields; the helper compares
+    /// every immutable body field back to this source's retained record.
+    pub(crate) fn candidate_for_promotion(&self) -> Result<Candidate, RustTargetSourceError> {
+        candidate_from_complete_record(self.candidate())
+            .map_err(|_| RustTargetSourceError::CandidateMismatch)
     }
 
     pub(super) fn bindings(&self) -> RustTargetSnapshotBindings {

@@ -18,6 +18,7 @@ use super::{
     CandidateValidationError, Evidence, Rule, RuleId, RuleScope, SafetyTier, ScanCoverage,
     ScanCoverageStatus, ScanId,
 };
+use crate::persistence::CompleteCandidateRecord;
 use crate::projection::{
     ArtifactKind, BuildArtifactEntry, StaleThreshold, project_build_artifacts_bounded_at,
 };
@@ -506,6 +507,49 @@ pub(crate) fn current_rust_target_candidate_id(
         .ok_or(CandidateEvaluationError::InvalidBundledCatalog)?;
     let rule = rule_for(catalog, binding)?;
     Ok(candidate_id(source_scan_id, rule, &native_path_bytes(path)))
+}
+
+/// Rehydrate one domain candidate from a complete durable record only after
+/// the current bundled rule catalog has been loaded. Every immutable field is
+/// compared back to the record so history cannot smuggle policy-shaped data
+/// into the planner when the catalog or storage has drifted.
+pub(crate) fn candidate_from_complete_record(
+    record: &CompleteCandidateRecord,
+) -> Result<Candidate, CandidateEvaluationError> {
+    let catalog = load_and_validate_catalog()?;
+    let rule = catalog
+        .get(record.rule().id())
+        .ok_or(CandidateEvaluationError::InvalidBundledCatalog)?;
+    if rule.reference() != record.rule() {
+        return Err(CandidateEvaluationError::InvalidArtifactProjection);
+    }
+    let candidate = Candidate::try_from_rule(
+        rule,
+        CandidateInput::new(
+            record.id().clone(),
+            record.paths().to_vec(),
+            record.estimated_bytes(),
+            record.newest_mtime(),
+            record.evidence().to_vec(),
+            record.blockers().to_vec(),
+            record.source_scan_id().clone(),
+        ),
+    )?;
+    let matches = candidate.id() == record.id()
+        && candidate.source_scan_id() == record.source_scan_id()
+        && candidate.rule() == record.rule()
+        && candidate.category() == record.category()
+        && candidate.paths() == record.paths()
+        && candidate.estimated_bytes() == record.estimated_bytes()
+        && candidate.newest_mtime() == record.newest_mtime()
+        && candidate.evidence() == record.evidence()
+        && candidate.safety() == record.safety()
+        && candidate.action() == record.action()
+        && candidate.rule_marks_schedule_eligible() == record.rule_schedule_eligible()
+        && candidate.blockers() == record.blockers();
+    matches
+        .then_some(candidate)
+        .ok_or(CandidateEvaluationError::InvalidArtifactProjection)
 }
 
 const fn coverage_status_rank(status: ScanCoverageStatus) -> u8 {

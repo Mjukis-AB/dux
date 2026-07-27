@@ -30,6 +30,8 @@ mod rust_target;
 #[cfg(unix)]
 mod rust_target_cargo;
 #[cfg(unix)]
+mod rust_target_pipeline;
+#[cfg(unix)]
 mod rust_target_promotion;
 mod rust_target_source;
 
@@ -42,9 +44,11 @@ pub(crate) use exact_path_review::{ApprovedCleanupSession, ExactPathHandoffError
 pub(crate) use exact_path_review::{RustTargetJournalRequest, begin_rust_target_cleanup_session};
 #[cfg(test)]
 pub(crate) use rule_scope_grant::authorize_rule_target;
-pub(crate) use rust_target::RustTargetEffectWitness;
+pub(crate) use rust_target::{RustTargetEffectWitness, RustTargetLiveWitness};
 #[cfg(test)]
 pub(crate) use rust_target::{RustTargetLiveValidationError, validate_rust_target_effect};
+#[cfg(unix)]
+pub(crate) use rust_target_pipeline::{RustTargetPipelineError, prepare_rust_target_live_input};
 #[cfg(unix)]
 pub(crate) use rust_target_promotion::RustTargetPlanFacts;
 

@@ -116,8 +116,9 @@ use crate::persistence::{DatabaseStatus, StoreCoordinator};
 use crate::planner::ApprovedCleanupSession;
 #[cfg(unix)]
 use crate::planner::{
-    ExactPathHandoffError, RustTargetJournalRequest, RustTargetPlanFacts,
-    begin_rust_target_cleanup_session,
+    ExactPathHandoffError, RustTargetJournalRequest, RustTargetLiveWitness,
+    RustTargetPipelineError, RustTargetPlanFacts, begin_rust_target_cleanup_session,
+    prepare_rust_target_live_input,
 };
 use crate::scanner::{
     CancellationToken, ScanConfig, ScanMessage, ScanObjectIdentity, ScanTermination, Scanner,
@@ -1532,6 +1533,31 @@ impl EngineHandle {
             .map_err(RustTargetPlanExecutionError::Handoff)?;
         self.execute_approved_permanent_safe_session(&mut session, SystemTime::now(), cancelled)
             .map_err(RustTargetPlanExecutionError::Execution)
+    }
+
+    /// Acquire one exact durable Rust-target candidate as a fresh live
+    /// planner witness. This remains crate-private and stops before Cargo
+    /// authority, protected-root grants, plans, journal claims, FFI, or
+    /// effects; the owned witness lease is the only live capability returned.
+    #[cfg(unix)]
+    #[allow(
+        dead_code,
+        reason = "production planner acquisition is staged before Cargo and UI orchestration"
+    )]
+    pub(crate) fn prepare_rust_target_live_input(
+        &self,
+        scan_id: &ScanId,
+        candidate_id: &CandidateId,
+    ) -> Result<(crate::domain::Candidate, RustTargetLiveWitness), RustTargetPipelineError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(RustTargetPipelineError::Closed);
+        }
+        prepare_rust_target_live_input(
+            Arc::clone(&self.inner.store),
+            &self.inner.snapshots,
+            scan_id,
+            candidate_id,
+        )
     }
 
     /// Private capacity-aware variant used by the future core-owned volume

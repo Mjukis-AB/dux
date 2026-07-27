@@ -1206,6 +1206,11 @@ behind the approved-plan and cleanup-journal witnesses. It inventories the
 entire target before mutation, preserves the direct `CACHEDIR.TAG` marker, uses
 descriptor-relative no-follow operations, rejects unsafe or multiply-linked
 descendants, and records cancellation or unknown outcomes conservatively. A
+private production-core acquisition pipeline now joins only an exact succeeded
+scan/evaluation source to the current bundled catalog, rehydrates and compares
+the full immutable candidate body, and returns a lease-backed live witness with
+the domain candidate. It is crate-private and stops before Cargo/protected-root
+grants, plans, approval, journal, FFI, UI, scheduling, AI, or effects. A
 crate-private engine bridge now accepts only the non-cloneable approved
 session, selects that driver, and proves journal settlement and cleanup history
 in a project-local fixture. A private session orchestrator now consumes the

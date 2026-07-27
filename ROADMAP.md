@@ -4916,6 +4916,14 @@ Tasks:
 - [ ] Wire deterministic evaluator → reviewed plan → journal → executor through
   the core engine and FFI/Swift while preserving generation, cancellation,
   recovery, and outcome-unknown fencing.
+  - [x] 2026-07-19 slice: add the first production-core evaluator → planner
+    acquisition boundary for the staged Rust-target rule. It loads only the
+    exact succeeded scan/evaluation/source record, rehydrates the domain
+    candidate from the current bundled catalog, compares every immutable body
+    field back to durable history, and acquires a fresh lease-backed live
+    witness. The EngineHandle entry point is crate-private and stops before
+    Cargo/protected-root grants, plans, approval, journal, FFI, UI, scheduling,
+    AI, or effects.
 - [ ] Expose review intent, plan lifecycle, and path-free cleanup history through
   FFI/Swift UI without turning history into planner authority.
   - [x] 2026-07-19 slice: add the first app-facing history boundary as a

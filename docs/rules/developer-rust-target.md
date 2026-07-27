@@ -117,6 +117,14 @@ identity, cancellation, and terminalization fences. This bridge remains
 crate-private and has no production evaluator, FFI, UI, scheduler, AI, or CLI
 caller.
 
+The first production-shaped evaluator-to-planner pipeline now acquires an exact
+successful scan/evaluation source, rehydrates its domain candidate from the
+current bundled catalog, compares every immutable field against durable
+history, and returns the non-cloneable live witness together with that
+candidate. The EngineHandle entry point remains crate-private and stops before
+Cargo/protected-root grants, plans, approval, journal, FFI, UI, scheduling,
+AI, or effects.
+
 ## Live default-layout witness
 
 A later 2026-07-18 checkpoint adds a sealed, crate-private Unix planner witness

@@ -270,6 +270,8 @@ fn durable_source_can_be_reacquired_after_repository_reopen() {
         &candidate_id,
     )
     .unwrap();
+    let candidate = source.candidate_for_promotion().unwrap();
+    assert_eq!(candidate.id(), &candidate_id);
     let witness = validate_live_rust_target(source).unwrap();
     assert_eq!(witness.scan_root().canonical_path(), root);
     assert_eq!(witness.target().canonical_path(), target);
