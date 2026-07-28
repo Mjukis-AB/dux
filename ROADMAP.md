@@ -4850,6 +4850,21 @@ Tasks:
     touching the target. Cargo manifest revalidation remains in the production
     planner tests. This remains private test evidence: no FFI, Swift, CLI,
     scheduler, AI, or production cleanup route is enabled.
+  - [x] 2026-07-28 slice: close the durable candidate-claim mismatch for the
+    trusted Rust-target path without clearing or deleting its discovery
+    blocker. The private reviewed-plan handoff now mints an insertion-only
+    coupling variant for exactly one revision-2 `developer.rust.target`
+    permanent-safe item. Persistence still requires the complete immutable
+    source-scan, candidate, rule, path, byte, modification-time, evidence,
+    safety, action, schedule, and review-state body to match, then moves the
+    candidate and claim atomically while retaining `ProtectedPath` in candidate
+    history. The variant stores as the existing plan-claims format so reopen,
+    recovery, expiry, and terminal settlement remain compatible. Ordinary
+    plan claims cannot mint the variant, every other blocked candidate remains
+    rejected, and a focused rollback regression proves no session or claim is
+    left behind. The macOS facts-to-executor fixture now exercises this exact
+    retained-blocker route rather than deleting the blocker from its database.
+    No FFI, Swift, CLI, scheduler, AI, or production cleanup route is enabled.
 - [ ] Implement pre/post capacity verification.
   - [x] 2026-07-19 slice: add a private bounded verifier for cleanup capacity
     witnesses. It requires a stable volume identity, ordered effect window,

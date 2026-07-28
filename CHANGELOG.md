@@ -1,5 +1,16 @@
 # Changelog
 
+- Closed the durable Rust-target candidate-claim gap without weakening the
+  general blocker rule. The private reviewed-plan handoff now mints an
+  insertion-only typed coupling for exactly one revision-2
+  `developer.rust.target` permanent-safe item. Candidate history keeps its sole
+  `ProtectedPath` blocker, while immutable rule, source-scan, path, evidence,
+  byte, timestamp, policy, and review-state facts must still match before the
+  atomic planned claim. The capability persists using the existing plan-claim
+  format, so reopened journal recovery remains compatible. Ordinary plan
+  claims and every other blocked candidate continue to fail closed; focused
+  tests prove both the retained-blocker end-to-end lifecycle and the generic
+  rejection with no partial session or claim.
 - Added macOS regression coverage for the private Rust-target facts-to-executor
   lifecycle. A test-owned trusted-rule fixture proves the complete candidate →
   planner facts → approval → owner-fenced journal claim → descriptor-relative

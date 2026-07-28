@@ -21,9 +21,9 @@ use super::candidate_history::{
     RawEvidence, StoredCandidateRecord, TimeParts, action_as_stored, action_from_stored,
     category_as_stored, category_from_stored, decode_absolute_path, decode_evidence,
     decode_optional_time, from_i64, load_candidate_record_within_budget, mark_candidate_planned,
-    safety_as_stored, safety_from_stored, stored_bool, time_parts, to_i64,
-    validate_complete_children, validate_null_value, validate_optional_value, validate_policy,
-    validate_required_value,
+    mark_trusted_rust_target_candidate_planned, safety_as_stored, safety_from_stored, stored_bool,
+    time_parts, to_i64, validate_complete_children, validate_null_value, validate_optional_value,
+    validate_policy, validate_required_value,
 };
 use super::codec::{EncodedBytes, StoredEncoding, decode_host_path, encode_host_path};
 use super::history::{
@@ -110,6 +110,29 @@ impl NewCleanupSessionRecord {
     ) -> Result<Self, HistoryError> {
         let mut record = Self::try_from_plan(session_id, plan, started_at, trigger)?;
         record.candidate_status_coupling = CandidateStatusCoupling::LegacyUncoupled;
+        Ok(record)
+    }
+
+    pub(crate) fn try_from_trusted_rust_target_plan(
+        session_id: CleanupSessionId,
+        plan: &CleanupPlan,
+        started_at: SystemTime,
+        trigger: CleanupTrigger,
+    ) -> Result<Self, HistoryError> {
+        let mut record = Self::try_from_plan(session_id, plan, started_at, trigger)?;
+        let [item] = plan.items() else {
+            return Err(invalid());
+        };
+        if plan.mode() != CleanupMode::PermanentSafe
+            || item.rule().id().as_str() != "developer.rust.target"
+            || item.rule().revision().get() != 2
+            || item.safety() != SafetyTier::SafeRegenerable
+            || item.action() != CandidateAction::RemoveKnownRegenerableContents
+            || item.rule_marks_schedule_eligible()
+        {
+            return Err(invalid());
+        }
+        record.candidate_status_coupling = CandidateStatusCoupling::TrustedRustTargetPlanClaimsV1;
         Ok(record)
     }
 }
@@ -208,14 +231,28 @@ pub(crate) struct PlannedCleanupItemRecord {
 pub(super) enum CandidateStatusCoupling {
     LegacyUncoupled,
     PlanClaimsV1,
+    /// An insertion-only capability. It persists as `PlanClaimsV1`; only the
+    /// private trusted Rust-target constructor can mint this in-memory variant.
+    TrustedRustTargetPlanClaimsV1,
 }
 
 impl CandidateStatusCoupling {
     pub(super) fn as_i64(self) -> i64 {
         match self {
             Self::LegacyUncoupled => 1,
-            Self::PlanClaimsV1 => 2,
+            Self::PlanClaimsV1 | Self::TrustedRustTargetPlanClaimsV1 => 2,
         }
+    }
+
+    pub(super) fn claims_candidates(self) -> bool {
+        matches!(
+            self,
+            Self::PlanClaimsV1 | Self::TrustedRustTargetPlanClaimsV1
+        )
+    }
+
+    fn allows_trusted_rust_target_blocker(self) -> bool {
+        matches!(self, Self::TrustedRustTargetPlanClaimsV1)
     }
 }
 
@@ -335,7 +372,7 @@ pub(super) fn insert_cleanup_session(
     if conflicts != 0 {
         return Err(HistoryError::new(HistoryErrorKind::AlreadyExists));
     }
-    let candidates = if session.candidate_status_coupling == CandidateStatusCoupling::PlanClaimsV1 {
+    let candidates = if session.candidate_status_coupling.claims_candidates() {
         ensure_dependencies_match(transaction, session)?
     } else {
         Vec::new()
@@ -455,7 +492,15 @@ pub(super) fn insert_cleanup_session(
             .map_err(map_write_sql_error)?;
     }
     for (item_ordinal, candidate) in candidates.iter().enumerate() {
-        let prior = mark_candidate_planned(transaction, candidate)?;
+        let prior = if session
+            .candidate_status_coupling
+            .allows_trusted_rust_target_blocker()
+            && is_trusted_rust_target_candidate(candidate)
+        {
+            mark_trusted_rust_target_candidate_planned(transaction, candidate)?
+        } else {
+            mark_candidate_planned(transaction, candidate)?
+        };
         let changed = transaction
             .execute(
                 "INSERT INTO candidate_plan_claims (
@@ -500,7 +545,12 @@ fn ensure_dependencies_match(
         else {
             return Err(HistoryError::new(HistoryErrorKind::NotFound));
         };
-        if !prepared_item_matches_candidate(item, &candidate, &session.source_scan_id)? {
+        if !prepared_item_matches_candidate(
+            item,
+            &candidate,
+            &session.source_scan_id,
+            session.candidate_status_coupling,
+        )? {
             return Err(HistoryError::new(HistoryErrorKind::InvalidInput));
         }
         candidates.push(candidate);
@@ -508,10 +558,21 @@ fn ensure_dependencies_match(
     Ok(candidates)
 }
 
+fn is_trusted_rust_target_candidate(candidate: &CompleteCandidateRecord) -> bool {
+    candidate.rule.id().as_str() == "developer.rust.target"
+        && candidate.rule.revision().get() == 2
+        && candidate.category == CandidateCategory::DeveloperArtifact
+        && candidate.safety == SafetyTier::SafeRegenerable
+        && candidate.action == CandidateAction::RemoveKnownRegenerableContents
+        && !candidate.rule_schedule_eligible
+        && candidate.blockers == [crate::domain::BlockReason::ProtectedPath]
+}
+
 fn prepared_item_matches_candidate(
     item: &PreparedCleanupItem,
     candidate: &CompleteCandidateRecord,
     source_scan_id: &str,
+    coupling: CandidateStatusCoupling,
 ) -> Result<bool, HistoryError> {
     let paths = candidate
         .paths
@@ -540,7 +601,9 @@ fn prepared_item_matches_candidate(
         && safety_as_stored(candidate.safety) == item.safety
         && action_as_stored(candidate.action) == item.proposed_action
         && candidate.rule_schedule_eligible == item.rule_schedule_eligible
-        && candidate.blockers.is_empty()
+        && (candidate.blockers.is_empty()
+            || (coupling.allows_trusted_rust_target_blocker()
+                && is_trusted_rust_target_candidate(candidate)))
         && matches!(
             candidate.status,
             CandidateHistoryStatus::Discovered | CandidateHistoryStatus::Selected
@@ -833,8 +896,7 @@ fn decode_frozen_session(
         candidate_status_coupling,
         &mut items,
     )?;
-    if require_candidate_match && candidate_status_coupling == CandidateStatusCoupling::PlanClaimsV1
-    {
+    if require_candidate_match && candidate_status_coupling.claims_candidates() {
         for item in &items {
             ensure_loaded_item_matches_candidate(connection, item, &source_scan_id)?;
         }
@@ -1108,7 +1170,7 @@ fn load_candidate_plan_claims(
     coupling: CandidateStatusCoupling,
     items: &mut [PlannedCleanupItemRecord],
 ) -> Result<(), HistoryError> {
-    let claims_required = coupling == CandidateStatusCoupling::PlanClaimsV1
+    let claims_required = coupling.claims_candidates()
         && matches!(session_status, "planned" | "running" | "recovering");
     let mut statement = connection
         .prepare(
@@ -1337,7 +1399,7 @@ fn ensure_loaded_item_matches_candidate(
         || candidate.safety != item.safety
         || candidate.action != item.proposed_action
         || candidate.rule_schedule_eligible != item.rule_schedule_eligible
-        || !candidate.blockers.is_empty()
+        || (!candidate.blockers.is_empty() && !is_trusted_rust_target_candidate(&candidate))
     {
         return Err(corrupt());
     }
@@ -2008,6 +2070,92 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn ordinary_plan_claim_cannot_borrow_trusted_rust_target_coupling() {
+        let temp = TempDir::new().unwrap();
+        let store = StoreCoordinator::open(&temp.path().join("store/dux.sqlite3")).unwrap();
+        let root = temp.path().join("root");
+        let scan_id = "scan:cleanup-generic-blocked";
+        start_scan(&store, &root, scan_id);
+        let policy = Rule::try_new(RuleDefinition {
+            reference: RuleRef::new(
+                RuleId::new("developer.rust.target").unwrap(),
+                RuleRevision::new(2).unwrap(),
+            ),
+            title_key: LocalizedTextKey::new("fixture.cleanup.title").unwrap(),
+            category: CandidateCategory::DeveloperArtifact,
+            scope: RuleScope::ConfiguredProjectRoots,
+            matcher: RuleMatcher::try_new(RuleMatcherDefinition {
+                path_component: Some("cleanup-fixture".to_owned()),
+                required_ancestor_markers_any: Vec::new(),
+                required_markers_all: Vec::new(),
+                forbidden_markers_any: Vec::new(),
+                exact_bundle_identifiers: Vec::new(),
+                excluded_descendants: Vec::new(),
+                protected_descendants: Vec::new(),
+            })
+            .unwrap(),
+            guards: RuleGuards::try_new(None, 0, Vec::new(), false).unwrap(),
+            safety: SafetyTier::SafeRegenerable,
+            action: CandidateAction::RemoveKnownRegenerableContents,
+            schedule_eligible: false,
+            explanation_key: LocalizedTextKey::new("fixture.cleanup.explanation").unwrap(),
+            provenance: vec![ProvenanceUrl::new("https://example.com/cleanup").unwrap()],
+        })
+        .unwrap();
+        let candidate = candidate(
+            "candidate:cleanup-generic-blocked",
+            scan_id,
+            &policy,
+            root.join("cleanup-fixture"),
+            10,
+        );
+        persist_candidate(&store, &candidate, 1_750_000_002);
+        store.with_connection(|connection| {
+            connection
+                .execute(
+                    "INSERT INTO candidate_blockers (
+                         candidate_id, blocker_ordinal, blocker_kind
+                     ) VALUES (?1, 0, 'protected_path')",
+                    [candidate.id().as_str()],
+                )
+                .unwrap();
+        });
+
+        let session_id = CleanupSessionId::new("session:cleanup-generic-blocked").unwrap();
+        let record = NewCleanupSessionRecord::try_from_plan(
+            session_id.clone(),
+            &plan(
+                "plan:cleanup-generic-blocked",
+                CleanupMode::PermanentSafe,
+                std::slice::from_ref(&candidate),
+            ),
+            UNIX_EPOCH + Duration::from_secs(1_750_000_011),
+            CleanupTrigger::Manual,
+        )
+        .unwrap();
+        assert_eq!(
+            store
+                .record_cleanup_session_planned(&record)
+                .unwrap_err()
+                .kind,
+            HistoryErrorKind::InvalidInput
+        );
+        assert_eq!(
+            candidate_status(&store, candidate.id()),
+            CandidateHistoryStatus::Discovered
+        );
+        assert!(store.load_cleanup_session(&session_id).unwrap().is_none());
+        store.with_connection(|connection| {
+            let claims: i64 = connection
+                .query_row("SELECT COUNT(*) FROM candidate_plan_claims", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(claims, 0);
+        });
     }
 
     #[test]

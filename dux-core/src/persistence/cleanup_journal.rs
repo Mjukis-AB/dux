@@ -362,10 +362,8 @@ fn claim_planned(
 ) -> Result<ExecutionFence, HistoryError> {
     let graph = load_cleanup_journal(transaction, session_id)?
         .ok_or_else(|| HistoryError::new(HistoryErrorKind::NotFound))?;
-    if (!matches!(
-        graph.candidate_status_coupling,
-        CandidateStatusCoupling::PlanClaimsV1
-    ) && !is_explicit_explorer_selection(&graph))
+    if (!graph.candidate_status_coupling.claims_candidates()
+        && !is_explicit_explorer_selection(&graph))
         || graph.lifecycle != JournalLifecycle::Planned
         || claimed_at < graph.started_at
         || graph.plan_expires_at <= claimed_at
@@ -413,10 +411,8 @@ fn expire_planned(
 ) -> Result<ExecutionFence, HistoryError> {
     let journal = load_cleanup_journal(transaction, session_id)?
         .ok_or_else(|| HistoryError::new(HistoryErrorKind::NotFound))?;
-    if (!matches!(
-        journal.candidate_status_coupling,
-        CandidateStatusCoupling::PlanClaimsV1
-    ) && !is_explicit_explorer_selection(&journal))
+    if (!journal.candidate_status_coupling.claims_candidates()
+        && !is_explicit_explorer_selection(&journal))
         || journal.lifecycle != JournalLifecycle::Planned
         || observed_at < journal.plan_expires_at
     {
@@ -455,7 +451,7 @@ fn expire_planned(
     if changed_items != journal.items.len() {
         return Err(invalid_transition());
     }
-    if journal.candidate_status_coupling == CandidateStatusCoupling::PlanClaimsV1 {
+    if journal.candidate_status_coupling.claims_candidates() {
         for item in &journal.items {
             settle_candidate_plan_claim(
                 transaction,
@@ -1017,7 +1013,7 @@ fn terminalize(
     {
         return Err(invalid_transition());
     }
-    if journal.candidate_status_coupling == CandidateStatusCoupling::PlanClaimsV1 {
+    if journal.candidate_status_coupling.claims_candidates() {
         settle_candidate_plan_claims(transaction, &journal, status)?;
     }
     let completed = system_time_to_unix_ms(completed_at, HistoryErrorKind::InvalidInput)?;

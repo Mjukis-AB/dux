@@ -862,6 +862,43 @@ pub(super) fn mark_candidate_planned(
     Ok(prior)
 }
 
+/// Claim the one allowlisted deterministic rule whose discovery blocker is
+/// intentionally retained until the trusted planner boundary. The blocker is
+/// a safety fact, not a user-review failure: only the private Rust-target
+/// coupling may move this exact shape into `planned`.
+pub(super) fn mark_trusted_rust_target_candidate_planned(
+    transaction: &Transaction<'_>,
+    candidate: &CompleteCandidateRecord,
+) -> Result<CandidatePriorReviewStatus, HistoryError> {
+    if candidate.rule.id().as_str() != "developer.rust.target"
+        || candidate.rule.revision().get() != 2
+        || candidate.category != CandidateCategory::DeveloperArtifact
+        || candidate.safety != SafetyTier::SafeRegenerable
+        || candidate.action != CandidateAction::RemoveKnownRegenerableContents
+        || candidate.rule_schedule_eligible
+        || candidate.blockers != [BlockReason::ProtectedPath]
+    {
+        return Err(HistoryError::new(HistoryErrorKind::InvalidTransition));
+    }
+    let prior = match candidate.status {
+        CandidateHistoryStatus::Discovered => CandidatePriorReviewStatus::Discovered,
+        CandidateHistoryStatus::Selected => CandidatePriorReviewStatus::Selected,
+        _ => return Err(HistoryError::new(HistoryErrorKind::InvalidTransition)),
+    };
+    let changed = transaction
+        .execute(
+            "UPDATE candidates
+             SET status = 'planned'
+             WHERE candidate_id = ?1 AND record_format_version = 2 AND status = ?2",
+            params![candidate.id.as_str(), prior.as_stored()],
+        )
+        .map_err(map_write_sql_error)?;
+    if changed != 1 {
+        return Err(HistoryError::new(HistoryErrorKind::InvalidTransition));
+    }
+    Ok(prior)
+}
+
 pub(super) fn settle_planned_candidate(
     transaction: &Transaction<'_>,
     id: &CandidateId,

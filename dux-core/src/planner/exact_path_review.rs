@@ -166,6 +166,7 @@ pub(crate) struct ExactPathReview {
 pub(crate) struct TrustedReviewedCleanupPlan {
     plan: CleanupPlan,
     authorizations: Vec<RuleScopeAuthorization>,
+    trusted_rust_target_coupling: bool,
 }
 
 /// An explicitly approved reviewed plan. This capability is still crate
@@ -360,12 +361,21 @@ impl ApprovedTrustedReviewedCleanupPlan {
             .map_err(ExactPathApprovalError::Persistence)
             .map_err(ExactPathHandoffError::Approval)?;
         self.revalidate(started_at)?;
-        let record = NewCleanupSessionRecord::try_from_plan(
-            session_id.clone(),
-            self.plan(),
-            started_at,
-            trigger,
-        )
+        let record = if self.reviewed.trusted_rust_target_coupling {
+            NewCleanupSessionRecord::try_from_trusted_rust_target_plan(
+                session_id.clone(),
+                self.plan(),
+                started_at,
+                trigger,
+            )
+        } else {
+            NewCleanupSessionRecord::try_from_plan(
+                session_id.clone(),
+                self.plan(),
+                started_at,
+                trigger,
+            )
+        }
         .map_err(ExactPathApprovalError::Persistence)?;
         store
             .record_cleanup_session_planned(&record)
@@ -600,6 +610,7 @@ impl ExactPathReview {
         Ok(TrustedReviewedCleanupPlan {
             plan,
             authorizations: ordered_authorizations,
+            trusted_rust_target_coupling: false,
         })
     }
 }
@@ -680,6 +691,7 @@ impl ExactPathReview {
         Ok(TrustedReviewedCleanupPlan {
             plan,
             authorizations: vec![authorization],
+            trusted_rust_target_coupling: true,
         })
     }
 }

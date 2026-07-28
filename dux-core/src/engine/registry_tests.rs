@@ -854,8 +854,8 @@ fn rust_target_facts_fixture() -> RustTargetFactsFixture {
     };
     let candidate = crate::domain::candidate_from_complete_record(&stored).unwrap();
     // DUX-DESTRUCTIVE: allow=test-rust-target-facts-reviewable-fixture -- keep the
-    // planner facts' protected-path blocker, but make the durable candidate row
-    // reviewable so the plan-claims persistence coupling can be exercised.
+    // durable candidate's ProtectedPath blocker; normalize only the deterministic
+    // cleanup policy fields so this test exercises the trusted coupling itself.
     engine.inner.store.with_connection(|connection| {
         connection
             .execute(
@@ -863,12 +863,6 @@ fn rust_target_facts_fixture() -> RustTargetFactsFixture {
                  SET safety_tier = 'safe_regenerable',
                      proposed_action = 'remove_known_regenerable_contents'
                  WHERE candidate_id = ?1",
-                [candidate_id.as_str()],
-            )
-            .unwrap();
-        connection
-            .execute(
-                "DELETE FROM candidate_blockers WHERE candidate_id = ?1",
                 [candidate_id.as_str()],
             )
             .unwrap();
