@@ -24,8 +24,8 @@ use crate::path_validation::{
 };
 use crate::persistence::canonical_started_at;
 use crate::persistence::{
-    CleanupJournalClaim, CleanupSessionId, CleanupTrigger, HistoryError, NewCleanupSessionRecord,
-    StoreCoordinator,
+    CleanupJournalClaim, CleanupJournalLease, CleanupSessionId, CleanupTrigger, HistoryError,
+    HistoryErrorKind, JournalLeaseFailure, NewCleanupSessionRecord, StoreCoordinator,
 };
 
 use super::rule_scope_grant::{RuleScopeAuthorization, RuleScopeGrantError};
@@ -190,6 +190,97 @@ pub(crate) struct ApprovedCleanupSession {
     session_id: CleanupSessionId,
 }
 
+/// An owner-claim write whose exact generation-one outcome could not yet be
+/// reconciled. The approved capability and cleanup lease remain inseparable so
+/// callers can retry only the journal claim, never rebuild or repeat a plan.
+#[must_use = "retry the exact claim or retain its cleanup lease"]
+pub(crate) struct CleanupSessionClaimFailure {
+    approved: ApprovedTrustedReviewedCleanupPlan,
+    session_id: CleanupSessionId,
+    claimed_at: std::time::SystemTime,
+    failure: JournalLeaseFailure,
+}
+
+impl std::fmt::Debug for CleanupSessionClaimFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CleanupSessionClaimFailure")
+            .field("session_id", &self.session_id)
+            .field("claimed_at", &self.claimed_at)
+            .field("failure", &self.failure)
+            .finish_non_exhaustive()
+    }
+}
+
+impl CleanupSessionClaimFailure {
+    pub(crate) fn kind(&self) -> HistoryErrorKind {
+        self.failure.kind()
+    }
+
+    /// Retry only the exact owner/generation-one claim with the original
+    /// owner, session identifier, and canonical timestamp. `claim_planned`
+    /// adopts a matching post-state and never repeats a filesystem effect.
+    pub(crate) fn retry(
+        self: Box<Self>,
+    ) -> Result<ApprovedCleanupSession, CleanupSessionStartError> {
+        let Self {
+            approved,
+            session_id,
+            claimed_at,
+            failure,
+        } = *self;
+        let claim = match failure.into_lease().claim_planned(&session_id, claimed_at) {
+            Ok(claim) => claim,
+            Err(failure) => {
+                return Err(CleanupSessionStartError::JournalClaimUnresolved(Box::new(
+                    Self {
+                        approved,
+                        session_id,
+                        claimed_at,
+                        failure,
+                    },
+                )));
+            }
+        };
+        finish_claimed_cleanup_session(approved, claim, session_id)
+    }
+
+    /// Quarantine the still-held store-wide cleanup lease when the exact claim
+    /// cannot be proven during this engine session.
+    pub(crate) fn into_lease(self: Box<Self>) -> CleanupJournalLease {
+        self.failure.into_lease()
+    }
+}
+
+/// A live claimed session whose exact frozen plan could not be compared after
+/// claim. Dropping it would abandon a live database owner, so the engine must
+/// retain it until shutdown/recovery.
+#[must_use = "retain the claimed session until recovery owns its outcome"]
+pub(crate) struct ClaimedCleanupSessionFailure {
+    session: ApprovedCleanupSession,
+    error: HistoryError,
+}
+
+impl std::fmt::Debug for ClaimedCleanupSessionFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ClaimedCleanupSessionFailure")
+            .field("session_id", self.session.session_id())
+            .field("error", &self.error)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ClaimedCleanupSessionFailure {
+    pub(crate) fn kind(&self) -> HistoryErrorKind {
+        self.error.kind
+    }
+
+    pub(crate) fn into_session(self: Box<Self>) -> ApprovedCleanupSession {
+        self.session
+    }
+}
+
 #[derive(Debug, Error)]
 pub(crate) enum ExactPathHandoffError {
     #[error("approved cleanup plan is expired or its rule authorization changed")]
@@ -198,6 +289,16 @@ pub(crate) enum ExactPathHandoffError {
     Journal(HistoryError),
     #[error("rule-specific permanent-safe evidence failed: {0}")]
     RuleEvidence(#[source] RustTargetLiveValidationError),
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum CleanupSessionStartError {
+    #[error(transparent)]
+    Handoff(#[from] ExactPathHandoffError),
+    #[error("cleanup journal owner claim could not be reconciled")]
+    JournalClaimUnresolved(Box<CleanupSessionClaimFailure>),
+    #[error("claimed cleanup plan could not be revalidated")]
+    ClaimedPlanUnresolved(Box<ClaimedCleanupSessionFailure>),
 }
 
 impl TrustedReviewedCleanupPlan {
@@ -415,11 +516,12 @@ impl ApprovedTrustedReviewedCleanupPlan {
         started_at: std::time::SystemTime,
         trigger: CleanupTrigger,
         lock_timeout: Duration,
-    ) -> Result<ApprovedCleanupSession, ExactPathHandoffError> {
+    ) -> Result<ApprovedCleanupSession, CleanupSessionStartError> {
         let started_at = canonical_started_at(started_at)
             .map_err(ExactPathApprovalError::Persistence)
             .map_err(ExactPathHandoffError::Approval)?;
-        self.revalidate(started_at)?;
+        self.revalidate(started_at)
+            .map_err(ExactPathHandoffError::Approval)?;
         let record = if self.reviewed.trusted_rust_target_coupling {
             NewCleanupSessionRecord::try_from_trusted_rust_target_plan(
                 session_id.clone(),
@@ -435,10 +537,12 @@ impl ApprovedTrustedReviewedCleanupPlan {
                 trigger,
             )
         }
-        .map_err(ExactPathApprovalError::Persistence)?;
+        .map_err(ExactPathApprovalError::Persistence)
+        .map_err(ExactPathHandoffError::Approval)?;
         store
             .record_cleanup_session_planned(&record)
-            .map_err(ExactPathApprovalError::Persistence)?;
+            .map_err(ExactPathApprovalError::Persistence)
+            .map_err(ExactPathHandoffError::Approval)?;
 
         let lease = store
             .acquire_cleanup_journal_lease(lock_timeout)
@@ -452,20 +556,41 @@ impl ApprovedTrustedReviewedCleanupPlan {
             self.bind_trusted_rust_target_claim(session_id.clone())
                 .map_err(ExactPathHandoffError::Approval)?;
         }
-        let claim = lease
-            .claim_planned(&session_id, started_at)
-            .map_err(|failure| ExactPathHandoffError::Journal(HistoryError::new(failure.kind())))?;
-        claim
-            .validate_planned_plan(self.plan())
-            .map_err(ExactPathHandoffError::Journal)?;
-        Ok(ApprovedCleanupSession {
-            approved: self,
-            claim,
-            session_id,
-        })
+        let claim = match lease.claim_planned(&session_id, started_at) {
+            Ok(claim) => claim,
+            Err(failure) => {
+                return Err(CleanupSessionStartError::JournalClaimUnresolved(Box::new(
+                    CleanupSessionClaimFailure {
+                        approved: self,
+                        session_id,
+                        claimed_at: started_at,
+                        failure,
+                    },
+                )));
+            }
+        };
+        finish_claimed_cleanup_session(self, claim, session_id)
     }
 
     pub(crate) fn release(self) {}
+}
+
+fn finish_claimed_cleanup_session(
+    approved: ApprovedTrustedReviewedCleanupPlan,
+    claim: CleanupJournalClaim,
+    session_id: CleanupSessionId,
+) -> Result<ApprovedCleanupSession, CleanupSessionStartError> {
+    let session = ApprovedCleanupSession {
+        approved,
+        claim,
+        session_id,
+    };
+    if let Err(error) = session.claim.validate_planned_plan(session.plan()) {
+        return Err(CleanupSessionStartError::ClaimedPlanUnresolved(Box::new(
+            ClaimedCleanupSessionFailure { session, error },
+        )));
+    }
+    Ok(session)
 }
 
 impl ApprovedCleanupSession {
@@ -728,14 +853,15 @@ pub(crate) fn begin_rust_target_cleanup_session(
     facts: RustTargetPlanFacts,
     request: RustTargetJournalRequest,
     store: &Arc<StoreCoordinator>,
-) -> Result<ApprovedCleanupSession, ExactPathHandoffError> {
+) -> Result<ApprovedCleanupSession, CleanupSessionStartError> {
     let approved = approve_rust_target_plan_facts(
         facts,
         request.plan_id,
         request.created_at,
         request.approved_at,
     )
-    .map_err(ExactPathHandoffError::Approval)?;
+    .map_err(ExactPathHandoffError::Approval)
+    .map_err(CleanupSessionStartError::Handoff)?;
     approved.begin_cleanup_session(
         store,
         request.session_id,

@@ -1,8 +1,10 @@
-//! Opaque, observation-only review of one fully admitted Rust-target plan.
+//! Opaque review of one fully admitted Rust-target plan.
 //!
 //! The retained planner capability is deliberately inaccessible outside the
-//! core. This module exposes only a freshly revalidated, bounded observation
-//! and consuming release; it cannot approve, persist, claim, or execute.
+//! core. This module exposes a freshly revalidated bounded observation and
+//! consuming release. Only the owning engine can consume the capability into
+//! its permanent-safe task; displayed fields cannot approve, persist, claim,
+//! or execute.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -81,9 +83,10 @@ pub enum RustTargetPlanReviewError {
 }
 
 /// Non-cloneable retained reviewed-plan capability. Public operations are
-/// observation and release only.
+/// observation, release, and one engine-owned consuming execution transition.
 #[must_use = "retain the plan review while presenting its exact observation"]
 pub struct RustTargetPlanReview {
+    owner: Arc<SnapshotReviewOwner>,
     reviewed: TrustedReviewedCleanupPlan,
     info: RustTargetPlanReviewInfo,
     parent_review_expires_at: SystemTime,
@@ -115,6 +118,7 @@ pub struct PendingRustTargetPlanReview {
 
 /// Opaque pending result whose exact parent was revalidated after preparation.
 pub struct ValidatedPendingRustTargetPlanReview {
+    pub(super) owner: Arc<SnapshotReviewOwner>,
     pub(super) candidate_id: CandidateId,
     pub(super) parent_review_expires_at: SystemTime,
     pub(super) parent_review_live: Arc<AtomicBool>,
@@ -122,7 +126,8 @@ pub struct ValidatedPendingRustTargetPlanReview {
 }
 
 impl RustTargetPlanReview {
-    pub(crate) fn new(
+    pub(super) fn new(
+        owner: Arc<SnapshotReviewOwner>,
         reviewed: TrustedReviewedCleanupPlan,
         candidate_id: &CandidateId,
         parent_review_expires_at: SystemTime,
@@ -199,6 +204,7 @@ impl RustTargetPlanReview {
             return Err(RustTargetPlanReviewError::ReviewExpired);
         }
         Ok(Self {
+            owner,
             reviewed,
             info,
             parent_review_expires_at,
@@ -248,5 +254,102 @@ impl RustTargetPlanReview {
 
     pub fn release(self) {
         self.reviewed.release();
+    }
+
+    pub(super) fn belongs_to(&self, expected_owner: &Arc<SnapshotReviewOwner>) -> bool {
+        Arc::ptr_eq(&self.owner, expected_owner)
+    }
+
+    /// Consume the exact retained review into the engine-owned approval
+    /// boundary. Displayed identifiers and paths are never accepted back as
+    /// authority.
+    pub(super) fn into_reviewed_at(
+        self,
+        expected_owner: &Arc<SnapshotReviewOwner>,
+        now: SystemTime,
+    ) -> Result<TrustedReviewedCleanupPlan, RustTargetPlanReviewError> {
+        self.into_reviewed_at_with_completion_hooks(expected_owner, now, || {}, SystemTime::now)
+    }
+
+    #[cfg(test)]
+    pub(super) fn into_reviewed_at_with_test_completion_hook(
+        self,
+        expected_owner: &Arc<SnapshotReviewOwner>,
+        now: SystemTime,
+        completion_hook: impl FnOnce(),
+    ) -> Result<TrustedReviewedCleanupPlan, RustTargetPlanReviewError> {
+        self.into_reviewed_at_with_completion_hooks(
+            expected_owner,
+            now,
+            completion_hook,
+            SystemTime::now,
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn into_reviewed_at_with_test_completion_hooks(
+        self,
+        expected_owner: &Arc<SnapshotReviewOwner>,
+        now: SystemTime,
+        completion_hook: impl FnOnce(),
+        clock: impl FnMut() -> SystemTime,
+    ) -> Result<TrustedReviewedCleanupPlan, RustTargetPlanReviewError> {
+        self.into_reviewed_at_with_completion_hooks(expected_owner, now, completion_hook, clock)
+    }
+
+    fn into_reviewed_at_with_completion_hooks(
+        self,
+        expected_owner: &Arc<SnapshotReviewOwner>,
+        now: SystemTime,
+        completion_hook: impl FnOnce(),
+        mut clock: impl FnMut() -> SystemTime,
+    ) -> Result<TrustedReviewedCleanupPlan, RustTargetPlanReviewError> {
+        if !Arc::ptr_eq(&self.owner, expected_owner) {
+            return Err(RustTargetPlanReviewError::WrongEngine);
+        }
+        if let Some(error) = self.terminal_error_at(now) {
+            return Err(error);
+        }
+        self.reviewed
+            .revalidate_at(now)
+            .map_err(|error| match error {
+                crate::planner::ExactPathPlanError::Expired => {
+                    RustTargetPlanReviewError::ReviewExpired
+                }
+                _ => RustTargetPlanReviewError::ChangedDuringReview,
+            })?;
+        let completed_at = clock();
+        if !self.parent_review_live.load(Ordering::Acquire)
+            || completed_at >= self.parent_review_expires_at
+        {
+            return Err(RustTargetPlanReviewError::ParentReviewUnavailable);
+        }
+        if completed_at >= self.info.effective_expires_at {
+            return Err(RustTargetPlanReviewError::ReviewExpired);
+        }
+        self.reviewed
+            .revalidate_at(completed_at)
+            .map_err(|error| match error {
+                crate::planner::ExactPathPlanError::Expired => {
+                    RustTargetPlanReviewError::ReviewExpired
+                }
+                _ => RustTargetPlanReviewError::ChangedDuringReview,
+            })?;
+        completion_hook();
+        // Revalidation may itself cross either deadline. The final acquire is
+        // the parent consume/release linearization point. Sample the clock
+        // immediately afterward: if that later sample is still before both
+        // deadlines, the preceding transfer necessarily was too.
+        if !self.parent_review_live.load(Ordering::Acquire) {
+            return Err(RustTargetPlanReviewError::ParentReviewUnavailable);
+        }
+        let completed_at = clock();
+        if completed_at >= self.parent_review_expires_at {
+            return Err(RustTargetPlanReviewError::ParentReviewUnavailable);
+        }
+        if completed_at >= self.info.effective_expires_at {
+            return Err(RustTargetPlanReviewError::ReviewExpired);
+        }
+        Ok(self.reviewed)
     }
 }

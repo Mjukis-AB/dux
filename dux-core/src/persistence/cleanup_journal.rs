@@ -7,7 +7,14 @@
 
 mod lease;
 
-pub(crate) use lease::{CleanupJournalClaim, EffectStartReceipt};
+pub(crate) use lease::{
+    CleanupJournalClaim, CleanupJournalLease, EffectStartReceipt, JournalLeaseFailure,
+};
+#[cfg(test)]
+pub(crate) use lease::{
+    fail_next_write_after_commit_and_reconcile_read_for_test,
+    fail_next_write_after_commit_and_two_reconcile_reads_for_test,
+};
 
 #[cfg(test)]
 mod tests;

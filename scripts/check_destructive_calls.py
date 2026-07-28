@@ -407,6 +407,11 @@ EXCEPTIONS = {
         "rust-filesystem-effect",
         "test:revalidation_rejects_missing_object_without_returning_a_path",
     ),
+    "test-trash-admission-target-drift-remove": ExceptionSpec(
+        "dux-core/src/persistence/cleanup_journal/tests.rs",
+        "rust-filesystem-effect",
+        "test:trash_admission_terminalizes_known_target_drift_before_releasing_the_claim",
+    ),
     "test-descendant-policy-replacement-rename": ExceptionSpec(
         "dux-core/src/planner/descendant_policy.rs",
         "rust-filesystem-effect",
@@ -774,6 +779,7 @@ EXCEPTION_PRIMITIVES = {
     "permanent-safe-rust-target-descriptor-contents": "unlinkat",
     "test-reviewed-trash-replaced-file-remove": "remove_file",
     "test-reviewed-trash-missing-file-remove": "remove_file",
+    "test-trash-admission-target-drift-remove": "remove_file",
     "test-descendant-policy-replacement-rename": "rename",
     "test-rule-scope-target-replacement-rename": "rename",
     "test-exact-review-replacement-remove-temp": "remove_dir",
@@ -872,6 +878,7 @@ CLIPPY_SUPPRESSION_COUNTS = {
     "dux-core/src/engine/registry_tests.rs": 6,
     "dux-core/src/engine/volume_status.rs": 1,
     "dux-core/src/persistence/persistence_tests.rs": 3,
+    "dux-core/src/persistence/cleanup_journal/tests.rs": 1,
     "dux-core/src/persistence/storage.rs": 1,
     "dux-core/src/persistence/storage/windows.rs": 2,
     "dux-core/src/persistence/snapshot/storage.rs": 9,

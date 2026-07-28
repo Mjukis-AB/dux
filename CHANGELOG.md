@@ -1,5 +1,30 @@
 # Changelog
 
+- Added the first engine-owned permanent-safe cleanup task for an exact opaque
+  Rust-target plan review. Rejected start admission returns the unconsumed
+  review; acceptance synchronously consumes and approves the exact child before
+  returning. Consume completion rechecks parent liveness and both parent/child
+  deadlines after the final authorization revalidation, so release or expiry
+  cannot race authority transfer into queued work. The worker alone mints
+  session identity/trigger metadata and enters the existing
+  journal-fenced, descriptor-relative executor. A shared reservation serializes
+  permanent cleanup with Explorer Trash, queued cancellation creates no
+  journal, known terminal outcomes return a path-free result, and unknown tasks
+  retain their exact session correlation without retry. Ambiguous claims,
+  post-claim comparisons, and effect settlements retain their exact live
+  capabilities. Quarantine is keyed to the physical store and lasts for the
+  process lifetime, so closing and reopening an engine in the same process
+  cannot release an owner that durable recovery still considers alive.
+  Explorer Trash now has equivalent claim/receipt retention: every post-claim
+  admission refusal is durably terminalized before releasing its owner, or the
+  exact claim and any minted receipt enter quarantine. Its callback is caught
+  after `effect_started`, panic becomes durable `outcome_unknown`, and
+  settlement retry cannot invoke Trash twice. Focused regressions cover
+  completion-time parent release and expiry, reusable foreign/full/busy
+  refusal, queued and running contention, claim/admission/settlement ambiguity,
+  Trash panic, same-store reopen, session correlation, drift, and preservation
+  of Cargo metadata/source. The permanent-safe capability is core-only in this
+  checkpoint: UniFFI and the native app still cannot start it.
 - Defined cross-reboot and Windows-unproven cleanup-journal recovery as an
   explicit non-executable refusal. A changed macOS/Linux combined boot scope
   remains indistinguishable from a foreign copied database, while Windows

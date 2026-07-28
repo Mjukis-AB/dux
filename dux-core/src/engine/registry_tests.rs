@@ -22,6 +22,8 @@ use crate::engine::{
 use crate::path_validation::TrashTargetKind;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(target_os = "macos")]
+const RUST_TARGET_TASK_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const CARGO_CACHE_TAG: &[u8] =
     b"Signature: 8a477f597d28d172789f06886806bc55\n# Cargo-generated cache directory\n";
 
@@ -45,7 +47,15 @@ fn engine_with_limits(limits: RegistryLimits) -> (TempDir, EngineHandle) {
 }
 
 fn wait_terminal(engine: &EngineHandle, id: TaskId) -> TaskSnapshot {
-    let deadline = Instant::now() + TEST_TIMEOUT;
+    wait_terminal_with_timeout(engine, id, TEST_TIMEOUT)
+}
+
+fn wait_terminal_with_timeout(
+    engine: &EngineHandle,
+    id: TaskId,
+    timeout: Duration,
+) -> TaskSnapshot {
+    let deadline = Instant::now() + timeout;
     loop {
         let snapshot = engine.task_snapshot(id).unwrap();
         if snapshot.phase.is_terminal() {
@@ -491,6 +501,201 @@ fn engine_executes_all_paths_and_terminalizes_completed_session() {
 }
 
 #[cfg(unix)]
+struct PanickingPermanentSafeDriver;
+
+#[cfg(unix)]
+impl crate::cleanup::permanent_safe::PermanentSafeContentsDriver for PanickingPermanentSafeDriver {
+    fn remove_contents(
+        &mut self,
+        _witness: &crate::planner::RustTargetEffectWitness,
+        _cancelled: &dyn Fn() -> bool,
+    ) -> Result<
+        crate::cleanup::permanent_safe::PermanentSafeRemovalSummary,
+        crate::cleanup::permanent_safe::PermanentSafePlatformError,
+    > {
+        panic!("simulated platform driver panic after effect_started")
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn platform_driver_panic_is_durably_recorded_as_outcome_unknown() {
+    let mut fixture = approved_rust_target_fixture(1);
+    let mut driver = PanickingPermanentSafeDriver;
+    let mut authority_now = SystemTime::now;
+    let result =
+        crate::cleanup::permanent_safe::execute_rust_target_session_with_capacity_and_clock_for_test(
+            &mut fixture.session,
+            SystemTime::now() + Duration::from_secs(1),
+            &mut driver,
+            &|| false,
+            None,
+            &mut authority_now,
+        );
+    assert!(matches!(
+        result,
+        Err(
+            crate::cleanup::permanent_safe::PermanentSafeExecutionError::Platform(
+                crate::cleanup::permanent_safe::PermanentSafePlatformError::OutcomeUnknown,
+            )
+        )
+    ));
+    let history_id = fixture
+        .engine
+        .recent_cleanup_history(None, 64)
+        .unwrap()
+        .records()
+        .iter()
+        .find(|record| record.id().as_str() == fixture.session_id.as_str())
+        .map(|record| record.id().clone())
+        .unwrap();
+    let history = fixture.engine.cleanup_session_history(&history_id).unwrap();
+    assert_eq!(
+        history.summary().status(),
+        crate::engine::DurableCleanupSessionStatus::Recovering
+    );
+    assert_eq!(
+        history.items()[0].status(),
+        crate::engine::DurableCleanupItemStatus::OutcomeUnknown
+    );
+    assert!(fixture.payloads[0].exists());
+    fixture.engine.close();
+    assert!(fixture.engine.wait_until_closed(TEST_TIMEOUT));
+}
+
+#[cfg(unix)]
+struct SettlementFaultAfterRemovalDriver {
+    calls: usize,
+}
+
+#[cfg(unix)]
+impl crate::cleanup::permanent_safe::PermanentSafeContentsDriver
+    for SettlementFaultAfterRemovalDriver
+{
+    fn remove_contents(
+        &mut self,
+        witness: &crate::planner::RustTargetEffectWitness,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<
+        crate::cleanup::permanent_safe::PermanentSafeRemovalSummary,
+        crate::cleanup::permanent_safe::PermanentSafePlatformError,
+    > {
+        self.calls += 1;
+        let mut driver = crate::cleanup::permanent_safe::DescriptorRelativePermanentSafeDriver;
+        let result = crate::cleanup::permanent_safe::PermanentSafeContentsDriver::remove_contents(
+            &mut driver,
+            witness,
+            cancelled,
+        );
+        crate::persistence::fail_next_write_after_commit_and_reconcile_read_for_test();
+        result
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn ambiguous_effect_settlement_retries_only_the_exact_journal_receipt() {
+    let mut fixture = approved_rust_target_fixture(1);
+    let mut driver = SettlementFaultAfterRemovalDriver { calls: 0 };
+    let mut authority_now = SystemTime::now;
+    let summary =
+        crate::cleanup::permanent_safe::execute_rust_target_session_with_capacity_and_clock_for_test(
+            &mut fixture.session,
+            SystemTime::now() + Duration::from_secs(1),
+            &mut driver,
+            &|| false,
+            None,
+            &mut authority_now,
+        )
+        .unwrap();
+    assert_eq!(driver.calls, 1, "the filesystem effect must never retry");
+    assert_eq!(
+        summary.terminal_status,
+        crate::persistence::TerminalSessionStatus::Completed
+    );
+    assert!(!fixture.payloads[0].exists());
+    let history_id = fixture
+        .engine
+        .recent_cleanup_history(None, 64)
+        .unwrap()
+        .records()
+        .iter()
+        .find(|record| record.id().as_str() == fixture.session_id.as_str())
+        .map(|record| record.id().clone())
+        .unwrap();
+    assert_eq!(
+        fixture
+            .engine
+            .cleanup_session_history(&history_id)
+            .unwrap()
+            .summary()
+            .status(),
+        crate::engine::DurableCleanupSessionStatus::Completed
+    );
+    fixture.engine.close();
+    assert!(fixture.engine.wait_until_closed(TEST_TIMEOUT));
+}
+
+#[cfg(unix)]
+struct TwiceAmbiguousSettlementAfterRemovalDriver {
+    calls: usize,
+}
+
+#[cfg(unix)]
+impl crate::cleanup::permanent_safe::PermanentSafeContentsDriver
+    for TwiceAmbiguousSettlementAfterRemovalDriver
+{
+    fn remove_contents(
+        &mut self,
+        witness: &crate::planner::RustTargetEffectWitness,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<
+        crate::cleanup::permanent_safe::PermanentSafeRemovalSummary,
+        crate::cleanup::permanent_safe::PermanentSafePlatformError,
+    > {
+        self.calls += 1;
+        let mut driver = crate::cleanup::permanent_safe::DescriptorRelativePermanentSafeDriver;
+        let result = crate::cleanup::permanent_safe::PermanentSafeContentsDriver::remove_contents(
+            &mut driver,
+            witness,
+            cancelled,
+        );
+        crate::persistence::fail_next_write_after_commit_and_two_reconcile_reads_for_test();
+        result
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn twice_ambiguous_effect_settlement_retains_exact_receipt_without_reexecution() {
+    let mut fixture = approved_rust_target_fixture(1);
+    let mut driver = TwiceAmbiguousSettlementAfterRemovalDriver { calls: 0 };
+    let mut authority_now = SystemTime::now;
+    let result =
+        crate::cleanup::permanent_safe::execute_rust_target_session_with_capacity_and_clock_for_test(
+            &mut fixture.session,
+            SystemTime::now() + Duration::from_secs(1),
+            &mut driver,
+            &|| false,
+            None,
+            &mut authority_now,
+        );
+    let unsettled = match result {
+        Err(crate::cleanup::permanent_safe::PermanentSafeExecutionError::UnsettledEffect(
+            unsettled,
+        )) => unsettled,
+        other => panic!("double ambiguity must retain the exact effect receipt: {other:?}"),
+    };
+    assert_eq!(driver.calls, 1, "the filesystem effect must never retry");
+    assert!(!fixture.payloads[0].exists());
+
+    let _quarantined_session = fixture.session;
+    let _quarantined_effect = unsettled;
+    fixture.engine.close();
+    assert!(fixture.engine.wait_until_closed(TEST_TIMEOUT));
+}
+
+#[cfg(unix)]
 #[test]
 fn engine_persists_verified_capacity_delta_for_private_session() {
     let mut fixture = approved_rust_target_fixture(1);
@@ -845,14 +1050,14 @@ fn engine_stops_on_unknown_partial_effect_and_leaves_recovery_fence() {
             },
             &mut sampler,
         );
-    assert_eq!(
+    assert!(matches!(
         result,
         Err(
             crate::cleanup::permanent_safe::PermanentSafeExecutionError::Platform(
                 crate::cleanup::permanent_safe::PermanentSafePlatformError::OutcomeUnknown,
             )
         )
-    );
+    ));
     let history_id = fixture
         .engine
         .recent_cleanup_history(None, 64)
@@ -924,6 +1129,11 @@ impl RustTargetFactsFixture {
 
 #[cfg(target_os = "macos")]
 fn rust_target_facts_fixture() -> RustTargetFactsFixture {
+    rust_target_facts_fixture_with_limits(RegistryLimits::PRODUCTION)
+}
+
+#[cfg(target_os = "macos")]
+fn rust_target_facts_fixture_with_limits(limits: RegistryLimits) -> RustTargetFactsFixture {
     let home = PathBuf::from(std::env::var_os("HOME").unwrap());
     let temp = tempfile::tempdir_in(home).unwrap();
     let root = temp.path().join("scan-root");
@@ -953,7 +1163,7 @@ fn rust_target_facts_fixture() -> RustTargetFactsFixture {
     let payload = target.join("object");
     std::fs::write(&payload, b"temporary build output").unwrap();
 
-    let engine = EngineHandle::open(config(&temp)).unwrap();
+    let engine = EngineHandle::open_with_limits(config(&temp), limits).unwrap();
     let enrollment = engine
         .inspect_direct_cargo_enrollment(&direct_toolchain_cargo())
         .unwrap();
@@ -1021,6 +1231,84 @@ fn assert_rust_target_review_left_no_cleanup_authority(fixture: &RustTargetFacts
     assert!(fixture.payload.exists());
     assert!(fixture.target.join("CACHEDIR.TAG").exists());
     assert!(fixture.manifest.exists());
+}
+
+#[cfg(target_os = "macos")]
+fn prepared_rust_target_plan_review(
+    fixture: &RustTargetFactsFixture,
+) -> (
+    crate::engine::SnapshotReviewSession,
+    crate::engine::RustTargetPlanReview,
+) {
+    let mut parent = fixture
+        .engine
+        .acquire_explorer_snapshot_review(&fixture.scan_id)
+        .unwrap();
+    let review = fixture
+        .engine
+        .prepare_rust_target_plan_review(&mut parent, &fixture.candidate_id)
+        .unwrap();
+    (parent, review)
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn rust_target_plan_review_rechecks_parent_release_and_expiry_at_consume_completion() {
+    let fixture = rust_target_facts_fixture();
+    let (mut parent, review) = prepared_rust_target_plan_review(&fixture);
+
+    let result = review.into_reviewed_at_with_test_completion_hook(
+        &fixture.engine.inner.snapshot_review_owner,
+        SystemTime::now(),
+        || {
+            parent.release().unwrap();
+        },
+    );
+
+    assert!(matches!(
+        result,
+        Err(RustTargetPlanReviewError::ParentReviewUnavailable)
+    ));
+    assert_rust_target_review_left_no_cleanup_authority(&fixture);
+
+    let facts = fixture.prepare_facts();
+    let created_at = SystemTime::now();
+    let reviewed = crate::planner::review_rust_target_plan_facts(
+        facts,
+        crate::domain::CleanupPlanId::new("plan:rust-target-review:consume-expiry").unwrap(),
+        created_at,
+    )
+    .unwrap();
+    let expiry_review = RustTargetPlanReview::new(
+        std::sync::Arc::clone(&fixture.engine.inner.snapshot_review_owner),
+        reviewed,
+        &fixture.candidate_id,
+        created_at + Duration::from_secs(60 * 60),
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        created_at,
+    )
+    .unwrap();
+    let expires_at = expiry_review
+        .info_at(created_at)
+        .unwrap()
+        .effective_expires_at;
+    let before_expiry = expires_at - Duration::from_nanos(1);
+    let mut completion_times = [before_expiry, expires_at].into_iter();
+
+    let result = expiry_review.into_reviewed_at_with_test_completion_hooks(
+        &fixture.engine.inner.snapshot_review_owner,
+        created_at,
+        || {},
+        || completion_times.next().unwrap(),
+    );
+
+    assert!(matches!(
+        result,
+        Err(RustTargetPlanReviewError::ReviewExpired)
+    ));
+    assert_rust_target_review_left_no_cleanup_authority(&fixture);
+    fixture.engine.close();
+    assert!(fixture.engine.wait_until_closed(TEST_TIMEOUT));
 }
 
 #[cfg(target_os = "macos")]
@@ -1094,6 +1382,7 @@ fn rust_target_plan_review_reports_child_expiry_separately_from_parent_expiry() 
     )
     .unwrap();
     let review = RustTargetPlanReview::new(
+        std::sync::Arc::clone(&fixture.engine.inner.snapshot_review_owner),
         reviewed,
         &fixture.candidate_id,
         created_at + Duration::from_secs(60 * 60),
@@ -1234,6 +1523,367 @@ fn rust_target_plan_review_requires_current_direct_cargo_enrollment() {
 }
 
 #[cfg(target_os = "macos")]
+#[test]
+fn permanent_safe_cleanup_task_consumes_exact_review_and_returns_path_free_result() {
+    let fixture = rust_target_facts_fixture();
+    let (mut parent, review) = prepared_rust_target_plan_review(&fixture);
+
+    let task = fixture.engine.start_permanent_safe_cleanup(review).unwrap();
+    parent.release().unwrap();
+    let terminal = wait_terminal_with_timeout(&fixture.engine, task, RUST_TARGET_TASK_TIMEOUT);
+    assert_eq!(terminal.kind, TaskKind::PermanentSafeCleanup);
+    assert_eq!(terminal.phase, TaskPhase::Succeeded);
+    assert_eq!(terminal.failure, None);
+    let result = fixture
+        .engine
+        .permanent_safe_cleanup_result(task)
+        .unwrap()
+        .unwrap();
+    assert!(
+        result
+            .session_id()
+            .as_str()
+            .starts_with("cleanup:rust-target:")
+    );
+    assert_eq!(
+        result.status(),
+        crate::engine::DurableCleanupSessionStatus::Completed
+    );
+    assert!(result.removed_entries() >= 1);
+    assert!(result.removed_logical_bytes() > 0);
+    assert!(!fixture.payload.exists());
+    assert!(fixture.target.join("CACHEDIR.TAG").exists());
+    assert!(fixture.manifest.exists());
+    assert!(
+        fixture
+            .manifest
+            .parent()
+            .unwrap()
+            .join("Cargo.lock")
+            .exists()
+    );
+    assert!(
+        fixture
+            .manifest
+            .parent()
+            .unwrap()
+            .join("src/lib.rs")
+            .exists()
+    );
+
+    fixture.engine.close();
+    assert!(fixture.engine.wait_until_closed(TEST_TIMEOUT));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn foreign_engine_rejection_returns_the_unconsumed_review_to_its_owner() {
+    let fixture = rust_target_facts_fixture();
+    let foreign = rust_target_facts_fixture();
+    let (mut parent, review) = prepared_rust_target_plan_review(&fixture);
+
+    let failure = foreign
+        .engine
+        .start_permanent_safe_cleanup(review)
+        .unwrap_err();
+    assert_eq!(failure.error(), RustTargetCleanupError::WrongEngine);
+    let task = fixture
+        .engine
+        .start_permanent_safe_cleanup(failure.into_review())
+        .unwrap();
+    assert_eq!(
+        wait_terminal_with_timeout(&fixture.engine, task, RUST_TARGET_TASK_TIMEOUT).phase,
+        TaskPhase::Succeeded
+    );
+    assert!(!fixture.payload.exists());
+
+    parent.release().unwrap();
+    fixture.engine.close();
+    foreign.engine.close();
+    assert!(fixture.engine.wait_until_closed(TEST_TIMEOUT));
+    assert!(foreign.engine.wait_until_closed(TEST_TIMEOUT));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn queue_full_and_cleanup_busy_return_the_exact_reusable_review() {
+    let fixture = rust_target_facts_fixture_with_limits(RegistryLimits::testing(1, 1, 16, 16));
+    let (worker_started_tx, worker_started_rx) = mpsc::channel();
+    let (release_worker_tx, release_worker_rx) = mpsc::channel();
+    let blocker = fixture
+        .engine
+        .submit_test(Box::new(move |_| {
+            worker_started_tx.send(()).unwrap();
+            release_worker_rx
+                .recv_timeout(RUST_TARGET_TASK_TIMEOUT)
+                .unwrap();
+            WorkOutcome::Succeeded(TaskResult::TestOnly)
+        }))
+        .unwrap();
+    worker_started_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    let queued = fixture.engine.start_format_size_batch(vec![1]).unwrap();
+    let (mut parent, review) = prepared_rust_target_plan_review(&fixture);
+
+    let queue_failure = fixture
+        .engine
+        .start_permanent_safe_cleanup(review)
+        .unwrap_err();
+    assert_eq!(queue_failure.error(), RustTargetCleanupError::QueueFull);
+    assert_eq!(
+        fixture.engine.cancel_task(queued).unwrap(),
+        CancelOutcome::CancelledBeforeStart
+    );
+
+    let reservation = fixture.engine.reserve_trash_cleanup().unwrap();
+    let busy_failure = fixture
+        .engine
+        .start_permanent_safe_cleanup(queue_failure.into_review())
+        .unwrap_err();
+    assert_eq!(busy_failure.error(), RustTargetCleanupError::Busy);
+    drop(reservation);
+
+    let cleanup = fixture
+        .engine
+        .start_permanent_safe_cleanup(busy_failure.into_review())
+        .unwrap();
+    assert_eq!(
+        Arc::strong_count(&fixture.engine.inner),
+        1,
+        "a queued cleanup must not retain its owning EngineInner"
+    );
+    parent.release().unwrap();
+    release_worker_tx.send(()).unwrap();
+    assert_eq!(
+        wait_terminal(&fixture.engine, blocker).phase,
+        TaskPhase::Succeeded
+    );
+    assert_eq!(
+        wait_terminal_with_timeout(&fixture.engine, cleanup, RUST_TARGET_TASK_TIMEOUT).phase,
+        TaskPhase::Succeeded
+    );
+    assert!(!fixture.payload.exists());
+
+    fixture.engine.close();
+    assert!(fixture.engine.wait_until_closed(TEST_TIMEOUT));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn blocked_trash_callback_prevents_permanent_start_until_it_settles() {
+    let fixture = rust_target_facts_fixture();
+    let (mut parent, permanent_review) = prepared_rust_target_plan_review(&fixture);
+    let mut trash_review = fixture
+        .engine
+        .acquire_explorer_snapshot_review(&fixture.scan_id)
+        .unwrap();
+    let trash_node = trash_review
+        .child_nodes(0, SnapshotReviewNodeSort::NameAscending, 0, 10)
+        .unwrap()
+        .nodes[0]
+        .id;
+    let trash_engine = fixture.engine.clone();
+    let (callback_started_tx, callback_started_rx) = mpsc::channel();
+    let (release_callback_tx, release_callback_rx) = mpsc::channel();
+    let trash = std::thread::spawn(move || {
+        let result = trash_engine
+            .execute_explorer_trash_selection(&mut trash_review, trash_node, |_| {
+                callback_started_tx.send(()).unwrap();
+                release_callback_rx
+                    .recv_timeout(RUST_TARGET_TASK_TIMEOUT)
+                    .unwrap();
+                TrashPlatformResult::Completed
+            })
+            .unwrap();
+        trash_review.release().unwrap();
+        result
+    });
+    callback_started_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+
+    let busy = fixture
+        .engine
+        .start_permanent_safe_cleanup(permanent_review)
+        .unwrap_err();
+    assert_eq!(busy.error(), RustTargetCleanupError::Busy);
+    release_callback_tx.send(()).unwrap();
+    assert_eq!(trash.join().unwrap(), TrashPlatformResult::Completed);
+
+    let cleanup = fixture
+        .engine
+        .start_permanent_safe_cleanup(busy.into_review())
+        .unwrap();
+    parent.release().unwrap();
+    assert_eq!(
+        wait_terminal_with_timeout(&fixture.engine, cleanup, RUST_TARGET_TASK_TIMEOUT).phase,
+        TaskPhase::Succeeded
+    );
+    assert!(!fixture.payload.exists());
+
+    fixture.engine.close();
+    assert!(fixture.engine.wait_until_closed(TEST_TIMEOUT));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn queued_cleanup_cancellation_creates_no_journal_and_releases_trash_reservation() {
+    let fixture = rust_target_facts_fixture_with_limits(RegistryLimits::testing(1, 4, 16, 16));
+    let (worker_started_tx, worker_started_rx) = mpsc::channel();
+    let (release_worker_tx, release_worker_rx) = mpsc::channel();
+    let blocker = fixture
+        .engine
+        .submit_test(Box::new(move |_| {
+            worker_started_tx.send(()).unwrap();
+            release_worker_rx
+                .recv_timeout(RUST_TARGET_TASK_TIMEOUT)
+                .unwrap();
+            WorkOutcome::Succeeded(TaskResult::TestOnly)
+        }))
+        .unwrap();
+    worker_started_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+
+    let (mut parent, review) = prepared_rust_target_plan_review(&fixture);
+    let cleanup = fixture.engine.start_permanent_safe_cleanup(review).unwrap();
+    assert!(matches!(
+        fixture.engine.reserve_trash_cleanup(),
+        Err(TrashSelectionError::Busy)
+    ));
+    assert_eq!(
+        fixture.engine.cancel_task(cleanup).unwrap(),
+        CancelOutcome::CancelledBeforeStart
+    );
+    let terminal = fixture.engine.task_snapshot(cleanup).unwrap();
+    assert_eq!(terminal.phase, TaskPhase::Cancelled);
+    assert!(!terminal.result_available);
+    assert!(
+        fixture
+            .engine
+            .recent_cleanup_history(None, 64)
+            .unwrap()
+            .records()
+            .is_empty()
+    );
+    assert!(fixture.payload.exists());
+    drop(fixture.engine.reserve_trash_cleanup().unwrap());
+
+    release_worker_tx.send(()).unwrap();
+    assert_eq!(
+        wait_terminal(&fixture.engine, blocker).phase,
+        TaskPhase::Succeeded
+    );
+    parent.release().unwrap();
+    fixture.engine.close();
+    assert!(fixture.engine.wait_until_closed(TEST_TIMEOUT));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn cleanup_task_rejects_review_drift_before_journal_or_effect() {
+    let fixture = rust_target_facts_fixture();
+    let (mut parent, review) = prepared_rust_target_plan_review(&fixture);
+    std::fs::write(
+        &fixture.manifest,
+        b"[package]\nname = 'fixture'\nversion = '9.9.9'\nedition = '2021'\n\n[workspace]\n",
+    )
+    .unwrap();
+
+    let task = fixture.engine.start_permanent_safe_cleanup(review).unwrap();
+    let terminal = wait_terminal_with_timeout(&fixture.engine, task, RUST_TARGET_TASK_TIMEOUT);
+    assert_eq!(terminal.phase, TaskPhase::Failed);
+    assert_eq!(
+        terminal.failure,
+        Some(TaskFailureKind::PermanentSafeCleanup(
+            crate::engine::PermanentSafeCleanupFailureKind::ChangedDuringReview,
+        ))
+    );
+    assert!(!terminal.result_available);
+    assert!(fixture.payload.exists());
+    assert!(
+        fixture
+            .engine
+            .recent_cleanup_history(None, 64)
+            .unwrap()
+            .records()
+            .is_empty()
+    );
+
+    parent.release().unwrap();
+    fixture.engine.close();
+    assert!(fixture.engine.wait_until_closed(TEST_TIMEOUT));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn trash_callback_panic_quarantines_both_cleanup_entry_points_across_reopen() {
+    let fixture = rust_target_facts_fixture();
+    let config = fixture.engine.config().clone();
+    let (mut parent, permanent_review) = prepared_rust_target_plan_review(&fixture);
+    let mut trash_review = fixture
+        .engine
+        .acquire_explorer_snapshot_review(&fixture.scan_id)
+        .unwrap();
+    let trash_node = trash_review
+        .child_nodes(0, SnapshotReviewNodeSort::NameAscending, 0, 10)
+        .unwrap()
+        .nodes[0]
+        .id;
+
+    let result = fixture
+        .engine
+        .execute_explorer_trash_selection(&mut trash_review, trash_node, |_| {
+            panic!("simulated platform callback panic after effect receipt")
+        })
+        .unwrap();
+    assert_eq!(result, TrashPlatformResult::OutcomeUnknown);
+    assert!(matches!(
+        fixture.engine.reserve_trash_cleanup(),
+        Err(TrashSelectionError::OutcomeUnknown)
+    ));
+    let failure = fixture
+        .engine
+        .start_permanent_safe_cleanup(permanent_review)
+        .unwrap_err();
+    assert_eq!(failure.error(), RustTargetCleanupError::OutcomeUnknown);
+    failure.into_review().release();
+
+    let history = fixture.engine.recent_cleanup_history(None, 1).unwrap();
+    assert_eq!(
+        history.records()[0].status(),
+        DurableCleanupSessionStatus::Recovering
+    );
+    let exact = fixture
+        .engine
+        .cleanup_session_history(history.records()[0].id())
+        .unwrap();
+    assert_eq!(
+        exact.items()[0].status(),
+        DurableCleanupItemStatus::OutcomeUnknown
+    );
+
+    trash_review.release().unwrap();
+    parent.release().unwrap();
+    fixture.engine.close();
+    assert!(fixture.engine.wait_until_closed(TEST_TIMEOUT));
+    let RustTargetFactsFixture {
+        _temp: temp,
+        engine,
+        scan_id: _,
+        candidate_id: _,
+        manifest: _,
+        target: _,
+        payload: _,
+    } = fixture;
+    drop(engine);
+
+    let reopened = EngineHandle::open(config).unwrap();
+    assert!(matches!(
+        reopened.reserve_trash_cleanup(),
+        Err(TrashSelectionError::OutcomeUnknown)
+    ));
+    reopened.close();
+    assert!(reopened.wait_until_closed(TEST_TIMEOUT));
+    drop(temp);
+}
+
+#[cfg(target_os = "macos")]
 fn rust_target_journal_request(
     plan: &str,
     session: &str,
@@ -1341,6 +1991,110 @@ fn rust_target_facts_bridge_claims_and_executes_one_reviewed_session() {
             .unwrap();
         assert_eq!(active_claims, 0);
     });
+    fixture.engine.close();
+    assert!(fixture.engine.wait_until_closed(TEST_TIMEOUT));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn ambiguous_generation_one_claim_is_adopted_without_replanning_or_reexecution() {
+    let fixture = rust_target_facts_fixture();
+    let facts = fixture.prepare_facts();
+    let now = current_rust_target_test_time();
+    crate::persistence::fail_next_write_after_commit_and_reconcile_read_for_test();
+    let summary = fixture
+        .engine
+        .execute_rust_target_plan_facts(
+            facts,
+            rust_target_journal_request(
+                "plan:rust-target-claim-reconcile",
+                "cleanup:rust-target-claim-reconcile",
+                now,
+            ),
+            &|| false,
+        )
+        .unwrap();
+
+    assert_eq!(
+        summary.terminal_status,
+        crate::persistence::TerminalSessionStatus::Completed
+    );
+    assert!(!fixture.payload.exists());
+    let history_id = fixture
+        .engine
+        .recent_cleanup_history(None, 64)
+        .unwrap()
+        .records()
+        .iter()
+        .find(|record| record.id().as_str() == "cleanup:rust-target-claim-reconcile")
+        .map(|record| record.id().clone())
+        .unwrap();
+    assert_eq!(
+        fixture
+            .engine
+            .cleanup_session_history(&history_id)
+            .unwrap()
+            .summary()
+            .status(),
+        crate::engine::DurableCleanupSessionStatus::Completed
+    );
+    fixture.engine.close();
+    assert!(fixture.engine.wait_until_closed(TEST_TIMEOUT));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn twice_ambiguous_task_claim_is_quarantined_with_exact_session_correlation() {
+    let fixture = rust_target_facts_fixture();
+    let (mut first_parent, first_review) = prepared_rust_target_plan_review(&fixture);
+    let (mut second_parent, second_review) = prepared_rust_target_plan_review(&fixture);
+    let task = fixture
+        .engine
+        .start_permanent_safe_cleanup_with_before_begin_hook(first_review, || {
+            crate::persistence::fail_next_write_after_commit_and_two_reconcile_reads_for_test();
+        })
+        .unwrap();
+    first_parent.release().unwrap();
+
+    let terminal = wait_terminal_with_timeout(&fixture.engine, task, RUST_TARGET_TASK_TIMEOUT);
+    assert_eq!(terminal.phase, TaskPhase::Failed);
+    assert_eq!(
+        terminal.failure,
+        Some(TaskFailureKind::PermanentSafeCleanup(
+            crate::engine::PermanentSafeCleanupFailureKind::OutcomeUnknown,
+        ))
+    );
+    assert!(terminal.result_available);
+    let result = fixture
+        .engine
+        .permanent_safe_cleanup_result(task)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        result.status(),
+        crate::engine::DurableCleanupSessionStatus::Recovering
+    );
+    assert!(
+        result
+            .session_id()
+            .as_str()
+            .starts_with("cleanup:rust-target:")
+    );
+    assert_eq!(result.removed_entries(), 0);
+    assert_eq!(result.removed_logical_bytes(), 0);
+    assert!(fixture.payload.exists());
+    assert!(matches!(
+        fixture.engine.reserve_trash_cleanup(),
+        Err(TrashSelectionError::OutcomeUnknown)
+    ));
+    let failure = fixture
+        .engine
+        .start_permanent_safe_cleanup(second_review)
+        .unwrap_err();
+    assert_eq!(failure.error(), RustTargetCleanupError::OutcomeUnknown);
+    failure.into_review().release();
+
+    second_parent.release().unwrap();
     fixture.engine.close();
     assert!(fixture.engine.wait_until_closed(TEST_TIMEOUT));
 }

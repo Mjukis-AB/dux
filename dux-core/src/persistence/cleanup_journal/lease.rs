@@ -6,6 +6,10 @@
 //! plan, approval, or filesystem-effect authority.
 
 use std::cell::Cell;
+#[cfg(test)]
+use std::cell::RefCell;
+#[cfg(test)]
+use std::collections::VecDeque;
 use std::fmt;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -83,7 +87,7 @@ impl JournalLeaseFailure {
         self.error.kind
     }
 
-    pub(super) fn into_lease(self) -> CleanupJournalLease {
+    pub(crate) fn into_lease(self) -> CleanupJournalLease {
         self.lease
     }
 }
@@ -131,6 +135,37 @@ enum TestJournalFault {
 #[cfg(test)]
 thread_local! {
     static LEASE_TEST_FAULT: Cell<TestJournalFault> = const { Cell::new(TestJournalFault::None) };
+    static LEASE_TEST_RECONCILE_READ_FAILURES: Cell<u8> = const { Cell::new(0) };
+    static LEASE_TEST_AMBIGUOUS_WRITE_SCHEDULE: RefCell<VecDeque<u8>> =
+        const { RefCell::new(VecDeque::new()) };
+}
+
+#[cfg(test)]
+pub(crate) fn fail_next_write_after_commit_and_reconcile_read_for_test() {
+    set_lease_ambiguous_write_schedule_for_test([1]);
+}
+
+#[cfg(test)]
+pub(crate) fn fail_next_write_after_commit_and_two_reconcile_reads_for_test() {
+    set_lease_ambiguous_write_schedule_for_test([2]);
+}
+
+#[cfg(test)]
+fn set_lease_ambiguous_write_schedule_for_test(
+    reconcile_read_failures: impl IntoIterator<Item = u8>,
+) {
+    LEASE_TEST_FAULT.with(|fault| {
+        assert_eq!(fault.get(), TestJournalFault::None);
+    });
+    LEASE_TEST_RECONCILE_READ_FAILURES.with(|reads| {
+        assert_eq!(reads.get(), 0);
+    });
+    LEASE_TEST_AMBIGUOUS_WRITE_SCHEDULE.with(|schedule| {
+        let mut schedule = schedule.borrow_mut();
+        assert!(schedule.is_empty());
+        schedule.extend(reconcile_read_failures);
+        assert!(schedule.iter().all(|failures| *failures > 0));
+    });
 }
 
 impl StoreCoordinator {
@@ -166,16 +201,25 @@ impl CleanupJournalLease {
 
     #[cfg(test)]
     pub(super) fn fail_next_write_after_commit_and_reconcile_read_for_test(&self) {
-        LEASE_TEST_FAULT.with(|fault| {
-            assert_eq!(fault.get(), TestJournalFault::None);
-            fault.set(TestJournalFault::FailAfterCommitThenReconcileRead);
-        });
+        fail_next_write_after_commit_and_reconcile_read_for_test();
     }
 
     pub(super) fn load(
         &self,
         session_id: &CleanupSessionId,
     ) -> Result<Option<CleanupJournal>, HistoryError> {
+        #[cfg(test)]
+        if LEASE_TEST_RECONCILE_READ_FAILURES.with(|reads| {
+            let remaining = reads.get();
+            if remaining > 0 {
+                reads.set(remaining - 1);
+                true
+            } else {
+                false
+            }
+        }) {
+            return Err(HistoryError::new(HistoryErrorKind::DatabaseUnavailable));
+        }
         #[cfg(test)]
         if LEASE_TEST_FAULT.with(|fault| {
             let should_fail = fault.get() == TestJournalFault::FailReconcileRead;
@@ -406,6 +450,21 @@ impl CleanupJournalLease {
         self.store
             .validate_history_storage_after_write()
             .map_err(ambiguous_write_failure)?;
+        #[cfg(test)]
+        if LEASE_TEST_AMBIGUOUS_WRITE_SCHEDULE.with(|schedule| {
+            let Some(reconcile_reads) = schedule.borrow_mut().pop_front() else {
+                return false;
+            };
+            LEASE_TEST_RECONCILE_READ_FAILURES.with(|reads| {
+                assert_eq!(reads.get(), 0);
+                reads.set(reconcile_reads);
+            });
+            true
+        }) {
+            return Err(ambiguous_write_failure(HistoryError::new(
+                HistoryErrorKind::DatabaseUnavailable,
+            )));
+        }
         #[cfg(test)]
         if LEASE_TEST_FAULT.with(|fault| {
             let should_fail = fault.get() == TestJournalFault::FailAfterCommitThenReconcileRead;

@@ -2,14 +2,16 @@
 //!
 //! The engine runs read-only formatting, deterministic volume-pressure status,
 //! durable full-scan, bounded DUX-owned history and snapshot-maintenance tasks,
-//! and typed settings operations. It grants no cleanup authority; FFI
-//! transport and cleanup execution remain separate boundaries.
+//! and typed settings operations. One opaque reviewed Rust-target capability
+//! can enter a serialized permanent-safe task; FFI transport and explicit
+//! native confirmation remain separate boundaries.
 
 mod candidate_history;
 mod cleanup_history;
 mod cleanup_history_clear;
 mod config;
 mod registry;
+mod rust_target_cleanup;
 mod rust_target_plan_review;
 mod scan_coverage_details;
 mod settings;
@@ -39,6 +41,9 @@ pub use cleanup_history_clear::{
 };
 pub use config::{EngineConfig, EngineConfigError, EngineConfigField, EngineConfigReason};
 pub use registry::EngineHandle;
+pub use rust_target_cleanup::{
+    RustTargetCleanupError, RustTargetCleanupResult, RustTargetCleanupStartFailure,
+};
 pub use rust_target_plan_review::{
     PendingRustTargetPlanReview, RustTargetPlanReview, RustTargetPlanReviewAdmission,
     RustTargetPlanReviewError, RustTargetPlanReviewInfo, ValidatedPendingRustTargetPlanReview,
@@ -74,8 +79,8 @@ pub use task::{
     DurableCandidateStatus, DurableCandidateSummary, DurableScanCounts, DurableScanCoverage,
     DurableScanStatus, DurableScanSummary, EngineLifecycle, EngineOpenError, FormatSizeBatchResult,
     FormattedSizeEntry, HistoryMaintenanceFailureKind, HistoryMaintenanceResult,
-    HistoryMaintenanceStartOutcome, RecentScanHistory, ScanHistoryError,
-    ScanRecoveryMaintenanceFailureKind, ScanRecoveryMaintenanceOutcome,
+    HistoryMaintenanceStartOutcome, PermanentSafeCleanupFailureKind, RecentScanHistory,
+    ScanHistoryError, ScanRecoveryMaintenanceFailureKind, ScanRecoveryMaintenanceOutcome,
     ScanRecoveryMaintenanceResult, ScanRecoveryMaintenanceStartOutcome, ScanRootErrorKind,
     ScanTaskCounts, ScanTaskResult, ScanTaskStatus, SnapshotOrphanMaintenanceFailureKind,
     SnapshotOrphanMaintenanceOutcome, SnapshotOrphanMaintenanceResult,

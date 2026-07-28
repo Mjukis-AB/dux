@@ -3,10 +3,11 @@ use std::num::NonZeroU64;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+#[cfg(all(test, target_os = "macos"))]
 use thiserror::Error;
 
 use super::candidate_history::{
@@ -27,6 +28,17 @@ use super::cleanup_history_clear::{
     CleanupHistoryClearError, CleanupHistoryClearPreview, CleanupHistoryClearResult,
 };
 use super::config::EngineConfig;
+use super::rust_target_cleanup::{
+    RustTargetCleanupError, RustTargetCleanupResult, RustTargetCleanupStartFailure,
+};
+#[cfg(target_os = "macos")]
+use super::rust_target_cleanup::{
+    failure_kind as rust_target_cleanup_failure_kind, generate_session_id,
+    map_approval_error as map_rust_target_cleanup_approval_error,
+    map_handoff_error as map_rust_target_cleanup_handoff_error,
+    recovering_result as rust_target_cleanup_recovering_result,
+    result as rust_target_cleanup_result,
+};
 use super::rust_target_plan_review::{
     PendingRustTargetPlanReview, RustTargetPlanReview, RustTargetPlanReviewAdmission,
     RustTargetPlanReviewError, ValidatedPendingRustTargetPlanReview,
@@ -78,12 +90,17 @@ use super::task::{
 use crate::cleanup::capacity::CleanupCapacitySampler;
 #[cfg(target_os = "macos")]
 use crate::cleanup::capacity::MacOSCleanupCapacitySampler;
+use crate::cleanup::executor::{
+    TrashAdmissionError, TrashExecutionError, TrashPlatformError, TrashSelectionExecutionError,
+    UnsettledTrashAdmission, UnsettledTrashEffect,
+};
 #[cfg(test)]
 use crate::cleanup::permanent_safe::execute_rust_target_session_with_capacity_and_clock_for_test;
 use crate::cleanup::permanent_safe::{
     DescriptorRelativePermanentSafeDriver, PermanentSafeExecutionError,
-    PermanentSafeRemovalSummary, PermanentSafeSessionSummary, execute_rust_target_contents,
-    execute_rust_target_session, execute_rust_target_session_with_capacity,
+    PermanentSafeRemovalSummary, PermanentSafeSessionSummary, UnsettledPermanentSafeEffect,
+    execute_rust_target_contents, execute_rust_target_session,
+    execute_rust_target_session_with_capacity,
 };
 use crate::cleanup::{TrashEffectRequest, TrashPlatformResult, TrashSelectionError};
 use crate::domain::{
@@ -94,6 +111,8 @@ use crate::domain::{
     replay_snapshot_candidate_evaluation, validate_bundled_candidate_catalog,
 };
 use crate::path_validation::{FilesystemIdentity, capture_scan_root, validate_scan_root};
+#[cfg(any(test, target_os = "macos"))]
+use crate::persistence::CleanupTrigger;
 use crate::persistence::snapshot::from_scan::prepare_completed_scan;
 use crate::persistence::snapshot::{
     HostValue, SnapshotCodecErrorKind, SnapshotOrphanReconciliationBatchOutcome,
@@ -122,16 +141,19 @@ use crate::persistence::{
     PermanentCleanupSettingSource, PermanentCleanupSettingUpdate, SnapshotRetentionCapSetting,
     SnapshotRetentionCapSettingSource, SnapshotRetentionCapSettingUpdate,
 };
+use crate::persistence::{CleanupJournalLease, DatabaseStatus, StoreCoordinator};
 #[cfg(test)]
-use crate::persistence::{CleanupTrigger, NewCleanupSessionRecord, StoredCandidateRecord};
-use crate::persistence::{DatabaseStatus, StoreCoordinator};
-use crate::planner::ApprovedCleanupSession;
+use crate::persistence::{NewCleanupSessionRecord, StoredCandidateRecord};
+#[cfg(target_os = "macos")]
+use crate::planner::ExactPathHandoffError;
+use crate::planner::{ApprovedCleanupSession, ApprovedTrustedReviewedCleanupPlan};
 #[cfg(unix)]
 use crate::planner::{
-    ExactPathHandoffError, RustTargetJournalRequest, RustTargetLiveWitness,
-    RustTargetPipelineError, RustTargetPlanFacts, RustTargetPlanReviewFailure,
-    begin_rust_target_cleanup_session, prepare_rust_target_live_input,
+    CleanupSessionStartError, RustTargetLiveWitness, RustTargetPipelineError, RustTargetPlanFacts,
+    RustTargetPlanReviewFailure, prepare_rust_target_live_input,
 };
+#[cfg(all(test, target_os = "macos"))]
+use crate::planner::{RustTargetJournalRequest, begin_rust_target_cleanup_session};
 #[cfg(target_os = "macos")]
 use crate::planner::{
     RustTargetPromotion, prepare_rust_target_plan_facts, prepare_rust_target_promotion,
@@ -231,6 +253,7 @@ enum TaskResult {
     SnapshotProvisioningStageMaintenance(Arc<SnapshotProvisioningStageMaintenanceResult>),
     SnapshotTerminalTempMaintenance(Arc<SnapshotTerminalTempMaintenanceResult>),
     SnapshotUnleasedTempMaintenance(Arc<SnapshotUnleasedTempMaintenanceResult>),
+    PermanentSafeCleanup(Arc<RustTargetCleanupResult>),
     #[cfg(test)]
     TestOnly,
 }
@@ -250,6 +273,10 @@ struct TaskContext {
 impl TaskContext {
     fn is_cancellation_requested(&self) -> bool {
         self.cancellation.is_requested()
+    }
+
+    fn engine_is_open(&self) -> bool {
+        self.shared.lock_registry_recover().lifecycle == EngineLifecycle::Open
     }
 
     fn report_progress(&self, completed: u64, total: u64) {
@@ -626,6 +653,76 @@ struct Registry {
     active_snapshot_provisioning_stage_maintenance: Option<TaskId>,
     active_snapshot_terminal_temp_maintenance: Option<TaskId>,
     active_snapshot_unleased_temp_maintenance: Option<TaskId>,
+    active_cleanup_operation: Option<ActiveCleanupOperation>,
+    next_trash_reservation: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ActiveCleanupOperation {
+    PermanentSafe(TaskId),
+    Trash(u64),
+    Quarantined,
+}
+
+/// A retained lock/claim prevents any second cleanup after an ambiguous
+/// journal transition. It is intentionally never inspected or retried by
+/// ordinary task orchestration; process-lifetime quarantine prevents a
+/// same-process reopen from outrunning durable restart recovery.
+#[allow(
+    dead_code,
+    reason = "fields are retained capabilities, not observations"
+)]
+enum QuarantinedCleanup {
+    Lease(CleanupJournalLease),
+    TrashAdmission(Box<UnsettledTrashAdmission>),
+    TrashEffect(Box<UnsettledTrashEffect>),
+    Session {
+        session: Box<ApprovedCleanupSession>,
+        unsettled_effect: Option<Box<UnsettledPermanentSafeEffect>>,
+    },
+}
+
+/// Ambiguous cleanup authority cannot be handed to same-process recovery:
+/// process liveness intentionally ignores the random owner nonce. Retain every
+/// exact capability for the rest of the process and key exclusion by the
+/// process-unique store coordinator. A later engine opened on the same
+/// physical store receives that same coordinator while this quarantine holds
+/// it alive and therefore remains fail-closed.
+struct ProcessQuarantinedCleanup {
+    store: Arc<StoreCoordinator>,
+    _authority: QuarantinedCleanup,
+}
+
+static PROCESS_CLEANUP_QUARANTINE: OnceLock<Mutex<Vec<ProcessQuarantinedCleanup>>> =
+    OnceLock::new();
+
+fn process_cleanup_quarantine() -> &'static Mutex<Vec<ProcessQuarantinedCleanup>> {
+    PROCESS_CLEANUP_QUARANTINE.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn store_is_quarantined(
+    quarantine: &[ProcessQuarantinedCleanup],
+    store: &Arc<StoreCoordinator>,
+) -> bool {
+    quarantine
+        .iter()
+        .any(|entry| Arc::ptr_eq(&entry.store, store))
+}
+
+fn quarantine_cleanup_for_store(
+    store: &Arc<StoreCoordinator>,
+    shared: &Shared,
+    cleanup: QuarantinedCleanup,
+) {
+    let mut quarantine = process_cleanup_quarantine()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    quarantine.push(ProcessQuarantinedCleanup {
+        store: Arc::clone(store),
+        _authority: cleanup,
+    });
+    shared.lock_registry_recover().active_cleanup_operation =
+        Some(ActiveCleanupOperation::Quarantined);
 }
 
 impl Registry {
@@ -645,6 +742,8 @@ impl Registry {
             active_snapshot_provisioning_stage_maintenance: None,
             active_snapshot_terminal_temp_maintenance: None,
             active_snapshot_unleased_temp_maintenance: None,
+            active_cleanup_operation: None,
+            next_trash_reservation: 1,
         }
     }
 
@@ -693,6 +792,11 @@ impl Registry {
             && self.active_snapshot_unleased_temp_maintenance == Some(id)
         {
             self.active_snapshot_unleased_temp_maintenance = None;
+        }
+        if kind == TaskKind::PermanentSafeCleanup
+            && self.active_cleanup_operation == Some(ActiveCleanupOperation::PermanentSafe(id))
+        {
+            self.active_cleanup_operation = None;
         }
     }
 }
@@ -788,12 +892,22 @@ pub struct EngineHandle {
     inner: Arc<EngineInner>,
 }
 
-#[cfg(unix)]
+struct TrashCleanupReservation {
+    shared: Arc<Shared>,
+    token: u64,
+}
+
+impl Drop for TrashCleanupReservation {
+    fn drop(&mut self) {
+        let mut registry = self.shared.lock_registry_recover();
+        if registry.active_cleanup_operation == Some(ActiveCleanupOperation::Trash(self.token)) {
+            registry.active_cleanup_operation = None;
+        }
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
 #[derive(Debug, Error)]
-#[allow(
-    dead_code,
-    reason = "the private Rust-target planner-to-executor bridge is staged before UI orchestration"
-)]
 pub(crate) enum RustTargetPlanExecutionError {
     #[error("Rust-target planner/journal handoff failed: {0}")]
     Handoff(#[source] ExactPathHandoffError),
@@ -802,6 +916,43 @@ pub(crate) enum RustTargetPlanExecutionError {
 }
 
 impl EngineHandle {
+    fn reserve_trash_cleanup(&self) -> Result<TrashCleanupReservation, TrashSelectionError> {
+        let quarantine = process_cleanup_quarantine()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if store_is_quarantined(&quarantine, &self.inner.store) {
+            return Err(TrashSelectionError::OutcomeUnknown);
+        }
+        let mut registry = self
+            .inner
+            .shared
+            .registry
+            .lock()
+            .map_err(|_| TrashSelectionError::InternalState)?;
+        if registry.lifecycle != EngineLifecycle::Open {
+            return Err(TrashSelectionError::InternalState);
+        }
+        match registry.active_cleanup_operation {
+            Some(ActiveCleanupOperation::Quarantined) => {
+                return Err(TrashSelectionError::OutcomeUnknown);
+            }
+            Some(_) => return Err(TrashSelectionError::Busy),
+            None => {}
+        }
+        let token = registry.next_trash_reservation;
+        registry.next_trash_reservation = registry.next_trash_reservation.wrapping_add(1).max(1);
+        registry.active_cleanup_operation = Some(ActiveCleanupOperation::Trash(token));
+        Ok(TrashCleanupReservation {
+            shared: Arc::clone(&self.inner.shared),
+            token,
+        })
+    }
+
+    #[cfg(all(test, target_os = "macos"))]
+    fn quarantine_cleanup(&self, cleanup: QuarantinedCleanup) {
+        quarantine_cleanup_for_store(&self.inner.store, &self.inner.shared, cleanup);
+    }
+
     pub fn open(config: EngineConfig) -> Result<Self, EngineOpenError> {
         Self::open_with_limits(config, RegistryLimits::PRODUCTION)
     }
@@ -1464,7 +1615,63 @@ impl EngineHandle {
         if !review.belongs_to(&self.inner.snapshot_review_owner) {
             return Err(TrashSelectionError::InvalidRequest);
         }
-        crate::cleanup::execute_reviewed_trash_selection(&self.inner.store, review, node_id, driver)
+        let _reservation = self.reserve_trash_cleanup()?;
+        match crate::cleanup::execute_reviewed_trash_selection(
+            &self.inner.store,
+            review,
+            node_id,
+            driver,
+        ) {
+            Ok(result) => Ok(result),
+            Err(TrashSelectionExecutionError::Selection(error)) => Err(error),
+            Err(TrashSelectionExecutionError::JournalClaimUnresolved(unresolved)) => {
+                quarantine_cleanup_for_store(
+                    &self.inner.store,
+                    &self.inner.shared,
+                    QuarantinedCleanup::Lease(unresolved.into_lease()),
+                );
+                Err(TrashSelectionError::OutcomeUnknown)
+            }
+            Err(TrashSelectionExecutionError::ClaimedAdmissionUnresolved(unresolved)) => {
+                quarantine_cleanup_for_store(
+                    &self.inner.store,
+                    &self.inner.shared,
+                    QuarantinedCleanup::TrashAdmission(unresolved),
+                );
+                Err(TrashSelectionError::OutcomeUnknown)
+            }
+            Err(TrashSelectionExecutionError::UnresolvedEffect(unresolved)) => {
+                self.settle_or_quarantine_trash_effect(unresolved)
+            }
+        }
+    }
+
+    fn settle_or_quarantine_trash_effect(
+        &self,
+        unresolved: Box<UnsettledTrashEffect>,
+    ) -> Result<TrashPlatformResult, TrashSelectionError> {
+        match unresolved.retry() {
+            Ok(Ok(())) => Ok(TrashPlatformResult::Completed),
+            Ok(Err(TrashExecutionError::Platform(error))) => {
+                Ok(public_trash_platform_result(error))
+            }
+            Ok(Err(TrashExecutionError::Admission(error))) => Err(map_trash_admission_error(error)),
+            Ok(Err(TrashExecutionError::UnresolvedEffect(unresolved))) | Err(unresolved) => {
+                let platform_unknown = unresolved.observed_platform_error()
+                    == Some(TrashPlatformError::OutcomeUnknown)
+                    || unresolved.journal_outcome_is_unknown();
+                quarantine_cleanup_for_store(
+                    &self.inner.store,
+                    &self.inner.shared,
+                    QuarantinedCleanup::TrashEffect(unresolved),
+                );
+                if platform_unknown {
+                    Ok(TrashPlatformResult::OutcomeUnknown)
+                } else {
+                    Err(TrashSelectionError::OutcomeUnknown)
+                }
+            }
+        }
     }
 
     /// Execute one path from a planner-owned, approved permanent-safe session.
@@ -1532,11 +1739,7 @@ impl EngineHandle {
     /// AI output, FFI values, or CLI requests. The journal handoff owns the
     /// final plan/authorization checks; the executor owns descriptor-relative
     /// identity checks, effect receipts, cancellation, and terminalization.
-    #[cfg(target_os = "macos")]
-    #[allow(
-        dead_code,
-        reason = "the Rust-target facts-to-executor bridge is staged before FFI/UI orchestration"
-    )]
+    #[cfg(all(test, target_os = "macos"))]
     pub(crate) fn execute_rust_target_plan_facts(
         &self,
         facts: RustTargetPlanFacts,
@@ -1548,14 +1751,67 @@ impl EngineHandle {
                 PermanentSafeExecutionError::Admission(HistoryErrorKind::InvalidTransition),
             ));
         }
-        let mut session = begin_rust_target_cleanup_session(facts, request, &self.inner.store)
-            .map_err(RustTargetPlanExecutionError::Handoff)?;
-        self.execute_approved_permanent_safe_session_with_bound_capacity(
+        let begin = begin_rust_target_cleanup_session(facts, request, &self.inner.store);
+        let mut session = match begin {
+            Ok(session) => session,
+            Err(CleanupSessionStartError::JournalClaimUnresolved(failure)) => match failure.retry()
+            {
+                Ok(session) => session,
+                Err(CleanupSessionStartError::JournalClaimUnresolved(failure)) => {
+                    self.quarantine_cleanup(QuarantinedCleanup::Lease(failure.into_lease()));
+                    return Err(RustTargetPlanExecutionError::Execution(
+                        PermanentSafeExecutionError::Admission(HistoryErrorKind::OutcomeUnknown),
+                    ));
+                }
+                Err(CleanupSessionStartError::ClaimedPlanUnresolved(failure)) => {
+                    self.quarantine_cleanup(QuarantinedCleanup::Session {
+                        session: Box::new(failure.into_session()),
+                        unsettled_effect: None,
+                    });
+                    return Err(RustTargetPlanExecutionError::Execution(
+                        PermanentSafeExecutionError::Admission(HistoryErrorKind::OutcomeUnknown),
+                    ));
+                }
+                Err(CleanupSessionStartError::Handoff(error)) => {
+                    return Err(RustTargetPlanExecutionError::Handoff(error));
+                }
+            },
+            Err(CleanupSessionStartError::ClaimedPlanUnresolved(failure)) => {
+                self.quarantine_cleanup(QuarantinedCleanup::Session {
+                    session: Box::new(failure.into_session()),
+                    unsettled_effect: None,
+                });
+                return Err(RustTargetPlanExecutionError::Execution(
+                    PermanentSafeExecutionError::Admission(HistoryErrorKind::OutcomeUnknown),
+                ));
+            }
+            Err(CleanupSessionStartError::Handoff(error)) => {
+                return Err(RustTargetPlanExecutionError::Handoff(error));
+            }
+        };
+        match self.execute_approved_permanent_safe_session_with_bound_capacity(
             &mut session,
             SystemTime::now(),
             cancelled,
-        )
-        .map_err(RustTargetPlanExecutionError::Execution)
+        ) {
+            Ok(summary) => Ok(summary),
+            Err(PermanentSafeExecutionError::UnsettledEffect(unsettled_effect)) => {
+                self.quarantine_cleanup(QuarantinedCleanup::Session {
+                    session: Box::new(session),
+                    unsettled_effect: Some(unsettled_effect),
+                });
+                Err(RustTargetPlanExecutionError::Execution(
+                    PermanentSafeExecutionError::Admission(HistoryErrorKind::OutcomeUnknown),
+                ))
+            }
+            Err(error) => {
+                self.quarantine_cleanup(QuarantinedCleanup::Session {
+                    session: Box::new(session),
+                    unsettled_effect: None,
+                });
+                Err(RustTargetPlanExecutionError::Execution(error))
+            }
+        }
     }
 
     /// Acquire one exact durable Rust-target candidate as a fresh live
@@ -1753,6 +2009,7 @@ impl EngineHandle {
             .validate_and_expires_at(observed_at)
             .map_err(map_snapshot_review_plan_review_error)?;
         Ok(ValidatedPendingRustTargetPlanReview {
+            owner: pending.owner,
             candidate_id: pending.candidate_id,
             parent_review_expires_at: pending.parent_review_expires_at.min(parent_expires_after),
             parent_review_live: pending.parent_review_live,
@@ -1771,6 +2028,7 @@ impl EngineHandle {
         }
         let observed_at = SystemTime::now();
         RustTargetPlanReview::new(
+            pending.owner,
             pending.reviewed,
             &pending.candidate_id,
             pending.parent_review_expires_at,
@@ -1779,10 +2037,135 @@ impl EngineHandle {
         )
     }
 
+    /// Admit one exact Rust-target plan review to the engine-owned,
+    /// consume-once permanent-safe task boundary.
+    ///
+    /// Rejected admission returns the unconsumed opaque review. Acceptance
+    /// synchronously consumes and approves the exact child capability before
+    /// returning, so releasing the parent review afterward cannot invalidate
+    /// queued task authority. Queued cancellation still creates no journal.
+    pub fn start_permanent_safe_cleanup(
+        &self,
+        review: RustTargetPlanReview,
+    ) -> Result<TaskId, RustTargetCleanupStartFailure> {
+        self.start_permanent_safe_cleanup_with_hook(review, Box::new(|| {}))
+    }
+
+    #[cfg(test)]
+    fn start_permanent_safe_cleanup_with_before_begin_hook(
+        &self,
+        review: RustTargetPlanReview,
+        before_begin: impl FnOnce() + Send + 'static,
+    ) -> Result<TaskId, RustTargetCleanupStartFailure> {
+        self.start_permanent_safe_cleanup_with_hook(review, Box::new(before_begin))
+    }
+
+    fn start_permanent_safe_cleanup_with_hook(
+        &self,
+        review: RustTargetPlanReview,
+        before_begin: Box<dyn FnOnce() + Send>,
+    ) -> Result<TaskId, RustTargetCleanupStartFailure> {
+        if !review.belongs_to(&self.inner.snapshot_review_owner) {
+            return Err(RustTargetCleanupStartFailure::new(
+                RustTargetCleanupError::WrongEngine,
+                review,
+            ));
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = before_begin;
+            return Err(RustTargetCleanupStartFailure::new(
+                RustTargetCleanupError::Unavailable,
+                review,
+            ));
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let quarantine = process_cleanup_quarantine()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if store_is_quarantined(&quarantine, &self.inner.store) {
+                return Err(RustTargetCleanupStartFailure::new(
+                    RustTargetCleanupError::OutcomeUnknown,
+                    review,
+                ));
+            }
+            let mut registry = match self.inner.shared.registry.lock() {
+                Ok(registry) => registry,
+                Err(_) => {
+                    return Err(RustTargetCleanupStartFailure::new(
+                        RustTargetCleanupError::InternalState,
+                        review,
+                    ));
+                }
+            };
+            if registry.lifecycle != EngineLifecycle::Open {
+                return Err(RustTargetCleanupStartFailure::new(
+                    RustTargetCleanupError::Closed,
+                    review,
+                ));
+            }
+            if registry.queue.len() >= self.inner.shared.limits.queued_tasks {
+                return Err(RustTargetCleanupStartFailure::new(
+                    RustTargetCleanupError::QueueFull,
+                    review,
+                ));
+            }
+            match registry.active_cleanup_operation {
+                Some(ActiveCleanupOperation::Quarantined) => {
+                    return Err(RustTargetCleanupStartFailure::new(
+                        RustTargetCleanupError::OutcomeUnknown,
+                        review,
+                    ));
+                }
+                Some(_) => {
+                    return Err(RustTargetCleanupStartFailure::new(
+                        RustTargetCleanupError::Busy,
+                        review,
+                    ));
+                }
+                None => {}
+            }
+            let id = match TASK_IDS.allocate() {
+                Ok(id) => id,
+                Err(_) => {
+                    return Err(RustTargetCleanupStartFailure::new(
+                        RustTargetCleanupError::InternalState,
+                        review,
+                    ));
+                }
+            };
+            let approved_at = SystemTime::now();
+            let admitted = review
+                .into_reviewed_at(&self.inner.snapshot_review_owner, approved_at)
+                .map_err(map_rust_target_cleanup_review_error)
+                .and_then(|reviewed| {
+                    reviewed
+                        .approve(approved_at)
+                        .map_err(map_rust_target_cleanup_approval_error)
+                });
+            let store = Arc::clone(&self.inner.store);
+            let work: Work = Box::new(move |context| {
+                run_permanent_safe_cleanup_task(store, admitted, before_begin, &context)
+            });
+            let record = TaskRecord::new(
+                id,
+                TaskKind::PermanentSafeCleanup,
+                None,
+                self.inner.shared.limits.events_per_task,
+            );
+            registry.active_cleanup_operation = Some(ActiveCleanupOperation::PermanentSafe(id));
+            registry.records.insert(id, record);
+            registry.queue.push_back(Job { id, work });
+            self.inner.shared.workers_ready.notify_one();
+            Ok(id)
+        }
+    }
+
     /// Production capacity-aware execution derives its sampler only from the
     /// exact trusted volume retained by the approved plan. Sampling failure
     /// leaves the verified delta unknown and never changes effect authority.
-    #[cfg(target_os = "macos")]
+    #[cfg(all(test, target_os = "macos"))]
     fn execute_approved_permanent_safe_session_with_bound_capacity(
         &self,
         session: &mut ApprovedCleanupSession,
@@ -3546,7 +3929,8 @@ impl EngineHandle {
                 | TaskResult::SnapshotOrphanMaintenance(_)
                 | TaskResult::SnapshotProvisioningStageMaintenance(_)
                 | TaskResult::SnapshotTerminalTempMaintenance(_)
-                | TaskResult::SnapshotUnleasedTempMaintenance(_),
+                | TaskResult::SnapshotUnleasedTempMaintenance(_)
+                | TaskResult::PermanentSafeCleanup(_),
             ) => {
                 return Err(TaskAccessError::WrongTaskKind);
             }
@@ -3575,7 +3959,8 @@ impl EngineHandle {
                 | TaskResult::SnapshotOrphanMaintenance(_)
                 | TaskResult::SnapshotProvisioningStageMaintenance(_)
                 | TaskResult::SnapshotTerminalTempMaintenance(_)
-                | TaskResult::SnapshotUnleasedTempMaintenance(_),
+                | TaskResult::SnapshotUnleasedTempMaintenance(_)
+                | TaskResult::PermanentSafeCleanup(_),
             ) => {
                 return Err(TaskAccessError::WrongTaskKind);
             }
@@ -3607,7 +3992,8 @@ impl EngineHandle {
                 | TaskResult::SnapshotOrphanMaintenance(_)
                 | TaskResult::SnapshotProvisioningStageMaintenance(_)
                 | TaskResult::SnapshotTerminalTempMaintenance(_)
-                | TaskResult::SnapshotUnleasedTempMaintenance(_),
+                | TaskResult::SnapshotUnleasedTempMaintenance(_)
+                | TaskResult::PermanentSafeCleanup(_),
             ) => return Err(TaskAccessError::WrongTaskKind),
             #[cfg(test)]
             Some(TaskResult::TestOnly) => return Err(TaskAccessError::WrongTaskKind),
@@ -3637,7 +4023,8 @@ impl EngineHandle {
                 | TaskResult::SnapshotOrphanMaintenance(_)
                 | TaskResult::SnapshotProvisioningStageMaintenance(_)
                 | TaskResult::SnapshotTerminalTempMaintenance(_)
-                | TaskResult::SnapshotUnleasedTempMaintenance(_),
+                | TaskResult::SnapshotUnleasedTempMaintenance(_)
+                | TaskResult::PermanentSafeCleanup(_),
             ) => {
                 return Err(TaskAccessError::WrongTaskKind);
             }
@@ -3669,7 +4056,8 @@ impl EngineHandle {
                 | TaskResult::SnapshotOrphanMaintenance(_)
                 | TaskResult::SnapshotProvisioningStageMaintenance(_)
                 | TaskResult::SnapshotTerminalTempMaintenance(_)
-                | TaskResult::SnapshotUnleasedTempMaintenance(_),
+                | TaskResult::SnapshotUnleasedTempMaintenance(_)
+                | TaskResult::PermanentSafeCleanup(_),
             ) => return Err(TaskAccessError::WrongTaskKind),
             #[cfg(test)]
             Some(TaskResult::TestOnly) => return Err(TaskAccessError::WrongTaskKind),
@@ -3699,7 +4087,8 @@ impl EngineHandle {
                 | TaskResult::SnapshotRetention(_)
                 | TaskResult::SnapshotProvisioningStageMaintenance(_)
                 | TaskResult::SnapshotTerminalTempMaintenance(_)
-                | TaskResult::SnapshotUnleasedTempMaintenance(_),
+                | TaskResult::SnapshotUnleasedTempMaintenance(_)
+                | TaskResult::PermanentSafeCleanup(_),
             ) => return Err(TaskAccessError::WrongTaskKind),
             #[cfg(test)]
             Some(TaskResult::TestOnly) => return Err(TaskAccessError::WrongTaskKind),
@@ -3731,7 +4120,8 @@ impl EngineHandle {
                 | TaskResult::SnapshotRetention(_)
                 | TaskResult::SnapshotOrphanMaintenance(_)
                 | TaskResult::SnapshotTerminalTempMaintenance(_)
-                | TaskResult::SnapshotUnleasedTempMaintenance(_),
+                | TaskResult::SnapshotUnleasedTempMaintenance(_)
+                | TaskResult::PermanentSafeCleanup(_),
             ) => return Err(TaskAccessError::WrongTaskKind),
             #[cfg(test)]
             Some(TaskResult::TestOnly) => return Err(TaskAccessError::WrongTaskKind),
@@ -3761,7 +4151,8 @@ impl EngineHandle {
                 | TaskResult::SnapshotRetention(_)
                 | TaskResult::SnapshotOrphanMaintenance(_)
                 | TaskResult::SnapshotProvisioningStageMaintenance(_)
-                | TaskResult::SnapshotUnleasedTempMaintenance(_),
+                | TaskResult::SnapshotUnleasedTempMaintenance(_)
+                | TaskResult::PermanentSafeCleanup(_),
             ) => return Err(TaskAccessError::WrongTaskKind),
             #[cfg(test)]
             Some(TaskResult::TestOnly) => return Err(TaskAccessError::WrongTaskKind),
@@ -3791,7 +4182,39 @@ impl EngineHandle {
                 | TaskResult::SnapshotRetention(_)
                 | TaskResult::SnapshotOrphanMaintenance(_)
                 | TaskResult::SnapshotProvisioningStageMaintenance(_)
-                | TaskResult::SnapshotTerminalTempMaintenance(_),
+                | TaskResult::SnapshotTerminalTempMaintenance(_)
+                | TaskResult::PermanentSafeCleanup(_),
+            ) => return Err(TaskAccessError::WrongTaskKind),
+            #[cfg(test)]
+            Some(TaskResult::TestOnly) => return Err(TaskAccessError::WrongTaskKind),
+            None => None,
+        })
+    }
+
+    pub fn permanent_safe_cleanup_result(
+        &self,
+        id: TaskId,
+    ) -> Result<Option<Arc<RustTargetCleanupResult>>, TaskAccessError> {
+        let registry = self.lock_open_registry()?;
+        let record = registry
+            .records
+            .get(&id)
+            .ok_or(TaskAccessError::UnknownTask)?;
+        if record.kind != TaskKind::PermanentSafeCleanup {
+            return Err(TaskAccessError::WrongTaskKind);
+        }
+        Ok(match &record.result {
+            Some(TaskResult::PermanentSafeCleanup(result)) => Some(Arc::clone(result)),
+            Some(
+                TaskResult::FormatSizeBatch(_)
+                | TaskResult::Scan(_)
+                | TaskResult::ScanRecoveryMaintenance(_)
+                | TaskResult::HistoryMaintenance(_)
+                | TaskResult::SnapshotRetention(_)
+                | TaskResult::SnapshotOrphanMaintenance(_)
+                | TaskResult::SnapshotProvisioningStageMaintenance(_)
+                | TaskResult::SnapshotTerminalTempMaintenance(_)
+                | TaskResult::SnapshotUnleasedTempMaintenance(_),
             ) => return Err(TaskAccessError::WrongTaskKind),
             #[cfg(test)]
             Some(TaskResult::TestOnly) => return Err(TaskAccessError::WrongTaskKind),
@@ -4298,6 +4721,265 @@ fn map_rust_target_plan_review_pipeline_error(
         RustTargetPlanReviewFailure::CorruptData => RustTargetPlanReviewError::CorruptData,
         RustTargetPlanReviewFailure::Unavailable => RustTargetPlanReviewError::Unavailable,
         RustTargetPlanReviewFailure::InternalState => RustTargetPlanReviewError::InternalState,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn run_permanent_safe_cleanup_task(
+    store: Arc<StoreCoordinator>,
+    admitted: Result<ApprovedTrustedReviewedCleanupPlan, RustTargetCleanupError>,
+    before_begin: Box<dyn FnOnce() + Send>,
+    context: &TaskContext,
+) -> WorkOutcome {
+    if context.is_cancellation_requested() || !context.engine_is_open() {
+        if let Ok(approved) = admitted {
+            approved.release();
+        }
+        return WorkOutcome::Cancelled(None);
+    }
+    let approved = match admitted {
+        Ok(approved) => approved,
+        Err(error) => return permanent_safe_cleanup_failed(error),
+    };
+    let quarantine = process_cleanup_quarantine()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if store_is_quarantined(&quarantine, &store) {
+        approved.release();
+        return permanent_safe_cleanup_failed(RustTargetCleanupError::OutcomeUnknown);
+    }
+    drop(quarantine);
+    let session_id = match generate_session_id() {
+        Ok(session_id) => session_id,
+        Err(error) => return permanent_safe_cleanup_failed(error),
+    };
+    before_begin();
+    let started_at = SystemTime::now();
+    let begin = approved.begin_cleanup_session(
+        &store,
+        session_id.clone(),
+        started_at,
+        CleanupTrigger::Manual,
+        Duration::from_secs(5),
+    );
+    let mut session = match begin {
+        Ok(session) => session,
+        Err(CleanupSessionStartError::JournalClaimUnresolved(failure)) => match failure.retry() {
+            Ok(session) => session,
+            Err(CleanupSessionStartError::JournalClaimUnresolved(failure)) => {
+                quarantine_cleanup_for_store(
+                    &store,
+                    &context.shared,
+                    QuarantinedCleanup::Lease(failure.into_lease()),
+                );
+                return permanent_safe_cleanup_failed_with_session(
+                    RustTargetCleanupError::OutcomeUnknown,
+                    &session_id,
+                );
+            }
+            Err(CleanupSessionStartError::ClaimedPlanUnresolved(failure)) => {
+                quarantine_cleanup_for_store(
+                    &store,
+                    &context.shared,
+                    QuarantinedCleanup::Session {
+                        session: Box::new(failure.into_session()),
+                        unsettled_effect: None,
+                    },
+                );
+                return permanent_safe_cleanup_failed_with_session(
+                    RustTargetCleanupError::OutcomeUnknown,
+                    &session_id,
+                );
+            }
+            Err(CleanupSessionStartError::Handoff(error)) => {
+                return permanent_safe_cleanup_handoff_failed(error, &session_id);
+            }
+        },
+        Err(CleanupSessionStartError::ClaimedPlanUnresolved(failure)) => {
+            quarantine_cleanup_for_store(
+                &store,
+                &context.shared,
+                QuarantinedCleanup::Session {
+                    session: Box::new(failure.into_session()),
+                    unsettled_effect: None,
+                },
+            );
+            return permanent_safe_cleanup_failed_with_session(
+                RustTargetCleanupError::OutcomeUnknown,
+                &session_id,
+            );
+        }
+        Err(CleanupSessionStartError::Handoff(error)) => {
+            return permanent_safe_cleanup_handoff_failed(error, &session_id);
+        }
+    };
+
+    let summary = match execute_permanent_safe_task_session(
+        &mut session,
+        SystemTime::now(),
+        &|| context.is_cancellation_requested(),
+        context,
+    ) {
+        Ok(summary) => summary,
+        Err(PermanentSafeExecutionError::UnsettledEffect(unsettled_effect)) => {
+            quarantine_cleanup_for_store(
+                &store,
+                &context.shared,
+                QuarantinedCleanup::Session {
+                    session: Box::new(session),
+                    unsettled_effect: Some(unsettled_effect),
+                },
+            );
+            return permanent_safe_cleanup_failed_with_session(
+                RustTargetCleanupError::OutcomeUnknown,
+                &session_id,
+            );
+        }
+        Err(_) => {
+            quarantine_cleanup_for_store(
+                &store,
+                &context.shared,
+                QuarantinedCleanup::Session {
+                    session: Box::new(session),
+                    unsettled_effect: None,
+                },
+            );
+            return permanent_safe_cleanup_failed_with_session(
+                RustTargetCleanupError::OutcomeUnknown,
+                &session_id,
+            );
+        }
+    };
+    let result = match rust_target_cleanup_result(&session_id, summary) {
+        Ok(result) => Arc::new(result),
+        Err(error) => return permanent_safe_cleanup_failed(error),
+    };
+    if result.status() == DurableCleanupSessionStatus::Cancelled {
+        WorkOutcome::Cancelled(Some(TaskResult::PermanentSafeCleanup(result)))
+    } else {
+        WorkOutcome::Succeeded(TaskResult::PermanentSafeCleanup(result))
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn execute_permanent_safe_task_session(
+    session: &mut ApprovedCleanupSession,
+    now: SystemTime,
+    cancelled: &dyn Fn() -> bool,
+    context: &TaskContext,
+) -> Result<PermanentSafeSessionSummary, PermanentSafeExecutionError> {
+    if !context.engine_is_open() {
+        return Err(PermanentSafeExecutionError::Admission(
+            HistoryErrorKind::InvalidTransition,
+        ));
+    }
+    let mut sampler = session
+        .capacity_scope(SystemTime::now())
+        .ok()
+        .and_then(MacOSCleanupCapacitySampler::new);
+    let mut driver = DescriptorRelativePermanentSafeDriver;
+    execute_rust_target_session_with_capacity(
+        session,
+        now,
+        &mut driver,
+        cancelled,
+        sampler
+            .as_mut()
+            .map(|sampler| sampler as &mut dyn CleanupCapacitySampler),
+    )
+}
+
+#[cfg(target_os = "macos")]
+const fn map_rust_target_cleanup_review_error(
+    error: RustTargetPlanReviewError,
+) -> RustTargetCleanupError {
+    match error {
+        RustTargetPlanReviewError::Closed => RustTargetCleanupError::Closed,
+        RustTargetPlanReviewError::WrongEngine => RustTargetCleanupError::WrongEngine,
+        RustTargetPlanReviewError::ParentReviewUnavailable => {
+            RustTargetCleanupError::ParentReviewUnavailable
+        }
+        RustTargetPlanReviewError::ReviewExpired => RustTargetCleanupError::ReviewExpired,
+        RustTargetPlanReviewError::ChangedDuringReview
+        | RustTargetPlanReviewError::CandidateUnavailable
+        | RustTargetPlanReviewError::CargoNotEnrolled
+        | RustTargetPlanReviewError::ActiveProcesses => RustTargetCleanupError::ChangedDuringReview,
+        RustTargetPlanReviewError::UnsupportedPlatform | RustTargetPlanReviewError::Unavailable => {
+            RustTargetCleanupError::Unavailable
+        }
+        RustTargetPlanReviewError::BudgetExceeded => RustTargetCleanupError::BudgetExceeded,
+        RustTargetPlanReviewError::Busy => RustTargetCleanupError::Busy,
+        RustTargetPlanReviewError::UnsafeStorage => RustTargetCleanupError::UnsafeStorage,
+        RustTargetPlanReviewError::CorruptData => RustTargetCleanupError::CorruptData,
+        RustTargetPlanReviewError::InternalState => RustTargetCleanupError::InternalState,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn permanent_safe_cleanup_failed(error: RustTargetCleanupError) -> WorkOutcome {
+    WorkOutcome::Failed(
+        TaskFailureKind::PermanentSafeCleanup(rust_target_cleanup_failure_kind(error)),
+        None,
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn permanent_safe_cleanup_failed_with_session(
+    error: RustTargetCleanupError,
+    session_id: &CleanupSessionId,
+) -> WorkOutcome {
+    let result = rust_target_cleanup_recovering_result(session_id)
+        .ok()
+        .map(Arc::new)
+        .map(TaskResult::PermanentSafeCleanup);
+    WorkOutcome::Failed(
+        TaskFailureKind::PermanentSafeCleanup(rust_target_cleanup_failure_kind(error)),
+        result,
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn permanent_safe_cleanup_handoff_failed(
+    error: ExactPathHandoffError,
+    session_id: &CleanupSessionId,
+) -> WorkOutcome {
+    let error = map_rust_target_cleanup_handoff_error(error);
+    if error == RustTargetCleanupError::OutcomeUnknown {
+        permanent_safe_cleanup_failed_with_session(error, session_id)
+    } else {
+        permanent_safe_cleanup_failed(error)
+    }
+}
+
+const fn public_trash_platform_result(error: TrashPlatformError) -> TrashPlatformResult {
+    match error {
+        TrashPlatformError::Unsupported => TrashPlatformResult::Unsupported,
+        TrashPlatformError::Failed => TrashPlatformResult::Failed,
+        TrashPlatformError::OutcomeUnknown => TrashPlatformResult::OutcomeUnknown,
+    }
+}
+
+fn map_trash_admission_error(error: TrashAdmissionError) -> TrashSelectionError {
+    match error {
+        TrashAdmissionError::TargetUnavailable
+        | TrashAdmissionError::UnsupportedTargetKind
+        | TrashAdmissionError::UnsupportedEffectMode
+        | TrashAdmissionError::TargetNotBound => TrashSelectionError::Review,
+        TrashAdmissionError::TargetChanged => TrashSelectionError::ChangedSincePlan,
+        TrashAdmissionError::Journal(kind) => match kind {
+            HistoryErrorKind::Busy => TrashSelectionError::Busy,
+            HistoryErrorKind::UnsafeStorage => TrashSelectionError::UnsafeStorage,
+            HistoryErrorKind::IncompatibleSchema => TrashSelectionError::IncompatibleSchema,
+            HistoryErrorKind::CorruptData => TrashSelectionError::CorruptData,
+            HistoryErrorKind::DatabaseUnavailable => TrashSelectionError::Unavailable,
+            HistoryErrorKind::OutcomeUnknown => TrashSelectionError::OutcomeUnknown,
+            HistoryErrorKind::InvalidInput => TrashSelectionError::InvalidRequest,
+            HistoryErrorKind::InvalidTransition
+            | HistoryErrorKind::AlreadyExists
+            | HistoryErrorKind::NotFound
+            | HistoryErrorKind::QueryLimitExceeded
+            | HistoryErrorKind::InternalState => TrashSelectionError::InternalState,
+        },
     }
 }
 

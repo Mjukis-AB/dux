@@ -35,6 +35,7 @@ pub enum TaskKind {
     SnapshotProvisioningStageMaintenance,
     SnapshotTerminalTempMaintenance,
     SnapshotUnleasedTempMaintenance,
+    PermanentSafeCleanup,
 }
 
 /// Execution phase. Cancellation intent is reported separately until work is
@@ -70,6 +71,27 @@ pub enum TaskFailureKind {
     SnapshotProvisioningStageMaintenance(SnapshotProvisioningStageMaintenanceFailureKind),
     SnapshotTerminalTempMaintenance(SnapshotTerminalTempMaintenanceFailureKind),
     SnapshotUnleasedTempMaintenance(SnapshotUnleasedTempMaintenanceFailureKind),
+    PermanentSafeCleanup(PermanentSafeCleanupFailureKind),
+}
+
+/// Path-free terminal failure categories for one engine-owned permanent-safe
+/// cleanup task. Known durable cleanup terminal states are returned as task
+/// results instead; `OutcomeUnknown` always requires history/recovery and must
+/// never be retried automatically.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PermanentSafeCleanupFailureKind {
+    ParentReviewUnavailable,
+    ReviewExpired,
+    ChangedDuringReview,
+    BudgetExceeded,
+    Busy,
+    UnsafeStorage,
+    IncompatibleSchema,
+    CorruptData,
+    OutcomeUnknown,
+    Unavailable,
+    InternalState,
 }
 
 /// Path-free failure categories for durable running-scan recovery.

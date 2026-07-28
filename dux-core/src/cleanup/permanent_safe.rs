@@ -8,6 +8,7 @@
 
 use std::ffi::OsStr;
 use std::fs::File;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
 use std::time::SystemTime;
 
@@ -59,12 +60,72 @@ pub(crate) enum PermanentSafePlatformError {
     OutcomeUnknown,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
+#[derive(Debug, Error)]
 pub(crate) enum PermanentSafeExecutionError {
     #[error("permanent-safe admission was rejected: {0:?}")]
     Admission(HistoryErrorKind),
     #[error("permanent-safe platform effect failed: {0}")]
     Platform(PermanentSafePlatformError),
+    #[error("permanent-safe effect settlement could not be reconciled")]
+    UnsettledEffect(Box<UnsettledPermanentSafeEffect>),
+}
+
+#[derive(Clone, Copy, Debug)]
+enum PendingEffectSettlement {
+    CancelBeforeCall,
+    Finish {
+        outcome: EffectOutcome,
+        error_category: Option<&'static str>,
+    },
+}
+
+/// A one-shot filesystem call has returned but its exact journal post-state
+/// could not be proven. This capability retains the receipt and intended
+/// settlement so callers may retry persistence only; it contains no witness
+/// and cannot invoke or repeat the filesystem effect.
+#[must_use = "retry journal settlement or quarantine the owning cleanup session"]
+pub(crate) struct UnsettledPermanentSafeEffect {
+    receipt: EffectStartReceipt,
+    settlement: PendingEffectSettlement,
+    completed_at: SystemTime,
+    observed_result: Result<PermanentSafeRemovalSummary, PermanentSafePlatformError>,
+}
+
+impl std::fmt::Debug for UnsettledPermanentSafeEffect {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("UnsettledPermanentSafeEffect")
+            .field("settlement", &self.settlement)
+            .field("completed_at", &self.completed_at)
+            .field("observed_result", &self.observed_result)
+            .finish_non_exhaustive()
+    }
+}
+
+impl UnsettledPermanentSafeEffect {
+    /// Retry only the exact durable post-effect transition. The receipt is
+    /// retained again on failure and no platform callback is reachable here.
+    pub(crate) fn retry(
+        self: Box<Self>,
+        claim: &mut CleanupJournalClaim,
+    ) -> Result<
+        Result<PermanentSafeRemovalSummary, PermanentSafePlatformError>,
+        Box<UnsettledPermanentSafeEffect>,
+    > {
+        let result = match self.settlement {
+            PendingEffectSettlement::CancelBeforeCall => {
+                claim.cancel_effect_before_call(&self.receipt, self.completed_at)
+            }
+            PendingEffectSettlement::Finish {
+                outcome,
+                error_category,
+            } => claim.finish_effect(&self.receipt, outcome, error_category, self.completed_at),
+        };
+        match result {
+            Ok(()) => Ok(self.observed_result),
+            Err(_) => Err(self),
+        }
+    }
 }
 
 /// Synchronous, one-shot effect seam. Implementations must not retain the
@@ -214,6 +275,45 @@ fn execute_rust_target_session_with_capacity_and_clock(
                     PermanentSafePlatformError::OutcomeUnknown,
                 ),
             ) => return Err(error),
+            Err(PermanentSafeExecutionError::UnsettledEffect(settlement)) => {
+                match settlement.retry(session.claim_mut()) {
+                    Ok(Ok(summary)) => {
+                        removed_entries =
+                            removed_entries.saturating_add(u64::from(summary.removed_entries));
+                        removed_logical_bytes =
+                            removed_logical_bytes.saturating_add(summary.removed_logical_bytes);
+                    }
+                    Ok(Err(PermanentSafePlatformError::Cancelled)) => {
+                        let (terminal_status, verified_capacity_delta_bytes) =
+                            cancel_and_terminalize(
+                                session,
+                                now,
+                                expected_capacity_identity.as_ref(),
+                                pre_capacity.as_ref(),
+                                capacity_sampler.take(),
+                                effect_started_at,
+                            )?;
+                        return Ok(PermanentSafeSessionSummary {
+                            removed_entries,
+                            removed_logical_bytes,
+                            terminal_status,
+                            verified_capacity_delta_bytes,
+                        });
+                    }
+                    Ok(Err(PermanentSafePlatformError::OutcomeUnknown)) => {
+                        return Err(PermanentSafeExecutionError::Platform(
+                            PermanentSafePlatformError::OutcomeUnknown,
+                        ));
+                    }
+                    Ok(Err(_)) => {
+                        // The exact path failure is now durably settled. Later
+                        // independent paths remain eligible for bounded work.
+                    }
+                    Err(settlement) => {
+                        return Err(PermanentSafeExecutionError::UnsettledEffect(settlement));
+                    }
+                }
+            }
             Err(PermanentSafeExecutionError::Platform(_)) => {
                 // The path executor durably settled failures before returning.
                 // Continue in plan order so a bad target cannot strand later
@@ -456,8 +556,13 @@ fn execute_rust_target_contents_inner(
         return Err(PermanentSafeExecutionError::Admission(error.kind));
     }
 
-    let result = driver.remove_contents(&witness, cancelled);
-    settle_effect(claim, receipt, result, now)
+    let (result, effect_panicked) = match catch_unwind(AssertUnwindSafe(|| {
+        driver.remove_contents(&witness, cancelled)
+    })) {
+        Ok(result) => (result, false),
+        Err(_) => (Err(PermanentSafePlatformError::OutcomeUnknown), true),
+    };
+    settle_effect(claim, receipt, result, now, effect_panicked)
 }
 
 fn map_handoff_error(error: crate::planner::ExactPathHandoffError) -> PermanentSafeExecutionError {
@@ -494,44 +599,37 @@ fn settle_effect(
     receipt: EffectStartReceipt,
     result: Result<PermanentSafeRemovalSummary, PermanentSafePlatformError>,
     completed_at: SystemTime,
+    effect_panicked: bool,
 ) -> Result<PermanentSafeRemovalSummary, PermanentSafeExecutionError> {
-    match result {
-        Ok(summary) => {
-            claim
-                .finish_effect(&receipt, EffectOutcome::Removed, None, completed_at)
-                .map_err(|error| PermanentSafeExecutionError::Admission(error.kind))?;
-            Ok(summary)
-        }
-        Err(PermanentSafePlatformError::Cancelled) => {
-            claim
-                .cancel_effect_before_call(&receipt, completed_at)
-                .map_err(|error| PermanentSafeExecutionError::Admission(error.kind))?;
-            Err(PermanentSafeExecutionError::Platform(
-                PermanentSafePlatformError::Cancelled,
-            ))
-        }
-        Err(error @ PermanentSafePlatformError::OutcomeUnknown) => {
-            claim
-                .finish_effect(
-                    &receipt,
-                    EffectOutcome::OutcomeUnknown,
-                    Some("permanent_safe_outcome_unknown"),
-                    completed_at,
-                )
-                .map_err(|journal| PermanentSafeExecutionError::Admission(journal.kind))?;
-            Err(PermanentSafeExecutionError::Platform(error))
-        }
-        Err(error) => {
-            claim
-                .finish_effect(
-                    &receipt,
-                    EffectOutcome::Failed,
-                    Some("permanent_safe_effect_failed"),
-                    completed_at,
-                )
-                .map_err(|journal| PermanentSafeExecutionError::Admission(journal.kind))?;
-            Err(PermanentSafeExecutionError::Platform(error))
-        }
+    let settlement = match result {
+        Ok(_) => PendingEffectSettlement::Finish {
+            outcome: EffectOutcome::Removed,
+            error_category: None,
+        },
+        Err(PermanentSafePlatformError::Cancelled) => PendingEffectSettlement::CancelBeforeCall,
+        Err(PermanentSafePlatformError::OutcomeUnknown) => PendingEffectSettlement::Finish {
+            outcome: EffectOutcome::OutcomeUnknown,
+            error_category: Some(if effect_panicked {
+                "permanent_safe_effect_panicked"
+            } else {
+                "permanent_safe_outcome_unknown"
+            }),
+        },
+        Err(_) => PendingEffectSettlement::Finish {
+            outcome: EffectOutcome::Failed,
+            error_category: Some("permanent_safe_effect_failed"),
+        },
+    };
+    let unsettled = Box::new(UnsettledPermanentSafeEffect {
+        receipt,
+        settlement,
+        completed_at,
+        observed_result: result,
+    });
+    match unsettled.retry(claim) {
+        Ok(Ok(summary)) => Ok(summary),
+        Ok(Err(error)) => Err(PermanentSafeExecutionError::Platform(error)),
+        Err(unsettled) => Err(PermanentSafeExecutionError::UnsettledEffect(unsettled)),
     }
 }
 

@@ -116,8 +116,13 @@ pub(crate) use cleanup_history_query::{
     StoredCleanupStatusCounts, StoredCleanupTrigger,
 };
 pub(crate) use cleanup_journal::{
-    CleanupJournalClaim, EffectOutcome, EffectStartReceipt, TerminalSessionStatus,
-    ValidationOutcome,
+    CleanupJournalClaim, CleanupJournalLease, EffectOutcome, EffectStartReceipt,
+    JournalLeaseFailure, TerminalSessionStatus, ValidationOutcome,
+};
+#[cfg(test)]
+pub(crate) use cleanup_journal::{
+    fail_next_write_after_commit_and_reconcile_read_for_test,
+    fail_next_write_after_commit_and_two_reconcile_reads_for_test,
 };
 pub(crate) use codec::{HostPathObservationEncoding, observe_host_path};
 pub(crate) use history::{

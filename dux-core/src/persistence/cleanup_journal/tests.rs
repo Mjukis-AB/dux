@@ -10,7 +10,8 @@ use rusqlite::{params, types::Value};
 use tempfile::TempDir;
 
 use crate::cleanup::executor::{
-    TrashExecutionAdmission, TrashExecutionError, TrashPlatformEffect, TrashPlatformError,
+    TrashAdmissionError, TrashAdmissionStartError, TrashExecutionAdmission, TrashExecutionError,
+    TrashPlatformEffect, TrashPlatformError,
 };
 use crate::engine::SnapshotReviewTrashTarget;
 use crate::path_validation::{
@@ -1079,13 +1080,19 @@ fn trash_execution_driver_records_unknown_outcome_without_retrying() {
         requested_path: None,
     };
 
-    assert_eq!(
-        admission
-            .execute_with_at(&mut platform, fixture.started_at + Duration::from_secs(3))
-            .unwrap_err(),
-        TrashExecutionError::Platform(TrashPlatformError::OutcomeUnknown)
-    );
+    let unresolved = match admission
+        .execute_with_at(&mut platform, fixture.started_at + Duration::from_secs(3))
+    {
+        Err(TrashExecutionError::UnresolvedEffect(unresolved)) => unresolved,
+        other => panic!("unknown Trash outcome must retain the recovering claim: {other:?}"),
+    };
     assert_eq!(platform.calls, 1);
+    assert_eq!(
+        unresolved.observed_platform_error(),
+        Some(TrashPlatformError::OutcomeUnknown)
+    );
+    assert!(unresolved.journal_outcome_is_unknown());
+    drop(unresolved);
     let journal = fixture.lease().load(&fixture.session_id).unwrap().unwrap();
     assert_eq!(journal.items[0].paths[0].status, PathStatus::OutcomeUnknown);
 }
@@ -1109,12 +1116,97 @@ fn trash_admission_rejects_a_non_trash_journal_row_before_driver_call() {
         Err(error) => error,
     };
 
-    assert_eq!(
+    assert!(matches!(
         error,
-        crate::cleanup::executor::TrashAdmissionError::UnsupportedEffectMode
-    );
+        TrashAdmissionStartError::Admission(TrashAdmissionError::UnsupportedEffectMode)
+    ));
     let journal = fixture.lease().load(&fixture.session_id).unwrap().unwrap();
     assert_eq!(journal.items[0].paths[0].status, PathStatus::Rejected);
+    assert!(matches!(
+        journal.lifecycle,
+        JournalLifecycle::Terminal {
+            status: TerminalSessionStatus::Rejected,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn trash_admission_retains_the_claim_when_a_post_claim_write_is_ambiguous() {
+    let fixture = Fixture::new_with_selected_in_current_dir(
+        CleanupMode::Trash,
+        CandidateAction::MoveToTrash,
+        1,
+        &[0],
+    );
+    let claim = fixture.claim();
+    fail_next_write_after_commit_and_reconcile_read_for_test();
+
+    let unresolved = match TrashExecutionAdmission::from_claim(
+        claim,
+        fixture_trash_target(&fixture),
+        0,
+        0,
+        fixture.started_at + Duration::from_secs(1),
+    ) {
+        Err(TrashAdmissionStartError::ClaimedAdmissionUnresolved(unresolved)) => unresolved,
+        Err(error) => panic!("post-claim ambiguity must retain its owner: {error:?}"),
+        Ok(_) => panic!("an ambiguous validation write must not admit Trash"),
+    };
+
+    let second_lease = fixture.store.acquire_cleanup_journal_lease(LOCK_TIMEOUT);
+    assert!(
+        matches!(
+            second_lease,
+            Err(ref error) if error.kind == HistoryErrorKind::Busy
+        ),
+        "the unresolved capability must keep the store-wide cleanup lease"
+    );
+    let _quarantined = unresolved;
+}
+
+#[test]
+#[allow(clippy::disallowed_methods)]
+fn trash_admission_terminalizes_known_target_drift_before_releasing_the_claim() {
+    let fixture = Fixture::new_with_selected_in_current_dir(
+        CleanupMode::Trash,
+        CandidateAction::MoveToTrash,
+        1,
+        &[0],
+    );
+    let target = fixture_trash_target(&fixture);
+    let object_path = target.snapshot.object_path().to_path_buf();
+    // DUX-DESTRUCTIVE: allow=test-trash-admission-target-drift-remove -- remove only a TempDir-owned reviewed file before installing an identity-changing replacement
+    fs::remove_file(&object_path).unwrap();
+    fs::write(&object_path, b"replacement").unwrap();
+
+    let error = match TrashExecutionAdmission::from_claim(
+        fixture.claim(),
+        target,
+        0,
+        0,
+        fixture.started_at + Duration::from_secs(1),
+    ) {
+        Err(error) => error,
+        Ok(_) => panic!("replaced identity must not enter Trash admission"),
+    };
+    assert!(matches!(
+        error,
+        TrashAdmissionStartError::Admission(TrashAdmissionError::TargetChanged)
+    ));
+
+    let journal = fixture.lease().load(&fixture.session_id).unwrap().unwrap();
+    assert_eq!(
+        journal.items[0].paths[0].status,
+        PathStatus::ChangedSincePlan
+    );
+    assert!(matches!(
+        journal.lifecycle,
+        JournalLifecycle::Terminal {
+            status: TerminalSessionStatus::Failed,
+            ..
+        }
+    ));
 }
 
 #[test]

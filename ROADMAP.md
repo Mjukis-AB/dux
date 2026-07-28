@@ -4844,6 +4844,40 @@ Tasks:
     does not clear `ProtectedPath`, and is not exposed to FFI or Swift; the
     descriptor-relative contents executor and journal effect admission remain
     open.
+  - [x] 2026-07-28 slice: add the engine-owned, consume-once
+    `PermanentSafeCleanup` task for the exact opaque Rust-target review. Start
+    admission rejects a foreign engine, closed/full registry, competing Trash
+    or permanent operation, and unresolved prior outcome without consuming the
+    review. Acceptance synchronously consumes and approves the child before it
+    returns; the consuming transition rechecks parent liveness and both
+    deadlines after its final authorization revalidation, detaching queued
+    authority from the parent-review lifetime without a release/expiry gap. The
+    task closure retains no `EngineInner`. Only the worker can mint random
+    session identity/manual trigger, claim the journal, bind a volume sampler,
+    or reach the descriptor-relative driver. Queued cancellation creates no
+    journal; durably settled cancellation retains its path-free result. Known
+    completed, partial, failed, rejected, and cancelled journal outcomes remain
+    task results, while unproven state is typed `OutcomeUnknown`, includes the
+    exact path-free session correlation, and cannot retry automatically. One
+    engine reservation serializes this task with synchronous Explorer Trash.
+    The claim handoff retains an ambiguous generation-one lease and retries
+    only that exact owner/session/timestamp. A still-unproven claim,
+    post-claim comparison, Trash admission transition, or effect settlement is
+    retained in a physical-store quarantine for the remainder of the process;
+    known pre-effect Trash refusal terminalizes before releasing its owner.
+    Same-process engine close/reopen therefore cannot outrun durable restart
+    recovery. The permanent driver and Explorer Trash callback are both caught
+    inside their receipt scopes: panic records `outcome_unknown`; owned
+    settlement retry has no callback and cannot repeat the filesystem call.
+    End-to-end macOS tests cover completion-time parent release and exact
+    expiry, no task/engine self-cycle, exact-review success,
+    foreign/full/busy review retention, queued cancellation/no journal, blocked
+    Trash contention, pre-journal drift, single and continued claim ambiguity,
+    continued settlement ambiguity, Trash panic, same-store reopen,
+    marker/source preservation, and path-free unknown correlation. This is a
+    core orchestration checkpoint only: UniFFI still exposes the v28 review as
+    observation/release, so explicit native confirmation and app execution
+    remain open and the parent item is intentionally unchecked.
 - [ ] Implement execution-time revalidation.
   - [x] 2026-07-19 slice: make the approved-session handoff use one canonical
     millisecond start time for persistence and journal claiming, and recheck
