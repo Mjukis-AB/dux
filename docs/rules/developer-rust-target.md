@@ -637,6 +637,17 @@ retains the enrollment revision and signature observation. Missing, revoked,
 corrupt, newer-schema, changed, unsigned, malformed, stale-preview, or
 foreign-engine state fails closed.
 
+The later private planner-to-journal handoff retains the discovery
+`ProtectedPath` fact rather than deleting it. Checksummed schema v12 records a
+revisioned active-claim seal only after the trusted Rust-target capability has
+matched the exact candidate, session, and item ordinal. Planned and active
+recovery loads require that seal and independently re-check the complete
+candidate body with exactly the sole `ProtectedPath` blocker. Ordinary claims,
+forged or moved seals, blocker drift, and unsealed pre-v12 trusted work cannot
+recover this exception. Terminal claim settlement cascades the seal away. This
+remains crate-private and grants no FFI, UI, CLI, AI, or scheduled cleanup
+route.
+
 This checkpoint deliberately exposes only the Rust core API. FFI and Swift
 settings UI remain future work, so the application cannot ask a user to enroll
 Cargo yet. That UI must clearly disclose that confirmation executes the exact

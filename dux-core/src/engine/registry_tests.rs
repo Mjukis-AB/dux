@@ -958,6 +958,21 @@ fn rust_target_facts_bridge_claims_and_executes_one_reviewed_session() {
         history.items()[0].status(),
         crate::engine::DurableCleanupItemStatus::Removed
     );
+    fixture.engine.inner.store.with_connection(|connection| {
+        let active_claims: i64 = connection
+            .query_row(
+                "SELECT (
+                     SELECT COUNT(*) FROM candidate_plan_claims
+                     WHERE session_id = 'cleanup:rust-target-facts-bridge'
+                 ) + (
+                     SELECT COUNT(*) FROM trusted_rust_target_plan_claims
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(active_claims, 0);
+    });
     fixture.engine.close();
     assert!(fixture.engine.wait_until_closed(TEST_TIMEOUT));
 }

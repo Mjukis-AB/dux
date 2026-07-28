@@ -1,5 +1,15 @@
 # Changelog
 
+- Added schema v12's revisioned active-claim seal for the private trusted
+  Rust-target cleanup handoff. The seal binds the exact candidate, session, and
+  item ordinal, and only the private retained-blocker insertion path can create
+  it. Planned, running, and recovering loads reconstruct the special coupling
+  only from that seal and re-check the complete candidate body plus its sole
+  `ProtectedPath` blocker; ordinary claims, forged seals, moved claims, missing
+  seals, extra blockers, and pre-v12 unsealed trusted work fail closed. Schema
+  upgrades create no trust. Terminal candidate-claim settlement removes the
+  seal by foreign-key cascade, preserving path-free history without retaining
+  active authority.
 - Added exact, read-only candidate drill-down to the native Snapshot Explorer.
   Selecting a candidate now loads bounded historical path and deterministic
   evidence pages through the retained scan review, presents blockers, safety,
@@ -22,9 +32,9 @@
   `developer.rust.target` permanent-safe item. Candidate history keeps its sole
   `ProtectedPath` blocker, while immutable rule, source-scan, path, evidence,
   byte, timestamp, policy, and review-state facts must still match before the
-  atomic planned claim. The capability persists using the existing plan-claim
-  format, so reopened journal recovery remains compatible. Ordinary plan
-  claims and every other blocked candidate continue to fail closed; focused
+  atomic planned claim. Schema v12's active seal now preserves that private
+  coupling across planned and recovery loads without granting it to ordinary
+  plan claims. Every other blocked candidate continues to fail closed; focused
   tests prove both the retained-blocker end-to-end lifecycle and the generic
   rejection with no partial session or claim.
 - Added macOS regression coverage for the private Rust-target facts-to-executor

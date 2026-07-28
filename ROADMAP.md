@@ -4858,13 +4858,28 @@ Tasks:
     source-scan, candidate, rule, path, byte, modification-time, evidence,
     safety, action, schedule, and review-state body to match, then moves the
     candidate and claim atomically while retaining `ProtectedPath` in candidate
-    history. The variant stores as the existing plan-claims format so reopen,
-    recovery, expiry, and terminal settlement remain compatible. Ordinary
-    plan claims cannot mint the variant, every other blocked candidate remains
-    rejected, and a focused rollback regression proves no session or claim is
-    left behind. The macOS facts-to-executor fixture now exercises this exact
-    retained-blocker route rather than deleting the blocker from its database.
-    No FFI, Swift, CLI, scheduler, AI, or production cleanup route is enabled.
+    history. This checkpoint initially stored the variant as the existing
+    plan-claims format; the immediately following schema-v12 slice makes its
+    active reopen identity explicit. Ordinary plan claims cannot mint the
+    variant, every other blocked candidate remains rejected, and a focused
+    rollback regression proves no session or claim is left behind. The macOS
+    facts-to-executor fixture now exercises this exact retained-blocker route
+    rather than deleting the blocker from its database. No FFI, Swift, CLI,
+    scheduler, AI, or production cleanup route is enabled.
+  - [x] 2026-07-28 slice: preserve that private trusted coupling across an
+    active journal reopen without inferring authority from the rule-shaped
+    candidate alone. Checksummed schema v12 adds a revisioned seal bound to the
+    exact candidate, session, and item ordinal. Planned, running, and
+    recovering decoders reconstruct the retained-blocker coupling only when
+    the seal, candidate claim, frozen one-item/one-path permanent-safe plan,
+    complete immutable candidate body, and sole `ProtectedPath` blocker all
+    still agree. Ordinary Rust-shaped claims must retain an empty blocker set;
+    forged or moved seals, missing seals, extra blockers, and unsealed pre-v12
+    trusted recovery fail closed. Migration creates an empty seal relation and
+    fabricates no trust. The existing atomic candidate-claim settlement
+    cascades the seal away for terminal history. Reopen, active-recovery,
+    tamper, migration, and completed-execution regressions pass; no public
+    cleanup caller or new filesystem effect was added.
 - [ ] Implement pre/post capacity verification.
   - [x] 2026-07-19 slice: add a private bounded verifier for cleanup capacity
     witnesses. It requires a stable volume identity, ordered effect window,

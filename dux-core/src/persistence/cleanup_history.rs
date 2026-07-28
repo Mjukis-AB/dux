@@ -123,6 +123,9 @@ impl NewCleanupSessionRecord {
         let [item] = plan.items() else {
             return Err(invalid());
         };
+        let [_path] = item.paths() else {
+            return Err(invalid());
+        };
         if plan.mode() != CleanupMode::PermanentSafe
             || item.rule().id().as_str() != "developer.rust.target"
             || item.rule().revision().get() != 2
@@ -231,8 +234,10 @@ pub(crate) struct PlannedCleanupItemRecord {
 pub(super) enum CandidateStatusCoupling {
     LegacyUncoupled,
     PlanClaimsV1,
-    /// An insertion-only capability. It persists as `PlanClaimsV1`; only the
-    /// private trusted Rust-target constructor can mint this in-memory variant.
+    /// Only the private trusted Rust-target constructor can mint this variant.
+    /// The session remains format-compatible with `PlanClaimsV1`, while a
+    /// separate revisioned durable seal preserves this distinction for active
+    /// reopen and recovery.
     TrustedRustTargetPlanClaimsV1,
 }
 
@@ -517,6 +522,28 @@ pub(super) fn insert_cleanup_session(
             .map_err(map_write_sql_error)?;
         if changed != 1 {
             return Err(HistoryError::new(HistoryErrorKind::InvalidTransition));
+        }
+        if session
+            .candidate_status_coupling
+            .allows_trusted_rust_target_blocker()
+        {
+            let sealed = transaction
+                .execute(
+                    "INSERT INTO trusted_rust_target_plan_claims (
+                         candidate_id, session_id, item_ordinal,
+                         coupling_revision
+                     ) VALUES (?1, ?2, ?3, 1)
+                     ON CONFLICT DO NOTHING",
+                    params![
+                        candidate.id.as_str(),
+                        session.session_id,
+                        item_ordinal as i64,
+                    ],
+                )
+                .map_err(map_write_sql_error)?;
+            if sealed != 1 {
+                return Err(HistoryError::new(HistoryErrorKind::InvalidTransition));
+            }
         }
     }
     Ok(())
@@ -858,11 +885,11 @@ fn decode_frozen_session(
     require_pristine_children: bool,
     require_candidate_match: bool,
 ) -> Result<PlannedCleanupSessionRecord, HistoryError> {
-    let candidate_status_coupling = match raw.candidate_status_coupling_version {
-        1 => CandidateStatusCoupling::LegacyUncoupled,
-        2 => CandidateStatusCoupling::PlanClaimsV1,
-        _ => return Err(corrupt()),
-    };
+    let candidate_status_coupling = decode_candidate_status_coupling(
+        connection,
+        &common.session_id,
+        raw.candidate_status_coupling_version,
+    )?;
     let source_scan_id =
         ScanId::new(raw.source_scan_id.clone().ok_or_else(corrupt)?).map_err(|_| corrupt())?;
     let plan_created_at =
@@ -896,9 +923,38 @@ fn decode_frozen_session(
         candidate_status_coupling,
         &mut items,
     )?;
-    if require_candidate_match && candidate_status_coupling.claims_candidates() {
+    let trusted_rust_target_shape = common.mode == CleanupMode::PermanentSafe
+        && matches!(items.as_slice(), [item] if is_trusted_rust_target_item(item));
+    let active_authority = matches!(raw.status.as_str(), "planned" | "running" | "recovering");
+    if candidate_status_coupling.allows_trusted_rust_target_blocker() {
+        if !active_authority || !trusted_rust_target_shape {
+            return Err(corrupt());
+        }
+    } else if matches!(raw.status.as_str(), "running" | "recovering") && trusted_rust_target_shape {
+        // Schema-v11 sessions have no durable proof that the special blocked
+        // candidate path was used. An ordinary active plan may continue only
+        // while its complete candidate row still proves an empty blocker set;
+        // missing history or a retained ProtectedPath fact cannot be resumed.
+        let [item] = items.as_slice() else {
+            return Err(corrupt());
+        };
+        ensure_loaded_item_matches_candidate(
+            connection,
+            item,
+            &source_scan_id,
+            candidate_status_coupling,
+        )?;
+    }
+    if candidate_status_coupling.allows_trusted_rust_target_blocker()
+        || (require_candidate_match && candidate_status_coupling.claims_candidates())
+    {
         for item in &items {
-            ensure_loaded_item_matches_candidate(connection, item, &source_scan_id)?;
+            ensure_loaded_item_matches_candidate(
+                connection,
+                item,
+                &source_scan_id,
+                candidate_status_coupling,
+            )?;
         }
     }
     if items
@@ -1378,15 +1434,82 @@ fn load_item_evidence(
     Ok(evidence)
 }
 
+fn decode_candidate_status_coupling(
+    connection: &Connection,
+    session_id: &CleanupSessionId,
+    stored_version: i64,
+) -> Result<CandidateStatusCoupling, HistoryError> {
+    let (
+        seal_count,
+        minimum_revision,
+        maximum_revision,
+        minimum_ordinal,
+        maximum_ordinal,
+        matching_claim_count,
+    ): (i64, Option<i64>, Option<i64>, Option<i64>, Option<i64>, i64) = connection
+        .query_row(
+            "SELECT COUNT(*), MIN(seal.coupling_revision),
+                    MAX(seal.coupling_revision), MIN(seal.item_ordinal),
+                    MAX(seal.item_ordinal),
+                    COUNT(claim.candidate_id)
+             FROM trusted_rust_target_plan_claims AS seal
+             LEFT JOIN candidate_plan_claims AS claim
+               ON claim.candidate_id = seal.candidate_id
+              AND claim.session_id = seal.session_id
+              AND claim.item_ordinal = seal.item_ordinal
+             WHERE seal.session_id = ?1",
+            [session_id.as_str()],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .map_err(map_query_sql_error)?;
+    let has_one_valid_seal = seal_count == 1
+        && minimum_revision == Some(1)
+        && maximum_revision == Some(1)
+        && minimum_ordinal == Some(0)
+        && maximum_ordinal == Some(0)
+        && matching_claim_count == 1;
+    match stored_version {
+        1 if seal_count == 0 => Ok(CandidateStatusCoupling::LegacyUncoupled),
+        2 if seal_count == 0 => Ok(CandidateStatusCoupling::PlanClaimsV1),
+        2 if has_one_valid_seal => Ok(CandidateStatusCoupling::TrustedRustTargetPlanClaimsV1),
+        _ => Err(corrupt()),
+    }
+}
+
+fn is_trusted_rust_target_item(item: &PlannedCleanupItemRecord) -> bool {
+    item.rule.id().as_str() == "developer.rust.target"
+        && item.rule.revision().get() == 2
+        && item.category == CandidateCategory::DeveloperArtifact
+        && item.paths.len() == 1
+        && item.safety == SafetyTier::SafeRegenerable
+        && item.proposed_action == CandidateAction::RemoveKnownRegenerableContents
+        && !item.rule_schedule_eligible
+}
+
 fn ensure_loaded_item_matches_candidate(
     connection: &Connection,
     item: &PlannedCleanupItemRecord,
     source_scan_id: &ScanId,
+    coupling: CandidateStatusCoupling,
 ) -> Result<(), HistoryError> {
     let Some(StoredCandidateRecord::Complete(candidate)) =
         load_candidate_record_within_budget(connection, &item.candidate_id)?
     else {
         return Err(corrupt());
+    };
+    let blocker_shape_matches = if coupling.allows_trusted_rust_target_blocker() {
+        is_trusted_rust_target_candidate(&candidate)
+    } else {
+        candidate.blockers.is_empty()
     };
     if candidate.source_scan_id != *source_scan_id
         || candidate.id != item.candidate_id
@@ -1399,7 +1522,7 @@ fn ensure_loaded_item_matches_candidate(
         || candidate.safety != item.safety
         || candidate.action != item.proposed_action
         || candidate.rule_schedule_eligible != item.rule_schedule_eligible
-        || (!candidate.blockers.is_empty() && !is_trusted_rust_target_candidate(&candidate))
+        || !blocker_shape_matches
     {
         return Err(corrupt());
     }
@@ -1789,6 +1912,35 @@ mod tests {
         .unwrap()
     }
 
+    fn rust_target_rule() -> Rule {
+        Rule::try_new(RuleDefinition {
+            reference: RuleRef::new(
+                RuleId::new("developer.rust.target").unwrap(),
+                RuleRevision::new(2).unwrap(),
+            ),
+            title_key: LocalizedTextKey::new("fixture.cleanup.title").unwrap(),
+            category: CandidateCategory::DeveloperArtifact,
+            scope: RuleScope::ConfiguredProjectRoots,
+            matcher: RuleMatcher::try_new(RuleMatcherDefinition {
+                path_component: Some("cleanup-fixture".to_owned()),
+                required_ancestor_markers_any: Vec::new(),
+                required_markers_all: Vec::new(),
+                forbidden_markers_any: Vec::new(),
+                exact_bundle_identifiers: Vec::new(),
+                excluded_descendants: Vec::new(),
+                protected_descendants: Vec::new(),
+            })
+            .unwrap(),
+            guards: RuleGuards::try_new(None, 0, Vec::new(), false).unwrap(),
+            safety: SafetyTier::SafeRegenerable,
+            action: CandidateAction::RemoveKnownRegenerableContents,
+            schedule_eligible: false,
+            explanation_key: LocalizedTextKey::new("fixture.cleanup.explanation").unwrap(),
+            provenance: vec![ProvenanceUrl::new("https://example.com/cleanup").unwrap()],
+        })
+        .unwrap()
+    }
+
     fn candidate(id: &str, scan_id: &str, rule: &Rule, path: PathBuf, bytes: u64) -> Candidate {
         let evidence = if rule.action() == CandidateAction::EvictLocalCopy {
             vec![Evidence::CloudUploadComplete { path: path.clone() }]
@@ -2079,32 +2231,7 @@ mod tests {
         let root = temp.path().join("root");
         let scan_id = "scan:cleanup-generic-blocked";
         start_scan(&store, &root, scan_id);
-        let policy = Rule::try_new(RuleDefinition {
-            reference: RuleRef::new(
-                RuleId::new("developer.rust.target").unwrap(),
-                RuleRevision::new(2).unwrap(),
-            ),
-            title_key: LocalizedTextKey::new("fixture.cleanup.title").unwrap(),
-            category: CandidateCategory::DeveloperArtifact,
-            scope: RuleScope::ConfiguredProjectRoots,
-            matcher: RuleMatcher::try_new(RuleMatcherDefinition {
-                path_component: Some("cleanup-fixture".to_owned()),
-                required_ancestor_markers_any: Vec::new(),
-                required_markers_all: Vec::new(),
-                forbidden_markers_any: Vec::new(),
-                exact_bundle_identifiers: Vec::new(),
-                excluded_descendants: Vec::new(),
-                protected_descendants: Vec::new(),
-            })
-            .unwrap(),
-            guards: RuleGuards::try_new(None, 0, Vec::new(), false).unwrap(),
-            safety: SafetyTier::SafeRegenerable,
-            action: CandidateAction::RemoveKnownRegenerableContents,
-            schedule_eligible: false,
-            explanation_key: LocalizedTextKey::new("fixture.cleanup.explanation").unwrap(),
-            provenance: vec![ProvenanceUrl::new("https://example.com/cleanup").unwrap()],
-        })
-        .unwrap();
+        let policy = rust_target_rule();
         let candidate = candidate(
             "candidate:cleanup-generic-blocked",
             scan_id,
@@ -2155,6 +2282,271 @@ mod tests {
                 })
                 .unwrap();
             assert_eq!(claims, 0);
+        });
+    }
+
+    #[test]
+    fn ordinary_rust_target_claim_rejects_a_forged_blocker_on_reopen() {
+        let temp = TempDir::new().unwrap();
+        let store = StoreCoordinator::open(&temp.path().join("store/dux.sqlite3")).unwrap();
+        let root = temp.path().join("root");
+        let scan_id = "scan:cleanup-ordinary-rust-target";
+        start_scan(&store, &root, scan_id);
+        let candidate = candidate(
+            "candidate:cleanup-ordinary-rust-target",
+            scan_id,
+            &rust_target_rule(),
+            root.join("cleanup-fixture"),
+            10,
+        );
+        persist_candidate(&store, &candidate, 1_750_000_002);
+        let session_id = CleanupSessionId::new("session:cleanup-ordinary-rust-target").unwrap();
+        store
+            .record_cleanup_session_planned(
+                &NewCleanupSessionRecord::try_from_plan(
+                    session_id.clone(),
+                    &plan(
+                        "plan:cleanup-ordinary-rust-target",
+                        CleanupMode::PermanentSafe,
+                        std::slice::from_ref(&candidate),
+                    ),
+                    UNIX_EPOCH + Duration::from_secs(1_750_000_011),
+                    CleanupTrigger::Manual,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let Some(StoredCleanupSessionRecord::Planned(stored)) =
+            store.load_cleanup_session(&session_id).unwrap()
+        else {
+            panic!("ordinary Rust-target-shaped plan did not reopen");
+        };
+        assert_eq!(
+            stored.candidate_status_coupling,
+            CandidateStatusCoupling::PlanClaimsV1
+        );
+
+        store.with_connection(|connection| {
+            connection
+                .execute(
+                    "INSERT INTO candidate_blockers (
+                         candidate_id, blocker_ordinal, blocker_kind
+                     ) VALUES (?1, 0, 'protected_path')",
+                    [candidate.id().as_str()],
+                )
+                .unwrap();
+        });
+        assert_eq!(
+            store.load_cleanup_session(&session_id).unwrap_err().kind,
+            HistoryErrorKind::CorruptData
+        );
+        store.with_connection(|connection| {
+            connection
+                .execute(
+                    "DELETE FROM candidate_blockers
+                     WHERE candidate_id = ?1",
+                    [candidate.id().as_str()],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "UPDATE cleanup_sessions
+                     SET status = 'running',
+                         execution_owner_id = 'process:ordinary-forged-seal',
+                         execution_generation = 1,
+                         last_heartbeat_at_unix_ms = started_at_unix_ms
+                     WHERE session_id = ?1",
+                    [session_id.as_str()],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO trusted_rust_target_plan_claims (
+                         candidate_id, session_id, item_ordinal,
+                         coupling_revision
+                     ) VALUES (?1, ?2, 0, 1)",
+                    params![candidate.id().as_str(), session_id.as_str()],
+                )
+                .unwrap();
+            assert_eq!(
+                load_frozen_cleanup_session_within_budget(connection, &session_id, false)
+                    .unwrap_err()
+                    .kind,
+                HistoryErrorKind::CorruptData
+            );
+        });
+    }
+
+    #[test]
+    fn trusted_rust_target_seal_survives_reopen_and_fences_tampering() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let root = temp.path().join("root");
+        let scan_id = "scan:cleanup-trusted-rust-target";
+        let session_id = CleanupSessionId::new("session:cleanup-trusted-rust-target").unwrap();
+        let candidate_id = CandidateId::new("candidate:cleanup-trusted-rust-target").unwrap();
+        {
+            let store = StoreCoordinator::open(&database).unwrap();
+            start_scan(&store, &root, scan_id);
+            let candidate = candidate(
+                candidate_id.as_str(),
+                scan_id,
+                &rust_target_rule(),
+                root.join("cleanup-fixture"),
+                10,
+            );
+            persist_candidate(&store, &candidate, 1_750_000_002);
+            store.with_connection(|connection| {
+                connection
+                    .execute(
+                        "INSERT INTO candidate_blockers (
+                             candidate_id, blocker_ordinal, blocker_kind
+                         ) VALUES (?1, 0, 'protected_path')",
+                        [candidate.id().as_str()],
+                    )
+                    .unwrap();
+            });
+            store
+                .record_cleanup_session_planned(
+                    &NewCleanupSessionRecord::try_from_trusted_rust_target_plan(
+                        session_id.clone(),
+                        &plan(
+                            "plan:cleanup-trusted-rust-target",
+                            CleanupMode::PermanentSafe,
+                            std::slice::from_ref(&candidate),
+                        ),
+                        UNIX_EPOCH + Duration::from_secs(1_750_000_011),
+                        CleanupTrigger::Manual,
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+            store.with_connection(|connection| {
+                let seal_count: i64 = connection
+                    .query_row(
+                        "SELECT COUNT(*) FROM trusted_rust_target_plan_claims
+                         WHERE candidate_id = ?1 AND session_id = ?2
+                           AND item_ordinal = 0 AND coupling_revision = 1",
+                        params![candidate.id().as_str(), session_id.as_str()],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(seal_count, 1);
+            });
+        }
+
+        let store = StoreCoordinator::open(&database).unwrap();
+        let Some(StoredCleanupSessionRecord::Planned(stored)) =
+            store.load_cleanup_session(&session_id).unwrap()
+        else {
+            panic!("trusted Rust-target plan did not reopen");
+        };
+        assert_eq!(
+            stored.candidate_status_coupling,
+            CandidateStatusCoupling::TrustedRustTargetPlanClaimsV1
+        );
+
+        store.with_connection(|connection| {
+            assert!(
+                connection
+                    .execute(
+                        "INSERT INTO trusted_rust_target_plan_claims (
+                             candidate_id, session_id, item_ordinal,
+                             coupling_revision
+                         ) VALUES (
+                             'candidate:missing-trusted-claim',
+                             'session:missing-trusted-claim', 0, 1
+                         )",
+                        [],
+                    )
+                    .is_err()
+            );
+            connection
+                .execute(
+                    "UPDATE trusted_rust_target_plan_claims
+                     SET session_id = 'session:moved-trusted-claim'
+                     WHERE candidate_id = ?1",
+                    [candidate_id.as_str()],
+                )
+                .unwrap();
+        });
+        assert_eq!(
+            store.load_cleanup_session(&session_id).unwrap_err().kind,
+            HistoryErrorKind::CorruptData
+        );
+
+        store.with_connection(|connection| {
+            connection
+                .execute(
+                    "DELETE FROM trusted_rust_target_plan_claims
+                     WHERE candidate_id = ?1",
+                    [candidate_id.as_str()],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO trusted_rust_target_plan_claims (
+                         candidate_id, session_id, item_ordinal,
+                         coupling_revision
+                     ) VALUES (?1, ?2, 0, 1)",
+                    params![candidate_id.as_str(), session_id.as_str()],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO candidate_blockers (
+                         candidate_id, blocker_ordinal, blocker_kind
+                     ) VALUES (?1, 1, 'partial_scan_coverage')",
+                    [candidate_id.as_str()],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "UPDATE cleanup_sessions
+                     SET status = 'running',
+                         execution_owner_id = 'process:trusted-reopen-fixture',
+                         execution_generation = 1,
+                         last_heartbeat_at_unix_ms = started_at_unix_ms
+                     WHERE session_id = ?1",
+                    [session_id.as_str()],
+                )
+                .unwrap();
+        });
+        store.with_connection(|connection| {
+            assert_eq!(
+                load_frozen_cleanup_session_within_budget(connection, &session_id, false)
+                    .unwrap_err()
+                    .kind,
+                HistoryErrorKind::CorruptData
+            );
+            connection
+                .execute(
+                    "DELETE FROM candidate_blockers
+                     WHERE candidate_id = ?1 AND blocker_ordinal = 1",
+                    [candidate_id.as_str()],
+                )
+                .unwrap();
+            let recovered =
+                load_frozen_cleanup_session_within_budget(connection, &session_id, false)
+                    .unwrap()
+                    .expect("valid trusted active claim should reopen");
+            assert_eq!(
+                recovered.candidate_status_coupling,
+                CandidateStatusCoupling::TrustedRustTargetPlanClaimsV1
+            );
+            connection
+                .execute(
+                    "DELETE FROM trusted_rust_target_plan_claims
+                     WHERE candidate_id = ?1",
+                    [candidate_id.as_str()],
+                )
+                .unwrap();
+            assert_eq!(
+                load_frozen_cleanup_session_within_budget(connection, &session_id, false)
+                    .unwrap_err()
+                    .kind,
+                HistoryErrorKind::CorruptData
+            );
         });
     }
 

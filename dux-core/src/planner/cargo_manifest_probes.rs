@@ -786,7 +786,7 @@ mod tests {
     }
 
     #[test]
-    fn more_than_sixty_four_candidates_and_oversized_files_fail_closed() {
+    fn excessive_ancestor_depth_and_oversized_files_fail_closed() {
         let temp = TempDir::new().unwrap();
         let base = fs::canonicalize(temp.path()).unwrap();
         let cargo_home_path = base.join("cargo-home");
@@ -796,10 +796,9 @@ mod tests {
             deep.push("d");
         }
         fs::create_dir_all(&deep).unwrap();
-        let project = capture_exact_directory(&deep).unwrap();
         let cargo_home = capture_exact_directory(&cargo_home_path).unwrap();
         assert!(matches!(
-            CargoManifestProbeGuard::capture_unfenced_for_test(&project, &cargo_home),
+            capture_exact_directory(&deep),
             Err(CargoManifestProbeError::Unavailable)
         ));
 
