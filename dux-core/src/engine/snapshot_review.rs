@@ -3,6 +3,7 @@ use std::collections::{BinaryHeap, HashMap};
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::domain::{CandidateCategory, ScanId};
@@ -281,7 +282,25 @@ pub struct SnapshotReviewLiveTarget {
 }
 
 /// Unforgeable owner shared by one engine and the reviews it created.
-pub(super) struct SnapshotReviewOwner;
+pub(super) struct SnapshotReviewOwner {
+    next_session_identity: AtomicU64,
+}
+
+impl SnapshotReviewOwner {
+    pub(super) fn new() -> Self {
+        Self {
+            next_session_identity: AtomicU64::new(1),
+        }
+    }
+
+    pub(super) fn issue_session_identity(&self) -> Result<u64, SnapshotReviewError> {
+        self.next_session_identity
+            .fetch_update(AtomicOrdering::AcqRel, AtomicOrdering::Acquire, |current| {
+                current.checked_add(1)
+            })
+            .map_err(|_| SnapshotReviewError::InternalState)
+    }
+}
 
 /// Current, no-follow directory evidence sealed inside the core. The path is
 /// never transported and the identity must be revalidated by the scan worker.
@@ -374,6 +393,8 @@ pub enum SnapshotReviewReleaseOutcome {
 #[must_use = "retain the session while Explorer is reviewing the snapshot"]
 pub struct SnapshotReviewSession {
     owner: Arc<SnapshotReviewOwner>,
+    session_identity: u64,
+    plan_review_live: Arc<AtomicBool>,
     scan_id: ScanId,
     lease: Option<StoredReviewLease>,
     document: Option<StoredReviewDocument>,
@@ -390,12 +411,15 @@ struct SortedChildCache {
 impl SnapshotReviewSession {
     pub(super) fn new(
         owner: Arc<SnapshotReviewOwner>,
+        session_identity: u64,
         scan_id: ScanId,
         lease: StoredReviewLease,
         category_roots: Vec<SnapshotReviewCategoryRoot>,
     ) -> Self {
         Self {
             owner,
+            session_identity,
+            plan_review_live: Arc::new(AtomicBool::new(true)),
             scan_id,
             lease: Some(lease),
             document: None,
@@ -410,6 +434,14 @@ impl SnapshotReviewSession {
 
     pub(super) fn belongs_to(&self, owner: &Arc<SnapshotReviewOwner>) -> bool {
         Arc::ptr_eq(&self.owner, owner)
+    }
+
+    pub(super) fn session_identity(&self) -> u64 {
+        self.session_identity
+    }
+
+    pub(super) fn plan_review_liveness(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.plan_review_live)
     }
 
     /// Resolve a historical directory into a sealed current scan target. This
@@ -462,9 +494,39 @@ impl SnapshotReviewSession {
             .map_err(|error| map_repository_error(error.kind))
     }
 
+    /// Prove that this exact retained Explorer review is still current at the
+    /// supplied instant and return the same durable lease's expiry.
+    pub(super) fn validate_and_expires_at(
+        &self,
+        observed_at: SystemTime,
+    ) -> Result<SystemTime, SnapshotReviewError> {
+        let lease = self
+            .lease
+            .as_ref()
+            .ok_or(SnapshotReviewError::LeaseExpired)?;
+        lease
+            .validate(observed_at)
+            .map_err(|error| map_repository_error(error.kind))?;
+        lease
+            .expires_at()
+            .map_err(|error| map_repository_error(error.kind))
+    }
+
+    /// Revalidate this exact retained review for a non-authoritative
+    /// app-facing plan observation.
+    pub fn validate_for_plan_review(&self) -> Result<SystemTime, SnapshotReviewError> {
+        self.validate_current()
+    }
+
+    /// Revalidate the exact durable lease rather than trusting its stored
+    /// expiry field alone.
+    pub fn validate_current(&self) -> Result<SystemTime, SnapshotReviewError> {
+        self.validate_and_expires_at(SystemTime::now())
+    }
+
     pub fn expires_at_unix_ms(&self) -> Result<i64, SnapshotReviewError> {
         let duration = self
-            .expires_at()?
+            .validate_current()?
             .duration_since(UNIX_EPOCH)
             .map_err(|_| SnapshotReviewError::InternalState)?;
         i64::try_from(duration.as_millis()).map_err(|_| SnapshotReviewError::InternalState)
@@ -481,6 +543,7 @@ impl SnapshotReviewSession {
     }
 
     pub fn release(&mut self) -> Result<SnapshotReviewReleaseOutcome, SnapshotReviewError> {
+        self.plan_review_live.store(false, AtomicOrdering::Release);
         self.document = None;
         self.sorted_children = None;
         self.category_index.clear();
@@ -822,6 +885,12 @@ impl SnapshotReviewSession {
     #[cfg(test)]
     pub(super) fn category_root_count_for_test(&self) -> usize {
         self.category_index.roots.len()
+    }
+}
+
+impl Drop for SnapshotReviewSession {
+    fn drop(&mut self) {
+        self.plan_review_live.store(false, AtomicOrdering::Release);
     }
 }
 

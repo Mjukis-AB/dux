@@ -20,10 +20,19 @@ actor DuxSnapshotReviewController {
         var ownerCount: UInt64
     }
 
+    private struct PlanReviewEntry: Sendable {
+        let parentGeneration: UUID
+        let scanID: String
+        let candidateID: String
+        let session: any DuxRustTargetPlanReviewSession
+    }
+
     private let service: any DuxSnapshotReviewServing
     private let clock: any DuxSnapshotReviewRenewalClock
+    private let now: @Sendable () -> Date
 
     private var leases: [String: LeaseEntry] = [:]
+    private var planReviews: [UUID: PlanReviewEntry] = [:]
     private var pendingAcquisitions: [String: UUID] = [:]
     private var pendingLatestAcquisition: UUID?
     private var renewalTask: Task<Void, Never>?
@@ -33,10 +42,12 @@ actor DuxSnapshotReviewController {
 
     init(
         service: any DuxSnapshotReviewServing,
-        clock: any DuxSnapshotReviewRenewalClock = ContinuousDuxSnapshotReviewRenewalClock()
+        clock: any DuxSnapshotReviewRenewalClock = ContinuousDuxSnapshotReviewRenewalClock(),
+        now: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.service = service
         self.clock = clock
+        self.now = now
     }
 
     func acquire(scanID: String) async throws {
@@ -137,6 +148,10 @@ actor DuxSnapshotReviewController {
             return
         }
         leases.removeValue(forKey: scanID)
+        await releasePlanReviews(
+            scanID: scanID,
+            parentGeneration: entry.generation
+        )
         await entry.lease.release()
         stopRenewalLoopIfEmpty()
     }
@@ -354,6 +369,130 @@ actor DuxSnapshotReviewController {
         return page
     }
 
+    func prepareRustTargetPlanReview(
+        scanID: String,
+        candidateID: String
+    ) async throws -> ExplorerRustTargetPlanReviewHandle {
+        guard !isShuttingDown else {
+            throw ExplorerRustTargetPlanReviewError.closed
+        }
+        guard let entry = leases[scanID] else {
+            throw ExplorerRustTargetPlanReviewError.reviewNotAcquired
+        }
+
+        let session: any DuxRustTargetPlanReviewSession
+        do {
+            session = try await entry.lease.prepareRustTargetPlanReview(
+                candidateID: candidateID
+            )
+        } catch {
+            await discardExpiredLeaseIfCurrent(error, scanID: scanID, entry: entry)
+            throw error
+        }
+
+        let info: ExplorerRustTargetPlanReviewInfo
+        do {
+            guard
+                session.scanID == scanID,
+                session.candidateID == candidateID
+            else {
+                throw ExplorerRustTargetPlanReviewError.invalidResponse
+            }
+            let raw = try await session.info()
+            info = try ExplorerRustTargetPlanReviewAdapter.map(
+                raw,
+                expectedScanID: scanID,
+                expectedCandidateID: candidateID,
+                now: ExplorerRustTargetPlanReviewAdapter.timestamp(for: now())
+            )
+        } catch {
+            await session.release()
+            await discardExpiredLeaseIfCurrent(error, scanID: scanID, entry: entry)
+            throw error
+        }
+
+        guard
+            !isShuttingDown,
+            !Task.isCancelled,
+            leases[scanID]?.generation == entry.generation
+        else {
+            await session.release()
+            throw CancellationError()
+        }
+        let id = UUID()
+        planReviews[id] = PlanReviewEntry(
+            parentGeneration: entry.generation,
+            scanID: scanID,
+            candidateID: candidateID,
+            session: session
+        )
+        return ExplorerRustTargetPlanReviewHandle(id: id, info: info)
+    }
+
+    func releaseRustTargetPlanReview(
+        _ handle: ExplorerRustTargetPlanReviewHandle
+    ) async {
+        guard let entry = planReviews.removeValue(forKey: handle.id) else {
+            return
+        }
+        await entry.session.release()
+    }
+
+    func refreshRustTargetPlanReview(
+        _ handle: ExplorerRustTargetPlanReviewHandle
+    ) async throws -> ExplorerRustTargetPlanReviewHandle {
+        guard !isShuttingDown else {
+            throw ExplorerRustTargetPlanReviewError.closed
+        }
+        guard let review = planReviews[handle.id] else {
+            throw ExplorerRustTargetPlanReviewError.reviewExpired
+        }
+        guard
+            let parent = leases[review.scanID],
+            parent.generation == review.parentGeneration,
+            review.scanID == handle.info.sourceScanID,
+            review.candidateID == handle.info.candidateID
+        else {
+            await releasePlanReviewIfCurrent(id: handle.id, entry: review)
+            throw ExplorerRustTargetPlanReviewError.parentReviewUnavailable
+        }
+
+        do {
+            let raw = try await review.session.info()
+            let info = try ExplorerRustTargetPlanReviewAdapter.map(
+                raw,
+                expectedScanID: review.scanID,
+                expectedCandidateID: review.candidateID,
+                now: ExplorerRustTargetPlanReviewAdapter.timestamp(for: now())
+            )
+            guard info == handle.info else {
+                throw ExplorerRustTargetPlanReviewError.invalidResponse
+            }
+        } catch {
+            await releasePlanReviewIfCurrent(id: handle.id, entry: review)
+            await discardExpiredLeaseIfCurrent(
+                error,
+                scanID: review.scanID,
+                entry: parent
+            )
+            throw error
+        }
+
+        guard
+            !isShuttingDown,
+            !Task.isCancelled,
+            let current = planReviews[handle.id],
+            current.parentGeneration == review.parentGeneration,
+            current.scanID == review.scanID,
+            current.candidateID == review.candidateID,
+            leases[review.scanID]?.generation == review.parentGeneration
+        else {
+            await releasePlanReviewIfCurrent(id: handle.id, entry: review)
+            throw CancellationError()
+        }
+        return handle
+    }
+
     func resolveLiveItem(
         scanID: String,
         nodeID: UInt64,
@@ -437,8 +576,28 @@ actor DuxSnapshotReviewController {
             return
         }
         leases.removeValue(forKey: scanID)
+        await releasePlanReviews(
+            scanID: scanID,
+            parentGeneration: entry.generation
+        )
         await entry.lease.release()
         stopRenewalLoopIfEmpty()
+    }
+
+    private func releasePlanReviewIfCurrent(
+        id: UUID,
+        entry: PlanReviewEntry
+    ) async {
+        guard
+            let current = planReviews[id],
+            current.parentGeneration == entry.parentGeneration,
+            current.scanID == entry.scanID,
+            current.candidateID == entry.candidateID
+        else {
+            return
+        }
+        planReviews.removeValue(forKey: id)
+        await current.session.release()
     }
 
     private func isReviewExpired(_ error: Error) -> Bool {
@@ -447,6 +606,8 @@ actor DuxSnapshotReviewController {
             || error as? ExplorerSnapshotLargeFilesError == .reviewExpired
             || error as? ExplorerSnapshotLivePathError == .reviewExpired
             || error as? ExplorerSnapshotSubtreeScanError == .reviewExpired
+            || error as? ExplorerCandidateDetailError == .reviewExpired
+            || error as? ExplorerRustTargetPlanReviewError == .parentReviewUnavailable
     }
 
     private static func subtreeScanServiceError(_ error: Error) -> Error {
@@ -481,6 +642,10 @@ actor DuxSnapshotReviewController {
             } catch {
                 if leases[scanID]?.generation == entry.generation {
                     leases.removeValue(forKey: scanID)
+                    await releasePlanReviews(
+                        scanID: scanID,
+                        parentGeneration: entry.generation
+                    )
                     // Renew failure or expiry must promptly close the retained
                     // file handle. Explicit release is best-effort; the core
                     // expiry remains the durable fallback.
@@ -506,8 +671,13 @@ actor DuxSnapshotReviewController {
         renewalRequested = false
         renewalTask?.cancel()
         renewalTask = nil
+        let currentPlanReviews = planReviews.values.map(\.session)
+        planReviews.removeAll(keepingCapacity: false)
         let current = leases.values.map(\.lease)
         leases.removeAll(keepingCapacity: false)
+        for session in currentPlanReviews {
+            await session.release()
+        }
         for lease in current {
             await lease.release()
         }
@@ -553,6 +723,22 @@ actor DuxSnapshotReviewController {
         }
         renewalTask?.cancel()
         renewalTask = nil
+    }
+
+    private func releasePlanReviews(
+        scanID: String,
+        parentGeneration: UUID
+    ) async {
+        let matchingIDs = planReviews.compactMap { id, entry in
+            entry.scanID == scanID && entry.parentGeneration == parentGeneration
+                ? id : nil
+        }
+        let sessions = matchingIDs.compactMap {
+            planReviews.removeValue(forKey: $0)?.session
+        }
+        for session in sessions {
+            await session.release()
+        }
     }
 }
 

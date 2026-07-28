@@ -173,6 +173,28 @@ malformed response, DUX never retries it: Settings performs one read-only status
 reload, visibly blocks further mutations until authoritative state is available,
 and offers an explicit **Reload Cargo status** action if that read fails.
 
+Explorer exposes FFI v28's observation-only **Permanent-safe plan preview** for
+one exact revision-2 Rust-target candidate. Preparing it passes only the
+candidate ID through the already-retained snapshot review. Rust derives and
+revalidates the current target, source scan, permanent-safe mode, plan
+identity, estimate, warnings, and short effective expiry; the returned opaque
+child supports only information reads and release. There is no app/FFI
+approval, journal, schedule, callback, AI, or permanent-safe cleanup endpoint
+for this preview. The existing confirmation-gated Explorer Trash route is
+separate and cannot consume the preview child or its display DTO.
+
+The controller owns the child separately from its renewable parent review,
+refreshes the immutable observation every 15 seconds, and releases the child
+before the parent on candidate, mode, snapshot, expiry, cancellation, window
+close, or app shutdown transitions. Parent renewal never extends the frozen
+child expiry. The UI distinguishes the exact current target from historical
+candidate evidence and shows its estimate, ordered warnings, and expiry with
+only **Prepare plan preview**, **Check again**, and **Close preview** actions.
+It explicitly states that the preview is not approved and changed no files.
+Current paths are lossless byte observations: unsafe/hidden Unicode and
+non-UTF-8 bytes use a deterministic escaped display that Swift validates
+byte-for-byte before presentation.
+
 Private-store maintenance is deliberately separate from user cleanup and from
 Milestone 8 automations. After a 60-second startup grace, the scheduler runs at
 most one sealed Rust batch at a time across scan recovery, terminal temps,

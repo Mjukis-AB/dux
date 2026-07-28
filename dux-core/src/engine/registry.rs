@@ -24,6 +24,10 @@ use super::cleanup_history::{
     MAX_RECENT_CLEANUP_HISTORY_LIMIT,
 };
 use super::config::EngineConfig;
+use super::rust_target_plan_review::{
+    PendingRustTargetPlanReview, RustTargetPlanReview, RustTargetPlanReviewAdmission,
+    RustTargetPlanReviewError, ValidatedPendingRustTargetPlanReview,
+};
 use super::scan_coverage_details::{
     DurableScanCoverageDetailsPage, DurableScanIssue, DurableScanIssueLocation,
     MAX_SCAN_COVERAGE_DETAIL_PAGE_LIMIT, MAX_SCAN_COVERAGE_LOCATION_COMPONENT_CHARS,
@@ -77,7 +81,7 @@ use crate::cleanup::{TrashEffectRequest, TrashPlatformResult, TrashSelectionErro
 use crate::domain::{
     CANDIDATE_CATALOG_SCHEMA_VERSION, CANDIDATE_CATALOG_SHA256, CANDIDATE_CONTEXT_FORMAT_VERSION,
     CANDIDATE_EVALUATOR_REVISION, CandidateEvaluationError, CandidateId,
-    CandidateSnapshotReplayError, Evidence, ScanCoverage, ScanId,
+    CandidateSnapshotReplayError, CleanupPlanId, Evidence, ScanCoverage, ScanId,
     candidate_evaluation_context_digest_sha256, evaluate_completed_scan_candidates,
     replay_snapshot_candidate_evaluation, validate_bundled_candidate_catalog,
 };
@@ -117,12 +121,13 @@ use crate::planner::ApprovedCleanupSession;
 #[cfg(unix)]
 use crate::planner::{
     ExactPathHandoffError, RustTargetJournalRequest, RustTargetLiveWitness,
-    RustTargetPipelineError, RustTargetPlanFacts, begin_rust_target_cleanup_session,
-    prepare_rust_target_live_input,
+    RustTargetPipelineError, RustTargetPlanFacts, RustTargetPlanReviewFailure,
+    begin_rust_target_cleanup_session, prepare_rust_target_live_input,
 };
 #[cfg(target_os = "macos")]
 use crate::planner::{
     RustTargetPromotion, prepare_rust_target_plan_facts, prepare_rust_target_promotion,
+    review_rust_target_plan_facts,
 };
 use crate::scanner::{
     CancellationToken, ScanConfig, ScanMessage, ScanObjectIdentity, ScanTermination, Scanner,
@@ -861,7 +866,7 @@ impl EngineHandle {
                 config,
                 store,
                 snapshots,
-                snapshot_review_owner: Arc::new(SnapshotReviewOwner),
+                snapshot_review_owner: Arc::new(SnapshotReviewOwner::new()),
                 startup_volume_pressure: Mutex::new(
                     super::volume_status::StartupVolumePressureBaseline::new(),
                 ),
@@ -1114,6 +1119,7 @@ impl EngineHandle {
         scan_id: &ScanId,
         reference: &SnapshotReference,
     ) -> Result<SnapshotReviewSession, SnapshotReviewError> {
+        let session_identity = self.inner.snapshot_review_owner.issue_session_identity()?;
         let lease = self
             .inner
             .snapshots
@@ -1133,6 +1139,7 @@ impl EngineHandle {
         }
         Ok(SnapshotReviewSession::new(
             Arc::clone(&self.inner.snapshot_review_owner),
+            session_identity,
             scan_id.clone(),
             lease,
             category_roots,
@@ -1611,6 +1618,152 @@ impl EngineHandle {
             &self.inner.snapshots,
             scan_id,
             candidate_id,
+        )
+    }
+
+    /// Build one exact, opaque Rust-target plan review from an active Explorer
+    /// review. The scan identity comes only from that retained review; this
+    /// operation creates no approval, journal row, status transition, or
+    /// filesystem effect.
+    pub fn prepare_rust_target_plan_review(
+        &self,
+        review: &mut SnapshotReviewSession,
+        candidate_id: &CandidateId,
+    ) -> Result<RustTargetPlanReview, RustTargetPlanReviewError> {
+        let admission = self.begin_rust_target_plan_review(review, candidate_id)?;
+        let pending = self.prepare_admitted_rust_target_plan_review(admission)?;
+        self.finalize_rust_target_plan_review(review, pending)
+    }
+
+    /// Capture only the exact parent/scan/candidate admission under the
+    /// Explorer review lock. The token carries no plan or execution authority.
+    pub fn begin_rust_target_plan_review(
+        &self,
+        review: &SnapshotReviewSession,
+        candidate_id: &CandidateId,
+    ) -> Result<RustTargetPlanReviewAdmission, RustTargetPlanReviewError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(RustTargetPlanReviewError::Closed);
+        }
+        if !review.belongs_to(&self.inner.snapshot_review_owner) {
+            return Err(RustTargetPlanReviewError::WrongEngine);
+        }
+        let before = SystemTime::now();
+        let parent_expires_before = review
+            .validate_and_expires_at(before)
+            .map_err(map_snapshot_review_plan_review_error)?;
+        Ok(RustTargetPlanReviewAdmission {
+            owner: Arc::clone(&self.inner.snapshot_review_owner),
+            parent_session_identity: review.session_identity(),
+            parent_review_live: review.plan_review_liveness(),
+            source_scan_id: review.scan_id().clone(),
+            candidate_id: candidate_id.clone(),
+            parent_review_expires_at: parent_expires_before,
+        })
+    }
+
+    /// Perform the expensive deterministic Rust-target pipeline without
+    /// retaining the Explorer review mutex. The result is still pending and
+    /// cannot be observed until finalized against that exact parent.
+    pub fn prepare_admitted_rust_target_plan_review(
+        &self,
+        admission: RustTargetPlanReviewAdmission,
+    ) -> Result<PendingRustTargetPlanReview, RustTargetPlanReviewError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(RustTargetPlanReviewError::Closed);
+        }
+        if !Arc::ptr_eq(&admission.owner, &self.inner.snapshot_review_owner) {
+            return Err(RustTargetPlanReviewError::WrongEngine);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = admission;
+            return Err(RustTargetPlanReviewError::UnsupportedPlatform);
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let facts = prepare_rust_target_plan_facts(
+                Arc::clone(&self.inner.store),
+                &self.inner.snapshots,
+                &admission.source_scan_id,
+                &admission.candidate_id,
+            )
+            .map_err(map_rust_target_plan_review_pipeline_error)?;
+            let created_at = SystemTime::now();
+            let plan_id = generate_rust_target_plan_review_id()?;
+            let reviewed = review_rust_target_plan_facts(facts, plan_id, created_at)
+                .map_err(|_| RustTargetPlanReviewError::ChangedDuringReview)?;
+            Ok(PendingRustTargetPlanReview {
+                owner: admission.owner,
+                parent_session_identity: admission.parent_session_identity,
+                parent_review_live: admission.parent_review_live,
+                source_scan_id: admission.source_scan_id,
+                candidate_id: admission.candidate_id,
+                parent_review_expires_at: admission.parent_review_expires_at,
+                reviewed,
+            })
+        }
+    }
+
+    /// Revalidate the exact parent after expensive work and publish only the
+    /// still-current opaque observation. Any failure drops pending authority.
+    pub fn finalize_rust_target_plan_review(
+        &self,
+        review: &SnapshotReviewSession,
+        pending: PendingRustTargetPlanReview,
+    ) -> Result<RustTargetPlanReview, RustTargetPlanReviewError> {
+        let validated = self.validate_pending_rust_target_plan_review(review, pending)?;
+        self.materialize_rust_target_plan_review(validated)
+    }
+
+    /// Revalidate only the exact parent binding under the caller's parent
+    /// lock. Reviewed-plan filesystem revalidation remains deferred.
+    pub fn validate_pending_rust_target_plan_review(
+        &self,
+        review: &SnapshotReviewSession,
+        pending: PendingRustTargetPlanReview,
+    ) -> Result<ValidatedPendingRustTargetPlanReview, RustTargetPlanReviewError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(RustTargetPlanReviewError::Closed);
+        }
+        if !Arc::ptr_eq(&pending.owner, &self.inner.snapshot_review_owner)
+            || !review.belongs_to(&self.inner.snapshot_review_owner)
+        {
+            return Err(RustTargetPlanReviewError::WrongEngine);
+        }
+        if review.session_identity() != pending.parent_session_identity
+            || review.scan_id() != &pending.source_scan_id
+        {
+            return Err(RustTargetPlanReviewError::ParentReviewUnavailable);
+        }
+        let observed_at = SystemTime::now();
+        let parent_expires_after = review
+            .validate_and_expires_at(observed_at)
+            .map_err(map_snapshot_review_plan_review_error)?;
+        Ok(ValidatedPendingRustTargetPlanReview {
+            candidate_id: pending.candidate_id,
+            parent_review_expires_at: pending.parent_review_expires_at.min(parent_expires_after),
+            parent_review_live: pending.parent_review_live,
+            reviewed: pending.reviewed,
+        })
+    }
+
+    /// Materialize the opaque child outside the parent mutex. A caller must
+    /// still post-validate that same parent before publishing the result.
+    pub fn materialize_rust_target_plan_review(
+        &self,
+        pending: ValidatedPendingRustTargetPlanReview,
+    ) -> Result<RustTargetPlanReview, RustTargetPlanReviewError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(RustTargetPlanReviewError::Closed);
+        }
+        let observed_at = SystemTime::now();
+        RustTargetPlanReview::new(
+            pending.reviewed,
+            &pending.candidate_id,
+            pending.parent_review_expires_at,
+            pending.parent_review_live,
+            observed_at,
         )
     }
 
@@ -3979,6 +4132,68 @@ fn generate_scan_id() -> Result<ScanId, TaskFailureKind> {
         value.push(char::from(HEX[usize::from(byte & 0x0f)]));
     }
     ScanId::new(value).map_err(|_| TaskFailureKind::InternalFailure)
+}
+
+#[cfg(target_os = "macos")]
+fn generate_rust_target_plan_review_id() -> Result<CleanupPlanId, RustTargetPlanReviewError> {
+    let mut random = [0_u8; 16];
+    getrandom::fill(&mut random).map_err(|_| RustTargetPlanReviewError::InternalState)?;
+    let mut value = String::with_capacity("plan:rust-target-review:".len() + random.len() * 2);
+    value.push_str("plan:rust-target-review:");
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for byte in random {
+        value.push(char::from(HEX[usize::from(byte >> 4)]));
+        value.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    CleanupPlanId::new(value).map_err(|_| RustTargetPlanReviewError::InternalState)
+}
+
+#[cfg(target_os = "macos")]
+fn map_rust_target_plan_review_pipeline_error(
+    error: RustTargetPipelineError,
+) -> RustTargetPlanReviewError {
+    match error.plan_review_failure() {
+        RustTargetPlanReviewFailure::Closed => RustTargetPlanReviewError::Closed,
+        RustTargetPlanReviewFailure::CandidateUnavailable => {
+            RustTargetPlanReviewError::CandidateUnavailable
+        }
+        RustTargetPlanReviewFailure::CargoNotEnrolled => {
+            RustTargetPlanReviewError::CargoNotEnrolled
+        }
+        RustTargetPlanReviewFailure::ActiveProcesses => RustTargetPlanReviewError::ActiveProcesses,
+        RustTargetPlanReviewFailure::ChangedDuringReview => {
+            RustTargetPlanReviewError::ChangedDuringReview
+        }
+        RustTargetPlanReviewFailure::UnsupportedPlatform => {
+            RustTargetPlanReviewError::UnsupportedPlatform
+        }
+        RustTargetPlanReviewFailure::BudgetExceeded => RustTargetPlanReviewError::BudgetExceeded,
+        RustTargetPlanReviewFailure::Busy => RustTargetPlanReviewError::Busy,
+        RustTargetPlanReviewFailure::UnsafeStorage => RustTargetPlanReviewError::UnsafeStorage,
+        RustTargetPlanReviewFailure::CorruptData => RustTargetPlanReviewError::CorruptData,
+        RustTargetPlanReviewFailure::Unavailable => RustTargetPlanReviewError::Unavailable,
+        RustTargetPlanReviewFailure::InternalState => RustTargetPlanReviewError::InternalState,
+    }
+}
+
+fn map_snapshot_review_plan_review_error(error: SnapshotReviewError) -> RustTargetPlanReviewError {
+    match error {
+        SnapshotReviewError::Closed => RustTargetPlanReviewError::Closed,
+        SnapshotReviewError::ScanNotFound
+        | SnapshotReviewError::SnapshotUnavailable
+        | SnapshotReviewError::LeaseExpired => RustTargetPlanReviewError::ParentReviewUnavailable,
+        SnapshotReviewError::Busy => RustTargetPlanReviewError::Busy,
+        SnapshotReviewError::UnsafeStorage => RustTargetPlanReviewError::UnsafeStorage,
+        SnapshotReviewError::BudgetExceeded => RustTargetPlanReviewError::BudgetExceeded,
+        SnapshotReviewError::CorruptData
+        | SnapshotReviewError::IncompatibleSchema
+        | SnapshotReviewError::IncompatibleSnapshot => RustTargetPlanReviewError::CorruptData,
+        SnapshotReviewError::ReadOnlyStore
+        | SnapshotReviewError::Unavailable
+        | SnapshotReviewError::OutcomeUnknown => RustTargetPlanReviewError::Unavailable,
+        SnapshotReviewError::InternalState => RustTargetPlanReviewError::InternalState,
+        _ => RustTargetPlanReviewError::InternalState,
+    }
 }
 
 fn start_durable_scan(

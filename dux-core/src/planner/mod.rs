@@ -39,16 +39,22 @@ mod rust_target_source;
 pub(crate) use exact_path_review::ExactPathApprovalError;
 #[cfg(test)]
 pub(crate) use exact_path_review::review_exact_paths;
-pub(crate) use exact_path_review::{ApprovedCleanupSession, ExactPathHandoffError};
+pub(crate) use exact_path_review::{
+    ApprovedCleanupSession, ExactPathHandoffError, ExactPathPlanError, TrustedReviewedCleanupPlan,
+};
 #[cfg(unix)]
-pub(crate) use exact_path_review::{RustTargetJournalRequest, begin_rust_target_cleanup_session};
+pub(crate) use exact_path_review::{
+    RustTargetJournalRequest, begin_rust_target_cleanup_session, review_rust_target_plan_facts,
+};
 #[cfg(test)]
 pub(crate) use rule_scope_grant::authorize_rule_target;
 pub(crate) use rust_target::{RustTargetEffectWitness, RustTargetLiveWitness};
 #[cfg(test)]
 pub(crate) use rust_target::{RustTargetLiveValidationError, validate_rust_target_effect};
 #[cfg(unix)]
-pub(crate) use rust_target_pipeline::{RustTargetPipelineError, prepare_rust_target_live_input};
+pub(crate) use rust_target_pipeline::{
+    RustTargetPipelineError, RustTargetPlanReviewFailure, prepare_rust_target_live_input,
+};
 #[cfg(target_os = "macos")]
 pub(crate) use rust_target_pipeline::{
     prepare_rust_target_plan_facts, prepare_rust_target_promotion,

@@ -32,6 +32,7 @@ const RUST_TARGET_REVISION: u32 = 2;
 pub(crate) struct RustTargetPromotion {
     candidate: Candidate,
     authorization: RuleScopeAuthorization,
+    authority_expires_at: std::time::SystemTime,
 }
 
 /// Planner-owned, path-private facts for a future Rust-target plan
@@ -78,6 +79,7 @@ pub(super) fn admit_rust_target_candidate(
     source_scan_id: &ScanId,
     scan_root: &CanonicalScanRoot,
     target: &CanonicalPathSnapshot,
+    authority_expires_at: std::time::SystemTime,
 ) -> Result<RustTargetPromotion, RustTargetPromotionError> {
     validate_candidate_shape(&candidate, source_scan_id, target)?;
     authorization
@@ -89,6 +91,7 @@ pub(super) fn admit_rust_target_candidate(
     Ok(RustTargetPromotion {
         candidate,
         authorization,
+        authority_expires_at,
     })
 }
 
@@ -210,6 +213,7 @@ impl RustTargetPlanFacts {
                 RustTargetPromotion {
                     candidate,
                     authorization,
+                    authority_expires_at: _,
                 },
             ..
         } = self;
@@ -239,6 +243,10 @@ impl RustTargetPlanFacts {
         self.promotion
             .revalidate(&self.scan_root, &self.target)
             .map_err(RustTargetPromotionError::Authorization)
+    }
+
+    pub(super) fn authority_expires_at(&self) -> std::time::SystemTime {
+        self.promotion.authority_expires_at
     }
 
     pub(super) fn release(self) {
@@ -386,6 +394,7 @@ mod tests {
                 &fixture.scan_id,
                 &scan_root,
                 &target,
+                std::time::SystemTime::now(),
             ),
             Err(RustTargetPromotionError::Authorization(
                 RuleScopeGrantError::CargoBoundaryMismatch

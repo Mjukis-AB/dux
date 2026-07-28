@@ -670,6 +670,26 @@ promotion. The FFI surface cannot create a candidate, plan, approval, journal
 claim, schedule, AI request, or cleanup effect, and `ProtectedPath` therefore
 remains untouched.
 
+UniFFI contract v28 and the native Explorer can now prepare a short-lived,
+observation-only preview after this complete deterministic chain succeeds for
+one exact revision-2 candidate. The request supplies only the candidate ID
+through the candidate's retained Explorer review. Rust derives the current
+target, source scan, plan ID, permanent-safe mode, estimate, ordered warnings,
+rule facts, and effective expiry; the returned opaque child supports only
+`info` and release. It creates no approval, durable plan/session, claim,
+journal row, schedule, callback, AI request, or filesystem effect, and the
+candidate remains `Discovered` with its `ProtectedPath` blocker.
+
+The preview is bound to one exact parent-session identity, not merely its scan
+ID. Parent release, drop, or expiry invalidates it; parent renewal cannot
+extend the frozen child deadline. Exact current-path bytes are display-only
+and cannot be supplied back to Rust. Controls, invalid UTF-8, backslashes, and
+the pinned Unicode-16 format/default-ignorable set use a deterministic escaped
+display that Swift rederives and compares byte-for-byte. Explorer shows that
+current path separately from historical discovery evidence, along with the
+estimate, warnings, and expiry, and offers only prepare/check-again/close. It
+states explicitly that no cleanup was approved or performed.
+
 ## Required before executable use
 
 Removing `ProtectedPath` requires a separate reviewed implementation that

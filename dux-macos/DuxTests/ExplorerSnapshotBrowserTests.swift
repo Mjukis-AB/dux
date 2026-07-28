@@ -1136,6 +1136,104 @@ final class ExplorerSnapshotBrowserTests: XCTestCase {
         XCTAssertFalse(browser.isCandidateDetailLoading)
     }
 
+    func testRustTargetPlanReviewPublishesExactObservationAndReleasesOnClose() async throws {
+        let reviews = BrowserReviewStub(mode: .rustTargetPlanReviewAvailable)
+        let browser = ExplorerSnapshotBrowserModel(reviews: reviews)
+        await browser.reloadLatest()
+        await browser.selectContentMode(.candidates)
+        let candidate = try XCTUnwrap(browser.candidatePage?.candidates.first)
+        await browser.selectCandidate(candidate.candidateID)
+
+        await browser.prepareSelectedRustTargetPlanReview()
+
+        guard case let .ready(info) = browser.rustTargetPlanReviewState else {
+            return XCTFail("Expected an exact Rust-target plan observation")
+        }
+        XCTAssertEqual(info.candidateID, candidate.candidateID)
+        XCTAssertEqual(info.target.display, "/Users/example/project/target")
+        XCTAssertEqual(browser.phase, .ready)
+
+        await browser.closeRustTargetPlanReview()
+
+        let releasedPlanReviewCount = await reviews.releasedPlanReviewCount()
+        let releasedScanIDs = await reviews.releasedScanIDs()
+        XCTAssertEqual(browser.rustTargetPlanReviewState, .idle)
+        XCTAssertEqual(releasedPlanReviewCount, 1)
+        XCTAssertTrue(releasedScanIDs.isEmpty)
+    }
+
+    func testReadyRustTargetPlanReviewRevalidatesAndFailsClosedOnDrift() async throws {
+        let reviews = BrowserReviewStub(mode: .rustTargetPlanReviewChangesOnRefresh)
+        let clock = SuspendedRustTargetPlanReviewClock(now: Date())
+        let browser = ExplorerSnapshotBrowserModel(
+            reviews: reviews,
+            rustTargetPlanReviewClock: clock
+        )
+        await browser.reloadLatest()
+        await browser.selectContentMode(.candidates)
+        let candidate = try XCTUnwrap(browser.candidatePage?.candidates.first)
+        await browser.selectCandidate(candidate.candidateID)
+
+        await browser.prepareSelectedRustTargetPlanReview()
+
+        guard case .ready = browser.rustTargetPlanReviewState else {
+            return XCTFail("Expected a prepared plan before revalidation")
+        }
+        try await eventually { await clock.hasSuspendedSleep() }
+        await clock.resumeSleep()
+        try await eventually {
+            await MainActor.run {
+                browser.rustTargetPlanReviewState == .failed(.changedDuringReview)
+            }
+        }
+
+        let releasedPlanReviewCount = await reviews.releasedPlanReviewCount()
+        let releasedScanIDs = await reviews.releasedScanIDs()
+        XCTAssertEqual(releasedPlanReviewCount, 1)
+        XCTAssertTrue(releasedScanIDs.isEmpty)
+        XCTAssertEqual(browser.phase, .ready)
+        XCTAssertEqual(browser.scanID, "scan:latest")
+    }
+
+    func testExpiredRustTargetPlanReviewKeepsRenewableParentSnapshot() async throws {
+        let reviews = BrowserReviewStub(mode: .rustTargetPlanReviewExpired)
+        let browser = ExplorerSnapshotBrowserModel(reviews: reviews)
+        await browser.reloadLatest()
+        await browser.selectContentMode(.candidates)
+        let candidate = try XCTUnwrap(browser.candidatePage?.candidates.first)
+        await browser.selectCandidate(candidate.candidateID)
+
+        await browser.prepareSelectedRustTargetPlanReview()
+
+        let releasedScanIDs = await reviews.releasedScanIDs()
+        XCTAssertEqual(browser.rustTargetPlanReviewState, .expired)
+        XCTAssertEqual(browser.phase, .ready)
+        XCTAssertEqual(browser.scanID, "scan:latest")
+        XCTAssertTrue(releasedScanIDs.isEmpty)
+    }
+
+    func testLateRustTargetPlanReviewIsReleasedAfterCandidateChanges() async throws {
+        let reviews = BrowserReviewStub(mode: .suspendedRustTargetPlanReview)
+        let browser = ExplorerSnapshotBrowserModel(reviews: reviews)
+        await browser.reloadLatest()
+        await browser.selectContentMode(.candidates)
+        let candidates = try XCTUnwrap(browser.candidatePage?.candidates)
+        let preparing = Task {
+            await browser.selectCandidate(candidates[0].candidateID)
+            await browser.prepareSelectedRustTargetPlanReview()
+        }
+        try await eventually { await reviews.hasSuspendedPlanReview() }
+
+        await browser.selectCandidate(candidates[1].candidateID)
+        await reviews.resumePlanReview()
+        await preparing.value
+
+        let releasedPlanReviewCount = await reviews.releasedPlanReviewCount()
+        XCTAssertEqual(browser.selectedCandidateID, candidates[1].candidateID)
+        XCTAssertEqual(browser.rustTargetPlanReviewState, .idle)
+        XCTAssertEqual(releasedPlanReviewCount, 1)
+    }
+
     private func eventually(
         _ condition: @escaping @Sendable () async -> Bool,
         file: StaticString = #filePath,
@@ -1235,6 +1333,10 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
         case suspendedCandidateDetail
         case candidateDetailExpired
         case candidateDetailMalformed
+        case rustTargetPlanReviewAvailable
+        case rustTargetPlanReviewChangesOnRefresh
+        case rustTargetPlanReviewExpired
+        case suspendedRustTargetPlanReview
     }
 
     enum Call: Equatable, Sendable {
@@ -1286,6 +1388,8 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
     private var largeFilesContinuation: CheckedContinuation<Void, Never>?
     private var liveActionContinuation: CheckedContinuation<Void, Never>?
     private var candidateDetailContinuation: CheckedContinuation<Void, Never>?
+    private var planReviewContinuation: CheckedContinuation<Void, Never>?
+    private var releasedPlanReviewIDs: [UUID] = []
     private var didSuspendRelease = false
     private var didSuspendQuery = false
     private var didSuspendCandidateDetail = false
@@ -1361,13 +1465,14 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
                 || mode == .suspendedCandidateDetail
                 || mode == .candidateDetailExpired
                 || mode == .candidateDetailMalformed
+                || mode == .rustTargetPlanReviewAvailable
+                || mode == .rustTargetPlanReviewChangesOnRefresh
+                || mode == .rustTargetPlanReviewExpired
+                || mode == .suspendedRustTargetPlanReview
         else {
             throw ExplorerCandidateDetailError.reviewNotAcquired
         }
-        let candidates = [
-            browserCandidateSummary(id: "candidate:browser-0"),
-            browserCandidateSummary(id: "candidate:browser-1"),
-        ]
+        let candidates = candidateSummaries()
         return ExplorerCandidateSummaryPage(
             scanID: scanID,
             cursor: cursor,
@@ -1396,6 +1501,10 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
             mode == .candidatesAvailable
                 || mode == .suspendedCandidateDetail
                 || mode == .candidateDetailMalformed
+                || mode == .rustTargetPlanReviewAvailable
+                || mode == .rustTargetPlanReviewChangesOnRefresh
+                || mode == .rustTargetPlanReviewExpired
+                || mode == .suspendedRustTargetPlanReview
         else {
             throw ExplorerCandidateDetailError.reviewNotAcquired
         }
@@ -1405,7 +1514,7 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
                 candidateDetailContinuation = continuation
             }
         }
-        let candidate = browserCandidateSummary(id: candidateID)
+        let candidate = candidateSummary(id: candidateID)
         let allPaths = (0 ..< Int(candidate.pathCount)).map { index in
             ExplorerCandidateObservedPath(
                 encoding: .utf8,
@@ -1444,10 +1553,14 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
             mode == .candidatesAvailable
                 || mode == .suspendedCandidateDetail
                 || mode == .candidateDetailMalformed
+                || mode == .rustTargetPlanReviewAvailable
+                || mode == .rustTargetPlanReviewChangesOnRefresh
+                || mode == .rustTargetPlanReviewExpired
+                || mode == .suspendedRustTargetPlanReview
         else {
             throw ExplorerCandidateDetailError.reviewNotAcquired
         }
-        let candidate = browserCandidateSummary(id: candidateID)
+        let candidate = candidateSummary(id: candidateID)
         let allEvidence = candidate.evidenceKinds.indices.map { index in
             ExplorerCandidateEvidence(
                 ordinal: UInt16(index),
@@ -1738,6 +1851,78 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
         )
     }
 
+    func prepareRustTargetPlanReview(
+        scanID: String,
+        candidateID: String
+    ) async throws -> ExplorerRustTargetPlanReviewHandle {
+        guard scanID == "scan:latest" else {
+            throw ExplorerRustTargetPlanReviewError.parentReviewUnavailable
+        }
+        if mode == .rustTargetPlanReviewExpired {
+            throw ExplorerRustTargetPlanReviewError.reviewExpired
+        }
+        guard
+            mode == .rustTargetPlanReviewAvailable
+                || mode == .rustTargetPlanReviewChangesOnRefresh
+                || mode == .suspendedRustTargetPlanReview
+        else {
+            throw ExplorerRustTargetPlanReviewError.unavailable
+        }
+        if mode == .suspendedRustTargetPlanReview {
+            await withCheckedContinuation { continuation in
+                planReviewContinuation = continuation
+            }
+        }
+        let now = Date()
+        let info = ExplorerRustTargetPlanReviewInfo(
+            planID: "plan:browser",
+            sourceScanID: scanID,
+            candidateID: candidateID,
+            ruleID: "developer.rust.target",
+            ruleRevision: 2,
+            category: .developerArtifact,
+            mode: .permanentSafe,
+            safety: .safeRegenerable,
+            action: .removeKnownRegenerableContents,
+            estimatedBytes: 42_000,
+            itemCount: 1,
+            pathCount: 1,
+            warnings: [
+                .estimatedBytesUnverified,
+                .permanentRemovalCannotBeUndone,
+            ],
+            createdAt: ExplorerRustTargetPlanReviewAdapter.timestamp(for: now),
+            effectiveExpiresAt: ExplorerRustTargetPlanReviewAdapter.timestamp(
+                for: now.addingTimeInterval(60)
+            ),
+            scheduleEligible: false,
+            target: ExplorerRustTargetPlanReviewPath(
+                encoding: .unixBytes,
+                encodedBytes: Data("/Users/example/project/target".utf8),
+                display: "/Users/example/project/target"
+            )
+        )
+        return ExplorerRustTargetPlanReviewHandle(id: UUID(), info: info)
+    }
+
+    func refreshRustTargetPlanReview(
+        _ handle: ExplorerRustTargetPlanReviewHandle
+    ) throws -> ExplorerRustTargetPlanReviewHandle {
+        if mode == .rustTargetPlanReviewChangesOnRefresh {
+            throw ExplorerRustTargetPlanReviewError.changedDuringReview
+        }
+        guard mode == .rustTargetPlanReviewAvailable else {
+            throw ExplorerRustTargetPlanReviewError.unavailable
+        }
+        return handle
+    }
+
+    func releaseRustTargetPlanReview(
+        _ handle: ExplorerRustTargetPlanReviewHandle
+    ) {
+        releasedPlanReviewIDs.append(handle.id)
+    }
+
     func recordedCalls() -> [Call] {
         calls
     }
@@ -1800,6 +1985,19 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
         candidateDetailContinuation = nil
     }
 
+    func hasSuspendedPlanReview() -> Bool {
+        planReviewContinuation != nil
+    }
+
+    func resumePlanReview() {
+        planReviewContinuation?.resume()
+        planReviewContinuation = nil
+    }
+
+    func releasedPlanReviewCount() -> Int {
+        releasedPlanReviewIDs.count
+    }
+
     func hasSuspendedRelease() -> Bool {
         releaseContinuation != nil
     }
@@ -1807,6 +2005,72 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
     func resumeRelease() {
         releaseContinuation?.resume()
         releaseContinuation = nil
+    }
+
+    private func candidateSummaries() -> [ExplorerCandidateSummary] {
+        [
+            candidateSummary(id: "candidate:browser-0"),
+            candidateSummary(id: "candidate:browser-1"),
+        ]
+    }
+
+    private func candidateSummary(id: String) -> ExplorerCandidateSummary {
+        switch mode {
+        case .rustTargetPlanReviewAvailable, .rustTargetPlanReviewChangesOnRefresh,
+             .rustTargetPlanReviewExpired,
+             .suspendedRustTargetPlanReview:
+            browserRustTargetCandidateSummary(id: id)
+        default:
+            browserCandidateSummary(id: id)
+        }
+    }
+}
+
+private struct SuspendedRustTargetPlanReviewClock:
+    ExplorerRustTargetPlanReviewClock
+{
+    private let instant: Date
+    private let sleeper = SuspendedRustTargetPlanReviewSleeper()
+
+    init(now: Date) {
+        instant = now
+    }
+
+    func now() -> Date {
+        instant
+    }
+
+    func sleep(until _: Date) async throws {
+        try Task.checkCancellation()
+        await sleeper.sleep()
+        try Task.checkCancellation()
+    }
+
+    func hasSuspendedSleep() async -> Bool {
+        await sleeper.hasSuspendedSleep()
+    }
+
+    func resumeSleep() async {
+        await sleeper.resumeSleep()
+    }
+}
+
+private actor SuspendedRustTargetPlanReviewSleeper {
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func sleep() async {
+        await withCheckedContinuation { continuation in
+            self.continuation = continuation
+        }
+    }
+
+    func hasSuspendedSleep() -> Bool {
+        continuation != nil
+    }
+
+    func resumeSleep() {
+        continuation?.resume()
+        continuation = nil
     }
 }
 
@@ -1928,6 +2192,31 @@ private func browserCandidateSummary(id: String) -> ExplorerCandidateSummary {
         ruleScheduleEligible: false,
         pathCount: 65,
         evidenceKinds: Array(repeating: .matchedPath, count: 65),
+        blockers: [.protectedPath],
+        createdAt: ExplorerSnapshotTimestamp(
+            secondsSinceUnixEpoch: 1_700_000_001,
+            nanoseconds: 0
+        ),
+        status: .discovered
+    )
+}
+
+private func browserRustTargetCandidateSummary(id: String) -> ExplorerCandidateSummary {
+    ExplorerCandidateSummary(
+        candidateID: id,
+        ruleID: "developer.rust.target",
+        ruleRevision: 2,
+        category: .developerArtifact,
+        estimatedBytes: 42_000,
+        newestMtime: ExplorerSnapshotTimestamp(
+            secondsSinceUnixEpoch: 1_700_000_000,
+            nanoseconds: 0
+        ),
+        safety: .safeRegenerable,
+        action: .removeKnownRegenerableContents,
+        ruleScheduleEligible: false,
+        pathCount: 1,
+        evidenceKinds: [.matchedPath],
         blockers: [.protectedPath],
         createdAt: ExplorerSnapshotTimestamp(
             secondsSinceUnixEpoch: 1_700_000_001,

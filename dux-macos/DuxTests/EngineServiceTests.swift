@@ -14,6 +14,114 @@ private func canonicalTestPath(_ url: URL) -> String {
 }
 
 final class EngineServiceTests: XCTestCase {
+    func testRustTargetPlanReviewBridgeUsesBoundParentAndMapsExactRecord() async throws {
+        let parent = RecordingGeneratedSnapshotReview()
+        let plan = RecordingGeneratedRustTargetPlanReview(
+            info: generatedRustTargetPlanReviewInfo()
+        )
+        let engine = RecordingRustTargetPlanReviewEngine(
+            parent: parent,
+            plan: plan
+        )
+        let service = EngineService(engine: engine)
+        let lease = try await service.acquireExplorerReview(scanID: "scan:example")
+
+        let session = try await lease.prepareRustTargetPlanReview(
+            candidateID: "candidate:example"
+        )
+        let info = try await session.info()
+
+        XCTAssertEqual(engine.receivedScanID, "scan:example")
+        XCTAssertTrue(engine.receivedParent === parent)
+        XCTAssertEqual(engine.receivedRequest?.recordVersion, 1)
+        XCTAssertEqual(engine.receivedRequest?.candidateId, "candidate:example")
+        XCTAssertEqual(session.scanID, "scan:example")
+        XCTAssertEqual(session.candidateID, "candidate:example")
+        XCTAssertEqual(info.createdAt.secondsSinceUnixEpoch, 1_700_000_000)
+        XCTAssertEqual(info.createdAt.nanoseconds, 123_000_000)
+        XCTAssertEqual(info.target.encoding, .unixBytes)
+        XCTAssertEqual(info.target.encodedBytes, Data("/Users/example/project/target".utf8))
+
+        await session.release()
+        XCTAssertEqual(plan.releaseCount, 1)
+        await lease.release()
+        XCTAssertEqual(parent.releaseCount, 1)
+        let closed = await service.close()
+        XCTAssertTrue(closed)
+    }
+
+    func testRustTargetPlanReviewBridgeMapsEveryGeneratedFailure() {
+        let cases: [(RustTargetPlanReviewError, ExplorerRustTargetPlanReviewError)] = [
+            (.Closed, .closed),
+            (.WrongEngine, .invalidResponse),
+            (.InvalidRecordVersion, .invalidResponse),
+            (.ParentReviewUnavailable, .parentReviewUnavailable),
+            (.ReviewExpired, .reviewExpired),
+            (.CandidateUnavailable, .candidateUnavailable),
+            (.CargoNotEnrolled, .cargoNotEnrolled),
+            (.ActiveProcesses, .activeProcesses),
+            (.ChangedDuringReview, .changedDuringReview),
+            (.UnsupportedPlatform, .unsupportedPlatform),
+            (.BudgetExceeded, .budgetExceeded),
+            (.Busy, .busy),
+            (.UnsafeStorage, .unsafeStorage),
+            (.CorruptData, .corruptData),
+            (.Unavailable, .unavailable),
+            (.ReviewBusy, .busy),
+            (.ReviewUnavailable, .unavailable),
+            (.InternalState, .invalidResponse),
+        ]
+
+        for (ffi, expected) in cases {
+            XCTAssertEqual(EngineRustTargetPlanReviewAdapter.map(ffi), expected)
+        }
+    }
+
+    func testRustTargetPlanReviewBridgeRejectsNegativeGeneratedTimestamp() {
+        XCTAssertThrowsError(
+            try EngineRustTargetPlanReviewAdapter.map(
+                generatedRustTargetPlanReviewInfo(createdAtUnixMS: -1)
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? ExplorerRustTargetPlanReviewError,
+                .invalidResponse
+            )
+        }
+    }
+
+    func testSuspendedRustTargetPrepareDoesNotBlockEngineClose() async throws {
+        let parent = RecordingGeneratedSnapshotReview()
+        let engine = SuspendedRustTargetPlanReviewEngine(parent: parent)
+        let service = EngineService(engine: engine)
+        let lease = try await service.acquireExplorerReview(scanID: "scan:example")
+
+        let preparing = Task {
+            try await lease.prepareRustTargetPlanReview(
+                candidateID: "candidate:example"
+            )
+        }
+        for _ in 0 ..< 2_000 where !engine.prepareStarted {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        XCTAssertTrue(engine.prepareStarted)
+
+        let closed = await service.close()
+
+        XCTAssertTrue(closed)
+        XCTAssertTrue(engine.closeReached)
+        engine.resumePrepare()
+        do {
+            _ = try await preparing.value
+            XCTFail("Expected the closed raw engine to reject late prepare")
+        } catch {
+            XCTAssertEqual(
+                error as? ExplorerRustTargetPlanReviewError,
+                .closed
+            )
+        }
+    }
+
     @MainActor
     func testDefaultInitializationDefersEngineOpenOffMainActor() async throws {
         let baseline = liveEngineInstanceCount()
@@ -57,7 +165,7 @@ final class EngineServiceTests: XCTestCase {
         // DUX-DESTRUCTIVE: allow=test-swift-retry-obstruction-remove -- remove only this test fixture's deliberate file obstruction
         try FileManager.default.removeItem(at: dataRoot)
         let status = try await service.loadStatus()
-        XCTAssertEqual(status.ffiContractVersion, 27)
+        XCTAssertEqual(status.ffiContractVersion, 28)
         let closed = await service.close()
         XCTAssertTrue(closed)
     }
@@ -67,7 +175,7 @@ final class EngineServiceTests: XCTestCase {
         let result = try await EngineService(engine: fixture.engine).loadStatus()
 
         XCTAssertEqual(result.libraryVersion, "0.5.0")
-        XCTAssertEqual(result.ffiContractVersion, 27)
+        XCTAssertEqual(result.ffiContractVersion, 28)
         XCTAssertTrue(result.executedOffMainThread)
     }
 
@@ -1039,7 +1147,7 @@ final class EngineServiceTests: XCTestCase {
             weakEngine = engine
 
             XCTAssertEqual(liveEngineInstanceCount(), baseline + 1)
-            XCTAssertEqual(try engine.libraryVersion().ffiContractVersion, 27)
+            XCTAssertEqual(try engine.libraryVersion().ffiContractVersion, 28)
             XCTAssertTrue(engine.close())
             XCTAssertTrue(engine.close())
             XCTAssertThrowsError(try engine.formatSize(bytes: 1_536)) { error in
@@ -1260,6 +1368,178 @@ final class EngineServiceTests: XCTestCase {
 
     func testApplicationRunsAsMenuBarAgent() {
         XCTAssertEqual(Bundle.main.object(forInfoDictionaryKey: "LSUIElement") as? Bool, true)
+    }
+}
+
+private func generatedRustTargetPlanReviewInfo(
+    createdAtUnixMS: Int64 = 1_700_000_000_123
+) -> RustTargetPlanReviewInfo {
+    RustTargetPlanReviewInfo(
+        recordVersion: 1,
+        planId: "plan:example",
+        sourceScanId: "scan:example",
+        candidateId: "candidate:example",
+        ruleId: "developer.rust.target",
+        ruleRevision: 2,
+        category: .developerArtifact,
+        mode: .permanentSafe,
+        safety: .safeRegenerable,
+        action: .removeKnownRegenerableContents,
+        estimatedBytes: 42,
+        warnings: [
+            .estimatedBytesUnverified,
+            .permanentRemovalCannotBeUndone,
+        ],
+        createdAtUnixMs: createdAtUnixMS,
+        effectiveExpiresAtUnixMs: 1_700_000_600_123,
+        scheduleEligible: false,
+        itemCount: 1,
+        pathCount: 1,
+        path: RustTargetPlanReviewPath(
+            encoding: .unixBytes,
+            encodedBytes: Data("/Users/example/project/target".utf8),
+            display: "/Users/example/project/target"
+        )
+    )
+}
+
+private final class RecordingRustTargetPlanReviewEngine: DuxEngine, @unchecked Sendable {
+    private let parent: SnapshotReviewSession
+    private let plan: RustTargetPlanReviewSession
+    private(set) var receivedScanID: String?
+    private(set) var receivedParent: SnapshotReviewSession?
+    private(set) var receivedRequest: RustTargetPlanReviewRequest?
+
+    required init(unsafeFromHandle handle: UInt64) {
+        fatalError("RecordingRustTargetPlanReviewEngine cannot be lifted: \(handle)")
+    }
+
+    init(parent: SnapshotReviewSession, plan: RustTargetPlanReviewSession) {
+        self.parent = parent
+        self.plan = plan
+        super.init(noHandle: NoHandle())
+    }
+
+    override func acquireExplorerSnapshotReview(scanId: String) throws
+        -> SnapshotReviewSession
+    {
+        receivedScanID = scanId
+        return parent
+    }
+
+    override func prepareRustTargetPlanReview(
+        parentReview: SnapshotReviewSession,
+        request: RustTargetPlanReviewRequest
+    ) throws -> RustTargetPlanReviewSession {
+        receivedParent = parentReview
+        receivedRequest = request
+        return plan
+    }
+
+    override func close() -> Bool {
+        true
+    }
+}
+
+private final class RecordingGeneratedSnapshotReview:
+    SnapshotReviewSession,
+    @unchecked Sendable
+{
+    private(set) var releaseCount = 0
+
+    required init(unsafeFromHandle handle: UInt64) {
+        fatalError("RecordingGeneratedSnapshotReview cannot be lifted: \(handle)")
+    }
+
+    init() {
+        super.init(noHandle: NoHandle())
+    }
+
+    override func release() throws -> ReviewReleaseOutcome {
+        releaseCount += 1
+        return releaseCount == 1 ? .released : .alreadyReleased
+    }
+}
+
+private final class RecordingGeneratedRustTargetPlanReview:
+    RustTargetPlanReviewSession,
+    @unchecked Sendable
+{
+    private let record: RustTargetPlanReviewInfo
+    private(set) var releaseCount = 0
+
+    required init(unsafeFromHandle handle: UInt64) {
+        fatalError("RecordingGeneratedRustTargetPlanReview cannot be lifted: \(handle)")
+    }
+
+    init(info: RustTargetPlanReviewInfo) {
+        record = info
+        super.init(noHandle: NoHandle())
+    }
+
+    override func info() throws -> RustTargetPlanReviewInfo {
+        record
+    }
+
+    override func release() throws -> RustTargetPlanReviewReleaseOutcome {
+        releaseCount += 1
+        return releaseCount == 1 ? .released : .alreadyUnavailable
+    }
+}
+
+private final class SuspendedRustTargetPlanReviewEngine: DuxEngine, @unchecked Sendable {
+    private let parent: SnapshotReviewSession
+    private let prepareGate = DispatchSemaphore(value: 0)
+    private let lock = NSLock()
+    private var _prepareStarted = false
+    private var _closeReached = false
+
+    var prepareStarted: Bool {
+        lock.withLock { _prepareStarted }
+    }
+
+    var closeReached: Bool {
+        lock.withLock { _closeReached }
+    }
+
+    required init(unsafeFromHandle handle: UInt64) {
+        fatalError("SuspendedRustTargetPlanReviewEngine cannot be lifted: \(handle)")
+    }
+
+    init(parent: SnapshotReviewSession) {
+        self.parent = parent
+        super.init(noHandle: NoHandle())
+    }
+
+    override func acquireExplorerSnapshotReview(scanId _: String) throws
+        -> SnapshotReviewSession
+    {
+        parent
+    }
+
+    override func prepareRustTargetPlanReview(
+        parentReview _: SnapshotReviewSession,
+        request _: RustTargetPlanReviewRequest
+    ) throws -> RustTargetPlanReviewSession {
+        lock.withLock {
+            _prepareStarted = true
+        }
+        prepareGate.wait()
+        if closeReached {
+            throw RustTargetPlanReviewError.Closed
+        }
+        throw RustTargetPlanReviewError.InternalState
+    }
+
+    override func close() -> Bool {
+        lock.withLock {
+            _closeReached = true
+        }
+        return true
+    }
+
+    func resumePrepare() {
+        prepareGate.signal()
     }
 }
 

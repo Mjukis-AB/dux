@@ -877,6 +877,258 @@ fn rust_target_facts_fixture() -> RustTargetFactsFixture {
 }
 
 #[cfg(target_os = "macos")]
+fn assert_rust_target_review_left_no_cleanup_authority(fixture: &RustTargetFactsFixture) {
+    let candidate = fixture
+        .engine
+        .candidate_history_for_scan(&fixture.scan_id)
+        .unwrap()
+        .candidates()
+        .iter()
+        .find(|candidate| candidate.id() == &fixture.candidate_id)
+        .cloned()
+        .expect("reviewed candidate should remain in durable history");
+    assert_eq!(candidate.status(), DurableCandidateStatus::Discovered);
+    assert_eq!(candidate.blockers(), [crate::BlockReason::ProtectedPath]);
+    assert!(
+        fixture
+            .engine
+            .recent_cleanup_history(None, 64)
+            .unwrap()
+            .records()
+            .is_empty()
+    );
+    fixture.engine.inner.store.with_connection(|connection| {
+        let authority_rows: i64 = connection
+            .query_row(
+                "SELECT (
+                     SELECT COUNT(*) FROM candidate_plan_claims
+                 ) + (
+                     SELECT COUNT(*) FROM trusted_rust_target_plan_claims
+                 ) + (
+                     SELECT COUNT(*) FROM cleanup_sessions
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(authority_rows, 0);
+    });
+    assert!(fixture.payload.exists());
+    assert!(fixture.target.join("CACHEDIR.TAG").exists());
+    assert!(fixture.manifest.exists());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn rust_target_plan_review_is_exact_observation_only_and_expires_at_the_boundary() {
+    let fixture = rust_target_facts_fixture();
+    let mut parent = fixture
+        .engine
+        .acquire_explorer_snapshot_review(&fixture.scan_id)
+        .unwrap();
+    let parent_expires_at = parent.validate_for_plan_review().unwrap();
+    let review = fixture
+        .engine
+        .prepare_rust_target_plan_review(&mut parent, &fixture.candidate_id)
+        .unwrap();
+    let info = review.info().unwrap();
+
+    assert!(info.plan_id.starts_with("plan:rust-target-review:"));
+    assert_eq!(info.source_scan_id, fixture.scan_id);
+    assert_eq!(info.candidate_id, fixture.candidate_id);
+    assert_eq!(info.rule_id, "developer.rust.target");
+    assert_eq!(info.rule_revision, 2);
+    assert_eq!(
+        info.category,
+        crate::domain::CandidateCategory::DeveloperArtifact
+    );
+    assert_eq!(info.mode, crate::domain::CleanupMode::PermanentSafe);
+    assert_eq!(info.safety, crate::domain::SafetyTier::SafeRegenerable);
+    assert_eq!(
+        info.action,
+        crate::domain::CandidateAction::RemoveKnownRegenerableContents
+    );
+    assert_eq!(
+        info.warnings,
+        [
+            crate::domain::PlanWarning::EstimatedBytesUnverified,
+            crate::domain::PlanWarning::PermanentRemovalCannotBeUndone,
+        ]
+    );
+    assert!(!info.schedule_eligible);
+    assert_eq!((info.item_count, info.path_count), (1, 1));
+    assert_eq!(info.path, fixture.target);
+    assert!(info.created_at < info.effective_expires_at);
+    assert!(info.effective_expires_at <= parent_expires_at);
+    assert_eq!(
+        review.info_at(info.effective_expires_at),
+        Err(RustTargetPlanReviewError::ParentReviewUnavailable)
+    );
+    assert_rust_target_review_left_no_cleanup_authority(&fixture);
+
+    drop(parent);
+    assert_eq!(
+        review.info(),
+        Err(RustTargetPlanReviewError::ParentReviewUnavailable)
+    );
+    review.release();
+    fixture.engine.close();
+    assert!(fixture.engine.wait_until_closed(TEST_TIMEOUT));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn rust_target_plan_review_reports_child_expiry_separately_from_parent_expiry() {
+    let fixture = rust_target_facts_fixture();
+    let facts = fixture.prepare_facts();
+    let created_at = SystemTime::now();
+    let reviewed = crate::planner::review_rust_target_plan_facts(
+        facts,
+        crate::domain::CleanupPlanId::new("plan:rust-target-review:expiry-test").unwrap(),
+        created_at,
+    )
+    .unwrap();
+    let review = RustTargetPlanReview::new(
+        reviewed,
+        &fixture.candidate_id,
+        created_at + Duration::from_secs(60 * 60),
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        created_at,
+    )
+    .unwrap();
+    let info = review.info_at(created_at).unwrap();
+
+    assert!(info.effective_expires_at < created_at + Duration::from_secs(60 * 60));
+    assert_eq!(review.terminal_error_at(created_at), None);
+    assert_eq!(
+        review.terminal_error_at(info.effective_expires_at),
+        Some(RustTargetPlanReviewError::ReviewExpired)
+    );
+    assert_eq!(
+        review.info_at(info.effective_expires_at),
+        Err(RustTargetPlanReviewError::ReviewExpired)
+    );
+    assert_rust_target_review_left_no_cleanup_authority(&fixture);
+
+    review.release();
+    fixture.engine.close();
+    assert!(fixture.engine.wait_until_closed(TEST_TIMEOUT));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn rust_target_plan_review_pending_result_requires_the_exact_parent_session() {
+    let fixture = rust_target_facts_fixture();
+    let mut admitted_parent = fixture
+        .engine
+        .acquire_explorer_snapshot_review(&fixture.scan_id)
+        .unwrap();
+    let admission = fixture
+        .engine
+        .begin_rust_target_plan_review(&admitted_parent, &fixture.candidate_id)
+        .unwrap();
+    let pending = fixture
+        .engine
+        .prepare_admitted_rust_target_plan_review(admission)
+        .unwrap();
+    let mut same_scan_other_parent = fixture
+        .engine
+        .acquire_explorer_snapshot_review(&fixture.scan_id)
+        .unwrap();
+
+    assert!(matches!(
+        fixture
+            .engine
+            .finalize_rust_target_plan_review(&same_scan_other_parent, pending),
+        Err(RustTargetPlanReviewError::ParentReviewUnavailable)
+    ));
+    assert_rust_target_review_left_no_cleanup_authority(&fixture);
+
+    admitted_parent.release().unwrap();
+    same_scan_other_parent.release().unwrap();
+    fixture.engine.close();
+    assert!(fixture.engine.wait_until_closed(TEST_TIMEOUT));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn rust_target_plan_review_fails_closed_for_parent_affinity_release_and_drift() {
+    let fixture = rust_target_facts_fixture();
+    let foreign = rust_target_facts_fixture();
+    let mut foreign_parent = foreign
+        .engine
+        .acquire_explorer_snapshot_review(&foreign.scan_id)
+        .unwrap();
+    assert!(matches!(
+        fixture
+            .engine
+            .prepare_rust_target_plan_review(&mut foreign_parent, &fixture.candidate_id),
+        Err(RustTargetPlanReviewError::WrongEngine)
+    ));
+    foreign_parent.release().unwrap();
+    foreign.engine.close();
+    assert!(foreign.engine.wait_until_closed(TEST_TIMEOUT));
+
+    let mut released_parent = fixture
+        .engine
+        .acquire_explorer_snapshot_review(&fixture.scan_id)
+        .unwrap();
+    released_parent.release().unwrap();
+    assert!(matches!(
+        fixture
+            .engine
+            .prepare_rust_target_plan_review(&mut released_parent, &fixture.candidate_id),
+        Err(RustTargetPlanReviewError::ParentReviewUnavailable)
+    ));
+
+    let mut parent = fixture
+        .engine
+        .acquire_explorer_snapshot_review(&fixture.scan_id)
+        .unwrap();
+    let review = fixture
+        .engine
+        .prepare_rust_target_plan_review(&mut parent, &fixture.candidate_id)
+        .unwrap();
+    std::fs::write(
+        &fixture.manifest,
+        b"[package]\nname = 'fixture'\nversion = '0.1.1'\nedition = '2021'\n\n[workspace]\n",
+    )
+    .unwrap();
+    assert_eq!(
+        review.info(),
+        Err(RustTargetPlanReviewError::ChangedDuringReview)
+    );
+    assert_rust_target_review_left_no_cleanup_authority(&fixture);
+
+    review.release();
+    parent.release().unwrap();
+    fixture.engine.close();
+    assert!(fixture.engine.wait_until_closed(TEST_TIMEOUT));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn rust_target_plan_review_requires_current_direct_cargo_enrollment() {
+    let fixture = rust_target_facts_fixture();
+    fixture.engine.revoke_direct_cargo_enrollment().unwrap();
+    let mut parent = fixture
+        .engine
+        .acquire_explorer_snapshot_review(&fixture.scan_id)
+        .unwrap();
+    assert!(matches!(
+        fixture
+            .engine
+            .prepare_rust_target_plan_review(&mut parent, &fixture.candidate_id),
+        Err(RustTargetPlanReviewError::CargoNotEnrolled)
+    ));
+    assert_rust_target_review_left_no_cleanup_authority(&fixture);
+
+    parent.release().unwrap();
+    fixture.engine.close();
+    assert!(fixture.engine.wait_until_closed(TEST_TIMEOUT));
+}
+
+#[cfg(target_os = "macos")]
 fn rust_target_journal_request(
     plan: &str,
     session: &str,
@@ -2080,6 +2332,50 @@ fn explorer_review_rejects_tombstoned_snapshot_through_path_free_facade() {
         engine.acquire_explorer_snapshot_review(&tombstoned),
         Err(SnapshotReviewError::SnapshotUnavailable)
     ));
+}
+
+#[test]
+fn explorer_review_expiry_observation_revalidates_the_durable_lease() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("scan-root");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("payload"), b"snapshot review").unwrap();
+    let engine = EngineHandle::open(config(&temp)).unwrap();
+    let task = engine.start_scan(root).unwrap();
+    assert_eq!(wait_terminal(&engine, task).phase, TaskPhase::Succeeded);
+    let scan_id = engine.scan_result(task).unwrap().unwrap().scan_id().clone();
+    let mut review = engine.acquire_explorer_snapshot_review(&scan_id).unwrap();
+    assert!(review.expires_at_unix_ms().is_ok());
+
+    engine.inner.store.with_connection(|connection| {
+        connection
+            .execute(
+                "INSERT INTO snapshot_retention_tombstones (
+                     scan_id, record_format_version, scan_status,
+                     completed_at_unix_ms, snapshot_version,
+                     snapshot_relative_path, snapshot_relative_path_encoding,
+                     snapshot_checksum_sha256, committed_at_unix_ms
+                 )
+                 SELECT scan_id, 1, status, completed_at_unix_ms,
+                        snapshot_version, snapshot_relative_path,
+                        snapshot_relative_path_encoding, snapshot_checksum_sha256,
+                        completed_at_unix_ms + 1
+                 FROM scans WHERE scan_id = ?1",
+                [scan_id.as_str()],
+            )
+            .unwrap();
+    });
+
+    assert_eq!(
+        review.expires_at_unix_ms(),
+        Err(SnapshotReviewError::CorruptData)
+    );
+    assert_eq!(
+        review.release().unwrap(),
+        super::super::snapshot_review::SnapshotReviewReleaseOutcome::Released
+    );
+    engine.close();
+    assert!(engine.wait_until_closed(TEST_TIMEOUT));
 }
 
 #[test]

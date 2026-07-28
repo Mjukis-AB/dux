@@ -1,6 +1,21 @@
 import Foundation
 import Observation
 
+protocol ExplorerRustTargetPlanReviewClock: Sendable {
+    func now() -> Date
+    func sleep(until deadline: Date) async throws
+}
+
+struct ContinuousExplorerRustTargetPlanReviewClock: ExplorerRustTargetPlanReviewClock {
+    func now() -> Date {
+        Date()
+    }
+
+    func sleep(until deadline: Date) async throws {
+        try await Task.sleep(for: .seconds(max(0, deadline.timeIntervalSince(now()))))
+    }
+}
+
 protocol DuxSnapshotReviewBrowsing: Sendable {
     func acquire(scanID: String) async throws
     func acquireLatest() async throws -> String
@@ -46,6 +61,16 @@ protocol DuxSnapshotReviewBrowsing: Sendable {
         cursor: UInt16,
         limit: UInt16
     ) async throws -> ExplorerCandidateEvidencePage
+    func prepareRustTargetPlanReview(
+        scanID: String,
+        candidateID: String
+    ) async throws -> ExplorerRustTargetPlanReviewHandle
+    func refreshRustTargetPlanReview(
+        _ handle: ExplorerRustTargetPlanReviewHandle
+    ) async throws -> ExplorerRustTargetPlanReviewHandle
+    func releaseRustTargetPlanReview(
+        _ handle: ExplorerRustTargetPlanReviewHandle
+    ) async
     func resolveLiveItem(
         scanID: String,
         nodeID: UInt64,
@@ -62,6 +87,23 @@ extension DuxSnapshotReviewBrowsing {
     ) async throws -> ExplorerCandidateReviewResult {
         throw ExplorerCandidateDetailError.unavailable
     }
+
+    func prepareRustTargetPlanReview(
+        scanID _: String,
+        candidateID _: String
+    ) async throws -> ExplorerRustTargetPlanReviewHandle {
+        throw ExplorerRustTargetPlanReviewError.unavailable
+    }
+
+    func refreshRustTargetPlanReview(
+        _: ExplorerRustTargetPlanReviewHandle
+    ) async throws -> ExplorerRustTargetPlanReviewHandle {
+        throw ExplorerRustTargetPlanReviewError.unavailable
+    }
+
+    func releaseRustTargetPlanReview(
+        _: ExplorerRustTargetPlanReviewHandle
+    ) async {}
 
     func resolveLiveItem(
         scanID _: String,
@@ -333,6 +375,7 @@ final class ExplorerSnapshotBrowserModel {
     private(set) var isCandidateDetailLoading = false
     private(set) var isCandidatePathPaging = false
     private(set) var isCandidateEvidencePaging = false
+    private(set) var rustTargetPlanReviewState = ExplorerRustTargetPlanReviewState.idle
     private(set) var largeFileThreshold = ExplorerSnapshotLargeFileThreshold.gibibyte1
     private(set) var largeFileAge = ExplorerSnapshotLargeFileAge.any
     private(set) var largeFilesPage: ExplorerSnapshotLargeFilesPage?
@@ -354,6 +397,7 @@ final class ExplorerSnapshotBrowserModel {
     private let liveActions: any ExplorerLiveFileActionPresenting
     private let subtreeScans: any DuxSnapshotSubtreeScanServing
     private let scanDriver: (any ExplorerSubtreeScanDriving)?
+    private let rustTargetPlanReviewClock: any ExplorerRustTargetPlanReviewClock
 
     @ObservationIgnored
     private var generation: UInt64 = 0
@@ -372,6 +416,12 @@ final class ExplorerSnapshotBrowserModel {
     @ObservationIgnored
     private var candidateEvidenceGeneration: UInt64 = 0
     @ObservationIgnored
+    private var rustTargetPlanReviewGeneration: UInt64 = 0
+    @ObservationIgnored
+    private var rustTargetPlanReviewHandle: ExplorerRustTargetPlanReviewHandle?
+    @ObservationIgnored
+    private var rustTargetPlanReviewExpiryTask: Task<Void, Never>?
+    @ObservationIgnored
     private var coverageGeneration: UInt64 = 0
     @ObservationIgnored
     private var liveActionGeneration: UInt64 = 0
@@ -386,7 +436,9 @@ final class ExplorerSnapshotBrowserModel {
             UnavailableExplorerLiveFileActionPresenter(),
         subtreeScans: any DuxSnapshotSubtreeScanServing =
             UnavailableDuxSnapshotSubtreeScanService(),
-        scanDriver: (any ExplorerSubtreeScanDriving)? = nil
+        scanDriver: (any ExplorerSubtreeScanDriving)? = nil,
+        rustTargetPlanReviewClock: any ExplorerRustTargetPlanReviewClock =
+            ContinuousExplorerRustTargetPlanReviewClock()
     ) {
         self.reviews = reviews
         self.history = history
@@ -394,6 +446,7 @@ final class ExplorerSnapshotBrowserModel {
         self.liveActions = liveActions
         self.subtreeScans = subtreeScans
         self.scanDriver = scanDriver
+        self.rustTargetPlanReviewClock = rustTargetPlanReviewClock
     }
 
     var currentDirectory: ExplorerSnapshotNode? {
@@ -451,6 +504,30 @@ final class ExplorerSnapshotBrowserModel {
             return nil
         }
         return candidatePage?.candidates.first { $0.candidateID == selectedCandidateID }
+    }
+
+    var isSelectedRustTargetPlanReviewCandidate: Bool {
+        guard let candidate = selectedCandidate else {
+            return false
+        }
+        return candidate.ruleID == "developer.rust.target"
+            && candidate.ruleRevision == 2
+            && candidate.category == .developerArtifact
+            && candidate.safety == .safeRegenerable
+            && candidate.action == .removeKnownRegenerableContents
+            && !candidate.ruleScheduleEligible
+            && candidate.pathCount == 1
+            && candidate.blockers == [.protectedPath]
+            && candidate.status == .discovered
+    }
+
+    var canPrepareRustTargetPlanReview: Bool {
+        phase == .ready
+            && contentMode == .candidates
+            && !isSwitchingSnapshot
+            && !isCandidateLoading
+            && isSelectedRustTargetPlanReviewCandidate
+            && rustTargetPlanReviewState != .preparing
     }
 
     var hasPreviousCandidatePathPage: Bool {
@@ -576,6 +653,15 @@ final class ExplorerSnapshotBrowserModel {
             return
         }
 
+        await releaseRustTargetPlanReview()
+        guard
+            historicalScan.scanID != scanID,
+            !isSwitchingSnapshot,
+            !isNavigating,
+            !isPaging
+        else {
+            return
+        }
         invalidateLiveAction()
         generation &+= 1
         let operation = generation
@@ -659,6 +745,7 @@ final class ExplorerSnapshotBrowserModel {
     }
 
     func reloadLatest() async {
+        await releaseRustTargetPlanReview()
         generation &+= 1
         let operation = generation
         let previousScanID = scanID
@@ -808,6 +895,7 @@ final class ExplorerSnapshotBrowserModel {
         guard mode != contentMode, phase == .ready, !isSwitchingSnapshot else {
             return
         }
+        await releaseRustTargetPlanReview()
         invalidateLiveAction()
         contentMode = mode
         selection = nil
@@ -842,6 +930,7 @@ final class ExplorerSnapshotBrowserModel {
             let scanID,
             !isSwitchingSnapshot
         else { return }
+        await releaseRustTargetPlanReview()
         candidateGeneration &+= 1
         let operation = candidateGeneration
         let snapshotGeneration = generation
@@ -877,6 +966,7 @@ final class ExplorerSnapshotBrowserModel {
             isCandidateLoading = false
             let failure = Self.failure(for: error)
             if failure == .expired {
+                await releaseRustTargetPlanReview()
                 await reviews.release(scanID: scanID)
                 guard operation == candidateGeneration, self.scanID == scanID else { return }
                 clearContent()
@@ -888,6 +978,7 @@ final class ExplorerSnapshotBrowserModel {
     }
 
     func selectCandidate(_ candidateID: String?) async {
+        await releaseRustTargetPlanReview()
         clearCandidateDetail()
         guard let candidateID else {
             return
@@ -1027,6 +1118,19 @@ final class ExplorerSnapshotBrowserModel {
             !isSwitchingSnapshot,
             !isCandidateLoading
         else { return }
+        await releaseRustTargetPlanReview()
+        guard
+            phase == .ready,
+            contentMode == .candidates,
+            self.scanID == scanID,
+            candidatePage?.candidates.contains(where: {
+                $0.candidateID == candidateID
+            }) == true,
+            !isSwitchingSnapshot,
+            !isCandidateLoading
+        else {
+            return
+        }
         let operation = candidateGeneration
         do {
             let result = try await reviews.reviewCandidate(
@@ -1074,6 +1178,13 @@ final class ExplorerSnapshotBrowserModel {
                 isFailure: false
             )
         } catch {
+            guard
+                operation == candidateGeneration,
+                self.scanID == scanID,
+                contentMode == .candidates
+            else {
+                return
+            }
             candidateNotice = ExplorerLiveActionNotice(
                 message: "DUX could not record that review decision. No cleanup action was performed.",
                 isFailure: true
@@ -1083,6 +1194,133 @@ final class ExplorerSnapshotBrowserModel {
 
     func dismissCandidateNotice() {
         candidateNotice = nil
+    }
+
+    func prepareSelectedRustTargetPlanReview() async {
+        guard
+            canPrepareRustTargetPlanReview,
+            let requestedScanID = scanID,
+            let requestedCandidateID = selectedCandidateID
+        else {
+            return
+        }
+        await releaseRustTargetPlanReview()
+        guard
+            canPrepareRustTargetPlanReview,
+            scanID == requestedScanID,
+            selectedCandidateID == requestedCandidateID,
+            let candidate = selectedCandidate,
+            candidate.candidateID == requestedCandidateID
+        else {
+            return
+        }
+        let scanID = requestedScanID
+        rustTargetPlanReviewGeneration &+= 1
+        let operation = rustTargetPlanReviewGeneration
+        let snapshotOperation = generation
+        let candidateOperation = candidateGeneration
+        let detailOperation = candidateDetailGeneration
+        rustTargetPlanReviewState = .preparing
+        do {
+            let handle = try await reviews.prepareRustTargetPlanReview(
+                scanID: scanID,
+                candidateID: candidate.candidateID
+            )
+            guard
+                operation == rustTargetPlanReviewGeneration,
+                snapshotOperation == generation,
+                candidateOperation == candidateGeneration,
+                detailOperation == candidateDetailGeneration,
+                self.scanID == scanID,
+                contentMode == .candidates,
+                selectedCandidateID == candidate.candidateID
+            else {
+                await reviews.releaseRustTargetPlanReview(handle)
+                return
+            }
+            guard !Task.isCancelled else {
+                await reviews.releaseRustTargetPlanReview(handle)
+                if operation == rustTargetPlanReviewGeneration {
+                    rustTargetPlanReviewState = .idle
+                }
+                return
+            }
+            guard
+                handle.info.sourceScanID == scanID,
+                ExplorerRustTargetPlanReviewAdapter.matches(
+                    handle.info,
+                    candidate: candidate
+                )
+            else {
+                await reviews.releaseRustTargetPlanReview(handle)
+                rustTargetPlanReviewState = .failed(.invalidResponse)
+                return
+            }
+            rustTargetPlanReviewHandle = handle
+            rustTargetPlanReviewState = .ready(handle.info)
+            scheduleRustTargetPlanReviewExpiry(
+                handle: handle,
+                operation: operation
+            )
+        } catch {
+            if Task.isCancelled {
+                if
+                    operation == rustTargetPlanReviewGeneration,
+                    snapshotOperation == generation,
+                    candidateOperation == candidateGeneration,
+                    detailOperation == candidateDetailGeneration,
+                    self.scanID == scanID,
+                    contentMode == .candidates,
+                    selectedCandidateID == candidate.candidateID
+                {
+                    rustTargetPlanReviewState = .idle
+                }
+                return
+            }
+            guard
+                operation == rustTargetPlanReviewGeneration,
+                snapshotOperation == generation,
+                candidateOperation == candidateGeneration,
+                detailOperation == candidateDetailGeneration,
+                self.scanID == scanID,
+                contentMode == .candidates,
+                selectedCandidateID == candidate.candidateID
+            else {
+                return
+            }
+            let mapped = (error as? ExplorerRustTargetPlanReviewError) ?? .unavailable
+            if mapped == .reviewExpired {
+                await releaseRustTargetPlanReview()
+                guard
+                    snapshotOperation == generation,
+                    candidateOperation == candidateGeneration,
+                    detailOperation == candidateDetailGeneration,
+                    self.scanID == scanID
+                else {
+                    return
+                }
+                rustTargetPlanReviewState = .expired
+            } else if mapped == .parentReviewUnavailable || mapped == .reviewNotAcquired {
+                await releaseRustTargetPlanReview()
+                await reviews.release(scanID: scanID)
+                guard
+                    snapshotOperation == generation,
+                    candidateOperation == candidateGeneration,
+                    detailOperation == candidateDetailGeneration,
+                    self.scanID == scanID
+                else {
+                    return
+                }
+                clearContent()
+                phase = .failed(.expired)
+            } else {
+                rustTargetPlanReviewState = .failed(mapped)
+            }
+        }
+    }
+
+    func closeRustTargetPlanReview() async {
+        await releaseRustTargetPlanReview()
     }
 
     private func loadCandidatePathPage(cursor: UInt16) async {
@@ -1246,6 +1484,7 @@ final class ExplorerSnapshotBrowserModel {
     ) async {
         let failure = Self.failure(for: error)
         if failure == .expired {
+            await releaseRustTargetPlanReview()
             await reviews.release(scanID: scanID)
             guard
                 detailOperation == candidateDetailGeneration,
@@ -1389,6 +1628,7 @@ final class ExplorerSnapshotBrowserModel {
             isLargeFilesLoading = false
             let failure = Self.failure(for: error)
             if failure == .expired {
+                await releaseRustTargetPlanReview()
                 await reviews.release(scanID: scanID)
                 guard
                     operation == largeFilesGeneration,
@@ -1592,6 +1832,7 @@ final class ExplorerSnapshotBrowserModel {
         historyGeneration &+= 1
         subtreeRefreshGeneration &+= 1
         let retainedScanID = scanID
+        await releaseRustTargetPlanReview()
         clearContent()
         historyScans = []
         historyHasMore = false
@@ -1620,6 +1861,15 @@ final class ExplorerSnapshotBrowserModel {
             return
         }
 
+        await releaseRustTargetPlanReview()
+        guard
+            requestedScanID != sourceScanID,
+            refreshOperation == subtreeRefreshGeneration,
+            scanID == sourceScanID,
+            !isSwitchingSnapshot
+        else {
+            return
+        }
         invalidateLiveAction()
         generation &+= 1
         let installOperation = generation
@@ -1811,6 +2061,7 @@ final class ExplorerSnapshotBrowserModel {
             }
             isLiveActionLoading = false
             if error as? ExplorerSnapshotLivePathError == .reviewExpired {
+                await releaseRustTargetPlanReview()
                 await reviews.release(scanID: scanID)
                 guard
                     actionOperation == liveActionGeneration,
@@ -2056,6 +2307,7 @@ final class ExplorerSnapshotBrowserModel {
     ) async {
         let failure = Self.failure(for: error)
         if failure == .expired {
+            await releaseRustTargetPlanReview()
             await reviews.release(scanID: scanID)
             guard generation == operation, self.scanID == scanID else {
                 return
@@ -2105,6 +2357,7 @@ final class ExplorerSnapshotBrowserModel {
         candidateDetailGeneration &+= 1
         candidatePathGeneration &+= 1
         candidateEvidenceGeneration &+= 1
+        _ = invalidateRustTargetPlanReview()
         selectedCandidateID = nil
         candidatePathPage = nil
         candidateEvidencePage = nil
@@ -2112,6 +2365,149 @@ final class ExplorerSnapshotBrowserModel {
         isCandidateDetailLoading = false
         isCandidatePathPaging = false
         isCandidateEvidencePaging = false
+    }
+
+    private func releaseRustTargetPlanReview() async {
+        let handle = invalidateRustTargetPlanReview()
+        if let handle {
+            await reviews.releaseRustTargetPlanReview(handle)
+        }
+    }
+
+    private func invalidateRustTargetPlanReview()
+        -> ExplorerRustTargetPlanReviewHandle?
+    {
+        rustTargetPlanReviewGeneration &+= 1
+        rustTargetPlanReviewExpiryTask?.cancel()
+        rustTargetPlanReviewExpiryTask = nil
+        let handle = rustTargetPlanReviewHandle
+        rustTargetPlanReviewHandle = nil
+        rustTargetPlanReviewState = .idle
+        return handle
+    }
+
+    private func scheduleRustTargetPlanReviewExpiry(
+        handle: ExplorerRustTargetPlanReviewHandle,
+        operation: UInt64
+    ) {
+        rustTargetPlanReviewExpiryTask?.cancel()
+        let expiry = ExplorerRustTargetPlanReviewAdapter.date(
+            for: handle.info.effectiveExpiresAt
+        )
+        let clock = rustTargetPlanReviewClock
+        rustTargetPlanReviewExpiryTask = Task { [weak self] in
+            while !Task.isCancelled {
+                let now = clock.now()
+                guard now < expiry else {
+                    await self?.finishRustTargetPlanReview(
+                        handle: handle,
+                        operation: operation,
+                        outcome: .expired
+                    )
+                    return
+                }
+                let refresh = min(
+                    expiry,
+                    now.addingTimeInterval(15)
+                )
+                do {
+                    try await clock.sleep(until: refresh)
+                } catch {
+                    return
+                }
+                guard
+                    !Task.isCancelled,
+                    let self,
+                    operation == self.rustTargetPlanReviewGeneration,
+                    self.rustTargetPlanReviewHandle?.id == handle.id
+                else {
+                    return
+                }
+                guard clock.now() < expiry else {
+                    await self.finishRustTargetPlanReview(
+                        handle: handle,
+                        operation: operation,
+                        outcome: .expired
+                    )
+                    return
+                }
+                do {
+                    let refreshed = try await self.reviews
+                        .refreshRustTargetPlanReview(handle)
+                    guard
+                        operation == self.rustTargetPlanReviewGeneration,
+                        self.rustTargetPlanReviewHandle?.id == handle.id
+                    else {
+                        await self.reviews
+                            .releaseRustTargetPlanReview(refreshed)
+                        return
+                    }
+                    guard
+                        refreshed.id == handle.id,
+                        refreshed.info == handle.info
+                    else {
+                        await self.finishRustTargetPlanReview(
+                            handle: handle,
+                            operation: operation,
+                            outcome: .failed(.invalidResponse)
+                        )
+                        return
+                    }
+                    self.rustTargetPlanReviewHandle = refreshed
+                    self.rustTargetPlanReviewState = .ready(refreshed.info)
+                } catch {
+                    guard !Task.isCancelled else {
+                        return
+                    }
+                    let mapped = (error as? ExplorerRustTargetPlanReviewError)
+                        ?? .unavailable
+                    await self.finishRustTargetPlanReview(
+                        handle: handle,
+                        operation: operation,
+                        outcome: mapped == .reviewExpired
+                            ? .expired
+                            : .failed(mapped)
+                    )
+                    return
+                }
+            }
+        }
+    }
+
+    private func finishRustTargetPlanReview(
+        handle: ExplorerRustTargetPlanReviewHandle,
+        operation: UInt64,
+        outcome: ExplorerRustTargetPlanReviewState
+    ) async {
+        guard
+            operation == rustTargetPlanReviewGeneration,
+            rustTargetPlanReviewHandle?.id == handle.id
+        else {
+            return
+        }
+        rustTargetPlanReviewExpiryTask = nil
+        rustTargetPlanReviewHandle = nil
+        rustTargetPlanReviewGeneration &+= 1
+        let terminalOperation = rustTargetPlanReviewGeneration
+        rustTargetPlanReviewState = outcome
+        await reviews.releaseRustTargetPlanReview(handle)
+
+        guard
+            case let .failed(error) = outcome,
+            error == .parentReviewUnavailable || error == .reviewNotAcquired,
+            let scanID
+        else {
+            return
+        }
+        await reviews.release(scanID: scanID)
+        guard
+            terminalOperation == rustTargetPlanReviewGeneration,
+            self.scanID == scanID
+        else {
+            return
+        }
+        clearContent()
+        phase = .failed(.expired)
     }
 
     private func clearLargeFiles() {

@@ -257,6 +257,42 @@ to task-style cancellation for a revisioned settings mutation, not precedent
 for scan, planner, or cleanup work. No candidate, plan, approval, journal,
 scheduler, AI, or executor handle crosses v27.
 
+Contract v28 adds the first reviewed-plan observation without adding an
+approval or cleanup call. The request contains one candidate ID and the
+already-retained opaque Explorer review; the caller cannot provide a scan ID,
+path, rule, mode, time, warning, estimate, plan ID, schedule, or command.
+Rust derives those values by running the exact production Rust-target
+acquisition chain and retains the resulting non-cloneable reviewed plan behind
+a second opaque object. That child exports only immutable `info` and
+idempotent `release`.
+
+Preparation does not hold a Swift/FFI parent mutex or engine-state mutex across
+Cargo, filesystem, database, or reviewed-plan work. The core splits admission,
+unlocked preparation, exact-parent validation, unlocked materialization, and
+post-validation; an unforgeable per-session identity and liveness token prevent
+another review of the same scan from substituting for the admitted parent.
+The FFI registry reserves one preparation/live slot atomically, rechecks close
+at publication, and treats parent release/drop/expiry, child expiry, evidence
+drift, and explicit release as terminal. Child deadlines are frozen to the
+minimum reviewed-authority and parent horizon; renewing the parent never
+extends a child.
+
+Plan information is a display observation only. The exact current path crosses
+as bounded platform bytes plus a display generated from those bytes. The v28
+display codec byte-escapes invalid UTF-8, backslashes, controls, and a pinned
+Unicode-16 union of format and default-ignorable scalars. Swift reconstructs
+the codec and compares UTF-8 bytes, not canonically equivalent `String`
+values, then independently checks the terminal `target` component and complete
+one-item permanent-safe rule/candidate/warning/lifetime shape. A dedicated
+utility queue keeps the bounded live checks off both the main actor and the
+serialized engine queue. The app controller owns each child, refreshes the
+unchanged observation every 15 seconds, releases children before parents, and
+generation-fences every candidate, mode, snapshot, cancellation, expiry, and
+shutdown transition. No reconstructed preview DTO can be passed to or mint
+authority for an approval, journal, scheduler, AI, Trash, or executor
+endpoint. The existing confirmation-gated Explorer Trash route is separate;
+v28 adds no permanent-safe cleanup endpoint.
+
 The Swift adapter lazily constructs and synchronizes the engine on its utility
 queue. FFI close invalidates renewal, attempts exact release for every
 still-live registered review, then performs bounded core shutdown; a failed

@@ -2,6 +2,184 @@ import XCTest
 @testable import DUX
 
 final class SnapshotReviewControllerTests: XCTestCase {
+    func testPlanReviewIsOwnedByExactParentAndExplicitlyReleased() async throws {
+        let plan = StubRustTargetPlanReviewSession(
+            scanID: "scan:one",
+            candidateID: "candidate:one"
+        )
+        let lease = StubSnapshotReviewLease(
+            scanID: "scan:one",
+            planReview: plan
+        )
+        let controller = DuxSnapshotReviewController(
+            service: StubSnapshotReviewService(leases: [lease]),
+            clock: SuspendedSnapshotReviewClock()
+        )
+        try await controller.acquire(scanID: "scan:one")
+
+        let handle = try await controller.prepareRustTargetPlanReview(
+            scanID: "scan:one",
+            candidateID: "candidate:one"
+        )
+        XCTAssertEqual(handle.info.target.display, "/Users/example/project/target")
+        let infoCount = await plan.infoCount()
+        XCTAssertEqual(infoCount, 1)
+
+        await controller.releaseRustTargetPlanReview(handle)
+        await controller.releaseRustTargetPlanReview(handle)
+        let planReleaseCount = await plan.releaseCount()
+        XCTAssertEqual(planReleaseCount, 1)
+        await controller.shutdown()
+    }
+
+    func testFinalParentReleaseDrainsOwnedPlanReviewBeforeParent() async throws {
+        let events = ControllerReleaseEvents()
+        let plan = StubRustTargetPlanReviewSession(
+            scanID: "scan:one",
+            candidateID: "candidate:one",
+            events: events
+        )
+        let lease = StubSnapshotReviewLease(
+            scanID: "scan:one",
+            planReview: plan,
+            releaseEvents: events
+        )
+        let controller = DuxSnapshotReviewController(
+            service: StubSnapshotReviewService(leases: [lease]),
+            clock: SuspendedSnapshotReviewClock()
+        )
+        try await controller.acquire(scanID: "scan:one")
+        _ = try await controller.prepareRustTargetPlanReview(
+            scanID: "scan:one",
+            candidateID: "candidate:one"
+        )
+
+        await controller.release(scanID: "scan:one")
+
+        let releaseEvents = await events.values()
+        let planReleaseCount = await plan.releaseCount()
+        let leaseReleaseCount = await lease.releaseCount()
+        XCTAssertEqual(releaseEvents, ["plan", "parent"])
+        XCTAssertEqual(planReleaseCount, 1)
+        XCTAssertEqual(leaseReleaseCount, 1)
+    }
+
+    func testMalformedPlanReviewInfoReleasesChildWithoutPublishingHandle() async throws {
+        let plan = StubRustTargetPlanReviewSession(
+            scanID: "scan:one",
+            candidateID: "candidate:one",
+            recordCandidateID: "candidate:wrong"
+        )
+        let lease = StubSnapshotReviewLease(
+            scanID: "scan:one",
+            planReview: plan
+        )
+        let controller = DuxSnapshotReviewController(
+            service: StubSnapshotReviewService(leases: [lease]),
+            clock: SuspendedSnapshotReviewClock()
+        )
+        try await controller.acquire(scanID: "scan:one")
+
+        do {
+            _ = try await controller.prepareRustTargetPlanReview(
+                scanID: "scan:one",
+                candidateID: "candidate:one"
+            )
+            XCTFail("expected invalid response")
+        } catch {
+            XCTAssertEqual(
+                error as? ExplorerRustTargetPlanReviewError,
+                .invalidResponse
+            )
+        }
+        let planReleaseCount = await plan.releaseCount()
+        XCTAssertEqual(planReleaseCount, 1)
+        await controller.shutdown()
+    }
+
+    func testExpiredChildReviewDoesNotInvalidateSharedRenewableParent() async throws {
+        let plan = StubRustTargetPlanReviewSession(
+            scanID: "scan:one",
+            candidateID: "candidate:one",
+            infoError: .reviewExpired
+        )
+        let lease = StubSnapshotReviewLease(
+            scanID: "scan:one",
+            planReview: plan
+        )
+        let controller = DuxSnapshotReviewController(
+            service: StubSnapshotReviewService(leases: [lease]),
+            clock: SuspendedSnapshotReviewClock()
+        )
+        try await controller.acquire(scanID: "scan:one")
+        try await controller.acquire(scanID: "scan:one")
+
+        do {
+            _ = try await controller.prepareRustTargetPlanReview(
+                scanID: "scan:one",
+                candidateID: "candidate:one"
+            )
+            XCTFail("expected child review expiry")
+        } catch {
+            XCTAssertEqual(
+                error as? ExplorerRustTargetPlanReviewError,
+                .reviewExpired
+            )
+        }
+        let childReleaseCount = await plan.releaseCount()
+        XCTAssertEqual(childReleaseCount, 1)
+
+        await controller.release(scanID: "scan:one")
+        let releaseCountWithOneOwner = await lease.releaseCount()
+        XCTAssertEqual(releaseCountWithOneOwner, 0)
+
+        await controller.release(scanID: "scan:one")
+        let finalReleaseCount = await lease.releaseCount()
+        XCTAssertEqual(finalReleaseCount, 1)
+    }
+
+    func testPlanRefreshDriftReleasesOnlyChildAndKeepsParentReview() async throws {
+        let plan = StubRustTargetPlanReviewSession(
+            scanID: "scan:one",
+            candidateID: "candidate:one",
+            refreshInfoError: .changedDuringReview
+        )
+        let lease = StubSnapshotReviewLease(
+            scanID: "scan:one",
+            planReview: plan
+        )
+        let controller = DuxSnapshotReviewController(
+            service: StubSnapshotReviewService(leases: [lease]),
+            clock: SuspendedSnapshotReviewClock()
+        )
+        try await controller.acquire(scanID: "scan:one")
+        let handle = try await controller.prepareRustTargetPlanReview(
+            scanID: "scan:one",
+            candidateID: "candidate:one"
+        )
+
+        do {
+            _ = try await controller.refreshRustTargetPlanReview(handle)
+            XCTFail("expected plan drift")
+        } catch {
+            XCTAssertEqual(
+                error as? ExplorerRustTargetPlanReviewError,
+                .changedDuringReview
+            )
+        }
+
+        let infoCount = await plan.infoCount()
+        let planReleaseCount = await plan.releaseCount()
+        let parentReleaseCount = await lease.releaseCount()
+        XCTAssertEqual(infoCount, 2)
+        XCTAssertEqual(planReleaseCount, 1)
+        XCTAssertEqual(parentReleaseCount, 0)
+
+        await controller.release(scanID: "scan:one")
+        let finalParentReleaseCount = await lease.releaseCount()
+        XCTAssertEqual(finalParentReleaseCount, 1)
+    }
+
     func testSubtreeScanStartsFromExactRetainedLease() async throws {
         let scanTask = ControllerScanTaskSpy()
         let lease = StubSnapshotReviewLease(
@@ -533,6 +711,8 @@ private actor StubSnapshotReviewLease: DuxSnapshotReviewLease {
     private let navigationExpires: Bool
     private let subtreeStart: Result<HomeScanStartDisposition, ExplorerSnapshotSubtreeScanError>
     private let suspendsSubtreeStart: Bool
+    private let planReview: StubRustTargetPlanReviewSession?
+    private let releaseEvents: ControllerReleaseEvents?
     private var renewals = 0
     private var releases = 0
     private var renewalContinuation: CheckedContinuation<Void, Never>?
@@ -546,7 +726,9 @@ private actor StubSnapshotReviewLease: DuxSnapshotReviewLease {
         navigationExpires: Bool = false,
         subtreeStart: Result<HomeScanStartDisposition, ExplorerSnapshotSubtreeScanError> =
             .failure(.unavailable),
-        suspendsSubtreeStart: Bool = false
+        suspendsSubtreeStart: Bool = false,
+        planReview: StubRustTargetPlanReviewSession? = nil,
+        releaseEvents: ControllerReleaseEvents? = nil
     ) {
         self.scanID = scanID
         self.renewFails = renewFails
@@ -554,6 +736,8 @@ private actor StubSnapshotReviewLease: DuxSnapshotReviewLease {
         self.navigationExpires = navigationExpires
         self.subtreeStart = subtreeStart
         self.suspendsSubtreeStart = suspendsSubtreeStart
+        self.planReview = planReview
+        self.releaseEvents = releaseEvents
     }
 
     func renew() async throws -> Int64 {
@@ -616,8 +800,18 @@ private actor StubSnapshotReviewLease: DuxSnapshotReviewLease {
         return try subtreeStart.get()
     }
 
-    func release() {
+    func prepareRustTargetPlanReview(
+        candidateID: String
+    ) async throws -> any DuxRustTargetPlanReviewSession {
+        guard let planReview, planReview.candidateID == candidateID else {
+            throw ExplorerRustTargetPlanReviewError.candidateUnavailable
+        }
+        return planReview
+    }
+
+    func release() async {
         releases += 1
+        await releaseEvents?.append("parent")
     }
 
     func renewCount() -> Int {
@@ -649,6 +843,108 @@ private actor StubSnapshotReviewLease: DuxSnapshotReviewLease {
         subtreeStartContinuation?.resume()
         subtreeStartContinuation = nil
     }
+}
+
+private actor StubRustTargetPlanReviewSession: DuxRustTargetPlanReviewSession {
+    nonisolated let scanID: String
+    nonisolated let candidateID: String
+
+    private let events: ControllerReleaseEvents?
+    private let infoError: ExplorerRustTargetPlanReviewError?
+    private let refreshInfoError: ExplorerRustTargetPlanReviewError?
+    private let record: ExplorerRustTargetPlanReviewRecord
+    private var infos = 0
+    private var releases = 0
+
+    init(
+        scanID: String,
+        candidateID: String,
+        recordCandidateID: String? = nil,
+        infoError: ExplorerRustTargetPlanReviewError? = nil,
+        refreshInfoError: ExplorerRustTargetPlanReviewError? = nil,
+        events: ControllerReleaseEvents? = nil
+    ) {
+        self.scanID = scanID
+        self.candidateID = candidateID
+        self.infoError = infoError
+        self.refreshInfoError = refreshInfoError
+        self.events = events
+        let now = Date()
+        record = controllerPlanReviewRecord(
+            scanID: scanID,
+            candidateID: recordCandidateID ?? candidateID,
+            createdAt: now,
+            expiresAt: now.addingTimeInterval(60)
+        )
+    }
+
+    func info() throws -> ExplorerRustTargetPlanReviewRecord {
+        infos += 1
+        if let infoError {
+            throw infoError
+        }
+        if infos > 1, let refreshInfoError {
+            throw refreshInfoError
+        }
+        return record
+    }
+
+    func release() async {
+        releases += 1
+        await events?.append("plan")
+    }
+
+    func infoCount() -> Int {
+        infos
+    }
+
+    func releaseCount() -> Int {
+        releases
+    }
+}
+
+private actor ControllerReleaseEvents {
+    private var events: [String] = []
+
+    func append(_ value: String) {
+        events.append(value)
+    }
+
+    func values() -> [String] {
+        events
+    }
+}
+
+private func controllerPlanReviewRecord(
+    scanID: String,
+    candidateID: String,
+    createdAt: Date,
+    expiresAt: Date
+) -> ExplorerRustTargetPlanReviewRecord {
+    ExplorerRustTargetPlanReviewRecord(
+        recordVersion: 1,
+        planID: "plan:controller",
+        sourceScanID: scanID,
+        candidateID: candidateID,
+        ruleID: "developer.rust.target",
+        ruleRevision: 2,
+        category: .developerArtifact,
+        mode: .permanentSafe,
+        safety: .safeRegenerable,
+        action: .removeKnownRegenerableContents,
+        estimatedBytes: 42,
+        itemCount: 1,
+        pathCount: 1,
+        warnings: [.estimatedBytesUnverified, .permanentRemovalCannotBeUndone],
+        createdAt: ExplorerRustTargetPlanReviewAdapter.timestamp(for: createdAt),
+        effectiveExpiresAt: ExplorerRustTargetPlanReviewAdapter.timestamp(for: expiresAt),
+        scheduleEligible: false,
+        target: ExplorerRustTargetPlanReviewPath(
+            encoding: .unixBytes,
+            encodedBytes: Data("/Users/example/project/target".utf8),
+            display: "/Users/example/project/target"
+        )
+    )
 }
 
 private actor ControllerScanTaskSpy: HomeScanTask {

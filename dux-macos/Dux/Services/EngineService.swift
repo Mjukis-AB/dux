@@ -182,12 +182,22 @@ protocol DuxSnapshotReviewLease: AnyObject, Sendable {
         cursor: UInt16,
         limit: UInt16
     ) async throws -> ExplorerCandidateEvidencePage
+    func prepareRustTargetPlanReview(
+        candidateID: String
+    ) async throws -> any DuxRustTargetPlanReviewSession
     func resolveLiveItem(
         nodeID: UInt64,
         purpose: ExplorerSnapshotLivePathPurpose
     ) async throws -> ExplorerResolvedLiveItem
     func executeTrash(nodeID: UInt64) async throws -> TrashPlatformResult
     func startSubtreeScan(nodeID: UInt64) async throws -> HomeScanStartDisposition
+    func release() async
+}
+
+protocol DuxRustTargetPlanReviewSession: AnyObject, Sendable {
+    var scanID: String { get }
+    var candidateID: String { get }
+    func info() async throws -> ExplorerRustTargetPlanReviewRecord
     func release() async
 }
 
@@ -222,6 +232,12 @@ extension DuxSnapshotReviewLease {
         throw ExplorerCandidateDetailError.unavailable
     }
 
+    func prepareRustTargetPlanReview(
+        candidateID _: String
+    ) async throws -> any DuxRustTargetPlanReviewSession {
+        throw ExplorerRustTargetPlanReviewError.unavailable
+    }
+
     func resolveLiveItem(
         nodeID _: UInt64,
         purpose _: ExplorerSnapshotLivePathPurpose
@@ -242,7 +258,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
     DuxSnapshotHistoryServing, DuxCleanupHistoryServing, DuxScanCoverageServing, HomeScanServing,
     Sendable
 {
-    fileprivate static let expectedFFIContractVersion: UInt32 = 27
+    fileprivate static let expectedFFIContractVersion: UInt32 = 28
     fileprivate static let expectedRecordVersion: UInt32 = 1
 
     private let state: EngineServiceState
@@ -1737,6 +1753,10 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
 
 private final class EngineServiceState: @unchecked Sendable {
     fileprivate let queue = DispatchQueue(label: "se.mjukis.dux.engine", qos: .utility)
+    private let planReviewQueue = DispatchQueue(
+        label: "se.mjukis.dux.plan-review",
+        qos: .utility
+    )
 
     private var engine: DuxEngine?
     private let storageRoots: EngineStorageRoots?
@@ -1795,6 +1815,20 @@ private final class EngineServiceState: @unchecked Sendable {
         await withCheckedContinuation { continuation in
             queue.async { [self] in
                 continuation.resume(returning: operation(self))
+            }
+        }
+    }
+
+    fileprivate func performPlanReview<T: Sendable>(
+        _ operation: @escaping @Sendable () throws -> T
+    ) async throws -> T {
+        try await withCheckedThrowingContinuation { continuation in
+            planReviewQueue.async {
+                do {
+                    continuation.resume(returning: try operation())
+                } catch {
+                    continuation.resume(throwing: error)
+                }
             }
         }
     }
@@ -2639,6 +2673,34 @@ private final class FFIDuxSnapshotReviewLease: DuxSnapshotReviewLease, @unchecke
         }
     }
 
+    func prepareRustTargetPlanReview(
+        candidateID: String
+    ) async throws -> any DuxRustTargetPlanReviewSession {
+        let engine = try await state.perform { state in
+            try state.resolveEngine()
+        }
+        let lease = lease
+        let session = try await state.performPlanReview {
+            do {
+                return try engine.prepareRustTargetPlanReview(
+                    parentReview: lease,
+                    request: RustTargetPlanReviewRequest(
+                        recordVersion: EngineService.expectedRecordVersion,
+                        candidateId: candidateID
+                    )
+                )
+            } catch let error as RustTargetPlanReviewError {
+                throw EngineRustTargetPlanReviewAdapter.map(error)
+            }
+        }
+        return FFIDuxRustTargetPlanReviewSession(
+            session: session,
+            state: state,
+            scanID: scanID,
+            candidateID: candidateID
+        )
+    }
+
     func resolveLiveItem(
         nodeID: UInt64,
         purpose: ExplorerSnapshotLivePathPurpose
@@ -2799,6 +2861,214 @@ private final class FFIDuxSnapshotReviewLease: DuxSnapshotReviewLease, @unchecke
         case .invalidCapacityObservation, .conflictingCapacityObservation,
              .supersededCapacityObservation, .unexpected:
             ExplorerSnapshotSubtreeScanError.invalidResponse
+        }
+    }
+}
+
+enum EngineRustTargetPlanReviewAdapter {
+    static func map(
+        _ raw: RustTargetPlanReviewInfo
+    ) throws -> ExplorerRustTargetPlanReviewRecord {
+        guard
+            let createdAt = timestamp(unixMilliseconds: raw.createdAtUnixMs),
+            let effectiveExpiresAt = timestamp(
+                unixMilliseconds: raw.effectiveExpiresAtUnixMs
+            )
+        else {
+            throw ExplorerRustTargetPlanReviewError.invalidResponse
+        }
+        return ExplorerRustTargetPlanReviewRecord(
+            recordVersion: raw.recordVersion,
+            planID: raw.planId,
+            sourceScanID: raw.sourceScanId,
+            candidateID: raw.candidateId,
+            ruleID: raw.ruleId,
+            ruleRevision: raw.ruleRevision,
+            category: map(raw.category),
+            mode: try map(raw.mode),
+            safety: map(raw.safety),
+            action: map(raw.action),
+            estimatedBytes: raw.estimatedBytes,
+            itemCount: raw.itemCount,
+            pathCount: raw.pathCount,
+            warnings: try raw.warnings.map(map),
+            createdAt: createdAt,
+            effectiveExpiresAt: effectiveExpiresAt,
+            scheduleEligible: raw.scheduleEligible,
+            target: ExplorerRustTargetPlanReviewPath(
+                encoding: map(raw.path.encoding),
+                encodedBytes: raw.path.encodedBytes,
+                display: raw.path.display
+            )
+        )
+    }
+
+    static func map(
+        _ error: RustTargetPlanReviewError
+    ) -> ExplorerRustTargetPlanReviewError {
+        switch error {
+        case .Closed:
+            .closed
+        case .WrongEngine, .InvalidRecordVersion, .InternalState:
+            .invalidResponse
+        case .ParentReviewUnavailable:
+            .parentReviewUnavailable
+        case .ReviewExpired:
+            .reviewExpired
+        case .CandidateUnavailable:
+            .candidateUnavailable
+        case .CargoNotEnrolled:
+            .cargoNotEnrolled
+        case .ActiveProcesses:
+            .activeProcesses
+        case .ChangedDuringReview:
+            .changedDuringReview
+        case .UnsupportedPlatform:
+            .unsupportedPlatform
+        case .BudgetExceeded:
+            .budgetExceeded
+        case .Busy, .ReviewBusy:
+            .busy
+        case .UnsafeStorage:
+            .unsafeStorage
+        case .CorruptData:
+            .corruptData
+        case .Unavailable, .ReviewUnavailable:
+            .unavailable
+        }
+    }
+
+    private static func timestamp(
+        unixMilliseconds: Int64
+    ) -> ExplorerSnapshotTimestamp? {
+        guard unixMilliseconds >= 0 else {
+            return nil
+        }
+        let seconds = UInt64(unixMilliseconds / 1_000)
+        let remainingMilliseconds = UInt32(unixMilliseconds % 1_000)
+        return ExplorerSnapshotTimestamp(
+            secondsSinceUnixEpoch: seconds,
+            nanoseconds: remainingMilliseconds * 1_000_000
+        )
+    }
+
+    private static func map(
+        _ value: CandidateCategory
+    ) -> ExplorerCandidateCategory {
+        switch value {
+        case .developerArtifact: .developerArtifact
+        case .applicationCache: .applicationCache
+        case .browserCache: .browserCache
+        case .logAndDiagnostic: .logAndDiagnostic
+        case .installerAndDownload: .installerAndDownload
+        case .deviceAndSimulatorData: .deviceAndSimulatorData
+        case .cloudFile: .cloudFile
+        case .largeReviewItem: .largeReviewItem
+        case .protectedSystemData: .protectedSystemData
+        case .unknownStorage: .unknownStorage
+        }
+    }
+
+    private static func map(
+        _ value: CleanupMode
+    ) throws -> ExplorerRustTargetPlanReviewMode {
+        switch value {
+        case .permanentSafe: .permanentSafe
+        case .dryRun, .trash, .evictLocalCopy:
+            throw ExplorerRustTargetPlanReviewError.invalidResponse
+        }
+    }
+
+    private static func map(
+        _ value: CandidateSafety
+    ) -> ExplorerCandidateSafety {
+        switch value {
+        case .safeRegenerable: .safeRegenerable
+        case .safeEvictable: .safeEvictable
+        case .reviewRequired: .reviewRequired
+        case .informational: .informational
+        case .protected: .protected
+        }
+    }
+
+    private static func map(
+        _ value: CandidateAction
+    ) -> ExplorerCandidateAction {
+        switch value {
+        case .removeKnownRegenerableContents: .removeKnownRegenerableContents
+        case .evictLocalCopy: .evictLocalCopy
+        case .moveToTrash: .moveToTrash
+        case .revealOnly: .revealOnly
+        case .noAction: .noAction
+        }
+    }
+
+    private static func map(
+        _ value: CleanupWarning
+    ) throws -> ExplorerRustTargetPlanReviewWarning {
+        switch value {
+        case .estimatedBytesUnverified: .estimatedBytesUnverified
+        case .permanentRemovalCannotBeUndone: .permanentRemovalCannotBeUndone
+        case .dryRunDoesNotMutate, .trashDoesNotFreeSpaceImmediately,
+             .cloudEvictionRequiresNetworkToRedownload:
+            throw ExplorerRustTargetPlanReviewError.invalidResponse
+        }
+    }
+
+    private static func map(
+        _ value: SnapshotNameEncoding
+    ) -> ExplorerRustTargetPlanReviewPathEncoding {
+        switch value {
+        case .unixBytes: .unixBytes
+        case .windowsUtf16LittleEndian: .windowsUTF16LittleEndian
+        }
+    }
+}
+
+private final class FFIDuxRustTargetPlanReviewSession:
+    DuxRustTargetPlanReviewSession,
+    @unchecked Sendable
+{
+    let scanID: String
+    let candidateID: String
+
+    private let session: RustTargetPlanReviewSession
+    private let state: EngineServiceState
+
+    init(
+        session: RustTargetPlanReviewSession,
+        state: EngineServiceState,
+        scanID: String,
+        candidateID: String
+    ) {
+        self.session = session
+        self.state = state
+        self.scanID = scanID
+        self.candidateID = candidateID
+    }
+
+    func info() async throws -> ExplorerRustTargetPlanReviewRecord {
+        try await state.performPlanReview {
+            do {
+                return try EngineRustTargetPlanReviewAdapter.map(
+                    try self.session.info()
+                )
+            } catch let error as RustTargetPlanReviewError {
+                throw EngineRustTargetPlanReviewAdapter.map(error)
+            }
+        }
+    }
+
+    func release() async {
+        await state.performNonthrowing { _ in
+            do {
+                switch try self.session.release() {
+                case .released, .alreadyUnavailable:
+                    break
+                }
+            } catch {
+                // Release is consuming, idempotent best effort during teardown.
+            }
         }
     }
 }

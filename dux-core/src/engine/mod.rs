@@ -9,6 +9,7 @@ mod candidate_history;
 mod cleanup_history;
 mod config;
 mod registry;
+mod rust_target_plan_review;
 mod scan_coverage_details;
 mod settings;
 mod snapshot_review;
@@ -33,6 +34,10 @@ pub use cleanup_history::{
 };
 pub use config::{EngineConfig, EngineConfigError, EngineConfigField, EngineConfigReason};
 pub use registry::EngineHandle;
+pub use rust_target_plan_review::{
+    PendingRustTargetPlanReview, RustTargetPlanReview, RustTargetPlanReviewAdmission,
+    RustTargetPlanReviewError, RustTargetPlanReviewInfo, ValidatedPendingRustTargetPlanReview,
+};
 pub use scan_coverage_details::{
     DurableScanCoverageDetailsPage, DurableScanIssue, DurableScanIssueKind,
     DurableScanIssueLocation, MAX_SCAN_COVERAGE_DETAIL_PAGE_LIMIT, ScanCoverageDetailsError,

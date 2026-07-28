@@ -61,6 +61,19 @@ enum ExplorerAccessibility {
     static let snapshotCandidateEvidencePrevious =
         "explorer-snapshot-candidate-evidence-previous"
     static let snapshotCandidateEvidenceNext = "explorer-snapshot-candidate-evidence-next"
+    static let snapshotCandidatePlanReview = "explorer-snapshot-candidate-plan-review"
+    static let snapshotCandidatePlanReviewPrepare =
+        "explorer-snapshot-candidate-plan-review-prepare"
+    static let snapshotCandidatePlanReviewStatus =
+        "explorer-snapshot-candidate-plan-review-status"
+    static let snapshotCandidatePlanReviewSummary =
+        "explorer-snapshot-candidate-plan-review-summary"
+    static let snapshotCandidatePlanReviewWarnings =
+        "explorer-snapshot-candidate-plan-review-warnings"
+    static let snapshotCandidatePlanReviewRefresh =
+        "explorer-snapshot-candidate-plan-review-refresh"
+    static let snapshotCandidatePlanReviewClose =
+        "explorer-snapshot-candidate-plan-review-close"
     static let snapshotLargeFileThreshold = "explorer-snapshot-large-file-threshold"
     static let snapshotLargeFileAge = "explorer-snapshot-large-file-age"
     static let snapshotLargeFileTable = "explorer-snapshot-large-file-table"
@@ -136,6 +149,13 @@ enum ExplorerAccessibility {
         snapshotCandidateEvidence,
         snapshotCandidateEvidencePrevious,
         snapshotCandidateEvidenceNext,
+        snapshotCandidatePlanReview,
+        snapshotCandidatePlanReviewPrepare,
+        snapshotCandidatePlanReviewStatus,
+        snapshotCandidatePlanReviewSummary,
+        snapshotCandidatePlanReviewWarnings,
+        snapshotCandidatePlanReviewRefresh,
+        snapshotCandidatePlanReviewClose,
         snapshotLargeFileThreshold,
         snapshotLargeFileAge,
         snapshotLargeFileTable,

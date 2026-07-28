@@ -425,6 +425,16 @@ impl RustTargetLiveWitness {
             .map(RustTargetDurableSource::store)
     }
 
+    pub(super) fn expires_at(
+        &self,
+    ) -> Result<std::time::SystemTime, RustTargetLiveValidationError> {
+        self.durable_source
+            .as_ref()
+            .ok_or(RustTargetLiveValidationError::DurableSourceChanged)?
+            .expires_at()
+            .map_err(|_| RustTargetLiveValidationError::DurableSourceChanged)
+    }
+
     pub(super) fn revalidate_current(&self) -> Result<(), RustTargetLiveValidationError> {
         if let Some(source) = self.durable_source.as_ref() {
             source

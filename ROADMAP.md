@@ -5050,6 +5050,22 @@ Tasks:
     manifest-drift run fails before journal insertion and leaves the target
     untouched. No FFI, Swift, CLI, scheduler, AI, or app cleanup route is
     enabled; generation-fenced product orchestration remains open.
+  - [x] 2026-07-28 slice: expose the first production-chain reviewed-plan
+    observation without exposing cleanup authority. An exact active Explorer
+    snapshot review plus one candidate ID can enter the deterministic
+    Rust-target acquisition chain; Rust alone derives the source scan, current
+    target, permanent-safe mode, plan identity, warnings, estimate, and frozen
+    effective expiry. The non-cloneable core review retains the real reviewed
+    plan but publicly supports only bounded observation and consuming release.
+    Admission, expensive acquisition, exact-parent post-validation, plan
+    materialization, and final publication are split so neither the parent
+    review mutex nor the FFI engine-state mutex is held across live Cargo,
+    filesystem, or reviewed-plan revalidation. A per-parent session identity
+    and liveness token reject same-scan substitution, explicit release, drop,
+    and expiry. This endpoint creates no approval, durable plan/session row,
+    candidate transition, journal claim, schedule, callback, AI request, or
+    filesystem effect; the broader evaluator → approval → journal → executor
+    product orchestration remains open.
 - [ ] Expose review intent, plan lifecycle, and path-free cleanup history through
   FFI/Swift UI without turning history into planner authority.
   - [x] 2026-07-19 slice: add the first app-facing history boundary as a
@@ -5093,7 +5109,39 @@ Tasks:
     malformed-response, cancellation, candidate-switch, expiry, and 65-row
     pagination regressions, the full macOS test suite, and universal
     arm64/x86_64 Debug and Release builds pass.
-    No plan, approval, schedule, AI input, or executor capability is exposed.
+  - [x] 2026-07-28 slice: add a review-only Rust-target plan preview through
+    UniFFI contract v28 and the native Explorer. The FFI request contains only
+    the candidate ID and an opaque exact parent review; one engine admits at
+    most one preparation or published child review. The child exposes only
+    `info` and idempotent `release`, is frozen to the shorter of its reviewed
+    authority and exact parent deadlines, and is reaped on child expiry,
+    parent release/drop/expiry, engine close, or terminal evidence drift.
+    Expensive preparation and information reads are operation-tracked without
+    holding registry/session locks, publication rechecks close and exact-parent
+    state, and shutdown remains bounded even when an operation or lease release
+    is still completing. Exact current paths cross only as bounded lossless
+    bytes plus a byte-derived display; controls, Unicode-16 format/default-
+    ignorable scalars, non-UTF-8 bytes, and backslashes are escaped, while
+    Swift compares the display as UTF-8 bytes to prevent normalization
+    substitution. App-owned adapters independently require the exact rule,
+    revision, candidate body, one-item/one-path shape, warning order, current
+    short lifetime, normalized terminal `target`, and scan/candidate
+    correlation. The controller owns every opaque child, releases children
+    before parents, and generation-fences preparation, refresh, candidate,
+    mode, snapshot, expiry, and shutdown races. Explorer presents the current
+    target, estimate, warnings, and expiry in an accessible
+    **Permanent-safe plan preview** with only prepare/check-again/close
+    controls and explicit “not approved; no files changed” copy. It performs
+    deterministic discovery and explanation only: the preview child exposes
+    no approval, permanent cleanup, journal, schedule, callback, CLI, AI, or
+    executor authority and cannot be supplied to the existing separately
+    confirmed Explorer Trash route. No plan, approval, schedule, AI input, or
+    executor capability is minted from the preview.
+    Verification covers 5 focused core lifecycle/path tests, all 49 FFI unit
+    tests, 129 focused native adapter/model/browser/controller tests, 21
+    destructive-boundary tests plus the 241-file source scan, deterministic
+    Debug/Release binding generation, and universal arm64/x86_64 Debug and
+    Release app builds targeting macOS 14.
 - [ ] Expand production cleanup session/item history with exact-session detail,
   verified capacity outcomes, and separately confirmed history clearing.
 - [ ] Define and test cross-reboot and Windows-unproven cleanup-journal recovery;

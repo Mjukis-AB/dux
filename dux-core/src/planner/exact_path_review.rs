@@ -167,6 +167,7 @@ pub(crate) struct TrustedReviewedCleanupPlan {
     plan: CleanupPlan,
     authorizations: Vec<RuleScopeAuthorization>,
     trusted_rust_target_coupling: bool,
+    authority_expires_at: std::time::SystemTime,
 }
 
 /// An explicitly approved reviewed plan. This capability is still crate
@@ -204,7 +205,21 @@ impl TrustedReviewedCleanupPlan {
         &self.plan
     }
 
+    pub(crate) fn effective_expires_at(&self) -> std::time::SystemTime {
+        self.plan.expires_at().min(self.authority_expires_at)
+    }
+
     pub(crate) fn revalidate(&self) -> Result<(), ExactPathPlanError> {
+        self.revalidate_at(std::time::SystemTime::now())
+    }
+
+    pub(crate) fn revalidate_at(
+        &self,
+        now: std::time::SystemTime,
+    ) -> Result<(), ExactPathPlanError> {
+        if now >= self.effective_expires_at() {
+            return Err(ExactPathPlanError::Expired);
+        }
         for authorization in &self.authorizations {
             authorization
                 .revalidate()
@@ -236,24 +251,26 @@ impl TrustedReviewedCleanupPlan {
         self,
         approved_at: std::time::SystemTime,
     ) -> Result<ApprovedTrustedReviewedCleanupPlan, ExactPathApprovalError> {
-        if self.plan.has_expired_at(approved_at) {
+        if approved_at >= self.effective_expires_at() {
             return Err(ExactPathApprovalError::Expired);
         }
-        self.revalidate().map_err(|error| match error {
-            ExactPathPlanError::Authorization(source) => {
-                ExactPathApprovalError::Authorization(source)
-            }
-            ExactPathPlanError::UnsupportedMode
-            | ExactPathPlanError::AuthorizationCount { .. }
-            | ExactPathPlanError::AuthorizationMismatch
-            | ExactPathPlanError::Plan(_) => {
-                unreachable!("trusted plan already passed construction validation")
-            }
-            #[cfg(unix)]
-            ExactPathPlanError::RustTargetPromotion(_) => {
-                unreachable!("trusted plan already passed construction validation")
-            }
-        })?;
+        self.revalidate_at(approved_at)
+            .map_err(|error| match error {
+                ExactPathPlanError::Expired => ExactPathApprovalError::Expired,
+                ExactPathPlanError::Authorization(source) => {
+                    ExactPathApprovalError::Authorization(source)
+                }
+                ExactPathPlanError::UnsupportedMode
+                | ExactPathPlanError::AuthorizationCount { .. }
+                | ExactPathPlanError::AuthorizationMismatch
+                | ExactPathPlanError::Plan(_) => {
+                    unreachable!("trusted plan already passed construction validation")
+                }
+                #[cfg(unix)]
+                ExactPathPlanError::RustTargetPromotion(_) => {
+                    unreachable!("trusted plan already passed construction validation")
+                }
+            })?;
         Ok(ApprovedTrustedReviewedCleanupPlan {
             reviewed: self,
             approved_at,
@@ -274,24 +291,27 @@ impl ApprovedTrustedReviewedCleanupPlan {
         &self,
         now: std::time::SystemTime,
     ) -> Result<(), ExactPathApprovalError> {
-        if self.plan().has_expired_at(now) {
+        if now >= self.reviewed.effective_expires_at() {
             return Err(ExactPathApprovalError::Expired);
         }
-        self.reviewed.revalidate().map_err(|error| match error {
-            ExactPathPlanError::Authorization(source) => {
-                ExactPathApprovalError::Authorization(source)
-            }
-            ExactPathPlanError::UnsupportedMode
-            | ExactPathPlanError::AuthorizationCount { .. }
-            | ExactPathPlanError::AuthorizationMismatch
-            | ExactPathPlanError::Plan(_) => {
-                unreachable!("trusted plan already passed construction validation")
-            }
-            #[cfg(unix)]
-            ExactPathPlanError::RustTargetPromotion(_) => {
-                unreachable!("trusted plan already passed construction validation")
-            }
-        })
+        self.reviewed
+            .revalidate_at(now)
+            .map_err(|error| match error {
+                ExactPathPlanError::Expired => ExactPathApprovalError::Expired,
+                ExactPathPlanError::Authorization(source) => {
+                    ExactPathApprovalError::Authorization(source)
+                }
+                ExactPathPlanError::UnsupportedMode
+                | ExactPathPlanError::AuthorizationCount { .. }
+                | ExactPathPlanError::AuthorizationMismatch
+                | ExactPathPlanError::Plan(_) => {
+                    unreachable!("trusted plan already passed construction validation")
+                }
+                #[cfg(unix)]
+                ExactPathPlanError::RustTargetPromotion(_) => {
+                    unreachable!("trusted plan already passed construction validation")
+                }
+            })
     }
 
     #[cfg(unix)]
@@ -322,7 +342,7 @@ impl ApprovedTrustedReviewedCleanupPlan {
         path_ordinal: usize,
         now: std::time::SystemTime,
     ) -> Result<crate::path_validation::CanonicalPathSnapshot, ExactPathApprovalError> {
-        if self.plan().has_expired_at(now) {
+        if now >= self.reviewed.effective_expires_at() {
             return Err(ExactPathApprovalError::Expired);
         }
         let authorization = self
@@ -630,11 +650,21 @@ impl ExactPathReview {
             CleanupPlan::try_from_candidates(plan_id, created_at, self.mode, &self.candidates)
                 .map_err(ExactPathPlanError::Plan)?;
         Ok(TrustedReviewedCleanupPlan {
+            authority_expires_at: plan.expires_at(),
             plan,
             authorizations: ordered_authorizations,
             trusted_rust_target_coupling: false,
         })
     }
+}
+
+#[cfg(unix)]
+pub(crate) fn review_rust_target_plan_facts(
+    facts: RustTargetPlanFacts,
+    plan_id: CleanupPlanId,
+    created_at: std::time::SystemTime,
+) -> Result<TrustedReviewedCleanupPlan, ExactPathPlanError> {
+    ExactPathReview::trusted_reviewed_plan_from_rust_target_facts(facts, plan_id, created_at)
 }
 
 #[cfg(unix)]
@@ -644,9 +674,8 @@ pub(crate) fn approve_rust_target_plan_facts(
     created_at: std::time::SystemTime,
     approved_at: std::time::SystemTime,
 ) -> Result<ApprovedTrustedReviewedCleanupPlan, ExactPathApprovalError> {
-    let reviewed =
-        ExactPathReview::trusted_reviewed_plan_from_rust_target_facts(facts, plan_id, created_at)
-            .map_err(ExactPathApprovalError::Plan)?;
+    let reviewed = review_rust_target_plan_facts(facts, plan_id, created_at)
+        .map_err(ExactPathApprovalError::Plan)?;
     reviewed.approve(approved_at)
 }
 
@@ -694,6 +723,7 @@ impl ExactPathReview {
         plan_id: CleanupPlanId,
         created_at: std::time::SystemTime,
     ) -> Result<TrustedReviewedCleanupPlan, ExactPathPlanError> {
+        let authority_expires_at = facts.authority_expires_at();
         let (plan, authorization) = facts
             .into_trusted_permanent_plan(plan_id, created_at, CleanupMode::PermanentSafe)
             .map_err(ExactPathPlanError::RustTargetPromotion)?;
@@ -711,6 +741,7 @@ impl ExactPathReview {
             .revalidate()
             .map_err(ExactPathPlanError::Authorization)?;
         Ok(TrustedReviewedCleanupPlan {
+            authority_expires_at,
             plan,
             authorizations: vec![authorization],
             trusted_rust_target_coupling: true,
@@ -808,6 +839,8 @@ pub(crate) enum ExactPathReviewError {
 
 #[derive(Debug, Error)]
 pub(crate) enum ExactPathPlanError {
+    #[error("trusted cleanup plan or retained authority expired")]
+    Expired,
     #[error("trusted permanent-safe plan construction requires permanent-safe mode")]
     UnsupportedMode,
     #[error("trusted plan requires {expected} exact authorizations but received {actual}")]

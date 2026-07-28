@@ -1,5 +1,27 @@
 # Changelog
 
+- Added an observation-only Rust-target plan preview through UniFFI contract
+  v28 and the native Explorer. Rust derives the exact current target, source
+  scan, permanent-safe mode, plan identity, estimate, ordered warnings, and
+  effective expiry from one retained Explorer review plus one candidate ID.
+  The non-cloneable child exposes only bounded `info` and idempotent `release`;
+  it cannot approve, persist, claim, schedule, invoke AI, or execute cleanup.
+  Exact-parent session identity and liveness reject same-scan substitution,
+  release, drop, or expiry. One engine admits at most one preparation or live
+  child, reaps stale children, performs expensive live checks outside
+  parent/registry locks, post-validates before publication, and tracks
+  preparation, inspection, and lease teardown through bounded close. Current
+  paths cross only as lossless bytes plus a byte-derived display. Controls,
+  non-UTF-8 bytes, backslashes, and the pinned Unicode-16
+  format/default-ignorable set are escaped; Swift compares UTF-8 display bytes
+  so canonical-equivalent text cannot substitute for Rust's exact projection.
+  The app adapter independently validates the exact rule/candidate/one-path
+  shape and short lifetime. Controller and browser generation fences release
+  children before parents across candidate, mode, snapshot, refresh, expiry,
+  cancellation, and shutdown races. The accessible
+  **Permanent-safe plan preview** shows the exact current target, estimate,
+  warnings, and expiry with only prepare/check-again/close controls and
+  explicit “not approved; no files changed” disclosure.
 - Added explicit Direct Cargo discovery enrollment to UniFFI contract v27 and
   native macOS Settings. Users choose one exact direct `cargo` executable;
   static inspection runs no selected bytes and returns a bounded,

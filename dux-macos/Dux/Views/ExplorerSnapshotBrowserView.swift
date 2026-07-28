@@ -354,7 +354,7 @@ struct ExplorerSnapshotBrowserView: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Label(
-                    "Review-only suggestions. Select a row to inspect exact historical evidence; no status or detail creates a plan or removes files.",
+                    "Review deterministic suggestions and inspect exact historical evidence. A supported plan preview performs live checks but cannot approve or remove anything.",
                     systemImage: "checkmark.shield"
                 )
                 .font(.callout)
@@ -1238,7 +1238,7 @@ private struct ExplorerCandidateInspectorView: View {
                 }
 
                 Label(
-                    "Historical, read-only evidence. This view does not use AI, create a cleanup plan, or authorize removal.",
+                    "Historical discovery evidence. The permanent-safe check below performs deterministic live validation. It does not use AI, approve cleanup, or remove files.",
                     systemImage: "checkmark.shield"
                 )
                 .font(.callout)
@@ -1291,6 +1291,10 @@ private struct ExplorerCandidateInspectorView: View {
                     }
                 }
 
+                if browser.isSelectedRustTargetPlanReviewCandidate {
+                    rustTargetPlanReviewSection(candidate)
+                }
+
                 if let failure = browser.candidateDetailFailure {
                     VStack(alignment: .leading, spacing: 8) {
                         Label(failure.title, systemImage: "exclamationmark.triangle.fill")
@@ -1316,6 +1320,134 @@ private struct ExplorerCandidateInspectorView: View {
             }
             .padding(14)
         }
+    }
+
+    private func rustTargetPlanReviewSection(
+        _: ExplorerCandidateSummary
+    ) -> some View {
+        GroupBox("Permanent-safe plan preview") {
+            VStack(alignment: .leading, spacing: 10) {
+                switch browser.rustTargetPlanReviewState {
+                case .idle:
+                    Label(
+                        "DUX can revalidate this exact Rust target and prepare a short-lived in-memory preview. Preparing it changes no files and records no approval.",
+                        systemImage: "checkmark.shield"
+                    )
+                    .foregroundStyle(.secondary)
+                    Button("Prepare plan preview") {
+                        Task { await browser.prepareSelectedRustTargetPlanReview() }
+                    }
+                    .disabled(!browser.canPrepareRustTargetPlanReview)
+                    .accessibilityIdentifier(
+                        ExplorerAccessibility.snapshotCandidatePlanReviewPrepare
+                    )
+                    .accessibilityHint(
+                        "Performs deterministic live checks without approving or removing files"
+                    )
+                case .preparing:
+                    ProgressView("Performing deterministic live checks…")
+                        .accessibilityIdentifier(
+                            ExplorerAccessibility.snapshotCandidatePlanReviewStatus
+                        )
+                case let .ready(info):
+                    Label("Ready for review", systemImage: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                        .accessibilityIdentifier(
+                            ExplorerAccessibility.snapshotCandidatePlanReviewStatus
+                        )
+                    VStack(alignment: .leading, spacing: 7) {
+                        detailRow("Mode", info.mode.displayName)
+                        detailRow(
+                            "Estimated reclaimable",
+                            StorageByteFormatter.string(from: info.estimatedBytes)
+                        )
+                        detailRow("Scope", "\(info.itemCount) candidate · \(info.pathCount) exact target")
+                        detailRow("Rule", "\(info.ruleID) revision \(info.ruleRevision)")
+                        detailRow("Created", timestamp(info.createdAt))
+                        detailRow("Current until", timestamp(info.effectiveExpiresAt))
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("Exact current target")
+                                .foregroundStyle(.secondary)
+                            Text(verbatim: info.target.display)
+                                .font(.system(.callout, design: .monospaced))
+                                .textSelection(.enabled)
+                                .lineLimit(4)
+                        }
+                    }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel(
+                        "Permanent-safe plan preview. Estimated \(StorageByteFormatter.string(from: info.estimatedBytes)). Current until \(timestamp(info.effectiveExpiresAt)). Exact current target \(accessibilityPlanTarget(info.target.display)). Not approved; no files changed."
+                    )
+                    .accessibilityIdentifier(
+                        ExplorerAccessibility.snapshotCandidatePlanReviewSummary
+                    )
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(Array(info.warnings.enumerated()), id: \.offset) { _, warning in
+                            Label(warning.displayName, systemImage: "exclamationmark.triangle")
+                                .foregroundStyle(.orange)
+                        }
+                    }
+                    .accessibilityIdentifier(
+                        ExplorerAccessibility.snapshotCandidatePlanReviewWarnings
+                    )
+                    Text(
+                        "No cleanup has been approved or performed. Closing this preview releases it."
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    HStack {
+                        Button("Check again") {
+                            Task { await browser.prepareSelectedRustTargetPlanReview() }
+                        }
+                        .accessibilityIdentifier(
+                            ExplorerAccessibility.snapshotCandidatePlanReviewRefresh
+                        )
+                        Button("Close preview") {
+                            Task { await browser.closeRustTargetPlanReview() }
+                        }
+                        .accessibilityIdentifier(
+                            ExplorerAccessibility.snapshotCandidatePlanReviewClose
+                        )
+                    }
+                case let .failed(error):
+                    Label(error.title, systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                        .accessibilityIdentifier(
+                            ExplorerAccessibility.snapshotCandidatePlanReviewStatus
+                        )
+                    Text(verbatim: error.detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Button("Check again") {
+                        Task { await browser.prepareSelectedRustTargetPlanReview() }
+                    }
+                    .disabled(!browser.canPrepareRustTargetPlanReview)
+                    .accessibilityIdentifier(
+                        ExplorerAccessibility.snapshotCandidatePlanReviewRefresh
+                    )
+                case .expired:
+                    Label("Plan preview expired", systemImage: "clock.badge.exclamationmark")
+                        .foregroundStyle(.orange)
+                        .accessibilityIdentifier(
+                            ExplorerAccessibility.snapshotCandidatePlanReviewStatus
+                        )
+                    Text(
+                        "This preview is no longer current. Prepare a new preview to repeat the live checks."
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    Button("Prepare new preview") {
+                        Task { await browser.prepareSelectedRustTargetPlanReview() }
+                    }
+                    .disabled(!browser.canPrepareRustTargetPlanReview)
+                    .accessibilityIdentifier(
+                        ExplorerAccessibility.snapshotCandidatePlanReviewRefresh
+                    )
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .accessibilityIdentifier(ExplorerAccessibility.snapshotCandidatePlanReview)
     }
 
     @ViewBuilder
@@ -1473,6 +1605,14 @@ private struct ExplorerCandidateInspectorView: View {
             return "0 of \(total)"
         }
         return "\(Int(cursor) + 1)–\(Int(cursor) + count) of \(total)"
+    }
+
+    private func accessibilityPlanTarget(_ value: String) -> String {
+        let limit = 512
+        guard value.count > limit else {
+            return value
+        }
+        return "\(value.prefix(limit))…"
     }
 
     private var candidateDetailStatus: String {

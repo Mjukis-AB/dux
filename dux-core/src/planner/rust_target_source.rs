@@ -58,6 +58,10 @@ impl AutoReleasingReviewLease {
             .expect("managed review lease remains present until consuming release")
     }
 
+    fn expires_at(&self) -> Result<SystemTime, RustTargetSourceError> {
+        self.lease().expires_at().map_err(map_snapshot)
+    }
+
     fn release(mut self) -> Result<(), RustTargetSourceError> {
         self.0
             .take()
@@ -230,6 +234,10 @@ impl RustTargetDurableSource {
 
     pub(super) fn bindings(&self) -> RustTargetSnapshotBindings {
         self.bindings.clone()
+    }
+
+    pub(super) fn expires_at(&self) -> Result<SystemTime, RustTargetSourceError> {
+        self.lease.expires_at()
     }
 
     #[cfg(test)]

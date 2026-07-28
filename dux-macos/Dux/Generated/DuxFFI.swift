@@ -797,6 +797,13 @@ public protocol DuxEngineProtocol: AnyObject, Sendable {
     func observeStartupVolume(observation: StartupVolumeObservation) throws  -> StartupVolumeStatus
 
     /**
+     * Prepare one exact Rust-target plan for presentation through an active
+     * snapshot review. The request supplies only a candidate ID; Rust derives
+     * the scan, path, mode, policy, plan identity, and time.
+     */
+    func prepareRustTargetPlanReview(parentReview: SnapshotReviewSession, request: RustTargetPlanReviewRequest) throws  -> RustTargetPlanReviewSession
+
+    /**
      * Return a bounded, newest-first page of durable scan metadata for
      * Explorer selection. Paths and snapshot contents remain sealed; a
      * selected snapshot must still be opened through a review lease.
@@ -1071,6 +1078,21 @@ open func observeStartupVolume(observation: StartupVolumeObservation)throws  -> 
     uniffi_dux_ffi_fn_method_duxengine_observe_startup_volume(
             self.uniffiCloneHandle(),
         FfiConverterTypeStartupVolumeObservation_lower(observation),$0
+    )
+})
+}
+
+    /**
+     * Prepare one exact Rust-target plan for presentation through an active
+     * snapshot review. The request supplies only a candidate ID; Rust derives
+     * the scan, path, mode, policy, plan identity, and time.
+     */
+open func prepareRustTargetPlanReview(parentReview: SnapshotReviewSession, request: RustTargetPlanReviewRequest)throws  -> RustTargetPlanReviewSession  {
+    return try  FfiConverterTypeRustTargetPlanReviewSession_lift(try rustCallWithError(FfiConverterTypeRustTargetPlanReviewError_lift) {
+    uniffi_dux_ffi_fn_method_duxengine_prepare_rust_target_plan_review(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeSnapshotReviewSession_lower(parentReview),
+        FfiConverterTypeRustTargetPlanReviewRequest_lower(request),$0
     )
 })
 }
@@ -1391,6 +1413,140 @@ public func FfiConverterTypeMaintenanceTask_lift(_ handle: UInt64) throws -> Mai
 #endif
 public func FfiConverterTypeMaintenanceTask_lower(_ value: MaintenanceTask) -> UInt64 {
     return FfiConverterTypeMaintenanceTask.lower(value)
+}
+
+
+
+
+
+
+/**
+ * Engine-bound, observation-only plan review. The retained core plan cannot
+ * be cloned, approved, persisted, or executed through this surface.
+ */
+public protocol RustTargetPlanReviewSessionProtocol: AnyObject, Sendable {
+
+    func info() throws  -> RustTargetPlanReviewInfo
+
+    func release() throws  -> RustTargetPlanReviewReleaseOutcome
+
+}
+/**
+ * Engine-bound, observation-only plan review. The retained core plan cannot
+ * be cloned, approved, persisted, or executed through this surface.
+ */
+open class RustTargetPlanReviewSession: RustTargetPlanReviewSessionProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_dux_ffi_fn_clone_rusttargetplanreviewsession(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_dux_ffi_fn_free_rusttargetplanreviewsession(handle, $0) }
+    }
+
+
+
+
+open func info()throws  -> RustTargetPlanReviewInfo  {
+    return try  FfiConverterTypeRustTargetPlanReviewInfo_lift(try rustCallWithError(FfiConverterTypeRustTargetPlanReviewError_lift) {
+    uniffi_dux_ffi_fn_method_rusttargetplanreviewsession_info(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+open func release()throws  -> RustTargetPlanReviewReleaseOutcome  {
+    return try  FfiConverterTypeRustTargetPlanReviewReleaseOutcome_lift(try rustCallWithError(FfiConverterTypeRustTargetPlanReviewError_lift) {
+    uniffi_dux_ffi_fn_method_rusttargetplanreviewsession_release(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+
+
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRustTargetPlanReviewSession: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = RustTargetPlanReviewSession
+
+    public static func lift(_ handle: UInt64) throws -> RustTargetPlanReviewSession {
+        return RustTargetPlanReviewSession(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: RustTargetPlanReviewSession) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RustTargetPlanReviewSession {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: RustTargetPlanReviewSession, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRustTargetPlanReviewSession_lift(_ handle: UInt64) throws -> RustTargetPlanReviewSession {
+    return try FfiConverterTypeRustTargetPlanReviewSession.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRustTargetPlanReviewSession_lower(_ value: RustTargetPlanReviewSession) -> UInt64 {
+    return FfiConverterTypeRustTargetPlanReviewSession.lower(value)
 }
 
 
@@ -5002,6 +5158,240 @@ public func FfiConverterTypeRecentScanHistoryPage_lift(_ buf: RustBuffer) throws
 #endif
 public func FfiConverterTypeRecentScanHistoryPage_lower(_ value: RecentScanHistoryPage) -> RustBuffer {
     return FfiConverterTypeRecentScanHistoryPage.lower(value)
+}
+
+
+public struct RustTargetPlanReviewInfo: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let planId: String
+    public let sourceScanId: String
+    public let candidateId: String
+    public let ruleId: String
+    public let ruleRevision: UInt32
+    public let category: CandidateCategory
+    public let mode: CleanupMode
+    public let safety: CandidateSafety
+    public let action: CandidateAction
+    public let estimatedBytes: UInt64
+    public let warnings: [CleanupWarning]
+    public let createdAtUnixMs: Int64
+    public let effectiveExpiresAtUnixMs: Int64
+    public let scheduleEligible: Bool
+    public let itemCount: UInt16
+    public let pathCount: UInt16
+    public let path: RustTargetPlanReviewPath
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, planId: String, sourceScanId: String, candidateId: String, ruleId: String, ruleRevision: UInt32, category: CandidateCategory, mode: CleanupMode, safety: CandidateSafety, action: CandidateAction, estimatedBytes: UInt64, warnings: [CleanupWarning], createdAtUnixMs: Int64, effectiveExpiresAtUnixMs: Int64, scheduleEligible: Bool, itemCount: UInt16, pathCount: UInt16, path: RustTargetPlanReviewPath) {
+        self.recordVersion = recordVersion
+        self.planId = planId
+        self.sourceScanId = sourceScanId
+        self.candidateId = candidateId
+        self.ruleId = ruleId
+        self.ruleRevision = ruleRevision
+        self.category = category
+        self.mode = mode
+        self.safety = safety
+        self.action = action
+        self.estimatedBytes = estimatedBytes
+        self.warnings = warnings
+        self.createdAtUnixMs = createdAtUnixMs
+        self.effectiveExpiresAtUnixMs = effectiveExpiresAtUnixMs
+        self.scheduleEligible = scheduleEligible
+        self.itemCount = itemCount
+        self.pathCount = pathCount
+        self.path = path
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension RustTargetPlanReviewInfo: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRustTargetPlanReviewInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RustTargetPlanReviewInfo {
+        return
+            try RustTargetPlanReviewInfo(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                planId: FfiConverterString.read(from: &buf),
+                sourceScanId: FfiConverterString.read(from: &buf),
+                candidateId: FfiConverterString.read(from: &buf),
+                ruleId: FfiConverterString.read(from: &buf),
+                ruleRevision: FfiConverterUInt32.read(from: &buf),
+                category: FfiConverterTypeCandidateCategory.read(from: &buf),
+                mode: FfiConverterTypeCleanupMode.read(from: &buf),
+                safety: FfiConverterTypeCandidateSafety.read(from: &buf),
+                action: FfiConverterTypeCandidateAction.read(from: &buf),
+                estimatedBytes: FfiConverterUInt64.read(from: &buf),
+                warnings: FfiConverterSequenceTypeCleanupWarning.read(from: &buf),
+                createdAtUnixMs: FfiConverterInt64.read(from: &buf),
+                effectiveExpiresAtUnixMs: FfiConverterInt64.read(from: &buf),
+                scheduleEligible: FfiConverterBool.read(from: &buf),
+                itemCount: FfiConverterUInt16.read(from: &buf),
+                pathCount: FfiConverterUInt16.read(from: &buf),
+                path: FfiConverterTypeRustTargetPlanReviewPath.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: RustTargetPlanReviewInfo, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterString.write(value.planId, into: &buf)
+        FfiConverterString.write(value.sourceScanId, into: &buf)
+        FfiConverterString.write(value.candidateId, into: &buf)
+        FfiConverterString.write(value.ruleId, into: &buf)
+        FfiConverterUInt32.write(value.ruleRevision, into: &buf)
+        FfiConverterTypeCandidateCategory.write(value.category, into: &buf)
+        FfiConverterTypeCleanupMode.write(value.mode, into: &buf)
+        FfiConverterTypeCandidateSafety.write(value.safety, into: &buf)
+        FfiConverterTypeCandidateAction.write(value.action, into: &buf)
+        FfiConverterUInt64.write(value.estimatedBytes, into: &buf)
+        FfiConverterSequenceTypeCleanupWarning.write(value.warnings, into: &buf)
+        FfiConverterInt64.write(value.createdAtUnixMs, into: &buf)
+        FfiConverterInt64.write(value.effectiveExpiresAtUnixMs, into: &buf)
+        FfiConverterBool.write(value.scheduleEligible, into: &buf)
+        FfiConverterUInt16.write(value.itemCount, into: &buf)
+        FfiConverterUInt16.write(value.pathCount, into: &buf)
+        FfiConverterTypeRustTargetPlanReviewPath.write(value.path, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRustTargetPlanReviewInfo_lift(_ buf: RustBuffer) throws -> RustTargetPlanReviewInfo {
+    return try FfiConverterTypeRustTargetPlanReviewInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRustTargetPlanReviewInfo_lower(_ value: RustTargetPlanReviewInfo) -> RustBuffer {
+    return FfiConverterTypeRustTargetPlanReviewInfo.lower(value)
+}
+
+
+/**
+ * Exact current plan path for presentation only. This observation cannot be
+ * supplied back to Rust as planner or executor input.
+ */
+public struct RustTargetPlanReviewPath: Equatable, Hashable {
+    public let encoding: SnapshotNameEncoding
+    public let encodedBytes: Data
+    public let display: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(encoding: SnapshotNameEncoding, encodedBytes: Data, display: String) {
+        self.encoding = encoding
+        self.encodedBytes = encodedBytes
+        self.display = display
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension RustTargetPlanReviewPath: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRustTargetPlanReviewPath: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RustTargetPlanReviewPath {
+        return
+            try RustTargetPlanReviewPath(
+                encoding: FfiConverterTypeSnapshotNameEncoding.read(from: &buf),
+                encodedBytes: FfiConverterData.read(from: &buf),
+                display: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: RustTargetPlanReviewPath, into buf: inout [UInt8]) {
+        FfiConverterTypeSnapshotNameEncoding.write(value.encoding, into: &buf)
+        FfiConverterData.write(value.encodedBytes, into: &buf)
+        FfiConverterString.write(value.display, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRustTargetPlanReviewPath_lift(_ buf: RustBuffer) throws -> RustTargetPlanReviewPath {
+    return try FfiConverterTypeRustTargetPlanReviewPath.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRustTargetPlanReviewPath_lower(_ value: RustTargetPlanReviewPath) -> RustBuffer {
+    return FfiConverterTypeRustTargetPlanReviewPath.lower(value)
+}
+
+
+public struct RustTargetPlanReviewRequest: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let candidateId: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, candidateId: String) {
+        self.recordVersion = recordVersion
+        self.candidateId = candidateId
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension RustTargetPlanReviewRequest: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRustTargetPlanReviewRequest: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RustTargetPlanReviewRequest {
+        return
+            try RustTargetPlanReviewRequest(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                candidateId: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: RustTargetPlanReviewRequest, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterString.write(value.candidateId, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRustTargetPlanReviewRequest_lift(_ buf: RustBuffer) throws -> RustTargetPlanReviewRequest {
+    return try FfiConverterTypeRustTargetPlanReviewRequest.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRustTargetPlanReviewRequest_lower(_ value: RustTargetPlanReviewRequest) -> RustBuffer {
+    return FfiConverterTypeRustTargetPlanReviewRequest.lower(value)
 }
 
 
@@ -10799,6 +11189,245 @@ public func FfiConverterTypeReviewReleaseOutcome_lower(_ value: ReviewReleaseOut
 }
 
 
+
+public enum RustTargetPlanReviewError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
+
+
+
+    case Closed
+    case WrongEngine
+    case InvalidRecordVersion
+    case ParentReviewUnavailable
+    case ReviewExpired
+    case CandidateUnavailable
+    case CargoNotEnrolled
+    case ActiveProcesses
+    case ChangedDuringReview
+    case UnsupportedPlatform
+    case BudgetExceeded
+    case Busy
+    case UnsafeStorage
+    case CorruptData
+    case Unavailable
+    case ReviewBusy
+    case ReviewUnavailable
+    case InternalState
+
+
+
+
+
+
+    public var errorDescription: String? {
+        String(reflecting: self)
+    }
+
+}
+
+#if compiler(>=6)
+extension RustTargetPlanReviewError: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRustTargetPlanReviewError: FfiConverterRustBuffer {
+    typealias SwiftType = RustTargetPlanReviewError
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RustTargetPlanReviewError {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+
+
+
+        case 1: return .Closed
+        case 2: return .WrongEngine
+        case 3: return .InvalidRecordVersion
+        case 4: return .ParentReviewUnavailable
+        case 5: return .ReviewExpired
+        case 6: return .CandidateUnavailable
+        case 7: return .CargoNotEnrolled
+        case 8: return .ActiveProcesses
+        case 9: return .ChangedDuringReview
+        case 10: return .UnsupportedPlatform
+        case 11: return .BudgetExceeded
+        case 12: return .Busy
+        case 13: return .UnsafeStorage
+        case 14: return .CorruptData
+        case 15: return .Unavailable
+        case 16: return .ReviewBusy
+        case 17: return .ReviewUnavailable
+        case 18: return .InternalState
+
+         default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: RustTargetPlanReviewError, into buf: inout [UInt8]) {
+        switch value {
+
+
+
+
+
+        case .Closed:
+            writeInt(&buf, Int32(1))
+
+
+        case .WrongEngine:
+            writeInt(&buf, Int32(2))
+
+
+        case .InvalidRecordVersion:
+            writeInt(&buf, Int32(3))
+
+
+        case .ParentReviewUnavailable:
+            writeInt(&buf, Int32(4))
+
+
+        case .ReviewExpired:
+            writeInt(&buf, Int32(5))
+
+
+        case .CandidateUnavailable:
+            writeInt(&buf, Int32(6))
+
+
+        case .CargoNotEnrolled:
+            writeInt(&buf, Int32(7))
+
+
+        case .ActiveProcesses:
+            writeInt(&buf, Int32(8))
+
+
+        case .ChangedDuringReview:
+            writeInt(&buf, Int32(9))
+
+
+        case .UnsupportedPlatform:
+            writeInt(&buf, Int32(10))
+
+
+        case .BudgetExceeded:
+            writeInt(&buf, Int32(11))
+
+
+        case .Busy:
+            writeInt(&buf, Int32(12))
+
+
+        case .UnsafeStorage:
+            writeInt(&buf, Int32(13))
+
+
+        case .CorruptData:
+            writeInt(&buf, Int32(14))
+
+
+        case .Unavailable:
+            writeInt(&buf, Int32(15))
+
+
+        case .ReviewBusy:
+            writeInt(&buf, Int32(16))
+
+
+        case .ReviewUnavailable:
+            writeInt(&buf, Int32(17))
+
+
+        case .InternalState:
+            writeInt(&buf, Int32(18))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRustTargetPlanReviewError_lift(_ buf: RustBuffer) throws -> RustTargetPlanReviewError {
+    return try FfiConverterTypeRustTargetPlanReviewError.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRustTargetPlanReviewError_lower(_ value: RustTargetPlanReviewError) -> RustBuffer {
+    return FfiConverterTypeRustTargetPlanReviewError.lower(value)
+}
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum RustTargetPlanReviewReleaseOutcome: Equatable, Hashable {
+
+    case released
+    case alreadyUnavailable
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension RustTargetPlanReviewReleaseOutcome: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRustTargetPlanReviewReleaseOutcome: FfiConverterRustBuffer {
+    typealias SwiftType = RustTargetPlanReviewReleaseOutcome
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RustTargetPlanReviewReleaseOutcome {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .released
+
+        case 2: return .alreadyUnavailable
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: RustTargetPlanReviewReleaseOutcome, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .released:
+            writeInt(&buf, Int32(1))
+
+
+        case .alreadyUnavailable:
+            writeInt(&buf, Int32(2))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRustTargetPlanReviewReleaseOutcome_lift(_ buf: RustBuffer) throws -> RustTargetPlanReviewReleaseOutcome {
+    return try FfiConverterTypeRustTargetPlanReviewReleaseOutcome.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRustTargetPlanReviewReleaseOutcome_lower(_ value: RustTargetPlanReviewReleaseOutcome) -> RustBuffer {
+    return FfiConverterTypeRustTargetPlanReviewReleaseOutcome.lower(value)
+}
+
+
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 
@@ -14111,6 +14740,31 @@ fileprivate struct FfiConverterSequenceTypeCandidateEvidenceKind: FfiConverterRu
         return seq
     }
 }
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeCleanupWarning: FfiConverterRustBuffer {
+    typealias SwiftType = [CleanupWarning]
+
+    public static func write(_ value: [CleanupWarning], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeCleanupWarning.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [CleanupWarning] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [CleanupWarning]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeCleanupWarning.read(from: &buf))
+        }
+        return seq
+    }
+}
 public func libraryVersion() -> LibraryVersion  {
     return try!  FfiConverterTypeLibraryVersion_lift(try! rustCall() {
     uniffi_dux_ffi_fn_func_library_version($0
@@ -14193,6 +14847,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_dux_ffi_checksum_method_duxengine_observe_startup_volume() != 49642) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_dux_ffi_checksum_method_duxengine_prepare_rust_target_plan_review() != 60431) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_dux_ffi_checksum_method_duxengine_recent_cleanup_history() != 29320) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -14236,6 +14893,12 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_maintenancetask_poll() != 5519) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_rusttargetplanreviewsession_info() != 44073) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_rusttargetplanreviewsession_release() != 32486) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_scantask_cancel() != 2858) {

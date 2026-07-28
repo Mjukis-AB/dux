@@ -15,9 +15,15 @@ use thiserror::Error;
 use crate::domain::{Candidate, CandidateId, ScanId};
 use crate::path_validation::TrustedHomeMountWitness;
 use crate::path_validation::{CanonicalPathSnapshot, CanonicalScanRoot};
+use crate::persistence::HistoryErrorKind;
 use crate::persistence::StoreCoordinator;
-use crate::persistence::snapshot::SnapshotRepository;
+use crate::persistence::snapshot::{
+    SnapshotCodecErrorKind, SnapshotRepository, SnapshotRepositoryErrorKind,
+    SnapshotStorageErrorKind,
+};
 
+#[cfg(target_os = "macos")]
+use super::process_activity::ProcessActivityError;
 #[cfg(target_os = "macos")]
 use super::rule_scope_grant::{RuleScopeGrantError, authorize_rust_target};
 use super::rust_target::{
@@ -60,6 +66,153 @@ pub(crate) enum RustTargetPipelineError {
     #[cfg(target_os = "macos")]
     #[error("Rust-target promotion admission failed: {0}")]
     Promotion(#[source] RustTargetPromotionError),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RustTargetPlanReviewFailure {
+    Closed,
+    CandidateUnavailable,
+    CargoNotEnrolled,
+    ActiveProcesses,
+    ChangedDuringReview,
+    UnsupportedPlatform,
+    BudgetExceeded,
+    Busy,
+    UnsafeStorage,
+    CorruptData,
+    Unavailable,
+    InternalState,
+}
+
+impl RustTargetPipelineError {
+    pub(crate) fn plan_review_failure(&self) -> RustTargetPlanReviewFailure {
+        match self {
+            Self::Closed => RustTargetPlanReviewFailure::Closed,
+            Self::Source(RustTargetSourceError::History { kind }) => {
+                map_history_review_failure(*kind)
+            }
+            Self::Source(RustTargetSourceError::Snapshot { kind }) => match kind {
+                SnapshotRepositoryErrorKind::ReviewLeaseExpired
+                | SnapshotRepositoryErrorKind::MissingSnapshot
+                | SnapshotRepositoryErrorKind::MissingStore
+                | SnapshotRepositoryErrorKind::SnapshotUnavailable
+                | SnapshotRepositoryErrorKind::ReferenceMismatch => {
+                    RustTargetPlanReviewFailure::CandidateUnavailable
+                }
+                SnapshotRepositoryErrorKind::IncompatibleVersion => {
+                    RustTargetPlanReviewFailure::CorruptData
+                }
+                SnapshotRepositoryErrorKind::Codec(kind) => map_codec_review_failure(*kind),
+                SnapshotRepositoryErrorKind::Storage(kind) => {
+                    map_snapshot_storage_review_failure(*kind)
+                }
+                SnapshotRepositoryErrorKind::History(kind) => map_history_review_failure(*kind),
+                SnapshotRepositoryErrorKind::ReadOnly => RustTargetPlanReviewFailure::Unavailable,
+            },
+            Self::Source(_) => RustTargetPlanReviewFailure::CandidateUnavailable,
+            Self::Live(RustTargetLiveValidationError::UnsupportedPlatform) => {
+                RustTargetPlanReviewFailure::UnsupportedPlatform
+            }
+            Self::Live(_) => RustTargetPlanReviewFailure::ChangedDuringReview,
+            #[cfg(target_os = "macos")]
+            Self::Cargo(CargoMetadataValidationError::CargoNotEnrolled) => {
+                RustTargetPlanReviewFailure::CargoNotEnrolled
+            }
+            #[cfg(target_os = "macos")]
+            Self::Cargo(CargoMetadataValidationError::CargoEnrollmentStore { kind }) => {
+                map_history_review_failure(*kind)
+            }
+            #[cfg(target_os = "macos")]
+            Self::Boundary(error) => map_boundary_review_failure(error),
+            #[cfg(target_os = "macos")]
+            Self::Authorization(error) => map_authorization_review_failure(error),
+            #[cfg(target_os = "macos")]
+            Self::Promotion(error) => map_promotion_review_failure(error),
+            #[cfg(target_os = "macos")]
+            Self::Cargo(_) | Self::Provenance(_) | Self::Location(_) => {
+                RustTargetPlanReviewFailure::ChangedDuringReview
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn map_boundary_review_failure(error: &RustTargetRuleBoundaryError) -> RustTargetPlanReviewFailure {
+    match error {
+        RustTargetRuleBoundaryError::ProcessActivity(
+            ProcessActivityError::Active | ProcessActivityError::RequiredCargoQuiescence,
+        ) => RustTargetPlanReviewFailure::ActiveProcesses,
+        RustTargetRuleBoundaryError::ProcessActivity(
+            ProcessActivityError::ProcessLimitExceeded,
+        ) => RustTargetPlanReviewFailure::BudgetExceeded,
+        RustTargetRuleBoundaryError::ProcessActivity(ProcessActivityError::UnsupportedPlatform) => {
+            RustTargetPlanReviewFailure::UnsupportedPlatform
+        }
+        _ => RustTargetPlanReviewFailure::ChangedDuringReview,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn map_authorization_review_failure(error: &RuleScopeGrantError) -> RustTargetPlanReviewFailure {
+    match error {
+        RuleScopeGrantError::CargoBoundary(error) => map_boundary_review_failure(error),
+        _ => RustTargetPlanReviewFailure::ChangedDuringReview,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn map_promotion_review_failure(error: &RustTargetPromotionError) -> RustTargetPlanReviewFailure {
+    match error {
+        RustTargetPromotionError::Authorization(error) => map_authorization_review_failure(error),
+        _ => RustTargetPlanReviewFailure::ChangedDuringReview,
+    }
+}
+
+fn map_history_review_failure(kind: HistoryErrorKind) -> RustTargetPlanReviewFailure {
+    match kind {
+        HistoryErrorKind::NotFound | HistoryErrorKind::InvalidTransition => {
+            RustTargetPlanReviewFailure::CandidateUnavailable
+        }
+        HistoryErrorKind::QueryLimitExceeded => RustTargetPlanReviewFailure::BudgetExceeded,
+        HistoryErrorKind::Busy => RustTargetPlanReviewFailure::Busy,
+        HistoryErrorKind::UnsafeStorage => RustTargetPlanReviewFailure::UnsafeStorage,
+        HistoryErrorKind::CorruptData | HistoryErrorKind::IncompatibleSchema => {
+            RustTargetPlanReviewFailure::CorruptData
+        }
+        HistoryErrorKind::DatabaseUnavailable | HistoryErrorKind::OutcomeUnknown => {
+            RustTargetPlanReviewFailure::Unavailable
+        }
+        HistoryErrorKind::InvalidInput
+        | HistoryErrorKind::AlreadyExists
+        | HistoryErrorKind::InternalState => RustTargetPlanReviewFailure::ChangedDuringReview,
+    }
+}
+
+fn map_codec_review_failure(kind: SnapshotCodecErrorKind) -> RustTargetPlanReviewFailure {
+    match kind {
+        SnapshotCodecErrorKind::LimitExceeded => RustTargetPlanReviewFailure::BudgetExceeded,
+        SnapshotCodecErrorKind::Io => RustTargetPlanReviewFailure::Unavailable,
+        SnapshotCodecErrorKind::IncompatibleVersion
+        | SnapshotCodecErrorKind::InvalidMagic
+        | SnapshotCodecErrorKind::InvalidLength
+        | SnapshotCodecErrorKind::ChecksumMismatch
+        | SnapshotCodecErrorKind::CorruptData => RustTargetPlanReviewFailure::CorruptData,
+        SnapshotCodecErrorKind::InvalidInput => RustTargetPlanReviewFailure::InternalState,
+    }
+}
+
+fn map_snapshot_storage_review_failure(
+    kind: SnapshotStorageErrorKind,
+) -> RustTargetPlanReviewFailure {
+    match kind {
+        SnapshotStorageErrorKind::UnsafeRoot
+        | SnapshotStorageErrorKind::UnsafeObject
+        | SnapshotStorageErrorKind::UnrecognizedStore => RustTargetPlanReviewFailure::UnsafeStorage,
+        SnapshotStorageErrorKind::Busy => RustTargetPlanReviewFailure::Busy,
+        SnapshotStorageErrorKind::Unavailable => RustTargetPlanReviewFailure::Unavailable,
+        SnapshotStorageErrorKind::InvalidConfiguration
+        | SnapshotStorageErrorKind::InternalState => RustTargetPlanReviewFailure::InternalState,
+    }
 }
 
 /// Acquire one exact durable candidate, rehydrate its domain policy, and turn
@@ -115,6 +268,7 @@ fn prepare_rust_target_promotion_with_witness(
 > {
     let (candidate, live) =
         prepare_rust_target_live_input(store, snapshots, scan_id, candidate_id)?;
+    let authority_expires_at = live.expires_at().map_err(RustTargetPipelineError::Live)?;
     let scan_root = live.scan_root().clone();
     let target = live.target().clone();
     let cargo = validate_enrolled_cargo_metadata(live).map_err(RustTargetPipelineError::Cargo)?;
@@ -135,9 +289,15 @@ fn prepare_rust_target_promotion_with_witness(
         candidate.rule(),
     )
     .map_err(RustTargetPipelineError::Authorization)?;
-    let promotion =
-        admit_rust_target_candidate(candidate, authorization, scan_id, &scan_root, &target)
-            .map_err(RustTargetPipelineError::Promotion)?;
+    let promotion = admit_rust_target_candidate(
+        candidate,
+        authorization,
+        scan_id,
+        &scan_root,
+        &target,
+        authority_expires_at,
+    )
+    .map_err(RustTargetPipelineError::Promotion)?;
     Ok((promotion, scan_root, target))
 }
 
@@ -158,4 +318,49 @@ pub(crate) fn prepare_rust_target_plan_facts(
     promotion
         .into_plan_facts(scan_root, target)
         .map_err(RustTargetPipelineError::Promotion)
+}
+
+#[cfg(test)]
+mod review_failure_tests {
+    use super::*;
+
+    #[test]
+    fn nested_snapshot_failures_preserve_retry_and_safety_categories() {
+        assert_eq!(
+            map_history_review_failure(HistoryErrorKind::QueryLimitExceeded),
+            RustTargetPlanReviewFailure::BudgetExceeded
+        );
+        assert_eq!(
+            map_history_review_failure(HistoryErrorKind::Busy),
+            RustTargetPlanReviewFailure::Busy
+        );
+        assert_eq!(
+            map_history_review_failure(HistoryErrorKind::UnsafeStorage),
+            RustTargetPlanReviewFailure::UnsafeStorage
+        );
+        assert_eq!(
+            map_history_review_failure(HistoryErrorKind::CorruptData),
+            RustTargetPlanReviewFailure::CorruptData
+        );
+        assert_eq!(
+            map_codec_review_failure(SnapshotCodecErrorKind::LimitExceeded),
+            RustTargetPlanReviewFailure::BudgetExceeded
+        );
+        assert_eq!(
+            map_codec_review_failure(SnapshotCodecErrorKind::Io),
+            RustTargetPlanReviewFailure::Unavailable
+        );
+        assert_eq!(
+            map_snapshot_storage_review_failure(SnapshotStorageErrorKind::Busy),
+            RustTargetPlanReviewFailure::Busy
+        );
+        assert_eq!(
+            map_snapshot_storage_review_failure(SnapshotStorageErrorKind::UnsafeRoot),
+            RustTargetPlanReviewFailure::UnsafeStorage
+        );
+        assert_eq!(
+            map_snapshot_storage_review_failure(SnapshotStorageErrorKind::Unavailable),
+            RustTargetPlanReviewFailure::Unavailable
+        );
+    }
 }

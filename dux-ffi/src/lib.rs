@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Weak};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(unix)]
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
@@ -53,6 +53,9 @@ use dux_core::engine::{
     PermanentCleanupPolicyError as CorePermanentCleanupPolicyError,
     PermanentCleanupPolicySource as CorePermanentCleanupPolicySource,
     PermanentCleanupPolicyUpdate as CorePermanentCleanupPolicyUpdate,
+    RustTargetPlanReview as CoreRustTargetPlanReview,
+    RustTargetPlanReviewError as CoreRustTargetPlanReviewError,
+    RustTargetPlanReviewInfo as CoreRustTargetPlanReviewInfo,
     ScanCoverageDetailsError as CoreScanCoverageDetailsError,
     ScanHistoryError as CoreScanHistoryError,
     ScanRecoveryMaintenanceOutcome as CoreScanRecoveryOutcome, ScanRecoveryMaintenanceStartOutcome,
@@ -85,16 +88,17 @@ use dux_core::engine::{
 use dux_core::{
     AvailableCapacitySource as CoreCapacitySource, BlockReason as CoreBlockReason,
     CandidateAction as CoreCandidateAction, CandidateCategory as CoreCandidateCategory,
-    CandidateId, DatabaseOpenErrorKind, DiskPressure as CoreDiskPressure, DiskPressureConfig,
-    DiskPressureConfigError, DiskPressureRecoveryMargin, DiskPressureThreshold,
-    EvidenceKind as CoreEvidenceKind, SafetyTier as CoreSafetyTier,
+    CandidateId, CleanupMode as CorePlanCleanupMode, DatabaseOpenErrorKind,
+    DiskPressure as CoreDiskPressure, DiskPressureConfig, DiskPressureConfigError,
+    DiskPressureRecoveryMargin, DiskPressureThreshold, EvidenceKind as CoreEvidenceKind,
+    PlanWarning as CorePlanWarning, SafetyTier as CoreSafetyTier,
     ScanCoverageStatus as CoreCoverageStatus, ScanId, SnapshotOpenErrorKind,
     TrashEffectTargetKind as CoreTrashEffectTargetKind,
     TrashPlatformResult as CoreTrashPlatformResult, TrashSelectionError as CoreTrashSelectionError,
     VolumeCapacity, VolumeId,
 };
 
-const FFI_CONTRACT_VERSION: u32 = 27;
+const FFI_CONTRACT_VERSION: u32 = 28;
 const FFI_RECORD_VERSION: u32 = 1;
 const SNAPSHOT_NODE_RECORD_VERSION: u32 = 2;
 const SCAN_EVENT_PAGE_LIMIT: u16 = 64;
@@ -1160,6 +1164,89 @@ pub struct CandidateObservedPath {
     pub display: String,
 }
 
+/// Exact current plan path for presentation only. This observation cannot be
+/// supplied back to Rust as planner or executor input.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct RustTargetPlanReviewPath {
+    pub encoding: SnapshotNameEncoding,
+    pub encoded_bytes: Vec<u8>,
+    pub display: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct RustTargetPlanReviewRequest {
+    pub record_version: u32,
+    pub candidate_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct RustTargetPlanReviewInfo {
+    pub record_version: u32,
+    pub plan_id: String,
+    pub source_scan_id: String,
+    pub candidate_id: String,
+    pub rule_id: String,
+    pub rule_revision: u32,
+    pub category: CandidateCategory,
+    pub mode: CleanupMode,
+    pub safety: CandidateSafety,
+    pub action: CandidateAction,
+    pub estimated_bytes: u64,
+    pub warnings: Vec<CleanupWarning>,
+    pub created_at_unix_ms: i64,
+    pub effective_expires_at_unix_ms: i64,
+    pub schedule_eligible: bool,
+    pub item_count: u16,
+    pub path_count: u16,
+    pub path: RustTargetPlanReviewPath,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum RustTargetPlanReviewReleaseOutcome {
+    Released,
+    AlreadyUnavailable,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error, uniffi::Error)]
+pub enum RustTargetPlanReviewError {
+    #[error("the engine session is closed")]
+    Closed,
+    #[error("the supplied snapshot review belongs to another engine")]
+    WrongEngine,
+    #[error("the Rust-target plan-review record version is unsupported")]
+    InvalidRecordVersion,
+    #[error("the exact parent snapshot review is released or expired")]
+    ParentReviewUnavailable,
+    #[error("the exact Rust-target plan review expired")]
+    ReviewExpired,
+    #[error("the exact Rust-target candidate is unavailable for review")]
+    CandidateUnavailable,
+    #[error("direct Cargo enrollment is required before this plan can be reviewed")]
+    CargoNotEnrolled,
+    #[error("Cargo or rustc is active")]
+    ActiveProcesses,
+    #[error("the Rust-target plan evidence changed during review")]
+    ChangedDuringReview,
+    #[error("Rust-target plan review is unsupported on this platform")]
+    UnsupportedPlatform,
+    #[error("the bounded plan-review operation exceeded its resource budget")]
+    BudgetExceeded,
+    #[error("the plan-review store is temporarily busy")]
+    Busy,
+    #[error("the plan-review store is unsafe")]
+    UnsafeStorage,
+    #[error("the plan-review store is corrupt")]
+    CorruptData,
+    #[error("the plan-review store is unavailable")]
+    Unavailable,
+    #[error("another Rust-target plan review is already active")]
+    ReviewBusy,
+    #[error("the Rust-target plan review is no longer available")]
+    ReviewUnavailable,
+    #[error("the plan-review state is internally unavailable")]
+    InternalState,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct CandidateSummary {
     pub record_version: u32,
@@ -1828,6 +1915,338 @@ enum DirectCargoEnrollmentPreviewState {
     Released,
 }
 
+enum RustTargetPlanReviewState {
+    Available(Box<CoreRustTargetPlanReview>),
+    Inspecting,
+    ReleasePending,
+    Released,
+}
+
+#[derive(Default)]
+struct RustTargetPlanPreparationTracker {
+    state: Mutex<RustTargetPlanOperationState>,
+    drained: Condvar,
+}
+
+#[derive(Default)]
+struct RustTargetPlanOperationState {
+    active: usize,
+    preparation_active: bool,
+}
+
+struct RustTargetPlanPreparationGuard {
+    tracker: Arc<RustTargetPlanPreparationTracker>,
+    preparation: bool,
+}
+
+impl RustTargetPlanPreparationTracker {
+    fn enter_operation(
+        self: &Arc<Self>,
+        closed: &AtomicBool,
+    ) -> Result<RustTargetPlanPreparationGuard, RustTargetPlanReviewError> {
+        self.enter(closed, false)
+    }
+
+    fn enter_preparation(
+        self: &Arc<Self>,
+        closed: &AtomicBool,
+    ) -> Result<RustTargetPlanPreparationGuard, RustTargetPlanReviewError> {
+        self.enter(closed, true)
+    }
+
+    fn enter_cleanup(
+        self: &Arc<Self>,
+    ) -> Result<RustTargetPlanPreparationGuard, RustTargetPlanReviewError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| RustTargetPlanReviewError::InternalState)?;
+        state.active = state
+            .active
+            .checked_add(1)
+            .ok_or(RustTargetPlanReviewError::BudgetExceeded)?;
+        Ok(RustTargetPlanPreparationGuard {
+            tracker: Arc::clone(self),
+            preparation: false,
+        })
+    }
+
+    fn enter(
+        self: &Arc<Self>,
+        closed: &AtomicBool,
+        preparation: bool,
+    ) -> Result<RustTargetPlanPreparationGuard, RustTargetPlanReviewError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| RustTargetPlanReviewError::InternalState)?;
+        if closed.load(Ordering::Acquire) {
+            return Err(RustTargetPlanReviewError::Closed);
+        }
+        if preparation && state.preparation_active {
+            return Err(RustTargetPlanReviewError::ReviewBusy);
+        }
+        state.active = state
+            .active
+            .checked_add(1)
+            .ok_or(RustTargetPlanReviewError::BudgetExceeded)?;
+        state.preparation_active |= preparation;
+        Ok(RustTargetPlanPreparationGuard {
+            tracker: Arc::clone(self),
+            preparation,
+        })
+    }
+
+    fn wait_until(&self, deadline: Instant) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while state.active != 0 {
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                return false;
+            };
+            let (next, timed_out) = self
+                .drained
+                .wait_timeout(state, remaining)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state = next;
+            if timed_out.timed_out() && state.active != 0 {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+impl Drop for RustTargetPlanPreparationGuard {
+    fn drop(&mut self) {
+        let mut state = self
+            .tracker
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.active = state.active.saturating_sub(1);
+        if self.preparation {
+            state.preparation_active = false;
+        }
+        if state.active == 0 {
+            self.tracker.drained.notify_all();
+        }
+    }
+}
+
+/// Engine-bound, observation-only plan review. The retained core plan cannot
+/// be cloned, approved, persisted, or executed through this surface.
+#[derive(uniffi::Object)]
+pub struct RustTargetPlanReviewSession {
+    state: Mutex<RustTargetPlanReviewState>,
+    parent_review: Weak<SnapshotReviewSession>,
+    operations: Arc<RustTargetPlanPreparationTracker>,
+    engine_closed: Arc<AtomicBool>,
+}
+
+#[uniffi::export]
+impl RustTargetPlanReviewSession {
+    pub fn info(&self) -> Result<RustTargetPlanReviewInfo, RustTargetPlanReviewError> {
+        let _operation = self.operations.enter_operation(&self.engine_closed)?;
+        let Some(parent) = self.parent_review.upgrade() else {
+            let _ = self.release_inner();
+            return Err(RustTargetPlanReviewError::ParentReviewUnavailable);
+        };
+        if let Err(error) = self.validate_parent(&parent) {
+            if error == RustTargetPlanReviewError::ParentReviewUnavailable {
+                let _ = self.release_inner();
+            }
+            return Err(error);
+        }
+        let review = {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| RustTargetPlanReviewError::InternalState)?;
+            let RustTargetPlanReviewState::Available(_) = &*state else {
+                return Err(RustTargetPlanReviewError::ReviewUnavailable);
+            };
+            let RustTargetPlanReviewState::Available(review) =
+                std::mem::replace(&mut *state, RustTargetPlanReviewState::Inspecting)
+            else {
+                unreachable!("available state was just matched")
+            };
+            review
+        };
+        let observation = review
+            .info()
+            .map_err(map_rust_target_plan_review_error)
+            .and_then(project_rust_target_plan_review_info);
+        let parent_result = self.validate_parent(&parent);
+        let closed = self.engine_closed.load(Ordering::Acquire);
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| RustTargetPlanReviewError::InternalState)?;
+        let release_pending = matches!(*state, RustTargetPlanReviewState::ReleasePending);
+        let should_release = closed
+            || release_pending
+            || is_terminal_plan_review_result(&observation)
+            || matches!(
+                parent_result,
+                Err(RustTargetPlanReviewError::ParentReviewUnavailable)
+            );
+        let mut review = Some(review);
+        if should_release {
+            *state = RustTargetPlanReviewState::Released;
+        } else {
+            *state = RustTargetPlanReviewState::Available(
+                review
+                    .take()
+                    .expect("the inspected review must still be locally retained"),
+            );
+        }
+        drop(state);
+        if let Some(review) = review {
+            review.release();
+        }
+        if closed {
+            return Err(RustTargetPlanReviewError::Closed);
+        }
+        if release_pending {
+            return Err(RustTargetPlanReviewError::ReviewUnavailable);
+        }
+        parent_result?;
+        observation
+    }
+
+    pub fn release(&self) -> Result<RustTargetPlanReviewReleaseOutcome, RustTargetPlanReviewError> {
+        self.release_inner()
+    }
+}
+
+impl RustTargetPlanReviewSession {
+    fn validate_parent(
+        &self,
+        parent: &SnapshotReviewSession,
+    ) -> Result<(), RustTargetPlanReviewError> {
+        let parent_session = parent
+            .inner
+            .lock()
+            .map_err(|_| RustTargetPlanReviewError::InternalState)?;
+        if self.engine_closed.load(Ordering::Acquire) {
+            return Err(RustTargetPlanReviewError::Closed);
+        }
+        parent_session
+            .validate_for_plan_review()
+            .map(|_| ())
+            .map_err(map_parent_plan_review_error)
+    }
+
+    fn occupies_capacity(&self) -> Result<bool, RustTargetPlanReviewError> {
+        let Some(parent) = self.parent_review.upgrade() else {
+            let _ = self.release_inner()?;
+            return Ok(false);
+        };
+        if let Err(error) = self.validate_parent(&parent) {
+            if error == RustTargetPlanReviewError::ParentReviewUnavailable {
+                let _ = self.release_inner()?;
+                return Ok(false);
+            }
+            return Err(error);
+        }
+        self.occupies_capacity_quick()
+    }
+
+    fn occupies_capacity_quick(&self) -> Result<bool, RustTargetPlanReviewError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| RustTargetPlanReviewError::InternalState)?;
+        match &*state {
+            RustTargetPlanReviewState::Available(review) => {
+                if review.terminal_error().is_none() {
+                    return Ok(true);
+                }
+                let RustTargetPlanReviewState::Available(review) =
+                    std::mem::replace(&mut *state, RustTargetPlanReviewState::Released)
+                else {
+                    unreachable!("available state was just matched")
+                };
+                drop(state);
+                review.release();
+                Ok(false)
+            }
+            RustTargetPlanReviewState::Inspecting => Ok(true),
+            RustTargetPlanReviewState::ReleasePending | RustTargetPlanReviewState::Released => {
+                Ok(false)
+            }
+        }
+    }
+
+    fn occupies_capacity_state_only(&self) -> Result<bool, RustTargetPlanReviewError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| RustTargetPlanReviewError::InternalState)?;
+        Ok(matches!(
+            *state,
+            RustTargetPlanReviewState::Available(_) | RustTargetPlanReviewState::Inspecting
+        ))
+    }
+
+    fn release_inner(
+        &self,
+    ) -> Result<RustTargetPlanReviewReleaseOutcome, RustTargetPlanReviewError> {
+        let _operation = self.operations.enter_cleanup()?;
+        let (outcome, review) = self.take_for_release()?;
+        if let Some(review) = review {
+            review.release();
+        }
+        Ok(outcome)
+    }
+
+    fn take_for_release(
+        &self,
+    ) -> Result<
+        (
+            RustTargetPlanReviewReleaseOutcome,
+            Option<Box<CoreRustTargetPlanReview>>,
+        ),
+        RustTargetPlanReviewError,
+    > {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| RustTargetPlanReviewError::InternalState)?;
+        match std::mem::replace(&mut *state, RustTargetPlanReviewState::Released) {
+            RustTargetPlanReviewState::Available(review) => {
+                Ok((RustTargetPlanReviewReleaseOutcome::Released, Some(review)))
+            }
+            RustTargetPlanReviewState::Inspecting => {
+                *state = RustTargetPlanReviewState::ReleasePending;
+                Ok((RustTargetPlanReviewReleaseOutcome::Released, None))
+            }
+            RustTargetPlanReviewState::ReleasePending | RustTargetPlanReviewState::Released => {
+                Ok((RustTargetPlanReviewReleaseOutcome::AlreadyUnavailable, None))
+            }
+        }
+    }
+
+    fn release_for_close(&self) {
+        let Ok(operation) = self.operations.enter_cleanup() else {
+            return;
+        };
+        let Ok((_, review)) = self.take_for_release() else {
+            return;
+        };
+        let Some(review) = review else {
+            return;
+        };
+        std::thread::spawn(move || {
+            review.release();
+            drop(operation);
+        });
+    }
+}
+
 /// Engine-bound, consume-once inspection capability. The object carries only
 /// Cargo discovery enrollment authority; it cannot create or execute cleanup.
 #[derive(uniffi::Object)]
@@ -2159,6 +2578,23 @@ impl SnapshotReviewSession {
 }
 
 impl SnapshotReviewSession {
+    fn ensure_open_for_plan_review(&self) -> Result<(), RustTargetPlanReviewError> {
+        if self.engine_closed.load(Ordering::Acquire) {
+            return Err(RustTargetPlanReviewError::Closed);
+        }
+        let session = self
+            .inner
+            .lock()
+            .map_err(|_| RustTargetPlanReviewError::InternalState)?;
+        if self.engine_closed.load(Ordering::Acquire) {
+            return Err(RustTargetPlanReviewError::Closed);
+        }
+        session
+            .validate_for_plan_review()
+            .map(|_| ())
+            .map_err(map_parent_plan_review_error)
+    }
+
     fn with_open_session<T>(
         &self,
         operation: impl FnOnce(&mut CoreReviewSession) -> Result<T, EngineError>,
@@ -2174,7 +2610,7 @@ impl SnapshotReviewSession {
         // identity. Validate the lease before every projection so expiry can
         // never silently turn historical disclosure into an unbounded store
         // query.
-        session.expires_at().map_err(map_review_error)?;
+        session.validate_current().map_err(map_review_error)?;
         operation(&mut session)
     }
 
@@ -2484,10 +2920,13 @@ enum EngineState {
 
 #[derive(uniffi::Object)]
 pub struct DuxEngine {
-    state: Mutex<EngineState>,
-    close_completed: Condvar,
-    reviews: Mutex<Vec<Weak<SnapshotReviewSession>>>,
-    direct_cargo_previews: Mutex<Vec<Weak<DirectCargoEnrollmentPreviewSession>>>,
+    state: Arc<Mutex<EngineState>>,
+    close_completed: Arc<Condvar>,
+    reviews: Arc<Mutex<Vec<Weak<SnapshotReviewSession>>>>,
+    direct_cargo_previews: Arc<Mutex<Vec<Weak<DirectCargoEnrollmentPreviewSession>>>>,
+    rust_target_plan_reviews: Arc<Mutex<Vec<Weak<RustTargetPlanReviewSession>>>>,
+    rust_target_plan_preparations: Arc<RustTargetPlanPreparationTracker>,
+    background_close_started: Arc<AtomicBool>,
     closed: Arc<AtomicBool>,
 }
 
@@ -2506,10 +2945,13 @@ impl DuxEngine {
         let engine = EngineHandle::open(config).map_err(map_open_error)?;
         LIVE_ENGINE_INSTANCE_COUNT.fetch_add(1, Ordering::Relaxed);
         Ok(Self {
-            state: Mutex::new(EngineState::Open(engine)),
-            close_completed: Condvar::new(),
-            reviews: Mutex::new(Vec::new()),
-            direct_cargo_previews: Mutex::new(Vec::new()),
+            state: Arc::new(Mutex::new(EngineState::Open(engine))),
+            close_completed: Arc::new(Condvar::new()),
+            reviews: Arc::new(Mutex::new(Vec::new())),
+            direct_cargo_previews: Arc::new(Mutex::new(Vec::new())),
+            rust_target_plan_reviews: Arc::new(Mutex::new(Vec::new())),
+            rust_target_plan_preparations: Arc::new(RustTargetPlanPreparationTracker::default()),
+            background_close_started: Arc::new(AtomicBool::new(false)),
             closed: Arc::new(AtomicBool::new(false)),
         })
     }
@@ -2780,6 +3222,79 @@ impl DuxEngine {
         })
     }
 
+    /// Prepare one exact Rust-target plan for presentation through an active
+    /// snapshot review. The request supplies only a candidate ID; Rust derives
+    /// the scan, path, mode, policy, plan identity, and time.
+    pub fn prepare_rust_target_plan_review(
+        &self,
+        parent_review: Arc<SnapshotReviewSession>,
+        request: RustTargetPlanReviewRequest,
+    ) -> Result<Arc<RustTargetPlanReviewSession>, RustTargetPlanReviewError> {
+        if request.record_version != FFI_RECORD_VERSION {
+            return Err(RustTargetPlanReviewError::InvalidRecordVersion);
+        }
+        let candidate_id = CandidateId::new(request.candidate_id)
+            .map_err(|_| RustTargetPlanReviewError::CandidateUnavailable)?;
+        if !Arc::ptr_eq(&parent_review.engine_closed, &self.closed) {
+            return Err(RustTargetPlanReviewError::WrongEngine);
+        }
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| RustTargetPlanReviewError::InternalState)?;
+        let engine = match &*state {
+            EngineState::Open(engine) => engine.clone(),
+            EngineState::Closing | EngineState::Closed { .. } => {
+                return Err(RustTargetPlanReviewError::Closed);
+            }
+        };
+        drop(state);
+        if self.closed.load(Ordering::Acquire) {
+            return Err(RustTargetPlanReviewError::Closed);
+        }
+        let _preparation = self
+            .rust_target_plan_preparations
+            .enter_preparation(&self.closed)?;
+        self.ensure_rust_target_plan_review_capacity()?;
+        let admission = {
+            let parent = parent_review
+                .inner
+                .lock()
+                .map_err(|_| RustTargetPlanReviewError::InternalState)?;
+            if self.closed.load(Ordering::Acquire) {
+                return Err(RustTargetPlanReviewError::Closed);
+            }
+            engine
+                .begin_rust_target_plan_review(&parent, &candidate_id)
+                .map_err(map_rust_target_plan_review_error)?
+        };
+        let pending = engine
+            .prepare_admitted_rust_target_plan_review(admission)
+            .map_err(map_rust_target_plan_review_error)?;
+        if self.closed.load(Ordering::Acquire) {
+            return Err(RustTargetPlanReviewError::Closed);
+        }
+        let validated = {
+            let parent = parent_review
+                .inner
+                .lock()
+                .map_err(|_| RustTargetPlanReviewError::InternalState)?;
+            if self.closed.load(Ordering::Acquire) {
+                return Err(RustTargetPlanReviewError::Closed);
+            }
+            engine
+                .validate_pending_rust_target_plan_review(&parent, pending)
+                .map_err(map_rust_target_plan_review_error)?
+        };
+        let review = engine
+            .materialize_rust_target_plan_review(validated)
+            .map_err(map_rust_target_plan_review_error)?;
+        if self.closed.load(Ordering::Acquire) {
+            return Err(RustTargetPlanReviewError::Closed);
+        }
+        self.register_rust_target_plan_review(review, &parent_review)
+    }
+
     pub fn start_scan(&self, request: ScanRequest) -> Result<ScanStart, ScanError> {
         if request.record_version != FFI_RECORD_VERSION {
             return Err(ScanError::InvalidRecordVersion);
@@ -2937,6 +3452,9 @@ impl DuxEngine {
         let EngineState::Open(engine) = &*state else {
             return Err(EngineError::Closed);
         };
+        if self.closed.load(Ordering::Acquire) {
+            return Err(EngineError::Closed);
+        }
         let session = engine
             .acquire_explorer_snapshot_review(&scan_id)
             .map_err(map_review_error)?;
@@ -2950,6 +3468,9 @@ impl DuxEngine {
         let EngineState::Open(engine) = &*state else {
             return Err(EngineError::Closed);
         };
+        if self.closed.load(Ordering::Acquire) {
+            return Err(EngineError::Closed);
+        }
         let session = engine
             .acquire_latest_explorer_snapshot_review()
             .map_err(map_review_error)?;
@@ -3021,47 +3542,232 @@ impl DuxEngine {
     /// first call's final observation without reopening storage.
     pub fn close(&self) -> bool {
         self.closed.store(true, Ordering::Release);
-        let engine = loop {
-            let mut state = self
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            match &*state {
-                EngineState::Open(_) => {
-                    let EngineState::Open(engine) =
-                        std::mem::replace(&mut *state, EngineState::Closing)
-                    else {
-                        unreachable!("open state was just matched")
-                    };
-                    break engine;
+        let deadline = Instant::now() + CLOSE_TIMEOUT;
+        loop {
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .unwrap_or(Duration::ZERO);
+            if remaining.is_zero() {
+                self.schedule_background_close();
+                return false;
+            }
+            match self.state.try_lock() {
+                Ok(mut state) => match &*state {
+                    EngineState::Open(_) => {
+                        let EngineState::Open(engine) =
+                            std::mem::replace(&mut *state, EngineState::Closing)
+                        else {
+                            unreachable!("open state was just matched")
+                        };
+                        drop(state);
+                        self.release_registered_rust_target_plan_reviews();
+                        self.release_registered_reviews();
+                        self.release_registered_direct_cargo_previews();
+                        return finish_ffi_engine_close(
+                            &self.state,
+                            &self.close_completed,
+                            &self.rust_target_plan_preparations,
+                            engine,
+                            deadline,
+                        );
+                    }
+                    EngineState::Closing => {
+                        let (state, timed_out) = self
+                            .close_completed
+                            .wait_timeout(state, remaining)
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        if let EngineState::Closed { quiesced } = *state {
+                            return quiesced;
+                        }
+                        if timed_out.timed_out() {
+                            return false;
+                        }
+                    }
+                    EngineState::Closed { quiesced } => return *quiesced,
+                },
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    std::thread::sleep(Duration::from_millis(1));
                 }
-                EngineState::Closing => {
-                    let state = self
-                        .close_completed
-                        .wait(state)
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    if let EngineState::Closed { quiesced } = *state {
-                        return quiesced;
+                Err(std::sync::TryLockError::Poisoned(poisoned)) => {
+                    let mut state = poisoned.into_inner();
+                    match &*state {
+                        EngineState::Open(_) => {
+                            let EngineState::Open(engine) =
+                                std::mem::replace(&mut *state, EngineState::Closing)
+                            else {
+                                unreachable!("open state was just matched")
+                            };
+                            drop(state);
+                            self.release_registered_rust_target_plan_reviews();
+                            self.release_registered_reviews();
+                            self.release_registered_direct_cargo_previews();
+                            return finish_ffi_engine_close(
+                                &self.state,
+                                &self.close_completed,
+                                &self.rust_target_plan_preparations,
+                                engine,
+                                deadline,
+                            );
+                        }
+                        EngineState::Closing => return false,
+                        EngineState::Closed { quiesced } => return *quiesced,
                     }
                 }
-                EngineState::Closed { quiesced } => return *quiesced,
             }
-        };
-        self.release_registered_reviews();
-        self.release_registered_direct_cargo_previews();
-        engine.close();
-        let quiesced = engine.wait_until_closed(CLOSE_TIMEOUT);
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *state = EngineState::Closed { quiesced };
-        self.close_completed.notify_all();
-        quiesced
+        }
     }
 }
 
 impl DuxEngine {
+    fn schedule_background_close(&self) {
+        if self.background_close_started.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let state = Arc::clone(&self.state);
+        let close_completed = Arc::clone(&self.close_completed);
+        let operations = Arc::clone(&self.rust_target_plan_preparations);
+        let reviews = Arc::clone(&self.reviews);
+        let plan_reviews = Arc::clone(&self.rust_target_plan_reviews);
+        let cargo_previews = Arc::clone(&self.direct_cargo_previews);
+        std::thread::spawn(move || {
+            let engine = loop {
+                let mut state_guard = state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                match &*state_guard {
+                    EngineState::Open(_) => {
+                        let EngineState::Open(engine) =
+                            std::mem::replace(&mut *state_guard, EngineState::Closing)
+                        else {
+                            unreachable!("open state was just matched")
+                        };
+                        break Some(engine);
+                    }
+                    EngineState::Closing => {
+                        let state_guard = close_completed
+                            .wait(state_guard)
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        if matches!(*state_guard, EngineState::Closed { .. }) {
+                            break None;
+                        }
+                    }
+                    EngineState::Closed { .. } => break None,
+                }
+            };
+            if let Some(engine) = engine {
+                release_plan_review_registry(&plan_reviews);
+                release_snapshot_review_registry(&reviews, &operations);
+                release_direct_cargo_preview_registry(&cargo_previews, &operations);
+                let _ = finish_ffi_engine_close(
+                    &state,
+                    &close_completed,
+                    &operations,
+                    engine,
+                    Instant::now() + CLOSE_TIMEOUT,
+                );
+            }
+        });
+    }
+
+    fn ensure_rust_target_plan_review_capacity(&self) -> Result<(), RustTargetPlanReviewError> {
+        let reviews = {
+            let mut reviews = self
+                .rust_target_plan_reviews
+                .lock()
+                .map_err(|_| RustTargetPlanReviewError::InternalState)?;
+            std::mem::take(&mut *reviews)
+        };
+        let live_reviews = reviews
+            .into_iter()
+            .filter_map(|review| review.upgrade())
+            .collect::<Vec<_>>();
+        let retained = live_reviews.iter().map(Arc::downgrade).collect::<Vec<_>>();
+        let mut available = false;
+        let mut failure = None;
+        for review in &live_reviews {
+            match review.occupies_capacity() {
+                Ok(true) => available = true,
+                Ok(false) => {}
+                Err(error) => {
+                    failure = Some(error);
+                    break;
+                }
+            }
+        }
+        let mut reviews = self
+            .rust_target_plan_reviews
+            .lock()
+            .map_err(|_| RustTargetPlanReviewError::InternalState)?;
+        if self.closed.load(Ordering::Acquire) {
+            drop(reviews);
+            for review in retained.into_iter().filter_map(|review| review.upgrade()) {
+                let _ = review.release_inner();
+            }
+            return Err(RustTargetPlanReviewError::Closed);
+        }
+        reviews.extend(retained);
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        if available {
+            Err(RustTargetPlanReviewError::ReviewBusy)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn register_rust_target_plan_review(
+        &self,
+        review: CoreRustTargetPlanReview,
+        parent_review: &Arc<SnapshotReviewSession>,
+    ) -> Result<Arc<RustTargetPlanReviewSession>, RustTargetPlanReviewError> {
+        parent_review.ensure_open_for_plan_review()?;
+        let _ = review
+            .info()
+            .map_err(map_rust_target_plan_review_error)
+            .and_then(project_rust_target_plan_review_info)?;
+        parent_review.ensure_open_for_plan_review()?;
+        let review = Arc::new(RustTargetPlanReviewSession {
+            state: Mutex::new(RustTargetPlanReviewState::Available(Box::new(review))),
+            parent_review: Arc::downgrade(parent_review),
+            operations: Arc::clone(&self.rust_target_plan_preparations),
+            engine_closed: Arc::clone(&self.closed),
+        });
+        if self.closed.load(Ordering::Acquire) {
+            let _ = review.release_inner();
+            return Err(RustTargetPlanReviewError::Closed);
+        }
+        let mut reviews = match self.rust_target_plan_reviews.lock() {
+            Ok(reviews) => reviews,
+            Err(_) => {
+                let _ = review.release_inner();
+                return Err(RustTargetPlanReviewError::InternalState);
+            }
+        };
+        let mut retained = Vec::with_capacity(reviews.len().saturating_add(1));
+        let mut existing_busy = false;
+        for retained_review in reviews.iter().filter_map(Weak::upgrade) {
+            if retained_review.occupies_capacity_state_only()? {
+                existing_busy = true;
+                break;
+            }
+            retained.push(Arc::downgrade(&retained_review));
+        }
+        if existing_busy {
+            drop(reviews);
+            let _ = review.release_inner();
+            return Err(RustTargetPlanReviewError::ReviewBusy);
+        }
+        if self.closed.load(Ordering::Acquire) {
+            drop(reviews);
+            let _ = review.release_inner();
+            return Err(RustTargetPlanReviewError::Closed);
+        }
+        *reviews = retained;
+        reviews.push(Arc::downgrade(&review));
+        Ok(review)
+    }
+
     fn ensure_direct_cargo_preview_capacity(&self) -> Result<(), DirectCargoEnrollmentError> {
         let mut previews = self
             .direct_cargo_previews
@@ -3107,12 +3813,23 @@ impl DuxEngine {
             }
         };
         let mut retained = Vec::with_capacity(previews.len().saturating_add(1));
+        let mut existing_busy = false;
         for retained_preview in previews.iter().filter_map(Weak::upgrade) {
             if retained_preview.is_available()? {
-                let _ = preview.release_inner();
-                return Err(DirectCargoEnrollmentError::Busy);
+                existing_busy = true;
+                break;
             }
             retained.push(Arc::downgrade(&retained_preview));
+        }
+        if existing_busy {
+            drop(previews);
+            let _ = preview.release_inner();
+            return Err(DirectCargoEnrollmentError::Busy);
+        }
+        if self.closed.load(Ordering::Acquire) {
+            drop(previews);
+            let _ = preview.release_inner();
+            return Err(DirectCargoEnrollmentError::Closed);
         }
         *previews = retained;
         previews.push(Arc::downgrade(&preview));
@@ -3141,6 +3858,11 @@ impl DuxEngine {
             }
         };
         reviews.retain(|review| review.strong_count() != 0);
+        if self.closed.load(Ordering::Acquire) {
+            drop(reviews);
+            let _ = review.release_inner();
+            return Err(EngineError::Closed);
+        }
         reviews.push(Arc::downgrade(&review));
         Ok(review)
     }
@@ -3150,8 +3872,10 @@ impl DuxEngine {
     ) -> Result<T, EngineError> {
         let state = self.state.lock().map_err(|_| EngineError::InternalState)?;
         match &*state {
-            EngineState::Open(engine) => operation(engine),
-            EngineState::Closing | EngineState::Closed { .. } => Err(EngineError::Closed),
+            EngineState::Open(engine) if !self.closed.load(Ordering::Acquire) => operation(engine),
+            EngineState::Open(_) | EngineState::Closing | EngineState::Closed { .. } => {
+                Err(EngineError::Closed)
+            }
         }
     }
 
@@ -3164,8 +3888,10 @@ impl DuxEngine {
             .lock()
             .map_err(|_| PressurePolicyError::InternalState)?;
         match &*state {
-            EngineState::Open(engine) => operation(engine),
-            EngineState::Closing | EngineState::Closed { .. } => Err(PressurePolicyError::Closed),
+            EngineState::Open(engine) if !self.closed.load(Ordering::Acquire) => operation(engine),
+            EngineState::Open(_) | EngineState::Closing | EngineState::Closed { .. } => {
+                Err(PressurePolicyError::Closed)
+            }
         }
     }
 
@@ -3178,8 +3904,8 @@ impl DuxEngine {
             .lock()
             .map_err(|_| PermanentCleanupPolicyError::InternalState)?;
         match &*state {
-            EngineState::Open(engine) => operation(engine),
-            EngineState::Closing | EngineState::Closed { .. } => {
+            EngineState::Open(engine) if !self.closed.load(Ordering::Acquire) => operation(engine),
+            EngineState::Open(_) | EngineState::Closing | EngineState::Closed { .. } => {
                 Err(PermanentCleanupPolicyError::Closed)
             }
         }
@@ -3194,8 +3920,8 @@ impl DuxEngine {
             .lock()
             .map_err(|_| CleanupExclusionsError::InternalState)?;
         match &*state {
-            EngineState::Open(engine) => operation(engine),
-            EngineState::Closing | EngineState::Closed { .. } => {
+            EngineState::Open(engine) if !self.closed.load(Ordering::Acquire) => operation(engine),
+            EngineState::Open(_) | EngineState::Closing | EngineState::Closed { .. } => {
                 Err(CleanupExclusionsError::Closed)
             }
         }
@@ -3210,8 +3936,10 @@ impl DuxEngine {
             .lock()
             .map_err(|_| CleanupHistoryError::InternalState)?;
         match &*state {
-            EngineState::Open(engine) => operation(engine),
-            EngineState::Closing | EngineState::Closed { .. } => Err(CleanupHistoryError::Closed),
+            EngineState::Open(engine) if !self.closed.load(Ordering::Acquire) => operation(engine),
+            EngineState::Open(_) | EngineState::Closing | EngineState::Closed { .. } => {
+                Err(CleanupHistoryError::Closed)
+            }
         }
     }
 
@@ -3237,30 +3965,109 @@ impl DuxEngine {
     ) -> Result<T, ScanError> {
         let state = self.state.lock().map_err(|_| ScanError::InternalState)?;
         match &*state {
-            EngineState::Open(engine) => operation(engine),
-            EngineState::Closing | EngineState::Closed { .. } => Err(ScanError::Closed),
+            EngineState::Open(engine) if !self.closed.load(Ordering::Acquire) => operation(engine),
+            EngineState::Open(_) | EngineState::Closing | EngineState::Closed { .. } => {
+                Err(ScanError::Closed)
+            }
         }
     }
 
     fn release_registered_reviews(&self) {
-        let reviews = match self.reviews.lock() {
-            Ok(mut reviews) => std::mem::take(&mut *reviews),
-            Err(poisoned) => std::mem::take(&mut *poisoned.into_inner()),
-        };
-        for review in reviews.into_iter().filter_map(|review| review.upgrade()) {
-            let _ = review.release_inner();
-        }
+        release_snapshot_review_registry(&self.reviews, &self.rust_target_plan_preparations);
+    }
+
+    fn release_registered_rust_target_plan_reviews(&self) {
+        release_plan_review_registry(&self.rust_target_plan_reviews);
     }
 
     fn release_registered_direct_cargo_previews(&self) {
-        let previews = match self.direct_cargo_previews.lock() {
-            Ok(mut previews) => std::mem::take(&mut *previews),
-            Err(poisoned) => std::mem::take(&mut *poisoned.into_inner()),
-        };
-        for preview in previews.into_iter().filter_map(|preview| preview.upgrade()) {
+        release_direct_cargo_preview_registry(
+            &self.direct_cargo_previews,
+            &self.rust_target_plan_preparations,
+        );
+    }
+}
+
+fn release_snapshot_review_registry(
+    registry: &Mutex<Vec<Weak<SnapshotReviewSession>>>,
+    operations: &Arc<RustTargetPlanPreparationTracker>,
+) {
+    let reviews = match registry.lock() {
+        Ok(mut reviews) => std::mem::take(&mut *reviews),
+        Err(poisoned) => std::mem::take(&mut *poisoned.into_inner()),
+    }
+    .into_iter()
+    .filter_map(|review| review.upgrade())
+    .collect::<Vec<_>>();
+    if reviews.is_empty() {
+        return;
+    }
+    let Ok(operation) = operations.enter_cleanup() else {
+        return;
+    };
+    std::thread::spawn(move || {
+        for review in reviews {
+            let _ = review.release_inner();
+        }
+        drop(operation);
+    });
+}
+
+fn release_plan_review_registry(registry: &Mutex<Vec<Weak<RustTargetPlanReviewSession>>>) {
+    let reviews = match registry.lock() {
+        Ok(mut reviews) => std::mem::take(&mut *reviews),
+        Err(poisoned) => std::mem::take(&mut *poisoned.into_inner()),
+    };
+    for review in reviews.into_iter().filter_map(|review| review.upgrade()) {
+        review.release_for_close();
+    }
+}
+
+fn release_direct_cargo_preview_registry(
+    registry: &Mutex<Vec<Weak<DirectCargoEnrollmentPreviewSession>>>,
+    operations: &Arc<RustTargetPlanPreparationTracker>,
+) {
+    let previews = match registry.lock() {
+        Ok(mut previews) => std::mem::take(&mut *previews),
+        Err(poisoned) => std::mem::take(&mut *poisoned.into_inner()),
+    }
+    .into_iter()
+    .filter_map(|preview| preview.upgrade())
+    .collect::<Vec<_>>();
+    if previews.is_empty() {
+        return;
+    }
+    let Ok(operation) = operations.enter_cleanup() else {
+        return;
+    };
+    std::thread::spawn(move || {
+        for preview in previews {
             let _ = preview.release_inner();
         }
-    }
+        drop(operation);
+    });
+}
+
+fn finish_ffi_engine_close(
+    state: &Mutex<EngineState>,
+    close_completed: &Condvar,
+    operations: &RustTargetPlanPreparationTracker,
+    engine: EngineHandle,
+    deadline: Instant,
+) -> bool {
+    engine.close();
+    let operations_drained = operations.wait_until(deadline);
+    let worker_budget = deadline
+        .checked_duration_since(Instant::now())
+        .unwrap_or(Duration::ZERO);
+    let workers_quiesced = engine.wait_until_closed(worker_budget);
+    let quiesced = operations_drained && workers_quiesced;
+    let mut state = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *state = EngineState::Closed { quiesced };
+    close_completed.notify_all();
+    quiesced
 }
 
 impl Drop for DuxEngine {
@@ -4117,6 +4924,270 @@ fn map_candidate_history_error(error: CoreCandidateHistoryError) -> EngineError 
         CoreCandidateHistoryError::InternalState => EngineError::InternalState,
         _ => EngineError::InternalState,
     }
+}
+
+const fn map_rust_target_plan_review_error(
+    error: CoreRustTargetPlanReviewError,
+) -> RustTargetPlanReviewError {
+    match error {
+        CoreRustTargetPlanReviewError::Closed => RustTargetPlanReviewError::Closed,
+        CoreRustTargetPlanReviewError::WrongEngine => RustTargetPlanReviewError::WrongEngine,
+        CoreRustTargetPlanReviewError::ParentReviewUnavailable => {
+            RustTargetPlanReviewError::ParentReviewUnavailable
+        }
+        CoreRustTargetPlanReviewError::ReviewExpired => RustTargetPlanReviewError::ReviewExpired,
+        CoreRustTargetPlanReviewError::CandidateUnavailable => {
+            RustTargetPlanReviewError::CandidateUnavailable
+        }
+        CoreRustTargetPlanReviewError::CargoNotEnrolled => {
+            RustTargetPlanReviewError::CargoNotEnrolled
+        }
+        CoreRustTargetPlanReviewError::ActiveProcesses => {
+            RustTargetPlanReviewError::ActiveProcesses
+        }
+        CoreRustTargetPlanReviewError::ChangedDuringReview => {
+            RustTargetPlanReviewError::ChangedDuringReview
+        }
+        CoreRustTargetPlanReviewError::UnsupportedPlatform => {
+            RustTargetPlanReviewError::UnsupportedPlatform
+        }
+        CoreRustTargetPlanReviewError::BudgetExceeded => RustTargetPlanReviewError::BudgetExceeded,
+        CoreRustTargetPlanReviewError::Busy => RustTargetPlanReviewError::Busy,
+        CoreRustTargetPlanReviewError::UnsafeStorage => RustTargetPlanReviewError::UnsafeStorage,
+        CoreRustTargetPlanReviewError::CorruptData => RustTargetPlanReviewError::CorruptData,
+        CoreRustTargetPlanReviewError::Unavailable => RustTargetPlanReviewError::Unavailable,
+        CoreRustTargetPlanReviewError::InternalState => RustTargetPlanReviewError::InternalState,
+    }
+}
+
+const fn map_parent_plan_review_error(error: CoreReviewError) -> RustTargetPlanReviewError {
+    match error {
+        CoreReviewError::Closed => RustTargetPlanReviewError::Closed,
+        CoreReviewError::ScanNotFound
+        | CoreReviewError::SnapshotUnavailable
+        | CoreReviewError::LeaseExpired => RustTargetPlanReviewError::ParentReviewUnavailable,
+        CoreReviewError::Busy => RustTargetPlanReviewError::Busy,
+        CoreReviewError::UnsafeStorage => RustTargetPlanReviewError::UnsafeStorage,
+        CoreReviewError::BudgetExceeded => RustTargetPlanReviewError::BudgetExceeded,
+        CoreReviewError::CorruptData
+        | CoreReviewError::IncompatibleSchema
+        | CoreReviewError::IncompatibleSnapshot => RustTargetPlanReviewError::CorruptData,
+        CoreReviewError::ReadOnlyStore
+        | CoreReviewError::Unavailable
+        | CoreReviewError::OutcomeUnknown => RustTargetPlanReviewError::Unavailable,
+        CoreReviewError::InternalState => RustTargetPlanReviewError::InternalState,
+        _ => RustTargetPlanReviewError::InternalState,
+    }
+}
+
+fn is_terminal_plan_review_result(
+    result: &Result<RustTargetPlanReviewInfo, RustTargetPlanReviewError>,
+) -> bool {
+    matches!(
+        result,
+        Err(RustTargetPlanReviewError::ReviewExpired
+            | RustTargetPlanReviewError::ParentReviewUnavailable
+            | RustTargetPlanReviewError::ChangedDuringReview
+            | RustTargetPlanReviewError::ReviewUnavailable)
+    )
+}
+
+fn project_rust_target_plan_review_info(
+    info: CoreRustTargetPlanReviewInfo,
+) -> Result<RustTargetPlanReviewInfo, RustTargetPlanReviewError> {
+    if info.item_count != 1
+        || info.path_count != 1
+        || info.rule_id != "developer.rust.target"
+        || info.rule_revision != 2
+        || info.category != CoreCandidateCategory::DeveloperArtifact
+        || info.mode != CorePlanCleanupMode::PermanentSafe
+        || info.safety != CoreSafetyTier::SafeRegenerable
+        || info.action != CoreCandidateAction::RemoveKnownRegenerableContents
+        || info.schedule_eligible
+        || info.warnings
+            != [
+                CorePlanWarning::EstimatedBytesUnverified,
+                CorePlanWarning::PermanentRemovalCannotBeUndone,
+            ]
+        || !is_bounded_plan_review_identifier(&info.plan_id)
+        || !is_bounded_plan_review_identifier(info.source_scan_id.as_str())
+        || !is_bounded_plan_review_identifier(info.candidate_id.as_str())
+        || !is_bounded_plan_review_identifier(&info.rule_id)
+    {
+        return Err(RustTargetPlanReviewError::InternalState);
+    }
+    let created_at_unix_ms = rust_target_plan_review_time_ms(info.created_at)?;
+    let effective_expires_at_unix_ms = rust_target_plan_review_time_ms(info.effective_expires_at)?;
+    if created_at_unix_ms >= effective_expires_at_unix_ms {
+        return Err(RustTargetPlanReviewError::InternalState);
+    }
+    let path = project_rust_target_plan_review_path(&info.path)?;
+    Ok(RustTargetPlanReviewInfo {
+        record_version: FFI_RECORD_VERSION,
+        plan_id: info.plan_id,
+        source_scan_id: info.source_scan_id.as_str().to_owned(),
+        candidate_id: info.candidate_id.as_str().to_owned(),
+        rule_id: info.rule_id,
+        rule_revision: info.rule_revision,
+        category: map_candidate_category(info.category),
+        mode: CleanupMode::PermanentSafe,
+        safety: map_candidate_safety(info.safety),
+        action: map_candidate_action(info.action),
+        estimated_bytes: info.estimated_bytes,
+        warnings: vec![
+            CleanupWarning::EstimatedBytesUnverified,
+            CleanupWarning::PermanentRemovalCannotBeUndone,
+        ],
+        created_at_unix_ms,
+        effective_expires_at_unix_ms,
+        schedule_eligible: info.schedule_eligible,
+        item_count: info.item_count,
+        path_count: info.path_count,
+        path,
+    })
+}
+
+fn is_bounded_plan_review_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_CANDIDATE_IDENTIFIER_BYTES
+        && !value.chars().any(char::is_control)
+}
+
+fn rust_target_plan_review_time_ms(value: SystemTime) -> Result<i64, RustTargetPlanReviewError> {
+    i64::try_from(
+        value
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| RustTargetPlanReviewError::InternalState)?
+            .as_millis(),
+    )
+    .map_err(|_| RustTargetPlanReviewError::InternalState)
+}
+
+fn project_rust_target_plan_review_path(
+    path: &Path,
+) -> Result<RustTargetPlanReviewPath, RustTargetPlanReviewError> {
+    if !path.is_absolute()
+        || path.components().count() == 1
+        || path.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::CurDir | std::path::Component::ParentDir
+            )
+        })
+    {
+        return Err(RustTargetPlanReviewError::InternalState);
+    }
+    #[cfg(unix)]
+    let (encoding, encoded_bytes) = (
+        SnapshotNameEncoding::UnixBytes,
+        path.as_os_str().as_bytes().to_vec(),
+    );
+    #[cfg(windows)]
+    let (encoding, encoded_bytes) = {
+        let units = path.as_os_str().encode_wide().collect::<Vec<_>>();
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(units.len().saturating_mul(2))
+            .map_err(|_| RustTargetPlanReviewError::BudgetExceeded)?;
+        for unit in units {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        (SnapshotNameEncoding::WindowsUtf16LittleEndian, bytes)
+    };
+    if encoded_bytes.is_empty() || encoded_bytes.len() > MAX_CANDIDATE_ENCODED_PATH_BYTES {
+        return Err(RustTargetPlanReviewError::BudgetExceeded);
+    }
+    #[cfg(unix)]
+    if encoded_bytes.contains(&0) {
+        return Err(RustTargetPlanReviewError::InternalState);
+    }
+    #[cfg(windows)]
+    if encoded_bytes
+        .chunks_exact(2)
+        .any(|bytes| bytes == [0_u8, 0_u8])
+    {
+        return Err(RustTargetPlanReviewError::InternalState);
+    }
+    #[cfg(unix)]
+    let display = match std::str::from_utf8(&encoded_bytes) {
+        Ok(exact) if !exact.chars().any(is_unsafe_plan_review_display_scalar) => exact.to_owned(),
+        _ => format!(
+            "unix-bytes:{}",
+            escaped_plan_review_path_bytes(&encoded_bytes)
+        ),
+    };
+    #[cfg(windows)]
+    let display = {
+        let units = encoded_bytes
+            .chunks_exact(2)
+            .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]))
+            .collect::<Vec<_>>();
+        match String::from_utf16(&units) {
+            Ok(exact) if !exact.chars().any(is_unsafe_plan_review_display_scalar) => exact,
+            _ => format!(
+                "windows-utf16le:{}",
+                escaped_plan_review_path_bytes(&encoded_bytes)
+            ),
+        }
+    };
+    if display.len() > MAX_CANDIDATE_DISPLAY_PATH_BYTES {
+        return Err(RustTargetPlanReviewError::BudgetExceeded);
+    }
+    Ok(RustTargetPlanReviewPath {
+        encoding,
+        encoded_bytes,
+        display,
+    })
+}
+
+fn escaped_plan_review_path_bytes(bytes: &[u8]) -> String {
+    let mut escaped = String::with_capacity(bytes.len());
+    for byte in bytes {
+        match byte {
+            0x20..=0x7e if *byte != b'\\' => escaped.push(char::from(*byte)),
+            b'\\' => escaped.push_str("\\\\"),
+            _ => {
+                use std::fmt::Write as _;
+                let _ = write!(&mut escaped, "\\x{byte:02x}");
+            }
+        }
+    }
+    escaped
+}
+
+/// Contract-wide plain-path display policy. C0/C1 controls and Unicode
+/// 16.0 format/default-ignorable scalars are always byte-escaped so UI and
+/// accessibility text cannot reorder, hide, or silently normalize a path.
+fn is_unsafe_plan_review_display_scalar(value: char) -> bool {
+    value.is_control()
+        || matches!(
+            value,
+            '\u{00ad}'
+                | '\u{034f}'
+                | '\u{0600}'..='\u{0605}'
+                | '\u{061c}'
+                | '\u{06dd}'
+                | '\u{070f}'
+                | '\u{0890}'..='\u{0891}'
+                | '\u{08e2}'
+                | '\u{115f}'..='\u{1160}'
+                | '\u{17b4}'..='\u{17b5}'
+                | '\u{180b}'..='\u{180f}'
+                | '\u{200b}'..='\u{200f}'
+                | '\u{202a}'..='\u{202e}'
+                | '\u{2060}'..='\u{206f}'
+                | '\u{3164}'
+                | '\u{fe00}'..='\u{fe0f}'
+                | '\u{feff}'
+                | '\u{ffa0}'
+                | '\u{fff0}'..='\u{fffb}'
+                | '\u{110bd}'
+                | '\u{110cd}'
+                | '\u{13430}'..='\u{1343f}'
+                | '\u{1bca0}'..='\u{1bca3}'
+                | '\u{1d173}'..='\u{1d17a}'
+                | '\u{e0000}'..='\u{e0fff}'
+        )
 }
 
 fn project_candidate_path_page(
@@ -5795,14 +6866,248 @@ mod tests {
     }
 
     #[test]
-    fn reports_contract_twenty_seven_and_preserves_legacy_formatting() {
+    fn reports_contract_twenty_eight_and_preserves_legacy_formatting() {
         let _guard = ENGINE_TEST_LOCK.lock().unwrap();
         let (_temp, engine) = engine();
-        assert_eq!(library_version().ffi_contract_version, 27);
+        assert_eq!(library_version().ffi_contract_version, 28);
         assert_eq!(engine.library_version().unwrap(), library_version());
         assert_eq!(engine.format_size(1536).unwrap().display, "1.5 KB");
         assert!(engine.close());
         assert_eq!(engine.format_size(1), Err(EngineError::Closed));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rust_target_plan_review_path_preserves_exact_bytes_and_escapes_unsafe_display() {
+        let path = PathBuf::from(std::ffi::OsString::from_vec(
+            b"/tmp/non-utf8-\xff\\\n".to_vec(),
+        ));
+        let projected = project_rust_target_plan_review_path(&path).unwrap();
+        assert_eq!(projected.encoding, SnapshotNameEncoding::UnixBytes);
+        assert_eq!(projected.encoded_bytes, b"/tmp/non-utf8-\xff\\\n");
+        assert_eq!(projected.display, "unix-bytes:/tmp/non-utf8-\\xff\\\\\\x0a");
+        assert!(!projected.display.chars().any(char::is_control));
+
+        let controlled =
+            project_rust_target_plan_review_path(Path::new("/tmp/valid-utf8-\ttarget")).unwrap();
+        assert_eq!(controlled.display, "unix-bytes:/tmp/valid-utf8-\\x09target");
+        assert!(!controlled.display.chars().any(char::is_control));
+
+        let bidi =
+            project_rust_target_plan_review_path(Path::new("/tmp/bidi-\u{202e}target")).unwrap();
+        assert_eq!(bidi.display, "unix-bytes:/tmp/bidi-\\xe2\\x80\\xaetarget");
+        assert!(!bidi.display.contains('\u{202e}'));
+
+        let arabic_mark =
+            project_rust_target_plan_review_path(Path::new("/tmp/mark-\u{061c}target")).unwrap();
+        assert_eq!(arabic_mark.display, "unix-bytes:/tmp/mark-\\xd8\\x9ctarget");
+        assert!(!arabic_mark.display.contains('\u{061c}'));
+        for unsafe_scalar in ['\u{00ad}', '\u{034f}', '\u{180e}', '\u{180f}', '\u{fe0f}'] {
+            assert!(is_unsafe_plan_review_display_scalar(unsafe_scalar));
+        }
+        assert!(!is_unsafe_plan_review_display_scalar('å'));
+
+        let plain = project_rust_target_plan_review_path(Path::new("/tmp/plain target")).unwrap();
+        assert_eq!(plain.display, "/tmp/plain target");
+    }
+
+    #[test]
+    fn rust_target_plan_preparation_tracker_enforces_one_inflight_reservation() {
+        let tracker = Arc::new(RustTargetPlanPreparationTracker::default());
+        let closed = AtomicBool::new(false);
+        let first = tracker.enter_preparation(&closed).unwrap();
+        assert!(matches!(
+            tracker.enter_preparation(&closed),
+            Err(RustTargetPlanReviewError::ReviewBusy)
+        ));
+        let observation = tracker.enter_operation(&closed).unwrap();
+        drop(observation);
+        drop(first);
+        let second = tracker.enter_preparation(&closed).unwrap();
+        drop(second);
+    }
+
+    #[test]
+    fn rust_target_plan_operation_tracker_keeps_shutdown_wait_bounded() {
+        let tracker = Arc::new(RustTargetPlanPreparationTracker::default());
+        let closed = AtomicBool::new(false);
+        let operation = tracker.enter_operation(&closed).unwrap();
+        let started = Instant::now();
+        assert!(!tracker.wait_until(started + Duration::from_millis(10)));
+        assert!(started.elapsed() < Duration::from_secs(1));
+        drop(operation);
+        assert!(tracker.wait_until(Instant::now() + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn engine_close_returns_within_bound_when_state_admission_is_blocked() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (_temp, engine) = engine();
+        let engine = Arc::new(engine);
+        let state_guard = engine.state.lock().unwrap();
+        let started = Instant::now();
+        let closing = {
+            let engine = Arc::clone(&engine);
+            std::thread::spawn(move || engine.close())
+        };
+        wait_until("blocked close admission", || {
+            engine.closed.load(Ordering::Acquire)
+        });
+        assert!(!closing.join().unwrap());
+        assert!(started.elapsed() < Duration::from_secs(6));
+        drop(state_guard);
+        wait_until("background engine close", || {
+            matches!(*engine.state.lock().unwrap(), EngineState::Closed { .. })
+        });
+        assert_eq!(engine.format_size(1), Err(EngineError::Closed));
+    }
+
+    #[test]
+    fn closed_admission_bit_rejects_every_shared_engine_helper_while_state_is_open() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (_temp, engine) = engine();
+        engine.closed.store(true, Ordering::Release);
+        assert_eq!(engine.with_engine(|_| Ok(())), Err(EngineError::Closed));
+        assert_eq!(
+            engine.with_pressure_engine(|_| Ok(())),
+            Err(PressurePolicyError::Closed)
+        );
+        assert_eq!(
+            engine.with_permanent_cleanup_engine(|_| Ok(())),
+            Err(PermanentCleanupPolicyError::Closed)
+        );
+        assert_eq!(
+            engine.with_cleanup_exclusions_engine(|_| Ok(())),
+            Err(CleanupExclusionsError::Closed)
+        );
+        assert_eq!(
+            engine.with_cleanup_history_engine(|_| Ok(())),
+            Err(CleanupHistoryError::Closed)
+        );
+        assert_eq!(
+            engine.with_direct_cargo_engine(|_| Ok(())),
+            Err(DirectCargoEnrollmentError::Closed)
+        );
+        assert_eq!(engine.with_scan_engine(|_| Ok(())), Err(ScanError::Closed));
+    }
+
+    #[test]
+    fn rust_target_plan_release_does_not_wait_for_inflight_info() {
+        let tracker = Arc::new(RustTargetPlanPreparationTracker::default());
+        let session = RustTargetPlanReviewSession {
+            state: Mutex::new(RustTargetPlanReviewState::Inspecting),
+            parent_review: Weak::new(),
+            operations: tracker,
+            engine_closed: Arc::new(AtomicBool::new(false)),
+        };
+        assert_eq!(
+            session.release().unwrap(),
+            RustTargetPlanReviewReleaseOutcome::Released
+        );
+        assert!(matches!(
+            *session.state.lock().unwrap(),
+            RustTargetPlanReviewState::ReleasePending
+        ));
+        assert_eq!(
+            session.release().unwrap(),
+            RustTargetPlanReviewReleaseOutcome::AlreadyUnavailable
+        );
+    }
+
+    #[test]
+    fn rust_target_plan_capacity_reaps_a_retained_released_parent() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (temp, engine) = engine();
+        let root = temp.path().join("review-capacity-root");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("payload"), b"review capacity").unwrap();
+        let task = engine
+            .with_engine(|core| core.start_scan(root).map_err(map_start_error))
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let scan_id = loop {
+            let result = engine
+                .with_engine(|core| {
+                    if core
+                        .task_snapshot(task)
+                        .map_err(map_task_access_error)?
+                        .phase
+                        == CoreTaskPhase::Succeeded
+                    {
+                        Ok(core
+                            .scan_result(task)
+                            .map_err(map_task_access_error)?
+                            .map(|result| result.scan_id().as_str().to_owned()))
+                    } else {
+                        Ok(None)
+                    }
+                })
+                .unwrap();
+            if let Some(scan_id) = result {
+                break scan_id;
+            }
+            assert!(Instant::now() < deadline);
+            std::thread::yield_now();
+        };
+        let parent = engine.acquire_explorer_snapshot_review(scan_id).unwrap();
+        let child = Arc::new(RustTargetPlanReviewSession {
+            state: Mutex::new(RustTargetPlanReviewState::Inspecting),
+            parent_review: Arc::downgrade(&parent),
+            operations: Arc::clone(&engine.rust_target_plan_preparations),
+            engine_closed: Arc::clone(&engine.closed),
+        });
+        engine
+            .rust_target_plan_reviews
+            .lock()
+            .unwrap()
+            .push(Arc::downgrade(&child));
+
+        assert_eq!(parent.release().unwrap(), ReviewReleaseOutcome::Released);
+        assert!(engine.ensure_rust_target_plan_review_capacity().is_ok());
+        assert!(matches!(
+            *child.state.lock().unwrap(),
+            RustTargetPlanReviewState::ReleasePending
+        ));
+        assert!(engine.close());
+    }
+
+    #[test]
+    fn parent_review_registry_uses_one_bounded_cleanup_task() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (temp, engine) = engine();
+        let root = temp.path().join("many-review-root");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("payload"), b"many reviews").unwrap();
+        let terminal = wait_for_scan(&engine.start_scan(scan_request(&root)).unwrap().task);
+        let scan_id = terminal.result.unwrap().scan_id;
+        let parents = (0..4)
+            .map(|_| {
+                engine
+                    .acquire_explorer_snapshot_review(scan_id.clone())
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let first_parent_guard = parents[0].inner.lock().unwrap();
+
+        engine.release_registered_reviews();
+        assert_eq!(
+            engine
+                .rust_target_plan_preparations
+                .state
+                .lock()
+                .unwrap()
+                .active,
+            1
+        );
+        assert!(engine.reviews.lock().unwrap().is_empty());
+        drop(first_parent_guard);
+        assert!(
+            engine
+                .rust_target_plan_preparations
+                .wait_until(Instant::now() + Duration::from_secs(5))
+        );
+        assert!(parents.iter().all(|parent| parent.info().unwrap().released));
+        assert!(engine.close());
     }
 
     #[cfg(unix)]
@@ -6444,7 +7749,15 @@ mod tests {
             inspect_thread.join().unwrap(),
             Err(DirectCargoEnrollmentError::Closed)
         ));
-        assert!(inspect_close_thread.join().unwrap());
+        let inspect_close_result = inspect_close_thread.join().unwrap();
+        if !inspect_close_result {
+            wait_until("timed-out inspection close to finish in background", || {
+                matches!(
+                    *inspect_engine.state.lock().unwrap(),
+                    EngineState::Closed { .. }
+                )
+            });
+        }
         assert!(
             inspect_engine
                 .direct_cargo_previews
