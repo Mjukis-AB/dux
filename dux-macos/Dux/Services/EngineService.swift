@@ -205,7 +205,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
     DuxSnapshotHistoryServing, DuxCleanupHistoryServing, DuxScanCoverageServing, HomeScanServing,
     Sendable
 {
-    fileprivate static let expectedFFIContractVersion: UInt32 = 25
+    fileprivate static let expectedFFIContractVersion: UInt32 = 26
     fileprivate static let expectedRecordVersion: UInt32 = 1
 
     private let state: EngineServiceState
@@ -637,7 +637,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         }
         return try await state.perform { state in
             precondition(!Thread.isMainThread, "Blocking FFI work reached the main thread")
-            let engine = try state.resolveEngine()
+            let engine = try Self.resolveCleanupHistoryEngine(state)
             let rawCursor = try cursor.map { observation in
                 guard let milliseconds = Self.unixMilliseconds(observation.startedAt) else {
                     throw CleanupHistoryServiceError.invalidCursor
@@ -1193,6 +1193,23 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         }
     }
 
+    private static func resolveCleanupHistoryEngine(
+        _ state: EngineServiceState
+    ) throws -> DuxEngine {
+        do {
+            return try state.resolveEngine()
+        } catch let error as EngineServiceError {
+            throw switch error {
+            case .closed: CleanupHistoryServiceError.closed
+            case .retryable: CleanupHistoryServiceError.retryable
+            case .unavailable: CleanupHistoryServiceError.unavailable
+            case .invalidCapacityObservation, .conflictingCapacityObservation,
+                 .supersededCapacityObservation, .unexpected:
+                CleanupHistoryServiceError.internalState
+            }
+        }
+    }
+
     private static func capacityBasis(_ source: VolumeCapacitySource) -> VolumeCapacityBasis {
         switch source {
         case .importantUsage: .importantUsage
@@ -1341,6 +1358,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
              .SnapshotLivePathChanged, .SnapshotLivePathAccessDenied,
              .InvalidScanCoverageDetailsRequest, .InvalidCandidateDetailRequest,
              .CandidateEvaluationNotSucceeded, .CandidateNotFound,
+             .CandidateReviewNotReviewable,
              .CandidateCursorOutOfRange, .ReadOnlyStore,
              .IncompatibleSchema, .UnsafeStorage, .CorruptData,
              .IncompatibleSnapshot, .OutcomeUnknown, .InternalState:

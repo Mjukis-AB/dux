@@ -86,6 +86,33 @@ final class ExplorerCandidateDetailTests: XCTestCase {
         XCTAssertEqual(mapped.paths.first?.encodedBytes, path.encodedBytes)
         XCTAssertEqual(mapped.candidate.blockers, [.protectedPath])
 
+        let oversizedPathPage = CandidatePathPage(
+            recordVersion: 1,
+            scanId: "scan:example",
+            candidate: summary,
+            cursor: 0,
+            nextCursor: nil,
+            totalPaths: 1,
+            paths: [
+                CandidateObservedPath(
+                    encoding: .utf8,
+                    encodedBytes: Data(repeating: 0x61, count: 65_537),
+                    display: "/Users/example/target"
+                ),
+            ]
+        )
+        XCTAssertThrowsError(
+            try ExplorerCandidateDetailAdapter.mapPaths(
+                oversizedPathPage,
+                expectedScanID: "scan:example",
+                expectedCandidateID: "candidate:example",
+                expectedCursor: 0,
+                requestedLimit: 64
+            )
+        ) { error in
+            XCTAssertEqual(error as? ExplorerCandidateDetailError, .invalidResponse)
+        }
+
         let summaries = CandidateSummaryPage(
             recordVersion: 1,
             scanId: "scan:example",

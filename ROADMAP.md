@@ -5002,6 +5002,28 @@ Tasks:
     blocked candidates remain typed failures and every confirmation states
     that no cleanup action was performed. Plan lifecycle, exact candidate
     detail, and effect controls remain separate gates.
+  - [x] 2026-07-28 slice: add exact candidate drill-down to the native
+    Explorer without widening cleanup authority. Selecting one confirmed
+    summary loads its first bounded historical-path and deterministic-evidence
+    pages concurrently through the same retained scan review; independent
+    previous/next controls replace one 64-row page at a time. The model checks
+    scan ID, candidate ID, every immutable candidate field, cursor, total,
+    count, and next cursor again above the strict FFI adapter, generation-fences
+    snapshot/mode/selection/page changes, discards late results, and releases
+    the complete review when detail reports expiry. Direct task cancellation
+    clears current loading/paging latches without accepting a reply. FFI and
+    Swift both enforce the 64-KiB encoded-path, 256-KiB display-path, and
+    24-MiB aggregate-page ceilings before projection. The accessible inspector
+    shows category, observed size/time, safety, proposed action, status,
+    schedule eligibility, blockers, lossless display paths, precise typed
+    evidence, visible page status, and named row inspection, with explicit
+    historical/read-only/no-AI/no-plan copy. UniFFI remains v26; Swift now
+    expects that current contract, exhaustively maps its candidate review
+    error, and returns typed cleanup-history closed-state errors. Focused
+    malformed-response, cancellation, candidate-switch, expiry, and 65-row
+    pagination regressions, the full macOS test suite, and universal
+    arm64/x86_64 Debug and Release builds pass.
+    No plan, approval, schedule, AI input, or executor capability is exposed.
 - [ ] Expand production cleanup session/item history with exact-session detail,
   verified capacity outcomes, and separately confirmed history clearing.
 - [ ] Define and test cross-reboot and Windows-unproven cleanup-journal recovery;

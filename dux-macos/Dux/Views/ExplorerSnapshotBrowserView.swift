@@ -330,8 +330,13 @@ struct ExplorerSnapshotBrowserView: View {
                 }
             }
         )) {
-            ExplorerSnapshotInspectorView(browser: browser)
-                .inspectorColumnWidth(min: 230, ideal: 270, max: 330)
+            if browser.contentMode == .candidates {
+                ExplorerCandidateInspectorView(browser: browser)
+                    .inspectorColumnWidth(min: 300, ideal: 380, max: 480)
+            } else {
+                ExplorerSnapshotInspectorView(browser: browser)
+                    .inspectorColumnWidth(min: 230, ideal: 270, max: 330)
+            }
         }
         .overlay {
             if browser.contentMode == .browse, browser.isNavigating {
@@ -349,7 +354,7 @@ struct ExplorerSnapshotBrowserView: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Label(
-                    "Review-only suggestions. These statuses do not create plans or remove files.",
+                    "Review-only suggestions. Select a row to inspect exact historical evidence; no status or detail creates a plan or removes files.",
                     systemImage: "checkmark.shield"
                 )
                 .font(.callout)
@@ -393,14 +398,29 @@ struct ExplorerSnapshotBrowserView: View {
     }
 
     private func candidatesTable(_ candidates: [ExplorerCandidateSummary]) -> some View {
-        Table(candidates) {
+        Table(
+            candidates,
+            selection: Binding(
+                get: { browser.selectedCandidateID },
+                set: { candidateID in
+                    Task { await browser.selectCandidate(candidateID) }
+                }
+            )
+        ) {
             TableColumn("Rule") { candidate in
                 VStack(alignment: .leading, spacing: 2) {
                     Text(verbatim: candidate.ruleID)
                         .font(.headline)
-                    Text(verbatim: "Revision (candidate.ruleRevision) · (candidate.category.displayName)")
+                    Text(
+                        verbatim:
+                        "Revision \(candidate.ruleRevision) · \(candidate.category.displayName)"
+                    )
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityAction(named: Text("Inspect details")) {
+                    Task { await browser.selectCandidate(candidate.candidateID) }
                 }
             }
             TableColumn("Observed size") { candidate in
@@ -409,6 +429,10 @@ struct ExplorerSnapshotBrowserView: View {
             }
             TableColumn("Safety") { candidate in
                 Text(verbatim: candidate.safety.displayName)
+            }
+            TableColumn("Paths") { candidate in
+                Text(candidate.pathCount, format: .number)
+                    .monospacedDigit()
             }
             TableColumn("Status") { candidate in
                 Text(verbatim: candidate.status.displayName)
@@ -1175,6 +1199,348 @@ struct ExplorerSnapshotBrowserView: View {
             return 0
         }
         return min(Double(node.logicalBytes) / Double(parentBytes), 1)
+    }
+}
+
+private struct ExplorerCandidateInspectorView: View {
+    @Bindable var browser: ExplorerSnapshotBrowserModel
+
+    var body: some View {
+        Group {
+            if let candidate = browser.selectedCandidate {
+                selectedContent(candidate)
+            } else {
+                ContentUnavailableView(
+                    "Select a candidate",
+                    systemImage: "list.bullet.rectangle",
+                    description: Text(
+                        "Choose a row to inspect its exact historical paths, blockers, and deterministic evidence."
+                    )
+                )
+            }
+        }
+        .accessibilityIdentifier(ExplorerAccessibility.snapshotCandidateInspector)
+    }
+
+    private func selectedContent(_ candidate: ExplorerCandidateSummary) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(verbatim: candidate.ruleID)
+                        .font(.title3.bold())
+                        .textSelection(.enabled)
+                    Text(
+                        verbatim:
+                        "Revision \(candidate.ruleRevision) · \(candidate.category.displayName)"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+
+                Label(
+                    "Historical, read-only evidence. This view does not use AI, create a cleanup plan, or authorize removal.",
+                    systemImage: "checkmark.shield"
+                )
+                .font(.callout)
+                .foregroundStyle(.secondary)
+
+                Text(verbatim: candidateDetailStatus)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier(
+                        ExplorerAccessibility.snapshotCandidateDetailStatus
+                    )
+
+                GroupBox("Candidate") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        detailRow(
+                            "Observed size",
+                            StorageByteFormatter.string(from: candidate.estimatedBytes)
+                        )
+                        detailRow("Safety label", candidate.safety.displayName)
+                        detailRow("Proposed action", candidate.action.displayName)
+                        detailRow("Review status", candidate.status.displayName)
+                        detailRow("Paths", "\(candidate.pathCount)")
+                        detailRow("Observed", timestamp(candidate.createdAt))
+                        detailRow(
+                            "Schedule eligible",
+                            candidate.ruleScheduleEligible ? "Yes" : "No"
+                        )
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
+                GroupBox("Discovery blockers") {
+                    if candidate.blockers.isEmpty {
+                        Label(
+                            "No blockers were recorded, but this observation is not cleanup approval.",
+                            systemImage: "info.circle"
+                        )
+                        .foregroundStyle(.secondary)
+                    } else {
+                        VStack(alignment: .leading, spacing: 7) {
+                            ForEach(
+                                Array(candidate.blockers.enumerated()),
+                                id: \.offset
+                            ) { _, blocker in
+                                Label(blocker.displayName, systemImage: "lock.trianglebadge.exclamationmark")
+                                    .foregroundStyle(.orange)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+
+                if let failure = browser.candidateDetailFailure {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Label(failure.title, systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                        Text(verbatim: failure.detail)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Button("Retry detail") {
+                            Task { await browser.reloadSelectedCandidateDetail() }
+                        }
+                    }
+                    .padding(10)
+                    .background(Color.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
+                }
+
+                if browser.isCandidateDetailLoading {
+                    ProgressView("Loading exact candidate evidence…")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    pathsSection
+                    evidenceSection
+                }
+            }
+            .padding(14)
+        }
+    }
+
+    @ViewBuilder
+    private var pathsSection: some View {
+        if let page = browser.candidatePathPage {
+            GroupBox("Historical paths") {
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(Array(page.paths.enumerated()), id: \.offset) { _, path in
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(verbatim: path.display)
+                                .font(.system(.callout, design: .monospaced))
+                                .textSelection(.enabled)
+                                .lineLimit(4)
+                            Text(verbatim: path.encoding.displayName)
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    Divider()
+                    HStack {
+                        Text(
+                            verbatim: pageStatus(
+                                cursor: page.cursor,
+                                count: page.paths.count,
+                                total: page.totalPaths
+                            )
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                        Spacer()
+                        if browser.isCandidatePathPaging {
+                            ProgressView()
+                                .controlSize(.small)
+                        }
+                        Button {
+                            Task { await browser.showPreviousCandidatePathPage() }
+                        } label: {
+                            Label("Previous paths", systemImage: "chevron.left")
+                                .labelStyle(.iconOnly)
+                        }
+                        .disabled(
+                            !browser.hasPreviousCandidatePathPage
+                                || browser.isCandidatePathPaging
+                        )
+                        .accessibilityIdentifier(
+                            ExplorerAccessibility.snapshotCandidatePathPrevious
+                        )
+                        Button {
+                            Task { await browser.showNextCandidatePathPage() }
+                        } label: {
+                            Label("Next paths", systemImage: "chevron.right")
+                                .labelStyle(.iconOnly)
+                        }
+                        .disabled(
+                            !browser.hasNextCandidatePathPage
+                                || browser.isCandidatePathPaging
+                        )
+                        .accessibilityIdentifier(
+                            ExplorerAccessibility.snapshotCandidatePathNext
+                        )
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .accessibilityIdentifier(ExplorerAccessibility.snapshotCandidatePaths)
+        }
+    }
+
+    @ViewBuilder
+    private var evidenceSection: some View {
+        if let page = browser.candidateEvidencePage {
+            GroupBox("Deterministic evidence") {
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(page.evidence, id: \.ordinal) { evidence in
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(verbatim: evidence.kind.displayName)
+                                .font(.callout.weight(.semibold))
+                            if let detail = evidenceDetail(evidence) {
+                                Text(verbatim: detail)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .textSelection(.enabled)
+                                    .lineLimit(4)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    Divider()
+                    HStack {
+                        Text(
+                            verbatim: pageStatus(
+                                cursor: page.cursor,
+                                count: page.evidence.count,
+                                total: page.totalEvidence
+                            )
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                        Spacer()
+                        if browser.isCandidateEvidencePaging {
+                            ProgressView()
+                                .controlSize(.small)
+                        }
+                        Button {
+                            Task { await browser.showPreviousCandidateEvidencePage() }
+                        } label: {
+                            Label("Previous evidence", systemImage: "chevron.left")
+                                .labelStyle(.iconOnly)
+                        }
+                        .disabled(
+                            !browser.hasPreviousCandidateEvidencePage
+                                || browser.isCandidateEvidencePaging
+                        )
+                        .accessibilityIdentifier(
+                            ExplorerAccessibility.snapshotCandidateEvidencePrevious
+                        )
+                        Button {
+                            Task { await browser.showNextCandidateEvidencePage() }
+                        } label: {
+                            Label("Next evidence", systemImage: "chevron.right")
+                                .labelStyle(.iconOnly)
+                        }
+                        .disabled(
+                            !browser.hasNextCandidateEvidencePage
+                                || browser.isCandidateEvidencePaging
+                        )
+                        .accessibilityIdentifier(
+                            ExplorerAccessibility.snapshotCandidateEvidenceNext
+                        )
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .accessibilityIdentifier(ExplorerAccessibility.snapshotCandidateEvidence)
+        }
+    }
+
+    private func detailRow(_ label: String, _ value: String) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(verbatim: label)
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 12)
+            Text(verbatim: value)
+                .multilineTextAlignment(.trailing)
+                .textSelection(.enabled)
+        }
+        .font(.callout)
+    }
+
+    private func pageStatus(cursor: UInt16, count: Int, total: UInt16) -> String {
+        guard count > 0 else {
+            return "0 of \(total)"
+        }
+        return "\(Int(cursor) + 1)–\(Int(cursor) + count) of \(total)"
+    }
+
+    private var candidateDetailStatus: String {
+        if browser.isCandidateDetailLoading {
+            return "Loading exact historical paths and deterministic evidence."
+        }
+        if browser.candidateDetailFailure != nil {
+            return "Candidate detail is unavailable. No path or evidence was accepted."
+        }
+        let paths = browser.candidatePathPage.map {
+            "Paths \(pageStatus(cursor: $0.cursor, count: $0.paths.count, total: $0.totalPaths))"
+        } ?? "Paths unavailable"
+        let evidence = browser.candidateEvidencePage.map {
+            "Evidence \(pageStatus(cursor: $0.cursor, count: $0.evidence.count, total: $0.totalEvidence))"
+        } ?? "Evidence unavailable"
+        if browser.isCandidatePathPaging {
+            return "\(paths). \(evidence). Updating paths."
+        }
+        if browser.isCandidateEvidencePaging {
+            return "\(paths). \(evidence). Updating evidence."
+        }
+        return "\(paths). \(evidence)."
+    }
+
+    private func timestamp(_ value: ExplorerSnapshotTimestamp) -> String {
+        let interval = Double(value.secondsSinceUnixEpoch)
+            + Double(value.nanoseconds) / 1_000_000_000
+        return Date(timeIntervalSince1970: interval).formatted(
+            date: .abbreviated,
+            time: .shortened
+        )
+    }
+
+    private func evidenceDetail(_ evidence: ExplorerCandidateEvidence) -> String? {
+        if let path = evidence.path {
+            if let identifier = evidence.identifier {
+                return "\(path.display) · \(identifier)"
+            }
+            return path.display
+        }
+        if let identifier = evidence.identifier {
+            return identifier
+        }
+        if
+            let newestMtime = evidence.newestMtime,
+            let minimumAgeSeconds = evidence.minimumAgeSeconds,
+            let minimumAgeNanoseconds = evidence.minimumAgeNanoseconds
+        {
+            return "Newest item \(timestamp(newestMtime)); minimum age \(duration(seconds: minimumAgeSeconds, nanoseconds: minimumAgeNanoseconds))"
+        }
+        if
+            let observedBytes = evidence.observedBytes,
+            let minimumBytes = evidence.minimumBytes
+        {
+            return "\(StorageByteFormatter.string(from: observedBytes)) observed; minimum \(StorageByteFormatter.string(from: minimumBytes))"
+        }
+        return nil
+    }
+
+    private func duration(seconds: UInt64, nanoseconds: UInt32) -> String {
+        guard nanoseconds > 0 else {
+            return "\(seconds) seconds"
+        }
+        var fraction = String(format: "%09u", nanoseconds)
+        while fraction.last == "0" {
+            fraction.removeLast()
+        }
+        return "\(seconds).\(fraction) seconds"
     }
 }
 

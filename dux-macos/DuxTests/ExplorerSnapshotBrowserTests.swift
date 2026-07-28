@@ -985,6 +985,157 @@ final class ExplorerSnapshotBrowserTests: XCTestCase {
         XCTAssertEqual(released, ["scan:refreshed"])
     }
 
+    func testCandidateDetailLoadsAndPagesExactHistoricalPathsAndEvidence() async throws {
+        let reviews = BrowserReviewStub(mode: .candidatesAvailable)
+        let browser = ExplorerSnapshotBrowserModel(reviews: reviews)
+        await browser.reloadLatest()
+        await browser.selectContentMode(.candidates)
+        let candidate = try XCTUnwrap(browser.candidatePage?.candidates.first)
+
+        await browser.selectCandidate(candidate.candidateID)
+
+        XCTAssertEqual(browser.selectedCandidateID, candidate.candidateID)
+        XCTAssertEqual(browser.selectedCandidate, candidate)
+        XCTAssertEqual(browser.candidatePathPage?.cursor, 0)
+        XCTAssertEqual(browser.candidatePathPage?.paths.count, 64)
+        XCTAssertEqual(browser.candidatePathPage?.nextCursor, 64)
+        XCTAssertEqual(browser.candidateEvidencePage?.cursor, 0)
+        XCTAssertEqual(browser.candidateEvidencePage?.evidence.count, 64)
+        XCTAssertEqual(browser.candidateEvidencePage?.nextCursor, 64)
+        XCTAssertNil(browser.candidateDetailFailure)
+        XCTAssertFalse(browser.isCandidateDetailLoading)
+
+        await browser.showNextCandidatePathPage()
+        await browser.showNextCandidateEvidencePage()
+
+        XCTAssertEqual(browser.candidatePathPage?.cursor, 64)
+        XCTAssertEqual(browser.candidatePathPage?.paths.count, 1)
+        XCTAssertNil(browser.candidatePathPage?.nextCursor)
+        XCTAssertTrue(browser.hasPreviousCandidatePathPage)
+        XCTAssertEqual(browser.candidateEvidencePage?.cursor, 64)
+        XCTAssertEqual(browser.candidateEvidencePage?.evidence.map(\.ordinal), [64])
+        XCTAssertNil(browser.candidateEvidencePage?.nextCursor)
+        XCTAssertTrue(browser.hasPreviousCandidateEvidencePage)
+
+        await browser.showPreviousCandidatePathPage()
+        await browser.showPreviousCandidateEvidencePage()
+
+        XCTAssertEqual(browser.candidatePathPage?.cursor, 0)
+        XCTAssertEqual(browser.candidateEvidencePage?.cursor, 0)
+        let calls = await reviews.recordedCalls()
+        XCTAssertTrue(calls.contains(.candidatePaths(
+            scanID: "scan:latest",
+            candidateID: candidate.candidateID,
+            cursor: 64,
+            limit: ExplorerCandidateDetailAdapter.maximumPageLimit
+        )))
+        XCTAssertTrue(calls.contains(.candidateEvidence(
+            scanID: "scan:latest",
+            candidateID: candidate.candidateID,
+            cursor: 64,
+            limit: ExplorerCandidateDetailAdapter.maximumPageLimit
+        )))
+    }
+
+    func testLateCandidateDetailIsDiscardedAfterLeavingCandidates() async throws {
+        let reviews = BrowserReviewStub(mode: .suspendedCandidateDetail)
+        let browser = ExplorerSnapshotBrowserModel(reviews: reviews)
+        await browser.reloadLatest()
+        await browser.selectContentMode(.candidates)
+        let candidate = try XCTUnwrap(browser.candidatePage?.candidates.first)
+
+        let loading = Task { await browser.selectCandidate(candidate.candidateID) }
+        try await eventually { await reviews.hasSuspendedCandidateDetail() }
+        XCTAssertTrue(browser.isCandidateDetailLoading)
+
+        await browser.selectContentMode(.browse)
+        await reviews.resumeCandidateDetail()
+        await loading.value
+
+        XCTAssertEqual(browser.contentMode, .browse)
+        XCTAssertNil(browser.selectedCandidateID)
+        XCTAssertNil(browser.candidatePathPage)
+        XCTAssertNil(browser.candidateEvidencePage)
+        XCTAssertNil(browser.candidateDetailFailure)
+        XCTAssertFalse(browser.isCandidateDetailLoading)
+    }
+
+    func testLateCandidateDetailCannotReplaceAChangedSelection() async throws {
+        let reviews = BrowserReviewStub(mode: .suspendedCandidateDetail)
+        let browser = ExplorerSnapshotBrowserModel(reviews: reviews)
+        await browser.reloadLatest()
+        await browser.selectContentMode(.candidates)
+        let candidates = try XCTUnwrap(browser.candidatePage?.candidates)
+        XCTAssertGreaterThanOrEqual(candidates.count, 2)
+
+        let firstLoad = Task { await browser.selectCandidate(candidates[0].candidateID) }
+        try await eventually { await reviews.hasSuspendedCandidateDetail() }
+
+        await browser.selectCandidate(candidates[1].candidateID)
+        await reviews.resumeCandidateDetail()
+        await firstLoad.value
+
+        XCTAssertEqual(browser.selectedCandidateID, candidates[1].candidateID)
+        XCTAssertEqual(browser.candidatePathPage?.candidate.candidateID, candidates[1].candidateID)
+        XCTAssertEqual(
+            browser.candidateEvidencePage?.candidate.candidateID,
+            candidates[1].candidateID
+        )
+        XCTAssertFalse(browser.isCandidateDetailLoading)
+    }
+
+    func testCancelledCurrentCandidateDetailStopsLoadingWithoutPublishing() async throws {
+        let reviews = BrowserReviewStub(mode: .suspendedCandidateDetail)
+        let browser = ExplorerSnapshotBrowserModel(reviews: reviews)
+        await browser.reloadLatest()
+        await browser.selectContentMode(.candidates)
+        let candidate = try XCTUnwrap(browser.candidatePage?.candidates.first)
+
+        let loading = Task { await browser.selectCandidate(candidate.candidateID) }
+        try await eventually { await reviews.hasSuspendedCandidateDetail() }
+        loading.cancel()
+        await reviews.resumeCandidateDetail()
+        await loading.value
+
+        XCTAssertEqual(browser.selectedCandidateID, candidate.candidateID)
+        XCTAssertNil(browser.candidatePathPage)
+        XCTAssertNil(browser.candidateEvidencePage)
+        XCTAssertNil(browser.candidateDetailFailure)
+        XCTAssertFalse(browser.isCandidateDetailLoading)
+    }
+
+    func testCandidateDetailExpiryInvalidatesAndReleasesWholeReview() async throws {
+        let reviews = BrowserReviewStub(mode: .candidateDetailExpired)
+        let browser = ExplorerSnapshotBrowserModel(reviews: reviews)
+        await browser.reloadLatest()
+        await browser.selectContentMode(.candidates)
+        let candidate = try XCTUnwrap(browser.candidatePage?.candidates.first)
+
+        await browser.selectCandidate(candidate.candidateID)
+
+        XCTAssertEqual(browser.phase, .failed(.expired))
+        XCTAssertNil(browser.scanID)
+        XCTAssertNil(browser.selectedCandidateID)
+        let released = await reviews.releasedScanIDs()
+        XCTAssertEqual(released, ["scan:latest"])
+    }
+
+    func testMalformedCandidateDetailStopsLoadingWithoutPublishingEitherPage() async throws {
+        let reviews = BrowserReviewStub(mode: .candidateDetailMalformed)
+        let browser = ExplorerSnapshotBrowserModel(reviews: reviews)
+        await browser.reloadLatest()
+        await browser.selectContentMode(.candidates)
+        let candidate = try XCTUnwrap(browser.candidatePage?.candidates.first)
+
+        await browser.selectCandidate(candidate.candidateID)
+
+        XCTAssertEqual(browser.selectedCandidateID, candidate.candidateID)
+        XCTAssertNil(browser.candidatePathPage)
+        XCTAssertNil(browser.candidateEvidencePage)
+        XCTAssertEqual(browser.candidateDetailFailure, .invalidResponse)
+        XCTAssertFalse(browser.isCandidateDetailLoading)
+    }
+
     private func eventually(
         _ condition: @escaping @Sendable () async -> Bool,
         file: StaticString = #filePath,
@@ -1080,6 +1231,10 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
         case treemapCategoryMismatch
         case offPageCategoryMismatch
         case refreshedTreemapMismatch
+        case candidatesAvailable
+        case suspendedCandidateDetail
+        case candidateDetailExpired
+        case candidateDetailMalformed
     }
 
     enum Call: Equatable, Sendable {
@@ -1094,6 +1249,19 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
             limit: UInt16
         )
         case treemap(scanID: String, parentID: UInt64, maxCells: UInt16)
+        case candidateSummaries(scanID: String, cursor: UInt16, limit: UInt16)
+        case candidatePaths(
+            scanID: String,
+            candidateID: String,
+            cursor: UInt16,
+            limit: UInt16
+        )
+        case candidateEvidence(
+            scanID: String,
+            candidateID: String,
+            cursor: UInt16,
+            limit: UInt16
+        )
         case largeFiles(
             scanID: String,
             minimumLogicalBytes: UInt64,
@@ -1117,8 +1285,10 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
     private var releaseContinuation: CheckedContinuation<Void, Never>?
     private var largeFilesContinuation: CheckedContinuation<Void, Never>?
     private var liveActionContinuation: CheckedContinuation<Void, Never>?
+    private var candidateDetailContinuation: CheckedContinuation<Void, Never>?
     private var didSuspendRelease = false
     private var didSuspendQuery = false
+    private var didSuspendCandidateDetail = false
     private var rootFirstPageRequestCount = 0
 
     init(mode: Mode = .available) {
@@ -1181,29 +1351,130 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
     }
 
     func candidateSummaries(
-        scanID _: String,
-        cursor _: UInt16,
-        limit _: UInt16
+        scanID: String,
+        cursor: UInt16,
+        limit: UInt16
     ) async throws -> ExplorerCandidateSummaryPage {
-        throw ExplorerCandidateDetailError.reviewNotAcquired
+        calls.append(.candidateSummaries(scanID: scanID, cursor: cursor, limit: limit))
+        guard
+            mode == .candidatesAvailable
+                || mode == .suspendedCandidateDetail
+                || mode == .candidateDetailExpired
+                || mode == .candidateDetailMalformed
+        else {
+            throw ExplorerCandidateDetailError.reviewNotAcquired
+        }
+        let candidates = [
+            browserCandidateSummary(id: "candidate:browser-0"),
+            browserCandidateSummary(id: "candidate:browser-1"),
+        ]
+        return ExplorerCandidateSummaryPage(
+            scanID: scanID,
+            cursor: cursor,
+            nextCursor: nil,
+            totalCandidates: UInt16(candidates.count),
+            candidates: candidates
+        )
     }
 
     func candidatePaths(
-        scanID _: String,
-        candidateID _: String,
-        cursor _: UInt16,
-        limit _: UInt16
+        scanID: String,
+        candidateID: String,
+        cursor: UInt16,
+        limit: UInt16
     ) async throws -> ExplorerCandidatePathPage {
-        throw ExplorerCandidateDetailError.reviewNotAcquired
+        calls.append(.candidatePaths(
+            scanID: scanID,
+            candidateID: candidateID,
+            cursor: cursor,
+            limit: limit
+        ))
+        if mode == .candidateDetailExpired {
+            throw ExplorerCandidateDetailError.reviewExpired
+        }
+        guard
+            mode == .candidatesAvailable
+                || mode == .suspendedCandidateDetail
+                || mode == .candidateDetailMalformed
+        else {
+            throw ExplorerCandidateDetailError.reviewNotAcquired
+        }
+        if mode == .suspendedCandidateDetail, !didSuspendCandidateDetail {
+            didSuspendCandidateDetail = true
+            await withCheckedContinuation { continuation in
+                candidateDetailContinuation = continuation
+            }
+        }
+        let candidate = browserCandidateSummary(id: candidateID)
+        let allPaths = (0 ..< Int(candidate.pathCount)).map { index in
+            ExplorerCandidateObservedPath(
+                encoding: .utf8,
+                encodedBytes: Data("/Users/example/target/\(index)".utf8),
+                display: "/Users/example/target/\(index)"
+            )
+        }
+        let start = min(Int(cursor), allPaths.count)
+        let end = min(start + Int(limit), allPaths.count)
+        return ExplorerCandidatePathPage(
+            scanID: mode == .candidateDetailMalformed ? "scan:wrong" : scanID,
+            candidate: candidate,
+            cursor: cursor,
+            nextCursor: end < allPaths.count ? UInt16(end) : nil,
+            totalPaths: UInt16(allPaths.count),
+            paths: Array(allPaths[start ..< end])
+        )
     }
 
     func candidateEvidence(
-        scanID _: String,
-        candidateID _: String,
-        cursor _: UInt16,
-        limit _: UInt16
+        scanID: String,
+        candidateID: String,
+        cursor: UInt16,
+        limit: UInt16
     ) async throws -> ExplorerCandidateEvidencePage {
-        throw ExplorerCandidateDetailError.reviewNotAcquired
+        calls.append(.candidateEvidence(
+            scanID: scanID,
+            candidateID: candidateID,
+            cursor: cursor,
+            limit: limit
+        ))
+        if mode == .candidateDetailExpired {
+            throw ExplorerCandidateDetailError.reviewExpired
+        }
+        guard
+            mode == .candidatesAvailable
+                || mode == .suspendedCandidateDetail
+                || mode == .candidateDetailMalformed
+        else {
+            throw ExplorerCandidateDetailError.reviewNotAcquired
+        }
+        let candidate = browserCandidateSummary(id: candidateID)
+        let allEvidence = candidate.evidenceKinds.indices.map { index in
+            ExplorerCandidateEvidence(
+                ordinal: UInt16(index),
+                kind: .matchedPath,
+                path: ExplorerCandidateObservedPath(
+                    encoding: .utf8,
+                    encodedBytes: Data("/Users/example/target/\(index)".utf8),
+                    display: "/Users/example/target/\(index)"
+                ),
+                identifier: nil,
+                newestMtime: nil,
+                minimumAgeSeconds: nil,
+                minimumAgeNanoseconds: nil,
+                observedBytes: nil,
+                minimumBytes: nil
+            )
+        }
+        let start = min(Int(cursor), allEvidence.count)
+        let end = min(start + Int(limit), allEvidence.count)
+        return ExplorerCandidateEvidencePage(
+            scanID: scanID,
+            candidate: candidate,
+            cursor: cursor,
+            nextCursor: end < allEvidence.count ? UInt16(end) : nil,
+            totalEvidence: UInt16(allEvidence.count),
+            evidence: Array(allEvidence[start ..< end])
+        )
     }
 
     func childNodes(
@@ -1520,6 +1791,15 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
         liveActionContinuation = nil
     }
 
+    func hasSuspendedCandidateDetail() -> Bool {
+        candidateDetailContinuation != nil
+    }
+
+    func resumeCandidateDetail() {
+        candidateDetailContinuation?.resume()
+        candidateDetailContinuation = nil
+    }
+
     func hasSuspendedRelease() -> Bool {
         releaseContinuation != nil
     }
@@ -1630,6 +1910,31 @@ private actor BrowserHistoryStub: DuxSnapshotHistoryServing {
     func requestedLimits() -> [UInt16] {
         limits
     }
+}
+
+private func browserCandidateSummary(id: String) -> ExplorerCandidateSummary {
+    ExplorerCandidateSummary(
+        candidateID: id,
+        ruleID: "developer.rust.target",
+        ruleRevision: 2,
+        category: .developerArtifact,
+        estimatedBytes: 42_000,
+        newestMtime: ExplorerSnapshotTimestamp(
+            secondsSinceUnixEpoch: 1_700_000_000,
+            nanoseconds: 0
+        ),
+        safety: .safeRegenerable,
+        action: .removeKnownRegenerableContents,
+        ruleScheduleEligible: false,
+        pathCount: 65,
+        evidenceKinds: Array(repeating: .matchedPath, count: 65),
+        blockers: [.protectedPath],
+        createdAt: ExplorerSnapshotTimestamp(
+            secondsSinceUnixEpoch: 1_700_000_001,
+            nanoseconds: 0
+        ),
+        status: .discovered
+    )
 }
 
 private func historicalBrowserScan(id: String, startedAt: TimeInterval) -> ExplorerHistoricalScan {

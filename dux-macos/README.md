@@ -310,8 +310,26 @@ review candidate: opening it acquires the exact expiring scan-bound lease and
 validates its root, first page, and treemap before replacing the last confirmed
 view. Missing retained snapshots are marked unavailable only for the session;
 refresh retries them. History failure does not close an active review or erase
-the last confirmed list. Snapshot paths, issue paths, candidate details, and
-cleanup authority do not cross in this slice.
+the last confirmed list. No live snapshot path or cleanup authority crosses
+this history-selection boundary.
+
+Candidates is a fourth lazy view over the same retained review lease. UniFFI
+v26 returns one bounded summary page and supports four semantic review-status
+commands that never create a cleanup plan. Selecting a confirmed row loads the
+first exact historical-path and deterministic-evidence pages concurrently;
+previous/next controls replace one page of at most 64 rows at a time. The
+Rust FFI and Swift adapter independently enforce 64-KiB encoded-path,
+256-KiB display-path, and 24-MiB aggregate-page budgets. The browser repeats
+scan ID, candidate ID, immutable candidate body, cursor, total, count, and
+next-cursor validation above the generated adapter, and generation-fences
+snapshot, mode, selection, and independent page changes. Cancellation clears
+the current loading latch without accepting the response. Review expiry
+releases and invalidates the whole snapshot, while late results cannot
+repopulate a closed or changed inspector. The inspector presents lossless
+display paths, precise evidence, blockers, safety, proposed action, and review
+status as historical observations with visible and VoiceOver page status, and
+explicitly disclaims AI, planning, and cleanup authority. It never converts a
+displayed path into a live URL or an executor request.
 
 Large Files is a second, lazy view over the same retained review lease. FFI v12
 requires a positive size threshold, supports an optional strict modification

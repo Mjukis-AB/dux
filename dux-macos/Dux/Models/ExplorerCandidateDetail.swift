@@ -5,6 +5,13 @@ import Foundation
 enum ExplorerCandidatePathEncoding: Equatable, Sendable {
     case utf8
     case utf16LittleEndian
+
+    var displayName: String {
+        switch self {
+        case .utf8: "UTF-8"
+        case .utf16LittleEndian: "UTF-16LE"
+        }
+    }
 }
 
 enum ExplorerCandidateCategory: Equatable, Hashable, Sendable {
@@ -59,6 +66,16 @@ enum ExplorerCandidateAction: Equatable, Sendable {
     case moveToTrash
     case revealOnly
     case noAction
+
+    var displayName: String {
+        switch self {
+        case .removeKnownRegenerableContents: "Remove regenerable contents"
+        case .evictLocalCopy: "Evict local copy"
+        case .moveToTrash: "Move to Trash"
+        case .revealOnly: "Reveal only"
+        case .noAction: "No action"
+        }
+    }
 }
 
 enum ExplorerCandidateStatus: Equatable, Sendable {
@@ -109,6 +126,19 @@ enum ExplorerCandidateEvidenceKind: Equatable, Sendable {
     case minimumSize
     case inactiveProcess
     case cloudUploadComplete
+
+    var displayName: String {
+        switch self {
+        case .matchedPath: "Matched path"
+        case .requiredMarker: "Required marker"
+        case .forbiddenMarkerAbsent: "Forbidden marker absent"
+        case .bundleIdentifier: "Bundle identifier"
+        case .minimumAge: "Minimum age"
+        case .minimumSize: "Minimum size"
+        case .inactiveProcess: "Inactive process"
+        case .cloudUploadComplete: "Cloud upload complete"
+        }
+    }
 }
 
 enum ExplorerCandidateBlockReason: Equatable, Sendable {
@@ -126,6 +156,25 @@ enum ExplorerCandidateBlockReason: Equatable, Sendable {
     case changedSinceScan
     case unsupportedPlatform
     case cloudUploadUnconfirmed
+
+    var displayName: String {
+        switch self {
+        case .missingOrIncompleteEvidence: "Missing or incomplete evidence"
+        case .missingModificationTime: "Missing modification time"
+        case .partialScanCoverage: "Partial scan coverage"
+        case .recentActivity: "Recent activity"
+        case .belowMinimumBytes: "Below minimum size"
+        case .activeUse: "Active use"
+        case .accessDenied: "Access denied"
+        case .protectedPath: "Protected path"
+        case .protectedDescendant: "Protected descendant"
+        case .symlinkBoundary: "Symbolic-link boundary"
+        case .volumeBoundary: "Volume boundary"
+        case .changedSinceScan: "Changed since scan"
+        case .unsupportedPlatform: "Unsupported platform"
+        case .cloudUploadUnconfirmed: "Cloud upload unconfirmed"
+        }
+    }
 }
 
 struct ExplorerCandidateObservedPath: Equatable, Sendable {
@@ -209,7 +258,9 @@ enum ExplorerCandidateDetailError: Error, Equatable, Sendable {
 enum ExplorerCandidateDetailAdapter {
     static let maximumPageLimit: UInt16 = 64
     private static let recordVersion: UInt32 = 1
-    private static let maximumPathBytes = 16 * 1_024 * 1_024
+    private static let maximumEncodedPathBytes = 65_536
+    private static let maximumDisplayPathBytes = maximumEncodedPathBytes * 4
+    private static let maximumPagePayloadBytes = 24 * 1_024 * 1_024
     private static let maximumIdentifierBytes = 4_096
     private static let maximumCandidateCount: UInt16 = 4_096
     private static let maximumUnixSeconds: UInt64 = 253_402_300_799
@@ -241,7 +292,8 @@ enum ExplorerCandidateDetailAdapter {
             raw.totalPaths <= maximumCandidateCount,
             raw.paths.count <= Int(requestedLimit),
             UInt16(raw.paths.count) == min(requestedLimit, raw.totalPaths - raw.cursor),
-            validNext(raw.nextCursor, cursor: raw.cursor, count: raw.paths.count, total: raw.totalPaths)
+            validNext(raw.nextCursor, cursor: raw.cursor, count: raw.paths.count, total: raw.totalPaths),
+            validPathPagePayload(raw.paths)
         else {
             throw ExplorerCandidateDetailError.invalidResponse
         }
@@ -311,7 +363,8 @@ enum ExplorerCandidateDetailAdapter {
             raw.totalEvidence <= maximumCandidateCount,
             raw.evidence.count <= Int(requestedLimit),
             UInt16(raw.evidence.count) == min(requestedLimit, raw.totalEvidence - raw.cursor),
-            validNext(raw.nextCursor, cursor: raw.cursor, count: raw.evidence.count, total: raw.totalEvidence)
+            validNext(raw.nextCursor, cursor: raw.cursor, count: raw.evidence.count, total: raw.totalEvidence),
+            validEvidencePagePayload(raw.evidence)
         else {
             throw ExplorerCandidateDetailError.invalidResponse
         }
@@ -392,8 +445,8 @@ enum ExplorerCandidateDetailAdapter {
 
     private static func mapPath(_ raw: CandidateObservedPath) throws -> ExplorerCandidateObservedPath {
         guard
-            raw.encodedBytes.count <= maximumPathBytes,
-            raw.display.utf8.count <= maximumPathBytes,
+            raw.encodedBytes.count <= maximumEncodedPathBytes,
+            raw.display.utf8.count <= maximumDisplayPathBytes,
             !raw.display.contains("\0")
         else {
             throw ExplorerCandidateDetailError.invalidResponse
@@ -403,6 +456,50 @@ enum ExplorerCandidateDetailAdapter {
             encodedBytes: raw.encodedBytes,
             display: raw.display
         )
+    }
+
+    private static func validPathPagePayload(_ paths: [CandidateObservedPath]) -> Bool {
+        var total = 0
+        for path in paths {
+            guard
+                addPayload(path.encodedBytes.count, to: &total),
+                addPayload(path.display.utf8.count, to: &total)
+            else {
+                return false
+            }
+        }
+        return true
+    }
+
+    private static func validEvidencePagePayload(
+        _ evidence: [CandidateEvidenceRecord]
+    ) -> Bool {
+        var total = 0
+        for item in evidence {
+            if let path = item.path {
+                guard
+                    addPayload(path.encodedBytes.count, to: &total),
+                    addPayload(path.display.utf8.count, to: &total)
+                else {
+                    return false
+                }
+            }
+            if let identifier = item.identifier,
+               !addPayload(identifier.utf8.count, to: &total)
+            {
+                return false
+            }
+        }
+        return true
+    }
+
+    private static func addPayload(_ bytes: Int, to total: inout Int) -> Bool {
+        let (next, overflow) = total.addingReportingOverflow(bytes)
+        guard !overflow, next <= maximumPagePayloadBytes else {
+            return false
+        }
+        total = next
+        return true
     }
 
     private static func mapEvidence(_ raw: CandidateEvidenceRecord) throws -> ExplorerCandidateEvidence {

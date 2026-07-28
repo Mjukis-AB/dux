@@ -1,5 +1,21 @@
 # Changelog
 
+- Added exact, read-only candidate drill-down to the native Snapshot Explorer.
+  Selecting a candidate now loads bounded historical path and deterministic
+  evidence pages through the retained scan review, presents blockers, safety,
+  proposed action, review status, and source facts in an accessible inspector,
+  and provides independent previous/next paging without retaining unbounded
+  results. Snapshot, candidate, immutable-body, cursor, count, and generation
+  checks suppress stale or inconsistent responses; review expiry releases and
+  invalidates the whole snapshot, and direct task cancellation clears its
+  loading latch. FFI and Swift independently cap encoded/display path values
+  and the aggregate page payload; sub-second age evidence remains precise.
+  Visible/VoiceOver page status and a named row action make detail navigation
+  explicit. The screen states that it uses no AI and creates no plan or cleanup
+  authority. The macOS service now expects the actual UniFFI v26 contract,
+  handles its complete error enum, and preserves typed cleanup-history
+  closed-state errors. Universal Debug/Release builds and the full macOS test
+  suite pass.
 - Closed the durable Rust-target candidate-claim gap without weakening the
   general blocker rule. The private reviewed-plan handoff now mints an
   insertion-only typed coupling for exactly one revision-2

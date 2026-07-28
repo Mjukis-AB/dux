@@ -326,6 +326,13 @@ final class ExplorerSnapshotBrowserModel {
     private(set) var candidateFailure: ExplorerSnapshotBrowserFailure?
     private(set) var isCandidateLoading = false
     private(set) var candidateNotice: ExplorerLiveActionNotice?
+    private(set) var selectedCandidateID: String?
+    private(set) var candidatePathPage: ExplorerCandidatePathPage?
+    private(set) var candidateEvidencePage: ExplorerCandidateEvidencePage?
+    private(set) var candidateDetailFailure: ExplorerSnapshotBrowserFailure?
+    private(set) var isCandidateDetailLoading = false
+    private(set) var isCandidatePathPaging = false
+    private(set) var isCandidateEvidencePaging = false
     private(set) var largeFileThreshold = ExplorerSnapshotLargeFileThreshold.gibibyte1
     private(set) var largeFileAge = ExplorerSnapshotLargeFileAge.any
     private(set) var largeFilesPage: ExplorerSnapshotLargeFilesPage?
@@ -358,6 +365,12 @@ final class ExplorerSnapshotBrowserModel {
     private var largeFilesGeneration: UInt64 = 0
     @ObservationIgnored
     private var candidateGeneration: UInt64 = 0
+    @ObservationIgnored
+    private var candidateDetailGeneration: UInt64 = 0
+    @ObservationIgnored
+    private var candidatePathGeneration: UInt64 = 0
+    @ObservationIgnored
+    private var candidateEvidenceGeneration: UInt64 = 0
     @ObservationIgnored
     private var coverageGeneration: UInt64 = 0
     @ObservationIgnored
@@ -431,6 +444,29 @@ final class ExplorerSnapshotBrowserModel {
             return nil
         }
         return historyScans.first { $0.scanID == scanID }
+    }
+
+    var selectedCandidate: ExplorerCandidateSummary? {
+        guard let selectedCandidateID else {
+            return nil
+        }
+        return candidatePage?.candidates.first { $0.candidateID == selectedCandidateID }
+    }
+
+    var hasPreviousCandidatePathPage: Bool {
+        (candidatePathPage?.cursor ?? 0) > 0
+    }
+
+    var hasNextCandidatePathPage: Bool {
+        candidatePathPage?.nextCursor != nil
+    }
+
+    var hasPreviousCandidateEvidencePage: Bool {
+        (candidateEvidencePage?.cursor ?? 0) > 0
+    }
+
+    var hasNextCandidateEvidencePage: Bool {
+        candidateEvidencePage?.nextCursor != nil
     }
 
     var canRevealSelectedLiveItem: Bool {
@@ -809,6 +845,7 @@ final class ExplorerSnapshotBrowserModel {
         candidateGeneration &+= 1
         let operation = candidateGeneration
         let snapshotGeneration = generation
+        clearCandidateDetail()
         candidatePage = nil
         candidateFailure = nil
         isCandidateLoading = true
@@ -848,6 +885,134 @@ final class ExplorerSnapshotBrowserModel {
                 candidateFailure = failure
             }
         }
+    }
+
+    func selectCandidate(_ candidateID: String?) async {
+        clearCandidateDetail()
+        guard let candidateID else {
+            return
+        }
+        guard
+            phase == .ready,
+            contentMode == .candidates,
+            let scanID,
+            let candidate = candidatePage?.candidates.first(where: {
+                $0.candidateID == candidateID
+            }),
+            !isSwitchingSnapshot,
+            !isCandidateLoading
+        else {
+            return
+        }
+
+        selectedCandidateID = candidateID
+        isCandidateDetailLoading = true
+        let operation = candidateDetailGeneration
+        let snapshotGeneration = generation
+        do {
+            async let paths = reviews.candidatePaths(
+                scanID: scanID,
+                candidateID: candidateID,
+                cursor: 0,
+                limit: ExplorerCandidateDetailAdapter.maximumPageLimit
+            )
+            async let evidence = reviews.candidateEvidence(
+                scanID: scanID,
+                candidateID: candidateID,
+                cursor: 0,
+                limit: ExplorerCandidateDetailAdapter.maximumPageLimit
+            )
+            let (pathPage, evidencePage) = try await (paths, evidence)
+            guard
+                operation == candidateDetailGeneration,
+                snapshotGeneration == generation,
+                self.scanID == scanID,
+                contentMode == .candidates,
+                selectedCandidateID == candidateID
+            else {
+                return
+            }
+            guard !Task.isCancelled else {
+                isCandidateDetailLoading = false
+                return
+            }
+            guard
+                Self.validCandidatePathPage(
+                    pathPage,
+                    candidate: candidate,
+                    scanID: scanID,
+                    cursor: 0
+                ),
+                Self.validCandidateEvidencePage(
+                    evidencePage,
+                    candidate: candidate,
+                    scanID: scanID,
+                    cursor: 0
+                )
+            else {
+                isCandidateDetailLoading = false
+                candidateDetailFailure = .invalidResponse
+                return
+            }
+            candidatePathPage = pathPage
+            candidateEvidencePage = evidencePage
+            candidateDetailFailure = nil
+            isCandidateDetailLoading = false
+        } catch {
+            guard
+                operation == candidateDetailGeneration,
+                snapshotGeneration == generation,
+                self.scanID == scanID,
+                contentMode == .candidates,
+                selectedCandidateID == candidateID
+            else {
+                return
+            }
+            guard !Task.isCancelled else {
+                isCandidateDetailLoading = false
+                return
+            }
+            isCandidateDetailLoading = false
+            await publishCandidateDetailFailure(
+                error,
+                scanID: scanID,
+                detailOperation: operation
+            )
+        }
+    }
+
+    func reloadSelectedCandidateDetail() async {
+        await selectCandidate(selectedCandidateID)
+    }
+
+    func showNextCandidatePathPage() async {
+        guard let cursor = candidatePathPage?.nextCursor else {
+            return
+        }
+        await loadCandidatePathPage(cursor: cursor)
+    }
+
+    func showPreviousCandidatePathPage() async {
+        guard let page = candidatePathPage, page.cursor > 0 else {
+            return
+        }
+        let limit = ExplorerCandidateDetailAdapter.maximumPageLimit
+        await loadCandidatePathPage(cursor: page.cursor >= limit ? page.cursor - limit : 0)
+    }
+
+    func showNextCandidateEvidencePage() async {
+        guard let cursor = candidateEvidencePage?.nextCursor else {
+            return
+        }
+        await loadCandidateEvidencePage(cursor: cursor)
+    }
+
+    func showPreviousCandidateEvidencePage() async {
+        guard let page = candidateEvidencePage, page.cursor > 0 else {
+            return
+        }
+        let limit = ExplorerCandidateDetailAdapter.maximumPageLimit
+        await loadCandidateEvidencePage(cursor: page.cursor >= limit ? page.cursor - limit : 0)
     }
 
     func reviewCandidate(
@@ -918,6 +1083,188 @@ final class ExplorerSnapshotBrowserModel {
 
     func dismissCandidateNotice() {
         candidateNotice = nil
+    }
+
+    private func loadCandidatePathPage(cursor: UInt16) async {
+        guard
+            phase == .ready,
+            contentMode == .candidates,
+            let scanID,
+            let candidate = selectedCandidate,
+            !isSwitchingSnapshot,
+            !isCandidateDetailLoading,
+            !isCandidatePathPaging
+        else {
+            return
+        }
+        candidatePathGeneration &+= 1
+        let operation = candidatePathGeneration
+        let detailOperation = candidateDetailGeneration
+        let snapshotGeneration = generation
+        isCandidatePathPaging = true
+        candidateDetailFailure = nil
+        do {
+            let page = try await reviews.candidatePaths(
+                scanID: scanID,
+                candidateID: candidate.candidateID,
+                cursor: cursor,
+                limit: ExplorerCandidateDetailAdapter.maximumPageLimit
+            )
+            guard
+                operation == candidatePathGeneration,
+                detailOperation == candidateDetailGeneration,
+                snapshotGeneration == generation,
+                self.scanID == scanID,
+                contentMode == .candidates,
+                selectedCandidateID == candidate.candidateID
+            else {
+                return
+            }
+            guard !Task.isCancelled else {
+                isCandidatePathPaging = false
+                return
+            }
+            guard
+                Self.validCandidatePathPage(
+                    page,
+                    candidate: candidate,
+                    scanID: scanID,
+                    cursor: cursor
+                )
+            else {
+                isCandidatePathPaging = false
+                candidateDetailFailure = .invalidResponse
+                return
+            }
+            candidatePathPage = page
+            isCandidatePathPaging = false
+        } catch {
+            guard
+                operation == candidatePathGeneration,
+                detailOperation == candidateDetailGeneration,
+                snapshotGeneration == generation,
+                self.scanID == scanID,
+                contentMode == .candidates,
+                selectedCandidateID == candidate.candidateID
+            else {
+                return
+            }
+            guard !Task.isCancelled else {
+                isCandidatePathPaging = false
+                return
+            }
+            isCandidatePathPaging = false
+            await publishCandidateDetailFailure(
+                error,
+                scanID: scanID,
+                detailOperation: detailOperation
+            )
+        }
+    }
+
+    private func loadCandidateEvidencePage(cursor: UInt16) async {
+        guard
+            phase == .ready,
+            contentMode == .candidates,
+            let scanID,
+            let candidate = selectedCandidate,
+            !isSwitchingSnapshot,
+            !isCandidateDetailLoading,
+            !isCandidateEvidencePaging
+        else {
+            return
+        }
+        candidateEvidenceGeneration &+= 1
+        let operation = candidateEvidenceGeneration
+        let detailOperation = candidateDetailGeneration
+        let snapshotGeneration = generation
+        isCandidateEvidencePaging = true
+        candidateDetailFailure = nil
+        do {
+            let page = try await reviews.candidateEvidence(
+                scanID: scanID,
+                candidateID: candidate.candidateID,
+                cursor: cursor,
+                limit: ExplorerCandidateDetailAdapter.maximumPageLimit
+            )
+            guard
+                operation == candidateEvidenceGeneration,
+                detailOperation == candidateDetailGeneration,
+                snapshotGeneration == generation,
+                self.scanID == scanID,
+                contentMode == .candidates,
+                selectedCandidateID == candidate.candidateID
+            else {
+                return
+            }
+            guard !Task.isCancelled else {
+                isCandidateEvidencePaging = false
+                return
+            }
+            guard
+                Self.validCandidateEvidencePage(
+                    page,
+                    candidate: candidate,
+                    scanID: scanID,
+                    cursor: cursor
+                )
+            else {
+                isCandidateEvidencePaging = false
+                candidateDetailFailure = .invalidResponse
+                return
+            }
+            candidateEvidencePage = page
+            isCandidateEvidencePaging = false
+        } catch {
+            guard
+                operation == candidateEvidenceGeneration,
+                detailOperation == candidateDetailGeneration,
+                snapshotGeneration == generation,
+                self.scanID == scanID,
+                contentMode == .candidates,
+                selectedCandidateID == candidate.candidateID
+            else {
+                return
+            }
+            guard !Task.isCancelled else {
+                isCandidateEvidencePaging = false
+                return
+            }
+            isCandidateEvidencePaging = false
+            await publishCandidateDetailFailure(
+                error,
+                scanID: scanID,
+                detailOperation: detailOperation
+            )
+        }
+    }
+
+    private func publishCandidateDetailFailure(
+        _ error: Error,
+        scanID: String,
+        detailOperation: UInt64
+    ) async {
+        let failure = Self.failure(for: error)
+        if failure == .expired {
+            await reviews.release(scanID: scanID)
+            guard
+                detailOperation == candidateDetailGeneration,
+                self.scanID == scanID
+            else {
+                return
+            }
+            clearContent()
+            phase = .failed(.expired)
+        } else {
+            guard
+                detailOperation == candidateDetailGeneration,
+                self.scanID == scanID,
+                contentMode == .candidates
+            else {
+                return
+            }
+            candidateDetailFailure = failure
+        }
     }
 
     func reloadCoverage() async {
@@ -1747,10 +2094,24 @@ final class ExplorerSnapshotBrowserModel {
 
     private func clearCandidates() {
         candidateGeneration &+= 1
+        clearCandidateDetail()
         candidatePage = nil
         candidateFailure = nil
         isCandidateLoading = false
         candidateNotice = nil
+    }
+
+    private func clearCandidateDetail() {
+        candidateDetailGeneration &+= 1
+        candidatePathGeneration &+= 1
+        candidateEvidenceGeneration &+= 1
+        selectedCandidateID = nil
+        candidatePathPage = nil
+        candidateEvidencePage = nil
+        candidateDetailFailure = nil
+        isCandidateDetailLoading = false
+        isCandidatePathPaging = false
+        isCandidateEvidencePaging = false
     }
 
     private func clearLargeFiles() {
@@ -1910,6 +2271,85 @@ final class ExplorerSnapshotBrowserModel {
             }
         }
         return .invalidResponse
+    }
+
+    private static func validCandidatePathPage(
+        _ page: ExplorerCandidatePathPage,
+        candidate: ExplorerCandidateSummary,
+        scanID: String,
+        cursor: UInt16
+    ) -> Bool {
+        page.scanID == scanID
+            && page.cursor == cursor
+            && page.totalPaths == candidate.pathCount
+            && sameCandidateObservation(page.candidate, candidate)
+            && validCandidatePageWindow(
+                cursor: page.cursor,
+                count: page.paths.count,
+                total: page.totalPaths,
+                nextCursor: page.nextCursor
+            )
+    }
+
+    private static func validCandidateEvidencePage(
+        _ page: ExplorerCandidateEvidencePage,
+        candidate: ExplorerCandidateSummary,
+        scanID: String,
+        cursor: UInt16
+    ) -> Bool {
+        guard let expectedEvidence = UInt16(exactly: candidate.evidenceKinds.count) else {
+            return false
+        }
+        return page.scanID == scanID
+            && page.cursor == cursor
+            && page.totalEvidence == expectedEvidence
+            && sameCandidateObservation(page.candidate, candidate)
+            && validCandidatePageWindow(
+                cursor: page.cursor,
+                count: page.evidence.count,
+                total: page.totalEvidence,
+                nextCursor: page.nextCursor
+            )
+    }
+
+    private static func validCandidatePageWindow(
+        cursor: UInt16,
+        count: Int,
+        total: UInt16,
+        nextCursor: UInt16?
+    ) -> Bool {
+        let limit = ExplorerCandidateDetailAdapter.maximumPageLimit
+        guard cursor <= total, count <= Int(limit) else {
+            return false
+        }
+        let remaining = total - cursor
+        guard count == Int(min(limit, remaining)) else {
+            return false
+        }
+        let end = UInt32(cursor) + UInt32(count)
+        guard end <= UInt32(total) else {
+            return false
+        }
+        return end < UInt32(total) ? nextCursor == UInt16(end) : nextCursor == nil
+    }
+
+    private static func sameCandidateObservation(
+        _ lhs: ExplorerCandidateSummary,
+        _ rhs: ExplorerCandidateSummary
+    ) -> Bool {
+        lhs.candidateID == rhs.candidateID
+            && lhs.ruleID == rhs.ruleID
+            && lhs.ruleRevision == rhs.ruleRevision
+            && lhs.category == rhs.category
+            && lhs.estimatedBytes == rhs.estimatedBytes
+            && lhs.newestMtime == rhs.newestMtime
+            && lhs.safety == rhs.safety
+            && lhs.action == rhs.action
+            && lhs.ruleScheduleEligible == rhs.ruleScheduleEligible
+            && lhs.pathCount == rhs.pathCount
+            && lhs.evidenceKinds == rhs.evidenceKinds
+            && lhs.blockers == rhs.blockers
+            && lhs.createdAt == rhs.createdAt
     }
 
     static func trashFailureMessage(_ error: ExplorerTrashError) -> String {

@@ -9,7 +9,7 @@ final class ExplorerTrashErrorPresentationTests: XCTestCase {
 
         XCTAssertEqual(error, .changedSincePlan)
         XCTAssertTrue(
-            ExplorerSnapshotBrowserModel.trashFailureMessageForTesting(error)
+            ExplorerSnapshotBrowserModel.trashFailureMessage(error)
                 .contains("changed after it was reviewed")
         )
     }

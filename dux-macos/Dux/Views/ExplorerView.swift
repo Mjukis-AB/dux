@@ -214,7 +214,10 @@ private struct ExplorerCleanupHistoryView: View {
     @ViewBuilder
     private var historyContent: some View {
         switch model.cleanupHistoryState {
-        case .idle, .loading where model.cleanupHistoryRecords.isEmpty:
+        case .idle:
+            ProgressView("Loading cleanup history…")
+                .accessibilityIdentifier(ExplorerAccessibility.cleanupHistoryStatus)
+        case .loading where model.cleanupHistoryRecords.isEmpty:
             ProgressView("Loading cleanup history…")
                 .accessibilityIdentifier(ExplorerAccessibility.cleanupHistoryStatus)
         case let .failed(error):

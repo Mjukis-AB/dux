@@ -52,6 +52,15 @@ enum ExplorerAccessibility {
     static let snapshotCandidates = "explorer-snapshot-candidates"
     static let snapshotCandidateTable = "explorer-snapshot-candidate-table"
     static let snapshotCandidateStatus = "explorer-snapshot-candidate-status"
+    static let snapshotCandidateInspector = "explorer-snapshot-candidate-inspector"
+    static let snapshotCandidateDetailStatus = "explorer-snapshot-candidate-detail-status"
+    static let snapshotCandidatePaths = "explorer-snapshot-candidate-paths"
+    static let snapshotCandidatePathPrevious = "explorer-snapshot-candidate-path-previous"
+    static let snapshotCandidatePathNext = "explorer-snapshot-candidate-path-next"
+    static let snapshotCandidateEvidence = "explorer-snapshot-candidate-evidence"
+    static let snapshotCandidateEvidencePrevious =
+        "explorer-snapshot-candidate-evidence-previous"
+    static let snapshotCandidateEvidenceNext = "explorer-snapshot-candidate-evidence-next"
     static let snapshotLargeFileThreshold = "explorer-snapshot-large-file-threshold"
     static let snapshotLargeFileAge = "explorer-snapshot-large-file-age"
     static let snapshotLargeFileTable = "explorer-snapshot-large-file-table"
@@ -119,6 +128,14 @@ enum ExplorerAccessibility {
         snapshotCandidates,
         snapshotCandidateTable,
         snapshotCandidateStatus,
+        snapshotCandidateInspector,
+        snapshotCandidateDetailStatus,
+        snapshotCandidatePaths,
+        snapshotCandidatePathPrevious,
+        snapshotCandidatePathNext,
+        snapshotCandidateEvidence,
+        snapshotCandidateEvidencePrevious,
+        snapshotCandidateEvidenceNext,
         snapshotLargeFileThreshold,
         snapshotLargeFileAge,
         snapshotLargeFileTable,

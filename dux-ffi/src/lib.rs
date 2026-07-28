@@ -94,6 +94,10 @@ const SCAN_EVENT_PAGE_LIMIT: u16 = 64;
 const RECENT_SCAN_HISTORY_PAGE_LIMIT: u16 = 200;
 const SCAN_COVERAGE_DETAIL_PAGE_LIMIT: u16 = 64;
 const CANDIDATE_DETAIL_PAGE_LIMIT: u16 = 64;
+const MAX_CANDIDATE_ENCODED_PATH_BYTES: usize = 65_536;
+const MAX_CANDIDATE_DISPLAY_PATH_BYTES: usize = MAX_CANDIDATE_ENCODED_PATH_BYTES * 4;
+const MAX_CANDIDATE_DETAIL_PAGE_PAYLOAD_BYTES: usize = 24 * 1_024 * 1_024;
+const MAX_CANDIDATE_IDENTIFIER_BYTES: usize = 4_096;
 const MAX_SCAN_ROOT_UTF8_BYTES: usize = 32 * 1_024;
 const MAX_CLEANUP_EXCLUSION_COUNT: usize = 64;
 const MAX_CLEANUP_EXCLUSION_PATH_BYTES: usize = 32 * 1_024;
@@ -3703,6 +3707,11 @@ fn map_candidate_history_error(error: CoreCandidateHistoryError) -> EngineError 
 fn project_candidate_path_page(
     page: CoreCandidatePathPage,
 ) -> Result<CandidatePathPage, EngineError> {
+    ensure_candidate_detail_page_payload(
+        page.paths()
+            .iter()
+            .map(|item| candidate_path_payload_bytes(item.path())),
+    )?;
     Ok(CandidatePathPage {
         record_version: FFI_RECORD_VERSION,
         scan_id: page.scan_id().as_str().to_owned(),
@@ -3721,6 +3730,11 @@ fn project_candidate_path_page(
 fn project_candidate_evidence_page(
     page: CoreCandidateEvidencePage,
 ) -> Result<CandidateEvidencePage, EngineError> {
+    ensure_candidate_detail_page_payload(
+        page.evidence()
+            .iter()
+            .map(|item| candidate_evidence_payload_bytes(item.evidence())),
+    )?;
     Ok(CandidateEvidencePage {
         record_version: FFI_RECORD_VERSION,
         scan_id: page.scan_id().as_str().to_owned(),
@@ -3744,15 +3758,72 @@ fn project_candidate_path(path: &CoreObservedPath) -> Result<CandidateObservedPa
         }
         _ => return Err(EngineError::InternalState),
     };
-    if path.encoded_bytes().len() > 16 * 1_024 * 1_024 || path.display().len() > 16 * 1_024 * 1_024
-    {
-        return Err(EngineError::BudgetExceeded);
-    }
+    candidate_path_payload_bytes(path)?;
     Ok(CandidateObservedPath {
         encoding,
         encoded_bytes: path.encoded_bytes().to_vec(),
         display: path.display().to_owned(),
     })
+}
+
+fn candidate_path_payload_bytes(path: &CoreObservedPath) -> Result<usize, EngineError> {
+    candidate_path_payload_from_lengths(path.encoded_bytes().len(), path.display().len())
+}
+
+fn candidate_path_payload_from_lengths(
+    encoded_bytes: usize,
+    display_bytes: usize,
+) -> Result<usize, EngineError> {
+    if encoded_bytes > MAX_CANDIDATE_ENCODED_PATH_BYTES
+        || display_bytes > MAX_CANDIDATE_DISPLAY_PATH_BYTES
+    {
+        return Err(EngineError::BudgetExceeded);
+    }
+    encoded_bytes
+        .checked_add(display_bytes)
+        .ok_or(EngineError::BudgetExceeded)
+}
+
+fn candidate_evidence_payload_bytes(
+    evidence: &CoreCandidateEvidence,
+) -> Result<usize, EngineError> {
+    let (path, identifier) = match evidence {
+        CoreCandidateEvidence::MatchedPath { path }
+        | CoreCandidateEvidence::RequiredMarker { path }
+        | CoreCandidateEvidence::ForbiddenMarkerAbsent { path }
+        | CoreCandidateEvidence::CloudUploadComplete { path } => (Some(path), None),
+        CoreCandidateEvidence::BundleIdentifier { path, identifier } => {
+            (Some(path), Some(identifier.len()))
+        }
+        CoreCandidateEvidence::InactiveProcess { identifier } => (None, Some(identifier.len())),
+        CoreCandidateEvidence::MinimumAge { .. } | CoreCandidateEvidence::MinimumSize { .. } => {
+            (None, None)
+        }
+        _ => return Err(EngineError::InternalState),
+    };
+    let path_bytes = path.map_or(Ok(0), candidate_path_payload_bytes)?;
+    let identifier_bytes = identifier.unwrap_or(0);
+    if identifier_bytes > MAX_CANDIDATE_IDENTIFIER_BYTES {
+        return Err(EngineError::BudgetExceeded);
+    }
+    path_bytes
+        .checked_add(identifier_bytes)
+        .ok_or(EngineError::BudgetExceeded)
+}
+
+fn ensure_candidate_detail_page_payload(
+    payloads: impl IntoIterator<Item = Result<usize, EngineError>>,
+) -> Result<(), EngineError> {
+    let mut total = 0_usize;
+    for payload in payloads {
+        total = total
+            .checked_add(payload?)
+            .ok_or(EngineError::BudgetExceeded)?;
+        if total > MAX_CANDIDATE_DETAIL_PAGE_PAYLOAD_BYTES {
+            return Err(EngineError::BudgetExceeded);
+        }
+    }
+    Ok(())
 }
 
 fn project_candidate_summary(
@@ -6695,6 +6766,32 @@ mod tests {
         ] {
             assert_eq!(project_snapshot_category(core), ffi);
         }
+    }
+
+    #[test]
+    fn candidate_detail_projection_enforces_item_and_aggregate_payload_budgets() {
+        assert_eq!(
+            candidate_path_payload_from_lengths(
+                MAX_CANDIDATE_ENCODED_PATH_BYTES,
+                MAX_CANDIDATE_DISPLAY_PATH_BYTES
+            ),
+            Ok(MAX_CANDIDATE_ENCODED_PATH_BYTES + MAX_CANDIDATE_DISPLAY_PATH_BYTES)
+        );
+        assert_eq!(
+            candidate_path_payload_from_lengths(MAX_CANDIDATE_ENCODED_PATH_BYTES + 1, 0),
+            Err(EngineError::BudgetExceeded)
+        );
+        assert_eq!(
+            candidate_path_payload_from_lengths(0, MAX_CANDIDATE_DISPLAY_PATH_BYTES + 1),
+            Err(EngineError::BudgetExceeded)
+        );
+        assert_eq!(
+            ensure_candidate_detail_page_payload([
+                Ok(MAX_CANDIDATE_DETAIL_PAGE_PAYLOAD_BYTES),
+                Ok(1),
+            ]),
+            Err(EngineError::BudgetExceeded)
+        );
     }
 
     #[test]
