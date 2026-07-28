@@ -336,10 +336,12 @@ fn start_scan(store: &StoreCoordinator, root: &Path, id: &str) {
 }
 
 fn mutable_journal_bytes(store: &StoreCoordinator, session_id: &CleanupSessionId) -> Vec<u8> {
-    const QUERIES: [&str; 3] = [
+    const QUERIES: [&str; 5] = [
         "SELECT status, completed_at_unix_ms, verified_capacity_delta_bytes, execution_owner_id, execution_generation, last_heartbeat_at_unix_ms, cancellation_requested FROM cleanup_sessions WHERE session_id = ?1",
         "SELECT item_ordinal, final_status, error_category FROM cleanup_items WHERE session_id = ?1 ORDER BY item_ordinal",
         "SELECT item_ordinal, path_ordinal, attempt_generation, status, error_category, effect_started_at_unix_ms, completed_at_unix_ms FROM cleanup_item_paths WHERE session_id = ?1 ORDER BY item_ordinal, path_ordinal",
+        "SELECT candidate_id, item_ordinal, prior_review_status FROM candidate_plan_claims WHERE session_id = ?1 ORDER BY item_ordinal",
+        "SELECT candidate_id, item_ordinal, coupling_revision FROM trusted_rust_target_plan_claims WHERE session_id = ?1 ORDER BY item_ordinal",
     ];
     store.with_connection(|connection| {
         let mut bytes = Vec::new();
@@ -2310,13 +2312,18 @@ fn dry_run_cannot_record_effect_intent() {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
-fn foreign_scope_recovery_refusal_is_a_byte_for_byte_state_no_op() {
+fn changed_boot_or_foreign_scope_recovery_is_a_byte_for_byte_no_op() {
     let fixture = Fixture::new(
         CleanupMode::PermanentSafe,
         CandidateAction::RemoveKnownRegenerableContents,
-        1,
+        2,
     );
     let claim = fixture.claim();
+    claim.begin_validation(0, 0).unwrap();
+    claim.begin_validation(1, 0).unwrap();
+    claim
+        .mark_effect_started(1, 0, fixture.started_at + Duration::from_secs(3))
+        .unwrap();
     let active = claim.snapshot().unwrap();
     let JournalLifecycle::Active { fence, .. } = active.lifecycle else {
         panic!("claim did not produce active journal state");
@@ -2340,6 +2347,7 @@ fn foreign_scope_recovery_refusal_is_a_byte_for_byte_state_no_op() {
         mutable_journal_bytes(&fixture.store, &fixture.session_id),
         before
     );
+    assert_eq!(fixture.claim_count(), 2);
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -2358,6 +2366,55 @@ fn changed_scope_owner(owner: &ProcessInstanceId) -> String {
     };
     components[4].replace_range(..1, &replacement.to_string());
     let encoded = components.join(":");
+    ProcessInstanceId::from_stored(&encoded).unwrap();
+    encoded
+}
+
+#[test]
+fn windows_unproven_owner_recovery_is_a_byte_for_byte_no_op() {
+    let fixture = Fixture::new(
+        CleanupMode::PermanentSafe,
+        CandidateAction::RemoveKnownRegenerableContents,
+        1,
+    );
+    let claim = fixture.claim();
+    claim.begin_validation(0, 0).unwrap();
+    let active = claim.snapshot().unwrap();
+    let JournalLifecycle::Active { fence, .. } = active.lifecycle else {
+        panic!("claim did not produce active journal state");
+    };
+    let windows_owner = windows_unproven_changed_start_owner(&fence.owner);
+    drop(claim);
+    fixture.execute(
+        "UPDATE cleanup_sessions SET execution_owner_id = ?2 WHERE session_id = ?1",
+        params![fixture.session_id.as_str(), windows_owner],
+    );
+
+    let before = mutable_journal_bytes(&fixture.store, &fixture.session_id);
+    let result = fixture
+        .lease()
+        .try_recover(
+            &fixture.session_id,
+            fixture.started_at + Duration::from_secs(10),
+        )
+        .unwrap();
+    assert!(matches!(result, RecoveryClaimResult::LivenessUnknown));
+    assert_eq!(
+        mutable_journal_bytes(&fixture.store, &fixture.session_id),
+        before
+    );
+    assert_eq!(fixture.claim_count(), 1);
+}
+
+fn windows_unproven_changed_start_owner(owner: &ProcessInstanceId) -> String {
+    let components = owner.as_str().split(':').collect::<Vec<_>>();
+    assert_eq!(components.len(), 6);
+    let current = u64::from_str_radix(components[3], 16).unwrap();
+    let changed = current.checked_add(1).unwrap_or(current - 1);
+    let encoded = format!(
+        "1:w:{}:{changed:x}:-:00000000000000000000000000000001",
+        components[2]
+    );
     ProcessInstanceId::from_stored(&encoded).unwrap();
     encoded
 }

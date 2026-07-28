@@ -26,7 +26,7 @@ use super::migrations::{
     test_v12_schema_fingerprint, validate_compiled_migrations,
 };
 use super::process_liveness::current_process_instance;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use super::process_liveness::{ProcessInstanceId, ProcessLiveness, probe_process_instance};
 use super::storage::SecureStorePaths;
 use super::*;
@@ -54,7 +54,7 @@ impl TestChild {
         self.child.try_wait().unwrap()
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     fn terminate_without_unwinding(&mut self) {
         self.child.kill().unwrap();
         let status = self.child.wait().unwrap();
@@ -3433,7 +3433,7 @@ fn cleanup_lock_is_released_after_abrupt_process_death() {
     paths.validate_cleanup_lock_guard(&guard).unwrap();
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[test]
 fn process_instance_liveness_tracks_graceful_and_abrupt_death() {
     for abrupt in [false, true] {
@@ -3460,9 +3460,16 @@ fn process_instance_liveness_tracks_graceful_and_abrupt_death() {
             publish_handshake(&release);
             child.wait_for_success();
         }
+        #[cfg(unix)]
         assert_eq!(
             probe_process_instance(&identity),
             ProcessLiveness::DefinitelyGone
+        );
+        #[cfg(windows)]
+        assert_eq!(
+            probe_process_instance(&identity),
+            ProcessLiveness::Unknown,
+            "Windows death remains unproven without a qualified host/boot scope"
         );
     }
 }

@@ -5242,8 +5242,42 @@ Tasks:
     and warnings-denied Clippy pass, both fuzz adapters compile, all 28
     destructive-policy tests pass, and the authority scan accepts all 244
     repository source files.
-- [ ] Define and test cross-reboot and Windows-unproven cleanup-journal recovery;
+- [x] Define and test cross-reboot and Windows-unproven cleanup-journal recovery;
   unknown ownership must remain non-executable.
+  - [x] 2026-07-28 slice: define recovery across a changed boot and on
+    Windows without qualified host/boot evidence as refusal, not resumable
+    cleanup. The existing version-1 owner identity deliberately hashes macOS
+    boot-session or Linux boot/PID-namespace scope as one opaque value, so a
+    changed boot is indistinguishable from observing a copied database on a
+    foreign host. Both remain `Unknown`. Windows can prove only an exact live
+    PID/start-token match; process exit, PID reuse, absence, access failure,
+    and changed start remain `Unknown` because its owner is unscoped. PID,
+    heartbeat age, cleanup-lock availability, and plan timestamps never
+    substitute for that proof.
+
+    `CleanupJournalLease::try_recover` returns `LivenessUnknown` for those
+    cases, issues no `CleanupJournalClaim`, increments no generation, and
+    changes no session, item, path, ordinary candidate claim, or trusted
+    Rust-target claim byte. Therefore no validation, resume, effect receipt,
+    callback, or filesystem mutation is reachable. Only same-reliable-scope
+    `DefinitelyGone` retains the existing exact-CAS generation-two recovery;
+    interrupted validation resets to planned, interrupted effect intent
+    becomes outcome-unknown, and new effects remain blocked until explicit
+    reconciliation and resume.
+
+    Deterministic journal regressions cover a changed combined scope and a
+    Windows unscoped changed-start owner while validating and effect-adjacent
+    rows exist, then compare the complete mutable cleanup/candidate-claim graph
+    byte-for-byte. Native macOS/Linux subprocess coverage proves graceful and
+    abrupt same-scope death; the same test is compiled for native Windows and
+    requires both deaths to remain `Unknown`. All 49 journal tests and the
+    process-liveness tests pass on macOS. The installed Windows Rust target
+    reaches bundled SQLite compilation, where this macOS host lacks the MSVC
+    C headers (`stdlib.h`); native Windows execution remains an explicit M9
+    release gate. Any future diagnostic distinction between prior boot and
+    foreign host requires schema v13-or-later provenance for new claims only;
+    migrated rows stay unproven, and any reconciliation capability must be
+    non-resumable and unable to start effects.
 
 Exit criteria:
 

@@ -1,5 +1,14 @@
 # Changelog
 
+- Defined cross-reboot and Windows-unproven cleanup-journal recovery as an
+  explicit non-executable refusal. A changed macOS/Linux combined boot scope
+  remains indistinguishable from a foreign copied database, while Windows
+  process death remains unproven without a qualified host/boot scope. Both
+  return no journal claim and change no cleanup or candidate-claim row; PID,
+  heartbeat age, lock availability, and durable plan history cannot substitute
+  for liveness proof. Deterministic regressions compare the complete mutable
+  graph byte-for-byte; the same subprocess test requires `Unknown` when run on
+  native Windows.
 - Added separately confirmed cleanup-history clearing through UniFFI contract
   v30 and native macOS Settings. Rust prepares one short-lived, engine-bound,
   consume-once preview over the exact validated terminal five-table journal
