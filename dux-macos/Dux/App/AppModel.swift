@@ -29,6 +29,14 @@ final class AppModel: DuxCapacitySampling {
     private(set) var permanentCleanupPolicyState = PermanentCleanupPolicyState.idle
     private(set) var cleanupExclusions: CleanupExclusionsPolicy?
     private(set) var cleanupExclusionsState = CleanupExclusionsState.idle
+    private(set) var directCargoEnrollmentStatus: DirectCargoEnrollmentStatusModel?
+    private(set) var directCargoEnrollmentPreview: DirectCargoEnrollmentPreviewModel?
+    private(set) var directCargoEnrollmentConfirmation:
+        DirectCargoEnrollmentConfirmation?
+    private(set) var directCargoEnrollmentState = DirectCargoEnrollmentViewState.idle
+    var directCargoEnrollmentNeedsStatusReload: Bool {
+        directCargoEnrollmentRequiresAuthoritativeReload
+    }
     private(set) var cleanupHistoryRecords: [CleanupHistorySessionSummaryModel] = []
     private(set) var cleanupHistoryNextCursor: CleanupHistoryCursorModel?
     private(set) var cleanupHistoryState = CleanupHistoryLoadState.idle
@@ -88,6 +96,17 @@ final class AppModel: DuxCapacitySampling {
     private var cleanupExclusionsGeneration: UInt64 = 0
     @ObservationIgnored
     private var cleanupExclusionsIsInvalidated = false
+    @ObservationIgnored
+    private var directCargoEnrollmentTask: Task<Void, Never>?
+    @ObservationIgnored
+    private var directCargoEnrollmentGeneration: UInt64 = 0
+    @ObservationIgnored
+    private var directCargoEnrollmentIsInvalidated = false
+    @ObservationIgnored
+    private var directCargoEnrollmentRequiresAuthoritativeReload = false
+    @ObservationIgnored
+    private var pendingDirectCargoEnrollmentPreview:
+        (any DuxDirectCargoEnrollmentPreviewLease)?
     @ObservationIgnored
     private var cleanupHistoryTask: Task<Void, Never>?
     @ObservationIgnored
@@ -167,6 +186,9 @@ final class AppModel: DuxCapacitySampling {
         capacityTrend = nil
         permanentCleanupPolicy = nil
         cleanupExclusions = nil
+        directCargoEnrollmentStatus = nil
+        directCargoEnrollmentPreview = nil
+        directCargoEnrollmentConfirmation = nil
         menuBarLabelMode = menuBarLabelPreferenceStore.load()
         menuBarVisibilityPreference = menuBarVisibilityPreferenceStore.load()
         showsStorageAccessIntroduction =
@@ -560,6 +582,350 @@ final class AppModel: DuxCapacitySampling {
         cleanupExclusionsTask?.cancel()
         cleanupExclusionsTask = nil
         cleanupExclusionsState = cleanupExclusions == nil ? .idle : .ready
+    }
+
+    func loadDirectCargoEnrollmentStatus() async {
+        guard !directCargoEnrollmentIsInvalidated else {
+            return
+        }
+        if pendingDirectCargoEnrollmentPreview != nil {
+            directCargoEnrollmentState = .awaitingEnrollmentConfirmation
+            return
+        }
+        if let directCargoEnrollmentTask {
+            await directCargoEnrollmentTask.value
+            return
+        }
+
+        directCargoEnrollmentGeneration &+= 1
+        let generation = directCargoEnrollmentGeneration
+        directCargoEnrollmentState = .loading
+        let service = engineService
+        let task = Task { @MainActor [weak self] in
+            let result: Result<DirectCargoEnrollmentStatusModel, Error>
+            do {
+                result = .success(try await service.loadDirectCargoEnrollmentStatus())
+            } catch {
+                result = .failure(error)
+            }
+            guard !Task.isCancelled else {
+                return
+            }
+            self?.publishDirectCargoEnrollmentLoad(result, generation: generation)
+        }
+        directCargoEnrollmentTask = task
+        await task.value
+    }
+
+    func inspectDirectCargoExecutable(_ selection: DirectCargoExecutableSelection) async {
+        guard
+            !directCargoEnrollmentIsInvalidated,
+            !directCargoEnrollmentRequiresAuthoritativeReload,
+            directCargoEnrollmentTask == nil,
+            !directCargoEnrollmentState.isBusy
+        else {
+            return
+        }
+        guard DirectCargoExecutableSelection.isValidUnixCargoPath(
+            selection.encodedPathBytes
+        ) else {
+            directCargoEnrollmentState = .failed(.invalidSelection)
+            return
+        }
+
+        directCargoEnrollmentGeneration &+= 1
+        let generation = directCargoEnrollmentGeneration
+        let superseded = pendingDirectCargoEnrollmentPreview
+        pendingDirectCargoEnrollmentPreview = nil
+        directCargoEnrollmentPreview = nil
+        directCargoEnrollmentConfirmation = nil
+        await superseded?.release()
+        guard
+            generation == directCargoEnrollmentGeneration,
+            !directCargoEnrollmentIsInvalidated
+        else {
+            return
+        }
+
+        directCargoEnrollmentState = .inspecting
+        let service = engineService
+        let task = Task { @MainActor [weak self] in
+            let result: Result<any DuxDirectCargoEnrollmentPreviewLease, Error>
+            do {
+                result = .success(try await service.inspectDirectCargoExecutable(selection))
+            } catch {
+                result = .failure(error)
+            }
+            guard !Task.isCancelled, let self,
+                  generation == self.directCargoEnrollmentGeneration,
+                  !self.directCargoEnrollmentIsInvalidated else {
+                if case let .success(preview) = result {
+                    await preview.release()
+                }
+                return
+            }
+            self.directCargoEnrollmentTask = nil
+            switch result {
+            case let .success(preview):
+                self.pendingDirectCargoEnrollmentPreview = preview
+                self.directCargoEnrollmentPreview = preview.preview
+                self.directCargoEnrollmentConfirmation =
+                    DirectCargoEnrollmentConfirmation(
+                        generation: generation,
+                        preview: preview.preview
+                    )
+                self.directCargoEnrollmentState = .awaitingEnrollmentConfirmation
+            case let .failure(error):
+                self.directCargoEnrollmentState = .failed(
+                    Self.directCargoEnrollmentFailure(for: error)
+                )
+            }
+        }
+        directCargoEnrollmentTask = task
+        await task.value
+    }
+
+    func rejectDirectCargoExecutableSelection() {
+        guard
+            !directCargoEnrollmentIsInvalidated,
+            !directCargoEnrollmentRequiresAuthoritativeReload,
+            directCargoEnrollmentTask == nil,
+            !directCargoEnrollmentState.isBusy
+        else {
+            return
+        }
+        directCargoEnrollmentState = .failed(.invalidSelection)
+    }
+
+    func enrollInspectedDirectCargo(
+        confirmation: DirectCargoEnrollmentConfirmation? = nil
+    ) async {
+        guard
+            !directCargoEnrollmentIsInvalidated,
+            !directCargoEnrollmentRequiresAuthoritativeReload,
+            directCargoEnrollmentTask == nil,
+            !directCargoEnrollmentState.isBusy,
+            let preview = pendingDirectCargoEnrollmentPreview,
+            let currentConfirmation = directCargoEnrollmentConfirmation
+        else {
+            return
+        }
+        guard let confirmation else {
+            directCargoEnrollmentState = .failed(.enrollmentConfirmationRequired)
+            return
+        }
+        guard
+            confirmation == currentConfirmation,
+            confirmation.preview == preview.preview,
+            confirmation.generation == directCargoEnrollmentGeneration
+        else {
+            directCargoEnrollmentState = .failed(.enrollmentPreviewChanged)
+            return
+        }
+
+        directCargoEnrollmentGeneration &+= 1
+        let generation = directCargoEnrollmentGeneration
+        pendingDirectCargoEnrollmentPreview = nil
+        directCargoEnrollmentConfirmation = nil
+        directCargoEnrollmentState = .enrolling
+        let service = engineService
+        let task = Task { @MainActor [weak self] in
+            let result: Result<DirectCargoEnrollmentUpdateModel, Error>
+            do {
+                result = .success(try await service.enrollDirectCargo(preview))
+            } catch {
+                result = .failure(error)
+            }
+            await preview.release()
+            guard !Task.isCancelled, let self,
+                  generation == self.directCargoEnrollmentGeneration,
+                  !self.directCargoEnrollmentIsInvalidated else {
+                return
+            }
+            self.directCargoEnrollmentPreview = nil
+            switch result {
+            case let .success(update):
+                self.directCargoEnrollmentStatus = update.status
+                self.directCargoEnrollmentRequiresAuthoritativeReload = false
+                self.directCargoEnrollmentState = .ready
+            case let .failure(error):
+                let failure = Self.directCargoEnrollmentFailure(for: error)
+                if failure == .service(.outcomeUnknown) {
+                    // The commit preview is consumed and must never be retried.
+                    self.directCargoEnrollmentRequiresAuthoritativeReload = true
+                    await self.reconcileUncertainDirectCargoMutation(
+                        service: service,
+                        generation: generation
+                    )
+                }
+                guard
+                    !Task.isCancelled,
+                    generation == self.directCargoEnrollmentGeneration,
+                    !self.directCargoEnrollmentIsInvalidated
+                else {
+                    return
+                }
+                self.directCargoEnrollmentState = .failed(failure)
+            }
+            self.directCargoEnrollmentTask = nil
+        }
+        directCargoEnrollmentTask = task
+        await task.value
+    }
+
+    func discardDirectCargoEnrollmentPreview(
+        matching confirmation: DirectCargoEnrollmentConfirmation? = nil
+    ) async {
+        guard
+            directCargoEnrollmentTask == nil,
+            !directCargoEnrollmentState.isBusy,
+            let preview = pendingDirectCargoEnrollmentPreview
+        else {
+            return
+        }
+        if let confirmation {
+            guard confirmation == directCargoEnrollmentConfirmation else {
+                return
+            }
+        }
+        directCargoEnrollmentGeneration &+= 1
+        pendingDirectCargoEnrollmentPreview = nil
+        directCargoEnrollmentPreview = nil
+        directCargoEnrollmentConfirmation = nil
+        directCargoEnrollmentState = directCargoEnrollmentStatus == nil ? .idle : .ready
+        await preview.release()
+    }
+
+    func revokeDirectCargoEnrollment(confirmed: Bool = false) async {
+        guard
+            !directCargoEnrollmentIsInvalidated,
+            !directCargoEnrollmentRequiresAuthoritativeReload,
+            directCargoEnrollmentTask == nil,
+            !directCargoEnrollmentState.isBusy
+        else {
+            return
+        }
+        guard confirmed else {
+            directCargoEnrollmentState = .failed(.revocationConfirmationRequired)
+            return
+        }
+
+        directCargoEnrollmentGeneration &+= 1
+        let generation = directCargoEnrollmentGeneration
+        let superseded = pendingDirectCargoEnrollmentPreview
+        pendingDirectCargoEnrollmentPreview = nil
+        directCargoEnrollmentPreview = nil
+        directCargoEnrollmentConfirmation = nil
+        directCargoEnrollmentState = .revoking
+        await superseded?.release()
+        guard
+            generation == directCargoEnrollmentGeneration,
+            !directCargoEnrollmentIsInvalidated
+        else {
+            return
+        }
+
+        let service = engineService
+        let task = Task { @MainActor [weak self] in
+            let result: Result<DirectCargoEnrollmentUpdateModel, Error>
+            do {
+                result = .success(try await service.revokeDirectCargoEnrollment())
+            } catch {
+                result = .failure(error)
+            }
+            guard !Task.isCancelled, let self,
+                  generation == self.directCargoEnrollmentGeneration,
+                  !self.directCargoEnrollmentIsInvalidated else {
+                return
+            }
+            self.directCargoEnrollmentTask = nil
+            switch result {
+            case let .success(update):
+                self.directCargoEnrollmentStatus = update.status
+                self.directCargoEnrollmentRequiresAuthoritativeReload = false
+                self.directCargoEnrollmentState = .ready
+            case let .failure(error):
+                let failure = Self.directCargoEnrollmentFailure(for: error)
+                if failure == .service(.outcomeUnknown) {
+                    self.directCargoEnrollmentRequiresAuthoritativeReload = true
+                    await self.reconcileUncertainDirectCargoMutation(
+                        service: service,
+                        generation: generation
+                    )
+                }
+                guard
+                    !Task.isCancelled,
+                    generation == self.directCargoEnrollmentGeneration,
+                    !self.directCargoEnrollmentIsInvalidated
+                else {
+                    return
+                }
+                self.directCargoEnrollmentState = .failed(failure)
+            }
+        }
+        directCargoEnrollmentTask = task
+        await task.value
+    }
+
+    func invalidateDirectCargoEnrollmentOperations() {
+        directCargoEnrollmentIsInvalidated = true
+        directCargoEnrollmentGeneration &+= 1
+        directCargoEnrollmentTask?.cancel()
+        directCargoEnrollmentTask = nil
+        let preview = pendingDirectCargoEnrollmentPreview
+        pendingDirectCargoEnrollmentPreview = nil
+        directCargoEnrollmentPreview = nil
+        directCargoEnrollmentConfirmation = nil
+        directCargoEnrollmentState = directCargoEnrollmentStatus == nil ? .idle : .ready
+        if let preview {
+            Task { await preview.release() }
+        }
+    }
+
+    /// Cancels only unconfirmed presentation work. A confirmed enrollment or
+    /// revocation is never interrupted merely because Settings disappeared.
+    func dismissDirectCargoEnrollmentPresentation() async {
+        guard
+            directCargoEnrollmentState != .enrolling,
+            directCargoEnrollmentState != .revoking
+        else {
+            return
+        }
+        directCargoEnrollmentGeneration &+= 1
+        let generation = directCargoEnrollmentGeneration
+        let operation = directCargoEnrollmentTask
+        let preview = pendingDirectCargoEnrollmentPreview
+        pendingDirectCargoEnrollmentPreview = nil
+        directCargoEnrollmentPreview = nil
+        directCargoEnrollmentConfirmation = nil
+        operation?.cancel()
+        await operation?.value
+        await preview?.release()
+        guard generation == directCargoEnrollmentGeneration else {
+            return
+        }
+        directCargoEnrollmentTask = nil
+        directCargoEnrollmentState =
+            directCargoEnrollmentRequiresAuthoritativeReload
+            ? .failed(.service(.outcomeUnknown))
+            : (directCargoEnrollmentStatus == nil ? .idle : .ready)
+    }
+
+    /// Suppresses late presentation but waits for any already-confirmed,
+    /// synchronous core mutation to finish before the engine is closed.
+    func shutdownDirectCargoEnrollment() async {
+        directCargoEnrollmentIsInvalidated = true
+        directCargoEnrollmentGeneration &+= 1
+        let operation = directCargoEnrollmentTask
+        let preview = pendingDirectCargoEnrollmentPreview
+        pendingDirectCargoEnrollmentPreview = nil
+        directCargoEnrollmentPreview = nil
+        directCargoEnrollmentConfirmation = nil
+        operation?.cancel()
+        await operation?.value
+        await preview?.release()
+        directCargoEnrollmentTask = nil
+        directCargoEnrollmentState = directCargoEnrollmentStatus == nil ? .idle : .ready
     }
 
     /// Loads only path-free durable cleanup outcome metadata. This operation
@@ -1297,6 +1663,60 @@ final class AppModel: DuxCapacitySampling {
         }
     }
 
+    private func publishDirectCargoEnrollmentLoad(
+        _ result: Result<DirectCargoEnrollmentStatusModel, Error>,
+        generation: UInt64
+    ) {
+        guard
+            generation == directCargoEnrollmentGeneration,
+            !directCargoEnrollmentIsInvalidated
+        else {
+            return
+        }
+        directCargoEnrollmentTask = nil
+        switch result {
+        case let .success(status):
+            directCargoEnrollmentStatus = status
+            directCargoEnrollmentRequiresAuthoritativeReload = false
+            directCargoEnrollmentState = .ready
+        case let .failure(error):
+            if error is CancellationError {
+                directCargoEnrollmentState =
+                    directCargoEnrollmentStatus == nil ? .idle : .ready
+            } else if directCargoEnrollmentRequiresAuthoritativeReload {
+                directCargoEnrollmentState = .failed(.service(.outcomeUnknown))
+            } else {
+                directCargoEnrollmentState = .failed(
+                    Self.directCargoEnrollmentFailure(for: error)
+                )
+            }
+        }
+    }
+
+    /// A native mutation reported uncertainty after it may have reached
+    /// durable storage. Observation is safe, but another mutation remains
+    /// blocked until one authoritative status read succeeds.
+    private func reconcileUncertainDirectCargoMutation(
+        service: any EngineServing,
+        generation: UInt64
+    ) async {
+        do {
+            let status = try await service.loadDirectCargoEnrollmentStatus()
+            guard
+                !Task.isCancelled,
+                generation == directCargoEnrollmentGeneration,
+                !directCargoEnrollmentIsInvalidated
+            else {
+                return
+            }
+            directCargoEnrollmentStatus = status
+            directCargoEnrollmentRequiresAuthoritativeReload = false
+        } catch {
+            // Keep the last proven status and the reconciliation gate. The
+            // outcomeUnknown warning is published by the calling mutation.
+        }
+    }
+
     private func publishCleanupHistory(
         _ result: Result<CleanupHistoryPageModel, Error>,
         appending: Bool,
@@ -1375,6 +1795,15 @@ final class AppModel: DuxCapacitySampling {
         for error: Error
     ) -> CleanupExclusionsFailure {
         if let error = error as? CleanupExclusionsServiceError {
+            return .service(error)
+        }
+        return .unexpected
+    }
+
+    private static func directCargoEnrollmentFailure(
+        for error: Error
+    ) -> DirectCargoEnrollmentFailure {
+        if let error = error as? DirectCargoEnrollmentServiceError {
             return .service(error)
         }
         return .unexpected

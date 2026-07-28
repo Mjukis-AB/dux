@@ -146,6 +146,33 @@ wake/significant time change; generation tokens discard acquisitions or renewal
 failures that complete after the selected review changed. FFI close also drains
 still-live registered review pins and rejects later renewal.
 
+Settings exposes FFI v27's explicit **Rust project discovery** enrollment. The
+picker accepts one canonical direct file named `cargo`; the usual
+`~/.cargo/bin/cargo` rustup proxy is a symlink and is intentionally rejected.
+For a rustup-managed toolchain, choose its direct binary below
+`~/.rustup/toolchains/<toolchain>/bin/cargo`. DUX does not search `PATH`, invoke
+rustup, install or update a toolchain, or accept command text.
+
+The first phase is static inspection: it runs no selected bytes and presents the
+exact lossless path, executable SHA-256, and bounded macOS signing evidence.
+Only the opaque engine-owned preview can reach the second phase. The final
+confirmation is bound to the exact displayed preview and permits one
+core-owned, bounded verbose-version invocation of those bytes to verify Cargo
+1.96.0. Ad-hoc signing is local integrity evidence, not publisher identity; CMS
+evidence does not create a publisher allowlist. A confirmed invocation is shown
+as finishing and is not falsely cancellable. Dismissal releases unconfirmed
+previews, and one memoized ordered shutdown waits for any confirmed mutation
+before closing the engine exactly once even when multiple callers request
+shutdown.
+
+Enrollment grants deterministic Rust workspace discovery provenance only. It
+cannot select a candidate, clear `ProtectedPath`, create or approve a cleanup
+plan, schedule work, grant AI authority, or delete data. Revocation is separately
+confirmed and deletes nothing. If a native mutation returns an unprovable or
+malformed response, DUX never retries it: Settings performs one read-only status
+reload, visibly blocks further mutations until authoritative state is available,
+and offers an explicit **Reload Cargo status** action if that read fails.
+
 Private-store maintenance is deliberately separate from user cleanup and from
 Milestone 8 automations. After a 60-second startup grace, the scheduler runs at
 most one sealed Rust batch at a time across scan recovery, terminal temps,

@@ -1,5 +1,28 @@
 # Changelog
 
+- Added explicit Direct Cargo discovery enrollment to UniFFI contract v27 and
+  native macOS Settings. Users choose one exact direct `cargo` executable;
+  static inspection runs no selected bytes and returns a bounded,
+  engine-bound, consume-once preview showing the lossless path, executable
+  digest, and macOS signature evidence. At most one preview may be live,
+  foreign engines cannot consume it, commit consumes it before the core's
+  fixed Cargo 1.96.0 version validation, and explicit release or engine close
+  destroys it. Settings clearly separates inspection from execution consent,
+  distinguishes ad-hoc integrity from CMS evidence, generation-fences late
+  presentation, binds confirmation to the exact evidence shown, releases a
+  preview that arrives after Settings closes, and separately confirms
+  revocation. Confirmed enrollment is a bounded non-cancellable settings
+  operation on the utility queue; it is shown as finishing and never
+  automatically retried after failure or uncertainty. Any untrusted
+  post-mutation response triggers a read-only authoritative status reload and
+  visibly blocks another mutation until that reload succeeds. FFI projection
+  failures after core reports a successful mutation are explicitly
+  outcome-unknown, while pre-mutation core errors retain their typed result.
+  Runtime shutdown installs one shared pipeline before its first suspension,
+  so concurrent callers wait for the same confirmed mutation and close the
+  engine exactly once.
+  Enrollment enables deterministic Rust discovery only and adds no candidate,
+  plan, approval, journal, cleanup, scheduler, CLI, or AI authority.
 - Joined the private Rust-target production acquisition chain to its reviewed
   plan, schema-v12 journal, and descriptor-relative executor in one end-to-end
   macOS regression. The fixture now enrolls the exact direct Cargo executable,

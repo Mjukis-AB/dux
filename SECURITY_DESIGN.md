@@ -282,12 +282,50 @@ Trust comes from a consuming user commit of one non-cloneable preview bound to
 its exact engine/store and prior setting revision. Commit repeats the static
 checks, then explicitly authorizes bounded execution to bind the reviewed
 verbose-version digest before conditionally writing; exact retries are no-ops,
-while replacement and revocation advance the revision. Revocation persists a field-free
-tombstone so stale previews cannot recreate earlier trust. The enrolled
+while replacement and revocation advance the revision. Revocation persists a
+field-free tombstone so stale previews cannot recreate earlier trust. The enrolled
 metadata entry statically matches the stored bytes/signature and rereads the
 complete enrollment before any automatic execution, then retains the same
-guard before and after the fixed Cargo command. This checkpoint exposes no blocker-removal, plan,
-FFI, scheduling, or effect edge.
+guard before and after the fixed Cargo command. That core-only checkpoint
+exposed no blocker-removal, plan, FFI, scheduling, or effect edge.
+
+UniFFI contract v27 exposes only the explicit discovery-enrollment lifecycle to
+the native Settings surface. The request contains one lossless, bounded,
+control-free UTF-8 Unix path selected by the user and cannot contain command
+text, `PATH` lookup, arguments, environment, expected output, signatures,
+digests, candidates, plans, or cleanup modes. Static inspection runs no
+selected bytes. Its result stays inside one opaque engine-bound preview;
+display DTOs are observations only and are never accepted back as authority.
+An engine admits at most one live preview, ownership is checked before
+consumption, commit consumes the preview before any fallible version work, and
+explicit release, engine close, or object drop destroys the retained
+capability. Status is read-only and revoke takes no path or identity.
+
+The confirmed commit is a bounded synchronous settings operation that may run
+the exact inspected bytes only with the core-owned verbose-version command. It
+runs on `EngineService`'s utility executor, not the Swift main actor. There is
+no cancellation token in this core boundary: after explicit confirmation the
+UI truthfully shows that enrollment is finishing, offers no false Cancel
+action, and ordered shutdown waits behind the serialized engine operation.
+Swift task cancellation only generation-fences presentation. A stale, failed,
+or outcome-unknown commit is never retried from the consumed preview; the app
+must acquire fresh status and require a fresh inspection for another attempt.
+The confirmation action carries the exact generation and full evidence shown,
+so it cannot consume a replacement preview. A native mutation whose returned
+record is malformed or does not correlate to that operation is treated as
+outcome-unknown, followed by one observation-only status reload. Settings
+visibly blocks another mutation and exposes an explicit reload action until an
+authoritative read succeeds. Closing Settings releases even a late-arriving
+inspection preview; it does not interrupt a confirmed mutation. Once core has
+reported a successful mutation, any failure to project its transport record is
+also outcome-unknown; typed core errors are preserved only before that
+successful boundary. Runtime shutdown installs one shared task before its
+first suspension, so reentrant callers cannot duplicate the stop/close
+pipeline while a confirmed mutation is finishing.
+This narrow lifecycle is discovery provenance only and cannot clear
+`ProtectedPath`, build or approve a plan, create a journal claim, schedule
+work, invoke AI, or perform a filesystem cleanup effect.
+
 The admitted macOS metadata case now also has bounded positive Cargo 1.96
 file-configuration provenance. DUX reproduces Cargo's cwd-ancestor lookup
 order, admits one unambiguous `config` or `config.toml` at each non-Cargo-home
@@ -2734,7 +2772,7 @@ coverage is labelled as Home-scoped and unknown coverage stays unknown.
 | Strict lexical/live path evidence | Implemented, crate-private and non-authoritative, including retained-descriptor bounded regular-file prefix and full-file SHA-256 reads on Unix. A separate Unix/macOS Trash witness preserves a final symlink as the link object without canonicalization or target inspection, while rejecting symlinked roots/intermediate ancestors and special entries. A repeated filesystem-boundary witness now retains bounded no-follow root-to-scan ancestry plus descriptor-bound platform mount identity | Bind trusted account/home, volume/location, and rule witnesses and executor revalidation; APFS firmlink semantics and Windows handle-relative/reparse evidence remain open |
 | Protected-root registry | Implemented text-only policy; Unix/macOS current-account home discovery is code-owned and fail-closed (OS account database, UID ambiguity, no-follow identity, owner check); Windows construction remains unavailable | Trusted OS profile/mount/firmlink evidence and stable rule grants |
 | Dangerous-path corpus and fuzzing | Implemented | Keep cross-platform and promote every crash regression |
-| Rule schema/loader | Strict schema plus a build-time digest/policy-gated and strict load-time-validated discovery catalog; nine rules remain selected-root RevealOnly observations, while independently researched `developer.rust.target` and `developer.python.pycache` revision 2 require exact snapshot marker evidence and propose only SafeRegenerable/RemoveKnownRegenerableContents. Every rule is unschedulable and every result remains blocked by `ProtectedPath`. Sealed Unix-only live and Cargo-resolution witnesses verify the exact Rust tag, manifest digest, current default layout, and scrubbed-context Cargo workspace/target result; Python live-writer and relocation authority remains open. macOS additionally has explicit revisioned same-store direct-Cargo enrollment, bounded policy-3 positive config/include byte closure and ordered Cargo trace intent, descriptor-retained metadata cwd, static-code evidence, suspended selected-running-code attestation, complete executable/config/manifest ancestry APFS fences, a guarded two-pass reported root/member-manifest closure, a policy-1 closed accepted path-dependency graph, stale-preview rejection, revocation tombstones, and post-publication retention/revalidation of every Cargo read-set fence and enrolled version, still without clearing that blocker | Developer ID signing must cover catalog bytes; before either safe rule can lose its blocker, complete its marker/read-set and namespace provenance, review the documented conservative path-dependency compatibility and path-intent/path-based/same-UID launch limits, prove authoritative volume/protected-root grants, add process/descendant/change guards, and complete adversarial review |
+| Rule schema/loader | Strict schema plus a build-time digest/policy-gated and strict load-time-validated discovery catalog; nine rules remain selected-root RevealOnly observations, while independently researched `developer.rust.target` and `developer.python.pycache` revision 2 require exact snapshot marker evidence and propose only SafeRegenerable/RemoveKnownRegenerableContents. Every rule is unschedulable and every result remains blocked by `ProtectedPath`. Sealed Unix-only live and Cargo-resolution witnesses verify the exact Rust tag, manifest digest, current default layout, and scrubbed-context Cargo workspace/target result; Python live-writer and relocation authority remains open. macOS additionally has explicit revisioned same-store direct-Cargo enrollment, a contract-v27 one-preview native enrollment surface, bounded policy-3 positive config/include byte closure and ordered Cargo trace intent, descriptor-retained metadata cwd, static-code evidence, suspended selected-running-code attestation, complete executable/config/manifest ancestry APFS fences, a guarded two-pass reported root/member-manifest closure, a policy-1 closed accepted path-dependency graph, stale-preview rejection, revocation tombstones, and post-publication retention/revalidation of every Cargo read-set fence and enrolled version, still without clearing that blocker | Developer ID signing must cover catalog bytes; before either safe rule can lose its blocker, complete its marker/read-set and namespace provenance, review the documented conservative path-dependency compatibility and path-intent/path-based/same-UID launch limits, prove authoritative volume/protected-root grants, add process/descendant/change guards, and complete adversarial review |
 | Candidate and cleanup-plan records | Completed fresh scans create deterministic, snapshot-bound durable candidate batches; exact-scan summaries plus bounded lossless path/evidence pages and semantic review commands remain non-authoritative history. A crate-private planner module now seals an exact current-evaluator/current-catalog succeeded scan/evaluation/candidate join to a fully decoded retained snapshot and fresh cleanup-review lease, replays the complete batch from that snapshot with bounded working state, rejects every immutable-field mismatch, and carries scan-time Unix identities into the ephemeral Rust-target live and bounded Cargo metadata witnesses. A separate sealed candidate-grouping result records deterministic category/safety/action groups and conservative exact/parent-child overlap decisions without becoming a plan. The planner also has a non-actionable exact-path review evidence boundary that binds a code-owned canonical root to strict lexical/no-follow live snapshots, retaining exact identity and hard-link facts while trusted protection remains unresolved. One private Rust-target authority chain can now construct and approve an exact permanent-safe plan and atomically claim its durable candidate while preserving the sole `ProtectedPath` history fact; an insertion-only typed coupling, schema-v12 exact active-claim seal, complete immutable-body/blocker comparison, and rule-specific policy checks prevent generic blocked candidates from borrowing that path. No plan capability crosses FFI/UI, CLI, scheduling, or AI | Add exact review/plan transport only after generation-fenced product orchestration and release gates; keep the blocker exception rule-specific and non-forgeable |
 | macOS app cleanup | Absent | Entire cleanup release gate in §17.3 |
 | Legacy CLI deletion | Active arbitrary-descendant permanent path routed through a temporary core adapter; strict-target/volume/identity rechecks only; scanned-byte estimates labeled in CLI | Replace adapter with reviewed plan/approval/executor chain without weakening current checks |

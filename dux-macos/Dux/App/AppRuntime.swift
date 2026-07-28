@@ -167,11 +167,7 @@ final class AppRuntime {
             return
         }
         shuttingDown = true
-        model.invalidatePressurePolicyOperations()
-        model.invalidatePermanentCleanupPolicyOperations()
-        model.invalidateCleanupExclusionsOperations()
-        model.invalidateCleanupHistoryOperations()
-        model.invalidateStorageAccessProbeOperations()
+        let model = model
         let capacityScheduler = capacityScheduler
         let capacityResampleRouter = capacityResampleRouter
         let scheduler = scheduler
@@ -179,7 +175,13 @@ final class AppRuntime {
         let scans = scans
         let explorerSnapshotBrowser = explorerSnapshotBrowser
         let engineService = engineService
-        let task = Task {
+        let task = Task { @MainActor in
+            model.invalidatePressurePolicyOperations()
+            model.invalidatePermanentCleanupPolicyOperations()
+            model.invalidateCleanupExclusionsOperations()
+            model.invalidateCleanupHistoryOperations()
+            model.invalidateStorageAccessProbeOperations()
+            await model.shutdownDirectCargoEnrollment()
             await scans.shutdownHomeScan()
             await explorerSnapshotBrowser.close()
             await capacityResampleRouter?.invalidate()

@@ -41,6 +41,42 @@ protocol DuxCleanupExclusionsServing: Sendable {
     func resetCleanupExclusions() async throws -> CleanupExclusionsUpdateResult
 }
 
+protocol DuxDirectCargoEnrollmentServing: Sendable {
+    func loadDirectCargoEnrollmentStatus() async throws
+        -> DirectCargoEnrollmentStatusModel
+    func inspectDirectCargoExecutable(
+        _ selection: DirectCargoExecutableSelection
+    ) async throws -> any DuxDirectCargoEnrollmentPreviewLease
+    func enrollDirectCargo(
+        _ preview: any DuxDirectCargoEnrollmentPreviewLease
+    ) async throws -> DirectCargoEnrollmentUpdateModel
+    func revokeDirectCargoEnrollment() async throws -> DirectCargoEnrollmentUpdateModel
+}
+
+extension DuxDirectCargoEnrollmentServing {
+    func loadDirectCargoEnrollmentStatus() async throws
+        -> DirectCargoEnrollmentStatusModel
+    {
+        throw DirectCargoEnrollmentServiceError.unavailable
+    }
+
+    func inspectDirectCargoExecutable(
+        _: DirectCargoExecutableSelection
+    ) async throws -> any DuxDirectCargoEnrollmentPreviewLease {
+        throw DirectCargoEnrollmentServiceError.unavailable
+    }
+
+    func enrollDirectCargo(
+        _: any DuxDirectCargoEnrollmentPreviewLease
+    ) async throws -> DirectCargoEnrollmentUpdateModel {
+        throw DirectCargoEnrollmentServiceError.unavailable
+    }
+
+    func revokeDirectCargoEnrollment() async throws -> DirectCargoEnrollmentUpdateModel {
+        throw DirectCargoEnrollmentServiceError.unavailable
+    }
+}
+
 extension DuxCleanupExclusionsServing {
     func loadCleanupExclusions() async throws -> CleanupExclusionsPolicy {
         throw CleanupExclusionsServiceError.unavailable
@@ -74,7 +110,8 @@ extension DuxPermanentCleanupPolicyServing {
 }
 
 protocol EngineServing: DuxVolumeStatusServing, DuxCapacityTrendServing, DuxPressurePolicyServing,
-    DuxPermanentCleanupPolicyServing, DuxCleanupExclusionsServing, DuxCleanupHistoryServing, Sendable
+    DuxPermanentCleanupPolicyServing, DuxCleanupExclusionsServing,
+    DuxDirectCargoEnrollmentServing, DuxCleanupHistoryServing, Sendable
 {
     func loadStatus() async throws -> EngineStatus
 }
@@ -205,7 +242,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
     DuxSnapshotHistoryServing, DuxCleanupHistoryServing, DuxScanCoverageServing, HomeScanServing,
     Sendable
 {
-    fileprivate static let expectedFFIContractVersion: UInt32 = 26
+    fileprivate static let expectedFFIContractVersion: UInt32 = 27
     fileprivate static let expectedRecordVersion: UInt32 = 1
 
     private let state: EngineServiceState
@@ -502,6 +539,122 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
                 return update
             } catch let error as CleanupExclusionsError {
                 throw Self.cleanupExclusionsError(error)
+            }
+        }
+    }
+
+    func loadDirectCargoEnrollmentStatus() async throws
+        -> DirectCargoEnrollmentStatusModel
+    {
+        try await state.perform { state in
+            precondition(!Thread.isMainThread, "Blocking FFI work reached the main thread")
+            let engine = try Self.resolveDirectCargoEnrollmentEngine(state)
+            do {
+                return try Self.directCargoEnrollmentStatus(
+                    engine.directCargoEnrollmentStatus()
+                )
+            } catch let error as DirectCargoEnrollmentError {
+                throw Self.directCargoEnrollmentError(error)
+            }
+        }
+    }
+
+    func inspectDirectCargoExecutable(
+        _ selection: DirectCargoExecutableSelection
+    ) async throws -> any DuxDirectCargoEnrollmentPreviewLease {
+        try await state.perform { state in
+            precondition(!Thread.isMainThread, "Blocking FFI work reached the main thread")
+            guard DirectCargoExecutableSelection.isValidUnixCargoPath(
+                selection.encodedPathBytes
+            ) else {
+                throw DirectCargoEnrollmentServiceError.invalidExecutablePath
+            }
+            let engine = try Self.resolveDirectCargoEnrollmentEngine(state)
+            do {
+                let preview = try engine.inspectDirectCargoEnrollment(
+                    request: DirectCargoEnrollmentInspectionRequest(
+                        recordVersion: Self.expectedRecordVersion,
+                        pathEncoding: .unixBytes,
+                        executablePathBytes: selection.encodedPathBytes
+                    )
+                )
+                do {
+                    let info = try preview.info()
+                    let summary = try Self.directCargoEnrollmentPreview(info)
+                    guard summary.executable == selection else {
+                        throw DirectCargoEnrollmentServiceError.invalidResponse
+                    }
+                    return FFIDirectCargoEnrollmentPreviewLease(
+                        preview: preview,
+                        summary: summary,
+                        state: state
+                    )
+                } catch {
+                    _ = try? preview.release()
+                    throw error
+                }
+            } catch let error as DirectCargoEnrollmentError {
+                throw Self.directCargoEnrollmentError(error)
+            }
+        }
+    }
+
+    func enrollDirectCargo(
+        _ preview: any DuxDirectCargoEnrollmentPreviewLease
+    ) async throws -> DirectCargoEnrollmentUpdateModel {
+        try await state.perform { state in
+            precondition(!Thread.isMainThread, "Blocking FFI work reached the main thread")
+            guard let preview = preview as? FFIDirectCargoEnrollmentPreviewLease else {
+                throw DirectCargoEnrollmentServiceError.previewUnavailable
+            }
+            let engine = try Self.resolveDirectCargoEnrollmentEngine(state)
+            let ffiPreview = try preview.take(for: state)
+            let response: DirectCargoEnrollmentUpdate
+            do {
+                response = try engine.commitDirectCargoEnrollment(preview: ffiPreview)
+            } catch let error as DirectCargoEnrollmentError {
+                throw Self.directCargoEnrollmentError(error)
+            }
+            do {
+                let update = try Self.directCargoEnrollmentUpdate(response)
+                guard
+                    case let .enrolled(identity) = update.status.disposition,
+                    identity.executable == preview.preview.executable,
+                    identity.executableSHA256 == preview.preview.executableSHA256,
+                    identity.signature == preview.preview.signature
+                else {
+                    throw DirectCargoEnrollmentServiceError.outcomeUnknown
+                }
+                return update
+            } catch {
+                // The native commit returned, so any malformed or
+                // non-correlating projection is an uncertain mutation
+                // outcome rather than a safe-to-retry response error.
+                throw DirectCargoEnrollmentServiceError.outcomeUnknown
+            }
+        }
+    }
+
+    func revokeDirectCargoEnrollment() async throws -> DirectCargoEnrollmentUpdateModel {
+        try await state.perform { state in
+            precondition(!Thread.isMainThread, "Blocking FFI work reached the main thread")
+            let engine = try Self.resolveDirectCargoEnrollmentEngine(state)
+            let response: DirectCargoEnrollmentUpdate
+            do {
+                response = try engine.revokeDirectCargoEnrollment()
+            } catch let error as DirectCargoEnrollmentError {
+                throw Self.directCargoEnrollmentError(error)
+            }
+            do {
+                let update = try Self.directCargoEnrollmentUpdate(response)
+                guard update.status.disposition == .revoked else {
+                    throw DirectCargoEnrollmentServiceError.outcomeUnknown
+                }
+                return update
+            } catch {
+                // A returned native revoke may already be durable even when
+                // its projection cannot be trusted.
+                throw DirectCargoEnrollmentServiceError.outcomeUnknown
             }
         }
     }
@@ -1099,6 +1252,204 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         }
     }
 
+    private static func directCargoEnrollmentPreview(
+        _ info: DirectCargoEnrollmentPreviewInfo
+    ) throws -> DirectCargoEnrollmentPreviewModel {
+        guard info.recordVersion == expectedRecordVersion else {
+            throw DirectCargoEnrollmentServiceError.invalidResponse
+        }
+        return DirectCargoEnrollmentPreviewModel(
+            executable: try directCargoExecutable(info.executablePath),
+            executableSHA256: try directCargoSHA256(info.executableSha256),
+            signature: try directCargoSignature(info.codeSignature)
+        )
+    }
+
+    private static func directCargoEnrollmentStatus(
+        _ status: DirectCargoEnrollmentStatus
+    ) throws -> DirectCargoEnrollmentStatusModel {
+        guard status.recordVersion == expectedRecordVersion else {
+            throw DirectCargoEnrollmentServiceError.invalidResponse
+        }
+        let disposition: DirectCargoEnrollmentDisposition
+        switch status.state {
+        case .notEnrolled:
+            guard
+                status.revision == 0,
+                status.identity == nil,
+                status.updatedAtUnixMs == nil
+            else {
+                throw DirectCargoEnrollmentServiceError.invalidResponse
+            }
+            disposition = .notEnrolled
+        case .revoked:
+            guard
+                status.revision > 0,
+                status.identity == nil,
+                status.updatedAtUnixMs.map({ $0 >= 0 }) == true
+            else {
+                throw DirectCargoEnrollmentServiceError.invalidResponse
+            }
+            disposition = .revoked
+        case .enrolled:
+            guard
+                status.revision > 0,
+                let identity = status.identity,
+                status.updatedAtUnixMs.map({ $0 >= 0 }) == true
+            else {
+                throw DirectCargoEnrollmentServiceError.invalidResponse
+            }
+            disposition = .enrolled(try directCargoIdentity(identity))
+        }
+        return DirectCargoEnrollmentStatusModel(
+            revision: status.revision,
+            disposition: disposition,
+            updatedAtUnixMilliseconds: status.updatedAtUnixMs
+        )
+    }
+
+    private static func directCargoEnrollmentUpdate(
+        _ update: DirectCargoEnrollmentUpdate
+    ) throws -> DirectCargoEnrollmentUpdateModel {
+        guard update.recordVersion == expectedRecordVersion else {
+            throw DirectCargoEnrollmentServiceError.invalidResponse
+        }
+        return DirectCargoEnrollmentUpdateModel(
+            status: try directCargoEnrollmentStatus(update.status),
+            changed: update.changed
+        )
+    }
+
+    private static func directCargoIdentity(
+        _ identity: DirectCargoEnrollmentIdentity
+    ) throws -> DirectCargoEnrollmentIdentityModel {
+        guard
+            identity.recordVersion == expectedRecordVersion,
+            identity.cargoMajor == 1,
+            identity.cargoMinor == 96,
+            identity.cargoPatch == 0
+        else {
+            throw DirectCargoEnrollmentServiceError.invalidResponse
+        }
+        return DirectCargoEnrollmentIdentityModel(
+            executable: try directCargoExecutable(identity.executablePath),
+            executableSHA256: try directCargoSHA256(identity.executableSha256),
+            versionSHA256: try directCargoSHA256(identity.versionSha256),
+            version: DirectCargoVersion(
+                major: identity.cargoMajor,
+                minor: identity.cargoMinor,
+                patch: identity.cargoPatch
+            ),
+            signature: try directCargoSignature(identity.codeSignature)
+        )
+    }
+
+    private static func directCargoExecutable(
+        _ executable: DirectCargoExecutablePath
+    ) throws -> DirectCargoExecutableSelection {
+        guard
+            executable.encoding == .unixBytes,
+            DirectCargoExecutableSelection.isValidUnixCargoPath(executable.encodedBytes)
+        else {
+            throw DirectCargoEnrollmentServiceError.invalidResponse
+        }
+        return DirectCargoExecutableSelection(encodedPathBytes: executable.encodedBytes)
+    }
+
+    private static func directCargoSHA256(_ bytes: Data) throws -> Data {
+        guard bytes.count == 32 else {
+            throw DirectCargoEnrollmentServiceError.invalidResponse
+        }
+        return bytes
+    }
+
+    private static func directCargoSignature(
+        _ signature: DirectCargoCodeSignature
+    ) throws -> DirectCargoSignatureEvidence {
+        guard
+            signature.recordVersion == expectedRecordVersion,
+            (1 ... 16).contains(signature.codeDirectoryHashes.count),
+            DirectCargoSignatureEvidence.hasSafeBoundedIdentifier(
+                signature.signingIdentifier,
+                maximumUTF8Bytes: 512
+            ),
+            signature.teamIdentifier.map({
+                DirectCargoSignatureEvidence.hasSafeBoundedIdentifier(
+                    $0,
+                    maximumUTF8Bytes: 128
+                )
+            }) ?? true,
+            signature.designatedRequirementSha256.map({ $0.count == 32 }) ?? true
+        else {
+            throw DirectCargoEnrollmentServiceError.invalidResponse
+        }
+        let hashes = try signature.codeDirectoryHashes.map { hash -> Data in
+            guard
+                hash.recordVersion == expectedRecordVersion,
+                (20 ... 64).contains(hash.bytes.count)
+            else {
+                throw DirectCargoEnrollmentServiceError.invalidResponse
+            }
+            return hash.bytes
+        }
+        guard zip(hashes, hashes.dropFirst()).allSatisfy({
+            $0.0.lexicographicallyPrecedes($0.1)
+        }) else {
+            throw DirectCargoEnrollmentServiceError.invalidResponse
+        }
+        let kind: DirectCargoSignatureKind
+        switch signature.class {
+        case .adHoc:
+            guard signature.flags & 0x2 != 0, signature.teamIdentifier == nil else {
+                throw DirectCargoEnrollmentServiceError.invalidResponse
+            }
+            kind = .adHoc
+        case .cms:
+            guard signature.flags & 0x2 == 0 else {
+                throw DirectCargoEnrollmentServiceError.invalidResponse
+            }
+            kind = .cms
+        }
+        return DirectCargoSignatureEvidence(
+            kind: kind,
+            flags: signature.flags,
+            codeDirectoryHashes: hashes,
+            signingIdentifier: signature.signingIdentifier,
+            teamIdentifier: signature.teamIdentifier,
+            designatedRequirementSHA256: signature.designatedRequirementSha256
+        )
+    }
+
+    private static func directCargoEnrollmentError(
+        _ error: DirectCargoEnrollmentError
+    ) -> DirectCargoEnrollmentServiceError {
+        switch error {
+        case .Closed: .closed
+        case .UnsupportedPlatform: .unsupportedPlatform
+        case .InvalidRecordVersion: .invalidRecordVersion
+        case .InvalidExecutablePath: .invalidExecutablePath
+        case .ExecutableNotRegular: .executableNotRegular
+        case .ChangedDuringInspection: .changedDuringInspection
+        case .InspectionUnavailable: .inspectionUnavailable
+        case .InspectionLimitExceeded: .inspectionLimitExceeded
+        case .InvalidResolutionEnvironment: .invalidResolutionEnvironment
+        case .InvalidCargoVersion: .invalidCargoVersion
+        case .InvalidCodeSignature: .invalidCodeSignature
+        case .WrongEngine: .wrongEngine
+        case .PreviewUnavailable: .previewUnavailable
+        case .RevisionExhausted: .revisionExhausted
+        case .InvalidClock: .invalidClock
+        case .IncompatibleSchema: .incompatibleSchema
+        case .Busy: .retryable
+        case .UnsafeStorage: .unsafeStorage
+        case .BudgetExceeded: .budgetExceeded
+        case .CorruptData: .corruptData
+        case .Unavailable: .unavailable
+        case .OutcomeUnknown: .outcomeUnknown
+        case .InternalState: .internalState
+        }
+    }
+
     fileprivate static func homeScanServiceError(_ error: ScanError) -> HomeScanServiceError {
         switch error {
         case .Closed: .closed
@@ -1189,6 +1540,23 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
             case .invalidCapacityObservation, .conflictingCapacityObservation,
                  .supersededCapacityObservation, .unexpected:
                 CleanupExclusionsServiceError.invalidResponse
+            }
+        }
+    }
+
+    private static func resolveDirectCargoEnrollmentEngine(
+        _ state: EngineServiceState
+    ) throws -> DuxEngine {
+        do {
+            return try state.resolveEngine()
+        } catch let error as EngineServiceError {
+            throw switch error {
+            case .closed: DirectCargoEnrollmentServiceError.closed
+            case .retryable: DirectCargoEnrollmentServiceError.retryable
+            case .unavailable: DirectCargoEnrollmentServiceError.unavailable
+            case .invalidCapacityObservation, .conflictingCapacityObservation,
+                 .supersededCapacityObservation, .unexpected:
+                DirectCargoEnrollmentServiceError.invalidResponse
             }
         }
     }
@@ -1439,6 +1807,48 @@ private final class EngineServiceState: @unchecked Sendable {
             let result = state.engine?.close() ?? true
             state.closeResult = result
             return result
+        }
+    }
+}
+
+private final class FFIDirectCargoEnrollmentPreviewLease:
+    DuxDirectCargoEnrollmentPreviewLease, @unchecked Sendable
+{
+    let preview: DirectCargoEnrollmentPreviewModel
+
+    private let ffiPreview: DirectCargoEnrollmentPreviewSession
+    private let state: EngineServiceState
+    private var isAvailable = true
+
+    init(
+        preview: DirectCargoEnrollmentPreviewSession,
+        summary: DirectCargoEnrollmentPreviewModel,
+        state: EngineServiceState
+    ) {
+        ffiPreview = preview
+        self.preview = summary
+        self.state = state
+    }
+
+    fileprivate func take(
+        for expectedState: EngineServiceState
+    ) throws -> DirectCargoEnrollmentPreviewSession {
+        dispatchPrecondition(condition: .onQueue(state.queue))
+        guard state === expectedState, isAvailable else {
+            throw DirectCargoEnrollmentServiceError.previewUnavailable
+        }
+        isAvailable = false
+        return ffiPreview
+    }
+
+    func release() async {
+        let ffiPreview = ffiPreview
+        await state.performNonthrowing { [self] _ in
+            guard isAvailable else {
+                return
+            }
+            isAvailable = false
+            _ = try? ffiPreview.release()
         }
     }
 }

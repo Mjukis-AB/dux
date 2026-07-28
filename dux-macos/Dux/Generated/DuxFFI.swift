@@ -577,6 +577,156 @@ fileprivate struct FfiConverterData: FfiConverterRustBuffer {
 
 
 
+/**
+ * Engine-bound, consume-once inspection capability. The object carries only
+ * Cargo discovery enrollment authority; it cannot create or execute cleanup.
+ */
+public protocol DirectCargoEnrollmentPreviewSessionProtocol: AnyObject, Sendable {
+
+    /**
+     * Return immutable static inspection evidence while this preview remains
+     * available. No selected executable bytes are run by this call.
+     */
+    func info() throws  -> DirectCargoEnrollmentPreviewInfo
+
+    /**
+     * Explicitly discard this preview. Releasing an already consumed or
+     * released preview is an idempotent no-op.
+     */
+    func release() throws  -> DirectCargoEnrollmentPreviewReleaseOutcome
+
+}
+/**
+ * Engine-bound, consume-once inspection capability. The object carries only
+ * Cargo discovery enrollment authority; it cannot create or execute cleanup.
+ */
+open class DirectCargoEnrollmentPreviewSession: DirectCargoEnrollmentPreviewSessionProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_dux_ffi_fn_clone_directcargoenrollmentpreviewsession(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_dux_ffi_fn_free_directcargoenrollmentpreviewsession(handle, $0) }
+    }
+
+
+
+
+    /**
+     * Return immutable static inspection evidence while this preview remains
+     * available. No selected executable bytes are run by this call.
+     */
+open func info()throws  -> DirectCargoEnrollmentPreviewInfo  {
+    return try  FfiConverterTypeDirectCargoEnrollmentPreviewInfo_lift(try rustCallWithError(FfiConverterTypeDirectCargoEnrollmentError_lift) {
+    uniffi_dux_ffi_fn_method_directcargoenrollmentpreviewsession_info(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+    /**
+     * Explicitly discard this preview. Releasing an already consumed or
+     * released preview is an idempotent no-op.
+     */
+open func release()throws  -> DirectCargoEnrollmentPreviewReleaseOutcome  {
+    return try  FfiConverterTypeDirectCargoEnrollmentPreviewReleaseOutcome_lift(try rustCallWithError(FfiConverterTypeDirectCargoEnrollmentError_lift) {
+    uniffi_dux_ffi_fn_method_directcargoenrollmentpreviewsession_release(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+
+
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDirectCargoEnrollmentPreviewSession: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = DirectCargoEnrollmentPreviewSession
+
+    public static func lift(_ handle: UInt64) throws -> DirectCargoEnrollmentPreviewSession {
+        return DirectCargoEnrollmentPreviewSession(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: DirectCargoEnrollmentPreviewSession) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DirectCargoEnrollmentPreviewSession {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: DirectCargoEnrollmentPreviewSession, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDirectCargoEnrollmentPreviewSession_lift(_ handle: UInt64) throws -> DirectCargoEnrollmentPreviewSession {
+    return try FfiConverterTypeDirectCargoEnrollmentPreviewSession.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDirectCargoEnrollmentPreviewSession_lower(_ value: DirectCargoEnrollmentPreviewSession) -> UInt64 {
+    return FfiConverterTypeDirectCargoEnrollmentPreviewSession.lower(value)
+}
+
+
+
+
+
+
 public protocol DuxEngineProtocol: AnyObject, Sendable {
 
     func acquireExplorerSnapshotReview(scanId: String) throws  -> SnapshotReviewSession
@@ -589,6 +739,19 @@ public protocol DuxEngineProtocol: AnyObject, Sendable {
      * first call's final observation without reopening storage.
      */
     func close()  -> Bool
+
+    /**
+     * Consume one preview from this exact engine and persist its identity.
+     * Consumption happens before core validation, so a stale or failed
+     * preview cannot be retried through the same foreign object.
+     */
+    func commitDirectCargoEnrollment(preview: DirectCargoEnrollmentPreviewSession) throws  -> DirectCargoEnrollmentUpdate
+
+    /**
+     * Return the revisioned direct-Cargo discovery enrollment. This endpoint
+     * exposes observation DTOs only and cannot create cleanup authority.
+     */
+    func directCargoEnrollmentStatus() throws  -> DirectCargoEnrollmentStatus
 
     /**
      * Execute one explicit Explorer Trash selection. Rust resolves and
@@ -622,6 +785,13 @@ public protocol DuxEngineProtocol: AnyObject, Sendable {
      */
     func getPermanentCleanupPolicy() throws  -> PermanentCleanupPolicyStatus
 
+    /**
+     * Statically inspect one exact Cargo file and return an engine-bound,
+     * consume-once preview. Inspection does not run the selected bytes or
+     * change durable enrollment.
+     */
+    func inspectDirectCargoEnrollment(request: DirectCargoEnrollmentInspectionRequest) throws  -> DirectCargoEnrollmentPreviewSession
+
     func libraryVersion() throws  -> LibraryVersion
 
     func observeStartupVolume(observation: StartupVolumeObservation) throws  -> StartupVolumeStatus
@@ -647,6 +817,12 @@ public protocol DuxEngineProtocol: AnyObject, Sendable {
     func resetDiskPressurePolicy() throws  -> PressurePolicyUpdate
 
     func resetPermanentCleanup() throws  -> PermanentCleanupPolicyUpdate
+
+    /**
+     * Revoke any active discovery enrollment and retain core's revisioned
+     * tombstone. Previously issued previews become stale in core.
+     */
+    func revokeDirectCargoEnrollment() throws  -> DirectCargoEnrollmentUpdate
 
     /**
      * Return one exact, bounded page of durable coverage issues. This reads
@@ -770,6 +946,32 @@ open func close() -> Bool  {
 }
 
     /**
+     * Consume one preview from this exact engine and persist its identity.
+     * Consumption happens before core validation, so a stale or failed
+     * preview cannot be retried through the same foreign object.
+     */
+open func commitDirectCargoEnrollment(preview: DirectCargoEnrollmentPreviewSession)throws  -> DirectCargoEnrollmentUpdate  {
+    return try  FfiConverterTypeDirectCargoEnrollmentUpdate_lift(try rustCallWithError(FfiConverterTypeDirectCargoEnrollmentError_lift) {
+    uniffi_dux_ffi_fn_method_duxengine_commit_direct_cargo_enrollment(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeDirectCargoEnrollmentPreviewSession_lower(preview),$0
+    )
+})
+}
+
+    /**
+     * Return the revisioned direct-Cargo discovery enrollment. This endpoint
+     * exposes observation DTOs only and cannot create cleanup authority.
+     */
+open func directCargoEnrollmentStatus()throws  -> DirectCargoEnrollmentStatus  {
+    return try  FfiConverterTypeDirectCargoEnrollmentStatus_lift(try rustCallWithError(FfiConverterTypeDirectCargoEnrollmentError_lift) {
+    uniffi_dux_ffi_fn_method_duxengine_direct_cargo_enrollment_status(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+    /**
      * Execute one explicit Explorer Trash selection. Rust resolves and
      * revalidates the retained node, creates the bounded journal row, and
      * fences the one-shot callback. Swift cannot supply a path or retry a
@@ -842,6 +1044,20 @@ open func getPermanentCleanupPolicy()throws  -> PermanentCleanupPolicyStatus  {
 })
 }
 
+    /**
+     * Statically inspect one exact Cargo file and return an engine-bound,
+     * consume-once preview. Inspection does not run the selected bytes or
+     * change durable enrollment.
+     */
+open func inspectDirectCargoEnrollment(request: DirectCargoEnrollmentInspectionRequest)throws  -> DirectCargoEnrollmentPreviewSession  {
+    return try  FfiConverterTypeDirectCargoEnrollmentPreviewSession_lift(try rustCallWithError(FfiConverterTypeDirectCargoEnrollmentError_lift) {
+    uniffi_dux_ffi_fn_method_duxengine_inspect_direct_cargo_enrollment(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeDirectCargoEnrollmentInspectionRequest_lower(request),$0
+    )
+})
+}
+
 open func libraryVersion()throws  -> LibraryVersion  {
     return try  FfiConverterTypeLibraryVersion_lift(try rustCallWithError(FfiConverterTypeEngineError_lift) {
     uniffi_dux_ffi_fn_method_duxengine_library_version(
@@ -909,6 +1125,18 @@ open func resetDiskPressurePolicy()throws  -> PressurePolicyUpdate  {
 open func resetPermanentCleanup()throws  -> PermanentCleanupPolicyUpdate  {
     return try  FfiConverterTypePermanentCleanupPolicyUpdate_lift(try rustCallWithError(FfiConverterTypePermanentCleanupPolicyError_lift) {
     uniffi_dux_ffi_fn_method_duxengine_reset_permanent_cleanup(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+    /**
+     * Revoke any active discovery enrollment and retain core's revisioned
+     * tombstone. Previously issued previews become stale in core.
+     */
+open func revokeDirectCargoEnrollment()throws  -> DirectCargoEnrollmentUpdate  {
+    return try  FfiConverterTypeDirectCargoEnrollmentUpdate_lift(try rustCallWithError(FfiConverterTypeDirectCargoEnrollmentError_lift) {
+    uniffi_dux_ffi_fn_method_duxengine_revoke_direct_cargo_enrollment(
             self.uniffiCloneHandle(),$0
     )
 })
@@ -3187,6 +3415,537 @@ public func FfiConverterTypeCleanupStatusCounts_lift(_ buf: RustBuffer) throws -
 #endif
 public func FfiConverterTypeCleanupStatusCounts_lower(_ value: CleanupStatusCounts) -> RustBuffer {
     return FfiConverterTypeCleanupStatusCounts.lower(value)
+}
+
+
+/**
+ * One bounded Code Directory digest from macOS static-code inspection.
+ */
+public struct DirectCargoCodeDirectoryHash: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let bytes: Data
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, bytes: Data) {
+        self.recordVersion = recordVersion
+        self.bytes = bytes
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension DirectCargoCodeDirectoryHash: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDirectCargoCodeDirectoryHash: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DirectCargoCodeDirectoryHash {
+        return
+            try DirectCargoCodeDirectoryHash(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                bytes: FfiConverterData.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: DirectCargoCodeDirectoryHash, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterData.write(value.bytes, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDirectCargoCodeDirectoryHash_lift(_ buf: RustBuffer) throws -> DirectCargoCodeDirectoryHash {
+    return try FfiConverterTypeDirectCargoCodeDirectoryHash.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDirectCargoCodeDirectoryHash_lower(_ value: DirectCargoCodeDirectoryHash) -> RustBuffer {
+    return FfiConverterTypeDirectCargoCodeDirectoryHash.lower(value)
+}
+
+
+/**
+ * Exact bounded static-code evidence. This proves local byte identity, not a
+ * publisher identity and not cleanup authority.
+ */
+public struct DirectCargoCodeSignature: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let `class`: DirectCargoSignatureClass
+    public let flags: UInt32
+    public let codeDirectoryHashes: [DirectCargoCodeDirectoryHash]
+    public let signingIdentifier: String
+    public let teamIdentifier: String?
+    public let designatedRequirementSha256: Data?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, `class`: DirectCargoSignatureClass, flags: UInt32, codeDirectoryHashes: [DirectCargoCodeDirectoryHash], signingIdentifier: String, teamIdentifier: String?, designatedRequirementSha256: Data?) {
+        self.recordVersion = recordVersion
+        self.`class` = `class`
+        self.flags = flags
+        self.codeDirectoryHashes = codeDirectoryHashes
+        self.signingIdentifier = signingIdentifier
+        self.teamIdentifier = teamIdentifier
+        self.designatedRequirementSha256 = designatedRequirementSha256
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension DirectCargoCodeSignature: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDirectCargoCodeSignature: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DirectCargoCodeSignature {
+        return
+            try DirectCargoCodeSignature(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                class: FfiConverterTypeDirectCargoSignatureClass.read(from: &buf),
+                flags: FfiConverterUInt32.read(from: &buf),
+                codeDirectoryHashes: FfiConverterSequenceTypeDirectCargoCodeDirectoryHash.read(from: &buf),
+                signingIdentifier: FfiConverterString.read(from: &buf),
+                teamIdentifier: FfiConverterOptionString.read(from: &buf),
+                designatedRequirementSha256: FfiConverterOptionData.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: DirectCargoCodeSignature, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterTypeDirectCargoSignatureClass.write(value.`class`, into: &buf)
+        FfiConverterUInt32.write(value.flags, into: &buf)
+        FfiConverterSequenceTypeDirectCargoCodeDirectoryHash.write(value.codeDirectoryHashes, into: &buf)
+        FfiConverterString.write(value.signingIdentifier, into: &buf)
+        FfiConverterOptionString.write(value.teamIdentifier, into: &buf)
+        FfiConverterOptionData.write(value.designatedRequirementSha256, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDirectCargoCodeSignature_lift(_ buf: RustBuffer) throws -> DirectCargoCodeSignature {
+    return try FfiConverterTypeDirectCargoCodeSignature.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDirectCargoCodeSignature_lower(_ value: DirectCargoCodeSignature) -> RustBuffer {
+    return FfiConverterTypeDirectCargoCodeSignature.lower(value)
+}
+
+
+/**
+ * Exact enrolled identity. It grants permission to use this Cargo only for
+ * deterministic discovery and cannot name or authorize a cleanup target.
+ */
+public struct DirectCargoEnrollmentIdentity: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let executablePath: DirectCargoExecutablePath
+    public let executableSha256: Data
+    public let versionSha256: Data
+    public let cargoMajor: UInt32
+    public let cargoMinor: UInt32
+    public let cargoPatch: UInt32
+    public let codeSignature: DirectCargoCodeSignature
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, executablePath: DirectCargoExecutablePath, executableSha256: Data, versionSha256: Data, cargoMajor: UInt32, cargoMinor: UInt32, cargoPatch: UInt32, codeSignature: DirectCargoCodeSignature) {
+        self.recordVersion = recordVersion
+        self.executablePath = executablePath
+        self.executableSha256 = executableSha256
+        self.versionSha256 = versionSha256
+        self.cargoMajor = cargoMajor
+        self.cargoMinor = cargoMinor
+        self.cargoPatch = cargoPatch
+        self.codeSignature = codeSignature
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension DirectCargoEnrollmentIdentity: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDirectCargoEnrollmentIdentity: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DirectCargoEnrollmentIdentity {
+        return
+            try DirectCargoEnrollmentIdentity(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                executablePath: FfiConverterTypeDirectCargoExecutablePath.read(from: &buf),
+                executableSha256: FfiConverterData.read(from: &buf),
+                versionSha256: FfiConverterData.read(from: &buf),
+                cargoMajor: FfiConverterUInt32.read(from: &buf),
+                cargoMinor: FfiConverterUInt32.read(from: &buf),
+                cargoPatch: FfiConverterUInt32.read(from: &buf),
+                codeSignature: FfiConverterTypeDirectCargoCodeSignature.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: DirectCargoEnrollmentIdentity, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterTypeDirectCargoExecutablePath.write(value.executablePath, into: &buf)
+        FfiConverterData.write(value.executableSha256, into: &buf)
+        FfiConverterData.write(value.versionSha256, into: &buf)
+        FfiConverterUInt32.write(value.cargoMajor, into: &buf)
+        FfiConverterUInt32.write(value.cargoMinor, into: &buf)
+        FfiConverterUInt32.write(value.cargoPatch, into: &buf)
+        FfiConverterTypeDirectCargoCodeSignature.write(value.codeSignature, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDirectCargoEnrollmentIdentity_lift(_ buf: RustBuffer) throws -> DirectCargoEnrollmentIdentity {
+    return try FfiConverterTypeDirectCargoEnrollmentIdentity.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDirectCargoEnrollmentIdentity_lower(_ value: DirectCargoEnrollmentIdentity) -> RustBuffer {
+    return FfiConverterTypeDirectCargoEnrollmentIdentity.lower(value)
+}
+
+
+/**
+ * Versioned request to inspect one exact Cargo executable without changing
+ * durable settings. The adapter accepts no PATH lookup or command text.
+ */
+public struct DirectCargoEnrollmentInspectionRequest: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let pathEncoding: SnapshotNameEncoding
+    public let executablePathBytes: Data
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, pathEncoding: SnapshotNameEncoding, executablePathBytes: Data) {
+        self.recordVersion = recordVersion
+        self.pathEncoding = pathEncoding
+        self.executablePathBytes = executablePathBytes
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension DirectCargoEnrollmentInspectionRequest: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDirectCargoEnrollmentInspectionRequest: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DirectCargoEnrollmentInspectionRequest {
+        return
+            try DirectCargoEnrollmentInspectionRequest(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                pathEncoding: FfiConverterTypeSnapshotNameEncoding.read(from: &buf),
+                executablePathBytes: FfiConverterData.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: DirectCargoEnrollmentInspectionRequest, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterTypeSnapshotNameEncoding.write(value.pathEncoding, into: &buf)
+        FfiConverterData.write(value.executablePathBytes, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDirectCargoEnrollmentInspectionRequest_lift(_ buf: RustBuffer) throws -> DirectCargoEnrollmentInspectionRequest {
+    return try FfiConverterTypeDirectCargoEnrollmentInspectionRequest.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDirectCargoEnrollmentInspectionRequest_lower(_ value: DirectCargoEnrollmentInspectionRequest) -> RustBuffer {
+    return FfiConverterTypeDirectCargoEnrollmentInspectionRequest.lower(value)
+}
+
+
+/**
+ * Read-only evidence held by an opaque inspection session until it is either
+ * consumed by enrollment or explicitly released.
+ */
+public struct DirectCargoEnrollmentPreviewInfo: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let executablePath: DirectCargoExecutablePath
+    public let executableSha256: Data
+    public let codeSignature: DirectCargoCodeSignature
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, executablePath: DirectCargoExecutablePath, executableSha256: Data, codeSignature: DirectCargoCodeSignature) {
+        self.recordVersion = recordVersion
+        self.executablePath = executablePath
+        self.executableSha256 = executableSha256
+        self.codeSignature = codeSignature
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension DirectCargoEnrollmentPreviewInfo: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDirectCargoEnrollmentPreviewInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DirectCargoEnrollmentPreviewInfo {
+        return
+            try DirectCargoEnrollmentPreviewInfo(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                executablePath: FfiConverterTypeDirectCargoExecutablePath.read(from: &buf),
+                executableSha256: FfiConverterData.read(from: &buf),
+                codeSignature: FfiConverterTypeDirectCargoCodeSignature.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: DirectCargoEnrollmentPreviewInfo, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterTypeDirectCargoExecutablePath.write(value.executablePath, into: &buf)
+        FfiConverterData.write(value.executableSha256, into: &buf)
+        FfiConverterTypeDirectCargoCodeSignature.write(value.codeSignature, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDirectCargoEnrollmentPreviewInfo_lift(_ buf: RustBuffer) throws -> DirectCargoEnrollmentPreviewInfo {
+    return try FfiConverterTypeDirectCargoEnrollmentPreviewInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDirectCargoEnrollmentPreviewInfo_lower(_ value: DirectCargoEnrollmentPreviewInfo) -> RustBuffer {
+    return FfiConverterTypeDirectCargoEnrollmentPreviewInfo.lower(value)
+}
+
+
+/**
+ * Revisioned durable enrollment state. `identity` is present exactly for the
+ * Enrolled state.
+ */
+public struct DirectCargoEnrollmentStatus: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let revision: UInt64
+    public let state: DirectCargoEnrollmentState
+    public let identity: DirectCargoEnrollmentIdentity?
+    public let updatedAtUnixMs: Int64?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, revision: UInt64, state: DirectCargoEnrollmentState, identity: DirectCargoEnrollmentIdentity?, updatedAtUnixMs: Int64?) {
+        self.recordVersion = recordVersion
+        self.revision = revision
+        self.state = state
+        self.identity = identity
+        self.updatedAtUnixMs = updatedAtUnixMs
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension DirectCargoEnrollmentStatus: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDirectCargoEnrollmentStatus: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DirectCargoEnrollmentStatus {
+        return
+            try DirectCargoEnrollmentStatus(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                revision: FfiConverterUInt64.read(from: &buf),
+                state: FfiConverterTypeDirectCargoEnrollmentState.read(from: &buf),
+                identity: FfiConverterOptionTypeDirectCargoEnrollmentIdentity.read(from: &buf),
+                updatedAtUnixMs: FfiConverterOptionInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: DirectCargoEnrollmentStatus, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterUInt64.write(value.revision, into: &buf)
+        FfiConverterTypeDirectCargoEnrollmentState.write(value.state, into: &buf)
+        FfiConverterOptionTypeDirectCargoEnrollmentIdentity.write(value.identity, into: &buf)
+        FfiConverterOptionInt64.write(value.updatedAtUnixMs, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDirectCargoEnrollmentStatus_lift(_ buf: RustBuffer) throws -> DirectCargoEnrollmentStatus {
+    return try FfiConverterTypeDirectCargoEnrollmentStatus.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDirectCargoEnrollmentStatus_lower(_ value: DirectCargoEnrollmentStatus) -> RustBuffer {
+    return FfiConverterTypeDirectCargoEnrollmentStatus.lower(value)
+}
+
+
+public struct DirectCargoEnrollmentUpdate: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let status: DirectCargoEnrollmentStatus
+    public let changed: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, status: DirectCargoEnrollmentStatus, changed: Bool) {
+        self.recordVersion = recordVersion
+        self.status = status
+        self.changed = changed
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension DirectCargoEnrollmentUpdate: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDirectCargoEnrollmentUpdate: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DirectCargoEnrollmentUpdate {
+        return
+            try DirectCargoEnrollmentUpdate(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                status: FfiConverterTypeDirectCargoEnrollmentStatus.read(from: &buf),
+                changed: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: DirectCargoEnrollmentUpdate, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterTypeDirectCargoEnrollmentStatus.write(value.status, into: &buf)
+        FfiConverterBool.write(value.changed, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDirectCargoEnrollmentUpdate_lift(_ buf: RustBuffer) throws -> DirectCargoEnrollmentUpdate {
+    return try FfiConverterTypeDirectCargoEnrollmentUpdate.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDirectCargoEnrollmentUpdate_lower(_ value: DirectCargoEnrollmentUpdate) -> RustBuffer {
+    return FfiConverterTypeDirectCargoEnrollmentUpdate.lower(value)
+}
+
+
+/**
+ * Lossless host path for one explicitly chosen Cargo executable. These bytes
+ * identify discovery tooling only; they are never a cleanup target.
+ */
+public struct DirectCargoExecutablePath: Equatable, Hashable {
+    public let encoding: SnapshotNameEncoding
+    public let encodedBytes: Data
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(encoding: SnapshotNameEncoding, encodedBytes: Data) {
+        self.encoding = encoding
+        self.encodedBytes = encodedBytes
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension DirectCargoExecutablePath: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDirectCargoExecutablePath: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DirectCargoExecutablePath {
+        return
+            try DirectCargoExecutablePath(
+                encoding: FfiConverterTypeSnapshotNameEncoding.read(from: &buf),
+                encodedBytes: FfiConverterData.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: DirectCargoExecutablePath, into buf: inout [UInt8]) {
+        FfiConverterTypeSnapshotNameEncoding.write(value.encoding, into: &buf)
+        FfiConverterData.write(value.encodedBytes, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDirectCargoExecutablePath_lift(_ buf: RustBuffer) throws -> DirectCargoExecutablePath {
+    return try FfiConverterTypeDirectCargoExecutablePath.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDirectCargoExecutablePath_lower(_ value: DirectCargoExecutablePath) -> RustBuffer {
+    return FfiConverterTypeDirectCargoExecutablePath.lower(value)
 }
 
 
@@ -7917,6 +8676,416 @@ public func FfiConverterTypeCleanupWarning_lower(_ value: CleanupWarning) -> Rus
 
 
 
+public enum DirectCargoEnrollmentError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
+
+
+
+    case Closed
+    case UnsupportedPlatform
+    case InvalidRecordVersion
+    case InvalidExecutablePath
+    case ExecutableNotRegular
+    case ChangedDuringInspection
+    case InspectionUnavailable
+    case InspectionLimitExceeded
+    case InvalidResolutionEnvironment
+    case InvalidCargoVersion
+    case InvalidCodeSignature
+    case WrongEngine
+    case PreviewUnavailable
+    case RevisionExhausted
+    case InvalidClock
+    case IncompatibleSchema
+    case Busy
+    case UnsafeStorage
+    case BudgetExceeded
+    case CorruptData
+    case Unavailable
+    case OutcomeUnknown
+    case InternalState
+
+
+
+
+
+
+    public var errorDescription: String? {
+        String(reflecting: self)
+    }
+
+}
+
+#if compiler(>=6)
+extension DirectCargoEnrollmentError: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDirectCargoEnrollmentError: FfiConverterRustBuffer {
+    typealias SwiftType = DirectCargoEnrollmentError
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DirectCargoEnrollmentError {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+
+
+
+        case 1: return .Closed
+        case 2: return .UnsupportedPlatform
+        case 3: return .InvalidRecordVersion
+        case 4: return .InvalidExecutablePath
+        case 5: return .ExecutableNotRegular
+        case 6: return .ChangedDuringInspection
+        case 7: return .InspectionUnavailable
+        case 8: return .InspectionLimitExceeded
+        case 9: return .InvalidResolutionEnvironment
+        case 10: return .InvalidCargoVersion
+        case 11: return .InvalidCodeSignature
+        case 12: return .WrongEngine
+        case 13: return .PreviewUnavailable
+        case 14: return .RevisionExhausted
+        case 15: return .InvalidClock
+        case 16: return .IncompatibleSchema
+        case 17: return .Busy
+        case 18: return .UnsafeStorage
+        case 19: return .BudgetExceeded
+        case 20: return .CorruptData
+        case 21: return .Unavailable
+        case 22: return .OutcomeUnknown
+        case 23: return .InternalState
+
+         default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: DirectCargoEnrollmentError, into buf: inout [UInt8]) {
+        switch value {
+
+
+
+
+
+        case .Closed:
+            writeInt(&buf, Int32(1))
+
+
+        case .UnsupportedPlatform:
+            writeInt(&buf, Int32(2))
+
+
+        case .InvalidRecordVersion:
+            writeInt(&buf, Int32(3))
+
+
+        case .InvalidExecutablePath:
+            writeInt(&buf, Int32(4))
+
+
+        case .ExecutableNotRegular:
+            writeInt(&buf, Int32(5))
+
+
+        case .ChangedDuringInspection:
+            writeInt(&buf, Int32(6))
+
+
+        case .InspectionUnavailable:
+            writeInt(&buf, Int32(7))
+
+
+        case .InspectionLimitExceeded:
+            writeInt(&buf, Int32(8))
+
+
+        case .InvalidResolutionEnvironment:
+            writeInt(&buf, Int32(9))
+
+
+        case .InvalidCargoVersion:
+            writeInt(&buf, Int32(10))
+
+
+        case .InvalidCodeSignature:
+            writeInt(&buf, Int32(11))
+
+
+        case .WrongEngine:
+            writeInt(&buf, Int32(12))
+
+
+        case .PreviewUnavailable:
+            writeInt(&buf, Int32(13))
+
+
+        case .RevisionExhausted:
+            writeInt(&buf, Int32(14))
+
+
+        case .InvalidClock:
+            writeInt(&buf, Int32(15))
+
+
+        case .IncompatibleSchema:
+            writeInt(&buf, Int32(16))
+
+
+        case .Busy:
+            writeInt(&buf, Int32(17))
+
+
+        case .UnsafeStorage:
+            writeInt(&buf, Int32(18))
+
+
+        case .BudgetExceeded:
+            writeInt(&buf, Int32(19))
+
+
+        case .CorruptData:
+            writeInt(&buf, Int32(20))
+
+
+        case .Unavailable:
+            writeInt(&buf, Int32(21))
+
+
+        case .OutcomeUnknown:
+            writeInt(&buf, Int32(22))
+
+
+        case .InternalState:
+            writeInt(&buf, Int32(23))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDirectCargoEnrollmentError_lift(_ buf: RustBuffer) throws -> DirectCargoEnrollmentError {
+    return try FfiConverterTypeDirectCargoEnrollmentError.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDirectCargoEnrollmentError_lower(_ value: DirectCargoEnrollmentError) -> RustBuffer {
+    return FfiConverterTypeDirectCargoEnrollmentError.lower(value)
+}
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum DirectCargoEnrollmentPreviewReleaseOutcome: Equatable, Hashable {
+
+    case released
+    case alreadyUnavailable
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension DirectCargoEnrollmentPreviewReleaseOutcome: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDirectCargoEnrollmentPreviewReleaseOutcome: FfiConverterRustBuffer {
+    typealias SwiftType = DirectCargoEnrollmentPreviewReleaseOutcome
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DirectCargoEnrollmentPreviewReleaseOutcome {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .released
+
+        case 2: return .alreadyUnavailable
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: DirectCargoEnrollmentPreviewReleaseOutcome, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .released:
+            writeInt(&buf, Int32(1))
+
+
+        case .alreadyUnavailable:
+            writeInt(&buf, Int32(2))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDirectCargoEnrollmentPreviewReleaseOutcome_lift(_ buf: RustBuffer) throws -> DirectCargoEnrollmentPreviewReleaseOutcome {
+    return try FfiConverterTypeDirectCargoEnrollmentPreviewReleaseOutcome.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDirectCargoEnrollmentPreviewReleaseOutcome_lower(_ value: DirectCargoEnrollmentPreviewReleaseOutcome) -> RustBuffer {
+    return FfiConverterTypeDirectCargoEnrollmentPreviewReleaseOutcome.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum DirectCargoEnrollmentState: Equatable, Hashable {
+
+    case notEnrolled
+    case enrolled
+    case revoked
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension DirectCargoEnrollmentState: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDirectCargoEnrollmentState: FfiConverterRustBuffer {
+    typealias SwiftType = DirectCargoEnrollmentState
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DirectCargoEnrollmentState {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .notEnrolled
+
+        case 2: return .enrolled
+
+        case 3: return .revoked
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: DirectCargoEnrollmentState, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .notEnrolled:
+            writeInt(&buf, Int32(1))
+
+
+        case .enrolled:
+            writeInt(&buf, Int32(2))
+
+
+        case .revoked:
+            writeInt(&buf, Int32(3))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDirectCargoEnrollmentState_lift(_ buf: RustBuffer) throws -> DirectCargoEnrollmentState {
+    return try FfiConverterTypeDirectCargoEnrollmentState.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDirectCargoEnrollmentState_lower(_ value: DirectCargoEnrollmentState) -> RustBuffer {
+    return FfiConverterTypeDirectCargoEnrollmentState.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum DirectCargoSignatureClass: Equatable, Hashable {
+
+    case adHoc
+    case cms
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension DirectCargoSignatureClass: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDirectCargoSignatureClass: FfiConverterRustBuffer {
+    typealias SwiftType = DirectCargoSignatureClass
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DirectCargoSignatureClass {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .adHoc
+
+        case 2: return .cms
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: DirectCargoSignatureClass, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .adHoc:
+            writeInt(&buf, Int32(1))
+
+
+        case .cms:
+            writeInt(&buf, Int32(2))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDirectCargoSignatureClass_lift(_ buf: RustBuffer) throws -> DirectCargoSignatureClass {
+    return try FfiConverterTypeDirectCargoSignatureClass.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDirectCargoSignatureClass_lower(_ value: DirectCargoSignatureClass) -> RustBuffer {
+    return FfiConverterTypeDirectCargoSignatureClass.lower(value)
+}
+
+
+
 public enum EngineError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
 
 
@@ -12161,6 +13330,30 @@ fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionData: FfiConverterRustBuffer {
+    typealias SwiftType = Data?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterData.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterData.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeMaintenanceTask: FfiConverterRustBuffer {
     typealias SwiftType = MaintenanceTask?
 
@@ -12249,6 +13442,30 @@ fileprivate struct FfiConverterOptionTypeCleanupHistoryCursor: FfiConverterRustB
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeCleanupHistoryCursor.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeDirectCargoEnrollmentIdentity: FfiConverterRustBuffer {
+    typealias SwiftType = DirectCargoEnrollmentIdentity?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeDirectCargoEnrollmentIdentity.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeDirectCargoEnrollmentIdentity.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -12648,6 +13865,31 @@ fileprivate struct FfiConverterSequenceTypeCleanupSessionSummary: FfiConverterRu
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeDirectCargoCodeDirectoryHash: FfiConverterRustBuffer {
+    typealias SwiftType = [DirectCargoCodeDirectoryHash]
+
+    public static func write(_ value: [DirectCargoCodeDirectoryHash], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeDirectCargoCodeDirectoryHash.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [DirectCargoCodeDirectoryHash] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [DirectCargoCodeDirectoryHash]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeDirectCargoCodeDirectoryHash.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeHistoricalScanIssue: FfiConverterRustBuffer {
     typealias SwiftType = [HistoricalScanIssue]
 
@@ -12903,6 +14145,12 @@ private let initializationResult: InitializationResult = {
     if (uniffi_dux_ffi_checksum_func_live_engine_instance_count() != 11788) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_dux_ffi_checksum_method_directcargoenrollmentpreviewsession_info() != 57967) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_directcargoenrollmentpreviewsession_release() != 47875) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_dux_ffi_checksum_method_duxengine_acquire_explorer_snapshot_review() != 56224) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -12910,6 +14158,12 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_close() != 17149) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_duxengine_commit_direct_cargo_enrollment() != 31885) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_duxengine_direct_cargo_enrollment_status() != 23292) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_execute_explorer_trash() != 27346) {
@@ -12928,6 +14182,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_get_permanent_cleanup_policy() != 39054) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_duxengine_inspect_direct_cargo_enrollment() != 42063) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_library_version() != 14309) {
@@ -12949,6 +14206,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_reset_permanent_cleanup() != 25182) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_duxengine_revoke_direct_cargo_enrollment() != 61450) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_scan_coverage_details() != 53756) {

@@ -72,6 +72,38 @@ enum CleanupExclusionsAccessibility {
     }
 }
 
+enum DirectCargoEnrollmentAccessibility {
+    static let section = "direct-cargo-section"
+    static let choose = "direct-cargo-choose"
+    static let status = "direct-cargo-status"
+    static let preview = "direct-cargo-preview"
+    static let enroll = "direct-cargo-enroll"
+    static let discard = "direct-cargo-discard"
+    static let revoke = "direct-cargo-revoke"
+    static let confirmEnroll = "direct-cargo-confirm-enroll"
+    static let confirmRevoke = "direct-cargo-confirm-revoke"
+    static let confirmCancel = "direct-cargo-confirm-cancel"
+    static let reload = "direct-cargo-reload"
+    static let progress = "direct-cargo-progress"
+    static let error = "direct-cargo-error"
+
+    static let allControlIdentifiers = [
+        section,
+        choose,
+        status,
+        preview,
+        enroll,
+        discard,
+        revoke,
+        confirmEnroll,
+        confirmRevoke,
+        confirmCancel,
+        reload,
+        progress,
+        error,
+    ]
+}
+
 private enum PermanentCleanupConfirmationAction {
     case enable
     case reset
@@ -82,6 +114,17 @@ private enum CleanupExclusionConfirmationAction {
     case reset
 }
 
+private enum DirectCargoConfirmationAction: Equatable {
+    case enroll(DirectCargoEnrollmentConfirmation)
+    case revoke
+}
+
+private enum DirectCargoExecutablePickerResult {
+    case cancelled
+    case invalid
+    case selected(DirectCargoExecutableSelection)
+}
+
 struct DuxSettingsView: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var permanentCleanupConfirmation = ""
@@ -90,6 +133,8 @@ struct DuxSettingsView: View {
         PermanentCleanupConfirmationAction = .enable
     @State private var cleanupExclusionConfirmationAction:
         CleanupExclusionConfirmationAction?
+    @State private var directCargoConfirmationAction:
+        DirectCargoConfirmationAction?
 
     let model: AppModel
 
@@ -433,6 +478,8 @@ struct DuxSettingsView: View {
                 }
             }
 
+            directCargoEnrollmentSettings(model: model)
+
             cleanupExclusionSettings(model: model)
 
             Section("Engine") {
@@ -466,6 +513,7 @@ struct DuxSettingsView: View {
             await model.loadDiskPressurePolicy()
             await model.loadPermanentCleanupPolicy()
             await model.loadCleanupExclusions()
+            await model.loadDirectCargoEnrollmentStatus()
             await model.loadInitialState()
         }
         .confirmationDialog(
@@ -511,6 +559,61 @@ struct DuxSettingsView: View {
                 )
             }
         }
+        .confirmationDialog(
+            directCargoConfirmationTitle,
+            isPresented: Binding(
+                get: { directCargoConfirmationAction != nil },
+                set: { presented in
+                    if !presented {
+                        directCargoConfirmationAction = nil
+                    }
+                }
+            ),
+            presenting: directCargoConfirmationAction
+        ) { action in
+            switch action {
+            case let .enroll(confirmation):
+                Button("Run once and enroll") {
+                    directCargoConfirmationAction = nil
+                    Task {
+                        await model.enrollInspectedDirectCargo(
+                            confirmation: confirmation
+                        )
+                    }
+                }
+                .keyboardShortcut(.defaultAction)
+                .accessibilityIdentifier(DirectCargoEnrollmentAccessibility.confirmEnroll)
+            case .revoke:
+                Button("Revoke Cargo enrollment", role: .destructive) {
+                    directCargoConfirmationAction = nil
+                    Task { await model.revokeDirectCargoEnrollment(confirmed: true) }
+                }
+                .accessibilityIdentifier(DirectCargoEnrollmentAccessibility.confirmRevoke)
+            }
+            Button("Cancel", role: .cancel) {
+                directCargoConfirmationAction = nil
+                if case let .enroll(confirmation) = action {
+                    Task {
+                        await model.discardDirectCargoEnrollmentPreview(
+                            matching: confirmation
+                        )
+                    }
+                }
+            }
+            .keyboardShortcut(.cancelAction)
+            .accessibilityIdentifier(DirectCargoEnrollmentAccessibility.confirmCancel)
+        } message: { action in
+            switch action {
+            case let .enroll(confirmation):
+                Text(directCargoEnrollmentConfirmationMessage(confirmation))
+            case .revoke:
+                Text(
+                    "DUX will stop trusting the enrolled Cargo executable for discovery. "
+                        + "This does not remove Cargo, project files, build output, or any "
+                        + "other data."
+                )
+            }
+        }
         .onChange(of: scenePhase) { _, phase in
             guard phase == .active else {
                 return
@@ -519,6 +622,325 @@ struct DuxSettingsView: View {
                 await model.refreshLoginItemState()
                 await model.refreshNotificationAuthorizationState()
             }
+        }
+        .onDisappear {
+            directCargoConfirmationAction = nil
+            Task { await model.dismissDirectCargoEnrollmentPresentation() }
+        }
+    }
+
+    @ViewBuilder
+    private func directCargoEnrollmentSettings(model: AppModel) -> some View {
+        Section("Rust project discovery") {
+            Text(
+                "Enroll one exact Cargo executable so DUX can understand recognized Rust "
+                    + "target directories. Enrollment enables discovery only: it cannot "
+                    + "select, plan, approve, schedule, or perform cleanup, and AI gains no "
+                    + "authority from it."
+            )
+            .foregroundStyle(.secondary)
+
+            Text(
+                "Choose a direct toolchain Cargo executable. The common "
+                    + "~/.cargo/bin/cargo rustup proxy symlink is intentionally rejected. "
+                    + "DUX does not install or update Cargo and never accepts arbitrary commands."
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+
+            if let status = model.directCargoEnrollmentStatus {
+                LabeledContent("Enrollment revision") {
+                    Text(verbatim: String(status.revision))
+                }
+                if let milliseconds = status.updatedAtUnixMilliseconds {
+                    LabeledContent("Updated") {
+                        Text(
+                            Date(timeIntervalSince1970: Double(milliseconds) / 1_000),
+                            format: .dateTime
+                        )
+                    }
+                }
+                switch status.disposition {
+                case .notEnrolled:
+                    Label("No Cargo executable enrolled", systemImage: "circle.dashed")
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier(DirectCargoEnrollmentAccessibility.status)
+                case .revoked:
+                    Label("Cargo enrollment revoked", systemImage: "xmark.shield")
+                        .foregroundStyle(.orange)
+                        .accessibilityIdentifier(DirectCargoEnrollmentAccessibility.status)
+                case let .enrolled(identity):
+                    Label("Cargo identity enrolled", systemImage: "checkmark.shield")
+                        .foregroundStyle(.green)
+                        .accessibilityIdentifier(DirectCargoEnrollmentAccessibility.status)
+                    Text(
+                        "The exact executable identity is revalidated before every use."
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    directCargoIdentityDetails(identity)
+                    Button("Revoke enrollment…", role: .destructive) {
+                        directCargoConfirmationAction = .revoke
+                    }
+                    .disabled(
+                        model.directCargoEnrollmentState.isBusy
+                            || model.directCargoEnrollmentNeedsStatusReload
+                    )
+                    .accessibilityIdentifier(DirectCargoEnrollmentAccessibility.revoke)
+                    .accessibilityHint(
+                        "Asks for confirmation before disabling Cargo-backed discovery"
+                    )
+                }
+            } else if model.directCargoEnrollmentState == .loading {
+                ProgressView("Loading Cargo enrollment")
+                    .accessibilityIdentifier(DirectCargoEnrollmentAccessibility.progress)
+            }
+
+            if model.directCargoEnrollmentNeedsStatusReload {
+                Label(
+                    "Current enrollment state is unverified",
+                    systemImage: "questionmark.diamond"
+                )
+                .foregroundStyle(.red)
+                Button("Reload Cargo status") {
+                    Task { await model.loadDirectCargoEnrollmentStatus() }
+                }
+                .disabled(model.directCargoEnrollmentState.isBusy)
+                .accessibilityIdentifier(DirectCargoEnrollmentAccessibility.reload)
+                .accessibilityHint(
+                    "Reads authoritative enrollment state without retrying the prior mutation"
+                )
+            }
+
+            if let preview = model.directCargoEnrollmentPreview {
+                GroupBox("Inspected executable") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        directCargoPreviewDetails(preview)
+                        Text(
+                            "Inspection performed static file and code-signature validation only. "
+                                + "The selected executable has not been run."
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier(DirectCargoEnrollmentAccessibility.preview)
+
+                HStack {
+                    Button("Review and enroll exact Cargo…") {
+                        if let confirmation = model.directCargoEnrollmentConfirmation {
+                            directCargoConfirmationAction = .enroll(confirmation)
+                        }
+                    }
+                    .disabled(model.directCargoEnrollmentState.isBusy)
+                    .accessibilityIdentifier(DirectCargoEnrollmentAccessibility.enroll)
+                    .accessibilityHint(
+                        "Shows exact identity evidence before Cargo is run once for version verification"
+                    )
+
+                    Button("Discard inspection") {
+                        Task { await model.discardDirectCargoEnrollmentPreview() }
+                    }
+                    .disabled(model.directCargoEnrollmentState.isBusy)
+                    .accessibilityIdentifier(DirectCargoEnrollmentAccessibility.discard)
+                    .accessibilityHint("Releases the inspected preview without enrolling Cargo")
+                }
+            }
+
+            HStack {
+                Button("Choose Cargo executable…") {
+                    switch selectDirectCargoExecutable() {
+                    case .cancelled:
+                        break
+                    case .invalid:
+                        model.rejectDirectCargoExecutableSelection()
+                    case let .selected(selection):
+                        Task {
+                            await model.inspectDirectCargoExecutable(selection)
+                            if let confirmation =
+                                model.directCargoEnrollmentConfirmation
+                            {
+                                directCargoConfirmationAction = .enroll(confirmation)
+                            }
+                        }
+                    }
+                }
+                .disabled(
+                    model.directCargoEnrollmentState.isBusy
+                        || model.directCargoEnrollmentNeedsStatusReload
+                )
+                .accessibilityIdentifier(DirectCargoEnrollmentAccessibility.choose)
+                .accessibilityHint(
+                    "Selects one exact file named cargo for static inspection"
+                )
+
+                if model.directCargoEnrollmentState.isBusy {
+                    ProgressView()
+                        .controlSize(.small)
+                        .accessibilityIdentifier(DirectCargoEnrollmentAccessibility.progress)
+                        .accessibilityLabel(directCargoProgressLabel(model))
+                }
+            }
+
+            if case let .failed(failure) = model.directCargoEnrollmentState {
+                Label(
+                    Self.message(
+                        for: failure,
+                        authoritativeReloadRequired:
+                            model.directCargoEnrollmentNeedsStatusReload
+                    ),
+                    systemImage: "exclamationmark.triangle"
+                )
+                    .foregroundStyle(.red)
+                    .accessibilityIdentifier(DirectCargoEnrollmentAccessibility.error)
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier(DirectCargoEnrollmentAccessibility.section)
+    }
+
+    @ViewBuilder
+    private func directCargoPreviewDetails(
+        _ preview: DirectCargoEnrollmentPreviewModel
+    ) -> some View {
+        LabeledContent("Path") {
+            selectableTechnicalText(preview.executable.displayPath)
+        }
+        LabeledContent("Executable SHA-256") {
+            selectableTechnicalText(preview.executableSHA256.duxLowercaseHex)
+        }
+        directCargoSignatureDetails(preview.signature)
+        LabeledContent("Required Cargo version") {
+            Text("1.96.0")
+        }
+    }
+
+    @ViewBuilder
+    private func directCargoIdentityDetails(
+        _ identity: DirectCargoEnrollmentIdentityModel
+    ) -> some View {
+        LabeledContent("Cargo path") {
+            selectableTechnicalText(identity.executable.displayPath)
+        }
+        LabeledContent("Cargo version") {
+            Text(verbatim: identity.version.displayText)
+        }
+        LabeledContent("Executable SHA-256") {
+            selectableTechnicalText(identity.executableSHA256.duxLowercaseHex)
+        }
+        LabeledContent("Version evidence SHA-256") {
+            selectableTechnicalText(identity.versionSHA256.duxLowercaseHex)
+        }
+        directCargoSignatureDetails(identity.signature)
+    }
+
+    @ViewBuilder
+    private func directCargoSignatureDetails(
+        _ signature: DirectCargoSignatureEvidence
+    ) -> some View {
+        LabeledContent("Signature") {
+            Text(verbatim: signature.kindLabel)
+        }
+        Text(
+            signature.kind == .adHoc
+                ? "Ad-hoc signing proves local byte integrity only."
+                : "CMS evidence is displayed for identity review; DUX does not treat it "
+                    + "as a publisher allowlist."
+        )
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        LabeledContent("Signing identifier") {
+            selectableTechnicalText(signature.signingIdentifier)
+        }
+        if let teamIdentifier = signature.teamIdentifier {
+            LabeledContent("Team identifier") {
+                selectableTechnicalText(teamIdentifier)
+            }
+        }
+        ForEach(Array(signature.codeDirectoryHashes.enumerated()), id: \.offset) { index, hash in
+            LabeledContent(
+                signature.codeDirectoryHashes.count == 1
+                    ? "Code Directory hash"
+                    : "Code Directory hash \(index + 1)"
+            ) {
+                selectableTechnicalText(hash.duxLowercaseHex)
+            }
+        }
+        if let digest = signature.designatedRequirementSHA256 {
+            LabeledContent("Requirement SHA-256") {
+                selectableTechnicalText(digest.duxLowercaseHex)
+            }
+        }
+    }
+
+    private func selectableTechnicalText(_ text: String) -> some View {
+        Text(verbatim: text)
+            .font(.system(.caption, design: .monospaced))
+            .textSelection(.enabled)
+            .lineLimit(3)
+            .truncationMode(.middle)
+    }
+
+    private func selectDirectCargoExecutable() -> DirectCargoExecutablePickerResult {
+        let panel = NSOpenPanel()
+        panel.title = "Choose the exact Cargo executable DUX may inspect"
+        panel.message =
+            "Inspection validates the selected file and its signature without running it."
+        panel.prompt = "Inspect"
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.canCreateDirectories = false
+        panel.resolvesAliases = false
+        guard panel.runModal() == .OK, let url = panel.url else {
+            return .cancelled
+        }
+        guard let selection = DirectCargoExecutableSelection(fileURL: url) else {
+            return .invalid
+        }
+        return .selected(selection)
+    }
+
+    private var directCargoConfirmationTitle: String {
+        switch directCargoConfirmationAction {
+        case .enroll(_): "Run and enroll this exact Cargo executable?"
+        case .revoke: "Revoke Cargo enrollment?"
+        case nil: "Confirm Cargo enrollment change"
+        }
+    }
+
+    private func directCargoEnrollmentConfirmationMessage(
+        _ confirmation: DirectCargoEnrollmentConfirmation
+    ) -> String {
+        let preview = confirmation.preview
+        let team = preview.signature.teamIdentifier.map { ", team \($0)" } ?? ""
+        let codeDirectoryHashes = preview.signature.codeDirectoryHashes
+            .map(\.duxLowercaseHex)
+            .joined(separator: ", ")
+        return "Path: \(preview.executable.displayPath)\n"
+            + "Executable SHA-256: \(preview.executableSHA256.duxLowercaseHex)\n"
+            + "Signature: \(preview.signature.kindLabel), "
+            + "\(preview.signature.signingIdentifier)\(team)\n"
+            + "Code Directory hash"
+            + (preview.signature.codeDirectoryHashes.count == 1 ? ": " : "es: ")
+            + "\(codeDirectoryHashes)\n\n"
+            + "DUX will now run these exact inspected bytes once with a fixed, bounded "
+            + "verbose-version check to verify Cargo 1.96.0 "
+            + "and bind the version-output hash before storing discovery trust. "
+            + "This does not start or authorize cleanup."
+    }
+
+    private func directCargoProgressLabel(_ model: AppModel) -> String {
+        switch model.directCargoEnrollmentState {
+        case .loading: "Loading Cargo enrollment"
+        case .inspecting: "Inspecting Cargo without running it"
+        case .enrolling:
+            "Finishing Cargo enrollment; the exact inspected executable may be running once"
+        case .revoking: "Revoking Cargo enrollment"
+        case .idle, .ready, .awaitingEnrollmentConfirmation, .failed:
+            "Updating Cargo enrollment"
         }
     }
 
@@ -910,6 +1332,88 @@ struct DuxSettingsView: View {
             String(
                 localized: "Cleanup exclusions are unavailable. Your last saved exclusions are unchanged."
             )
+        }
+    }
+
+    static func message(
+        for failure: DirectCargoEnrollmentFailure,
+        authoritativeReloadRequired: Bool = true
+    ) -> String {
+        switch failure {
+        case .invalidSelection:
+            String(
+                localized:
+                    "Choose an absolute canonical UTF-8 file path named cargo with no control characters."
+            )
+        case .enrollmentConfirmationRequired:
+            String(localized: "Review the inspected identity before enrolling Cargo.")
+        case .enrollmentPreviewChanged:
+            String(
+                localized:
+                    "The inspected Cargo identity changed after confirmation opened. Review the current identity again."
+            )
+        case .revocationConfirmationRequired:
+            String(localized: "Confirm before revoking Cargo-backed discovery.")
+        case let .service(error):
+            switch error {
+            case .closed:
+                String(localized: "The storage engine session is closed.")
+            case .unsupportedPlatform:
+                String(localized: "Direct Cargo enrollment is available only on macOS.")
+            case .invalidRecordVersion, .incompatibleSchema:
+                String(localized: "This Cargo enrollment format is incompatible with this app.")
+            case .invalidExecutablePath:
+                String(
+                    localized:
+                        "Choose one canonical local executable file named cargo; aliases and PATH lookup are not accepted."
+                )
+            case .executableNotRegular:
+                String(localized: "The selected Cargo path is not a regular file.")
+            case .changedDuringInspection:
+                String(
+                    localized:
+                        "Cargo or its resolution environment changed. Inspect the executable again."
+                )
+            case .inspectionUnavailable:
+                String(localized: "DUX could not inspect the selected Cargo executable.")
+            case .inspectionLimitExceeded:
+                String(localized: "Cargo inspection exceeded its fixed safety budget.")
+            case .invalidResolutionEnvironment:
+                String(localized: "Cargo's executable-resolution directories are not safe to use.")
+            case .invalidCargoVersion:
+                String(localized: "The exact executable is not supported Cargo 1.96.0.")
+            case .invalidCodeSignature:
+                String(
+                    localized:
+                        "The selected Cargo executable lacks acceptable bounded macOS signing evidence."
+                )
+            case .previewUnavailable, .wrongEngine:
+                String(localized: "That inspection expired. Inspect the Cargo executable again.")
+            case .revisionExhausted:
+                String(localized: "The Cargo enrollment revision limit has been reached.")
+            case .retryable, .invalidClock:
+                String(localized: "Cargo enrollment is temporarily unavailable. Try again.")
+            case .outcomeUnknown:
+                if authoritativeReloadRequired {
+                    String(
+                        localized:
+                            "DUX could not prove whether enrollment changed. Reload status before trying again."
+                    )
+                } else {
+                    String(
+                        localized:
+                            "DUX could not prove the mutation response. Authoritative status was reloaded and no operation was retried."
+                    )
+                }
+            case .unsafeStorage, .budgetExceeded, .corruptData, .unavailable,
+                 .internalState, .invalidResponse:
+                String(
+                    localized:
+                        "Cargo enrollment is unavailable. No cleanup action was performed."
+                )
+            }
+        case .unexpected:
+            String(localized: "Cargo enrollment is unavailable. No cleanup action was performed.")
         }
     }
 

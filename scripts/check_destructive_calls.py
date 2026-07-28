@@ -682,6 +682,11 @@ EXCEPTIONS = {
         "swift-filesystem-effect",
         "test",
     ),
+    "test-swift-cargo-inspection-fixture-remove": ExceptionSpec(
+        "dux-macos/DuxTests/DirectCargoEnrollmentTests.swift",
+        "swift-filesystem-effect",
+        "test",
+    ),
     "test-swift-retry-obstruction-remove": ExceptionSpec(
         "dux-macos/DuxTests/EngineServiceTests.swift",
         "swift-filesystem-effect",
@@ -833,6 +838,7 @@ EXCEPTION_PRIMITIVES = {
     "test-swift-storage-roots-fixture-remove": "removeItem",
     "test-swift-cleanup-exclusions-fixture-remove": "removeItem",
     "test-swift-permanent-policy-fixture-remove": "removeItem",
+    "test-swift-cargo-inspection-fixture-remove": "removeItem",
     "test-swift-retry-obstruction-remove": "removeItem",
     "test-swift-home-scan-fixture-write": "write",
     "macos-trash-platform-adapter": "trashItem",

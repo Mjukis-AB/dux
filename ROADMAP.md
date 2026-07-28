@@ -4141,9 +4141,41 @@ Tasks:
       exact enrollment before any automatic execution, then retains the
       enrollment guard before and after Cargo.
       Malformed, oversized, newer-schema, changed, unsigned, foreign-engine,
-      and ambiguous-write cases fail closed. This adds discovery provenance
-      only: no FFI/Swift surface, blocker removal, plan, schedule, or effect was
-      added.
+      and ambiguous-write cases fail closed. This core-only checkpoint added
+      discovery provenance only: it added no FFI/Swift surface, blocker
+      removal, plan, schedule, or effect.
+    - [x] 2026-07-28 slice: expose explicit direct-Cargo discovery enrollment
+      through UniFFI contract v27 and native Settings without opening cleanup.
+      A versioned input carries only one user-selected, canonical, direct
+      `cargo` path as bounded control-free UTF-8 Unix bytes; no `PATH`, rustup
+      selection, command, arguments, environment, version, signature, digest,
+      candidate, or cleanup value can be supplied. Static inspection executes
+      no selected bytes and returns one engine-bound, non-cloneable opaque
+      preview. Each engine admits at most one live preview, exposes only
+      independently bounded display evidence, releases it explicitly or on
+      close, checks engine affinity before commit, and consumes it permanently
+      before core version validation. Status and revoke are observational
+      settings operations; revocation retains the core tombstone.
+      `EngineService` performs the synchronous bounded work off the main actor;
+      AppModel generation-fences late presentation, releases superseded
+      previews, binds confirmation to the exact evidence shown, releases an
+      in-flight inspection that arrives after Settings closes, and treats
+      confirmed enrollment as finishing rather than falsely cancellable.
+      Returned mutation records are correlated to the preview/operation; any
+      malformed or mismatched response becomes outcome uncertainty, triggers
+      one observation-only authoritative reload, and visibly blocks another
+      mutation until that reload succeeds. Projection failures after core
+      success are outcome-unknown, while pre-mutation core failures keep their
+      typed mapping. Runtime shutdown memoizes one shared task before
+      suspension so concurrent callers wait for the same confirmed mutation
+      and engine close. Settings separates static inspection from the final
+      confirmation that permits one fixed Cargo 1.96.0 version execution,
+      distinguishes ad-hoc integrity from CMS evidence, and states that this
+      enables deterministic Rust discovery only. Revocation has a separate
+      confirmation and deletes no files. No planner, approval, journal,
+      executor, scheduler, CLI, AI, or cleanup route was added. Nine focused
+      FFI lifecycle/race tests, 16 focused native tests, the complete 340-test
+      linked Swift suite, and deterministic binding/project regeneration pass.
     - [x] 2026-07-18 slice: close Cargo 1.96 file-based configuration to one
       bounded negative case and retain the metadata working directory.
       Production now accepts metadata only when both `config` and

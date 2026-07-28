@@ -224,6 +224,39 @@ availability and safety authority. Swift performs the call on the utility queue
 and rejects malformed versions, ordering, identity, timestamps, lifecycle/count
 shape, coverage, or snapshot hints before returning app-owned values.
 
+Contract v27 adds explicit direct-Cargo discovery enrollment without adding a
+cleanup edge. Its only input is one versioned, bounded, control-free UTF-8 Unix
+path selected by the user; the boundary accepts no command, `PATH`,
+environment, expected identity, candidate, plan, or effect data. Static
+inspection returns one opaque engine-bound preview and runs no selected bytes.
+At most one preview may be live per engine. Its bounded path, digest, and
+static-code records are display observations only; commit accepts only the
+opaque object, checks engine affinity before consuming it, and consumes it
+permanently before the core's fallible Cargo-version validation. Release is
+explicit and idempotent, close drains retained previews, status is
+observational, and revoke accepts no identity.
+
+Inspect and commit remain synchronous bounded core calls on
+`EngineService`'s utility queue. This settings lifecycle deliberately has no
+pretend Swift cancellation after the user confirms execution of the fixed
+version command: Settings shows a finishing state, ordered shutdown waits
+behind the serialized call, and task cancellation only prevents stale
+presentation. Failure or outcome uncertainty requires authoritative status
+reload and a newly inspected preview; the app never automatically retries the
+consumed capability. The confirmation carries the exact displayed generation
+and evidence. A malformed or non-correlating returned mutation record is
+outcome uncertainty, not a retryable presentation error; one read-only status
+reload runs, and Settings visibly blocks mutations until an authoritative read
+succeeds. Once core reports mutation success, a transport-projection failure is
+likewise outcome-unknown; pre-mutation core errors retain their typed mapping.
+Dismissal releases a preview even when static inspection completes after the
+view disappears. Runtime shutdown memoizes one shared task before its first
+suspension, preventing reentrant callers from duplicating the stop/close
+pipeline while a confirmed mutation is finishing. This is a narrow exception
+to task-style cancellation for a revisioned settings mutation, not precedent
+for scan, planner, or cleanup work. No candidate, plan, approval, journal,
+scheduler, AI, or executor handle crosses v27.
+
 The Swift adapter lazily constructs and synchronizes the engine on its utility
 queue. FFI close invalidates renewal, attempts exact release for every
 still-live registered review, then performs bounded core shutdown; a failed

@@ -25,8 +25,15 @@ use dux_core::engine::{
     CleanupExclusionsError as CoreCleanupExclusionsError,
     CleanupExclusionsUpdate as CoreCleanupExclusionsUpdate,
     CleanupHistoryCursor as CoreCleanupHistoryCursor,
-    CleanupHistoryError as CoreCleanupHistoryError, DiskPressurePolicy as CorePressurePolicy,
-    DiskPressurePolicyError as CorePressurePolicyError,
+    CleanupHistoryError as CoreCleanupHistoryError,
+    DirectCargoCodeSignature as CoreDirectCargoCodeSignature,
+    DirectCargoEnrollmentError as CoreDirectCargoEnrollmentError,
+    DirectCargoEnrollmentPreview as CoreDirectCargoEnrollmentPreview,
+    DirectCargoEnrollmentState as CoreDirectCargoEnrollmentState,
+    DirectCargoEnrollmentStatus as CoreDirectCargoEnrollmentStatus,
+    DirectCargoEnrollmentUpdate as CoreDirectCargoEnrollmentUpdate,
+    DirectCargoSignatureClass as CoreDirectCargoSignatureClass,
+    DiskPressurePolicy as CorePressurePolicy, DiskPressurePolicyError as CorePressurePolicyError,
     DiskPressurePolicySource as CorePressurePolicySource,
     DiskPressurePolicyUpdate as CorePressurePolicyUpdate,
     DurableCandidateEvaluationStatus as CoreDurableCandidateEvaluationStatus,
@@ -87,7 +94,7 @@ use dux_core::{
     VolumeCapacity, VolumeId,
 };
 
-const FFI_CONTRACT_VERSION: u32 = 26;
+const FFI_CONTRACT_VERSION: u32 = 27;
 const FFI_RECORD_VERSION: u32 = 1;
 const SNAPSHOT_NODE_RECORD_VERSION: u32 = 2;
 const SCAN_EVENT_PAGE_LIMIT: u16 = 64;
@@ -101,6 +108,13 @@ const MAX_CANDIDATE_IDENTIFIER_BYTES: usize = 4_096;
 const MAX_SCAN_ROOT_UTF8_BYTES: usize = 32 * 1_024;
 const MAX_CLEANUP_EXCLUSION_COUNT: usize = 64;
 const MAX_CLEANUP_EXCLUSION_PATH_BYTES: usize = 32 * 1_024;
+const MAX_DIRECT_CARGO_EXECUTABLE_PATH_BYTES: usize = 32 * 1_024;
+const MAX_DIRECT_CARGO_CODE_DIRECTORY_HASHES: usize = 16;
+const MIN_DIRECT_CARGO_CODE_DIRECTORY_HASH_BYTES: usize = 20;
+const MAX_DIRECT_CARGO_CODE_DIRECTORY_HASH_BYTES: usize = 64;
+const MAX_DIRECT_CARGO_SIGNING_IDENTIFIER_BYTES: usize = 512;
+const MAX_DIRECT_CARGO_TEAM_IDENTIFIER_BYTES: usize = 128;
+const DIRECT_CARGO_SUPPORTED_RELEASE: [u32; 3] = [1, 96, 0];
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 static LIVE_ENGINE_INSTANCE_COUNT: AtomicU64 = AtomicU64::new(0);
 
@@ -383,6 +397,154 @@ pub enum CleanupExclusionsError {
     #[error("the settings write outcome could not be proven")]
     OutcomeUnknown,
     #[error("engine settings state is unavailable")]
+    InternalState,
+}
+
+/// Lossless host path for one explicitly chosen Cargo executable. These bytes
+/// identify discovery tooling only; they are never a cleanup target.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct DirectCargoExecutablePath {
+    pub encoding: SnapshotNameEncoding,
+    pub encoded_bytes: Vec<u8>,
+}
+
+/// Versioned request to inspect one exact Cargo executable without changing
+/// durable settings. The adapter accepts no PATH lookup or command text.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct DirectCargoEnrollmentInspectionRequest {
+    pub record_version: u32,
+    pub path_encoding: SnapshotNameEncoding,
+    pub executable_path_bytes: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum DirectCargoSignatureClass {
+    AdHoc,
+    Cms,
+}
+
+/// One bounded Code Directory digest from macOS static-code inspection.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct DirectCargoCodeDirectoryHash {
+    pub record_version: u32,
+    pub bytes: Vec<u8>,
+}
+
+/// Exact bounded static-code evidence. This proves local byte identity, not a
+/// publisher identity and not cleanup authority.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct DirectCargoCodeSignature {
+    pub record_version: u32,
+    pub class: DirectCargoSignatureClass,
+    pub flags: u32,
+    pub code_directory_hashes: Vec<DirectCargoCodeDirectoryHash>,
+    pub signing_identifier: String,
+    pub team_identifier: Option<String>,
+    pub designated_requirement_sha256: Option<Vec<u8>>,
+}
+
+/// Read-only evidence held by an opaque inspection session until it is either
+/// consumed by enrollment or explicitly released.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct DirectCargoEnrollmentPreviewInfo {
+    pub record_version: u32,
+    pub executable_path: DirectCargoExecutablePath,
+    pub executable_sha256: Vec<u8>,
+    pub code_signature: DirectCargoCodeSignature,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum DirectCargoEnrollmentState {
+    NotEnrolled,
+    Enrolled,
+    Revoked,
+}
+
+/// Exact enrolled identity. It grants permission to use this Cargo only for
+/// deterministic discovery and cannot name or authorize a cleanup target.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct DirectCargoEnrollmentIdentity {
+    pub record_version: u32,
+    pub executable_path: DirectCargoExecutablePath,
+    pub executable_sha256: Vec<u8>,
+    pub version_sha256: Vec<u8>,
+    pub cargo_major: u32,
+    pub cargo_minor: u32,
+    pub cargo_patch: u32,
+    pub code_signature: DirectCargoCodeSignature,
+}
+
+/// Revisioned durable enrollment state. `identity` is present exactly for the
+/// Enrolled state.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct DirectCargoEnrollmentStatus {
+    pub record_version: u32,
+    pub revision: u64,
+    pub state: DirectCargoEnrollmentState,
+    pub identity: Option<DirectCargoEnrollmentIdentity>,
+    pub updated_at_unix_ms: Option<i64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct DirectCargoEnrollmentUpdate {
+    pub record_version: u32,
+    pub status: DirectCargoEnrollmentStatus,
+    pub changed: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum DirectCargoEnrollmentPreviewReleaseOutcome {
+    Released,
+    AlreadyUnavailable,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error, uniffi::Error)]
+pub enum DirectCargoEnrollmentError {
+    #[error("engine session is closed")]
+    Closed,
+    #[error("direct Cargo enrollment is supported only on macOS")]
+    UnsupportedPlatform,
+    #[error("direct Cargo enrollment record version is unsupported")]
+    InvalidRecordVersion,
+    #[error("the Cargo executable path is invalid or exceeds its fixed bound")]
+    InvalidExecutablePath,
+    #[error("the Cargo executable is not a regular file")]
+    ExecutableNotRegular,
+    #[error("the Cargo executable or its environment changed during inspection")]
+    ChangedDuringInspection,
+    #[error("Cargo inspection could not run to completion")]
+    InspectionUnavailable,
+    #[error("Cargo inspection exceeded its fixed time or output budget")]
+    InspectionLimitExceeded,
+    #[error("Cargo resolution directories are not canonical directories")]
+    InvalidResolutionEnvironment,
+    #[error("Cargo verbose version is invalid or unsupported")]
+    InvalidCargoVersion,
+    #[error("Cargo does not have valid bounded macOS code-signing evidence")]
+    InvalidCodeSignature,
+    #[error("the inspection preview belongs to a different engine session")]
+    WrongEngine,
+    #[error("the inspection preview was already consumed or released")]
+    PreviewUnavailable,
+    #[error("the enrollment revision cannot advance")]
+    RevisionExhausted,
+    #[error("the system clock cannot be represented by the settings store")]
+    InvalidClock,
+    #[error("the durable store schema is newer than this engine")]
+    IncompatibleSchema,
+    #[error("the durable store is busy")]
+    Busy,
+    #[error("the durable store is unsafe")]
+    UnsafeStorage,
+    #[error("the settings query exceeded its fixed resource budget")]
+    BudgetExceeded,
+    #[error("direct Cargo enrollment is corrupt")]
+    CorruptData,
+    #[error("direct Cargo enrollment is unavailable")]
+    Unavailable,
+    #[error("the enrollment write outcome could not be proven")]
+    OutcomeUnknown,
+    #[error("direct Cargo enrollment state is unavailable")]
     InternalState,
 }
 
@@ -1660,6 +1822,100 @@ pub enum TrashExecutionError {
     InternalState,
 }
 
+enum DirectCargoEnrollmentPreviewState {
+    Available(Box<CoreDirectCargoEnrollmentPreview>),
+    Consumed,
+    Released,
+}
+
+/// Engine-bound, consume-once inspection capability. The object carries only
+/// Cargo discovery enrollment authority; it cannot create or execute cleanup.
+#[derive(uniffi::Object)]
+pub struct DirectCargoEnrollmentPreviewSession {
+    state: Mutex<DirectCargoEnrollmentPreviewState>,
+    info: DirectCargoEnrollmentPreviewInfo,
+    engine_closed: Arc<AtomicBool>,
+}
+
+#[uniffi::export]
+impl DirectCargoEnrollmentPreviewSession {
+    /// Return immutable static inspection evidence while this preview remains
+    /// available. No selected executable bytes are run by this call.
+    pub fn info(&self) -> Result<DirectCargoEnrollmentPreviewInfo, DirectCargoEnrollmentError> {
+        if self.engine_closed.load(Ordering::Acquire) {
+            return Err(DirectCargoEnrollmentError::Closed);
+        }
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| DirectCargoEnrollmentError::InternalState)?;
+        match &*state {
+            DirectCargoEnrollmentPreviewState::Available(_) => Ok(self.info.clone()),
+            DirectCargoEnrollmentPreviewState::Consumed
+            | DirectCargoEnrollmentPreviewState::Released => {
+                Err(DirectCargoEnrollmentError::PreviewUnavailable)
+            }
+        }
+    }
+
+    /// Explicitly discard this preview. Releasing an already consumed or
+    /// released preview is an idempotent no-op.
+    pub fn release(
+        &self,
+    ) -> Result<DirectCargoEnrollmentPreviewReleaseOutcome, DirectCargoEnrollmentError> {
+        self.release_inner()
+    }
+}
+
+impl DirectCargoEnrollmentPreviewSession {
+    fn is_available(&self) -> Result<bool, DirectCargoEnrollmentError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| DirectCargoEnrollmentError::InternalState)?;
+        Ok(matches!(
+            *state,
+            DirectCargoEnrollmentPreviewState::Available(_)
+        ))
+    }
+
+    fn take_for_commit(
+        &self,
+    ) -> Result<CoreDirectCargoEnrollmentPreview, DirectCargoEnrollmentError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| DirectCargoEnrollmentError::InternalState)?;
+        match std::mem::replace(&mut *state, DirectCargoEnrollmentPreviewState::Consumed) {
+            DirectCargoEnrollmentPreviewState::Available(preview) => Ok(*preview),
+            prior @ (DirectCargoEnrollmentPreviewState::Consumed
+            | DirectCargoEnrollmentPreviewState::Released) => {
+                *state = prior;
+                Err(DirectCargoEnrollmentError::PreviewUnavailable)
+            }
+        }
+    }
+
+    fn release_inner(
+        &self,
+    ) -> Result<DirectCargoEnrollmentPreviewReleaseOutcome, DirectCargoEnrollmentError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| DirectCargoEnrollmentError::InternalState)?;
+        match std::mem::replace(&mut *state, DirectCargoEnrollmentPreviewState::Released) {
+            DirectCargoEnrollmentPreviewState::Available(_) => {
+                Ok(DirectCargoEnrollmentPreviewReleaseOutcome::Released)
+            }
+            prior @ (DirectCargoEnrollmentPreviewState::Consumed
+            | DirectCargoEnrollmentPreviewState::Released) => {
+                *state = prior;
+                Ok(DirectCargoEnrollmentPreviewReleaseOutcome::AlreadyUnavailable)
+            }
+        }
+    }
+}
+
 #[derive(uniffi::Object)]
 pub struct SnapshotReviewSession {
     inner: Mutex<CoreReviewSession>,
@@ -2231,6 +2487,7 @@ pub struct DuxEngine {
     state: Mutex<EngineState>,
     close_completed: Condvar,
     reviews: Mutex<Vec<Weak<SnapshotReviewSession>>>,
+    direct_cargo_previews: Mutex<Vec<Weak<DirectCargoEnrollmentPreviewSession>>>,
     closed: Arc<AtomicBool>,
 }
 
@@ -2252,6 +2509,7 @@ impl DuxEngine {
             state: Mutex::new(EngineState::Open(engine)),
             close_completed: Condvar::new(),
             reviews: Mutex::new(Vec::new()),
+            direct_cargo_previews: Mutex::new(Vec::new()),
             closed: Arc::new(AtomicBool::new(false)),
         })
     }
@@ -2446,6 +2704,79 @@ impl DuxEngine {
                 .reset_cleanup_exclusions()
                 .map_err(map_cleanup_exclusions_error)
                 .and_then(cleanup_exclusions_update)
+        })
+    }
+
+    /// Statically inspect one exact Cargo file and return an engine-bound,
+    /// consume-once preview. Inspection does not run the selected bytes or
+    /// change durable enrollment.
+    pub fn inspect_direct_cargo_enrollment(
+        &self,
+        request: DirectCargoEnrollmentInspectionRequest,
+    ) -> Result<Arc<DirectCargoEnrollmentPreviewSession>, DirectCargoEnrollmentError> {
+        let executable = decode_direct_cargo_executable_path(request)?;
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| DirectCargoEnrollmentError::InternalState)?;
+        let EngineState::Open(engine) = &*state else {
+            return Err(DirectCargoEnrollmentError::Closed);
+        };
+        if self.closed.load(Ordering::Acquire) {
+            return Err(DirectCargoEnrollmentError::Closed);
+        }
+        self.ensure_direct_cargo_preview_capacity()?;
+        let preview = engine
+            .inspect_direct_cargo_enrollment(&executable)
+            .map_err(map_direct_cargo_enrollment_error)?;
+        let info = direct_cargo_preview_info(&preview)?;
+        self.register_direct_cargo_preview(preview, info)
+    }
+
+    /// Consume one preview from this exact engine and persist its identity.
+    /// Consumption happens before core validation, so a stale or failed
+    /// preview cannot be retried through the same foreign object.
+    pub fn commit_direct_cargo_enrollment(
+        &self,
+        preview: Arc<DirectCargoEnrollmentPreviewSession>,
+    ) -> Result<DirectCargoEnrollmentUpdate, DirectCargoEnrollmentError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| DirectCargoEnrollmentError::InternalState)?;
+        let EngineState::Open(engine) = &*state else {
+            return Err(DirectCargoEnrollmentError::Closed);
+        };
+        if self.closed.load(Ordering::Acquire) {
+            return Err(DirectCargoEnrollmentError::Closed);
+        }
+        if !Arc::ptr_eq(&preview.engine_closed, &self.closed) {
+            return Err(DirectCargoEnrollmentError::WrongEngine);
+        }
+        let core_preview = preview.take_for_commit()?;
+        direct_cargo_mutation_result(engine.commit_direct_cargo_enrollment(core_preview))
+    }
+
+    /// Return the revisioned direct-Cargo discovery enrollment. This endpoint
+    /// exposes observation DTOs only and cannot create cleanup authority.
+    pub fn direct_cargo_enrollment_status(
+        &self,
+    ) -> Result<DirectCargoEnrollmentStatus, DirectCargoEnrollmentError> {
+        self.with_direct_cargo_engine(|engine| {
+            engine
+                .direct_cargo_enrollment_status()
+                .map_err(map_direct_cargo_enrollment_error)
+                .and_then(direct_cargo_enrollment_status)
+        })
+    }
+
+    /// Revoke any active discovery enrollment and retain core's revisioned
+    /// tombstone. Previously issued previews become stale in core.
+    pub fn revoke_direct_cargo_enrollment(
+        &self,
+    ) -> Result<DirectCargoEnrollmentUpdate, DirectCargoEnrollmentError> {
+        self.with_direct_cargo_engine(|engine| {
+            direct_cargo_mutation_result(engine.revoke_direct_cargo_enrollment())
         })
     }
 
@@ -2717,6 +3048,7 @@ impl DuxEngine {
             }
         };
         self.release_registered_reviews();
+        self.release_registered_direct_cargo_previews();
         engine.close();
         let quiesced = engine.wait_until_closed(CLOSE_TIMEOUT);
         let mut state = self
@@ -2730,6 +3062,63 @@ impl DuxEngine {
 }
 
 impl DuxEngine {
+    fn ensure_direct_cargo_preview_capacity(&self) -> Result<(), DirectCargoEnrollmentError> {
+        let mut previews = self
+            .direct_cargo_previews
+            .lock()
+            .map_err(|_| DirectCargoEnrollmentError::InternalState)?;
+        let mut retained = Vec::with_capacity(previews.len());
+        let mut available = false;
+        for preview in previews.iter().filter_map(Weak::upgrade) {
+            if preview.is_available()? {
+                available = true;
+            }
+            retained.push(Arc::downgrade(&preview));
+        }
+        *previews = retained;
+        if available {
+            Err(DirectCargoEnrollmentError::Busy)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn register_direct_cargo_preview(
+        &self,
+        preview: CoreDirectCargoEnrollmentPreview,
+        info: DirectCargoEnrollmentPreviewInfo,
+    ) -> Result<Arc<DirectCargoEnrollmentPreviewSession>, DirectCargoEnrollmentError> {
+        let preview = Arc::new(DirectCargoEnrollmentPreviewSession {
+            state: Mutex::new(DirectCargoEnrollmentPreviewState::Available(Box::new(
+                preview,
+            ))),
+            info,
+            engine_closed: Arc::clone(&self.closed),
+        });
+        if self.closed.load(Ordering::Acquire) {
+            let _ = preview.release_inner();
+            return Err(DirectCargoEnrollmentError::Closed);
+        }
+        let mut previews = match self.direct_cargo_previews.lock() {
+            Ok(previews) => previews,
+            Err(_) => {
+                let _ = preview.release_inner();
+                return Err(DirectCargoEnrollmentError::InternalState);
+            }
+        };
+        let mut retained = Vec::with_capacity(previews.len().saturating_add(1));
+        for retained_preview in previews.iter().filter_map(Weak::upgrade) {
+            if retained_preview.is_available()? {
+                let _ = preview.release_inner();
+                return Err(DirectCargoEnrollmentError::Busy);
+            }
+            retained.push(Arc::downgrade(&retained_preview));
+        }
+        *previews = retained;
+        previews.push(Arc::downgrade(&preview));
+        Ok(preview)
+    }
+
     fn register_snapshot_review(
         &self,
         engine: &EngineHandle,
@@ -2826,6 +3215,22 @@ impl DuxEngine {
         }
     }
 
+    fn with_direct_cargo_engine<T>(
+        &self,
+        operation: impl FnOnce(&EngineHandle) -> Result<T, DirectCargoEnrollmentError>,
+    ) -> Result<T, DirectCargoEnrollmentError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| DirectCargoEnrollmentError::InternalState)?;
+        match &*state {
+            EngineState::Open(engine) if !self.closed.load(Ordering::Acquire) => operation(engine),
+            EngineState::Open(_) | EngineState::Closing | EngineState::Closed { .. } => {
+                Err(DirectCargoEnrollmentError::Closed)
+            }
+        }
+    }
+
     fn with_scan_engine<T>(
         &self,
         operation: impl FnOnce(&EngineHandle) -> Result<T, ScanError>,
@@ -2844,6 +3249,16 @@ impl DuxEngine {
         };
         for review in reviews.into_iter().filter_map(|review| review.upgrade()) {
             let _ = review.release_inner();
+        }
+    }
+
+    fn release_registered_direct_cargo_previews(&self) {
+        let previews = match self.direct_cargo_previews.lock() {
+            Ok(mut previews) => std::mem::take(&mut *previews),
+            Err(poisoned) => std::mem::take(&mut *poisoned.into_inner()),
+        };
+        for preview in previews.into_iter().filter_map(|preview| preview.upgrade()) {
+            let _ = preview.release_inner();
         }
     }
 }
@@ -4836,6 +5251,346 @@ fn encode_cleanup_exclusion_path(
     Err(CleanupExclusionsError::InternalState)
 }
 
+fn decode_direct_cargo_executable_path(
+    request: DirectCargoEnrollmentInspectionRequest,
+) -> Result<PathBuf, DirectCargoEnrollmentError> {
+    if request.record_version != FFI_RECORD_VERSION {
+        return Err(DirectCargoEnrollmentError::InvalidRecordVersion);
+    }
+    if request.executable_path_bytes.is_empty()
+        || request.executable_path_bytes.len() > MAX_DIRECT_CARGO_EXECUTABLE_PATH_BYTES
+    {
+        return Err(DirectCargoEnrollmentError::InvalidExecutablePath);
+    }
+    let path = match request.path_encoding {
+        SnapshotNameEncoding::UnixBytes => {
+            #[cfg(unix)]
+            {
+                if request.executable_path_bytes.contains(&0) {
+                    return Err(DirectCargoEnrollmentError::InvalidExecutablePath);
+                }
+                let text = std::str::from_utf8(&request.executable_path_bytes)
+                    .map_err(|_| DirectCargoEnrollmentError::InvalidExecutablePath)?;
+                if !is_lexical_direct_cargo_unix_path(text) {
+                    return Err(DirectCargoEnrollmentError::InvalidExecutablePath);
+                }
+                PathBuf::from(std::ffi::OsString::from_vec(request.executable_path_bytes))
+            }
+            #[cfg(not(unix))]
+            {
+                return Err(DirectCargoEnrollmentError::InvalidExecutablePath);
+            }
+        }
+        SnapshotNameEncoding::WindowsUtf16LittleEndian => {
+            #[cfg(windows)]
+            {
+                if request.executable_path_bytes.len() % 2 != 0 {
+                    return Err(DirectCargoEnrollmentError::InvalidExecutablePath);
+                }
+                let units = request
+                    .executable_path_bytes
+                    .chunks_exact(2)
+                    .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]))
+                    .collect::<Vec<_>>();
+                if units.contains(&0) {
+                    return Err(DirectCargoEnrollmentError::InvalidExecutablePath);
+                }
+                PathBuf::from(std::ffi::OsString::from_wide(&units))
+            }
+            #[cfg(not(windows))]
+            {
+                return Err(DirectCargoEnrollmentError::InvalidExecutablePath);
+            }
+        }
+    };
+    if !path.is_absolute()
+        || path.file_name() != Some(std::ffi::OsStr::new("cargo"))
+        || path.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::CurDir | std::path::Component::ParentDir
+            )
+        })
+    {
+        return Err(DirectCargoEnrollmentError::InvalidExecutablePath);
+    }
+    Ok(path)
+}
+
+fn is_lexical_direct_cargo_unix_path(text: &str) -> bool {
+    text.starts_with('/')
+        && !text.ends_with('/')
+        && !text.contains("//")
+        && !text.chars().any(char::is_control)
+        && text[1..]
+            .split('/')
+            .all(|component| !component.is_empty() && component != "." && component != "..")
+        && text.rsplit('/').next() == Some("cargo")
+}
+
+fn direct_cargo_executable_path(
+    path: &Path,
+) -> Result<DirectCargoExecutablePath, DirectCargoEnrollmentError> {
+    if !path.is_absolute()
+        || path.file_name() != Some(std::ffi::OsStr::new("cargo"))
+        || path.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::CurDir | std::path::Component::ParentDir
+            )
+        })
+    {
+        return Err(DirectCargoEnrollmentError::InternalState);
+    }
+    #[cfg(unix)]
+    {
+        let bytes = path.as_os_str().as_bytes();
+        let text =
+            std::str::from_utf8(bytes).map_err(|_| DirectCargoEnrollmentError::InternalState)?;
+        if bytes.is_empty()
+            || bytes.len() > MAX_DIRECT_CARGO_EXECUTABLE_PATH_BYTES
+            || bytes.contains(&0)
+            || !is_lexical_direct_cargo_unix_path(text)
+        {
+            return Err(DirectCargoEnrollmentError::InternalState);
+        }
+        return Ok(DirectCargoExecutablePath {
+            encoding: SnapshotNameEncoding::UnixBytes,
+            encoded_bytes: bytes.to_vec(),
+        });
+    }
+    #[cfg(windows)]
+    {
+        let units = path.as_os_str().encode_wide().collect::<Vec<_>>();
+        if units.is_empty()
+            || units.len().saturating_mul(2) > MAX_DIRECT_CARGO_EXECUTABLE_PATH_BYTES
+            || units.contains(&0)
+        {
+            return Err(DirectCargoEnrollmentError::InternalState);
+        }
+        let mut encoded_bytes = Vec::new();
+        encoded_bytes
+            .try_reserve_exact(units.len().saturating_mul(2))
+            .map_err(|_| DirectCargoEnrollmentError::InternalState)?;
+        for unit in units {
+            encoded_bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        return Ok(DirectCargoExecutablePath {
+            encoding: SnapshotNameEncoding::WindowsUtf16LittleEndian,
+            encoded_bytes,
+        });
+    }
+    #[allow(unreachable_code)]
+    Err(DirectCargoEnrollmentError::InternalState)
+}
+
+fn direct_cargo_code_signature(
+    signature: &CoreDirectCargoCodeSignature,
+) -> Result<DirectCargoCodeSignature, DirectCargoEnrollmentError> {
+    if !(1..=MAX_DIRECT_CARGO_CODE_DIRECTORY_HASHES)
+        .contains(&signature.code_directory_hashes.len())
+        || signature.code_directory_hashes.iter().any(|hash| {
+            !(MIN_DIRECT_CARGO_CODE_DIRECTORY_HASH_BYTES
+                ..=MAX_DIRECT_CARGO_CODE_DIRECTORY_HASH_BYTES)
+                .contains(&hash.len())
+        })
+        || !signature
+            .code_directory_hashes
+            .windows(2)
+            .all(|pair| pair[0] < pair[1])
+        || signature.signing_identifier.is_empty()
+        || signature.signing_identifier.len() > MAX_DIRECT_CARGO_SIGNING_IDENTIFIER_BYTES
+        || signature.signing_identifier.chars().any(char::is_control)
+        || signature
+            .team_identifier
+            .as_ref()
+            .is_some_and(|identifier| {
+                identifier.is_empty()
+                    || identifier.len() > MAX_DIRECT_CARGO_TEAM_IDENTIFIER_BYTES
+                    || identifier.chars().any(char::is_control)
+            })
+    {
+        return Err(DirectCargoEnrollmentError::InternalState);
+    }
+    Ok(DirectCargoCodeSignature {
+        record_version: FFI_RECORD_VERSION,
+        class: match signature.class {
+            CoreDirectCargoSignatureClass::AdHoc => DirectCargoSignatureClass::AdHoc,
+            CoreDirectCargoSignatureClass::Cms => DirectCargoSignatureClass::Cms,
+        },
+        flags: signature.flags,
+        code_directory_hashes: signature
+            .code_directory_hashes
+            .iter()
+            .map(|hash| DirectCargoCodeDirectoryHash {
+                record_version: FFI_RECORD_VERSION,
+                bytes: hash.clone(),
+            })
+            .collect(),
+        signing_identifier: signature.signing_identifier.clone(),
+        team_identifier: signature.team_identifier.clone(),
+        designated_requirement_sha256: signature
+            .designated_requirement_sha256
+            .map(|digest| digest.to_vec()),
+    })
+}
+
+fn direct_cargo_preview_info(
+    preview: &CoreDirectCargoEnrollmentPreview,
+) -> Result<DirectCargoEnrollmentPreviewInfo, DirectCargoEnrollmentError> {
+    Ok(DirectCargoEnrollmentPreviewInfo {
+        record_version: FFI_RECORD_VERSION,
+        executable_path: direct_cargo_executable_path(preview.path())?,
+        executable_sha256: preview.executable_sha256().to_vec(),
+        code_signature: direct_cargo_code_signature(preview.code_signature())?,
+    })
+}
+
+fn direct_cargo_enrollment_status(
+    status: CoreDirectCargoEnrollmentStatus,
+) -> Result<DirectCargoEnrollmentStatus, DirectCargoEnrollmentError> {
+    let updated_at_unix_ms = status
+        .updated_at
+        .map(direct_cargo_enrollment_time_ms)
+        .transpose()?;
+    let (state, identity) = match status.state {
+        CoreDirectCargoEnrollmentState::NotEnrolled => {
+            (DirectCargoEnrollmentState::NotEnrolled, None)
+        }
+        CoreDirectCargoEnrollmentState::Revoked => (DirectCargoEnrollmentState::Revoked, None),
+        CoreDirectCargoEnrollmentState::Enrolled {
+            path,
+            executable_sha256,
+            version_sha256,
+            cargo_release,
+            code_signature,
+        } => {
+            if cargo_release != DIRECT_CARGO_SUPPORTED_RELEASE {
+                return Err(DirectCargoEnrollmentError::InternalState);
+            }
+            (
+                DirectCargoEnrollmentState::Enrolled,
+                Some(DirectCargoEnrollmentIdentity {
+                    record_version: FFI_RECORD_VERSION,
+                    executable_path: direct_cargo_executable_path(&path)?,
+                    executable_sha256: executable_sha256.to_vec(),
+                    version_sha256: version_sha256.to_vec(),
+                    cargo_major: cargo_release[0],
+                    cargo_minor: cargo_release[1],
+                    cargo_patch: cargo_release[2],
+                    code_signature: direct_cargo_code_signature(&code_signature)?,
+                }),
+            )
+        }
+    };
+    let valid_shape = match state {
+        DirectCargoEnrollmentState::NotEnrolled => {
+            status.revision == 0 && identity.is_none() && updated_at_unix_ms.is_none()
+        }
+        DirectCargoEnrollmentState::Enrolled => {
+            status.revision > 0 && identity.is_some() && updated_at_unix_ms.is_some()
+        }
+        DirectCargoEnrollmentState::Revoked => {
+            status.revision > 0 && identity.is_none() && updated_at_unix_ms.is_some()
+        }
+    };
+    if !valid_shape {
+        return Err(DirectCargoEnrollmentError::InternalState);
+    }
+    Ok(DirectCargoEnrollmentStatus {
+        record_version: FFI_RECORD_VERSION,
+        revision: status.revision,
+        state,
+        identity,
+        updated_at_unix_ms,
+    })
+}
+
+fn direct_cargo_enrollment_update(
+    update: CoreDirectCargoEnrollmentUpdate,
+) -> Result<DirectCargoEnrollmentUpdate, DirectCargoEnrollmentError> {
+    Ok(DirectCargoEnrollmentUpdate {
+        record_version: FFI_RECORD_VERSION,
+        status: direct_cargo_enrollment_status(update.status)?,
+        changed: update.changed,
+    })
+}
+
+/// Project a mutating core result without claiming that a successful mutation
+/// failed safely. Once core returns an update, its durable outcome may already
+/// be visible even if the transport shape cannot be represented.
+fn direct_cargo_mutation_result(
+    result: Result<CoreDirectCargoEnrollmentUpdate, CoreDirectCargoEnrollmentError>,
+) -> Result<DirectCargoEnrollmentUpdate, DirectCargoEnrollmentError> {
+    let update = result.map_err(map_direct_cargo_enrollment_error)?;
+    direct_cargo_enrollment_update(update).map_err(|_| DirectCargoEnrollmentError::OutcomeUnknown)
+}
+
+fn direct_cargo_enrollment_time_ms(value: SystemTime) -> Result<i64, DirectCargoEnrollmentError> {
+    i64::try_from(
+        value
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| DirectCargoEnrollmentError::InternalState)?
+            .as_millis(),
+    )
+    .map_err(|_| DirectCargoEnrollmentError::InternalState)
+}
+
+const fn map_direct_cargo_enrollment_error(
+    error: CoreDirectCargoEnrollmentError,
+) -> DirectCargoEnrollmentError {
+    match error {
+        CoreDirectCargoEnrollmentError::Closed => DirectCargoEnrollmentError::Closed,
+        CoreDirectCargoEnrollmentError::UnsupportedPlatform => {
+            DirectCargoEnrollmentError::UnsupportedPlatform
+        }
+        CoreDirectCargoEnrollmentError::InvalidExecutableLocator => {
+            DirectCargoEnrollmentError::InvalidExecutablePath
+        }
+        CoreDirectCargoEnrollmentError::ExecutableNotRegular => {
+            DirectCargoEnrollmentError::ExecutableNotRegular
+        }
+        CoreDirectCargoEnrollmentError::ChangedDuringInspection => {
+            DirectCargoEnrollmentError::ChangedDuringInspection
+        }
+        CoreDirectCargoEnrollmentError::InspectionUnavailable => {
+            DirectCargoEnrollmentError::InspectionUnavailable
+        }
+        CoreDirectCargoEnrollmentError::InspectionLimitExceeded => {
+            DirectCargoEnrollmentError::InspectionLimitExceeded
+        }
+        CoreDirectCargoEnrollmentError::InvalidResolutionEnvironment => {
+            DirectCargoEnrollmentError::InvalidResolutionEnvironment
+        }
+        CoreDirectCargoEnrollmentError::InvalidCargoVersion => {
+            DirectCargoEnrollmentError::InvalidCargoVersion
+        }
+        CoreDirectCargoEnrollmentError::InvalidCodeSignature => {
+            DirectCargoEnrollmentError::InvalidCodeSignature
+        }
+        CoreDirectCargoEnrollmentError::WrongEngine => DirectCargoEnrollmentError::WrongEngine,
+        CoreDirectCargoEnrollmentError::RevisionExhausted => {
+            DirectCargoEnrollmentError::RevisionExhausted
+        }
+        CoreDirectCargoEnrollmentError::InvalidClock => DirectCargoEnrollmentError::InvalidClock,
+        CoreDirectCargoEnrollmentError::IncompatibleSchema => {
+            DirectCargoEnrollmentError::IncompatibleSchema
+        }
+        CoreDirectCargoEnrollmentError::Busy => DirectCargoEnrollmentError::Busy,
+        CoreDirectCargoEnrollmentError::UnsafeStorage => DirectCargoEnrollmentError::UnsafeStorage,
+        CoreDirectCargoEnrollmentError::QueryLimitExceeded => {
+            DirectCargoEnrollmentError::BudgetExceeded
+        }
+        CoreDirectCargoEnrollmentError::CorruptData => DirectCargoEnrollmentError::CorruptData,
+        CoreDirectCargoEnrollmentError::Unavailable => DirectCargoEnrollmentError::Unavailable,
+        CoreDirectCargoEnrollmentError::OutcomeUnknown => {
+            DirectCargoEnrollmentError::OutcomeUnknown
+        }
+        CoreDirectCargoEnrollmentError::InternalState => DirectCargoEnrollmentError::InternalState,
+        _ => DirectCargoEnrollmentError::InternalState,
+    }
+}
+
 fn permanent_cleanup_policy_status(
     policy: CorePermanentCleanupPolicy,
 ) -> Result<PermanentCleanupPolicyStatus, PermanentCleanupPolicyError> {
@@ -5004,7 +5759,7 @@ uniffi::setup_scaffolding!();
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+    use std::sync::{Mutex, TryLockError};
     use std::time::{Duration, Instant};
     use tempfile::TempDir;
 
@@ -5020,15 +5775,774 @@ mod tests {
         (temp, engine)
     }
 
+    fn wait_until(description: &str, mut condition: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !condition() {
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for {description}"
+            );
+            std::thread::yield_now();
+        }
+    }
+
+    fn mutex_is_locked<T>(mutex: &Mutex<T>) -> bool {
+        match mutex.try_lock() {
+            Ok(_) => false,
+            Err(TryLockError::WouldBlock) => true,
+            Err(TryLockError::Poisoned(_)) => panic!("test mutex was poisoned"),
+        }
+    }
+
     #[test]
-    fn reports_contract_twenty_six_and_preserves_legacy_formatting() {
+    fn reports_contract_twenty_seven_and_preserves_legacy_formatting() {
         let _guard = ENGINE_TEST_LOCK.lock().unwrap();
         let (_temp, engine) = engine();
-        assert_eq!(library_version().ffi_contract_version, 26);
+        assert_eq!(library_version().ffi_contract_version, 27);
         assert_eq!(engine.library_version().unwrap(), library_version());
         assert_eq!(engine.format_size(1536).unwrap().display, "1.5 KB");
         assert!(engine.close());
         assert_eq!(engine.format_size(1), Err(EngineError::Closed));
+    }
+
+    #[cfg(unix)]
+    fn direct_cargo_request(path: &Path) -> DirectCargoEnrollmentInspectionRequest {
+        DirectCargoEnrollmentInspectionRequest {
+            record_version: FFI_RECORD_VERSION,
+            path_encoding: SnapshotNameEncoding::UnixBytes,
+            executable_path_bytes: path.as_os_str().as_bytes().to_vec(),
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn direct_toolchain_cargo() -> PathBuf {
+        let rustup_home = std::env::var_os("RUSTUP_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap()).join(".rustup"));
+        let toolchain = std::env::var_os("RUSTUP_TOOLCHAIN")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(format!("stable-{}-apple-darwin", std::env::consts::ARCH))
+            });
+        let cargo = rustup_home
+            .join("toolchains")
+            .join(toolchain)
+            .join("bin/cargo");
+        assert!(
+            cargo.is_file(),
+            "direct stable Cargo must exist at {cargo:?}"
+        );
+        cargo
+    }
+
+    #[test]
+    fn direct_cargo_locator_preserves_valid_bytes_and_rejects_unbounded_or_unsafe_text() {
+        let valid = DirectCargoEnrollmentInspectionRequest {
+            record_version: FFI_RECORD_VERSION,
+            path_encoding: SnapshotNameEncoding::UnixBytes,
+            executable_path_bytes: b"/tmp/Cargo \xF0\x9F\xA6\x80/cargo".to_vec(),
+        };
+        let decoded = decode_direct_cargo_executable_path(valid.clone()).unwrap();
+        assert_eq!(direct_cargo_request(&decoded), valid);
+
+        for request in [
+            DirectCargoEnrollmentInspectionRequest {
+                record_version: FFI_RECORD_VERSION + 1,
+                ..valid.clone()
+            },
+            DirectCargoEnrollmentInspectionRequest {
+                executable_path_bytes: Vec::new(),
+                ..valid.clone()
+            },
+            DirectCargoEnrollmentInspectionRequest {
+                executable_path_bytes: vec![b'x'; MAX_DIRECT_CARGO_EXECUTABLE_PATH_BYTES + 1],
+                ..valid.clone()
+            },
+            DirectCargoEnrollmentInspectionRequest {
+                executable_path_bytes: b"relative/cargo".to_vec(),
+                ..valid.clone()
+            },
+            DirectCargoEnrollmentInspectionRequest {
+                executable_path_bytes: b"/tmp/cargo\0suffix".to_vec(),
+                ..valid.clone()
+            },
+            DirectCargoEnrollmentInspectionRequest {
+                executable_path_bytes: b"/tmp/cargo\nsuffix".to_vec(),
+                ..valid.clone()
+            },
+            DirectCargoEnrollmentInspectionRequest {
+                executable_path_bytes: b"/tmp/\xff/cargo".to_vec(),
+                ..valid.clone()
+            },
+            DirectCargoEnrollmentInspectionRequest {
+                executable_path_bytes: b"/tmp//cargo".to_vec(),
+                ..valid.clone()
+            },
+            DirectCargoEnrollmentInspectionRequest {
+                executable_path_bytes: b"/tmp/./cargo".to_vec(),
+                ..valid.clone()
+            },
+            DirectCargoEnrollmentInspectionRequest {
+                executable_path_bytes: b"/tmp/../cargo".to_vec(),
+                ..valid.clone()
+            },
+            DirectCargoEnrollmentInspectionRequest {
+                executable_path_bytes: b"/tmp/cargo/".to_vec(),
+                ..valid.clone()
+            },
+            DirectCargoEnrollmentInspectionRequest {
+                executable_path_bytes: b"/tmp/Cargo".to_vec(),
+                ..valid.clone()
+            },
+            DirectCargoEnrollmentInspectionRequest {
+                executable_path_bytes: b"/cargo-other".to_vec(),
+                ..valid.clone()
+            },
+            DirectCargoEnrollmentInspectionRequest {
+                path_encoding: SnapshotNameEncoding::WindowsUtf16LittleEndian,
+                ..valid
+            },
+        ] {
+            let expected = if request.record_version != FFI_RECORD_VERSION {
+                DirectCargoEnrollmentError::InvalidRecordVersion
+            } else {
+                DirectCargoEnrollmentError::InvalidExecutablePath
+            };
+            assert_eq!(decode_direct_cargo_executable_path(request), Err(expected));
+        }
+        for path in [
+            "/tmp//cargo",
+            "/tmp/./cargo",
+            "/tmp/../cargo",
+            "/tmp/cargo/",
+            "/tmp/Cargo",
+            "/cargo-other",
+        ] {
+            assert_eq!(
+                direct_cargo_executable_path(Path::new(path)),
+                Err(DirectCargoEnrollmentError::InternalState)
+            );
+        }
+    }
+
+    #[test]
+    fn direct_cargo_status_projection_rejects_malformed_state_and_release_shapes() {
+        assert_eq!(
+            direct_cargo_enrollment_status(CoreDirectCargoEnrollmentStatus {
+                revision: 1,
+                state: CoreDirectCargoEnrollmentState::NotEnrolled,
+                updated_at: Some(UNIX_EPOCH),
+            }),
+            Err(DirectCargoEnrollmentError::InternalState)
+        );
+        assert_eq!(
+            direct_cargo_enrollment_status(CoreDirectCargoEnrollmentStatus {
+                revision: 0,
+                state: CoreDirectCargoEnrollmentState::Revoked,
+                updated_at: None,
+            }),
+            Err(DirectCargoEnrollmentError::InternalState)
+        );
+        let signature = CoreDirectCargoCodeSignature {
+            class: CoreDirectCargoSignatureClass::AdHoc,
+            flags: 2,
+            code_directory_hashes: vec![vec![1; 20]],
+            signing_identifier: "cargo-test".to_owned(),
+            team_identifier: None,
+            designated_requirement_sha256: None,
+        };
+        assert_eq!(
+            direct_cargo_enrollment_status(CoreDirectCargoEnrollmentStatus {
+                revision: 1,
+                state: CoreDirectCargoEnrollmentState::Enrolled {
+                    path: PathBuf::from("/tmp/cargo"),
+                    executable_sha256: [2; 32],
+                    version_sha256: [3; 32],
+                    cargo_release: [1, 95, 0],
+                    code_signature: Box::new(signature.clone()),
+                },
+                updated_at: Some(UNIX_EPOCH),
+            }),
+            Err(DirectCargoEnrollmentError::InternalState)
+        );
+        let enrolled = direct_cargo_enrollment_status(CoreDirectCargoEnrollmentStatus {
+            revision: 1,
+            state: CoreDirectCargoEnrollmentState::Enrolled {
+                path: PathBuf::from("/tmp/cargo"),
+                executable_sha256: [2; 32],
+                version_sha256: [3; 32],
+                cargo_release: DIRECT_CARGO_SUPPORTED_RELEASE,
+                code_signature: Box::new(signature),
+            },
+            updated_at: Some(UNIX_EPOCH),
+        })
+        .unwrap();
+        let identity = enrolled.identity.unwrap();
+        assert_eq!(identity.executable_sha256, vec![2; 32]);
+        assert_eq!(identity.version_sha256, vec![3; 32]);
+        assert_eq!(
+            direct_cargo_enrollment_status(CoreDirectCargoEnrollmentStatus {
+                revision: 1,
+                state: CoreDirectCargoEnrollmentState::Revoked,
+                updated_at: Some(UNIX_EPOCH),
+            })
+            .unwrap(),
+            DirectCargoEnrollmentStatus {
+                record_version: FFI_RECORD_VERSION,
+                revision: 1,
+                state: DirectCargoEnrollmentState::Revoked,
+                identity: None,
+                updated_at_unix_ms: Some(0),
+            }
+        );
+    }
+
+    #[test]
+    fn direct_cargo_commit_projection_failure_after_core_success_is_outcome_unknown() {
+        let malformed_success = CoreDirectCargoEnrollmentUpdate {
+            status: CoreDirectCargoEnrollmentStatus {
+                revision: 1,
+                state: CoreDirectCargoEnrollmentState::Enrolled {
+                    path: PathBuf::from("/tmp/cargo"),
+                    executable_sha256: [2; 32],
+                    version_sha256: [3; 32],
+                    cargo_release: [1, 95, 0],
+                    code_signature: Box::new(CoreDirectCargoCodeSignature {
+                        class: CoreDirectCargoSignatureClass::AdHoc,
+                        flags: 2,
+                        code_directory_hashes: vec![vec![1; 20]],
+                        signing_identifier: "cargo-test".to_owned(),
+                        team_identifier: None,
+                        designated_requirement_sha256: None,
+                    }),
+                },
+                updated_at: Some(UNIX_EPOCH),
+            },
+            changed: true,
+        };
+        assert_eq!(
+            direct_cargo_enrollment_update(malformed_success.clone()),
+            Err(DirectCargoEnrollmentError::InternalState)
+        );
+        assert_eq!(
+            direct_cargo_mutation_result(Ok(malformed_success)),
+            Err(DirectCargoEnrollmentError::OutcomeUnknown)
+        );
+        assert_eq!(
+            direct_cargo_mutation_result(Err(CoreDirectCargoEnrollmentError::InternalState)),
+            Err(DirectCargoEnrollmentError::InternalState)
+        );
+    }
+
+    #[test]
+    fn direct_cargo_revoke_projection_failure_after_core_success_is_outcome_unknown() {
+        let malformed_success = CoreDirectCargoEnrollmentUpdate {
+            status: CoreDirectCargoEnrollmentStatus {
+                revision: 0,
+                state: CoreDirectCargoEnrollmentState::Revoked,
+                updated_at: Some(UNIX_EPOCH),
+            },
+            changed: true,
+        };
+        assert_eq!(
+            direct_cargo_enrollment_update(malformed_success.clone()),
+            Err(DirectCargoEnrollmentError::InternalState)
+        );
+        assert_eq!(
+            direct_cargo_mutation_result(Ok(malformed_success)),
+            Err(DirectCargoEnrollmentError::OutcomeUnknown)
+        );
+    }
+
+    #[test]
+    fn direct_cargo_signature_projection_enforces_independent_transport_bounds() {
+        let signature = CoreDirectCargoCodeSignature {
+            class: CoreDirectCargoSignatureClass::AdHoc,
+            flags: 2,
+            code_directory_hashes: (0_u8..15)
+                .map(|value| vec![value; MIN_DIRECT_CARGO_CODE_DIRECTORY_HASH_BYTES])
+                .chain(std::iter::once(vec![
+                    15;
+                    MAX_DIRECT_CARGO_CODE_DIRECTORY_HASH_BYTES
+                ]))
+                .collect(),
+            signing_identifier: "s".repeat(MAX_DIRECT_CARGO_SIGNING_IDENTIFIER_BYTES),
+            team_identifier: Some("T".repeat(MAX_DIRECT_CARGO_TEAM_IDENTIFIER_BYTES)),
+            designated_requirement_sha256: Some([3; 32]),
+        };
+        let projected = direct_cargo_code_signature(&signature).unwrap();
+        assert_eq!(projected.record_version, FFI_RECORD_VERSION);
+        assert_eq!(
+            projected.code_directory_hashes.len(),
+            MAX_DIRECT_CARGO_CODE_DIRECTORY_HASHES
+        );
+        assert_eq!(
+            projected.code_directory_hashes.first().unwrap().bytes.len(),
+            MIN_DIRECT_CARGO_CODE_DIRECTORY_HASH_BYTES
+        );
+        assert_eq!(
+            projected.code_directory_hashes.last().unwrap().bytes.len(),
+            MAX_DIRECT_CARGO_CODE_DIRECTORY_HASH_BYTES
+        );
+        assert_eq!(
+            projected.signing_identifier.len(),
+            MAX_DIRECT_CARGO_SIGNING_IDENTIFIER_BYTES
+        );
+        assert_eq!(
+            projected.team_identifier.as_ref().unwrap().len(),
+            MAX_DIRECT_CARGO_TEAM_IDENTIFIER_BYTES
+        );
+        assert_eq!(projected.designated_requirement_sha256, Some(vec![3; 32]));
+
+        let mut invalid = signature.clone();
+        invalid.code_directory_hashes = vec![vec![0; 19]];
+        assert_eq!(
+            direct_cargo_code_signature(&invalid),
+            Err(DirectCargoEnrollmentError::InternalState)
+        );
+        let mut invalid = signature.clone();
+        invalid
+            .code_directory_hashes
+            .push(vec![u8::MAX; MIN_DIRECT_CARGO_CODE_DIRECTORY_HASH_BYTES]);
+        assert_eq!(
+            direct_cargo_code_signature(&invalid),
+            Err(DirectCargoEnrollmentError::InternalState)
+        );
+        let mut invalid = signature.clone();
+        invalid.code_directory_hashes =
+            vec![vec![0; MAX_DIRECT_CARGO_CODE_DIRECTORY_HASH_BYTES + 1]];
+        assert_eq!(
+            direct_cargo_code_signature(&invalid),
+            Err(DirectCargoEnrollmentError::InternalState)
+        );
+        let mut invalid = signature.clone();
+        invalid.code_directory_hashes = vec![vec![2; 20], vec![1; 20]];
+        assert_eq!(
+            direct_cargo_code_signature(&invalid),
+            Err(DirectCargoEnrollmentError::InternalState)
+        );
+        let mut invalid = signature.clone();
+        invalid.signing_identifier = "s".repeat(MAX_DIRECT_CARGO_SIGNING_IDENTIFIER_BYTES + 1);
+        assert_eq!(
+            direct_cargo_code_signature(&invalid),
+            Err(DirectCargoEnrollmentError::InternalState)
+        );
+        let mut invalid = signature.clone();
+        invalid.signing_identifier = "cargo\nunsafe".to_owned();
+        assert_eq!(
+            direct_cargo_code_signature(&invalid),
+            Err(DirectCargoEnrollmentError::InternalState)
+        );
+        let mut invalid = signature.clone();
+        invalid.team_identifier = Some("T".repeat(MAX_DIRECT_CARGO_TEAM_IDENTIFIER_BYTES + 1));
+        assert_eq!(
+            direct_cargo_code_signature(&invalid),
+            Err(DirectCargoEnrollmentError::InternalState)
+        );
+        let mut invalid = signature;
+        invalid.team_identifier = Some("TEAM\u{7f}".to_owned());
+        assert_eq!(
+            direct_cargo_code_signature(&invalid),
+            Err(DirectCargoEnrollmentError::InternalState)
+        );
+    }
+
+    #[test]
+    fn every_direct_cargo_core_error_maps_to_a_stable_transport_error() {
+        for (core, ffi) in [
+            (
+                CoreDirectCargoEnrollmentError::Closed,
+                DirectCargoEnrollmentError::Closed,
+            ),
+            (
+                CoreDirectCargoEnrollmentError::UnsupportedPlatform,
+                DirectCargoEnrollmentError::UnsupportedPlatform,
+            ),
+            (
+                CoreDirectCargoEnrollmentError::InvalidExecutableLocator,
+                DirectCargoEnrollmentError::InvalidExecutablePath,
+            ),
+            (
+                CoreDirectCargoEnrollmentError::ExecutableNotRegular,
+                DirectCargoEnrollmentError::ExecutableNotRegular,
+            ),
+            (
+                CoreDirectCargoEnrollmentError::ChangedDuringInspection,
+                DirectCargoEnrollmentError::ChangedDuringInspection,
+            ),
+            (
+                CoreDirectCargoEnrollmentError::InspectionUnavailable,
+                DirectCargoEnrollmentError::InspectionUnavailable,
+            ),
+            (
+                CoreDirectCargoEnrollmentError::InspectionLimitExceeded,
+                DirectCargoEnrollmentError::InspectionLimitExceeded,
+            ),
+            (
+                CoreDirectCargoEnrollmentError::InvalidResolutionEnvironment,
+                DirectCargoEnrollmentError::InvalidResolutionEnvironment,
+            ),
+            (
+                CoreDirectCargoEnrollmentError::InvalidCargoVersion,
+                DirectCargoEnrollmentError::InvalidCargoVersion,
+            ),
+            (
+                CoreDirectCargoEnrollmentError::InvalidCodeSignature,
+                DirectCargoEnrollmentError::InvalidCodeSignature,
+            ),
+            (
+                CoreDirectCargoEnrollmentError::WrongEngine,
+                DirectCargoEnrollmentError::WrongEngine,
+            ),
+            (
+                CoreDirectCargoEnrollmentError::RevisionExhausted,
+                DirectCargoEnrollmentError::RevisionExhausted,
+            ),
+            (
+                CoreDirectCargoEnrollmentError::InvalidClock,
+                DirectCargoEnrollmentError::InvalidClock,
+            ),
+            (
+                CoreDirectCargoEnrollmentError::IncompatibleSchema,
+                DirectCargoEnrollmentError::IncompatibleSchema,
+            ),
+            (
+                CoreDirectCargoEnrollmentError::Busy,
+                DirectCargoEnrollmentError::Busy,
+            ),
+            (
+                CoreDirectCargoEnrollmentError::UnsafeStorage,
+                DirectCargoEnrollmentError::UnsafeStorage,
+            ),
+            (
+                CoreDirectCargoEnrollmentError::QueryLimitExceeded,
+                DirectCargoEnrollmentError::BudgetExceeded,
+            ),
+            (
+                CoreDirectCargoEnrollmentError::CorruptData,
+                DirectCargoEnrollmentError::CorruptData,
+            ),
+            (
+                CoreDirectCargoEnrollmentError::Unavailable,
+                DirectCargoEnrollmentError::Unavailable,
+            ),
+            (
+                CoreDirectCargoEnrollmentError::OutcomeUnknown,
+                DirectCargoEnrollmentError::OutcomeUnknown,
+            ),
+            (
+                CoreDirectCargoEnrollmentError::InternalState,
+                DirectCargoEnrollmentError::InternalState,
+            ),
+        ] {
+            assert_eq!(map_direct_cargo_enrollment_error(core), ffi);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn direct_cargo_preview_is_bounded_engine_bound_consume_once_and_close_drained() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (temp, primary) = engine();
+        let primary = Arc::new(primary);
+        let (_foreign_temp, foreign) = engine();
+        let same_store = DuxEngine::new(EngineStorageRoots {
+            data_root: temp.path().join("data").to_string_lossy().into_owned(),
+            cache_root: temp
+                .path()
+                .join("cache-peer")
+                .to_string_lossy()
+                .into_owned(),
+        })
+        .unwrap();
+        let cargo = direct_toolchain_cargo();
+        assert_eq!(
+            primary.direct_cargo_enrollment_status().unwrap(),
+            DirectCargoEnrollmentStatus {
+                record_version: FFI_RECORD_VERSION,
+                revision: 0,
+                state: DirectCargoEnrollmentState::NotEnrolled,
+                identity: None,
+                updated_at_unix_ms: None,
+            }
+        );
+
+        let released = primary
+            .inspect_direct_cargo_enrollment(direct_cargo_request(&cargo))
+            .unwrap();
+        let info = released.info().unwrap();
+        assert_eq!(info.record_version, FFI_RECORD_VERSION);
+        assert_eq!(
+            info.executable_path.encoded_bytes,
+            cargo.as_os_str().as_bytes()
+        );
+        assert_eq!(info.executable_sha256.len(), 32);
+        assert!(!info.code_signature.code_directory_hashes.is_empty());
+        assert!(matches!(
+            primary.inspect_direct_cargo_enrollment(direct_cargo_request(&cargo)),
+            Err(DirectCargoEnrollmentError::Busy)
+        ));
+        assert_eq!(
+            same_store.commit_direct_cargo_enrollment(Arc::clone(&released)),
+            Err(DirectCargoEnrollmentError::WrongEngine)
+        );
+        assert_eq!(
+            foreign.commit_direct_cargo_enrollment(Arc::clone(&released)),
+            Err(DirectCargoEnrollmentError::WrongEngine)
+        );
+        assert_eq!(
+            released.release().unwrap(),
+            DirectCargoEnrollmentPreviewReleaseOutcome::Released
+        );
+        assert_eq!(
+            released.release().unwrap(),
+            DirectCargoEnrollmentPreviewReleaseOutcome::AlreadyUnavailable
+        );
+        assert_eq!(
+            released.info(),
+            Err(DirectCargoEnrollmentError::PreviewUnavailable)
+        );
+
+        let stale = primary
+            .inspect_direct_cargo_enrollment(direct_cargo_request(&cargo))
+            .unwrap();
+        let peer_preview = same_store
+            .inspect_direct_cargo_enrollment(direct_cargo_request(&cargo))
+            .unwrap();
+        let peer_update = same_store
+            .commit_direct_cargo_enrollment(peer_preview)
+            .unwrap();
+        assert!(peer_update.changed);
+        assert_eq!(
+            primary.commit_direct_cargo_enrollment(Arc::clone(&stale)),
+            Err(DirectCargoEnrollmentError::ChangedDuringInspection)
+        );
+        assert_eq!(
+            primary.commit_direct_cargo_enrollment(stale),
+            Err(DirectCargoEnrollmentError::PreviewUnavailable)
+        );
+        let revoked = primary.revoke_direct_cargo_enrollment().unwrap();
+        assert!(revoked.changed);
+        assert_eq!(revoked.status.state, DirectCargoEnrollmentState::Revoked);
+
+        let committed_preview = primary
+            .inspect_direct_cargo_enrollment(direct_cargo_request(&cargo))
+            .unwrap();
+        let committed = primary
+            .commit_direct_cargo_enrollment(Arc::clone(&committed_preview))
+            .unwrap();
+        assert!(committed.changed);
+        assert_eq!(committed.status.state, DirectCargoEnrollmentState::Enrolled);
+        let identity = committed.status.identity.as_ref().unwrap();
+        assert_eq!(
+            identity.executable_path.encoded_bytes,
+            cargo.as_os_str().as_bytes()
+        );
+        assert_eq!(identity.executable_sha256.len(), 32);
+        assert_eq!(identity.version_sha256.len(), 32);
+        assert_eq!(
+            primary.commit_direct_cargo_enrollment(committed_preview),
+            Err(DirectCargoEnrollmentError::PreviewUnavailable)
+        );
+        assert_eq!(
+            primary.direct_cargo_enrollment_status().unwrap(),
+            committed.status
+        );
+
+        let raced = primary
+            .inspect_direct_cargo_enrollment(direct_cargo_request(&cargo))
+            .unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let commit_thread = {
+            let primary = Arc::clone(&primary);
+            let raced = Arc::clone(&raced);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                primary.commit_direct_cargo_enrollment(raced)
+            })
+        };
+        let release_thread = {
+            let raced = Arc::clone(&raced);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                raced.release()
+            })
+        };
+        barrier.wait();
+        let commit_result = commit_thread.join().unwrap();
+        let release_result = release_thread.join().unwrap().unwrap();
+        match commit_result {
+            Ok(_) => assert_eq!(
+                release_result,
+                DirectCargoEnrollmentPreviewReleaseOutcome::AlreadyUnavailable
+            ),
+            Err(DirectCargoEnrollmentError::PreviewUnavailable) => assert_eq!(
+                release_result,
+                DirectCargoEnrollmentPreviewReleaseOutcome::Released
+            ),
+            other => panic!("unexpected commit/release race result: {other:?}"),
+        }
+        assert_eq!(
+            raced.info(),
+            Err(DirectCargoEnrollmentError::PreviewUnavailable)
+        );
+
+        let close_drained = primary
+            .inspect_direct_cargo_enrollment(direct_cargo_request(&cargo))
+            .unwrap();
+        assert!(primary.close());
+        assert_eq!(
+            close_drained.info(),
+            Err(DirectCargoEnrollmentError::Closed)
+        );
+        assert_eq!(
+            close_drained.release().unwrap(),
+            DirectCargoEnrollmentPreviewReleaseOutcome::AlreadyUnavailable
+        );
+        assert_eq!(
+            primary.commit_direct_cargo_enrollment(close_drained),
+            Err(DirectCargoEnrollmentError::Closed)
+        );
+        assert_eq!(
+            primary.direct_cargo_enrollment_status(),
+            Err(DirectCargoEnrollmentError::Closed)
+        );
+        assert!(foreign.close());
+        assert!(same_store.close());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn direct_cargo_close_wins_inspection_registration_and_commit_admission() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let cargo = direct_toolchain_cargo();
+
+        let (_inspect_temp, inspect_engine) = engine();
+        let inspect_engine = Arc::new(inspect_engine);
+        let registry_guard = inspect_engine.direct_cargo_previews.lock().unwrap();
+        let inspect_thread = {
+            let inspect_engine = Arc::clone(&inspect_engine);
+            let cargo = cargo.clone();
+            std::thread::spawn(move || {
+                inspect_engine.inspect_direct_cargo_enrollment(direct_cargo_request(&cargo))
+            })
+        };
+        wait_until("inspection to acquire the engine state lock", || {
+            mutex_is_locked(&inspect_engine.state)
+        });
+        let inspect_close_thread = {
+            let inspect_engine = Arc::clone(&inspect_engine);
+            std::thread::spawn(move || inspect_engine.close())
+        };
+        wait_until("inspection engine close admission", || {
+            inspect_engine.closed.load(Ordering::Acquire)
+        });
+        drop(registry_guard);
+        assert!(matches!(
+            inspect_thread.join().unwrap(),
+            Err(DirectCargoEnrollmentError::Closed)
+        ));
+        assert!(inspect_close_thread.join().unwrap());
+        assert!(
+            inspect_engine
+                .direct_cargo_previews
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|preview| preview.upgrade().is_none())
+        );
+
+        let (_commit_temp, commit_engine) = engine();
+        let commit_engine = Arc::new(commit_engine);
+        let preview = commit_engine
+            .inspect_direct_cargo_enrollment(direct_cargo_request(&cargo))
+            .unwrap();
+        let state_guard = commit_engine.state.lock().unwrap();
+        let commit_close_thread = {
+            let commit_engine = Arc::clone(&commit_engine);
+            std::thread::spawn(move || commit_engine.close())
+        };
+        wait_until("commit engine close admission", || {
+            commit_engine.closed.load(Ordering::Acquire)
+        });
+        let commit_thread = {
+            let commit_engine = Arc::clone(&commit_engine);
+            let preview = Arc::clone(&preview);
+            std::thread::spawn(move || commit_engine.commit_direct_cargo_enrollment(preview))
+        };
+        drop(state_guard);
+        assert_eq!(
+            commit_thread.join().unwrap(),
+            Err(DirectCargoEnrollmentError::Closed)
+        );
+        assert!(commit_close_thread.join().unwrap());
+        assert_eq!(preview.info(), Err(DirectCargoEnrollmentError::Closed));
+        assert_eq!(
+            preview.release().unwrap(),
+            DirectCargoEnrollmentPreviewReleaseOutcome::AlreadyUnavailable
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn direct_cargo_concurrent_commit_and_revoke_converge_to_revoked() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (_temp, engine) = engine();
+        let engine = Arc::new(engine);
+        let cargo = direct_toolchain_cargo();
+        let initial = engine
+            .inspect_direct_cargo_enrollment(direct_cargo_request(&cargo))
+            .and_then(|preview| engine.commit_direct_cargo_enrollment(preview))
+            .unwrap();
+        assert_eq!(initial.status.state, DirectCargoEnrollmentState::Enrolled);
+        let preview = engine
+            .inspect_direct_cargo_enrollment(direct_cargo_request(&cargo))
+            .unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let commit_thread = {
+            let engine = Arc::clone(&engine);
+            let preview = Arc::clone(&preview);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                engine.commit_direct_cargo_enrollment(preview)
+            })
+        };
+        let revoke_thread = {
+            let engine = Arc::clone(&engine);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                engine.revoke_direct_cargo_enrollment()
+            })
+        };
+        barrier.wait();
+        let commit_result = commit_thread.join().unwrap();
+        let revoke = revoke_thread.join().unwrap().unwrap();
+        match commit_result {
+            Ok(update) => {
+                assert_eq!(update.status.state, DirectCargoEnrollmentState::Enrolled);
+            }
+            Err(DirectCargoEnrollmentError::ChangedDuringInspection) => {}
+            other => panic!("unexpected concurrent commit result: {other:?}"),
+        }
+        assert!(revoke.changed);
+        assert_eq!(revoke.status.state, DirectCargoEnrollmentState::Revoked);
+        assert_eq!(
+            engine.direct_cargo_enrollment_status().unwrap(),
+            revoke.status
+        );
+        assert_eq!(
+            preview.info(),
+            Err(DirectCargoEnrollmentError::PreviewUnavailable)
+        );
+        assert_eq!(
+            engine.commit_direct_cargo_enrollment(preview),
+            Err(DirectCargoEnrollmentError::PreviewUnavailable)
+        );
+        assert!(engine.close());
     }
 
     #[test]

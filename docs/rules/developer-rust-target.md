@@ -648,19 +648,27 @@ recover this exception. Terminal claim settlement cascades the seal away. This
 remains crate-private and grants no FFI, UI, CLI, AI, or scheduled cleanup
 route.
 
-This checkpoint deliberately exposes only the Rust core API. FFI and Swift
-settings UI remain future work, so the application cannot ask a user to enroll
-Cargo yet. That UI must clearly disclose that confirmation executes the exact
-statically previewed binary for bounded version validation. More importantly,
-enrollment establishes only local executable
-provenance for discovery. Positive `.cargo/config`, legacy extensionless
+UniFFI contract v27 and native Settings now expose this exact enrollment
+lifecycle without exposing the planner. The user selects one direct `cargo`
+file as lossless bytes; static inspection executes nothing and returns one
+engine-bound, consume-once preview whose bounded path, digest, and static-code
+records are display observations only. The explicit final confirmation
+discloses that DUX will execute those exact inspected bytes with its fixed
+bounded version command. Each engine admits at most one live preview, commit
+checks ownership before consuming it, close releases it, and status/revoke
+accept no path or reconstructed identity. Ad-hoc signing is presented as local
+integrity rather than publisher authentication. This surface still establishes
+only local executable provenance for discovery. Positive `.cargo/config`,
+legacy extensionless
 config, and recursive `include` inputs are not directly attested; projects
 containing them now reject. The bounded negative lookup observation, retained cwd,
 suspended selected-code checkpoint, and guarded two-pass root/member manifest
 closure cover the currently admitted direct-executable case, but launch and
 manifest reads remain path-based and the complete Cargo read/namespace set is
 not attested. Direct-read or generation evidence is still required before
-promotion. `ProtectedPath` therefore remains untouched.
+promotion. The FFI surface cannot create a candidate, plan, approval, journal
+claim, schedule, AI request, or cleanup effect, and `ProtectedPath` therefore
+remains untouched.
 
 ## Required before executable use
 
