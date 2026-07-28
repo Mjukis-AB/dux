@@ -1,6 +1,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rusqlite::{params, types::Value};
@@ -947,6 +950,20 @@ impl TrashPlatformEffect for RecordingTrashPlatform {
     }
 }
 
+struct OrderedTrashPlatform {
+    effect_called: Arc<AtomicBool>,
+}
+
+impl TrashPlatformEffect for OrderedTrashPlatform {
+    fn trash(
+        &mut self,
+        _: &crate::path_validation::TrashPathSnapshot,
+    ) -> Result<(), TrashPlatformError> {
+        self.effect_called.store(true, Ordering::Release);
+        Ok(())
+    }
+}
+
 fn fixture_trash_target(fixture: &Fixture) -> SnapshotReviewTrashTarget {
     let root = fixture._temp.path().join("root");
     fs::create_dir_all(&root).unwrap();
@@ -960,6 +977,42 @@ fn fixture_trash_target(fixture: &Fixture) -> SnapshotReviewTrashTarget {
         node_id: 11,
         snapshot,
     }
+}
+
+#[test]
+fn trash_execution_samples_completion_after_the_platform_effect_returns() {
+    let fixture = Fixture::new_with_selected_in_current_dir(
+        CleanupMode::Trash,
+        CandidateAction::MoveToTrash,
+        1,
+        &[0],
+    );
+    let admission = TrashExecutionAdmission::from_claim(
+        fixture.claim(),
+        fixture_trash_target(&fixture),
+        0,
+        0,
+        fixture.started_at + Duration::from_secs(1),
+    )
+    .unwrap();
+    let effect_called = Arc::new(AtomicBool::new(false));
+    let mut platform = OrderedTrashPlatform {
+        effect_called: Arc::clone(&effect_called),
+    };
+    let completed_at = fixture.started_at + Duration::from_secs(3);
+
+    admission
+        .execute_with_clock_for_test(&mut platform, || {
+            assert!(
+                effect_called.load(Ordering::Acquire),
+                "completion time must be sampled after the platform effect returns"
+            );
+            completed_at
+        })
+        .unwrap();
+
+    let journal = fixture.lease().load(&fixture.session_id).unwrap().unwrap();
+    assert_eq!(journal.items[0].paths[0].completed_at, Some(completed_at));
 }
 
 #[test]
@@ -986,7 +1039,7 @@ fn trash_execution_driver_records_success_and_calls_once() {
     };
 
     admission
-        .execute_with(&mut platform, fixture.started_at + Duration::from_secs(3))
+        .execute_with_at(&mut platform, fixture.started_at + Duration::from_secs(3))
         .unwrap();
 
     assert_eq!(platform.calls, 1);
@@ -1026,7 +1079,7 @@ fn trash_execution_driver_records_unknown_outcome_without_retrying() {
 
     assert_eq!(
         admission
-            .execute_with(&mut platform, fixture.started_at + Duration::from_secs(3))
+            .execute_with_at(&mut platform, fixture.started_at + Duration::from_secs(3))
             .unwrap_err(),
         TrashExecutionError::Platform(TrashPlatformError::OutcomeUnknown)
     );

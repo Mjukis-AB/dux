@@ -33,6 +33,11 @@ use super::cleanup_history::{
     CleanupSessionId, NewCleanupSessionRecord, PreparedCleanupSession, StoredCleanupSessionRecord,
     insert_cleanup_session, load_cleanup_session_record,
 };
+use super::cleanup_history_clear::{
+    CleanupHistoryClearReconciliation, CleanupHistoryClearResult, CleanupHistoryClearStoreError,
+    PreparedCleanupHistoryClear, apply_cleanup_history_clear, prepare_cleanup_history_clear,
+    reconcile_cleanup_history_clear,
+};
 use super::cleanup_history_query::{
     StoredCleanupHistoryCursor, StoredCleanupHistoryObservation, StoredCleanupHistoryPage,
     cleanup_history_session as query_cleanup_history_session,
@@ -2170,6 +2175,116 @@ impl StoreCoordinator {
     ) -> Result<Option<StoredCleanupHistoryObservation>, HistoryError> {
         let guard = self.lock_current_history_connection()?;
         query_cleanup_history_session(&guard.connection, id)
+    }
+
+    /// Prepare an exact, path-free witness for all terminal cleanup history.
+    /// The same cleanup exclusion used by journal effects prevents lifecycle
+    /// transitions while the complete graph is validated and fingerprinted.
+    pub(crate) fn prepare_cleanup_history_clear(
+        &self,
+    ) -> Result<PreparedCleanupHistoryClear, CleanupHistoryClearStoreError> {
+        let _cleanup_lock = self
+            .acquire_cleanup_lock_for_journal(MIGRATION_LOCK_TIMEOUT)
+            .map_err(CleanupHistoryClearStoreError::History)?;
+        let guard = self
+            .lock_current_history_connection()
+            .map_err(CleanupHistoryClearStoreError::History)?;
+        prepare_cleanup_history_clear(&guard.connection)
+    }
+
+    /// Consume one previously prepared witness and clear the exact unchanged
+    /// history graph. This operation accepts no caller-selected row or path.
+    pub(crate) fn clear_cleanup_history(
+        &self,
+        prepared: &PreparedCleanupHistoryClear,
+    ) -> Result<CleanupHistoryClearResult, CleanupHistoryClearStoreError> {
+        self.clear_cleanup_history_with_hook(prepared, || Ok(()))
+    }
+
+    fn clear_cleanup_history_with_hook(
+        &self,
+        prepared: &PreparedCleanupHistoryClear,
+        after_commit: impl FnOnce() -> Result<(), HistoryError>,
+    ) -> Result<CleanupHistoryClearResult, CleanupHistoryClearStoreError> {
+        self.clear_cleanup_history_with_hooks(
+            prepared,
+            after_commit,
+            reconcile_cleanup_history_clear,
+        )
+    }
+
+    fn clear_cleanup_history_with_hooks(
+        &self,
+        prepared: &PreparedCleanupHistoryClear,
+        after_commit: impl FnOnce() -> Result<(), HistoryError>,
+        reconcile: impl FnOnce(
+            &Connection,
+            &super::cleanup_history_clear::CleanupHistoryClearWitness,
+        ) -> Result<CleanupHistoryClearReconciliation, HistoryError>,
+    ) -> Result<CleanupHistoryClearResult, CleanupHistoryClearStoreError> {
+        // Lock order is cleanup exclusion -> history connection/writer lease,
+        // matching journal admission and preventing any lifecycle change
+        // between witness comparison and commit/reconciliation.
+        let _cleanup_lock = self
+            .acquire_cleanup_lock_for_journal(MIGRATION_LOCK_TIMEOUT)
+            .map_err(CleanupHistoryClearStoreError::History)?;
+        let mut guard = self
+            .lock_current_history_connection()
+            .map_err(CleanupHistoryClearStoreError::History)?;
+        let transaction = guard
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(map_write_sql_error)
+            .map_err(CleanupHistoryClearStoreError::History)?;
+        let result = apply_cleanup_history_clear(&transaction, prepared.witness())?;
+        let failure = match transaction
+            .commit()
+            .map_err(map_write_sql_error)
+            .and_then(|()| after_commit())
+            .and_then(|()| self.revalidate_current_history_guard(&guard))
+        {
+            Ok(()) => return Ok(result),
+            Err(failure) => failure,
+        };
+
+        if self.revalidate_current_history_guard(&guard).is_err() {
+            return Err(CleanupHistoryClearStoreError::History(HistoryError::new(
+                HistoryErrorKind::OutcomeUnknown,
+            )));
+        }
+        match reconcile(&guard.connection, prepared.witness()) {
+            Ok(CleanupHistoryClearReconciliation::Applied) => Ok(result),
+            Ok(CleanupHistoryClearReconciliation::NotApplied) => {
+                Err(CleanupHistoryClearStoreError::History(failure))
+            }
+            Ok(CleanupHistoryClearReconciliation::Ambiguous) | Err(_) => {
+                Err(CleanupHistoryClearStoreError::History(HistoryError::new(
+                    HistoryErrorKind::OutcomeUnknown,
+                )))
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn clear_cleanup_history_after_commit_failure_for_test(
+        &self,
+        prepared: &PreparedCleanupHistoryClear,
+    ) -> Result<CleanupHistoryClearResult, CleanupHistoryClearStoreError> {
+        self.clear_cleanup_history_with_hook(prepared, || {
+            Err(HistoryError::new(HistoryErrorKind::DatabaseUnavailable))
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn clear_cleanup_history_after_reconciliation_failure_for_test(
+        &self,
+        prepared: &PreparedCleanupHistoryClear,
+    ) -> Result<CleanupHistoryClearResult, CleanupHistoryClearStoreError> {
+        self.clear_cleanup_history_with_hooks(
+            prepared,
+            || Err(HistoryError::new(HistoryErrorKind::DatabaseUnavailable)),
+            |_, _| Err(HistoryError::new(HistoryErrorKind::CorruptData)),
+        )
     }
 
     /// Acquire the store-wide cleanup exclusion before any journal connection

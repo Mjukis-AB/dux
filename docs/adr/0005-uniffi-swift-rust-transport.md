@@ -316,6 +316,38 @@ Generation-fenced selection, summary refresh, read retry, close, and shutdown
 feed an in-window, path-free drill-down; its retry action reads the record
 again and cannot repeat cleanup.
 
+Contract v30 adds a separate Settings-only privacy operation for clearing
+terminal cleanup-history metadata. Preparation accepts no row, session,
+candidate, path, plan, approval, AI result, or effect input. It returns one
+opaque engine/store-bound, consume-once preview containing only an exact
+terminal-session count and date range. Rust validates and SHA-256 fingerprints
+the complete five-table graph in keyset pages with fixed per-page and
+per-session budgets; the two-minute authority lifetime is enforced with a
+monotonic deadline, so wall-clock rollback cannot extend or invalidate it.
+Active, recovering, and outcome-unknown evidence stays outside the terminal
+selection, while a terminal parent with unfinished items or live claims fails
+closed as inconsistent.
+
+Commit consumes the preview before mutation, reacquires the cleanup exclusion,
+opens an immediate transaction, and recomputes the exact terminal witness.
+An SQLite authorizer admits only reads plus deletes from the five cleanup
+history tables, and internal child-first statements delete terminal sessions
+without exposing selectors across FFI. Post-commit observation failures are
+reconciled against the exact witness: proven applied returns the correlated
+count, proven not-applied returns the original typed failure, and every
+unproven state becomes outcome-unknown. Neither Swift nor Rust retries the
+mutation.
+
+Swift independently validates the preview/result envelope, owns the raw child
+on the engine utility queue, and binds confirmation to the exact immutable
+count and range. AppModel generation-fences preparation, confirmation,
+cancellation, concurrent history reads, Settings disappearance, and shutdown.
+Every terminal response performs exactly one observation-only history reload.
+The Settings copy states that this deletes only DUX activity metadata and does
+not remove files, snapshots, scans, candidates, settings, exclusions, capacity
+samples, or AI insights; it does not compact storage, resample capacity, or
+promise free space.
+
 The Swift adapter lazily constructs and synchronizes the engine on its utility
 queue. FFI close invalidates renewal, attempts exact release for every
 still-live registered review, then performs bounded core shutdown; a failed

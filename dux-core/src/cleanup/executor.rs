@@ -7,6 +7,7 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
+use super::capacity::terminalize_with_capacity;
 use super::{TrashEffectRequest, TrashPlatformResult, TrashSelectionError};
 use crate::domain::{CandidateId, CleanupPlan, CleanupPlanId};
 use crate::engine::{SnapshotReviewSession, SnapshotReviewTrashTarget};
@@ -87,7 +88,7 @@ where
     let mut platform = CallbackTrashPlatform {
         driver: Some(driver),
     };
-    match admission.execute_with(&mut platform, SystemTime::now()) {
+    match admission.execute_with(&mut platform) {
         Ok(()) => Ok(TrashPlatformResult::Completed),
         Err(TrashExecutionError::Platform(TrashPlatformError::Unsupported)) => {
             Ok(TrashPlatformResult::Unsupported)
@@ -354,11 +355,37 @@ impl TrashExecutionAdmission {
     /// the one-shot claim is still held. The caller cannot retry this
     /// admission because it is consumed by the method.
     pub(crate) fn execute_with(
-        mut self,
+        self,
+        platform: &mut impl TrashPlatformEffect,
+    ) -> Result<(), TrashExecutionError> {
+        self.execute_with_clock(platform, SystemTime::now)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn execute_with_at(
+        self,
         platform: &mut impl TrashPlatformEffect,
         completed_at: SystemTime,
     ) -> Result<(), TrashExecutionError> {
+        self.execute_with_clock(platform, || completed_at)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn execute_with_clock_for_test(
+        self,
+        platform: &mut impl TrashPlatformEffect,
+        clock: impl FnMut() -> SystemTime,
+    ) -> Result<(), TrashExecutionError> {
+        self.execute_with_clock(platform, clock)
+    }
+
+    fn execute_with_clock(
+        mut self,
+        platform: &mut impl TrashPlatformEffect,
+        mut clock: impl FnMut() -> SystemTime,
+    ) -> Result<(), TrashExecutionError> {
         if let Err(error) = revalidate_target(&self.target) {
+            let completed_at = clock();
             self.claim
                 .cancel_effect_before_call(&self.receipt, completed_at)
                 .map_err(|journal_error| {
@@ -367,6 +394,7 @@ impl TrashExecutionAdmission {
             return Err(TrashExecutionError::Admission(error));
         }
         if let Err(error) = self.claim.revalidate_effect_receipt(&self.receipt) {
+            let completed_at = clock();
             self.claim
                 .cancel_effect_before_call(&self.receipt, completed_at)
                 .map_err(|journal_error| {
@@ -378,6 +406,7 @@ impl TrashExecutionAdmission {
         }
 
         let platform_result = platform.trash(&self.target.snapshot);
+        let completed_at = clock();
         let (outcome, error_category, platform_error) = match platform_result {
             Ok(()) => (EffectOutcome::Trashed, None, None),
             Err(error @ TrashPlatformError::Unsupported) => (
@@ -401,6 +430,14 @@ impl TrashExecutionAdmission {
             .map_err(|error| {
                 TrashExecutionError::Admission(TrashAdmissionError::Journal(error.kind))
             })?;
+        if outcome != EffectOutcome::OutcomeUnknown {
+            // Explorer Trash has no trustworthy post-effect capacity sample.
+            // Close the otherwise-finished journal with an explicitly unknown
+            // delta; Trash still must not claim immediate reclaimed space.
+            terminalize_with_capacity(&mut self.claim, completed_at, None).map_err(|error| {
+                TrashExecutionError::Admission(TrashAdmissionError::Journal(error.kind))
+            })?;
+        }
 
         match platform_error {
             Some(error) => Err(TrashExecutionError::Platform(error)),

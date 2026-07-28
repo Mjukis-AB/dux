@@ -2249,6 +2249,30 @@ fn explorer_trash_selection_uses_journal_and_only_core_issued_callback_data() {
 
     assert_eq!(callback_path, TrashPlatformResult::Completed);
     assert_eq!(std::fs::read(&item).unwrap(), b"do not mutate in this test");
+    let history = engine.recent_cleanup_history(None, 1).unwrap();
+    assert_eq!(
+        history.records()[0].status(),
+        DurableCleanupSessionStatus::Completed
+    );
+    assert_eq!(
+        history.records()[0].verified_capacity_delta_bytes(),
+        None,
+        "Trash terminalization must not claim immediate reclaimed space"
+    );
+    let exact = engine
+        .cleanup_session_history(history.records()[0].id())
+        .unwrap();
+    assert_eq!(exact.items()[0].status(), DurableCleanupItemStatus::Trashed);
+    assert_eq!(
+        engine.inner.store.with_connection(|connection| {
+            connection
+                .query_row("SELECT count(*) FROM candidate_plan_claims", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap()
+        }),
+        0
+    );
     review.release().unwrap();
     engine.close();
     assert!(engine.wait_until_closed(TEST_TIMEOUT));
@@ -3105,6 +3129,16 @@ fn insert_legacy_cleanup_history(
     item_status: &str,
     error_category: Option<&str>,
 ) {
+    let terminal = matches!(
+        status,
+        "completed"
+            | "partially_completed"
+            | "failed"
+            | "cancelled"
+            | "interrupted"
+            | "rejected"
+            | "dry_run"
+    );
     engine.inner.store.with_connection(|connection| {
         connection
             .execute(
@@ -3119,7 +3153,7 @@ fn insert_legacy_cleanup_history(
                     session,
                     format!("plan:{session}"),
                     started_at_unix_ms,
-                    (status != "planned").then_some(started_at_unix_ms + 1),
+                    terminal.then_some(started_at_unix_ms + 1),
                     status,
                 ],
             )
@@ -9434,6 +9468,503 @@ fn cleanup_history_keyset_order_and_legacy_incompleteness_are_explicit() {
     assert!(exact.items()[0].action().is_none());
     assert!(exact.items()[0].error_recorded());
     assert!(exact.items()[0].error_category().is_none());
+}
+
+#[test]
+fn cleanup_history_clear_empty_and_active_states_never_delete() {
+    let (_temp, engine) = engine_with_limits(RegistryLimits::testing(1, 4, 8, 16));
+    assert_eq!(
+        engine.prepare_cleanup_history_clear().unwrap_err(),
+        CleanupHistoryClearError::NothingToClear
+    );
+
+    for (index, status) in ["planned", "running", "recovering"].into_iter().enumerate() {
+        insert_legacy_cleanup_history(
+            &engine,
+            &format!("session:active-{status}"),
+            1_700_000_100_000 + i64::try_from(index).unwrap(),
+            status,
+            "planned",
+            None,
+        );
+        assert_eq!(
+            engine.prepare_cleanup_history_clear().unwrap_err(),
+            CleanupHistoryClearError::NothingToClear
+        );
+        let rows = engine.inner.store.with_connection(|connection| {
+            (
+                connection
+                    .query_row("SELECT count(*) FROM cleanup_sessions", [], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                    .unwrap(),
+                connection
+                    .query_row("SELECT count(*) FROM cleanup_items", [], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                    .unwrap(),
+            )
+        });
+        let expected = i64::try_from(index + 1).unwrap();
+        assert_eq!(rows, (expected, expected));
+    }
+}
+
+#[test]
+fn cleanup_history_clear_removes_terminal_rows_and_preserves_active_authority() {
+    let (_temp, _config, engine, scan_id, candidate_id, _target) = completed_marker_candidate();
+    let active_session = "session:clear-mixed-active";
+    let terminal_session = "session:clear-mixed-terminal";
+    record_planned_cleanup_history(&engine, &scan_id, &candidate_id, active_session);
+    insert_legacy_cleanup_history(
+        &engine,
+        terminal_session,
+        1_700_000_100_000,
+        "completed",
+        "removed",
+        None,
+    );
+
+    let preview = engine.prepare_cleanup_history_clear().unwrap();
+    assert_eq!(preview.info().unwrap().session_count(), 1);
+    assert_eq!(
+        engine
+            .clear_cleanup_history(preview)
+            .unwrap()
+            .cleared_session_count(),
+        1
+    );
+
+    let preserved = engine.inner.store.with_connection(|connection| {
+        (
+            connection
+                .query_row(
+                    "SELECT count(*) FROM cleanup_sessions WHERE session_id = ?1",
+                    [active_session],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            connection
+                .query_row(
+                    "SELECT count(*) FROM cleanup_items WHERE session_id = ?1",
+                    [active_session],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            connection
+                .query_row(
+                    "SELECT count(*) FROM candidate_plan_claims WHERE session_id = ?1",
+                    [active_session],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            connection
+                .query_row(
+                    "SELECT count(*) FROM cleanup_sessions WHERE session_id = ?1",
+                    [terminal_session],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            connection
+                .query_row(
+                    "SELECT count(*) FROM cleanup_items WHERE session_id = ?1",
+                    [terminal_session],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+        )
+    });
+    assert_eq!(preserved, (1, 1, 1, 0, 0));
+    assert_eq!(
+        engine.prepare_cleanup_history_clear().unwrap_err(),
+        CleanupHistoryClearError::NothingToClear
+    );
+}
+
+#[test]
+fn cleanup_history_clear_pages_through_more_than_two_terminal_pages() {
+    let (_temp, engine) = engine_with_limits(RegistryLimits::testing(1, 4, 8, 16));
+    for index in 0..129 {
+        insert_legacy_cleanup_history(
+            &engine,
+            &format!("session:clear-page-{index:03}"),
+            1_700_000_100_000 + i64::from(index),
+            "completed",
+            "removed",
+            None,
+        );
+    }
+
+    let preview = engine.prepare_cleanup_history_clear().unwrap();
+    assert_eq!(preview.info().unwrap().session_count(), 129);
+    assert_eq!(
+        engine
+            .clear_cleanup_history(preview)
+            .unwrap()
+            .cleared_session_count(),
+        129
+    );
+    let rows = engine.inner.store.with_connection(|connection| {
+        connection
+            .query_row(
+                "SELECT (
+                     SELECT count(*) FROM cleanup_sessions
+                 ) + (
+                     SELECT count(*) FROM cleanup_items
+                 )",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap()
+    });
+    assert_eq!(rows, 0);
+}
+
+#[test]
+fn cleanup_history_clear_accepts_terminal_history_started_after_wall_clock() {
+    let (_temp, engine) = engine_with_limits(RegistryLimits::testing(1, 4, 8, 16));
+    let now_ms = i64::try_from(
+        SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
+    let future_started_at_ms = now_ms.checked_add(3_600_000).unwrap();
+    insert_legacy_cleanup_history(
+        &engine,
+        "session:clear-future-clock",
+        future_started_at_ms,
+        "completed",
+        "removed",
+        None,
+    );
+
+    let preview = engine.prepare_cleanup_history_clear().unwrap();
+    let info = preview.info().unwrap();
+    assert!(info.newest_started_at() > info.prepared_at());
+    assert_eq!(
+        engine
+            .clear_cleanup_history(preview)
+            .unwrap()
+            .cleared_session_count(),
+        1
+    );
+    assert_eq!(
+        engine.prepare_cleanup_history_clear().unwrap_err(),
+        CleanupHistoryClearError::NothingToClear
+    );
+}
+
+#[test]
+fn cleanup_history_clear_requires_the_exact_unchanged_graph() {
+    let (_temp, engine) = engine_with_limits(RegistryLimits::testing(1, 4, 8, 16));
+    insert_legacy_cleanup_history(
+        &engine,
+        "session:clear-exact-a",
+        1_700_000_100_000,
+        "completed",
+        "removed",
+        None,
+    );
+    let preview = engine.prepare_cleanup_history_clear().unwrap();
+    let info = preview.info().unwrap();
+    assert_eq!(info.session_count(), 1);
+    assert_eq!(
+        info.oldest_started_at(),
+        UNIX_EPOCH + Duration::from_millis(1_700_000_100_000)
+    );
+    assert_eq!(info.newest_started_at(), info.oldest_started_at());
+    assert!(info.prepared_at() < info.expires_at());
+
+    insert_legacy_cleanup_history(
+        &engine,
+        "session:clear-exact-b",
+        1_700_000_200_000,
+        "failed",
+        "failed",
+        Some("fixture"),
+    );
+    assert_eq!(
+        engine.clear_cleanup_history(preview),
+        Err(CleanupHistoryClearError::ChangedSincePreview)
+    );
+    assert_eq!(
+        engine
+            .recent_cleanup_history(None, 64)
+            .unwrap()
+            .records()
+            .len(),
+        2
+    );
+}
+
+#[test]
+fn cleanup_history_clear_preview_is_engine_bound_and_expiry_is_inclusive() {
+    let (_first_temp, first) = engine_with_limits(RegistryLimits::testing(1, 4, 8, 16));
+    let (_second_temp, second) = engine_with_limits(RegistryLimits::testing(1, 4, 8, 16));
+    insert_legacy_cleanup_history(
+        &first,
+        "session:clear-owner",
+        1_700_000_100_000,
+        "completed",
+        "removed",
+        None,
+    );
+    let foreign = first.prepare_cleanup_history_clear().unwrap();
+    assert_eq!(
+        second.clear_cleanup_history(foreign),
+        Err(CleanupHistoryClearError::WrongEngine)
+    );
+    assert_eq!(
+        first
+            .recent_cleanup_history(None, 64)
+            .unwrap()
+            .records()
+            .len(),
+        1
+    );
+
+    let expiring = first.prepare_cleanup_history_clear().unwrap();
+    assert_eq!(
+        first.clear_cleanup_history_at_expiry_for_test(expiring),
+        Err(CleanupHistoryClearError::PreviewExpired)
+    );
+    assert_eq!(
+        first
+            .recent_cleanup_history(None, 64)
+            .unwrap()
+            .records()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn cleanup_history_clear_reconciles_a_post_commit_observation_failure() {
+    let (_temp, engine) = engine_with_limits(RegistryLimits::testing(1, 4, 8, 16));
+    insert_legacy_cleanup_history(
+        &engine,
+        "session:clear-reconcile",
+        1_700_000_100_000,
+        "completed",
+        "removed",
+        None,
+    );
+    let prepared = engine.inner.store.prepare_cleanup_history_clear().unwrap();
+    let result = engine
+        .inner
+        .store
+        .clear_cleanup_history_after_commit_failure_for_test(&prepared)
+        .unwrap();
+    assert_eq!(result.sessions_removed, 1);
+    assert_eq!(
+        engine.prepare_cleanup_history_clear().unwrap_err(),
+        CleanupHistoryClearError::NothingToClear
+    );
+}
+
+#[test]
+fn cleanup_history_clear_reports_outcome_unknown_when_reconciliation_fails() {
+    let (_temp, engine) = engine_with_limits(RegistryLimits::testing(1, 4, 8, 16));
+    insert_legacy_cleanup_history(
+        &engine,
+        "session:clear-reconcile-failure",
+        1_700_000_100_000,
+        "completed",
+        "removed",
+        None,
+    );
+    let prepared = engine.inner.store.prepare_cleanup_history_clear().unwrap();
+    let error = engine
+        .inner
+        .store
+        .clear_cleanup_history_after_reconciliation_failure_for_test(&prepared)
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        CleanupHistoryClearStoreError::History(error)
+            if error.kind == HistoryErrorKind::OutcomeUnknown
+    ));
+    let rows = engine.inner.store.with_connection(|connection| {
+        connection
+            .query_row(
+                "SELECT (
+                     SELECT count(*) FROM cleanup_sessions
+                 ) + (
+                     SELECT count(*) FROM cleanup_items
+                 )",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap()
+    });
+    assert_eq!(rows, 0);
+}
+
+#[test]
+fn cleanup_history_clear_refuses_live_claims_even_if_parent_looks_terminal() {
+    let (_temp, _config, engine, scan_id, candidate_id, _target) = completed_marker_candidate();
+    record_planned_cleanup_history(&engine, &scan_id, &candidate_id, "session:clear-live-claim");
+    engine.inner.store.with_connection(|connection| {
+        connection
+            .execute(
+                "UPDATE cleanup_sessions
+                 SET status = 'completed', completed_at_unix_ms = started_at_unix_ms + 1
+                 WHERE session_id = 'session:clear-live-claim'",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE cleanup_items
+                 SET final_status = 'removed'
+                 WHERE session_id = 'session:clear-live-claim'",
+                [],
+            )
+            .unwrap();
+    });
+    assert_eq!(
+        engine.prepare_cleanup_history_clear().unwrap_err(),
+        CleanupHistoryClearError::CorruptData
+    );
+    let counts = engine.inner.store.with_connection(|connection| {
+        (
+            connection
+                .query_row(
+                    "SELECT count(*) FROM cleanup_sessions
+                     WHERE session_id = 'session:clear-live-claim'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            connection
+                .query_row("SELECT count(*) FROM candidate_plan_claims", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+        )
+    });
+    assert_eq!(counts, (1, 1));
+}
+
+#[cfg(unix)]
+#[test]
+fn cleanup_history_clear_removes_complete_and_legacy_history_only() {
+    let mut fixture = approved_rust_target_fixture(1);
+    fixture
+        .engine
+        .execute_approved_permanent_safe_session(
+            &mut fixture.session,
+            SystemTime::now() + Duration::from_secs(1),
+            &|| false,
+        )
+        .unwrap();
+    fixture.session.release();
+    insert_legacy_cleanup_history(
+        &fixture.engine,
+        "session:clear-legacy",
+        1_700_000_100_000,
+        "failed",
+        "failed",
+        Some("fixture"),
+    );
+    seed_ai_insight(
+        &fixture.engine,
+        "insight:clear-preserved",
+        1_700_000_100_000,
+        1_800_000_100_000,
+    );
+    let before = fixture.engine.inner.store.with_connection(|connection| {
+        (
+            connection
+                .query_row("SELECT count(*) FROM cleanup_sessions", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            connection
+                .query_row("SELECT count(*) FROM cleanup_items", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            connection
+                .query_row("SELECT count(*) FROM cleanup_item_paths", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            connection
+                .query_row("SELECT count(*) FROM cleanup_item_evidence", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            connection
+                .query_row("SELECT count(*) FROM cleanup_plan_warnings", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            connection
+                .query_row("SELECT count(*) FROM candidates", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+        )
+    });
+    assert_eq!(before.0, 2);
+    assert!(before.1 >= 2);
+    assert!(before.2 >= 1);
+    assert!(before.3 >= 1);
+    assert!(before.4 >= 1);
+    assert!(before.5 >= 1);
+
+    let preview = fixture.engine.prepare_cleanup_history_clear().unwrap();
+    assert_eq!(preview.info().unwrap().session_count(), 2);
+    let result = fixture.engine.clear_cleanup_history(preview).unwrap();
+    assert_eq!(result.cleared_session_count(), 2);
+
+    let after = fixture.engine.inner.store.with_connection(|connection| {
+        let mut foreign_keys = connection.prepare("PRAGMA foreign_key_check").unwrap();
+        let mut violations = foreign_keys.query([]).unwrap();
+        let foreign_keys_clean = violations.next().unwrap().is_none();
+        drop(violations);
+        drop(foreign_keys);
+        (
+            connection
+                .query_row(
+                    "SELECT (
+                         SELECT count(*) FROM cleanup_sessions
+                     ) + (
+                         SELECT count(*) FROM cleanup_items
+                     ) + (
+                         SELECT count(*) FROM cleanup_item_paths
+                     ) + (
+                         SELECT count(*) FROM cleanup_item_evidence
+                     ) + (
+                         SELECT count(*) FROM cleanup_plan_warnings
+                     )",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            connection
+                .query_row("SELECT count(*) FROM candidates", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            connection
+                .query_row(
+                    "SELECT count(*) FROM ai_insights
+                     WHERE insight_id = 'insight:clear-preserved'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            foreign_keys_clean,
+        )
+    });
+    assert_eq!(after.0, 0);
+    assert_eq!(after.1, before.5);
+    assert_eq!(after.2, 1);
+    assert!(after.3);
 }
 
 #[test]

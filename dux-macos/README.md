@@ -212,6 +212,20 @@ metadata. No path, evidence payload, candidate ID, claim, receipt, history
 clear, cleanup retry, approval, scheduler, AI, or executor input crosses this
 route. **Try reading again** only reloads immutable history.
 
+Settings exposes FFI v30's separate **Clear cleanup history…** privacy action.
+It first prepares one two-minute, engine-bound, consume-once preview of the
+exact validated terminal history graph, then shows the exact session count and
+date range in a destructive confirmation. No session selector or path crosses
+the boundary. Active, recovering, and uncertain cleanup evidence is preserved;
+the confirmed transaction can delete only DUX's five cleanup-history tables.
+Closing Settings releases an unconfirmed preview, while app shutdown waits for
+an already confirmed operation. Success, failure, changed-history, and
+outcome-unknown responses are never retried and each triggers exactly one
+read-only history refresh. The screen explicitly distinguishes this metadata
+privacy action from cleanup: it removes no files, snapshots, scans, candidates,
+settings, exclusions, capacity samples, or AI insights, performs no database
+compaction or capacity resample, and promises no free space.
+
 Private-store maintenance is deliberately separate from user cleanup and from
 Milestone 8 automations. After a 60-second startup grace, the scheduler runs at
 most one sealed Rust batch at a time across scan recovery, terminal temps,

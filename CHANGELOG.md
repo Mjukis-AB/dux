@@ -1,5 +1,27 @@
 # Changelog
 
+- Added separately confirmed cleanup-history clearing through UniFFI contract
+  v30 and native macOS Settings. Rust prepares one short-lived, engine-bound,
+  consume-once preview over the exact validated terminal five-table journal
+  graph; commit recomputes its SHA-256 witness under the cleanup exclusion and
+  an immediate transaction, then an authorizer permits deletion from only
+  those five history tables. Validation, hashing, and deletion are keyset-
+  paged with fixed per-page/per-session budgets so retained history does not
+  acquire an accidental global deadline. Active and recovering sessions,
+  uncertain effects, live claims, scans, candidates, snapshots, settings,
+  exclusions, capacity samples, AI insights, and filesystem content remain
+  outside the deletion scope. Post-commit failures return success only after
+  proving the exact terminal graph is gone, preserve a definite failure only
+  after proving it remains unchanged, and otherwise return outcome-unknown
+  without retrying. Settings shows the exact terminal-session count and date
+  range, requires destructive confirmation, releases an unconfirmed preview
+  when dismissed, waits for a confirmed operation during shutdown, and
+  performs exactly one read-only history refresh after every terminal result.
+  The UI explicitly says this privacy action runs no cleanup, compaction, or
+  capacity resample and promises no freed space. Explorer Trash now closes
+  every known terminal outcome only after its platform callback returns and
+  records an unknown capacity delta; outcome-unknown effects remain recovery
+  evidence.
 - Bound permanent-safe capacity verification to the exact trusted target
   volume in the private production Rust-target bridge. The approved plan's
   revalidated rule-scope grant now yields a crate-private kernel mount scope;

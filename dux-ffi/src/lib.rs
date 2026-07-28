@@ -24,6 +24,10 @@ use dux_core::engine::{
     CleanupExclusions as CoreCleanupExclusions,
     CleanupExclusionsError as CoreCleanupExclusionsError,
     CleanupExclusionsUpdate as CoreCleanupExclusionsUpdate,
+    CleanupHistoryClearError as CoreCleanupHistoryClearError,
+    CleanupHistoryClearPreview as CoreCleanupHistoryClearPreview,
+    CleanupHistoryClearPreviewInfo as CoreCleanupHistoryClearPreviewInfo,
+    CleanupHistoryClearResult as CoreCleanupHistoryClearResult,
     CleanupHistoryCursor as CoreCleanupHistoryCursor,
     CleanupHistoryError as CoreCleanupHistoryError,
     DirectCargoCodeSignature as CoreDirectCargoCodeSignature,
@@ -101,7 +105,7 @@ use dux_core::{
     VolumeCapacity, VolumeId,
 };
 
-const FFI_CONTRACT_VERSION: u32 = 29;
+const FFI_CONTRACT_VERSION: u32 = 30;
 const FFI_RECORD_VERSION: u32 = 1;
 const SNAPSHOT_NODE_RECORD_VERSION: u32 = 2;
 const SCAN_EVENT_PAGE_LIMIT: u16 = 64;
@@ -1028,6 +1032,65 @@ pub enum CleanupHistoryError {
     #[error("durable cleanup history is unavailable")]
     Unavailable,
     #[error("cleanup history state is unavailable")]
+    InternalState,
+}
+
+/// Immutable, path-free confirmation facts for clearing the exact current
+/// cleanup-history graph. This record carries no row selector or cleanup
+/// authority; only its opaque companion session can be consumed.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct CleanupHistoryClearPreviewInfo {
+    pub record_version: u32,
+    pub session_count: u64,
+    pub oldest_started_at_unix_ms: i64,
+    pub newest_started_at_unix_ms: i64,
+    pub prepared_at_unix_ms: i64,
+    pub expires_at_unix_ms: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct CleanupHistoryClearResult {
+    pub record_version: u32,
+    pub cleared_session_count: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum CleanupHistoryClearPreviewReleaseOutcome {
+    Released,
+    AlreadyUnavailable,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error, uniffi::Error)]
+pub enum CleanupHistoryClearError {
+    #[error("engine session is closed")]
+    Closed,
+    #[error("there is no cleanup history to clear")]
+    NothingToClear,
+    #[error("cleanup history includes unfinished or uncertain work")]
+    ActiveCleanup,
+    #[error("cleanup history changed after confirmation")]
+    ChangedSincePreview,
+    #[error("the cleanup-history clear preview expired")]
+    PreviewExpired,
+    #[error("the cleanup-history clear preview belongs to another engine")]
+    WrongEngine,
+    #[error("the cleanup-history clear preview was consumed or released")]
+    PreviewUnavailable,
+    #[error("the durable store schema is newer than this engine")]
+    IncompatibleSchema,
+    #[error("the durable store is busy")]
+    Busy,
+    #[error("the durable store is unsafe")]
+    UnsafeStorage,
+    #[error("cleanup-history clearing exceeded its fixed resource budget")]
+    BudgetExceeded,
+    #[error("durable cleanup history is corrupt")]
+    CorruptData,
+    #[error("the result of clearing cleanup history is unknown")]
+    OutcomeUnknown,
+    #[error("durable cleanup history is unavailable")]
+    Unavailable,
+    #[error("cleanup-history clearing state is unavailable")]
     InternalState,
 }
 
@@ -1972,6 +2035,12 @@ enum DirectCargoEnrollmentPreviewState {
     Released,
 }
 
+enum CleanupHistoryClearPreviewState {
+    Available(Box<CoreCleanupHistoryClearPreview>),
+    Consumed,
+    Released,
+}
+
 enum RustTargetPlanReviewState {
     Available(Box<CoreRustTargetPlanReview>),
     Inspecting,
@@ -2387,6 +2456,105 @@ impl DirectCargoEnrollmentPreviewSession {
             | DirectCargoEnrollmentPreviewState::Released) => {
                 *state = prior;
                 Ok(DirectCargoEnrollmentPreviewReleaseOutcome::AlreadyUnavailable)
+            }
+        }
+    }
+}
+
+/// Engine-bound, consume-once confirmation for deleting only DUX's local
+/// terminal cleanup-history metadata.
+#[derive(uniffi::Object)]
+pub struct CleanupHistoryClearPreviewSession {
+    state: Mutex<CleanupHistoryClearPreviewState>,
+    info: CleanupHistoryClearPreviewInfo,
+    engine_closed: Arc<AtomicBool>,
+}
+
+#[uniffi::export]
+impl CleanupHistoryClearPreviewSession {
+    pub fn info(&self) -> Result<CleanupHistoryClearPreviewInfo, CleanupHistoryClearError> {
+        if self.engine_closed.load(Ordering::Acquire) {
+            return Err(CleanupHistoryClearError::Closed);
+        }
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| CleanupHistoryClearError::InternalState)?;
+        if self.engine_closed.load(Ordering::Acquire) {
+            return Err(CleanupHistoryClearError::Closed);
+        }
+        match &*state {
+            CleanupHistoryClearPreviewState::Available(preview) => {
+                preview.info().map_err(map_cleanup_history_clear_error)?;
+                if self.engine_closed.load(Ordering::Acquire) {
+                    return Err(CleanupHistoryClearError::Closed);
+                }
+                Ok(self.info.clone())
+            }
+            CleanupHistoryClearPreviewState::Consumed
+            | CleanupHistoryClearPreviewState::Released => {
+                Err(CleanupHistoryClearError::PreviewUnavailable)
+            }
+        }
+    }
+
+    pub fn release(
+        &self,
+    ) -> Result<CleanupHistoryClearPreviewReleaseOutcome, CleanupHistoryClearError> {
+        self.release_inner()
+    }
+}
+
+impl CleanupHistoryClearPreviewSession {
+    fn is_available(&self) -> Result<bool, CleanupHistoryClearError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| CleanupHistoryClearError::InternalState)?;
+        match &*state {
+            CleanupHistoryClearPreviewState::Available(preview) => match preview.info() {
+                Ok(_) => Ok(true),
+                Err(CoreCleanupHistoryClearError::PreviewExpired) => {
+                    *state = CleanupHistoryClearPreviewState::Released;
+                    Ok(false)
+                }
+                Err(error) => Err(map_cleanup_history_clear_error(error)),
+            },
+            CleanupHistoryClearPreviewState::Consumed
+            | CleanupHistoryClearPreviewState::Released => Ok(false),
+        }
+    }
+
+    fn take_for_clear(&self) -> Result<CoreCleanupHistoryClearPreview, CleanupHistoryClearError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| CleanupHistoryClearError::InternalState)?;
+        match std::mem::replace(&mut *state, CleanupHistoryClearPreviewState::Consumed) {
+            CleanupHistoryClearPreviewState::Available(preview) => Ok(*preview),
+            prior @ (CleanupHistoryClearPreviewState::Consumed
+            | CleanupHistoryClearPreviewState::Released) => {
+                *state = prior;
+                Err(CleanupHistoryClearError::PreviewUnavailable)
+            }
+        }
+    }
+
+    fn release_inner(
+        &self,
+    ) -> Result<CleanupHistoryClearPreviewReleaseOutcome, CleanupHistoryClearError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| CleanupHistoryClearError::InternalState)?;
+        match std::mem::replace(&mut *state, CleanupHistoryClearPreviewState::Released) {
+            CleanupHistoryClearPreviewState::Available(_) => {
+                Ok(CleanupHistoryClearPreviewReleaseOutcome::Released)
+            }
+            prior @ (CleanupHistoryClearPreviewState::Consumed
+            | CleanupHistoryClearPreviewState::Released) => {
+                *state = prior;
+                Ok(CleanupHistoryClearPreviewReleaseOutcome::AlreadyUnavailable)
             }
         }
     }
@@ -2981,6 +3149,7 @@ pub struct DuxEngine {
     close_completed: Arc<Condvar>,
     reviews: Arc<Mutex<Vec<Weak<SnapshotReviewSession>>>>,
     direct_cargo_previews: Arc<Mutex<Vec<Weak<DirectCargoEnrollmentPreviewSession>>>>,
+    cleanup_history_clear_previews: Arc<Mutex<Vec<Weak<CleanupHistoryClearPreviewSession>>>>,
     rust_target_plan_reviews: Arc<Mutex<Vec<Weak<RustTargetPlanReviewSession>>>>,
     rust_target_plan_preparations: Arc<RustTargetPlanPreparationTracker>,
     background_close_started: Arc<AtomicBool>,
@@ -3006,6 +3175,7 @@ impl DuxEngine {
             close_completed: Arc::new(Condvar::new()),
             reviews: Arc::new(Mutex::new(Vec::new())),
             direct_cargo_previews: Arc::new(Mutex::new(Vec::new())),
+            cleanup_history_clear_previews: Arc::new(Mutex::new(Vec::new())),
             rust_target_plan_reviews: Arc::new(Mutex::new(Vec::new())),
             rust_target_plan_preparations: Arc::new(RustTargetPlanPreparationTracker::default()),
             background_close_started: Arc::new(AtomicBool::new(false)),
@@ -3464,6 +3634,60 @@ impl DuxEngine {
         })
     }
 
+    /// Prepare one path-free, short-lived confirmation for clearing the exact
+    /// current terminal cleanup-history graph.
+    pub fn prepare_cleanup_history_clear(
+        &self,
+    ) -> Result<Arc<CleanupHistoryClearPreviewSession>, CleanupHistoryClearError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| CleanupHistoryClearError::InternalState)?;
+        let EngineState::Open(engine) = &*state else {
+            return Err(CleanupHistoryClearError::Closed);
+        };
+        if self.closed.load(Ordering::Acquire) {
+            return Err(CleanupHistoryClearError::Closed);
+        }
+        self.ensure_cleanup_history_clear_preview_capacity()?;
+        let preview = engine
+            .prepare_cleanup_history_clear()
+            .map_err(map_cleanup_history_clear_error)?;
+        let info = preview
+            .info()
+            .map_err(map_cleanup_history_clear_error)
+            .and_then(cleanup_history_clear_preview_info)?;
+        self.register_cleanup_history_clear_preview(preview, info)
+    }
+
+    /// Consume one confirmation from this exact engine. Consumption occurs
+    /// before the core mutation is called and is never restored after any
+    /// result.
+    pub fn clear_cleanup_history(
+        &self,
+        preview: Arc<CleanupHistoryClearPreviewSession>,
+    ) -> Result<CleanupHistoryClearResult, CleanupHistoryClearError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| CleanupHistoryClearError::InternalState)?;
+        let EngineState::Open(engine) = &*state else {
+            return Err(CleanupHistoryClearError::Closed);
+        };
+        if self.closed.load(Ordering::Acquire) {
+            return Err(CleanupHistoryClearError::Closed);
+        }
+        if !Arc::ptr_eq(&preview.engine_closed, &self.closed) {
+            return Err(CleanupHistoryClearError::WrongEngine);
+        }
+        let expected_session_count = preview.info.session_count;
+        let core_preview = preview.take_for_clear()?;
+        let result = engine
+            .clear_cleanup_history(core_preview)
+            .map_err(map_cleanup_history_clear_error)?;
+        cleanup_history_clear_result(result, expected_session_count)
+    }
+
     pub fn recent_scan_history(&self, limit: u16) -> Result<RecentScanHistoryPage, EngineError> {
         if !(1..=RECENT_SCAN_HISTORY_PAGE_LIMIT).contains(&limit) {
             return Err(EngineError::BudgetExceeded);
@@ -3645,6 +3869,7 @@ impl DuxEngine {
                         self.release_registered_rust_target_plan_reviews();
                         self.release_registered_reviews();
                         self.release_registered_direct_cargo_previews();
+                        self.release_registered_cleanup_history_clear_previews();
                         return finish_ffi_engine_close(
                             &self.state,
                             &self.close_completed,
@@ -3683,6 +3908,7 @@ impl DuxEngine {
                             self.release_registered_rust_target_plan_reviews();
                             self.release_registered_reviews();
                             self.release_registered_direct_cargo_previews();
+                            self.release_registered_cleanup_history_clear_previews();
                             return finish_ffi_engine_close(
                                 &self.state,
                                 &self.close_completed,
@@ -3711,6 +3937,7 @@ impl DuxEngine {
         let reviews = Arc::clone(&self.reviews);
         let plan_reviews = Arc::clone(&self.rust_target_plan_reviews);
         let cargo_previews = Arc::clone(&self.direct_cargo_previews);
+        let cleanup_history_clear_previews = Arc::clone(&self.cleanup_history_clear_previews);
         std::thread::spawn(move || {
             let engine = loop {
                 let mut state_guard = state
@@ -3740,6 +3967,7 @@ impl DuxEngine {
                 release_plan_review_registry(&plan_reviews);
                 release_snapshot_review_registry(&reviews, &operations);
                 release_direct_cargo_preview_registry(&cargo_previews, &operations);
+                release_cleanup_history_clear_preview_registry(&cleanup_history_clear_previews);
                 let _ = finish_ffi_engine_close(
                     &state,
                     &close_completed,
@@ -3848,6 +4076,76 @@ impl DuxEngine {
         *reviews = retained;
         reviews.push(Arc::downgrade(&review));
         Ok(review)
+    }
+
+    fn ensure_cleanup_history_clear_preview_capacity(
+        &self,
+    ) -> Result<(), CleanupHistoryClearError> {
+        let mut previews = self
+            .cleanup_history_clear_previews
+            .lock()
+            .map_err(|_| CleanupHistoryClearError::InternalState)?;
+        let mut retained = Vec::with_capacity(previews.len());
+        let mut available = false;
+        for preview in previews.iter().filter_map(Weak::upgrade) {
+            if preview.is_available()? {
+                available = true;
+                retained.push(Arc::downgrade(&preview));
+            }
+        }
+        *previews = retained;
+        if available {
+            Err(CleanupHistoryClearError::Busy)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn register_cleanup_history_clear_preview(
+        &self,
+        preview: CoreCleanupHistoryClearPreview,
+        info: CleanupHistoryClearPreviewInfo,
+    ) -> Result<Arc<CleanupHistoryClearPreviewSession>, CleanupHistoryClearError> {
+        let preview = Arc::new(CleanupHistoryClearPreviewSession {
+            state: Mutex::new(CleanupHistoryClearPreviewState::Available(Box::new(
+                preview,
+            ))),
+            info,
+            engine_closed: Arc::clone(&self.closed),
+        });
+        if self.closed.load(Ordering::Acquire) {
+            let _ = preview.release_inner();
+            return Err(CleanupHistoryClearError::Closed);
+        }
+        let mut previews = match self.cleanup_history_clear_previews.lock() {
+            Ok(previews) => previews,
+            Err(_) => {
+                let _ = preview.release_inner();
+                return Err(CleanupHistoryClearError::InternalState);
+            }
+        };
+        let mut retained = Vec::with_capacity(previews.len().saturating_add(1));
+        let mut existing_busy = false;
+        for retained_preview in previews.iter().filter_map(Weak::upgrade) {
+            if retained_preview.is_available()? {
+                existing_busy = true;
+                retained.push(Arc::downgrade(&retained_preview));
+                break;
+            }
+        }
+        if existing_busy {
+            drop(previews);
+            let _ = preview.release_inner();
+            return Err(CleanupHistoryClearError::Busy);
+        }
+        if self.closed.load(Ordering::Acquire) {
+            drop(previews);
+            let _ = preview.release_inner();
+            return Err(CleanupHistoryClearError::Closed);
+        }
+        *previews = retained;
+        previews.push(Arc::downgrade(&preview));
+        Ok(preview)
     }
 
     fn ensure_direct_cargo_preview_capacity(&self) -> Result<(), DirectCargoEnrollmentError> {
@@ -4068,6 +4366,10 @@ impl DuxEngine {
             &self.rust_target_plan_preparations,
         );
     }
+
+    fn release_registered_cleanup_history_clear_previews(&self) {
+        release_cleanup_history_clear_preview_registry(&self.cleanup_history_clear_previews);
+    }
 }
 
 fn release_snapshot_review_registry(
@@ -4128,6 +4430,18 @@ fn release_direct_cargo_preview_registry(
         }
         drop(operation);
     });
+}
+
+fn release_cleanup_history_clear_preview_registry(
+    registry: &Mutex<Vec<Weak<CleanupHistoryClearPreviewSession>>>,
+) {
+    let previews = match registry.lock() {
+        Ok(mut previews) => std::mem::take(&mut *previews),
+        Err(poisoned) => std::mem::take(&mut *poisoned.into_inner()),
+    };
+    for preview in previews.into_iter().filter_map(|preview| preview.upgrade()) {
+        let _ = preview.release_inner();
+    }
 }
 
 fn finish_ffi_engine_close(
@@ -5823,6 +6137,100 @@ fn map_cleanup_history_error(error: CoreCleanupHistoryError) -> CleanupHistoryEr
     }
 }
 
+fn map_cleanup_history_clear_error(
+    error: CoreCleanupHistoryClearError,
+) -> CleanupHistoryClearError {
+    match error {
+        CoreCleanupHistoryClearError::Closed => CleanupHistoryClearError::Closed,
+        CoreCleanupHistoryClearError::NothingToClear => CleanupHistoryClearError::NothingToClear,
+        CoreCleanupHistoryClearError::ActiveCleanup => CleanupHistoryClearError::ActiveCleanup,
+        CoreCleanupHistoryClearError::ChangedSincePreview => {
+            CleanupHistoryClearError::ChangedSincePreview
+        }
+        CoreCleanupHistoryClearError::PreviewExpired => CleanupHistoryClearError::PreviewExpired,
+        CoreCleanupHistoryClearError::WrongEngine => CleanupHistoryClearError::WrongEngine,
+        CoreCleanupHistoryClearError::IncompatibleSchema => {
+            CleanupHistoryClearError::IncompatibleSchema
+        }
+        CoreCleanupHistoryClearError::Busy => CleanupHistoryClearError::Busy,
+        CoreCleanupHistoryClearError::UnsafeStorage => CleanupHistoryClearError::UnsafeStorage,
+        CoreCleanupHistoryClearError::QueryLimitExceeded => {
+            CleanupHistoryClearError::BudgetExceeded
+        }
+        CoreCleanupHistoryClearError::CorruptData => CleanupHistoryClearError::CorruptData,
+        CoreCleanupHistoryClearError::OutcomeUnknown => CleanupHistoryClearError::OutcomeUnknown,
+        CoreCleanupHistoryClearError::Unavailable => CleanupHistoryClearError::Unavailable,
+        CoreCleanupHistoryClearError::InternalState => CleanupHistoryClearError::InternalState,
+        _ => CleanupHistoryClearError::InternalState,
+    }
+}
+
+fn cleanup_history_clear_time_ms(value: SystemTime) -> Result<i64, CleanupHistoryClearError> {
+    i64::try_from(
+        value
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| CleanupHistoryClearError::CorruptData)?
+            .as_millis(),
+    )
+    .map_err(|_| CleanupHistoryClearError::CorruptData)
+}
+
+fn cleanup_history_clear_preview_info(
+    info: CoreCleanupHistoryClearPreviewInfo,
+) -> Result<CleanupHistoryClearPreviewInfo, CleanupHistoryClearError> {
+    cleanup_history_clear_preview_info_values(
+        info.session_count(),
+        info.oldest_started_at(),
+        info.newest_started_at(),
+        info.prepared_at(),
+        info.expires_at(),
+    )
+}
+
+fn cleanup_history_clear_preview_info_values(
+    session_count: u64,
+    oldest_started_at: SystemTime,
+    newest_started_at: SystemTime,
+    prepared_at: SystemTime,
+    expires_at: SystemTime,
+) -> Result<CleanupHistoryClearPreviewInfo, CleanupHistoryClearError> {
+    let projected = CleanupHistoryClearPreviewInfo {
+        record_version: FFI_RECORD_VERSION,
+        session_count,
+        oldest_started_at_unix_ms: cleanup_history_clear_time_ms(oldest_started_at)?,
+        newest_started_at_unix_ms: cleanup_history_clear_time_ms(newest_started_at)?,
+        prepared_at_unix_ms: cleanup_history_clear_time_ms(prepared_at)?,
+        expires_at_unix_ms: cleanup_history_clear_time_ms(expires_at)?,
+    };
+    if projected.session_count == 0
+        || projected.oldest_started_at_unix_ms > projected.newest_started_at_unix_ms
+        || projected.prepared_at_unix_ms >= projected.expires_at_unix_ms
+    {
+        return Err(CleanupHistoryClearError::CorruptData);
+    }
+    Ok(projected)
+}
+
+fn cleanup_history_clear_result(
+    result: CoreCleanupHistoryClearResult,
+    expected_session_count: u64,
+) -> Result<CleanupHistoryClearResult, CleanupHistoryClearError> {
+    cleanup_history_clear_result_count(result.cleared_session_count(), expected_session_count)
+}
+
+fn cleanup_history_clear_result_count(
+    cleared_session_count: u64,
+    expected_session_count: u64,
+) -> Result<CleanupHistoryClearResult, CleanupHistoryClearError> {
+    if cleared_session_count == 0 || cleared_session_count != expected_session_count {
+        return Err(CleanupHistoryClearError::OutcomeUnknown);
+    }
+    Ok(CleanupHistoryClearResult {
+        record_version: FFI_RECORD_VERSION,
+        cleared_session_count,
+    })
+}
+
 fn core_cleanup_history_cursor(
     cursor: CleanupHistoryCursor,
 ) -> Result<CoreCleanupHistoryCursor, CleanupHistoryError> {
@@ -7291,6 +7699,47 @@ mod tests {
         (temp, engine)
     }
 
+    fn seed_terminal_cleanup_history(temp: &TempDir, engine: &DuxEngine, fixture: &str) -> String {
+        let root = temp.path().join(fixture);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("reviewed.bin"), b"reviewed").unwrap();
+        let scan = engine.start_scan(scan_request(&root)).unwrap();
+        let terminal = wait_for_scan(&scan.task);
+        assert_eq!(terminal.phase, TaskPhase::Succeeded);
+        let scan_id = terminal.result.unwrap().scan_id;
+        let review = engine.acquire_explorer_snapshot_review(scan_id).unwrap();
+        let root_node = review.root_node().unwrap();
+        let children = review
+            .child_nodes(root_node.id, SnapshotNodeSort::NameAscending, 0, 10)
+            .unwrap();
+        let selected = children
+            .nodes
+            .iter()
+            .find(|node| node.name.display == "reviewed.bin")
+            .unwrap();
+        assert_eq!(
+            engine
+                .execute_explorer_trash(
+                    Arc::clone(&review),
+                    selected.id,
+                    Box::new(RecordingTrashDriver {
+                        calls: Mutex::new(Vec::new()),
+                    }),
+                )
+                .unwrap(),
+            TrashPlatformResult::Completed
+        );
+        let _ = review.release();
+        engine
+            .recent_cleanup_history(None, 1)
+            .unwrap()
+            .records
+            .first()
+            .unwrap()
+            .session_id
+            .clone()
+    }
+
     fn wait_until(description: &str, mut condition: impl FnMut() -> bool) {
         let deadline = Instant::now() + Duration::from_secs(5);
         while !condition() {
@@ -7311,10 +7760,10 @@ mod tests {
     }
 
     #[test]
-    fn reports_contract_twenty_nine_and_preserves_legacy_formatting() {
+    fn reports_contract_thirty_and_preserves_legacy_formatting() {
         let _guard = ENGINE_TEST_LOCK.lock().unwrap();
         let (_temp, engine) = engine();
-        assert_eq!(library_version().ffi_contract_version, 29);
+        assert_eq!(library_version().ffi_contract_version, 30);
         assert_eq!(engine.library_version().unwrap(), library_version());
         assert_eq!(engine.format_size(1536).unwrap().display, "1.5 KB");
         assert!(engine.close());
@@ -8515,6 +8964,401 @@ mod tests {
                 session_id: summary.session_id,
             }),
             Err(CleanupHistoryError::Closed)
+        );
+    }
+
+    #[test]
+    fn cleanup_history_clear_preview_is_engine_bound_consume_once_and_close_drained() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (temp, primary) = engine();
+        let primary = Arc::new(primary);
+        assert_eq!(
+            primary.prepare_cleanup_history_clear().err().unwrap(),
+            CleanupHistoryClearError::NothingToClear
+        );
+        let session_id = seed_terminal_cleanup_history(&temp, &primary, "clear-history-primary");
+        let same_store = DuxEngine::new(EngineStorageRoots {
+            data_root: temp.path().join("data").to_string_lossy().into_owned(),
+            cache_root: temp
+                .path()
+                .join("cache-peer")
+                .to_string_lossy()
+                .into_owned(),
+        })
+        .unwrap();
+        let (_foreign_temp, foreign) = engine();
+
+        let released = primary.prepare_cleanup_history_clear().unwrap();
+        let info = released.info().unwrap();
+        assert_eq!(info.record_version, FFI_RECORD_VERSION);
+        assert_eq!(info.session_count, 1);
+        assert!(info.oldest_started_at_unix_ms <= info.newest_started_at_unix_ms);
+        assert!(info.prepared_at_unix_ms < info.expires_at_unix_ms);
+        assert_eq!(
+            primary.prepare_cleanup_history_clear().err().unwrap(),
+            CleanupHistoryClearError::Busy
+        );
+        assert_eq!(
+            same_store.clear_cleanup_history(Arc::clone(&released)),
+            Err(CleanupHistoryClearError::WrongEngine)
+        );
+        assert_eq!(
+            foreign.clear_cleanup_history(Arc::clone(&released)),
+            Err(CleanupHistoryClearError::WrongEngine)
+        );
+        assert_eq!(released.info().unwrap(), info);
+        assert_eq!(
+            released.release().unwrap(),
+            CleanupHistoryClearPreviewReleaseOutcome::Released
+        );
+        assert_eq!(
+            released.release().unwrap(),
+            CleanupHistoryClearPreviewReleaseOutcome::AlreadyUnavailable
+        );
+        assert_eq!(
+            released.info(),
+            Err(CleanupHistoryClearError::PreviewUnavailable)
+        );
+
+        let committed = primary.prepare_cleanup_history_clear().unwrap();
+        let result = primary
+            .clear_cleanup_history(Arc::clone(&committed))
+            .unwrap();
+        assert_eq!(
+            result,
+            CleanupHistoryClearResult {
+                record_version: FFI_RECORD_VERSION,
+                cleared_session_count: 1,
+            }
+        );
+        assert_eq!(
+            primary.clear_cleanup_history(committed),
+            Err(CleanupHistoryClearError::PreviewUnavailable)
+        );
+        assert!(
+            primary
+                .recent_cleanup_history(None, 64)
+                .unwrap()
+                .records
+                .is_empty()
+        );
+        assert_eq!(
+            primary.cleanup_session_history(CleanupSessionHistoryRequest {
+                record_version: FFI_RECORD_VERSION,
+                session_id,
+            }),
+            Err(CleanupHistoryError::SessionNotFound)
+        );
+
+        seed_terminal_cleanup_history(&temp, &primary, "clear-history-close");
+        let close_drained = primary.prepare_cleanup_history_clear().unwrap();
+        assert!(primary.close());
+        assert_eq!(close_drained.info(), Err(CleanupHistoryClearError::Closed));
+        assert_eq!(
+            close_drained.release().unwrap(),
+            CleanupHistoryClearPreviewReleaseOutcome::AlreadyUnavailable
+        );
+        assert_eq!(
+            primary.clear_cleanup_history(close_drained),
+            Err(CleanupHistoryClearError::Closed)
+        );
+        assert_eq!(
+            primary.prepare_cleanup_history_clear().err().unwrap(),
+            CleanupHistoryClearError::Closed
+        );
+        assert!(foreign.close());
+        assert!(same_store.close());
+    }
+
+    #[test]
+    fn cleanup_history_clear_close_wins_prepare_registration() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (temp, engine) = engine();
+        let engine = Arc::new(engine);
+        seed_terminal_cleanup_history(&temp, &engine, "clear-history-prepare-close");
+
+        let registry_guard = engine.cleanup_history_clear_previews.lock().unwrap();
+        let prepare_thread = {
+            let engine = Arc::clone(&engine);
+            std::thread::spawn(move || engine.prepare_cleanup_history_clear())
+        };
+        wait_until("clear preview preparation to acquire engine state", || {
+            mutex_is_locked(&engine.state)
+        });
+        let close_thread = {
+            let engine = Arc::clone(&engine);
+            std::thread::spawn(move || engine.close())
+        };
+        wait_until("clear preview preparation close admission", || {
+            engine.closed.load(Ordering::Acquire)
+        });
+        drop(registry_guard);
+
+        assert!(matches!(
+            prepare_thread.join().unwrap(),
+            Err(CleanupHistoryClearError::Closed)
+        ));
+        let close_result = close_thread.join().unwrap();
+        if !close_result {
+            wait_until("clear preview preparation background close", || {
+                matches!(*engine.state.lock().unwrap(), EngineState::Closed { .. })
+            });
+        }
+        assert!(
+            engine
+                .cleanup_history_clear_previews
+                .lock()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn cleanup_history_clear_close_wins_clear_admission() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (temp, engine) = engine();
+        let engine = Arc::new(engine);
+        seed_terminal_cleanup_history(&temp, &engine, "clear-history-admission-close");
+        let preview = engine.prepare_cleanup_history_clear().unwrap();
+
+        let state_guard = engine.state.lock().unwrap();
+        let close_thread = {
+            let engine = Arc::clone(&engine);
+            std::thread::spawn(move || engine.close())
+        };
+        wait_until("cleanup-history clear close admission", || {
+            engine.closed.load(Ordering::Acquire)
+        });
+        let clear_thread = {
+            let engine = Arc::clone(&engine);
+            let preview = Arc::clone(&preview);
+            std::thread::spawn(move || engine.clear_cleanup_history(preview))
+        };
+        drop(state_guard);
+
+        assert_eq!(
+            clear_thread.join().unwrap(),
+            Err(CleanupHistoryClearError::Closed)
+        );
+        let close_result = close_thread.join().unwrap();
+        if !close_result {
+            wait_until("cleanup-history clear background close", || {
+                matches!(*engine.state.lock().unwrap(), EngineState::Closed { .. })
+            });
+        }
+        assert_eq!(preview.info(), Err(CleanupHistoryClearError::Closed));
+        assert_eq!(
+            preview.release().unwrap(),
+            CleanupHistoryClearPreviewReleaseOutcome::AlreadyUnavailable
+        );
+    }
+
+    #[test]
+    fn cleanup_history_clear_and_release_race_has_one_terminal_winner() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (temp, engine) = engine();
+        let engine = Arc::new(engine);
+        seed_terminal_cleanup_history(&temp, &engine, "clear-history-release-race");
+        let preview = engine.prepare_cleanup_history_clear().unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+
+        let clear_thread = {
+            let engine = Arc::clone(&engine);
+            let preview = Arc::clone(&preview);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                engine.clear_cleanup_history(preview)
+            })
+        };
+        let release_thread = {
+            let preview = Arc::clone(&preview);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                preview.release()
+            })
+        };
+        barrier.wait();
+
+        let clear_result = clear_thread.join().unwrap();
+        let release_result = release_thread.join().unwrap().unwrap();
+        let expected_history_count = match clear_result {
+            Ok(result) => {
+                assert_eq!(result.cleared_session_count, 1);
+                assert_eq!(
+                    release_result,
+                    CleanupHistoryClearPreviewReleaseOutcome::AlreadyUnavailable
+                );
+                0
+            }
+            Err(CleanupHistoryClearError::PreviewUnavailable) => {
+                assert_eq!(
+                    release_result,
+                    CleanupHistoryClearPreviewReleaseOutcome::Released
+                );
+                1
+            }
+            other => panic!("unexpected cleanup-history clear/release race result: {other:?}"),
+        };
+        assert_eq!(
+            engine
+                .recent_cleanup_history(None, 64)
+                .unwrap()
+                .records
+                .len(),
+            expected_history_count
+        );
+        assert_eq!(
+            preview.info(),
+            Err(CleanupHistoryClearError::PreviewUnavailable)
+        );
+        assert!(engine.close());
+    }
+
+    #[test]
+    fn cleanup_history_clear_change_consumes_preview_without_retry() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (temp, engine) = engine();
+        seed_terminal_cleanup_history(&temp, &engine, "clear-history-before");
+        let preview = engine.prepare_cleanup_history_clear().unwrap();
+        seed_terminal_cleanup_history(&temp, &engine, "clear-history-after");
+        assert_eq!(
+            engine.clear_cleanup_history(Arc::clone(&preview)),
+            Err(CleanupHistoryClearError::ChangedSincePreview)
+        );
+        assert_eq!(
+            engine.clear_cleanup_history(preview),
+            Err(CleanupHistoryClearError::PreviewUnavailable)
+        );
+        assert_eq!(
+            engine
+                .recent_cleanup_history(None, 64)
+                .unwrap()
+                .records
+                .len(),
+            2
+        );
+        assert!(engine.close());
+    }
+
+    #[test]
+    fn cleanup_history_clear_projection_accepts_future_durable_history_time() {
+        let prepared_at = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let expires_at = prepared_at + Duration::from_secs(120);
+        let oldest_started_at = prepared_at - Duration::from_secs(60);
+        let newest_started_at = prepared_at + Duration::from_secs(1);
+
+        let projected = cleanup_history_clear_preview_info_values(
+            2,
+            oldest_started_at,
+            newest_started_at,
+            prepared_at,
+            expires_at,
+        )
+        .unwrap();
+        assert!(projected.newest_started_at_unix_ms > projected.prepared_at_unix_ms);
+        assert_eq!(projected.session_count, 2);
+        assert_eq!(projected.record_version, FFI_RECORD_VERSION);
+
+        assert_eq!(
+            cleanup_history_clear_preview_info_values(
+                2,
+                newest_started_at,
+                oldest_started_at,
+                prepared_at,
+                expires_at,
+            ),
+            Err(CleanupHistoryClearError::CorruptData)
+        );
+        assert_eq!(
+            cleanup_history_clear_preview_info_values(
+                2,
+                oldest_started_at,
+                newest_started_at,
+                prepared_at,
+                prepared_at,
+            ),
+            Err(CleanupHistoryClearError::CorruptData)
+        );
+    }
+
+    #[test]
+    fn cleanup_history_clear_errors_and_post_mutation_shape_are_exhaustive() {
+        for (core, expected) in [
+            (
+                CoreCleanupHistoryClearError::Closed,
+                CleanupHistoryClearError::Closed,
+            ),
+            (
+                CoreCleanupHistoryClearError::NothingToClear,
+                CleanupHistoryClearError::NothingToClear,
+            ),
+            (
+                CoreCleanupHistoryClearError::ActiveCleanup,
+                CleanupHistoryClearError::ActiveCleanup,
+            ),
+            (
+                CoreCleanupHistoryClearError::ChangedSincePreview,
+                CleanupHistoryClearError::ChangedSincePreview,
+            ),
+            (
+                CoreCleanupHistoryClearError::PreviewExpired,
+                CleanupHistoryClearError::PreviewExpired,
+            ),
+            (
+                CoreCleanupHistoryClearError::WrongEngine,
+                CleanupHistoryClearError::WrongEngine,
+            ),
+            (
+                CoreCleanupHistoryClearError::IncompatibleSchema,
+                CleanupHistoryClearError::IncompatibleSchema,
+            ),
+            (
+                CoreCleanupHistoryClearError::Busy,
+                CleanupHistoryClearError::Busy,
+            ),
+            (
+                CoreCleanupHistoryClearError::UnsafeStorage,
+                CleanupHistoryClearError::UnsafeStorage,
+            ),
+            (
+                CoreCleanupHistoryClearError::QueryLimitExceeded,
+                CleanupHistoryClearError::BudgetExceeded,
+            ),
+            (
+                CoreCleanupHistoryClearError::CorruptData,
+                CleanupHistoryClearError::CorruptData,
+            ),
+            (
+                CoreCleanupHistoryClearError::OutcomeUnknown,
+                CleanupHistoryClearError::OutcomeUnknown,
+            ),
+            (
+                CoreCleanupHistoryClearError::Unavailable,
+                CleanupHistoryClearError::Unavailable,
+            ),
+            (
+                CoreCleanupHistoryClearError::InternalState,
+                CleanupHistoryClearError::InternalState,
+            ),
+        ] {
+            assert_eq!(map_cleanup_history_clear_error(core), expected);
+        }
+        assert_eq!(
+            cleanup_history_clear_result_count(0, 1),
+            Err(CleanupHistoryClearError::OutcomeUnknown)
+        );
+        assert_eq!(
+            cleanup_history_clear_result_count(2, 1),
+            Err(CleanupHistoryClearError::OutcomeUnknown)
+        );
+        assert_eq!(
+            cleanup_history_clear_result_count(1, 1).unwrap(),
+            CleanupHistoryClearResult {
+                record_version: FFI_RECORD_VERSION,
+                cleared_session_count: 1,
+            }
         );
     }
 

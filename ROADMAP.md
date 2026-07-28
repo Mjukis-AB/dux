@@ -5183,7 +5183,7 @@ Tasks:
     destructive-boundary tests plus the 241-file source scan, deterministic
     Debug/Release binding generation, and universal arm64/x86_64 Debug and
     Release app builds targeting macOS 14.
-- [ ] Expand production cleanup session/item history with exact-session detail,
+- [x] Expand production cleanup session/item history with exact-session detail,
   verified capacity outcomes, and separately confirmed history clearing.
   - [x] 2026-07-28 slice: expose the existing core exact-session observation
     through UniFFI contract v29 without widening cleanup authority. The request
@@ -5206,7 +5206,42 @@ Tasks:
     tests plus the full 376-test native suite. The workspace-wide Rust lane
     passed 1,015 core tests before one load-sensitive probe-pool case observed
     `QueueSaturated`; that exact case passed immediately in isolation.
-    Separately confirmed history clearing remains open.
+  - [x] 2026-07-28 slice: add separately confirmed terminal cleanup-history
+    clearing through UniFFI contract v30 and native Settings. The public
+    boundary accepts no row, session, candidate, path, plan, approval, AI
+    result, cleanup instruction, or effect; it returns one two-minute,
+    monotonic-expiring, engine/store-bound, consume-once preview containing
+    only the exact terminal-session count and oldest/newest start times. Rust
+    validates and SHA-256 fingerprints raw rows across the five cleanup
+    history tables in 64-session keyset pages with fixed per-page/per-session
+    budgets. Active/recovering and outcome-unknown evidence plus its claims is
+    preserved; a terminal graph with unfinished items or live claims fails
+    closed. Commit consumes the preview, recomputes the witness under cleanup
+    exclusion and an immediate transaction, and installs an authorizer that
+    permits only child-first deletion from those five tables. Changed history
+    rejects before mutation; post-commit observation returns success only for
+    proven applied, retains the original error only for proven not-applied,
+    and maps every ambiguous or failed reconciliation to outcome-unknown
+    without retry.
+    Native Settings shows the exact count/date range, requires destructive
+    confirmation, releases unconfirmed authority on dismissal, fences
+    concurrent history reads and stale replies, waits through confirmed
+    clearing during shutdown, and performs exactly one observation-only
+    refresh after every terminal response. Its copy states that the action
+    deletes only DUX activity metadata, performs no file cleanup, database
+    compaction, or capacity resample, deletes no snapshots/scans/candidates/
+    settings/exclusions/capacity samples/AI insights, and promises no free
+    space. Explorer Trash now terminalizes known outcomes only after the OS
+    callback returns, records capacity delta as unknown, and leaves
+    outcome-unknown effects recoverable. Focused verification covers 12 core
+    clear-history tests, the post-effect timestamp regression, 7 FFI lifecycle/
+    race/projection tests, 11 strict-concurrency native tests, the full
+    387-test native suite, and universal arm64/x86_64 Debug and Release app
+    builds targeting macOS 14. The locked all-target Rust workspace lane
+    passed 1,168 tests with 2 intentional ignores and no failures; formatting
+    and warnings-denied Clippy pass, both fuzz adapters compile, all 28
+    destructive-policy tests pass, and the authority scan accepts all 244
+    repository source files.
 - [ ] Define and test cross-reboot and Windows-unproven cleanup-journal recovery;
   unknown ownership must remain non-executable.
 

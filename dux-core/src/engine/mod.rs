@@ -7,6 +7,7 @@
 
 mod candidate_history;
 mod cleanup_history;
+mod cleanup_history_clear;
 mod config;
 mod registry;
 mod rust_target_plan_review;
@@ -31,6 +32,10 @@ pub use cleanup_history::{
     DurableCleanupSessionObservation, DurableCleanupSessionStatus, DurableCleanupSessionSummary,
     DurableCleanupStatusCounts, DurableCleanupTrigger, DurableCleanupWarning,
     MAX_RECENT_CLEANUP_HISTORY_LIMIT,
+};
+pub use cleanup_history_clear::{
+    CleanupHistoryClearError, CleanupHistoryClearPreview, CleanupHistoryClearPreviewInfo,
+    CleanupHistoryClearResult,
 };
 pub use config::{EngineConfig, EngineConfigError, EngineConfigField, EngineConfigReason};
 pub use registry::EngineHandle;

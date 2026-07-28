@@ -104,6 +104,30 @@ enum DirectCargoEnrollmentAccessibility {
     ]
 }
 
+enum CleanupHistoryClearAccessibility {
+    static let section = "cleanup-history-clear-section"
+    static let prepare = "cleanup-history-clear-prepare"
+    static let status = "cleanup-history-clear-status"
+    static let confirmation = "cleanup-history-clear-confirmation"
+    static let confirm = "cleanup-history-clear-confirm"
+    static let cancel = "cleanup-history-clear-cancel"
+    static let progress = "cleanup-history-clear-progress"
+    static let error = "cleanup-history-clear-error"
+    static let dismiss = "cleanup-history-clear-dismiss"
+
+    static let allControlIdentifiers = [
+        section,
+        prepare,
+        status,
+        confirmation,
+        confirm,
+        cancel,
+        progress,
+        error,
+        dismiss,
+    ]
+}
+
 private enum PermanentCleanupConfirmationAction {
     case enable
     case reset
@@ -135,6 +159,8 @@ struct DuxSettingsView: View {
         CleanupExclusionConfirmationAction?
     @State private var directCargoConfirmationAction:
         DirectCargoConfirmationAction?
+    @State private var cleanupHistoryClearConfirmationAction:
+        CleanupHistoryClearConfirmation?
 
     let model: AppModel
 
@@ -482,6 +508,8 @@ struct DuxSettingsView: View {
 
             cleanupExclusionSettings(model: model)
 
+            cleanupHistoryClearSettings(model: model)
+
             Section("Engine") {
                 switch model.engineState {
                 case .idle, .loading:
@@ -614,6 +642,38 @@ struct DuxSettingsView: View {
                 )
             }
         }
+        .confirmationDialog(
+            cleanupHistoryClearConfirmationTitle,
+            isPresented: Binding(
+                get: { cleanupHistoryClearConfirmationAction != nil },
+                set: { presented in
+                    guard !presented,
+                          let confirmation = cleanupHistoryClearConfirmationAction else {
+                        return
+                    }
+                    cleanupHistoryClearConfirmationAction = nil
+                    Task { await model.cancelCleanupHistoryClear(confirmation) }
+                }
+            ),
+            presenting: cleanupHistoryClearConfirmationAction
+        ) { confirmation in
+            Button("Clear cleanup history", role: .destructive) {
+                cleanupHistoryClearConfirmationAction = nil
+                Task { await model.confirmCleanupHistoryClear(confirmation) }
+            }
+            .keyboardShortcut(.defaultAction)
+            .accessibilityIdentifier(CleanupHistoryClearAccessibility.confirm)
+
+            Button("Cancel", role: .cancel) {
+                cleanupHistoryClearConfirmationAction = nil
+                Task { await model.cancelCleanupHistoryClear(confirmation) }
+            }
+            .keyboardShortcut(.cancelAction)
+            .accessibilityIdentifier(CleanupHistoryClearAccessibility.cancel)
+        } message: { confirmation in
+            Text(cleanupHistoryClearConfirmationMessage(confirmation.preview))
+                .accessibilityIdentifier(CleanupHistoryClearAccessibility.confirmation)
+        }
         .onChange(of: scenePhase) { _, phase in
             guard phase == .active else {
                 return
@@ -625,7 +685,11 @@ struct DuxSettingsView: View {
         }
         .onDisappear {
             directCargoConfirmationAction = nil
-            Task { await model.dismissDirectCargoEnrollmentPresentation() }
+            cleanupHistoryClearConfirmationAction = nil
+            Task {
+                await model.dismissDirectCargoEnrollmentPresentation()
+                await model.dismissCleanupHistoryClearPresentation()
+            }
         }
     }
 
@@ -1059,6 +1123,178 @@ struct DuxSettingsView: View {
     }
 
     @ViewBuilder
+    private func cleanupHistoryClearSettings(model: AppModel) -> some View {
+        Section("Storage & Privacy") {
+            Text(
+                "Cleanup history is DUX’s local activity log. Clearing it does not delete "
+                    + "files, snapshots, scan or candidate history, settings, exclusions, "
+                    + "capacity samples, or AI insights."
+            )
+            .foregroundStyle(.secondary)
+
+            Text(
+                "This privacy action does not run cleanup, compact the database, resample "
+                    + "capacity, or promise to free disk space. Active or uncertain cleanup "
+                    + "evidence is preserved automatically."
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+
+            cleanupHistoryClearStateDetails(model)
+
+            HStack {
+                Button("Clear cleanup history…", role: .destructive) {
+                    Task {
+                        await model.prepareCleanupHistoryClear()
+                        if let confirmation = model.cleanupHistoryClearConfirmation {
+                            cleanupHistoryClearConfirmationAction = confirmation
+                        }
+                    }
+                }
+                .disabled(
+                    model.cleanupHistoryClearState.isBusy
+                        || model.cleanupHistoryClearConfirmation != nil
+                )
+                .accessibilityIdentifier(CleanupHistoryClearAccessibility.prepare)
+                .accessibilityHint(
+                    "Prepares an exact expiring preview before any history can be removed"
+                )
+
+                if model.cleanupHistoryClearState.isBusy {
+                    ProgressView()
+                        .controlSize(.small)
+                        .accessibilityIdentifier(CleanupHistoryClearAccessibility.progress)
+                        .accessibilityLabel(cleanupHistoryClearProgressLabel(model))
+                }
+
+                switch model.cleanupHistoryClearState {
+                case .completed, .failed, .outcomeUnknown:
+                    Button("Dismiss") {
+                        model.dismissCleanupHistoryClearNotice()
+                    }
+                    .accessibilityIdentifier(CleanupHistoryClearAccessibility.dismiss)
+                case .idle, .preparing, .awaitingConfirmation, .clearing:
+                    EmptyView()
+                }
+            }
+
+            switch model.cleanupHistoryClearState {
+            case let .failed(failure):
+                Label(
+                    Self.message(for: failure),
+                    systemImage: failure == .nothingToClear
+                        ? "checkmark.circle"
+                        : "exclamationmark.triangle"
+                )
+                .foregroundStyle(
+                    failure == .nothingToClear ? Color.secondary : Color.red
+                )
+                .accessibilityIdentifier(CleanupHistoryClearAccessibility.error)
+            case .outcomeUnknown:
+                Label(
+                    Self.cleanupHistoryClearOutcomeUnknownMessage,
+                    systemImage: "questionmark.diamond"
+                )
+                .foregroundStyle(.red)
+                .accessibilityIdentifier(CleanupHistoryClearAccessibility.error)
+            case .idle, .preparing, .awaitingConfirmation, .clearing, .completed:
+                EmptyView()
+            }
+        }
+        .accessibilityIdentifier(CleanupHistoryClearAccessibility.section)
+    }
+
+    @ViewBuilder
+    private func cleanupHistoryClearStateDetails(_ model: AppModel) -> some View {
+        switch model.cleanupHistoryClearState {
+        case .idle:
+            EmptyView()
+        case .preparing:
+            Label("Preparing an exact history preview…", systemImage: "clock")
+                .accessibilityIdentifier(CleanupHistoryClearAccessibility.status)
+        case let .awaitingConfirmation(confirmation):
+            Label(
+                cleanupHistorySessionCount(
+                    confirmation.preview.sessionCount,
+                    suffix: "ready for review"
+                ),
+                systemImage: "doc.text.magnifyingglass"
+            )
+            .accessibilityIdentifier(CleanupHistoryClearAccessibility.status)
+        case let .clearing(preview):
+            Label(
+                cleanupHistorySessionCount(
+                    preview.sessionCount,
+                    suffix: "being removed"
+                ),
+                systemImage: "trash"
+            )
+            .accessibilityIdentifier(CleanupHistoryClearAccessibility.status)
+        case let .completed(result):
+            Label(
+                cleanupHistorySessionCount(
+                    result.clearedSessionCount,
+                    suffix: "removed from DUX"
+                ),
+                systemImage: "checkmark.circle.fill"
+            )
+            .foregroundStyle(.green)
+            .accessibilityIdentifier(CleanupHistoryClearAccessibility.status)
+        case .failed, .outcomeUnknown:
+            EmptyView()
+        }
+    }
+
+    private func cleanupHistoryClearProgressLabel(_ model: AppModel) -> String {
+        switch model.cleanupHistoryClearState {
+        case .preparing:
+            "Preparing cleanup history preview"
+        case .clearing:
+            "Clearing cleanup history"
+        case .idle, .awaitingConfirmation, .completed, .failed, .outcomeUnknown:
+            "Updating cleanup history"
+        }
+    }
+
+    private var cleanupHistoryClearConfirmationTitle: String {
+        guard let confirmation = cleanupHistoryClearConfirmationAction else {
+            return "Clear cleanup history?"
+        }
+        return cleanupHistorySessionCount(
+            confirmation.preview.sessionCount,
+            suffix: "will be removed"
+        )
+    }
+
+    private func cleanupHistoryClearConfirmationMessage(
+        _ preview: CleanupHistoryClearPreviewModel
+    ) -> String {
+        let oldest = preview.oldestStartedAt.formatted(
+            date: .abbreviated,
+            time: .shortened
+        )
+        let newest = preview.newestStartedAt.formatted(
+            date: .abbreviated,
+            time: .shortened
+        )
+        return
+            "Clear \(cleanupHistorySessionCount(preview.sessionCount)) from \(oldest) "
+            + "through \(newest)? This removes DUX’s local activity log only. It does "
+            + "not delete files, snapshots, scan or candidate history, settings, "
+            + "exclusions, capacity samples, or AI insights. It does not promise to "
+            + "free disk space and cannot be undone."
+    }
+
+    private func cleanupHistorySessionCount(
+        _ count: UInt64,
+        suffix: String? = nil
+    ) -> String {
+        let noun = count == 1 ? "cleanup history session" : "cleanup history sessions"
+        let base = "\(count.formatted()) \(noun)"
+        return suffix.map { base + " " + $0 } ?? base
+    }
+
+    @ViewBuilder
     private func loginItemSettings(model: AppModel) -> some View {
         let presentation = LoginItemPresentation.make(state: model.loginItemState)
         Toggle(
@@ -1414,6 +1650,72 @@ struct DuxSettingsView: View {
             }
         case .unexpected:
             String(localized: "Cargo enrollment is unavailable. No cleanup action was performed.")
+        }
+    }
+
+    static let cleanupHistoryClearOutcomeUnknownMessage = String(
+        localized:
+            "DUX could not prove whether cleanup history was cleared. DUX attempted one read-only history refresh, retried nothing, and ran no file cleanup."
+    )
+
+    static func message(for failure: CleanupHistoryClearServiceError) -> String {
+        switch failure {
+        case .closed:
+            String(localized: "The storage engine session is closed.")
+        case .nothingToClear:
+            String(localized: "There is no terminal cleanup history to clear.")
+        case .activeCleanup:
+            String(
+                localized:
+                    "Cleanup history includes unfinished work. DUX will not erase recovery evidence."
+            )
+        case .changedSincePreview:
+            String(
+                localized:
+                    "Cleanup history changed after review. Nothing was removed; prepare a new preview."
+            )
+        case .previewExpired:
+            String(
+                localized:
+                    "The cleanup history preview expired. Nothing was removed; prepare a new preview."
+            )
+        case .wrongEngine, .previewUnavailable:
+            String(
+                localized:
+                    "That cleanup history preview is no longer available. Nothing was removed."
+            )
+        case .incompatibleSchema:
+            String(
+                localized:
+                    "This cleanup history format is incompatible with the current app."
+            )
+        case .retryable:
+            String(
+                localized:
+                    "Cleanup history is temporarily busy. Nothing was removed; try again."
+            )
+        case .unsafeStorage:
+            String(
+                localized:
+                    "DUX cannot verify safe access to its history store. Nothing was removed."
+            )
+        case .budgetExceeded:
+            String(
+                localized:
+                    "Cleanup history exceeded the fixed review budget. Nothing was removed."
+            )
+        case .corruptData:
+            String(
+                localized:
+                    "Cleanup history is inconsistent. DUX preserved it for diagnosis."
+            )
+        case .outcomeUnknown:
+            cleanupHistoryClearOutcomeUnknownMessage
+        case .unavailable, .internalState, .invalidResponse:
+            String(
+                localized:
+                    "Cleanup history clearing is unavailable. No file cleanup was performed."
+            )
         }
     }
 

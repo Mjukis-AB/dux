@@ -42,6 +42,9 @@ final class AppModel: DuxCapacitySampling {
     private(set) var cleanupHistoryState = CleanupHistoryLoadState.idle
     private(set) var selectedCleanupHistorySessionID: String?
     private(set) var cleanupHistoryDetailState = CleanupHistoryDetailLoadState.idle
+    private(set) var cleanupHistoryClearConfirmation:
+        CleanupHistoryClearConfirmation?
+    private(set) var cleanupHistoryClearState = CleanupHistoryClearState.idle
     private(set) var scanState = AppScanState.idle
     private(set) var loginItemState = LoginItemState.idle
     private(set) var notificationAuthorizationState = NotificationAuthorizationState.idle
@@ -117,6 +120,15 @@ final class AppModel: DuxCapacitySampling {
     private var cleanupHistoryDetailTask: Task<Void, Never>?
     @ObservationIgnored
     private var cleanupHistoryDetailGeneration: UInt64 = 0
+    @ObservationIgnored
+    private var cleanupHistoryClearTask: Task<Void, Never>?
+    @ObservationIgnored
+    private var cleanupHistoryClearGeneration: UInt64 = 0
+    @ObservationIgnored
+    private var cleanupHistoryClearIsShuttingDown = false
+    @ObservationIgnored
+    private var pendingCleanupHistoryClearPreview:
+        (any DuxCleanupHistoryClearPreviewLease)?
     @ObservationIgnored
     private var homeScanDriverTask: Task<AppScanRunOutcome, Never>?
     @ObservationIgnored
@@ -937,6 +949,9 @@ final class AppModel: DuxCapacitySampling {
     /// Loads only path-free durable cleanup outcome metadata. This operation
     /// never creates a plan, approval, journal claim, or effect capability.
     func loadCleanupHistory() async {
+        guard !cleanupHistoryClearState.isClearing else {
+            return
+        }
         if case .loaded = cleanupHistoryState {
             return
         }
@@ -971,7 +986,9 @@ final class AppModel: DuxCapacitySampling {
     }
 
     func loadMoreCleanupHistory() async {
-        guard cleanupHistoryTask == nil,
+        guard
+              !cleanupHistoryClearState.isClearing,
+              cleanupHistoryTask == nil,
               let cursor = cleanupHistoryNextCursor else {
             return
         }
@@ -1000,6 +1017,9 @@ final class AppModel: DuxCapacitySampling {
     }
 
     func refreshCleanupHistory() async {
+        guard !cleanupHistoryClearState.isClearing else {
+            return
+        }
         cleanupHistoryGeneration &+= 1
         cleanupHistoryTask?.cancel()
         cleanupHistoryTask = nil
@@ -1013,6 +1033,231 @@ final class AppModel: DuxCapacitySampling {
         cleanupHistoryTask = nil
         cleanupHistoryState = cleanupHistoryRecords.isEmpty ? .idle : .loaded
         closeCleanupHistorySession()
+    }
+
+    func prepareCleanupHistoryClear() async {
+        guard
+            !cleanupHistoryClearIsShuttingDown,
+            cleanupHistoryClearTask == nil,
+            !cleanupHistoryClearState.isBusy
+        else {
+            return
+        }
+
+        cleanupHistoryClearGeneration &+= 1
+        let generation = cleanupHistoryClearGeneration
+        let superseded = pendingCleanupHistoryClearPreview
+        pendingCleanupHistoryClearPreview = nil
+        cleanupHistoryClearConfirmation = nil
+        await superseded?.release()
+        guard
+            generation == cleanupHistoryClearGeneration,
+            !cleanupHistoryClearIsShuttingDown
+        else {
+            return
+        }
+
+        cleanupHistoryClearState = .preparing
+        let service = engineService
+        let task = Task { @MainActor [weak self] in
+            let result: Result<any DuxCleanupHistoryClearPreviewLease, Error>
+            do {
+                result = .success(try await service.prepareCleanupHistoryClear())
+            } catch {
+                result = .failure(error)
+            }
+            guard !Task.isCancelled, let self,
+                  generation == self.cleanupHistoryClearGeneration,
+                  !self.cleanupHistoryClearIsShuttingDown else {
+                if case let .success(preview) = result {
+                    await preview.release()
+                }
+                return
+            }
+            self.cleanupHistoryClearTask = nil
+            switch result {
+            case let .success(preview):
+                let confirmation = CleanupHistoryClearConfirmation(
+                    generation: generation,
+                    preview: preview.preview
+                )
+                self.pendingCleanupHistoryClearPreview = preview
+                self.cleanupHistoryClearConfirmation = confirmation
+                self.cleanupHistoryClearState = .awaitingConfirmation(
+                    confirmation
+                )
+            case let .failure(error):
+                let failure =
+                    (error as? CleanupHistoryClearServiceError)
+                    ?? .invalidResponse
+                self.cleanupHistoryClearState =
+                    failure == .outcomeUnknown
+                    ? .outcomeUnknown
+                    : .failed(failure)
+            }
+        }
+        cleanupHistoryClearTask = task
+        await task.value
+    }
+
+    func confirmCleanupHistoryClear(
+        _ confirmation: CleanupHistoryClearConfirmation
+    ) async {
+        guard
+            !cleanupHistoryClearIsShuttingDown,
+            cleanupHistoryClearTask == nil,
+            let currentConfirmation = cleanupHistoryClearConfirmation,
+            let preview = pendingCleanupHistoryClearPreview,
+            case .awaitingConfirmation = cleanupHistoryClearState,
+            confirmation == currentConfirmation,
+            confirmation.preview == preview.preview,
+            confirmation.generation == cleanupHistoryClearGeneration
+        else {
+            return
+        }
+
+        cleanupHistoryClearGeneration &+= 1
+        let generation = cleanupHistoryClearGeneration
+        pendingCleanupHistoryClearPreview = nil
+        cleanupHistoryClearConfirmation = nil
+        cleanupHistoryClearState = .clearing(confirmation.preview)
+
+        // Fence every pre-clear observation before the mutation is queued.
+        // A late read may finish, but it cannot republish deleted rows.
+        cleanupHistoryGeneration &+= 1
+        let historyGeneration = cleanupHistoryGeneration
+        cleanupHistoryTask?.cancel()
+        cleanupHistoryTask = nil
+        cleanupHistoryRecords = []
+        cleanupHistoryNextCursor = nil
+        cleanupHistoryState = .loading
+        closeCleanupHistorySession()
+
+        let service = engineService
+        let task = Task { @MainActor [weak self] in
+            let clearResult: Result<CleanupHistoryClearResultModel, Error>
+            do {
+                clearResult = .success(
+                    try await service.clearCleanupHistory(preview)
+                )
+            } catch {
+                clearResult = .failure(error)
+            }
+            await preview.release()
+
+            // Every terminal response performs exactly one observation-only
+            // refresh. It never repeats the clearing operation.
+            let historyResult: Result<CleanupHistoryPageModel, Error>
+            do {
+                historyResult = .success(
+                    try await service.loadRecentCleanupHistory(
+                        cursor: nil,
+                        limit: 64
+                    )
+                )
+            } catch {
+                historyResult = .failure(error)
+            }
+
+            guard !Task.isCancelled, let self,
+                  generation == self.cleanupHistoryClearGeneration,
+                  historyGeneration == self.cleanupHistoryGeneration,
+                  !self.cleanupHistoryClearIsShuttingDown else {
+                return
+            }
+            self.cleanupHistoryClearTask = nil
+            switch historyResult {
+            case let .success(page):
+                self.cleanupHistoryRecords = page.records
+                self.cleanupHistoryNextCursor = page.nextCursor
+                self.cleanupHistoryState = .loaded
+            case let .failure(error):
+                self.cleanupHistoryState = .failed(
+                    (error as? CleanupHistoryServiceError) ?? .invalidResponse
+                )
+            }
+            switch clearResult {
+            case let .success(result):
+                self.cleanupHistoryClearState = .completed(result)
+            case let .failure(error):
+                let failure =
+                    (error as? CleanupHistoryClearServiceError)
+                    ?? .invalidResponse
+                self.cleanupHistoryClearState =
+                    failure == .outcomeUnknown
+                    ? .outcomeUnknown
+                    : .failed(failure)
+            }
+        }
+        cleanupHistoryClearTask = task
+        await task.value
+    }
+
+    func cancelCleanupHistoryClear(
+        _ confirmation: CleanupHistoryClearConfirmation
+    ) async {
+        guard
+            cleanupHistoryClearTask == nil,
+            confirmation == cleanupHistoryClearConfirmation,
+            let preview = pendingCleanupHistoryClearPreview,
+            case .awaitingConfirmation = cleanupHistoryClearState
+        else {
+            return
+        }
+        cleanupHistoryClearGeneration &+= 1
+        pendingCleanupHistoryClearPreview = nil
+        cleanupHistoryClearConfirmation = nil
+        cleanupHistoryClearState = .idle
+        await preview.release()
+    }
+
+    func dismissCleanupHistoryClearNotice() {
+        guard
+            cleanupHistoryClearTask == nil,
+            pendingCleanupHistoryClearPreview == nil,
+            !cleanupHistoryClearState.isBusy
+        else {
+            return
+        }
+        cleanupHistoryClearState = .idle
+    }
+
+    /// Settings disappearance cancels only preparation/confirmation work.
+    /// Once clearing begins, it is allowed to finish and remains one-shot.
+    func dismissCleanupHistoryClearPresentation() async {
+        if case .clearing = cleanupHistoryClearState {
+            return
+        }
+        cleanupHistoryClearGeneration &+= 1
+        let generation = cleanupHistoryClearGeneration
+        let operation = cleanupHistoryClearTask
+        let preview = pendingCleanupHistoryClearPreview
+        pendingCleanupHistoryClearPreview = nil
+        cleanupHistoryClearConfirmation = nil
+        operation?.cancel()
+        await operation?.value
+        await preview?.release()
+        guard generation == cleanupHistoryClearGeneration else {
+            return
+        }
+        cleanupHistoryClearTask = nil
+        cleanupHistoryClearState = .idle
+    }
+
+    /// Suppress late presentation but await a confirmed clear before engine
+    /// close. Task cancellation never implies transaction cancellation.
+    func shutdownCleanupHistoryClear() async {
+        cleanupHistoryClearIsShuttingDown = true
+        cleanupHistoryClearGeneration &+= 1
+        let operation = cleanupHistoryClearTask
+        let preview = pendingCleanupHistoryClearPreview
+        pendingCleanupHistoryClearPreview = nil
+        cleanupHistoryClearConfirmation = nil
+        operation?.cancel()
+        await operation?.value
+        await preview?.release()
+        cleanupHistoryClearTask = nil
+        cleanupHistoryClearState = .idle
     }
 
     /// Selects one exact path-free history record. The ID must still be

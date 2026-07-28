@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use thiserror::Error;
 
@@ -22,6 +22,9 @@ use super::cleanup_history::{
     DurableCleanupSessionObservation, DurableCleanupSessionStatus, DurableCleanupSessionSummary,
     DurableCleanupStatusCounts, DurableCleanupTrigger, DurableCleanupWarning,
     MAX_RECENT_CLEANUP_HISTORY_LIMIT,
+};
+use super::cleanup_history_clear::{
+    CleanupHistoryClearError, CleanupHistoryClearPreview, CleanupHistoryClearResult,
 };
 use super::config::EngineConfig;
 use super::rust_target_plan_review::{
@@ -102,14 +105,14 @@ use crate::persistence::snapshot::{
 use crate::persistence::{
     CandidateEvaluationCompletion, CandidateEvaluationFailureKind, CandidateEvaluationIdentity,
     CandidateEvaluationObservation, CandidateEvaluationRecord, CandidateEvaluationStatus,
-    CandidateHistoryStatus, CandidateReviewAction, CleanupSessionId, CompleteCandidateRecord,
-    HistoryErrorKind, HostPathObservationEncoding, MAX_RECENT_SCAN_HISTORY_LIMIT,
-    NewCandidateRecord, NewScanRecord, ScanCompletionRecord, ScanCounts, ScanStatus,
-    SnapshotReviewPurpose, StoredCleanupErrorCategory, StoredCleanupHistoryCursor,
-    StoredCleanupHistoryObservation, StoredCleanupItemStatus, StoredCleanupItemSummary,
-    StoredCleanupMode, StoredCleanupRecordFormat, StoredCleanupSessionStatus,
-    StoredCleanupSessionSummary, StoredCleanupStatusCounts, StoredCleanupTrigger,
-    TerminalScanStatus, observe_host_path,
+    CandidateHistoryStatus, CandidateReviewAction, CleanupHistoryClearStoreError, CleanupSessionId,
+    CompleteCandidateRecord, HistoryErrorKind, HostPathObservationEncoding,
+    MAX_RECENT_SCAN_HISTORY_LIMIT, NewCandidateRecord, NewScanRecord, ScanCompletionRecord,
+    ScanCounts, ScanStatus, SnapshotReviewPurpose, StoredCleanupErrorCategory,
+    StoredCleanupHistoryCursor, StoredCleanupHistoryObservation, StoredCleanupItemStatus,
+    StoredCleanupItemSummary, StoredCleanupMode, StoredCleanupRecordFormat,
+    StoredCleanupSessionStatus, StoredCleanupSessionSummary, StoredCleanupStatusCounts,
+    StoredCleanupTrigger, TerminalScanStatus, observe_host_path,
 };
 use crate::persistence::{
     CargoCodeSignatureRecord, CargoEnrollmentSetting, CargoEnrollmentSettingUpdate,
@@ -2073,6 +2076,69 @@ impl EngineHandle {
             .map_err(|error| map_cleanup_history_error(error.kind))?
             .ok_or(CleanupHistoryError::SessionNotFound)?;
         public_cleanup_history_observation(observation)
+    }
+
+    /// Prepare one short-lived, consume-once confirmation for clearing the
+    /// exact current terminal cleanup-history graph. The preview contains no
+    /// session IDs, paths, plan facts, claims, or effect authority.
+    pub fn prepare_cleanup_history_clear(
+        &self,
+    ) -> Result<CleanupHistoryClearPreview, CleanupHistoryClearError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(CleanupHistoryClearError::Closed);
+        }
+        let prepared = self
+            .inner
+            .store
+            .prepare_cleanup_history_clear()
+            .map_err(map_cleanup_history_clear_store_error)?;
+        let monotonic_now = Instant::now();
+        let prepared_at = SystemTime::now();
+        CleanupHistoryClearPreview::new(&self.inner.store, prepared, prepared_at, monotonic_now)
+            .ok_or(CleanupHistoryClearError::CorruptData)
+    }
+
+    /// Consume one exact preview and clear only the unchanged terminal
+    /// cleanup-history graph. No cleanup target or effect is accepted here.
+    pub fn clear_cleanup_history(
+        &self,
+        preview: CleanupHistoryClearPreview,
+    ) -> Result<CleanupHistoryClearResult, CleanupHistoryClearError> {
+        self.clear_cleanup_history_at(preview, Instant::now())
+    }
+
+    fn clear_cleanup_history_at(
+        &self,
+        preview: CleanupHistoryClearPreview,
+        now: Instant,
+    ) -> Result<CleanupHistoryClearResult, CleanupHistoryClearError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(CleanupHistoryClearError::Closed);
+        }
+        if !preview.belongs_to(&self.inner.store) {
+            return Err(CleanupHistoryClearError::WrongEngine);
+        }
+        let info = preview.info_at(now)?;
+        let prepared = preview.into_prepared(now)?;
+        let result = self
+            .inner
+            .store
+            .clear_cleanup_history(&prepared)
+            .map_err(map_cleanup_history_clear_store_error)?;
+        if result.sessions_removed != info.session_count() {
+            return Err(CleanupHistoryClearError::OutcomeUnknown);
+        }
+        CleanupHistoryClearResult::new(result.sessions_removed)
+            .ok_or(CleanupHistoryClearError::OutcomeUnknown)
+    }
+
+    #[cfg(test)]
+    fn clear_cleanup_history_at_expiry_for_test(
+        &self,
+        preview: CleanupHistoryClearPreview,
+    ) -> Result<CleanupHistoryClearResult, CleanupHistoryClearError> {
+        let expires_at = preview.monotonic_expires_at_for_test();
+        self.clear_cleanup_history_at(preview, expires_at)
     }
 
     /// Load one exact, bounded candidate-discovery observation from durable
@@ -4948,6 +5014,32 @@ const fn map_cleanup_history_error(kind: HistoryErrorKind) -> CleanupHistoryErro
         | HistoryErrorKind::NotFound
         | HistoryErrorKind::InvalidTransition
         | HistoryErrorKind::OutcomeUnknown => CleanupHistoryError::Unavailable,
+    }
+}
+
+const fn map_cleanup_history_clear_store_error(
+    error: CleanupHistoryClearStoreError,
+) -> CleanupHistoryClearError {
+    match error {
+        CleanupHistoryClearStoreError::NothingToClear => CleanupHistoryClearError::NothingToClear,
+        CleanupHistoryClearStoreError::ActiveCleanup => CleanupHistoryClearError::ActiveCleanup,
+        CleanupHistoryClearStoreError::ChangedSincePreview => {
+            CleanupHistoryClearError::ChangedSincePreview
+        }
+        CleanupHistoryClearStoreError::History(history) => match history.kind {
+            HistoryErrorKind::IncompatibleSchema => CleanupHistoryClearError::IncompatibleSchema,
+            HistoryErrorKind::QueryLimitExceeded => CleanupHistoryClearError::QueryLimitExceeded,
+            HistoryErrorKind::Busy => CleanupHistoryClearError::Busy,
+            HistoryErrorKind::UnsafeStorage => CleanupHistoryClearError::UnsafeStorage,
+            HistoryErrorKind::CorruptData => CleanupHistoryClearError::CorruptData,
+            HistoryErrorKind::OutcomeUnknown => CleanupHistoryClearError::OutcomeUnknown,
+            HistoryErrorKind::DatabaseUnavailable => CleanupHistoryClearError::Unavailable,
+            HistoryErrorKind::InternalState
+            | HistoryErrorKind::InvalidInput
+            | HistoryErrorKind::AlreadyExists
+            | HistoryErrorKind::NotFound
+            | HistoryErrorKind::InvalidTransition => CleanupHistoryClearError::InternalState,
+        },
     }
 }
 

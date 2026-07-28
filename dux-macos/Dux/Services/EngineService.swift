@@ -111,7 +111,8 @@ extension DuxPermanentCleanupPolicyServing {
 
 protocol EngineServing: DuxVolumeStatusServing, DuxCapacityTrendServing, DuxPressurePolicyServing,
     DuxPermanentCleanupPolicyServing, DuxCleanupExclusionsServing,
-    DuxDirectCargoEnrollmentServing, DuxCleanupHistoryServing, Sendable
+    DuxDirectCargoEnrollmentServing, DuxCleanupHistoryServing,
+    DuxCleanupHistoryClearing, Sendable
 {
     func loadStatus() async throws -> EngineStatus
 }
@@ -147,6 +148,33 @@ extension DuxCleanupHistoryServing {
         sessionID _: String
     ) async throws -> CleanupHistorySessionDetailModel {
         throw CleanupHistoryServiceError.unavailable
+    }
+}
+
+protocol DuxCleanupHistoryClearPreviewLease: AnyObject, Sendable {
+    var preview: CleanupHistoryClearPreviewModel { get }
+    func release() async
+}
+
+protocol DuxCleanupHistoryClearing: Sendable {
+    func prepareCleanupHistoryClear() async throws
+        -> any DuxCleanupHistoryClearPreviewLease
+    func clearCleanupHistory(
+        _ preview: any DuxCleanupHistoryClearPreviewLease
+    ) async throws -> CleanupHistoryClearResultModel
+}
+
+extension DuxCleanupHistoryClearing {
+    func prepareCleanupHistoryClear() async throws
+        -> any DuxCleanupHistoryClearPreviewLease
+    {
+        throw CleanupHistoryClearServiceError.unavailable
+    }
+
+    func clearCleanupHistory(
+        _: any DuxCleanupHistoryClearPreviewLease
+    ) async throws -> CleanupHistoryClearResultModel {
+        throw CleanupHistoryClearServiceError.unavailable
     }
 }
 
@@ -267,7 +295,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
     DuxSnapshotHistoryServing, DuxCleanupHistoryServing, DuxScanCoverageServing, HomeScanServing,
     Sendable
 {
-    fileprivate static let expectedFFIContractVersion: UInt32 = 29
+    fileprivate static let expectedFFIContractVersion: UInt32 = 30
     fileprivate static let expectedRecordVersion: UInt32 = 1
 
     private let state: EngineServiceState
@@ -861,6 +889,66 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         }
     }
 
+    func prepareCleanupHistoryClear() async throws
+        -> any DuxCleanupHistoryClearPreviewLease
+    {
+        try await state.perform { state in
+            precondition(!Thread.isMainThread, "Blocking FFI work reached the main thread")
+            let engine = try Self.resolveCleanupHistoryClearEngine(state)
+            do {
+                let preview = try engine.prepareCleanupHistoryClear()
+                do {
+                    let model = try Self.cleanupHistoryClearPreview(
+                        preview.info(),
+                        observedAt: Date()
+                    )
+                    return FFICleanupHistoryClearPreviewLease(
+                        ffiPreview: preview,
+                        preview: model,
+                        state: state
+                    )
+                } catch {
+                    _ = try? preview.release()
+                    throw error
+                }
+            } catch let error as CleanupHistoryClearError {
+                throw Self.cleanupHistoryClearError(error)
+            }
+        }
+    }
+
+    func clearCleanupHistory(
+        _ preview: any DuxCleanupHistoryClearPreviewLease
+    ) async throws -> CleanupHistoryClearResultModel {
+        try await state.perform { state in
+            precondition(!Thread.isMainThread, "Blocking FFI work reached the main thread")
+            guard let preview = preview as? FFICleanupHistoryClearPreviewLease else {
+                throw CleanupHistoryClearServiceError.wrongEngine
+            }
+            let engine = try Self.resolveCleanupHistoryClearEngine(state)
+            let ffiPreview = try preview.take(for: state)
+            let response: CleanupHistoryClearResult
+            do {
+                response = try engine.clearCleanupHistory(preview: ffiPreview)
+            } catch let error as CleanupHistoryClearError {
+                throw Self.cleanupHistoryClearError(error)
+            }
+            guard
+                response.recordVersion == Self.expectedRecordVersion,
+                response.clearedSessionCount > 0,
+                response.clearedSessionCount == preview.preview.sessionCount
+            else {
+                // Rust may already have committed the metadata deletion.
+                // Malformed or non-correlating success is therefore unknown,
+                // never an ordinary response error that may be retried.
+                throw CleanupHistoryClearServiceError.outcomeUnknown
+            }
+            return CleanupHistoryClearResultModel(
+                clearedSessionCount: response.clearedSessionCount
+            )
+        }
+    }
+
     func loadScanCoverageDetails(scanID: String) async throws -> ExplorerScanCoverageDetails {
         guard ExplorerSnapshotHistoryAdapter.validScanID(scanID) else {
             throw ExplorerScanCoverageError.invalidRequest
@@ -1028,6 +1116,72 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         case .Unavailable: .unavailable
         case .InternalState: .internalState
         }
+    }
+
+    private static func cleanupHistoryClearError(
+        _ error: CleanupHistoryClearError
+    ) -> CleanupHistoryClearServiceError {
+        switch error {
+        case .Closed: .closed
+        case .NothingToClear: .nothingToClear
+        case .ActiveCleanup: .activeCleanup
+        case .ChangedSincePreview: .changedSincePreview
+        case .PreviewExpired: .previewExpired
+        case .WrongEngine: .wrongEngine
+        case .PreviewUnavailable: .previewUnavailable
+        case .IncompatibleSchema: .incompatibleSchema
+        case .Busy: .retryable
+        case .UnsafeStorage: .unsafeStorage
+        case .BudgetExceeded: .budgetExceeded
+        case .CorruptData: .corruptData
+        case .OutcomeUnknown: .outcomeUnknown
+        case .Unavailable: .unavailable
+        case .InternalState: .internalState
+        }
+    }
+
+    private static func cleanupHistoryClearPreview(
+        _ info: CleanupHistoryClearPreviewInfo,
+        observedAt: Date
+    ) throws -> CleanupHistoryClearPreviewModel {
+        let maximumUnixMilliseconds: Int64 = 253_402_300_799_999
+        let observedAtMilliseconds = unixMilliseconds(observedAt)
+        guard
+            info.recordVersion == expectedRecordVersion,
+            info.sessionCount > 0,
+            let observedAtMilliseconds,
+            (0 ... maximumUnixMilliseconds).contains(
+                info.oldestStartedAtUnixMs
+            ),
+            (0 ... maximumUnixMilliseconds).contains(
+                info.newestStartedAtUnixMs
+            ),
+            (0 ... maximumUnixMilliseconds).contains(info.preparedAtUnixMs),
+            (0 ... maximumUnixMilliseconds).contains(info.expiresAtUnixMs),
+            info.oldestStartedAtUnixMs <= info.newestStartedAtUnixMs,
+            info.preparedAtUnixMs <= observedAtMilliseconds,
+            observedAtMilliseconds < info.expiresAtUnixMs,
+            info.expiresAtUnixMs - info.preparedAtUnixMs <= 120_000
+        else {
+            throw CleanupHistoryClearServiceError.invalidResponse
+        }
+        return CleanupHistoryClearPreviewModel(
+            sessionCount: info.sessionCount,
+            oldestStartedAt: Date(
+                timeIntervalSince1970:
+                    Double(info.oldestStartedAtUnixMs) / 1_000
+            ),
+            newestStartedAt: Date(
+                timeIntervalSince1970:
+                    Double(info.newestStartedAtUnixMs) / 1_000
+            ),
+            preparedAt: Date(
+                timeIntervalSince1970: Double(info.preparedAtUnixMs) / 1_000
+            ),
+            expiresAt: Date(
+                timeIntervalSince1970: Double(info.expiresAtUnixMs) / 1_000
+            )
+        )
     }
 
     private static func unixMilliseconds(_ date: Date) -> Int64? {
@@ -1630,6 +1784,23 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         }
     }
 
+    private static func resolveCleanupHistoryClearEngine(
+        _ state: EngineServiceState
+    ) throws -> DuxEngine {
+        do {
+            return try state.resolveEngine()
+        } catch let error as EngineServiceError {
+            throw switch error {
+            case .closed: CleanupHistoryClearServiceError.closed
+            case .retryable: CleanupHistoryClearServiceError.retryable
+            case .unavailable: CleanupHistoryClearServiceError.unavailable
+            case .invalidCapacityObservation, .conflictingCapacityObservation,
+                 .supersededCapacityObservation, .unexpected:
+                CleanupHistoryClearServiceError.internalState
+            }
+        }
+    }
+
     private static func capacityBasis(_ source: VolumeCapacitySource) -> VolumeCapacityBasis {
         switch source {
         case .importantUsage: .importantUsage
@@ -1906,6 +2077,53 @@ private final class FFIDirectCargoEnrollmentPreviewLease:
         dispatchPrecondition(condition: .onQueue(state.queue))
         guard state === expectedState, isAvailable else {
             throw DirectCargoEnrollmentServiceError.previewUnavailable
+        }
+        isAvailable = false
+        return ffiPreview
+    }
+
+    func release() async {
+        let ffiPreview = ffiPreview
+        await state.performNonthrowing { [self] _ in
+            guard isAvailable else {
+                return
+            }
+            isAvailable = false
+            _ = try? ffiPreview.release()
+        }
+    }
+}
+
+private final class FFICleanupHistoryClearPreviewLease:
+    DuxCleanupHistoryClearPreviewLease, @unchecked Sendable
+{
+    let preview: CleanupHistoryClearPreviewModel
+
+    private let ffiPreview: CleanupHistoryClearPreviewSession
+    private let state: EngineServiceState
+    private var isAvailable = true
+
+    init(
+        ffiPreview: CleanupHistoryClearPreviewSession,
+        preview: CleanupHistoryClearPreviewModel,
+        state: EngineServiceState
+    ) {
+        self.ffiPreview = ffiPreview
+        self.preview = preview
+        self.state = state
+    }
+
+    fileprivate func take(
+        for expectedState: EngineServiceState
+    ) throws -> CleanupHistoryClearPreviewSession {
+        // Identity must be checked before asserting the owner queue. A lease
+        // handed to another EngineService is a typed rejection, not a crash.
+        guard state === expectedState else {
+            throw CleanupHistoryClearServiceError.wrongEngine
+        }
+        dispatchPrecondition(condition: .onQueue(state.queue))
+        guard isAvailable else {
+            throw CleanupHistoryClearServiceError.previewUnavailable
         }
         isAvailable = false
         return ffiPreview

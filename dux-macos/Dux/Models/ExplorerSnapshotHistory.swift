@@ -223,6 +223,71 @@ enum CleanupHistoryServiceError: Error, Equatable, Sendable {
     case invalidResponse
 }
 
+/// Exact, immutable confirmation facts for deleting only DUX-owned cleanup
+/// activity metadata. This model contains no row selector, path, plan, or
+/// filesystem-effect authority.
+struct CleanupHistoryClearPreviewModel: Equatable, Sendable {
+    let sessionCount: UInt64
+    let oldestStartedAt: Date
+    let newestStartedAt: Date
+    let preparedAt: Date
+    let expiresAt: Date
+}
+
+struct CleanupHistoryClearConfirmation: Equatable, Sendable {
+    let generation: UInt64
+    let preview: CleanupHistoryClearPreviewModel
+}
+
+struct CleanupHistoryClearResultModel: Equatable, Sendable {
+    let clearedSessionCount: UInt64
+}
+
+enum CleanupHistoryClearServiceError: Error, Equatable, Sendable {
+    case closed
+    case nothingToClear
+    case activeCleanup
+    case changedSincePreview
+    case previewExpired
+    case wrongEngine
+    case previewUnavailable
+    case incompatibleSchema
+    case retryable
+    case unsafeStorage
+    case budgetExceeded
+    case corruptData
+    case outcomeUnknown
+    case unavailable
+    case internalState
+    case invalidResponse
+}
+
+enum CleanupHistoryClearState: Equatable, Sendable {
+    case idle
+    case preparing
+    case awaitingConfirmation(CleanupHistoryClearConfirmation)
+    case clearing(CleanupHistoryClearPreviewModel)
+    case completed(CleanupHistoryClearResultModel)
+    case failed(CleanupHistoryClearServiceError)
+    case outcomeUnknown
+
+    var isBusy: Bool {
+        switch self {
+        case .preparing, .clearing:
+            true
+        case .idle, .awaitingConfirmation, .completed, .failed, .outcomeUnknown:
+            false
+        }
+    }
+
+    var isClearing: Bool {
+        if case .clearing = self {
+            return true
+        }
+        return false
+    }
+}
+
 enum ExplorerSnapshotReviewAcquisitionError: Error, Equatable, Sendable {
     case closed
     case scanNotFound

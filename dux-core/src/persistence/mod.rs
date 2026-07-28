@@ -30,6 +30,7 @@ mod cleanup_exclusions;
     )
 )]
 mod cleanup_history;
+mod cleanup_history_clear;
 mod cleanup_history_query;
 #[cfg_attr(
     not(test),
@@ -105,6 +106,9 @@ pub(crate) use cleanup_exclusions::{
 };
 pub(crate) use cleanup_history::{CleanupSessionId, canonical_started_at};
 pub(crate) use cleanup_history::{CleanupTrigger, NewCleanupSessionRecord};
+pub(crate) use cleanup_history_clear::{
+    CleanupHistoryClearStoreError, PreparedCleanupHistoryClear,
+};
 pub(crate) use cleanup_history_query::{
     StoredCleanupErrorCategory, StoredCleanupHistoryCursor, StoredCleanupHistoryObservation,
     StoredCleanupItemStatus, StoredCleanupItemSummary, StoredCleanupMode,

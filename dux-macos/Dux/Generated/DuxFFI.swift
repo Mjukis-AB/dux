@@ -578,6 +578,140 @@ fileprivate struct FfiConverterData: FfiConverterRustBuffer {
 
 
 /**
+ * Engine-bound, consume-once confirmation for deleting only DUX's local
+ * terminal cleanup-history metadata.
+ */
+public protocol CleanupHistoryClearPreviewSessionProtocol: AnyObject, Sendable {
+
+    func info() throws  -> CleanupHistoryClearPreviewInfo
+
+    func release() throws  -> CleanupHistoryClearPreviewReleaseOutcome
+
+}
+/**
+ * Engine-bound, consume-once confirmation for deleting only DUX's local
+ * terminal cleanup-history metadata.
+ */
+open class CleanupHistoryClearPreviewSession: CleanupHistoryClearPreviewSessionProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_dux_ffi_fn_clone_cleanuphistoryclearpreviewsession(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_dux_ffi_fn_free_cleanuphistoryclearpreviewsession(handle, $0) }
+    }
+
+
+
+
+open func info()throws  -> CleanupHistoryClearPreviewInfo  {
+    return try  FfiConverterTypeCleanupHistoryClearPreviewInfo_lift(try rustCallWithError(FfiConverterTypeCleanupHistoryClearError_lift) {
+    uniffi_dux_ffi_fn_method_cleanuphistoryclearpreviewsession_info(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+open func release()throws  -> CleanupHistoryClearPreviewReleaseOutcome  {
+    return try  FfiConverterTypeCleanupHistoryClearPreviewReleaseOutcome_lift(try rustCallWithError(FfiConverterTypeCleanupHistoryClearError_lift) {
+    uniffi_dux_ffi_fn_method_cleanuphistoryclearpreviewsession_release(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+
+
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCleanupHistoryClearPreviewSession: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = CleanupHistoryClearPreviewSession
+
+    public static func lift(_ handle: UInt64) throws -> CleanupHistoryClearPreviewSession {
+        return CleanupHistoryClearPreviewSession(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: CleanupHistoryClearPreviewSession) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CleanupHistoryClearPreviewSession {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: CleanupHistoryClearPreviewSession, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCleanupHistoryClearPreviewSession_lift(_ handle: UInt64) throws -> CleanupHistoryClearPreviewSession {
+    return try FfiConverterTypeCleanupHistoryClearPreviewSession.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCleanupHistoryClearPreviewSession_lower(_ value: CleanupHistoryClearPreviewSession) -> UInt64 {
+    return FfiConverterTypeCleanupHistoryClearPreviewSession.lower(value)
+}
+
+
+
+
+
+
+/**
  * Engine-bound, consume-once inspection capability. The object carries only
  * Cargo discovery enrollment authority; it cannot create or execute cleanup.
  */
@@ -741,6 +875,13 @@ public protocol DuxEngineProtocol: AnyObject, Sendable {
     func cleanupSessionHistory(request: CleanupSessionHistoryRequest) throws  -> CleanupSessionHistory
 
     /**
+     * Consume one confirmation from this exact engine. Consumption occurs
+     * before the core mutation is called and is never restored after any
+     * result.
+     */
+    func clearCleanupHistory(preview: CleanupHistoryClearPreviewSession) throws  -> CleanupHistoryClearResult
+
+    /**
      * Close the engine and wait for at most five seconds for worker quiescence.
      * Returns whether all workers have quiesced; repeated calls return the
      * first call's final observation without reopening storage.
@@ -802,6 +943,12 @@ public protocol DuxEngineProtocol: AnyObject, Sendable {
     func libraryVersion() throws  -> LibraryVersion
 
     func observeStartupVolume(observation: StartupVolumeObservation) throws  -> StartupVolumeStatus
+
+    /**
+     * Prepare one path-free, short-lived confirmation for clearing the exact
+     * current terminal cleanup-history graph.
+     */
+    func prepareCleanupHistoryClear() throws  -> CleanupHistoryClearPreviewSession
 
     /**
      * Prepare one exact Rust-target plan for presentation through an active
@@ -961,6 +1108,20 @@ open func cleanupSessionHistory(request: CleanupSessionHistoryRequest)throws  ->
 }
 
     /**
+     * Consume one confirmation from this exact engine. Consumption occurs
+     * before the core mutation is called and is never restored after any
+     * result.
+     */
+open func clearCleanupHistory(preview: CleanupHistoryClearPreviewSession)throws  -> CleanupHistoryClearResult  {
+    return try  FfiConverterTypeCleanupHistoryClearResult_lift(try rustCallWithError(FfiConverterTypeCleanupHistoryClearError_lift) {
+    uniffi_dux_ffi_fn_method_duxengine_clear_cleanup_history(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeCleanupHistoryClearPreviewSession_lower(preview),$0
+    )
+})
+}
+
+    /**
      * Close the engine and wait for at most five seconds for worker quiescence.
      * Returns whether all workers have quiesced; repeated calls return the
      * first call's final observation without reopening storage.
@@ -1099,6 +1260,18 @@ open func observeStartupVolume(observation: StartupVolumeObservation)throws  -> 
     uniffi_dux_ffi_fn_method_duxengine_observe_startup_volume(
             self.uniffiCloneHandle(),
         FfiConverterTypeStartupVolumeObservation_lower(observation),$0
+    )
+})
+}
+
+    /**
+     * Prepare one path-free, short-lived confirmation for clearing the exact
+     * current terminal cleanup-history graph.
+     */
+open func prepareCleanupHistoryClear()throws  -> CleanupHistoryClearPreviewSession  {
+    return try  FfiConverterTypeCleanupHistoryClearPreviewSession_lift(try rustCallWithError(FfiConverterTypeCleanupHistoryClearError_lift) {
+    uniffi_dux_ffi_fn_method_duxengine_prepare_cleanup_history_clear(
+            self.uniffiCloneHandle(),$0
     )
 })
 }
@@ -3239,6 +3412,135 @@ public func FfiConverterTypeCleanupExclusionsUpdate_lift(_ buf: RustBuffer) thro
 #endif
 public func FfiConverterTypeCleanupExclusionsUpdate_lower(_ value: CleanupExclusionsUpdate) -> RustBuffer {
     return FfiConverterTypeCleanupExclusionsUpdate.lower(value)
+}
+
+
+/**
+ * Immutable, path-free confirmation facts for clearing the exact current
+ * cleanup-history graph. This record carries no row selector or cleanup
+ * authority; only its opaque companion session can be consumed.
+ */
+public struct CleanupHistoryClearPreviewInfo: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let sessionCount: UInt64
+    public let oldestStartedAtUnixMs: Int64
+    public let newestStartedAtUnixMs: Int64
+    public let preparedAtUnixMs: Int64
+    public let expiresAtUnixMs: Int64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, sessionCount: UInt64, oldestStartedAtUnixMs: Int64, newestStartedAtUnixMs: Int64, preparedAtUnixMs: Int64, expiresAtUnixMs: Int64) {
+        self.recordVersion = recordVersion
+        self.sessionCount = sessionCount
+        self.oldestStartedAtUnixMs = oldestStartedAtUnixMs
+        self.newestStartedAtUnixMs = newestStartedAtUnixMs
+        self.preparedAtUnixMs = preparedAtUnixMs
+        self.expiresAtUnixMs = expiresAtUnixMs
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension CleanupHistoryClearPreviewInfo: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCleanupHistoryClearPreviewInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CleanupHistoryClearPreviewInfo {
+        return
+            try CleanupHistoryClearPreviewInfo(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                sessionCount: FfiConverterUInt64.read(from: &buf),
+                oldestStartedAtUnixMs: FfiConverterInt64.read(from: &buf),
+                newestStartedAtUnixMs: FfiConverterInt64.read(from: &buf),
+                preparedAtUnixMs: FfiConverterInt64.read(from: &buf),
+                expiresAtUnixMs: FfiConverterInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: CleanupHistoryClearPreviewInfo, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterUInt64.write(value.sessionCount, into: &buf)
+        FfiConverterInt64.write(value.oldestStartedAtUnixMs, into: &buf)
+        FfiConverterInt64.write(value.newestStartedAtUnixMs, into: &buf)
+        FfiConverterInt64.write(value.preparedAtUnixMs, into: &buf)
+        FfiConverterInt64.write(value.expiresAtUnixMs, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCleanupHistoryClearPreviewInfo_lift(_ buf: RustBuffer) throws -> CleanupHistoryClearPreviewInfo {
+    return try FfiConverterTypeCleanupHistoryClearPreviewInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCleanupHistoryClearPreviewInfo_lower(_ value: CleanupHistoryClearPreviewInfo) -> RustBuffer {
+    return FfiConverterTypeCleanupHistoryClearPreviewInfo.lower(value)
+}
+
+
+public struct CleanupHistoryClearResult: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let clearedSessionCount: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, clearedSessionCount: UInt64) {
+        self.recordVersion = recordVersion
+        self.clearedSessionCount = clearedSessionCount
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension CleanupHistoryClearResult: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCleanupHistoryClearResult: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CleanupHistoryClearResult {
+        return
+            try CleanupHistoryClearResult(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                clearedSessionCount: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: CleanupHistoryClearResult, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterUInt64.write(value.clearedSessionCount, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCleanupHistoryClearResult_lift(_ buf: RustBuffer) throws -> CleanupHistoryClearResult {
+    return try FfiConverterTypeCleanupHistoryClearResult.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCleanupHistoryClearResult_lower(_ value: CleanupHistoryClearResult) -> RustBuffer {
+    return FfiConverterTypeCleanupHistoryClearResult.lower(value)
 }
 
 
@@ -8599,6 +8901,227 @@ public func FfiConverterTypeCleanupExclusionsSource_lift(_ buf: RustBuffer) thro
 #endif
 public func FfiConverterTypeCleanupExclusionsSource_lower(_ value: CleanupExclusionsSource) -> RustBuffer {
     return FfiConverterTypeCleanupExclusionsSource.lower(value)
+}
+
+
+
+public enum CleanupHistoryClearError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
+
+
+
+    case Closed
+    case NothingToClear
+    case ActiveCleanup
+    case ChangedSincePreview
+    case PreviewExpired
+    case WrongEngine
+    case PreviewUnavailable
+    case IncompatibleSchema
+    case Busy
+    case UnsafeStorage
+    case BudgetExceeded
+    case CorruptData
+    case OutcomeUnknown
+    case Unavailable
+    case InternalState
+
+
+
+
+
+
+    public var errorDescription: String? {
+        String(reflecting: self)
+    }
+
+}
+
+#if compiler(>=6)
+extension CleanupHistoryClearError: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCleanupHistoryClearError: FfiConverterRustBuffer {
+    typealias SwiftType = CleanupHistoryClearError
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CleanupHistoryClearError {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+
+
+
+        case 1: return .Closed
+        case 2: return .NothingToClear
+        case 3: return .ActiveCleanup
+        case 4: return .ChangedSincePreview
+        case 5: return .PreviewExpired
+        case 6: return .WrongEngine
+        case 7: return .PreviewUnavailable
+        case 8: return .IncompatibleSchema
+        case 9: return .Busy
+        case 10: return .UnsafeStorage
+        case 11: return .BudgetExceeded
+        case 12: return .CorruptData
+        case 13: return .OutcomeUnknown
+        case 14: return .Unavailable
+        case 15: return .InternalState
+
+         default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: CleanupHistoryClearError, into buf: inout [UInt8]) {
+        switch value {
+
+
+
+
+
+        case .Closed:
+            writeInt(&buf, Int32(1))
+
+
+        case .NothingToClear:
+            writeInt(&buf, Int32(2))
+
+
+        case .ActiveCleanup:
+            writeInt(&buf, Int32(3))
+
+
+        case .ChangedSincePreview:
+            writeInt(&buf, Int32(4))
+
+
+        case .PreviewExpired:
+            writeInt(&buf, Int32(5))
+
+
+        case .WrongEngine:
+            writeInt(&buf, Int32(6))
+
+
+        case .PreviewUnavailable:
+            writeInt(&buf, Int32(7))
+
+
+        case .IncompatibleSchema:
+            writeInt(&buf, Int32(8))
+
+
+        case .Busy:
+            writeInt(&buf, Int32(9))
+
+
+        case .UnsafeStorage:
+            writeInt(&buf, Int32(10))
+
+
+        case .BudgetExceeded:
+            writeInt(&buf, Int32(11))
+
+
+        case .CorruptData:
+            writeInt(&buf, Int32(12))
+
+
+        case .OutcomeUnknown:
+            writeInt(&buf, Int32(13))
+
+
+        case .Unavailable:
+            writeInt(&buf, Int32(14))
+
+
+        case .InternalState:
+            writeInt(&buf, Int32(15))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCleanupHistoryClearError_lift(_ buf: RustBuffer) throws -> CleanupHistoryClearError {
+    return try FfiConverterTypeCleanupHistoryClearError.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCleanupHistoryClearError_lower(_ value: CleanupHistoryClearError) -> RustBuffer {
+    return FfiConverterTypeCleanupHistoryClearError.lower(value)
+}
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum CleanupHistoryClearPreviewReleaseOutcome: Equatable, Hashable {
+
+    case released
+    case alreadyUnavailable
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension CleanupHistoryClearPreviewReleaseOutcome: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCleanupHistoryClearPreviewReleaseOutcome: FfiConverterRustBuffer {
+    typealias SwiftType = CleanupHistoryClearPreviewReleaseOutcome
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CleanupHistoryClearPreviewReleaseOutcome {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .released
+
+        case 2: return .alreadyUnavailable
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: CleanupHistoryClearPreviewReleaseOutcome, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .released:
+            writeInt(&buf, Int32(1))
+
+
+        case .alreadyUnavailable:
+            writeInt(&buf, Int32(2))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCleanupHistoryClearPreviewReleaseOutcome_lift(_ buf: RustBuffer) throws -> CleanupHistoryClearPreviewReleaseOutcome {
+    return try FfiConverterTypeCleanupHistoryClearPreviewReleaseOutcome.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCleanupHistoryClearPreviewReleaseOutcome_lower(_ value: CleanupHistoryClearPreviewReleaseOutcome) -> RustBuffer {
+    return FfiConverterTypeCleanupHistoryClearPreviewReleaseOutcome.lower(value)
 }
 
 
@@ -15166,6 +15689,12 @@ private let initializationResult: InitializationResult = {
     if (uniffi_dux_ffi_checksum_func_live_engine_instance_count() != 11788) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_dux_ffi_checksum_method_cleanuphistoryclearpreviewsession_info() != 182) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_cleanuphistoryclearpreviewsession_release() != 2204) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_dux_ffi_checksum_method_directcargoenrollmentpreviewsession_info() != 57967) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -15179,6 +15708,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_cleanup_session_history() != 34658) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_duxengine_clear_cleanup_history() != 34237) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_close() != 17149) {
@@ -15215,6 +15747,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_observe_startup_volume() != 49642) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_duxengine_prepare_cleanup_history_clear() != 64565) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_prepare_rust_target_plan_review() != 60431) {
