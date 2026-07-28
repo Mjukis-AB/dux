@@ -1,5 +1,20 @@
 # Changelog
 
+- Bound permanent-safe capacity verification to the exact trusted target
+  volume in the private production Rust-target bridge. The approved plan's
+  revalidated rule-scope grant now yields a crate-private kernel mount scope;
+  the core-owned macOS sampler accepts only the same filesystem ID, mount
+  location, and filesystem type returned by `statfs`. Callers cannot nominate
+  a path, volume label, identifier, or capacity value. Verification now
+  brackets the real effect duration independently from journal timestamps and
+  reads the authority clock again after pre-sampling, immediately before each
+  live effect witness is rebuilt, so telemetry cannot extend an expired
+  approval. Verification still requires matching capacity shape, total bytes,
+  source, bounded skew, and a representable signed delta. Sampling failure,
+  volume drift, or timing mismatch keeps the history outcome explicitly
+  unknown without changing cleanup authority. The existing app-facing plan
+  review remains observation-only: no approval, execution, FFI, Swift, CLI,
+  scheduler, or AI route was added.
 - Added exact, path-free cleanup-session drill-down through UniFFI contract
   v29 and the native Cleanup History view. Selecting one bounded session ID
   from the recent summary feed reloads and independently validates the complete

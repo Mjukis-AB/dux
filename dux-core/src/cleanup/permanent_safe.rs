@@ -14,8 +14,9 @@ use std::time::SystemTime;
 use thiserror::Error;
 
 use super::capacity::{
-    CleanupCapacityObservation, CleanupCapacitySampler, VerifiedCleanupCapacity,
-    terminalize_with_capacity_with_status, verify_cleanup_capacity,
+    CleanupCapacityIdentity, CleanupCapacityObservation, CleanupCapacitySampler,
+    VerifiedCleanupCapacity, terminalize_with_capacity_with_status,
+    verify_cleanup_capacity_identity,
 };
 use crate::path_validation::FilesystemIdentity;
 use crate::persistence::{
@@ -100,11 +101,54 @@ pub(crate) fn execute_rust_target_session_with_capacity(
     now: SystemTime,
     driver: &mut impl PermanentSafeContentsDriver,
     cancelled: &dyn Fn() -> bool,
-    mut capacity_sampler: Option<&mut dyn CleanupCapacitySampler>,
+    capacity_sampler: Option<&mut dyn CleanupCapacitySampler>,
 ) -> Result<PermanentSafeSessionSummary, PermanentSafeExecutionError> {
+    execute_rust_target_session_with_capacity_and_clock(
+        session,
+        now,
+        driver,
+        cancelled,
+        capacity_sampler,
+        &mut SystemTime::now,
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn execute_rust_target_session_with_capacity_and_clock_for_test(
+    session: &mut ApprovedCleanupSession,
+    now: SystemTime,
+    driver: &mut impl PermanentSafeContentsDriver,
+    cancelled: &dyn Fn() -> bool,
+    capacity_sampler: Option<&mut dyn CleanupCapacitySampler>,
+    authority_now: &mut dyn FnMut() -> SystemTime,
+) -> Result<PermanentSafeSessionSummary, PermanentSafeExecutionError> {
+    execute_rust_target_session_with_capacity_and_clock(
+        session,
+        now,
+        driver,
+        cancelled,
+        capacity_sampler,
+        authority_now,
+    )
+}
+
+fn execute_rust_target_session_with_capacity_and_clock(
+    session: &mut ApprovedCleanupSession,
+    now: SystemTime,
+    driver: &mut impl PermanentSafeContentsDriver,
+    cancelled: &dyn Fn() -> bool,
+    mut capacity_sampler: Option<&mut dyn CleanupCapacitySampler>,
+    authority_now: &mut dyn FnMut() -> SystemTime,
+) -> Result<PermanentSafeSessionSummary, PermanentSafeExecutionError> {
+    let expected_capacity_identity = capacity_sampler
+        .as_ref()
+        .map(|sampler| sampler.expected_identity());
     let pre_capacity = capacity_sampler
         .as_mut()
         .and_then(|sampler| sampler.sample());
+    // Capacity attribution uses the real effect window, independently from
+    // the canonical journal timestamp supplied for deterministic transitions.
+    let effect_started_at = SystemTime::now();
     let ordered_paths = session
         .plan()
         .items()
@@ -122,8 +166,10 @@ pub(crate) fn execute_rust_target_session_with_capacity(
             let (terminal_status, verified_capacity_delta_bytes) = cancel_and_terminalize(
                 session,
                 now,
+                expected_capacity_identity.as_ref(),
                 pre_capacity.as_ref(),
                 capacity_sampler.take(),
+                effect_started_at,
             )?;
             return Ok(PermanentSafeSessionSummary {
                 removed_entries,
@@ -139,6 +185,7 @@ pub(crate) fn execute_rust_target_session_with_capacity(
             now,
             driver,
             cancelled,
+            authority_now,
         ) {
             Ok(summary) => {
                 removed_entries =
@@ -150,8 +197,10 @@ pub(crate) fn execute_rust_target_session_with_capacity(
                 let (terminal_status, verified_capacity_delta_bytes) = cancel_and_terminalize(
                     session,
                     now,
+                    expected_capacity_identity.as_ref(),
                     pre_capacity.as_ref(),
                     capacity_sampler.take(),
+                    effect_started_at,
                 )?;
                 return Ok(PermanentSafeSessionSummary {
                     removed_entries,
@@ -184,8 +233,13 @@ pub(crate) fn execute_rust_target_session_with_capacity(
         }
     }
 
-    let verification =
-        capture_verified_capacity(pre_capacity.as_ref(), capacity_sampler.take(), now, now);
+    let verification = capture_verified_capacity(
+        expected_capacity_identity.as_ref(),
+        pre_capacity.as_ref(),
+        capacity_sampler.take(),
+        effect_started_at,
+        SystemTime::now(),
+    );
     let verified_capacity_delta_bytes = verification
         .as_ref()
         .map(VerifiedCleanupCapacity::delta_bytes);
@@ -203,8 +257,10 @@ pub(crate) fn execute_rust_target_session_with_capacity(
 fn cancel_and_terminalize(
     session: &mut ApprovedCleanupSession,
     now: SystemTime,
+    expected_identity: Option<&CleanupCapacityIdentity>,
     pre_capacity: Option<&CleanupCapacityObservation>,
     capacity_sampler: Option<&mut dyn CleanupCapacitySampler>,
+    effect_started_at: SystemTime,
 ) -> Result<(TerminalSessionStatus, Option<i64>), PermanentSafeExecutionError> {
     session
         .claim_mut()
@@ -214,7 +270,13 @@ fn cancel_and_terminalize(
         .claim_mut()
         .settle_cancellation(now)
         .map_err(|error| PermanentSafeExecutionError::Admission(error.kind))?;
-    let verification = capture_verified_capacity(pre_capacity, capacity_sampler, now, now);
+    let verification = capture_verified_capacity(
+        expected_identity,
+        pre_capacity,
+        capacity_sampler,
+        effect_started_at,
+        SystemTime::now(),
+    );
     let verified_capacity_delta_bytes = verification
         .as_ref()
         .map(VerifiedCleanupCapacity::delta_bytes);
@@ -225,6 +287,7 @@ fn cancel_and_terminalize(
 }
 
 fn capture_verified_capacity(
+    expected_identity: Option<&CleanupCapacityIdentity>,
     pre_capacity: Option<&CleanupCapacityObservation>,
     mut capacity_sampler: Option<&mut dyn CleanupCapacitySampler>,
     effect_started_at: SystemTime,
@@ -233,10 +296,10 @@ fn capture_verified_capacity(
     let post_capacity = capacity_sampler
         .as_mut()
         .and_then(|sampler| sampler.sample());
+    let expected_identity = expected_identity?;
     let pre_capacity = pre_capacity?;
-    let expected_volume_id = pre_capacity.volume_id();
-    verify_cleanup_capacity(
-        expected_volume_id,
+    verify_cleanup_capacity_identity(
+        expected_identity,
         Some(pre_capacity),
         post_capacity.as_ref(),
         effect_started_at,
@@ -255,11 +318,16 @@ pub(crate) fn execute_rust_target_contents(
     driver: &mut impl PermanentSafeContentsDriver,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<PermanentSafeRemovalSummary, PermanentSafeExecutionError> {
+    let mut authority_now = SystemTime::now;
+    let mut clock = EffectExecutionClock {
+        journal_time: now,
+        authority_now: &mut authority_now,
+    };
     execute_rust_target_contents_inner(
         session,
         item_ordinal,
         path_ordinal,
-        now,
+        &mut clock,
         driver,
         cancelled,
         false,
@@ -273,27 +341,38 @@ fn execute_rust_target_contents_ordered(
     now: SystemTime,
     driver: &mut impl PermanentSafeContentsDriver,
     cancelled: &dyn Fn() -> bool,
+    authority_now: &mut dyn FnMut() -> SystemTime,
 ) -> Result<PermanentSafeRemovalSummary, PermanentSafeExecutionError> {
+    let mut clock = EffectExecutionClock {
+        journal_time: now,
+        authority_now,
+    };
     execute_rust_target_contents_inner(
         session,
         item_ordinal,
         path_ordinal,
-        now,
+        &mut clock,
         driver,
         cancelled,
         true,
     )
 }
 
+struct EffectExecutionClock<'a> {
+    journal_time: SystemTime,
+    authority_now: &'a mut dyn FnMut() -> SystemTime,
+}
+
 fn execute_rust_target_contents_inner(
     session: &mut ApprovedCleanupSession,
     item_ordinal: usize,
     path_ordinal: usize,
-    now: SystemTime,
+    clock: &mut EffectExecutionClock<'_>,
     driver: &mut impl PermanentSafeContentsDriver,
     cancelled: &dyn Fn() -> bool,
     ordered_session: bool,
 ) -> Result<PermanentSafeRemovalSummary, PermanentSafeExecutionError> {
+    let now = clock.journal_time;
     let expected_path = session
         .plan()
         .items()
@@ -326,10 +405,20 @@ fn execute_rust_target_contents_inner(
     // Validation is now durable before the live witness is rebuilt. This is
     // important for changed/expired targets: a rejection must not leave a
     // planned row looking executable on restart.
+    //
+    // Read the authority clock only here, after any capacity pre-sample and
+    // immediately before the live grant/witness revalidation. Journal
+    // transition timestamps are deliberately separate and cannot extend an
+    // expired approval lease.
+    let authority_time = (clock.authority_now)();
     let witness_result = if ordered_session {
-        session.revalidated_rust_target_effect_for_ordered_session(item_ordinal, path_ordinal, now)
+        session.revalidated_rust_target_effect_for_ordered_session(
+            item_ordinal,
+            path_ordinal,
+            authority_time,
+        )
     } else {
-        session.revalidated_rust_target_effect(item_ordinal, path_ordinal, now)
+        session.revalidated_rust_target_effect(item_ordinal, path_ordinal, authority_time)
     };
     let witness = match witness_result {
         Ok(witness) => witness,

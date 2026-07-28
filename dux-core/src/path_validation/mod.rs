@@ -94,7 +94,7 @@ use windows as platform;
 pub(crate) use filesystem::{
     CanonicalFileContentsSnapshot, CanonicalFileDigestError, CanonicalFileDigestSnapshot,
     CanonicalFilePrefixError, CanonicalFilePrefixSnapshot, FilesystemBoundarySnapshot,
-    TRUSTED_VOLUME_LOCATION_PROOF_REVISION, TrustedVolumeLocationError,
+    FilesystemCapacityScope, TRUSTED_VOLUME_LOCATION_PROOF_REVISION, TrustedVolumeLocationError,
     TrustedVolumeLocationWitness, capture_filesystem_boundary, capture_path_snapshot,
     capture_regular_file_contents, capture_regular_file_prefix, capture_regular_file_sha256,
     capture_scan_root, capture_trash_path_snapshot,

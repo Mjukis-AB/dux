@@ -16,8 +16,12 @@ use std::time::{Duration, SystemTime};
 
 use thiserror::Error;
 
-use crate::domain::{AvailableCapacitySource, VolumeCapacity, VolumeId};
+#[cfg(test)]
+use crate::domain::VolumeId;
+use crate::domain::{AvailableCapacitySource, VolumeCapacity};
+#[cfg(test)]
 use crate::engine::VolumeCapacityObservation;
+use crate::path_validation::FilesystemCapacityScope;
 use crate::persistence::{CleanupJournalClaim, HistoryError, TerminalSessionStatus};
 
 const MAX_SAMPLE_SKEW: Duration = Duration::from_secs(15 * 60);
@@ -29,9 +33,16 @@ const MAX_SAMPLE_SKEW: Duration = Duration::from_secs(15 * 60);
 /// while a cleanup is running.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CleanupCapacityObservation {
-    volume_id: VolumeId,
+    identity: CleanupCapacityIdentity,
     sampled_at: SystemTime,
     capacity: VolumeCapacity,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum CleanupCapacityIdentity {
+    #[cfg(test)]
+    StableVolumeId(VolumeId),
+    TrustedFilesystem(FilesystemCapacityScope),
 }
 
 /// Synchronous, private sampling seam used only while a cleanup journal claim
@@ -39,10 +50,12 @@ pub(crate) struct CleanupCapacityObservation {
 /// cleanup authority; a missing observation is represented by `None` and
 /// prevents capacity from being reported as verified.
 pub(crate) trait CleanupCapacitySampler {
+    fn expected_identity(&self) -> CleanupCapacityIdentity;
     fn sample(&mut self) -> Option<CleanupCapacityObservation>;
 }
 
 impl CleanupCapacityObservation {
+    #[cfg(test)]
     pub(crate) fn try_from_observation(
         observation: &VolumeCapacityObservation,
     ) -> Result<Self, CleanupCapacityVerificationError> {
@@ -51,23 +64,36 @@ impl CleanupCapacityObservation {
             .cloned()
             .ok_or(CleanupCapacityVerificationError::MissingVolumeIdentity)?;
         Ok(Self {
-            volume_id,
+            identity: CleanupCapacityIdentity::StableVolumeId(volume_id),
             sampled_at: observation.sampled_at(),
             capacity: observation.capacity(),
         })
     }
 
-    #[cfg(test)]
-    fn new(volume_id: VolumeId, sampled_at: SystemTime, capacity: VolumeCapacity) -> Self {
+    #[cfg(target_os = "macos")]
+    fn from_trusted_filesystem(
+        scope: FilesystemCapacityScope,
+        sampled_at: SystemTime,
+        capacity: VolumeCapacity,
+    ) -> Self {
         Self {
-            volume_id,
+            identity: CleanupCapacityIdentity::TrustedFilesystem(scope),
             sampled_at,
             capacity,
         }
     }
 
-    pub(crate) fn volume_id(&self) -> &VolumeId {
-        &self.volume_id
+    #[cfg(test)]
+    fn new(volume_id: VolumeId, sampled_at: SystemTime, capacity: VolumeCapacity) -> Self {
+        Self {
+            identity: CleanupCapacityIdentity::StableVolumeId(volume_id),
+            sampled_at,
+            capacity,
+        }
+    }
+
+    pub(crate) fn identity(&self) -> &CleanupCapacityIdentity {
+        &self.identity
     }
 
     pub(crate) const fn sampled_at(&self) -> SystemTime {
@@ -113,7 +139,7 @@ pub(crate) enum CleanupCapacityVerificationError {
 /// the private journal-terminalization adapter below.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct VerifiedCleanupCapacity {
-    volume_id: VolumeId,
+    identity: CleanupCapacityIdentity,
     pre_sampled_at: SystemTime,
     post_sampled_at: SystemTime,
     source: AvailableCapacitySource,
@@ -121,8 +147,8 @@ pub(crate) struct VerifiedCleanupCapacity {
 }
 
 impl VerifiedCleanupCapacity {
-    pub(crate) fn volume_id(&self) -> &VolumeId {
-        &self.volume_id
+    pub(crate) fn identity(&self) -> &CleanupCapacityIdentity {
+        &self.identity
     }
 
     pub(crate) const fn pre_sampled_at(&self) -> SystemTime {
@@ -149,8 +175,25 @@ impl VerifiedCleanupCapacity {
 /// bound. Stable volume identity, total capacity, headline source, and
 /// availability shape must remain equal. Any mismatch is a refusal to report
 /// a verified delta, never a zero or estimated value.
+#[cfg(test)]
 pub(crate) fn verify_cleanup_capacity(
     expected_volume_id: &VolumeId,
+    pre: Option<&CleanupCapacityObservation>,
+    post: Option<&CleanupCapacityObservation>,
+    effect_started_at: SystemTime,
+    effect_completed_at: SystemTime,
+) -> Result<VerifiedCleanupCapacity, CleanupCapacityVerificationError> {
+    verify_cleanup_capacity_identity(
+        &CleanupCapacityIdentity::StableVolumeId(expected_volume_id.clone()),
+        pre,
+        post,
+        effect_started_at,
+        effect_completed_at,
+    )
+}
+
+pub(crate) fn verify_cleanup_capacity_identity(
+    expected_identity: &CleanupCapacityIdentity,
     pre: Option<&CleanupCapacityObservation>,
     post: Option<&CleanupCapacityObservation>,
     effect_started_at: SystemTime,
@@ -161,7 +204,7 @@ pub(crate) fn verify_cleanup_capacity(
     }
     let pre = pre.ok_or(CleanupCapacityVerificationError::MissingPreSample)?;
     let post = post.ok_or(CleanupCapacityVerificationError::MissingPostSample)?;
-    if pre.volume_id != *expected_volume_id || post.volume_id != *expected_volume_id {
+    if pre.identity != *expected_identity || post.identity != *expected_identity {
         return Err(CleanupCapacityVerificationError::VolumeChanged);
     }
 
@@ -199,7 +242,7 @@ pub(crate) fn verify_cleanup_capacity(
     let delta_bytes = signed_delta(post_available, pre_available)
         .ok_or(CleanupCapacityVerificationError::DeltaOutOfRange)?;
     Ok(VerifiedCleanupCapacity {
-        volume_id: expected_volume_id.clone(),
+        identity: expected_identity.clone(),
         pre_sampled_at: pre.sampled_at,
         post_sampled_at: post.sampled_at,
         source: pre_capacity.headline_source(),
@@ -213,6 +256,106 @@ fn signed_delta(after: u64, before: u64) -> Option<i64> {
     } else {
         i64::try_from(before - after).ok().map(i64::wrapping_neg)
     }
+}
+
+/// Core-owned macOS sampler bound to one exact trusted plan volume.
+///
+/// The mount path and kernel filesystem identity originate from the retained
+/// rule-scope authorization; no caller can substitute a path, volume label, or
+/// capacity value. Sampling failure only makes verification unknown.
+#[cfg(target_os = "macos")]
+pub(crate) struct MacOSCleanupCapacitySampler {
+    scope: FilesystemCapacityScope,
+}
+
+#[cfg(target_os = "macos")]
+impl MacOSCleanupCapacitySampler {
+    pub(crate) fn new(scope: FilesystemCapacityScope) -> Option<Self> {
+        if scope.filesystem_id() == [0, 0]
+            || scope.mount_id() != 0
+            || scope.filesystem_type() == 0
+            || scope.mount_path().is_none_or(|path| !path.is_absolute())
+        {
+            return None;
+        }
+        Some(Self { scope })
+    }
+
+    fn sample_bound_volume(&self) -> Option<CleanupCapacityObservation> {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        let mount_path = self.scope.mount_path()?;
+        let path = CString::new(mount_path.as_os_str().as_bytes()).ok()?;
+        let mut stats = std::mem::MaybeUninit::<nix::libc::statfs>::uninit();
+        // SAFETY: `path` is a NUL-terminated copy of the trusted mount path
+        // and `stats` points to writable storage for the duration of statfs.
+        if unsafe { nix::libc::statfs(path.as_ptr(), stats.as_mut_ptr()) } != 0 {
+            return None;
+        }
+        // SAFETY: statfs returned success above.
+        let stats = unsafe { stats.assume_init() };
+        if macos_fsid_values(stats.f_fsid)? != self.scope.filesystem_id()
+            || stats.f_type as u64 != self.scope.filesystem_type()
+            || macos_mount_path(&stats)? != mount_path
+        {
+            return None;
+        }
+        let block_size = u64::from(stats.f_bsize);
+        let total_bytes = stats.f_blocks.checked_mul(block_size)?;
+        let available_bytes = stats.f_bavail.checked_mul(block_size)?;
+        let capacity = VolumeCapacity::new(total_bytes, Some(available_bytes), None).ok()?;
+        Some(CleanupCapacityObservation::from_trusted_filesystem(
+            self.scope.clone(),
+            SystemTime::now(),
+            capacity,
+        ))
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl CleanupCapacitySampler for MacOSCleanupCapacitySampler {
+    fn expected_identity(&self) -> CleanupCapacityIdentity {
+        CleanupCapacityIdentity::TrustedFilesystem(self.scope.clone())
+    }
+
+    fn sample(&mut self) -> Option<CleanupCapacityObservation> {
+        self.sample_bound_volume()
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_fsid_values(value: nix::libc::fsid_t) -> Option<[u64; 2]> {
+    // Darwin's fsid is two native-endian 32-bit words whose Rust fields are
+    // private. Copy the fixed ABI bytes without naming those fields.
+    let bytes = unsafe {
+        std::slice::from_raw_parts(
+            (&value as *const nix::libc::fsid_t).cast::<u8>(),
+            std::mem::size_of::<nix::libc::fsid_t>(),
+        )
+    };
+    (bytes.len() >= 8).then(|| {
+        [
+            u32::from_ne_bytes(bytes[0..4].try_into().expect("length checked")) as u64,
+            u32::from_ne_bytes(bytes[4..8].try_into().expect("length checked")) as u64,
+        ]
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn macos_mount_path(stats: &nix::libc::statfs) -> Option<&std::path::Path> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let bytes = unsafe {
+        std::slice::from_raw_parts(
+            stats.f_mntonname.as_ptr().cast::<u8>(),
+            stats.f_mntonname.len(),
+        )
+    };
+    let end = bytes.iter().position(|byte| *byte == 0)?;
+    Some(std::path::Path::new(std::ffi::OsStr::from_bytes(
+        &bytes[..end],
+    )))
 }
 
 /// Terminalize a cleanup session with only a verified capacity delta.
@@ -417,6 +560,48 @@ mod tests {
             )
             .unwrap_err(),
             CleanupCapacityVerificationError::DeltaOutOfRange
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_sampler_accepts_only_the_exact_kernel_volume_scope() {
+        use crate::path_validation::{
+            capture_filesystem_boundary, capture_scan_root, validate_scan_root,
+        };
+
+        let temp = tempfile::Builder::new()
+            .prefix("dux-capacity-scope-")
+            .tempdir_in(std::env::current_dir().unwrap())
+            .unwrap();
+        let root_path = std::fs::canonicalize(temp.path()).unwrap();
+        let root = capture_scan_root(validate_scan_root(&root_path).unwrap()).unwrap();
+        let scope = capture_filesystem_boundary(&root)
+            .unwrap()
+            .capacity_scope()
+            .unwrap();
+
+        let mut sampler = MacOSCleanupCapacitySampler::new(scope.clone()).unwrap();
+        assert_eq!(
+            sampler.expected_identity(),
+            CleanupCapacityIdentity::TrustedFilesystem(scope.clone())
+        );
+        let observation = sampler
+            .sample()
+            .expect("exact mounted volume should sample");
+        assert_eq!(
+            observation.identity(),
+            &CleanupCapacityIdentity::TrustedFilesystem(scope.clone())
+        );
+        assert!(observation.capacity().total_bytes() > 0);
+
+        let mut wrong_id = scope.filesystem_id();
+        wrong_id[0] ^= 1;
+        let forged = scope.with_filesystem_id_for_test(wrong_id);
+        let mut forged_sampler = MacOSCleanupCapacitySampler::new(forged).unwrap();
+        assert!(
+            forged_sampler.sample().is_none(),
+            "a self-consistent caller label cannot replace the kernel fsid"
         );
     }
 }

@@ -265,6 +265,15 @@ impl TrustedHomeMountWitness {
         self.scan_boundary.matches_boundary(boundary)
     }
 
+    pub(crate) fn capacity_scope(
+        &self,
+    ) -> Result<crate::path_validation::FilesystemCapacityScope, TrustedHomeMountError> {
+        self.revalidate()?;
+        self.scan_boundary
+            .capacity_scope()
+            .ok_or(TrustedHomeMountError::Changed)
+    }
+
     pub(crate) fn revalidate(&self) -> Result<(), TrustedHomeMountError> {
         if self.proof_revision != TRUSTED_HOME_MOUNT_PROOF_REVISION {
             return Err(TrustedHomeMountError::UnsupportedRevision);

@@ -315,6 +315,29 @@ impl ApprovedTrustedReviewedCleanupPlan {
     }
 
     #[cfg(unix)]
+    pub(crate) fn capacity_scope(
+        &self,
+        now: std::time::SystemTime,
+    ) -> Result<crate::path_validation::FilesystemCapacityScope, ExactPathApprovalError> {
+        self.revalidate(now)?;
+        let mut scopes = self.reviewed.authorizations.iter().map(|authorization| {
+            authorization
+                .capacity_scope()
+                .map_err(ExactPathApprovalError::Authorization)
+        });
+        let first = scopes
+            .next()
+            .transpose()?
+            .ok_or(ExactPathApprovalError::AuthorizationMismatch)?;
+        for scope in scopes {
+            if scope? != first {
+                return Err(ExactPathApprovalError::AuthorizationMismatch);
+            }
+        }
+        Ok(first)
+    }
+
+    #[cfg(unix)]
     fn bind_trusted_rust_target_claim(
         &mut self,
         session_id: CleanupSessionId,
@@ -460,6 +483,16 @@ impl ApprovedCleanupSession {
 
     pub(crate) fn claim_mut(&mut self) -> &mut CleanupJournalClaim {
         &mut self.claim
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn capacity_scope(
+        &self,
+        now: std::time::SystemTime,
+    ) -> Result<crate::path_validation::FilesystemCapacityScope, ExactPathHandoffError> {
+        self.approved
+            .capacity_scope(now)
+            .map_err(ExactPathHandoffError::Approval)
     }
 
     /// Last planner/journal check immediately before a future permanent-safe

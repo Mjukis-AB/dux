@@ -4924,7 +4924,7 @@ Tasks:
     cascades the seal away for terminal history. Reopen, active-recovery,
     tamper, migration, and completed-execution regressions pass; no public
     cleanup caller or new filesystem effect was added.
-- [ ] Implement pre/post capacity verification.
+- [x] Implement pre/post capacity verification.
   - [x] 2026-07-19 slice: add a private bounded verifier for cleanup capacity
     witnesses. It requires a stable volume identity, ordered effect window,
     pre/post samples inside a 15-minute skew bound, unchanged total capacity,
@@ -4943,6 +4943,37 @@ Tasks:
     recovery and are never terminalized. The sampler and capacity-aware bridge
     remain private until trusted volume grants and production observation
     wiring exist.
+  - [x] 2026-07-28 slice: bind production sampling to the exact authorized
+    target volume and real effect window. Every trusted rule-scope
+    authorization can now yield only its revalidated, crate-private kernel
+    filesystem ID, mount location, platform mount discriminator (mount path on
+    macOS; mount ID where available), and filesystem type; an approved
+    multi-path session requires every authorization to resolve to that same
+    scope. The macOS sampler is constructed inside the engine from that scope
+    and accepts a `statfs` result only when filesystem ID, mount path, and type
+    still match. No caller path, volume label, stable-ID DTO, or capacity value
+    enters the production bridge. Pre-sampling completes before a fresh
+    effect-start timestamp and post-sampling begins after a fresh
+    effect-completion timestamp, so the journal's canonical transition time
+    cannot fabricate a verification window. The executor also reads the
+    authority clock again after pre-sampling, immediately before every live
+    effect witness is rebuilt; an approval expiring during telemetry
+    terminalizes as rejected without mutation. Missing samples, scope drift,
+    total/source/shape changes, skew, and signed overflow persist `NULL`, never
+    zero or an estimate. The real enrolled-Cargo → trusted plan → journal →
+    descriptor-relative executor regression now proves that terminal history
+    receives a signed sample from the exact target volume. The separately
+    exposed v28 plan review remains observation/release only; no FFI, Swift,
+    CLI, scheduler, AI, approval, or app execution route was added. Focused
+    scope, wrong-filesystem-ID, missing-sample, synthetic-clock,
+    expiry-during-sampling, and real production-chain regressions pass. The
+    full serial core lane passed 1,014 tests; four pre-existing Cargo
+    manifest-probe availability/drift cases failed under the 26-minute
+    accumulated load, and each exact failure passed immediately when rerun
+    alone (0.87 s, 0.50 s, 145.92 s, and 103.41 s respectively). The
+    destructive boundary's 28 unit tests and 241-file repository scan also
+    pass, as do all 376 native tests and fresh universal arm64/x86_64 Debug and
+    Release builds targeting macOS 14.
 - [ ] Implement exclusions and global permanent-cleanup disable setting.
   - [x] 2026-07-19 slice: add the revisioned global permanent-cleanup kill
     switch to the typed settings store. Missing state defaults to enabled;
@@ -5175,8 +5206,7 @@ Tasks:
     tests plus the full 376-test native suite. The workspace-wide Rust lane
     passed 1,015 core tests before one load-sensitive probe-pool case observed
     `QueueSaturated`; that exact case passed immediately in isolation.
-    Production capacity sampling and separately confirmed history clearing
-    remain open.
+    Separately confirmed history clearing remains open.
 - [ ] Define and test cross-reboot and Windows-unproven cleanup-journal recovery;
   unknown ownership must remain non-executable.
 

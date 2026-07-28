@@ -1381,15 +1381,24 @@ The durable candidate continues to carry `ProtectedPath`; an insertion-only
 typed Rust-target coupling admits that retained fact only after the complete
 trusted facts/review/approval chain and exact candidate-body comparison.
 Generic blocked candidates remain unable to create a planned session. The
-optional private capacity-aware variant
-captures one pre-effect and one post-settlement observation through a
-core-owned sampler; only matching stable-volume, timing, total-capacity,
-headline-source, and availability-shape evidence can persist a signed
-available-space delta. Missing or conflicting samples leave the delta null,
-and outcome-unknown sessions remain in recovery without terminalization.
-Trusted volume/protected-root grants, process and descendant policy, and
-user-facing execution remain required before any permanent-safe effect is
-reachable.
+private production bridge derives one capacity scope from every revalidated
+rule authorization in the approved plan and refuses mixed scopes. That scope
+carries the kernel filesystem ID, mount location, platform mount discriminator
+(mount path on macOS; mount ID where available), and filesystem type without
+exposing a caller path or effect capability. A core-owned macOS
+`statfs` sampler accepts observations only while the exact ID, mount location,
+and type still match. It captures one pre-effect and one post-settlement
+observation around fresh system-clock effect boundaries; canonical journal
+timestamps cannot select or widen that window. After pre-sampling, the
+executor reads the authority clock again immediately before rebuilding every
+live effect witness, so telemetry cannot extend an expired approval. Only
+matching timing, total-capacity, headline-source, and availability-shape
+evidence can persist a signed available-space delta. Missing or conflicting
+samples leave the delta null, and outcome-unknown sessions remain in recovery
+without terminalization.
+The FFI, Swift, CLI, scheduler, and AI surfaces cannot supply the sampled
+volume or a capacity value. User-facing execution and the remaining release
+gates are still required before permanent-safe cleanup is reachable.
 
 The app-facing v28 boundary can now observe one fully admitted Rust-target
 review without making that private execution chain callable. The core derives
@@ -2748,7 +2757,20 @@ Before app cleanup ships, CI covers:
   volume identity, ordered effect timing, bounded pre/post sample skew, total
   capacity, headline source, and ordinary/important availability shape all
   match. Missing or conflicting telemetry produces no verified delta and cannot
-  authorize, imply, or substitute for a filesystem effect;
+  authorize, imply, or substitute for a filesystem effect. The private
+  production Rust-target bridge now derives a kernel filesystem ID, mount
+  location, mount ID, and filesystem type only from every revalidated
+  rule-scope authorization in the approved plan, using the mount path on macOS
+  and a kernel mount ID only where the platform supplies one. Its core-owned
+  macOS sampler issues `statfs` for that exact mount and rejects an ID,
+  location, or type
+  mismatch; no FFI, Swift, CLI, scheduler, AI, or generic capacity DTO can
+  select the sampled volume. Effect start and completion are fresh system-clock
+  observations around mutation, independently from canonical journal
+  timestamps. A separate fresh authority-clock read after pre-sampling and
+  immediately before every live witness rebuild refuses an approval that
+  expires during telemetry. The current app plan-review route still cannot
+  approve or invoke this private bridge;
 - private storage permissions, symlinked store roots, migrations, corruption,
   unsupported versions, and concurrent clients;
 - FFI panic/error/lifetime/callback/cancellation tests and bounded payloads;
@@ -2846,7 +2868,7 @@ coverage is labelled as Home-scoped and unknown coverage stays unknown.
 | Candidate and cleanup-plan records | Completed fresh scans create deterministic, snapshot-bound durable candidate batches; exact-scan summaries plus bounded lossless path/evidence pages and semantic review commands remain non-authoritative history. A crate-private planner module now seals an exact current-evaluator/current-catalog succeeded scan/evaluation/candidate join to a fully decoded retained snapshot and fresh cleanup-review lease, replays the complete batch from that snapshot with bounded working state, rejects every immutable-field mismatch, and carries scan-time Unix identities into the ephemeral Rust-target live and bounded Cargo metadata witnesses. A separate sealed candidate-grouping result records deterministic category/safety/action groups and conservative exact/parent-child overlap decisions without becoming a plan. The planner also has a non-actionable exact-path review evidence boundary that binds a code-owned canonical root to strict lexical/no-follow live snapshots, retaining exact identity and hard-link facts while trusted protection remains unresolved. One private Rust-target authority chain can now construct and approve an exact permanent-safe plan and atomically claim its durable candidate while preserving the sole `ProtectedPath` history fact; an insertion-only typed coupling, schema-v12 exact active-claim seal, complete immutable-body/blocker comparison, and rule-specific policy checks prevent generic blocked candidates from borrowing that path. Contract v28 can retain one real reviewed Rust-target plan behind an observation-only opaque child whose public operations are immutable `info` and consuming release. That child cannot mint or enter approval, journal, executor, scheduling, CLI, AI, or the separately confirmed Explorer Trash authority | Add explicit permanent-safe approval transport and generation-fenced journal/executor orchestration only after release gates; keep the blocker exception rule-specific and non-forgeable |
 | macOS app cleanup | Confirmation-gated Explorer Trash is implemented; permanent-safe app cleanup is absent | Entire permanent-safe cleanup release gate in §17.3 |
 | Legacy CLI deletion | Active arbitrary-descendant permanent path routed through a temporary core adapter; strict-target/volume/identity rechecks only; scanned-byte estimates labeled in CLI | Replace adapter with reviewed plan/approval/executor chain without weakening current checks |
-| Centralized executor | A private production-core Rust-target driver and typed admission/journal/revalidation chain exist and have end-to-end test coverage, but there is no app/FFI permanent-safe caller; the separately confirmed Explorer Trash route and temporary legacy CLI adapter do not expose that driver | Generation-fenced permanent-safe product orchestration, app review/approval transport, release gates, and removal of the legacy adapter boundary |
+| Centralized executor | A private production-core Rust-target driver and typed admission/journal/revalidation chain exist and have end-to-end test coverage. Its capacity sampler derives only from the approved plan's unanimous trusted kernel mount scope, rechecks macOS `statfs` identity/location/type, and brackets real effect time; missing telemetry remains unknown. There is no app/FFI permanent-safe caller, and the separately confirmed Explorer Trash route and temporary legacy CLI adapter do not expose that driver | Generation-fenced permanent-safe product orchestration, app review/approval transport, release gates, and removal of the legacy adapter boundary |
 | Engine/FFI task and plan API | Core handle, pre-worker catalog/SQLite/snapshot compatibility handshake, bounded per-session registry, read-only formatting, durable full-scan plus deterministic candidate-evaluation tasks, a bounded path-free recent-scan history DTO, an exact-scan path-free durable candidate-discovery DTO, bounded lossless candidate path/evidence pages, semantic scan-bound review intent, bounded recent and exact-session path-free cleanup-history DTOs, typed idle-only one-batch scan-recovery, history, snapshot-retention, physical-orphan, terminal snapshot-temp, unleased snapshot-temp, and provisioning-stage tasks, typed path-free snapshot-cap and pressure-policy get/set/reset, and atomic startup-volume pressure observation are implemented. Scan admission fences schema skew and overlapping session-local roots; maintenance preflights closed/active/busy without storage, rechecks schema/admission, and linearizes cancellation with its Applying point of no return. Scan-recovery, snapshot cap, physical-orphan, terminal-temp, unleased-temp, and provisioning-stage maintenance accept no caller cap, inventory, victim, scan/lease identity, owner, name, root, or path and expose only aggregate observations. Startup-volume status fixes `/` inside Rust, returns no path, and accepts no cleanup instruction or caller policy. Typed results/events/history/settings expose observations and bounded policy only; detail/review/cleanup-history DTOs cannot become planner inputs. App architecture lazily owns one real session; CLI status/history consume only the scan-history Rust DTO. UniFFI v28 rejects incompatible bindings and adds one engine-bound Rust-target reviewed-plan observation to the earlier discovery-root scan, retained snapshot navigation/detail, semantic review-intent, and read-only history surfaces. One in-flight/live child, exact-parent identity/liveness, frozen expiry, close fencing, bounded lossless current-path projection, and explicit release prevent the observation from becoming planner or executor input | Explicit approval, journal/executor orchestration, priority, cross-process scan leasing, and release-gated product cleanup remain later |
 | Global permanent-cleanup FFI switch | UniFFI contract v22 exposes only the revisioned enabled/default-or-stored observation and typed get/set/reset failures; the switch remains deny-only and cannot carry a path, plan, approval, callback, or executor input. Generated bindings are refreshed from the universal Debug XCFramework; Swift EngineService/AppModel/settings control maps every typed error, rejects malformed shapes, generation-fences work, and requires exact confirmation before re-enable/reset | The separate path-bearing exclusion boundary |
 | User cleanup exclusions | UniFFI contract v23 exposes a bounded lossless path-byte observation and replacement/reset operations with explicit source, revision, timestamp, and changed state. Rust validates absolute lexical prefixes, encoding, count, size, canonical order, storage races, and the shared cleanup exclusion lock; Swift treats returned bytes as display-only observations, allows adding a local prefix, and requires explicit confirmation before weakening protection by removing one or resetting all. No path is accepted as a plan, approval, callback, or executor input | Future planner/executor lifecycle and richer review presentation |

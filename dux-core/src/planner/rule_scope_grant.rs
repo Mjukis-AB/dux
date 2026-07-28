@@ -14,10 +14,10 @@ use crate::domain::RuleRef;
 #[cfg(unix)]
 use crate::domain::{CandidateId, ScanId};
 use crate::path_validation::{
-    CanonicalPathError, CanonicalPathSnapshot, CanonicalScanRoot, ProtectedRootDisposition,
-    ProtectedRootError, ProtectedRootRegistry, TrustedHomeMountError, TrustedHomeMountWitness,
-    capture_filesystem_boundary, capture_path_snapshot, capture_scan_root, validate_cleanup_path,
-    validate_scan_root,
+    CanonicalPathError, CanonicalPathSnapshot, CanonicalScanRoot, FilesystemCapacityScope,
+    ProtectedRootDisposition, ProtectedRootError, ProtectedRootRegistry, TrustedHomeMountError,
+    TrustedHomeMountWitness, capture_filesystem_boundary, capture_path_snapshot, capture_scan_root,
+    validate_cleanup_path, validate_scan_root,
 };
 #[cfg(unix)]
 use crate::persistence::CleanupSessionId;
@@ -76,6 +76,13 @@ impl TrustedVolumeGrant {
     ) -> bool {
         self.revision == TRUSTED_VOLUME_GRANT_REVISION
             && self.witness.matches_scan_boundary(boundary)
+    }
+
+    fn capacity_scope(&self) -> Result<FilesystemCapacityScope, TrustedVolumeGrantError> {
+        self.revalidate()?;
+        self.witness
+            .capacity_scope()
+            .map_err(|_| TrustedVolumeGrantError::Changed)
     }
 }
 
@@ -509,6 +516,19 @@ impl RuleScopeAuthorization {
             return Err(RuleScopeGrantError::ChangedSinceAuthorization);
         }
         Ok(())
+    }
+
+    /// Return the exact trusted volume scope for observation-only capacity
+    /// sampling after repeating the complete rule authorization boundary.
+    ///
+    /// The scope contains no target path or effect capability and cannot be
+    /// supplied by an FFI or presentation caller.
+    #[cfg(unix)]
+    pub(crate) fn capacity_scope(&self) -> Result<FilesystemCapacityScope, RuleScopeGrantError> {
+        self.validate_current()?;
+        self.volume
+            .capacity_scope()
+            .map_err(RuleScopeGrantError::VolumeGrant)
     }
 
     pub(crate) fn release(self) {}

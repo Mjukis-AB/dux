@@ -366,6 +366,44 @@ pub(super) struct FilesystemMountIdentity {
     pub(super) filesystem_type: u64,
 }
 
+/// Exact platform volume scope retained for capacity sampling.
+///
+/// This value describes one exact captured filesystem boundary. Production
+/// sampling obtains it only through a revalidated trusted-volume grant. It is
+/// observation metadata, not cleanup authority, and remains crate-private so a
+/// presentation or FFI caller cannot nominate a different volume.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct FilesystemCapacityScope {
+    filesystem_id: [u64; 2],
+    mount_id: u64,
+    mount_path: Option<PathBuf>,
+    filesystem_type: u64,
+}
+
+impl FilesystemCapacityScope {
+    pub(crate) const fn filesystem_id(&self) -> [u64; 2] {
+        self.filesystem_id
+    }
+
+    pub(crate) const fn mount_id(&self) -> u64 {
+        self.mount_id
+    }
+
+    pub(crate) fn mount_path(&self) -> Option<&Path> {
+        self.mount_path.as_deref()
+    }
+
+    pub(crate) const fn filesystem_type(&self) -> u64 {
+        self.filesystem_type
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_filesystem_id_for_test(mut self, filesystem_id: [u64; 2]) -> Self {
+        self.filesystem_id = filesystem_id;
+        self
+    }
+}
+
 /// A repeated, path-free-to-callers observation of the filesystem boundary
 /// around one canonical scan root.
 ///
@@ -425,6 +463,31 @@ impl FilesystemBoundarySnapshot {
     /// a cleanup capability from this observation alone.
     pub(crate) fn mount_filesystem_id(&self) -> [u64; 2] {
         self.mount.filesystem_id
+    }
+
+    pub(crate) fn capacity_scope(&self) -> Option<FilesystemCapacityScope> {
+        if self.mount.filesystem_id == [0, 0] || self.mount.filesystem_type == 0 {
+            return None;
+        }
+        #[cfg(target_os = "macos")]
+        if self
+            .mount
+            .mount_path
+            .as_deref()
+            .is_none_or(|path| !path.is_absolute())
+        {
+            return None;
+        }
+        #[cfg(target_os = "linux")]
+        if self.mount.mount_id == 0 {
+            return None;
+        }
+        Some(FilesystemCapacityScope {
+            filesystem_id: self.mount.filesystem_id,
+            mount_id: self.mount.mount_id,
+            mount_path: self.mount.mount_path.clone(),
+            filesystem_type: self.mount.filesystem_type,
+        })
     }
 
     /// Re-capture the same lexical boundary and compare every retained
@@ -585,6 +648,10 @@ impl TrustedVolumeLocationWitness {
 
     pub(crate) fn same_mount(&self, other: &Self) -> bool {
         self.boundary.mount == other.boundary.mount
+    }
+
+    pub(crate) fn capacity_scope(&self) -> Option<FilesystemCapacityScope> {
+        self.boundary.capacity_scope()
     }
 }
 

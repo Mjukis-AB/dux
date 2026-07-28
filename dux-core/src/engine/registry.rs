@@ -71,7 +71,12 @@ use super::task::{
     StartSubtreeScanError, StartTaskError, TaskAccessError, TaskEvent, TaskEventBatch,
     TaskEventKind, TaskFailureKind, TaskId, TaskKind, TaskPhase, TaskSnapshot,
 };
+#[cfg(any(test, target_os = "macos"))]
 use crate::cleanup::capacity::CleanupCapacitySampler;
+#[cfg(target_os = "macos")]
+use crate::cleanup::capacity::MacOSCleanupCapacitySampler;
+#[cfg(test)]
+use crate::cleanup::permanent_safe::execute_rust_target_session_with_capacity_and_clock_for_test;
 use crate::cleanup::permanent_safe::{
     DescriptorRelativePermanentSafeDriver, PermanentSafeExecutionError,
     PermanentSafeRemovalSummary, PermanentSafeSessionSummary, execute_rust_target_contents,
@@ -1524,7 +1529,7 @@ impl EngineHandle {
     /// AI output, FFI values, or CLI requests. The journal handoff owns the
     /// final plan/authorization checks; the executor owns descriptor-relative
     /// identity checks, effect receipts, cancellation, and terminalization.
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
     #[allow(
         dead_code,
         reason = "the Rust-target facts-to-executor bridge is staged before FFI/UI orchestration"
@@ -1542,8 +1547,12 @@ impl EngineHandle {
         }
         let mut session = begin_rust_target_cleanup_session(facts, request, &self.inner.store)
             .map_err(RustTargetPlanExecutionError::Handoff)?;
-        self.execute_approved_permanent_safe_session(&mut session, SystemTime::now(), cancelled)
-            .map_err(RustTargetPlanExecutionError::Execution)
+        self.execute_approved_permanent_safe_session_with_bound_capacity(
+            &mut session,
+            SystemTime::now(),
+            cancelled,
+        )
+        .map_err(RustTargetPlanExecutionError::Execution)
     }
 
     /// Acquire one exact durable Rust-target candidate as a fresh live
@@ -1767,14 +1776,39 @@ impl EngineHandle {
         )
     }
 
-    /// Private capacity-aware variant used by the future core-owned volume
-    /// observation boundary. The sampler is not accepted by FFI, Swift, CLI,
-    /// AI, or production UI, and it cannot grant or alter cleanup authority.
-    #[allow(
-        dead_code,
-        reason = "capacity-aware execution is staged before volume-grant and UI wiring"
-    )]
-    pub(crate) fn execute_approved_permanent_safe_session_with_capacity(
+    /// Production capacity-aware execution derives its sampler only from the
+    /// exact trusted volume retained by the approved plan. Sampling failure
+    /// leaves the verified delta unknown and never changes effect authority.
+    #[cfg(target_os = "macos")]
+    fn execute_approved_permanent_safe_session_with_bound_capacity(
+        &self,
+        session: &mut ApprovedCleanupSession,
+        now: SystemTime,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<PermanentSafeSessionSummary, PermanentSafeExecutionError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(PermanentSafeExecutionError::Admission(
+                HistoryErrorKind::InvalidTransition,
+            ));
+        }
+        let mut sampler = session
+            .capacity_scope(SystemTime::now())
+            .ok()
+            .and_then(MacOSCleanupCapacitySampler::new);
+        let mut driver = DescriptorRelativePermanentSafeDriver;
+        execute_rust_target_session_with_capacity(
+            session,
+            now,
+            &mut driver,
+            cancelled,
+            sampler
+                .as_mut()
+                .map(|sampler| sampler as &mut dyn CleanupCapacitySampler),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn execute_approved_permanent_safe_session_with_capacity_for_test(
         &self,
         session: &mut ApprovedCleanupSession,
         now: SystemTime,
@@ -1793,6 +1827,31 @@ impl EngineHandle {
             &mut driver,
             cancelled,
             Some(capacity_sampler),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn execute_approved_permanent_safe_session_with_capacity_and_clock_for_test(
+        &self,
+        session: &mut ApprovedCleanupSession,
+        now: SystemTime,
+        cancelled: &dyn Fn() -> bool,
+        capacity_sampler: &mut dyn CleanupCapacitySampler,
+        authority_now: &mut dyn FnMut() -> SystemTime,
+    ) -> Result<PermanentSafeSessionSummary, PermanentSafeExecutionError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(PermanentSafeExecutionError::Admission(
+                HistoryErrorKind::InvalidTransition,
+            ));
+        }
+        let mut driver = DescriptorRelativePermanentSafeDriver;
+        execute_rust_target_session_with_capacity_and_clock_for_test(
+            session,
+            now,
+            &mut driver,
+            cancelled,
+            Some(capacity_sampler),
+            authority_now,
         )
     }
 

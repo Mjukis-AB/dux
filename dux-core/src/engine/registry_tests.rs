@@ -398,6 +398,7 @@ fn approved_rust_target_fixture(project_count: usize) -> ApprovedRustTargetFixtu
 
 #[cfg(unix)]
 struct FixtureCapacitySampler {
+    expected_identity: crate::cleanup::capacity::CleanupCapacityIdentity,
     observations: Vec<Option<CleanupCapacityObservation>>,
     next: usize,
 }
@@ -405,7 +406,15 @@ struct FixtureCapacitySampler {
 #[cfg(unix)]
 impl FixtureCapacitySampler {
     fn new(observations: Vec<Option<CleanupCapacityObservation>>) -> Self {
+        let expected_identity = observations
+            .iter()
+            .flatten()
+            .next()
+            .expect("fixture capacity sampler requires one observation")
+            .identity()
+            .clone();
         Self {
+            expected_identity,
             observations,
             next: 0,
         }
@@ -414,6 +423,10 @@ impl FixtureCapacitySampler {
 
 #[cfg(unix)]
 impl CleanupCapacitySampler for FixtureCapacitySampler {
+    fn expected_identity(&self) -> crate::cleanup::capacity::CleanupCapacityIdentity {
+        self.expected_identity.clone()
+    }
+
     fn sample(&mut self) -> Option<CleanupCapacityObservation> {
         let observation = self.observations.get(self.next).cloned().flatten();
         self.next = self.next.saturating_add(1);
@@ -498,7 +511,7 @@ fn engine_persists_verified_capacity_delta_for_private_session() {
     let mut sampler = FixtureCapacitySampler::new(vec![Some(pre), Some(post)]);
     let summary = fixture
         .engine
-        .execute_approved_permanent_safe_session_with_capacity(
+        .execute_approved_permanent_safe_session_with_capacity_for_test(
             &mut fixture.session,
             now,
             &|| false,
@@ -536,7 +549,7 @@ fn engine_keeps_capacity_unknown_when_post_sample_is_missing() {
     let mut sampler = FixtureCapacitySampler::new(vec![Some(pre), None]);
     let summary = fixture
         .engine
-        .execute_approved_permanent_safe_session_with_capacity(
+        .execute_approved_permanent_safe_session_with_capacity_for_test(
             &mut fixture.session,
             now,
             &|| false,
@@ -555,6 +568,98 @@ fn engine_keeps_capacity_unknown_when_post_sample_is_missing() {
         .unwrap();
     let history = fixture.engine.cleanup_session_history(&history_id).unwrap();
     assert_eq!(history.summary().verified_capacity_delta_bytes(), None);
+    fixture.engine.close();
+    assert!(fixture.engine.wait_until_closed(TEST_TIMEOUT));
+}
+
+#[cfg(unix)]
+#[test]
+fn engine_capacity_window_uses_real_effect_time_not_the_journal_timestamp() {
+    let mut fixture = approved_rust_target_fixture(1);
+    let synthetic_journal_time = SystemTime::now() + Duration::from_secs(30);
+    let volume_id = VolumeId::new("volume:fixture-capacity-clock").unwrap();
+    let pre = fixture_capacity_observation(
+        &fixture._temp,
+        &volume_id,
+        synthetic_journal_time - Duration::from_secs(1),
+        400,
+    );
+    let post = fixture_capacity_observation(
+        &fixture._temp,
+        &volume_id,
+        synthetic_journal_time + Duration::from_secs(1),
+        550,
+    );
+    let mut sampler = FixtureCapacitySampler::new(vec![Some(pre), Some(post)]);
+    let summary = fixture
+        .engine
+        .execute_approved_permanent_safe_session_with_capacity_for_test(
+            &mut fixture.session,
+            synthetic_journal_time,
+            &|| false,
+            &mut sampler,
+        )
+        .unwrap();
+
+    assert_eq!(
+        summary.verified_capacity_delta_bytes, None,
+        "future fixture timestamps must not be accepted through a caller-supplied journal clock"
+    );
+    fixture.engine.close();
+    assert!(fixture.engine.wait_until_closed(TEST_TIMEOUT));
+}
+
+#[cfg(unix)]
+#[test]
+fn capacity_sampling_cannot_extend_an_expired_effect_approval() {
+    let mut fixture = approved_rust_target_fixture(1);
+    let journal_time = SystemTime::now() + Duration::from_secs(1);
+    let approval_expiry = fixture.session.plan().expires_at();
+    let volume_id = VolumeId::new("volume:fixture-capacity-expiry").unwrap();
+    let pre = fixture_capacity_observation(
+        &fixture._temp,
+        &volume_id,
+        journal_time - Duration::from_secs(1),
+        400,
+    );
+    let post = fixture_capacity_observation(
+        &fixture._temp,
+        &volume_id,
+        journal_time + Duration::from_secs(1),
+        550,
+    );
+    let mut sampler = FixtureCapacitySampler::new(vec![Some(pre), Some(post)]);
+    let mut authority_clock_reads = 0_u8;
+    let mut authority_now = || {
+        authority_clock_reads = authority_clock_reads.saturating_add(1);
+        approval_expiry
+    };
+
+    let summary = fixture
+        .engine
+        .execute_approved_permanent_safe_session_with_capacity_and_clock_for_test(
+            &mut fixture.session,
+            journal_time,
+            &|| false,
+            &mut sampler,
+            &mut authority_now,
+        )
+        .unwrap();
+
+    assert_eq!(authority_clock_reads, 1);
+    assert_eq!(
+        sampler.next, 2,
+        "pre/post telemetry should remain best-effort"
+    );
+    assert_eq!(summary.removed_entries, 0);
+    assert_eq!(
+        summary.terminal_status,
+        crate::persistence::TerminalSessionStatus::Rejected
+    );
+    assert!(
+        fixture.payloads.iter().all(|payload| payload.exists()),
+        "an approval that expired after pre-sampling must not reach mutation"
+    );
     fixture.engine.close();
     assert!(fixture.engine.wait_until_closed(TEST_TIMEOUT));
 }
@@ -729,7 +834,7 @@ fn engine_stops_on_unknown_partial_effect_and_leaves_recovery_fence() {
     let mut sampler = FixtureCapacitySampler::new(vec![Some(pre), None]);
     let result = fixture
         .engine
-        .execute_approved_permanent_safe_session_with_capacity(
+        .execute_approved_permanent_safe_session_with_capacity_for_test(
             &mut fixture.session,
             now,
             &|| {
@@ -1216,6 +1321,10 @@ fn rust_target_facts_bridge_claims_and_executes_one_reviewed_session() {
     assert_eq!(
         history.items()[0].status(),
         crate::engine::DurableCleanupItemStatus::Removed
+    );
+    assert!(
+        history.summary().verified_capacity_delta_bytes().is_some(),
+        "the production bridge must sample the exact trusted target volume"
     );
     fixture.engine.inner.store.with_connection(|connection| {
         let active_claims: i64 = connection
