@@ -528,7 +528,7 @@ private actor CleanupHistoryClearEngineSpy: EngineServing, DuxEngineClosing {
     func loadStatus() async throws -> EngineStatus {
         EngineStatus(
             libraryVersion: "test",
-            ffiContractVersion: 30,
+            ffiContractVersion: 31,
             executedOffMainThread: true
         )
     }

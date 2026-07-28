@@ -1004,6 +1004,14 @@ public protocol DuxEngineProtocol: AnyObject, Sendable {
 
     func startMaintenance(kind: MaintenanceKind) throws  -> MaintenanceStart
 
+    /**
+     * Irreversibly consume one exact, engine-bound reviewed plan and start
+     * core's permanent-safe task. This is the only FFI approval edge: no
+     * caller path, identifier, timestamp, Boolean, callback, or retry token
+     * participates in execution admission.
+     */
+    func startPermanentSafeCleanup(review: RustTargetPlanReviewSession) throws  -> RustTargetCleanupTask
+
     func startScan(request: ScanRequest) throws  -> ScanStart
 
     /**
@@ -1413,6 +1421,21 @@ open func startMaintenance(kind: MaintenanceKind)throws  -> MaintenanceStart  {
 })
 }
 
+    /**
+     * Irreversibly consume one exact, engine-bound reviewed plan and start
+     * core's permanent-safe task. This is the only FFI approval edge: no
+     * caller path, identifier, timestamp, Boolean, callback, or retry token
+     * participates in execution admission.
+     */
+open func startPermanentSafeCleanup(review: RustTargetPlanReviewSession)throws  -> RustTargetCleanupTask  {
+    return try  FfiConverterTypeRustTargetCleanupTask_lift(try rustCallWithError(FfiConverterTypeRustTargetCleanupStartError_lift) {
+    uniffi_dux_ffi_fn_method_duxengine_start_permanent_safe_cleanup(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeRustTargetPlanReviewSession_lower(review),$0
+    )
+})
+}
+
 open func startScan(request: ScanRequest)throws  -> ScanStart  {
     return try  FfiConverterTypeScanStart_lift(try rustCallWithError(FfiConverterTypeScanError_lift) {
     uniffi_dux_ffi_fn_method_duxengine_start_scan(
@@ -1615,8 +1638,145 @@ public func FfiConverterTypeMaintenanceTask_lower(_ value: MaintenanceTask) -> U
 
 
 /**
- * Engine-bound, observation-only plan review. The retained core plan cannot
- * be cloned, approved, persisted, or executed through this surface.
+ * Opaque observer for one engine-owned permanent-safe cleanup task. Dropping
+ * this object does not cancel the task; explicit cancellation or engine
+ * shutdown are the only cancellation routes.
+ */
+public protocol RustTargetCleanupTaskProtocol: AnyObject, Sendable {
+
+    func cancel() throws  -> RustTargetCleanupCancelOutcome
+
+    func poll() throws  -> RustTargetCleanupPoll
+
+}
+/**
+ * Opaque observer for one engine-owned permanent-safe cleanup task. Dropping
+ * this object does not cancel the task; explicit cancellation or engine
+ * shutdown are the only cancellation routes.
+ */
+open class RustTargetCleanupTask: RustTargetCleanupTaskProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_dux_ffi_fn_clone_rusttargetcleanuptask(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_dux_ffi_fn_free_rusttargetcleanuptask(handle, $0) }
+    }
+
+
+
+
+open func cancel()throws  -> RustTargetCleanupCancelOutcome  {
+    return try  FfiConverterTypeRustTargetCleanupCancelOutcome_lift(try rustCallWithError(FfiConverterTypeRustTargetCleanupTaskError_lift) {
+    uniffi_dux_ffi_fn_method_rusttargetcleanuptask_cancel(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+open func poll()throws  -> RustTargetCleanupPoll  {
+    return try  FfiConverterTypeRustTargetCleanupPoll_lift(try rustCallWithError(FfiConverterTypeRustTargetCleanupTaskError_lift) {
+    uniffi_dux_ffi_fn_method_rusttargetcleanuptask_poll(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+
+
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRustTargetCleanupTask: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = RustTargetCleanupTask
+
+    public static func lift(_ handle: UInt64) throws -> RustTargetCleanupTask {
+        return RustTargetCleanupTask(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: RustTargetCleanupTask) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RustTargetCleanupTask {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: RustTargetCleanupTask, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRustTargetCleanupTask_lift(_ handle: UInt64) throws -> RustTargetCleanupTask {
+    return try FfiConverterTypeRustTargetCleanupTask.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRustTargetCleanupTask_lower(_ value: RustTargetCleanupTask) -> UInt64 {
+    return FfiConverterTypeRustTargetCleanupTask.lower(value)
+}
+
+
+
+
+
+
+/**
+ * Engine-bound, consume-once reviewed-plan capability. Information remains a
+ * display observation; only the owning `DuxEngine` can irreversibly consume
+ * the retained core plan into its fixed permanent-safe cleanup task.
  */
 public protocol RustTargetPlanReviewSessionProtocol: AnyObject, Sendable {
 
@@ -1626,8 +1786,9 @@ public protocol RustTargetPlanReviewSessionProtocol: AnyObject, Sendable {
 
 }
 /**
- * Engine-bound, observation-only plan review. The retained core plan cannot
- * be cloned, approved, persisted, or executed through this surface.
+ * Engine-bound, consume-once reviewed-plan capability. Information remains a
+ * display observation; only the owning `DuxEngine` can irreversibly consume
+ * the retained core plan into its fixed permanent-safe cleanup task.
  */
 open class RustTargetPlanReviewSession: RustTargetPlanReviewSessionProtocol, @unchecked Sendable {
     fileprivate let handle: UInt64
@@ -5718,6 +5879,151 @@ public func FfiConverterTypeRecentScanHistoryPage_lift(_ buf: RustBuffer) throws
 #endif
 public func FfiConverterTypeRecentScanHistoryPage_lower(_ value: RecentScanHistoryPage) -> RustBuffer {
     return FfiConverterTypeRecentScanHistoryPage.lower(value)
+}
+
+
+public struct RustTargetCleanupPoll: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let phase: TaskPhase
+    public let cancellationRequested: Bool
+    public let revision: UInt64
+    public let failure: RustTargetCleanupTaskFailure?
+    public let result: RustTargetCleanupResult?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, phase: TaskPhase, cancellationRequested: Bool, revision: UInt64, failure: RustTargetCleanupTaskFailure?, result: RustTargetCleanupResult?) {
+        self.recordVersion = recordVersion
+        self.phase = phase
+        self.cancellationRequested = cancellationRequested
+        self.revision = revision
+        self.failure = failure
+        self.result = result
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension RustTargetCleanupPoll: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRustTargetCleanupPoll: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RustTargetCleanupPoll {
+        return
+            try RustTargetCleanupPoll(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                phase: FfiConverterTypeTaskPhase.read(from: &buf),
+                cancellationRequested: FfiConverterBool.read(from: &buf),
+                revision: FfiConverterUInt64.read(from: &buf),
+                failure: FfiConverterOptionTypeRustTargetCleanupTaskFailure.read(from: &buf),
+                result: FfiConverterOptionTypeRustTargetCleanupResult.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: RustTargetCleanupPoll, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterTypeTaskPhase.write(value.phase, into: &buf)
+        FfiConverterBool.write(value.cancellationRequested, into: &buf)
+        FfiConverterUInt64.write(value.revision, into: &buf)
+        FfiConverterOptionTypeRustTargetCleanupTaskFailure.write(value.failure, into: &buf)
+        FfiConverterOptionTypeRustTargetCleanupResult.write(value.result, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRustTargetCleanupPoll_lift(_ buf: RustBuffer) throws -> RustTargetCleanupPoll {
+    return try FfiConverterTypeRustTargetCleanupPoll.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRustTargetCleanupPoll_lower(_ value: RustTargetCleanupPoll) -> RustBuffer {
+    return FfiConverterTypeRustTargetCleanupPoll.lower(value)
+}
+
+
+/**
+ * Path-free terminal observation for one exact reviewed Rust-target cleanup.
+ * The session identifier is correlation for durable history only and cannot
+ * authorize, resume, or retry an effect.
+ */
+public struct RustTargetCleanupResult: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let sessionId: String
+    public let status: CleanupSessionStatus
+    public let removedEntries: UInt64
+    public let removedLogicalBytes: UInt64
+    public let verifiedCapacityDeltaBytes: Int64?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, sessionId: String, status: CleanupSessionStatus, removedEntries: UInt64, removedLogicalBytes: UInt64, verifiedCapacityDeltaBytes: Int64?) {
+        self.recordVersion = recordVersion
+        self.sessionId = sessionId
+        self.status = status
+        self.removedEntries = removedEntries
+        self.removedLogicalBytes = removedLogicalBytes
+        self.verifiedCapacityDeltaBytes = verifiedCapacityDeltaBytes
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension RustTargetCleanupResult: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRustTargetCleanupResult: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RustTargetCleanupResult {
+        return
+            try RustTargetCleanupResult(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                sessionId: FfiConverterString.read(from: &buf),
+                status: FfiConverterTypeCleanupSessionStatus.read(from: &buf),
+                removedEntries: FfiConverterUInt64.read(from: &buf),
+                removedLogicalBytes: FfiConverterUInt64.read(from: &buf),
+                verifiedCapacityDeltaBytes: FfiConverterOptionInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: RustTargetCleanupResult, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterString.write(value.sessionId, into: &buf)
+        FfiConverterTypeCleanupSessionStatus.write(value.status, into: &buf)
+        FfiConverterUInt64.write(value.removedEntries, into: &buf)
+        FfiConverterUInt64.write(value.removedLogicalBytes, into: &buf)
+        FfiConverterOptionInt64.write(value.verifiedCapacityDeltaBytes, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRustTargetCleanupResult_lift(_ buf: RustBuffer) throws -> RustTargetCleanupResult {
+    return try FfiConverterTypeRustTargetCleanupResult.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRustTargetCleanupResult_lower(_ value: RustTargetCleanupResult) -> RustBuffer {
+    return FfiConverterTypeRustTargetCleanupResult.lower(value)
 }
 
 
@@ -11982,6 +12288,465 @@ public func FfiConverterTypeReviewReleaseOutcome_lower(_ value: ReviewReleaseOut
 }
 
 
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum RustTargetCleanupCancelOutcome: Equatable, Hashable {
+
+    case cancelledBeforeStart
+    case requested
+    case alreadyRequested
+    case alreadyTerminal
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension RustTargetCleanupCancelOutcome: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRustTargetCleanupCancelOutcome: FfiConverterRustBuffer {
+    typealias SwiftType = RustTargetCleanupCancelOutcome
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RustTargetCleanupCancelOutcome {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .cancelledBeforeStart
+
+        case 2: return .requested
+
+        case 3: return .alreadyRequested
+
+        case 4: return .alreadyTerminal
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: RustTargetCleanupCancelOutcome, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .cancelledBeforeStart:
+            writeInt(&buf, Int32(1))
+
+
+        case .requested:
+            writeInt(&buf, Int32(2))
+
+
+        case .alreadyRequested:
+            writeInt(&buf, Int32(3))
+
+
+        case .alreadyTerminal:
+            writeInt(&buf, Int32(4))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRustTargetCleanupCancelOutcome_lift(_ buf: RustBuffer) throws -> RustTargetCleanupCancelOutcome {
+    return try FfiConverterTypeRustTargetCleanupCancelOutcome.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRustTargetCleanupCancelOutcome_lower(_ value: RustTargetCleanupCancelOutcome) -> RustBuffer {
+    return FfiConverterTypeRustTargetCleanupCancelOutcome.lower(value)
+}
+
+
+
+public enum RustTargetCleanupStartError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
+
+
+
+    case Closed
+    case WrongEngine
+    case ReviewUnavailable
+    case ParentReviewUnavailable
+    case ReviewExpired
+    case ChangedDuringReview
+    case CancelledBeforeStart
+    case BudgetExceeded
+    case QueueFull
+    case Busy
+    case UnsafeStorage
+    case IncompatibleSchema
+    case CorruptData
+    case OutcomeUnknown
+    case Unavailable
+    case InternalState
+
+
+
+
+
+
+    public var errorDescription: String? {
+        String(reflecting: self)
+    }
+
+}
+
+#if compiler(>=6)
+extension RustTargetCleanupStartError: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRustTargetCleanupStartError: FfiConverterRustBuffer {
+    typealias SwiftType = RustTargetCleanupStartError
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RustTargetCleanupStartError {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+
+
+
+        case 1: return .Closed
+        case 2: return .WrongEngine
+        case 3: return .ReviewUnavailable
+        case 4: return .ParentReviewUnavailable
+        case 5: return .ReviewExpired
+        case 6: return .ChangedDuringReview
+        case 7: return .CancelledBeforeStart
+        case 8: return .BudgetExceeded
+        case 9: return .QueueFull
+        case 10: return .Busy
+        case 11: return .UnsafeStorage
+        case 12: return .IncompatibleSchema
+        case 13: return .CorruptData
+        case 14: return .OutcomeUnknown
+        case 15: return .Unavailable
+        case 16: return .InternalState
+
+         default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: RustTargetCleanupStartError, into buf: inout [UInt8]) {
+        switch value {
+
+
+
+
+
+        case .Closed:
+            writeInt(&buf, Int32(1))
+
+
+        case .WrongEngine:
+            writeInt(&buf, Int32(2))
+
+
+        case .ReviewUnavailable:
+            writeInt(&buf, Int32(3))
+
+
+        case .ParentReviewUnavailable:
+            writeInt(&buf, Int32(4))
+
+
+        case .ReviewExpired:
+            writeInt(&buf, Int32(5))
+
+
+        case .ChangedDuringReview:
+            writeInt(&buf, Int32(6))
+
+
+        case .CancelledBeforeStart:
+            writeInt(&buf, Int32(7))
+
+
+        case .BudgetExceeded:
+            writeInt(&buf, Int32(8))
+
+
+        case .QueueFull:
+            writeInt(&buf, Int32(9))
+
+
+        case .Busy:
+            writeInt(&buf, Int32(10))
+
+
+        case .UnsafeStorage:
+            writeInt(&buf, Int32(11))
+
+
+        case .IncompatibleSchema:
+            writeInt(&buf, Int32(12))
+
+
+        case .CorruptData:
+            writeInt(&buf, Int32(13))
+
+
+        case .OutcomeUnknown:
+            writeInt(&buf, Int32(14))
+
+
+        case .Unavailable:
+            writeInt(&buf, Int32(15))
+
+
+        case .InternalState:
+            writeInt(&buf, Int32(16))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRustTargetCleanupStartError_lift(_ buf: RustBuffer) throws -> RustTargetCleanupStartError {
+    return try FfiConverterTypeRustTargetCleanupStartError.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRustTargetCleanupStartError_lower(_ value: RustTargetCleanupStartError) -> RustBuffer {
+    return FfiConverterTypeRustTargetCleanupStartError.lower(value)
+}
+
+
+public enum RustTargetCleanupTaskError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
+
+
+
+    case Closed
+    case TaskUnavailable
+    case WrongTaskKind
+    case InternalState
+
+
+
+
+
+
+    public var errorDescription: String? {
+        String(reflecting: self)
+    }
+
+}
+
+#if compiler(>=6)
+extension RustTargetCleanupTaskError: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRustTargetCleanupTaskError: FfiConverterRustBuffer {
+    typealias SwiftType = RustTargetCleanupTaskError
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RustTargetCleanupTaskError {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+
+
+
+        case 1: return .Closed
+        case 2: return .TaskUnavailable
+        case 3: return .WrongTaskKind
+        case 4: return .InternalState
+
+         default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: RustTargetCleanupTaskError, into buf: inout [UInt8]) {
+        switch value {
+
+
+
+
+
+        case .Closed:
+            writeInt(&buf, Int32(1))
+
+
+        case .TaskUnavailable:
+            writeInt(&buf, Int32(2))
+
+
+        case .WrongTaskKind:
+            writeInt(&buf, Int32(3))
+
+
+        case .InternalState:
+            writeInt(&buf, Int32(4))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRustTargetCleanupTaskError_lift(_ buf: RustBuffer) throws -> RustTargetCleanupTaskError {
+    return try FfiConverterTypeRustTargetCleanupTaskError.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRustTargetCleanupTaskError_lower(_ value: RustTargetCleanupTaskError) -> RustBuffer {
+    return FfiConverterTypeRustTargetCleanupTaskError.lower(value)
+}
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum RustTargetCleanupTaskFailure: Equatable, Hashable {
+
+    case parentReviewUnavailable
+    case reviewExpired
+    case changedDuringReview
+    case budgetExceeded
+    case busy
+    case unsafeStorage
+    case incompatibleSchema
+    case corruptData
+    case outcomeUnknown
+    case unavailable
+    case internalState
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension RustTargetCleanupTaskFailure: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRustTargetCleanupTaskFailure: FfiConverterRustBuffer {
+    typealias SwiftType = RustTargetCleanupTaskFailure
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RustTargetCleanupTaskFailure {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .parentReviewUnavailable
+
+        case 2: return .reviewExpired
+
+        case 3: return .changedDuringReview
+
+        case 4: return .budgetExceeded
+
+        case 5: return .busy
+
+        case 6: return .unsafeStorage
+
+        case 7: return .incompatibleSchema
+
+        case 8: return .corruptData
+
+        case 9: return .outcomeUnknown
+
+        case 10: return .unavailable
+
+        case 11: return .internalState
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: RustTargetCleanupTaskFailure, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .parentReviewUnavailable:
+            writeInt(&buf, Int32(1))
+
+
+        case .reviewExpired:
+            writeInt(&buf, Int32(2))
+
+
+        case .changedDuringReview:
+            writeInt(&buf, Int32(3))
+
+
+        case .budgetExceeded:
+            writeInt(&buf, Int32(4))
+
+
+        case .busy:
+            writeInt(&buf, Int32(5))
+
+
+        case .unsafeStorage:
+            writeInt(&buf, Int32(6))
+
+
+        case .incompatibleSchema:
+            writeInt(&buf, Int32(7))
+
+
+        case .corruptData:
+            writeInt(&buf, Int32(8))
+
+
+        case .outcomeUnknown:
+            writeInt(&buf, Int32(9))
+
+
+        case .unavailable:
+            writeInt(&buf, Int32(10))
+
+
+        case .internalState:
+            writeInt(&buf, Int32(11))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRustTargetCleanupTaskFailure_lift(_ buf: RustBuffer) throws -> RustTargetCleanupTaskFailure {
+    return try FfiConverterTypeRustTargetCleanupTaskFailure.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRustTargetCleanupTaskFailure_lower(_ value: RustTargetCleanupTaskFailure) -> RustBuffer {
+    return FfiConverterTypeRustTargetCleanupTaskFailure.lower(value)
+}
+
+
 
 public enum RustTargetPlanReviewError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
 
@@ -14944,6 +15709,30 @@ fileprivate struct FfiConverterOptionTypeMaintenanceResult: FfiConverterRustBuff
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeRustTargetCleanupResult: FfiConverterRustBuffer {
+    typealias SwiftType = RustTargetCleanupResult?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeRustTargetCleanupResult.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeRustTargetCleanupResult.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeScanProgress: FfiConverterRustBuffer {
     typealias SwiftType = ScanProgress?
 
@@ -15104,6 +15893,30 @@ fileprivate struct FfiConverterOptionTypeMaintenanceFailure: FfiConverterRustBuf
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeMaintenanceFailure.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeRustTargetCleanupTaskFailure: FfiConverterRustBuffer {
+    typealias SwiftType = RustTargetCleanupTaskFailure?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeRustTargetCleanupTaskFailure.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeRustTargetCleanupTaskFailure.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -15788,6 +16601,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_dux_ffi_checksum_method_duxengine_start_maintenance() != 4775) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_dux_ffi_checksum_method_duxengine_start_permanent_safe_cleanup() != 43458) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_dux_ffi_checksum_method_duxengine_start_scan() != 56895) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -15798,6 +16614,12 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_maintenancetask_poll() != 5519) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_rusttargetcleanuptask_cancel() != 18585) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_rusttargetcleanuptask_poll() != 1277) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_rusttargetplanreviewsession_info() != 44073) {

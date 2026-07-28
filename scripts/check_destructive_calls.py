@@ -737,6 +737,14 @@ EXCEPTIONS = {
         "python-filesystem-or-process-effect",
         "test",
     ),
+    "test-ffi-cleanup-success-binary": ExceptionSpec(
+        "scripts/test_ffi_rust_target_cleanup.sh",
+        "shell-indirect-command",
+    ),
+    "test-ffi-cleanup-refusal-binary": ExceptionSpec(
+        "scripts/test_ffi_rust_target_cleanup.sh",
+        "shell-indirect-command",
+    ),
 }
 
 EXCEPTION_PRIMITIVES = {
@@ -855,6 +863,8 @@ EXCEPTION_PRIMITIVES = {
     "test-lint-fixture-git-init": "subprocess.run",
     "test-lint-fixture-git-add": "subprocess.run",
     "test-release-script-spawn": "subprocess.run",
+    "test-ffi-cleanup-success-binary": "test_binary",
+    "test-ffi-cleanup-refusal-binary": "test_binary",
 }
 
 CLIPPY_SUPPRESSION_COUNTS = {

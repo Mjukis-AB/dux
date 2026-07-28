@@ -295,7 +295,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
     DuxSnapshotHistoryServing, DuxCleanupHistoryServing, DuxScanCoverageServing, HomeScanServing,
     Sendable
 {
-    fileprivate static let expectedFFIContractVersion: UInt32 = 30
+    fileprivate static let expectedFFIContractVersion: UInt32 = 31
     fileprivate static let expectedRecordVersion: UInt32 = 1
 
     private let state: EngineServiceState

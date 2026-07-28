@@ -4878,6 +4878,40 @@ Tasks:
     core orchestration checkpoint only: UniFFI still exposes the v28 review as
     observation/release, so explicit native confirmation and app execution
     remain open and the parent item is intentionally unchecked.
+  - [x] 2026-07-29 slice: expose the exact core task through UniFFI contract
+    v31 without adding a caller-shaped execution request. The sole start input
+    is the engine-bound opaque `RustTargetPlanReviewSession`; callers cannot
+    submit a path, candidate or plan ID, timestamp, approval Boolean, callback,
+    AI result, command, or retry token. A foreign engine is rejected before
+    touching the child. A correct-engine attempt consumes the review exactly
+    once even when core admission later refuses it, while an overlapping
+    information read is changed to release-pending so it cannot restore
+    authority after losing the start race. Start participates in the existing
+    bounded operation tracker, clones the open core handle without retaining
+    the FFI state mutex across revalidation, and lets close wait for the
+    admitted operation. The returned opaque task exposes only explicit
+    cancellation and path-free polling: phase, cancellation state, revision,
+    bounded failure taxonomy, durable session correlation, removed aggregates,
+    and optional verified capacity delta. FFI independently rejects the wrong
+    core task kind, malformed phase/failure/result combinations, invalid
+    cleanup session IDs, and recovering results that imply a known effect.
+    Dropping the observer does not cancel or retry work.
+    The production macOS process-quiescence proof is revision 2: it still
+    completely bounds and reads the libproc PID/name table, but requests
+    start-time/executable identity only for exact guarded names (`cargo` and
+    `rustc`). An unreadable guarded identity remains a fail-closed refusal;
+    unrelated applications no longer make cleanup unavailable merely because
+    macOS withholds their executable path. A zero-length or completely filled
+    PID buffer is treated as incomplete/possible truncation. A failed PID
+    inspection is skipped only
+    when libproc reports `ESRCH` or a second independently complete PID table
+    proves that exact PID disappeared; a still-listed or unprovable identity
+    failure refuses.
+    The generated Swift interface and universal XCFramework carry the v31
+    types, but `EngineService`, AppModel, and Explorer intentionally do not
+    consume them yet. Explicit native confirmation, changed-since-plan
+    presentation, and release gates remain open, so the parent item stays
+    unchecked.
 - [ ] Implement execution-time revalidation.
   - [x] 2026-07-19 slice: make the approved-session handoff use one canonical
     millisecond start time for persistence and journal claiming, and recheck

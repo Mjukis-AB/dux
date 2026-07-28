@@ -178,10 +178,13 @@ one exact revision-2 Rust-target candidate. Preparing it passes only the
 candidate ID through the already-retained snapshot review. Rust derives and
 revalidates the current target, source scan, permanent-safe mode, plan
 identity, estimate, warnings, and short effective expiry; the returned opaque
-child supports only information reads and release. There is no app/FFI
-approval, journal, schedule, callback, AI, or permanent-safe cleanup endpoint
-for this preview. The existing confirmation-gated Explorer Trash route is
-separate and cannot consume the preview child or its display DTO.
+child supports information reads and release. FFI v31 can consume that exact
+engine-bound child directly into the core-owned permanent-safe task, but
+`EngineService`, AppModel, and Explorer intentionally do not call the new
+transport yet. Its start accepts no path, identifier, timestamp, approval
+Boolean, callback, AI result, command, or retry token; its task observation is
+path-free. The existing confirmation-gated Explorer Trash route is separate
+and cannot consume the preview child or its display DTO.
 
 The controller owns the child separately from its renewable parent review,
 refreshes the immutable observation every 15 seconds, and releases the child
@@ -194,6 +197,12 @@ It explicitly states that the preview is not approved and changed no files.
 Current paths are lossless byte observations: unsafe/hidden Unicode and
 non-UTF-8 bytes use a deterministic escaped display that Swift validates
 byte-for-byte before presentation.
+
+The next product gate must add explicit confirmation bound to that immutable
+preview and generation-fenced task observation before the native app can start
+permanent cleanup. Dropping a v31 task observer does not cancel or retry the
+core task; cancellation is explicit, and every owning-engine start attempt
+consumes the opaque review once even if later core admission refuses it.
 
 Cleanup History exposes FFI v29's exact-session, observation-only drill-down.
 The list supplies one bounded stable session ID; Rust reloads and validates the

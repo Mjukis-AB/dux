@@ -2,9 +2,11 @@
 //!
 //! Rule documents can describe process guards, but the discovery evaluator
 //! deliberately rejects them until a live provider exists.  This module is
-//! the first provider seam: it captures a bounded macOS process table without
-//! invoking a shell, keeps PID/start-time/executable identity private, and
-//! requires a fresh enumeration for every revalidation.  It is not an
+//! the first provider seam: it captures a bounded macOS PID/name table without
+//! invoking a shell, retains PID/start-time/executable identity only for names
+//! covered by the exact guards, and requires a fresh enumeration for every
+//! revalidation. An unreadable executable for a guarded name fails closed;
+//! unrelated applications do not need to disclose their image path. It is not an
 //! authorization or a proof that a process cannot retain an already-open file
 //! descriptor; the future planner and executor must keep those limits visible.
 
@@ -16,7 +18,7 @@ use thiserror::Error;
 
 use crate::domain::ActivityGuard;
 
-const PROCESS_ACTIVITY_PROOF_REVISION: u32 = 1;
+const PROCESS_ACTIVITY_PROOF_REVISION: u32 = 2;
 const MAX_ACTIVITY_GUARDS: usize = 32;
 const MAX_PROCESS_RECORDS: usize = 16_384;
 const MAX_PROCESS_NAME_BYTES: usize = 255;
@@ -34,9 +36,9 @@ impl ProcessStartToken {
     }
 }
 
-/// A process identity is intentionally private and never enters durable or
-/// FFI records.  The executable bytes make PID reuse and same-name image
-/// replacement visible to the next live check.
+/// A guarded process identity is intentionally private and never enters
+/// durable or FFI records. The executable bytes make PID reuse and same-name
+/// image replacement visible to the next live check.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ProcessRecord {
     pid: u32,
@@ -63,7 +65,10 @@ impl PartialOrd for ProcessRecord {
 }
 
 trait ProcessProvider {
-    fn enumerate(&self) -> Result<Vec<ProcessRecord>, ProcessActivityError>;
+    fn enumerate(
+        &self,
+        guards: &[ActivityGuard],
+    ) -> Result<Vec<ProcessRecord>, ProcessActivityError>;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
@@ -78,7 +83,7 @@ pub(crate) enum ProcessActivityError {
     DuplicateGuard,
     #[error("bundle-identifier activity guards require a signed bundle provider")]
     UnsupportedBundleIdentifier,
-    #[error("the process table could not be enumerated completely")]
+    #[error("the process table or a guarded process identity could not be enumerated completely")]
     EnumerationUnavailable,
     #[error("the process table exceeded the bounded observation budget")]
     ProcessLimitExceeded,
@@ -93,7 +98,8 @@ pub(crate) enum ProcessActivityError {
 }
 
 /// Non-cloneable evidence that every requested process-name guard was absent
-/// in one bounded observation.  Holding it does not authorize a plan or an
+/// in one bounded observation. Only matching guarded identities are retained.
+/// Holding it does not authorize a plan or an
 /// effect; callers must revalidate immediately before any future mutation.
 #[must_use = "process activity evidence must be revalidated at the effect boundary"]
 #[derive(Debug, PartialEq, Eq)]
@@ -154,7 +160,7 @@ impl ProcessActivityWitness {
         provider: &impl ProcessProvider,
     ) -> Result<Self, ProcessActivityError> {
         validate_guards(guards)?;
-        let observed = normalized_records(provider.enumerate()?)?;
+        let observed = normalized_records(provider.enumerate(guards)?)?;
         ensure_guards_inactive(guards, &observed)?;
         Ok(Self {
             proof_revision: PROCESS_ACTIVITY_PROOF_REVISION,
@@ -179,13 +185,12 @@ impl ProcessActivityWitness {
         &self,
         provider: &impl ProcessProvider,
     ) -> Result<(), ProcessActivityError> {
-        let current = normalized_records(provider.enumerate()?)?;
+        let current = normalized_records(provider.enumerate(&self.guards)?)?;
         ensure_guards_inactive(&self.guards, &current)?;
-        // A process that was present in the retained observation must not be
-        // silently changed into a different identity while the witness lives.
-        // For an inactive guard this is normally empty, but retaining the
-        // comparison prevents future provider changes from weakening the
-        // boundary without a revision bump.
+        // A guarded process that was present in a retained observation must
+        // not silently change identity. An accepted inactive-name witness is
+        // normally empty, but keeping this comparison prevents future provider
+        // changes from weakening the boundary without a revision bump.
         if self
             .observed
             .iter()
@@ -284,78 +289,96 @@ struct EmptyProcessProvider;
 
 #[cfg(test)]
 impl ProcessProvider for EmptyProcessProvider {
-    fn enumerate(&self) -> Result<Vec<ProcessRecord>, ProcessActivityError> {
+    fn enumerate(
+        &self,
+        _guards: &[ActivityGuard],
+    ) -> Result<Vec<ProcessRecord>, ProcessActivityError> {
         Ok(Vec::new())
     }
 }
 
 impl ProcessProvider for NativeProcessProvider {
-    fn enumerate(&self) -> Result<Vec<ProcessRecord>, ProcessActivityError> {
+    fn enumerate(
+        &self,
+        guards: &[ActivityGuard],
+    ) -> Result<Vec<ProcessRecord>, ProcessActivityError> {
         #[cfg(target_os = "macos")]
         {
-            enumerate_macos_processes()
+            enumerate_macos_processes(guards)
         }
         #[cfg(not(target_os = "macos"))]
         {
+            let _ = guards;
             Err(ProcessActivityError::UnsupportedPlatform)
         }
     }
 }
 
 #[cfg(target_os = "macos")]
-fn enumerate_macos_processes() -> Result<Vec<ProcessRecord>, ProcessActivityError> {
-    use std::os::raw::c_void;
-
-    let reported = unsafe { nix::libc::proc_listallpids(std::ptr::null_mut(), 0) };
-    if reported <= 0 {
-        return Err(ProcessActivityError::EnumerationUnavailable);
-    }
-    let reported =
-        usize::try_from(reported).map_err(|_| ProcessActivityError::EnumerationUnavailable)?;
-    if reported > MAX_PROCESS_RECORDS {
-        return Err(ProcessActivityError::ProcessLimitExceeded);
-    }
-    let capacity = reported
-        .checked_add(256)
-        .ok_or(ProcessActivityError::ProcessLimitExceeded)?;
-    let byte_len = capacity
-        .checked_mul(std::mem::size_of::<nix::libc::pid_t>())
-        .ok_or(ProcessActivityError::ProcessLimitExceeded)?;
-    let byte_len =
-        i32::try_from(byte_len).map_err(|_| ProcessActivityError::ProcessLimitExceeded)?;
-    let mut pids = vec![0 as nix::libc::pid_t; capacity];
-    let returned =
-        unsafe { nix::libc::proc_listallpids(pids.as_mut_ptr().cast::<c_void>(), byte_len) };
-    if returned < 0 {
-        return Err(ProcessActivityError::EnumerationUnavailable);
-    }
-    let returned =
-        usize::try_from(returned).map_err(|_| ProcessActivityError::EnumerationUnavailable)?;
-    if returned > capacity {
-        return Err(ProcessActivityError::EnumerationUnavailable);
-    }
-
-    let mut records = Vec::with_capacity(returned);
-    for pid in pids.into_iter().take(returned) {
+fn enumerate_macos_processes(
+    guards: &[ActivityGuard],
+) -> Result<Vec<ProcessRecord>, ProcessActivityError> {
+    let pids = complete_macos_pid_list()?;
+    let mut records = Vec::with_capacity(pids.len());
+    for pid in pids {
         if pid <= 0 {
             continue;
         }
+        let mut short_info = MaybeUninit::<MacosProcessShortInfo>::zeroed();
+        let short_size = i32::try_from(std::mem::size_of::<MacosProcessShortInfo>())
+            .map_err(|_| ProcessActivityError::MalformedRecord)?;
+        unsafe {
+            *nix::libc::__error() = 0;
+        }
+        let short_read = unsafe {
+            nix::libc::proc_pidinfo(
+                pid,
+                MACOS_PROC_PIDT_SHORTBSDINFO,
+                0,
+                short_info.as_mut_ptr().cast::<std::os::raw::c_void>(),
+                short_size,
+            )
+        };
+        let short_errno = unsafe { *nix::libc::__error() };
+        if short_read == 0 {
+            if macos_pid_disappeared(pid, short_errno)? {
+                continue;
+            }
+            return Err(ProcessActivityError::EnumerationUnavailable);
+        }
+        if short_read != short_size {
+            return Err(ProcessActivityError::EnumerationUnavailable);
+        }
+        let short_info = unsafe { short_info.assume_init() };
+        if short_info.pid != pid as u32 {
+            return Err(ProcessActivityError::MalformedRecord);
+        }
+        let name = macos_process_name(&short_info.command)?;
+        if !process_name_is_guarded(guards, &name) {
+            continue;
+        }
+
         let mut info = MaybeUninit::<nix::libc::proc_bsdinfo>::zeroed();
         let size = i32::try_from(std::mem::size_of::<nix::libc::proc_bsdinfo>())
             .map_err(|_| ProcessActivityError::MalformedRecord)?;
+        unsafe {
+            *nix::libc::__error() = 0;
+        }
         let read = unsafe {
             nix::libc::proc_pidinfo(
                 pid,
                 nix::libc::PROC_PIDTBSDINFO,
                 0,
-                info.as_mut_ptr().cast::<c_void>(),
+                info.as_mut_ptr().cast::<std::os::raw::c_void>(),
                 size,
             )
         };
-        // A process can exit between proc_listallpids and proc_pidinfo.  It
-        // contributes no active evidence and will be checked again on use.
+        let inspection_errno = unsafe { *nix::libc::__error() };
         if read == 0 {
-            continue;
+            if macos_pid_disappeared(pid, inspection_errno)? {
+                continue;
+            }
+            return Err(ProcessActivityError::EnumerationUnavailable);
         }
         if read != size {
             return Err(ProcessActivityError::EnumerationUnavailable);
@@ -364,28 +387,14 @@ fn enumerate_macos_processes() -> Result<Vec<ProcessRecord>, ProcessActivityErro
         if info.pbi_pid != pid as u32 || info.pbi_start_tvusec >= 1_000_000 {
             return Err(ProcessActivityError::MalformedRecord);
         }
-        let name_end = info
-            .pbi_name
-            .iter()
-            .position(|byte| *byte == 0)
-            .ok_or(ProcessActivityError::MalformedRecord)?;
-        if name_end == 0 {
-            return Err(ProcessActivityError::MalformedRecord);
-        }
-        let name_bytes = info.pbi_name[..name_end]
-            .iter()
-            .map(|byte| *byte as u8)
-            .collect::<Vec<_>>();
-        let name =
-            String::from_utf8(name_bytes).map_err(|_| ProcessActivityError::MalformedRecord)?;
-        if name.len() > MAX_PROCESS_NAME_BYTES {
-            return Err(ProcessActivityError::MalformedRecord);
+        if macos_process_name(&info.pbi_name)? != name {
+            return Err(ProcessActivityError::Changed);
         }
         let mut path = vec![0_u8; MAX_EXECUTABLE_PATH_BYTES];
         let path_len = unsafe {
             nix::libc::proc_pidpath(
                 pid,
-                path.as_mut_ptr().cast::<c_void>(),
+                path.as_mut_ptr().cast::<std::os::raw::c_void>(),
                 u32::try_from(path.len()).expect("bounded path length fits u32"),
             )
         };
@@ -417,6 +426,111 @@ fn enumerate_macos_processes() -> Result<Vec<ProcessRecord>, ProcessActivityErro
     Ok(records)
 }
 
+#[cfg(target_os = "macos")]
+const MACOS_PROC_PIDT_SHORTBSDINFO: i32 = 13;
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
+struct MacosProcessShortInfo {
+    pid: u32,
+    _parent_pid: u32,
+    _process_group_id: u32,
+    _status: u32,
+    command: [std::os::raw::c_char; 16],
+    _flags: u32,
+    _effective_user_id: nix::libc::uid_t,
+    _effective_group_id: nix::libc::gid_t,
+    _real_user_id: nix::libc::uid_t,
+    _real_group_id: nix::libc::gid_t,
+    _saved_user_id: nix::libc::uid_t,
+    _saved_group_id: nix::libc::gid_t,
+    _reserved: u32,
+}
+
+#[cfg(target_os = "macos")]
+fn complete_macos_pid_list() -> Result<Vec<nix::libc::pid_t>, ProcessActivityError> {
+    let reported = unsafe { nix::libc::proc_listallpids(std::ptr::null_mut(), 0) };
+    if reported <= 0 {
+        return Err(ProcessActivityError::EnumerationUnavailable);
+    }
+    let reported =
+        usize::try_from(reported).map_err(|_| ProcessActivityError::EnumerationUnavailable)?;
+    if reported > MAX_PROCESS_RECORDS {
+        return Err(ProcessActivityError::ProcessLimitExceeded);
+    }
+    let capacity = reported
+        .checked_add(256)
+        .ok_or(ProcessActivityError::ProcessLimitExceeded)?;
+    let byte_len = capacity
+        .checked_mul(std::mem::size_of::<nix::libc::pid_t>())
+        .ok_or(ProcessActivityError::ProcessLimitExceeded)?;
+    let byte_len =
+        i32::try_from(byte_len).map_err(|_| ProcessActivityError::ProcessLimitExceeded)?;
+    let mut pids = vec![0 as nix::libc::pid_t; capacity];
+    let returned = unsafe {
+        nix::libc::proc_listallpids(pids.as_mut_ptr().cast::<std::os::raw::c_void>(), byte_len)
+    };
+    if returned < 0 {
+        return Err(ProcessActivityError::EnumerationUnavailable);
+    }
+    let returned =
+        usize::try_from(returned).map_err(|_| ProcessActivityError::EnumerationUnavailable)?;
+    validate_macos_process_count(returned, capacity)?;
+    pids.truncate(returned);
+    Ok(pids)
+}
+
+#[cfg(target_os = "macos")]
+fn validate_macos_process_count(
+    returned: usize,
+    capacity: usize,
+) -> Result<(), ProcessActivityError> {
+    if returned == 0 || returned >= capacity {
+        return Err(ProcessActivityError::EnumerationUnavailable);
+    }
+    if returned > MAX_PROCESS_RECORDS {
+        return Err(ProcessActivityError::ProcessLimitExceeded);
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn macos_process_name(bytes: &[std::os::raw::c_char]) -> Result<String, ProcessActivityError> {
+    let end = bytes
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(bytes.len());
+    if end == 0 || end > MAX_PROCESS_NAME_BYTES {
+        return Err(ProcessActivityError::MalformedRecord);
+    }
+    String::from_utf8(bytes[..end].iter().map(|byte| *byte as u8).collect())
+        .map_err(|_| ProcessActivityError::MalformedRecord)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_pid_disappeared(pid: nix::libc::pid_t, errno: i32) -> Result<bool, ProcessActivityError> {
+    if errno == nix::libc::ESRCH {
+        return Ok(true);
+    }
+    let current_pids = complete_macos_pid_list()?;
+    Ok(macos_failed_pid_is_proven_absent(pid, errno, &current_pids))
+}
+
+#[cfg(target_os = "macos")]
+fn macos_failed_pid_is_proven_absent(
+    pid: nix::libc::pid_t,
+    errno: i32,
+    current_pids: &[nix::libc::pid_t],
+) -> bool {
+    errno == nix::libc::ESRCH || !current_pids.contains(&pid)
+}
+
+fn process_name_is_guarded(guards: &[ActivityGuard], name: &str) -> bool {
+    guards
+        .iter()
+        .any(|guard| matches!(guard, ActivityGuard::ProcessName(guarded) if guarded == name))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -426,8 +540,16 @@ mod tests {
     }
 
     impl ProcessProvider for FakeProvider {
-        fn enumerate(&self) -> Result<Vec<ProcessRecord>, ProcessActivityError> {
-            Ok(self.records.clone())
+        fn enumerate(
+            &self,
+            guards: &[ActivityGuard],
+        ) -> Result<Vec<ProcessRecord>, ProcessActivityError> {
+            Ok(self
+                .records
+                .iter()
+                .filter(|record| process_name_is_guarded(guards, &record.name))
+                .cloned()
+                .collect())
         }
     }
 
@@ -454,6 +576,11 @@ mod tests {
         )
         .unwrap();
         assert!(witness.revalidate_with_provider(&provider).is_ok());
+        assert!(witness.observed.is_empty());
+        assert!(!process_name_is_guarded(
+            &[ActivityGuard::ProcessName("cargo".to_owned())],
+            "2.1.217"
+        ));
     }
 
     #[test]
@@ -487,9 +614,9 @@ mod tests {
     }
 
     #[test]
-    fn pid_reuse_or_image_change_invalidates_retained_observation() {
+    fn guarded_process_appearance_fails_active_and_revision_drift_fails_changed() {
         let first = FakeProvider {
-            records: vec![record(12, "other")],
+            records: vec![record(12, "unrelated")],
         };
         let witness = ProcessActivityWitness::capture_with_provider(
             &[ActivityGuard::ProcessName("cargo".to_owned())],
@@ -497,12 +624,18 @@ mod tests {
         )
         .unwrap();
         let replacement = FakeProvider {
-            records: vec![record(12, "replacement")],
+            records: vec![record(12, "cargo")],
         };
         assert_eq!(
             witness.revalidate_with_provider(&replacement),
-            Err(ProcessActivityError::Changed)
+            Err(ProcessActivityError::Active)
         );
+        let stale = ProcessActivityWitness {
+            proof_revision: PROCESS_ACTIVITY_PROOF_REVISION - 1,
+            guards: witness.guards,
+            observed: witness.observed,
+        };
+        assert_eq!(stale.revalidate(), Err(ProcessActivityError::Changed));
     }
 
     #[test]
@@ -526,7 +659,7 @@ mod tests {
 
     #[test]
     fn duplicate_and_malformed_records_fail_closed() {
-        let duplicate = record(1, "one");
+        let duplicate = record(1, "cargo");
         let provider = FakeProvider {
             records: vec![duplicate.clone(), duplicate],
         };
@@ -540,7 +673,7 @@ mod tests {
         let malformed = FakeProvider {
             records: vec![ProcessRecord {
                 pid: 0,
-                ..record(2, "bad")
+                ..record(2, "cargo")
             }],
         };
         assert_eq!(
@@ -555,7 +688,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn native_process_provider_is_bounded_and_returns_absolute_images() {
-        match NativeProcessProvider.enumerate() {
+        match NativeProcessProvider.enumerate(&cargo_quiescence_guards()) {
             Ok(records) => {
                 assert!(records.len() <= MAX_PROCESS_RECORDS);
                 assert!(records.iter().all(|record| record.executable.is_absolute()));
@@ -565,5 +698,48 @@ mod tests {
             Err(ProcessActivityError::EnumerationUnavailable) => {}
             Err(error) => panic!("unexpected native process result: {error:?}"),
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_process_list_full_buffer_and_failed_identity_are_fail_closed() {
+        assert_eq!(std::mem::size_of::<MacosProcessShortInfo>(), 64);
+        let mut cargo_name = [0 as std::os::raw::c_char; 16];
+        for (destination, source) in cargo_name.iter_mut().zip(b"cargo") {
+            *destination = *source as std::os::raw::c_char;
+        }
+        assert_eq!(macos_process_name(&cargo_name).unwrap(), "cargo");
+        assert_eq!(
+            macos_process_name(&[0 as std::os::raw::c_char; 16]),
+            Err(ProcessActivityError::MalformedRecord)
+        );
+        assert_eq!(
+            validate_macos_process_count(0, 8),
+            Err(ProcessActivityError::EnumerationUnavailable)
+        );
+        assert_eq!(
+            validate_macos_process_count(8, 8),
+            Err(ProcessActivityError::EnumerationUnavailable)
+        );
+        assert_eq!(
+            validate_macos_process_count(MAX_PROCESS_RECORDS + 1, MAX_PROCESS_RECORDS + 2),
+            Err(ProcessActivityError::ProcessLimitExceeded)
+        );
+        assert!(macos_failed_pid_is_proven_absent(
+            17,
+            nix::libc::ESRCH,
+            &[17]
+        ));
+        assert!(macos_failed_pid_is_proven_absent(
+            17,
+            nix::libc::EPERM,
+            &[18]
+        ));
+        assert!(!macos_failed_pid_is_proven_absent(
+            17,
+            nix::libc::EPERM,
+            &[17]
+        ));
+        assert!(!macos_failed_pid_is_proven_absent(17, 0, &[17]));
     }
 }

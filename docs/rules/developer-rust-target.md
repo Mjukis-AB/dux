@@ -1,6 +1,7 @@
 # `developer.rust.target` rule review
 
-Status: bundled revision 2, discovery-only, unschedulable, and non-executable.
+Status: bundled revision 2 with deterministic reviewed core/FFI execution,
+unschedulable and not yet executable from the shipped native UI.
 
 Reviewed: 2026-07-18 against Cargo 1.96.0 and the current Cargo Book. This is
 an independent DUX review. It does not derive policy, code, fixtures, or wording
@@ -530,9 +531,16 @@ Before a Cargo boundary can be retained, DUX also captures exact inactive
 process-name guards for `cargo` and `rustc` through the bounded macOS libproc
 provider. The guard set is code-owned, never shell-derived, and is revalidated
 at every boundary reuse. Active, incomplete, malformed, PID-replaced, or
-wrong-guard observations fail closed. This prevents cleanup while the known
-writers are active but does not claim that an already-open descriptor cannot
-exist, and it does not clear `ProtectedPath`.
+wrong-guard observations fail closed. Proof revision 2 validates the complete
+bounded PID/name table and requests start-time/executable identity only for
+exact guarded names. An inaccessible matching `cargo` or `rustc` process is
+still a refusal; unrelated processes do not need to disclose executable paths.
+A zero-length or full PID buffer rejects as incomplete/possible truncation,
+and failed PID inspection is treated as disappearance only when libproc returns
+`ESRCH` or a second
+independently complete PID table proves that exact PID absent. This prevents
+cleanup while the known writers are active but does not claim that an
+already-open descriptor cannot exist, and it does not clear `ProtectedPath`.
 
 The current rule declares no protected or excluded descendants, so the Cargo
 boundary still carries an explicit empty descendant-policy witness. A supplied
@@ -690,10 +698,26 @@ current path separately from historical discovery evidence, along with the
 estimate, warnings, and expiry, and offers only prepare/check-again/close. It
 states explicitly that no cleanup was approved or performed.
 
-## Required before executable use
+UniFFI contract v31 adds one consuming edge from this exact opaque review to
+the existing engine-owned permanent-safe task. A foreign FFI engine is rejected
+before the review changes. Any owning-engine start attempt consumes the child
+once before core revalidation, including when an information read is already in
+flight or core later refuses admission. The request cannot carry a path,
+candidate or plan ID, timestamp, approval flag, callback, AI result, command,
+or retry token. The opaque task exports only explicit cancellation and
+strictly validated, path-free polling with durable history correlation.
+Dropping it neither cancels nor retries the effect.
 
-Removing `ProtectedPath` requires a separate reviewed implementation that
-proves, at minimum:
+This is transport, not shipped product authorization. Generated Swift bindings
+contain v31, but the native service, model, and Explorer have no caller. The
+remaining native confirmation must bind the exact visible preview, disclose
+changed-since-plan failure, observe task state through generation fences, and
+satisfy every release gate below. AI, CLI, schedules, history, and reconstructed
+display values cannot enter the consuming call.
+
+## Required before native executable use
+
+Native executable use requires the remaining product gates to continue proving:
 
 - trusted home, selected-volume, canonical ancestry, and mount identity;
 - a stable code-owned protected-root boundary grant;

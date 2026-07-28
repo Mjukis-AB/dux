@@ -963,10 +963,19 @@ plan, approval, FFI, scheduling, or effect conversion is available.
 Rust-target boundary admission also requires a code-owned process-quiescence
 witness. On macOS it enumerates the bounded libproc table directly and accepts
 only a complete observation with both `cargo` and `rustc` absent. Active,
-incomplete, malformed, PID-replaced, or wrong-guard observations fail closed;
-the exact guard set and fresh process table are revalidated on each reuse.
-This is a safety precondition, not proof that an already-open descriptor is
-gone, and it does not remove `ProtectedPath`.
+incomplete, malformed, guarded-PID-replaced, or wrong-guard observations fail
+closed; the exact guard set and fresh process table are revalidated on each
+reuse. Proof revision 2 validates the bounded full PID/name table but retains
+start-time and executable-path identity only for exact guarded names. Failure
+to read a matching `cargo` or `rustc` identity is therefore still a refusal;
+an unrelated process whose image path macOS withholds cannot by itself make
+the guard unavailable. A zero-length or filled PID buffer is incomplete or
+possible truncation and rejects. A failed PID detail read counts as
+disappearance only for `ESRCH` or when a second independently complete PID
+table proves that exact PID is absent;
+still-listed, truncated, permission, transient, and otherwise unprovable
+failures reject. This is a safety precondition, not proof that an already-open
+descriptor is gone, and it does not remove `ProtectedPath`.
 
 The same boundary always carries descendant-policy coverage. For the current
 Rust-target catalog this is an explicit revalidated empty selector witness;
@@ -976,10 +985,12 @@ symlinked, multiply-linked, or changed selector evidence fails closed.
 
 The process-activity seam is now staged as a private, non-cloneable witness.
 On macOS it reads the bounded libproc table directly, never through a shell,
-and retains only private PID, start-time, executable-path, and process-name
-identity. Exact process-name guards require complete, duplicate-free records;
-active, malformed, truncated, inaccessible, and unsupported observations fail
-closed. Bundle-identifier guards do not fall back to process names and remain
+and retains private PID, start-time, executable-path, and process-name identity
+only for exact guarded names. Exact process-name guards require complete,
+duplicate-free matching records; active, malformed, truncated, inaccessible
+guarded identities, and unsupported observations fail closed. Unrelated
+processes require a valid bounded PID/name record but not readable executable
+identity. Bundle-identifier guards do not fall back to process names and remain
 unsupported until a signed bundle-identity provider can be reviewed. A fresh
 revalidation rejects newly active guards and PID/image replacement, but it is
 still defense-in-depth: a same-user process can retain an already-open file
@@ -1482,18 +1493,22 @@ retry. Failed permanent tasks retain the exact path-free session identifier
 with a `Recovering` observation so history lookup does not depend on recency.
 The FFI, Swift, CLI, scheduler, and AI surfaces cannot supply the sampled
 volume or a capacity value. User-facing execution and the remaining release
-gates are still required before permanent-safe cleanup is reachable.
+gates are still required before permanent-safe cleanup is reachable from the
+shipped app.
 
-The app-facing v28 boundary can observe one fully admitted Rust-target review
-without making the new task callable outside Rust. The core derives the
-complete one-item permanent-safe preview from the exact retained candidate and
-returns an expiring opaque object. FFI and Swift can inspect only its bounded
-immutable projection or release it; neither can invoke the core consuming
-transition. Until that happens, the durable candidate remains `Discovered`
-with `ProtectedPath` and preview alone creates no cleanup session, claim,
-approval, schedule, or journal row. This establishes current-path disclosure
-and reviewed-plan lifecycle fencing. Connecting explicit native confirmation
-to the consuming task remains a separate release-gated change.
+The app-facing v28 boundary observes one fully admitted Rust-target review.
+Contract v31 adds exactly one consuming edge from that opaque object to the
+engine-owned task. Foreign engines are rejected without touching the child;
+once the owning FFI engine attempts start, the child cannot be inspected,
+released into reuse, or tried again even when an information read was already
+in flight or core later refuses admission. The start request has no path,
+identifier, timestamp, approval Boolean, callback, AI output, command, or
+retry token. Its opaque observer exposes only cancellation plus strictly
+validated path-free task state and durable session correlation. The generated
+Swift binding carries this transport, but `EngineService`, AppModel, and
+Explorer do not call it. Preview alone still creates no cleanup session,
+claim, approval, schedule, or journal row; connecting explicit native
+confirmation remains a separate release-gated change.
 
 Arbitrary-path advanced permanent removal is excluded from the first production
 authority graph. Adding it later requires a separate threat model and revision
@@ -2949,11 +2964,11 @@ coverage is labelled as Home-scoped and unknown coverage stays unknown.
 | Protected-root registry | Implemented text-only policy; Unix/macOS current-account home discovery is code-owned and fail-closed (OS account database, UID ambiguity, no-follow identity, owner check); Windows construction remains unavailable | Trusted OS profile/mount/firmlink evidence and stable rule grants |
 | Dangerous-path corpus and fuzzing | Implemented | Keep cross-platform and promote every crash regression |
 | Rule schema/loader | Strict schema plus a build-time digest/policy-gated and strict load-time-validated discovery catalog; nine rules remain selected-root RevealOnly observations, while independently researched `developer.rust.target` and `developer.python.pycache` revision 2 require exact snapshot marker evidence and propose only SafeRegenerable/RemoveKnownRegenerableContents. Every rule is unschedulable and every result remains blocked by `ProtectedPath`. Sealed Unix-only live and Cargo-resolution witnesses verify the exact Rust tag, manifest digest, current default layout, and scrubbed-context Cargo workspace/target result; Python live-writer and relocation authority remains open. macOS additionally has explicit revisioned same-store direct-Cargo enrollment, a contract-v27 one-preview native enrollment surface, bounded policy-3 positive config/include byte closure and ordered Cargo trace intent, descriptor-retained metadata cwd, static-code evidence, suspended selected-running-code attestation, complete executable/config/manifest ancestry APFS fences, a guarded two-pass reported root/member-manifest closure, a policy-1 closed accepted path-dependency graph, stale-preview rejection, revocation tombstones, and post-publication retention/revalidation of every Cargo read-set fence and enrolled version, still without clearing that blocker | Developer ID signing must cover catalog bytes; before either safe rule can lose its blocker, complete its marker/read-set and namespace provenance, review the documented conservative path-dependency compatibility and path-intent/path-based/same-UID launch limits, prove authoritative volume/protected-root grants, add process/descendant/change guards, and complete adversarial review |
-| Candidate and cleanup-plan records | Completed fresh scans create deterministic, snapshot-bound durable candidate batches; exact-scan summaries plus bounded lossless path/evidence pages and semantic review commands remain non-authoritative history. A crate-private planner module seals an exact current-evaluator/current-catalog source to a retained snapshot and live Rust-target/Cargo witnesses. One private Rust-target authority chain constructs and approves an exact permanent-safe plan and atomically claims its durable candidate while preserving the sole `ProtectedPath` history fact; an insertion-only typed coupling, schema-v12 exact active-claim seal, complete immutable-body/blocker comparison, and rule-specific policy checks prevent generic blocked candidates from borrowing that path. Contract v28 retains the real reviewed plan behind an opaque child whose FFI operations remain immutable `info` and consuming release. The owning Rust engine can now consume that exact capability into its serialized task, but displayed fields and all FFI/Swift callers still cannot mint approval, journal metadata, paths, callbacks, scheduling, CLI, AI, or Trash authority | Add explicit FFI/native consuming approval transport and execution observation after release gates; keep the blocker exception rule-specific and non-forgeable |
+| Candidate and cleanup-plan records | Completed fresh scans create deterministic, snapshot-bound durable candidate batches; exact-scan summaries plus bounded lossless path/evidence pages and semantic review commands remain non-authoritative history. A crate-private planner module seals an exact current-evaluator/current-catalog source to a retained snapshot and live Rust-target/Cargo witnesses. One private Rust-target authority chain constructs and approves an exact permanent-safe plan and atomically claims its durable candidate while preserving the sole `ProtectedPath` history fact; an insertion-only typed coupling, schema-v12 exact active-claim seal, complete immutable-body/blocker comparison, and rule-specific policy checks prevent generic blocked candidates from borrowing that path. Contract v28 retains the real reviewed plan behind an opaque child; contract v31 can consume only that exact engine-bound child into the serialized task. Displayed fields still cannot mint approval, journal metadata, paths, callbacks, scheduling, CLI, AI, or Trash authority | Add explicit native confirmation and generation-fenced execution observation after release gates; keep the blocker exception rule-specific and non-forgeable |
 | macOS app cleanup | Confirmation-gated Explorer Trash is implemented; permanent-safe app cleanup is absent | Entire permanent-safe cleanup release gate in §17.3 |
 | Legacy CLI deletion | Active arbitrary-descendant permanent path routed through a temporary core adapter; strict-target/volume/identity rechecks only; scanned-byte estimates labeled in CLI | Replace adapter with reviewed plan/approval/executor chain without weakening current checks |
-| Centralized executor | A private production-core Rust-target driver and typed admission/journal/revalidation chain exist behind an engine-owned `PermanentSafeCleanup` task. The task consumes only the exact opaque review, mints all approval/session inputs inside Rust, serializes with Trash, returns path-free results, and quarantines unresolved claim/effect capabilities. Its capacity sampler derives only from the approved plan's unanimous trusted kernel mount scope, rechecks macOS `statfs` identity/location/type, and brackets real effect time; missing telemetry remains unknown. No FFI/app caller can start the task, and the separately confirmed Explorer Trash route and temporary legacy CLI adapter cannot nominate its driver inputs | Native consuming approval transport, generation-fenced execution observation, release gates, and removal of the legacy adapter boundary |
-| Engine/FFI task and plan API | Core handle, pre-worker catalog/SQLite/snapshot compatibility handshake, bounded per-session registry, read-only formatting, durable full-scan plus deterministic candidate-evaluation tasks, and an engine-owned consume-once permanent-safe Rust-target cleanup task are implemented alongside the bounded history/detail/maintenance/settings APIs. Permanent-safe admission returns an unconsumed review on foreign-engine, closed, full, busy, or quarantined refusal; acceptance consumes/approves the child synchronously after final parent/expiry checks, accepted queued cancellation creates no journal, the worker owns session/journal/effect metadata, one cleanup reservation also fences synchronous Trash, and only path-free terminal results/failures enter task state. Ambiguous owner claim, post-claim admission, and post-effect settlement capabilities are retained in process-lifetime physical-store quarantine and can never repeat a platform effect. Scan admission and maintenance retain their existing overlap, schema, idle, and cancellation fences. UniFFI v28 still exposes only the Rust-target reviewed-plan observation and release: the consuming task, cancellation, and result accessor are Rust-only at this checkpoint | Explicit native approval/execution transport, priority, cross-process scan leasing, and release-gated product cleanup remain later |
+| Centralized executor | A private production-core Rust-target driver and typed admission/journal/revalidation chain exist behind an engine-owned `PermanentSafeCleanup` task. The task consumes only the exact opaque review, mints all approval/session inputs inside Rust, serializes with Trash, returns path-free results, and quarantines unresolved claim/effect capabilities. Its capacity sampler derives only from the approved plan's unanimous trusted kernel mount scope, rechecks macOS `statfs` identity/location/type, and brackets real effect time; missing telemetry remains unknown. UniFFI v31 can start this task only by irreversibly consuming the exact engine-bound opaque review; the separately confirmed Explorer Trash route and temporary legacy CLI adapter cannot nominate its driver inputs. The shipped native service/UI has no permanent-safe start action | Native confirmation, generation-fenced execution observation, release gates, and removal of the legacy adapter boundary |
+| Engine/FFI task and plan API | Core handle, pre-worker catalog/SQLite/snapshot compatibility handshake, bounded per-session registry, read-only formatting, durable full-scan plus deterministic candidate-evaluation tasks, and an engine-owned consume-once permanent-safe Rust-target cleanup task are implemented alongside the bounded history/detail/maintenance/settings APIs. Permanent-safe admission returns an unconsumed review on core foreign-engine, closed, full, busy, or quarantined refusal; FFI rejects a foreign object without touching it but makes every owning-engine attempt one-shot before core revalidation. Acceptance consumes/approves the child synchronously after final parent/expiry checks, accepted queued cancellation creates no journal, the worker owns session/journal/effect metadata, one cleanup reservation also fences synchronous Trash, and only path-free terminal results/failures enter task state. Ambiguous owner claim, post-claim admission, and post-effect settlement capabilities are retained in process-lifetime physical-store quarantine and can never repeat a platform effect. Scan admission and maintenance retain their existing overlap, schema, idle, and cancellation fences. UniFFI v31 exposes the opaque review-to-task transition, explicit cancellation, and strictly validated path-free polling; generated Swift carries the types, but the native service/UI does not call them | Explicit native confirmation/execution orchestration, priority, cross-process scan leasing, and release-gated product cleanup remain later |
 | Global permanent-cleanup FFI switch | UniFFI contract v22 exposes only the revisioned enabled/default-or-stored observation and typed get/set/reset failures; the switch remains deny-only and cannot carry a path, plan, approval, callback, or executor input. Generated bindings are refreshed from the universal Debug XCFramework; Swift EngineService/AppModel/settings control maps every typed error, rejects malformed shapes, generation-fences work, and requires exact confirmation before re-enable/reset | The separate path-bearing exclusion boundary |
 | User cleanup exclusions | UniFFI contract v23 exposes a bounded lossless path-byte observation and replacement/reset operations with explicit source, revision, timestamp, and changed state. Rust validates absolute lexical prefixes, encoding, count, size, canonical order, storage races, and the shared cleanup exclusion lock; Swift treats returned bytes as display-only observations, allows adding a local prefix, and requires explicit confirmation before weakening protection by removing one or resetting all. No path is accepted as a plan, approval, callback, or executor input | Future planner/executor lifecycle and richer review presentation |
 | Candidate review intent and detail | UniFFI contract v26, Swift EngineService, and the native Explorer Candidates view expose four fixed scan-bound commands (`Select`, `ClearSelection`, `Dismiss`, `Restore`) plus bounded summary, historical path, and deterministic evidence pages. Rust revalidates the complete candidate/source binding and persists semantic review transitions transactionally; FFI and Swift independently enforce per-path and 24 MiB aggregate-page budgets, while Swift validates record version, exact scan/candidate IDs, immutable body, cursor/count/total shape, and generation before presentation. Contract v28 adds one current Rust-target plan observation through an opaque child; the adapter independently checks the complete one-item permanent-safe shape, byte-exact current-target projection, ordered warnings, and short expiry. Controller/browser ownership refreshes the immutable child, releases it before its parent, and generation-fences candidate, snapshot, mode, cancellation, expiry, and shutdown. The accessible preview has only prepare/check-again/close controls and explicit no-approval/no-effect disclosure | Explicit approval, changed-since-plan product orchestration, and every cleanup effect remain separately gated |

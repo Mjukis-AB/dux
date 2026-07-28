@@ -60,6 +60,9 @@ use dux_core::engine::{
     PermanentCleanupPolicyError as CorePermanentCleanupPolicyError,
     PermanentCleanupPolicySource as CorePermanentCleanupPolicySource,
     PermanentCleanupPolicyUpdate as CorePermanentCleanupPolicyUpdate,
+    PermanentSafeCleanupFailureKind as CorePermanentSafeCleanupFailureKind,
+    RustTargetCleanupError as CoreRustTargetCleanupError,
+    RustTargetCleanupResult as CoreRustTargetCleanupResult,
     RustTargetPlanReview as CoreRustTargetPlanReview,
     RustTargetPlanReviewError as CoreRustTargetPlanReviewError,
     RustTargetPlanReviewInfo as CoreRustTargetPlanReviewInfo,
@@ -105,7 +108,7 @@ use dux_core::{
     VolumeCapacity, VolumeId,
 };
 
-const FFI_CONTRACT_VERSION: u32 = 30;
+const FFI_CONTRACT_VERSION: u32 = 31;
 const FFI_RECORD_VERSION: u32 = 1;
 const SNAPSHOT_NODE_RECORD_VERSION: u32 = 2;
 const SCAN_EVENT_PAGE_LIMIT: u16 = 64;
@@ -1367,6 +1370,100 @@ pub enum RustTargetPlanReviewError {
     InternalState,
 }
 
+/// Path-free terminal observation for one exact reviewed Rust-target cleanup.
+/// The session identifier is correlation for durable history only and cannot
+/// authorize, resume, or retry an effect.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct RustTargetCleanupResult {
+    pub record_version: u32,
+    pub session_id: String,
+    pub status: CleanupSessionStatus,
+    pub removed_entries: u64,
+    pub removed_logical_bytes: u64,
+    pub verified_capacity_delta_bytes: Option<i64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum RustTargetCleanupTaskFailure {
+    ParentReviewUnavailable,
+    ReviewExpired,
+    ChangedDuringReview,
+    BudgetExceeded,
+    Busy,
+    UnsafeStorage,
+    IncompatibleSchema,
+    CorruptData,
+    OutcomeUnknown,
+    Unavailable,
+    InternalState,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct RustTargetCleanupPoll {
+    pub record_version: u32,
+    pub phase: TaskPhase,
+    pub cancellation_requested: bool,
+    pub revision: u64,
+    pub failure: Option<RustTargetCleanupTaskFailure>,
+    pub result: Option<RustTargetCleanupResult>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum RustTargetCleanupCancelOutcome {
+    CancelledBeforeStart,
+    Requested,
+    AlreadyRequested,
+    AlreadyTerminal,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error, uniffi::Error)]
+pub enum RustTargetCleanupStartError {
+    #[error("the engine session is closed")]
+    Closed,
+    #[error("the supplied plan review belongs to another engine")]
+    WrongEngine,
+    #[error("the exact Rust-target plan review is no longer available")]
+    ReviewUnavailable,
+    #[error("the exact parent snapshot review is released or expired")]
+    ParentReviewUnavailable,
+    #[error("the exact Rust-target plan review expired")]
+    ReviewExpired,
+    #[error("the Rust-target plan evidence changed before execution")]
+    ChangedDuringReview,
+    #[error("cleanup was cancelled before durable execution began")]
+    CancelledBeforeStart,
+    #[error("the cleanup operation exceeded its bounded resource budget")]
+    BudgetExceeded,
+    #[error("the engine task queue is full")]
+    QueueFull,
+    #[error("another cleanup operation is active")]
+    Busy,
+    #[error("the cleanup store is unsafe")]
+    UnsafeStorage,
+    #[error("the cleanup schema is incompatible")]
+    IncompatibleSchema,
+    #[error("the cleanup journal is corrupt")]
+    CorruptData,
+    #[error("the cleanup operation outcome is unknown")]
+    OutcomeUnknown,
+    #[error("the cleanup operation is unavailable")]
+    Unavailable,
+    #[error("the cleanup state is internally unavailable")]
+    InternalState,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error, uniffi::Error)]
+pub enum RustTargetCleanupTaskError {
+    #[error("the engine session is closed")]
+    Closed,
+    #[error("the cleanup task is no longer available")]
+    TaskUnavailable,
+    #[error("the retained task is not a permanent-safe cleanup")]
+    WrongTaskKind,
+    #[error("the cleanup task state is internally unavailable")]
+    InternalState,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct CandidateSummary {
     pub record_version: u32,
@@ -2045,6 +2142,7 @@ enum RustTargetPlanReviewState {
     Available(Box<CoreRustTargetPlanReview>),
     Inspecting,
     ReleasePending,
+    Consumed,
     Released,
 }
 
@@ -2162,8 +2260,9 @@ impl Drop for RustTargetPlanPreparationGuard {
     }
 }
 
-/// Engine-bound, observation-only plan review. The retained core plan cannot
-/// be cloned, approved, persisted, or executed through this surface.
+/// Engine-bound, consume-once reviewed-plan capability. Information remains a
+/// display observation; only the owning `DuxEngine` can irreversibly consume
+/// the retained core plan into its fixed permanent-safe cleanup task.
 #[derive(uniffi::Object)]
 pub struct RustTargetPlanReviewSession {
     state: Mutex<RustTargetPlanReviewState>,
@@ -2211,7 +2310,10 @@ impl RustTargetPlanReviewSession {
             .state
             .lock()
             .map_err(|_| RustTargetPlanReviewError::InternalState)?;
-        let release_pending = matches!(*state, RustTargetPlanReviewState::ReleasePending);
+        let release_pending = matches!(
+            *state,
+            RustTargetPlanReviewState::ReleasePending | RustTargetPlanReviewState::Consumed
+        );
         let should_release = closed
             || release_pending
             || is_terminal_plan_review_result(&observation)
@@ -2301,9 +2403,9 @@ impl RustTargetPlanReviewSession {
                 Ok(false)
             }
             RustTargetPlanReviewState::Inspecting => Ok(true),
-            RustTargetPlanReviewState::ReleasePending | RustTargetPlanReviewState::Released => {
-                Ok(false)
-            }
+            RustTargetPlanReviewState::ReleasePending
+            | RustTargetPlanReviewState::Consumed
+            | RustTargetPlanReviewState::Released => Ok(false),
         }
     }
 
@@ -2316,6 +2418,37 @@ impl RustTargetPlanReviewSession {
             *state,
             RustTargetPlanReviewState::Available(_) | RustTargetPlanReviewState::Inspecting
         ))
+    }
+
+    /// Irreversibly consume this FFI review for one correct-engine cleanup
+    /// start attempt. If an information read already owns the core review, the
+    /// pending transition makes that read release it instead of restoring it.
+    fn take_for_cleanup_start(
+        &self,
+    ) -> Result<Box<CoreRustTargetPlanReview>, RustTargetCleanupStartError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| RustTargetCleanupStartError::InternalState)?;
+        match &*state {
+            RustTargetPlanReviewState::Available(_) => {
+                let RustTargetPlanReviewState::Available(review) =
+                    std::mem::replace(&mut *state, RustTargetPlanReviewState::Consumed)
+                else {
+                    unreachable!("available state was just matched")
+                };
+                Ok(review)
+            }
+            RustTargetPlanReviewState::Inspecting => {
+                *state = RustTargetPlanReviewState::ReleasePending;
+                Err(RustTargetCleanupStartError::ReviewUnavailable)
+            }
+            RustTargetPlanReviewState::ReleasePending
+            | RustTargetPlanReviewState::Consumed
+            | RustTargetPlanReviewState::Released => {
+                Err(RustTargetCleanupStartError::ReviewUnavailable)
+            }
+        }
     }
 
     fn release_inner(
@@ -2350,7 +2483,9 @@ impl RustTargetPlanReviewSession {
                 *state = RustTargetPlanReviewState::ReleasePending;
                 Ok((RustTargetPlanReviewReleaseOutcome::Released, None))
             }
-            RustTargetPlanReviewState::ReleasePending | RustTargetPlanReviewState::Released => {
+            RustTargetPlanReviewState::ReleasePending
+            | RustTargetPlanReviewState::Consumed
+            | RustTargetPlanReviewState::Released => {
                 Ok((RustTargetPlanReviewReleaseOutcome::AlreadyUnavailable, None))
             }
         }
@@ -3091,6 +3226,58 @@ impl ScanTask {
     }
 }
 
+/// Opaque observer for one engine-owned permanent-safe cleanup task. Dropping
+/// this object does not cancel the task; explicit cancellation or engine
+/// shutdown are the only cancellation routes.
+#[derive(uniffi::Object)]
+pub struct RustTargetCleanupTask {
+    engine: EngineHandle,
+    id: TaskId,
+}
+
+#[uniffi::export]
+impl RustTargetCleanupTask {
+    pub fn poll(&self) -> Result<RustTargetCleanupPoll, RustTargetCleanupTaskError> {
+        let snapshot = self
+            .engine
+            .task_snapshot(self.id)
+            .map_err(map_rust_target_cleanup_task_access_error)?;
+        if snapshot.kind != CoreTaskKind::PermanentSafeCleanup {
+            return Err(RustTargetCleanupTaskError::WrongTaskKind);
+        }
+        let result = if snapshot.result_available {
+            self.engine
+                .permanent_safe_cleanup_result(self.id)
+                .map_err(map_rust_target_cleanup_task_access_error)?
+                .map(|result| project_rust_target_cleanup_result(&result))
+                .transpose()?
+        } else {
+            None
+        };
+        let failure = snapshot
+            .failure
+            .map(map_rust_target_cleanup_task_failure)
+            .transpose()?;
+        validate_rust_target_cleanup_poll_shape(snapshot.phase, failure, result.as_ref())?;
+        Ok(RustTargetCleanupPoll {
+            record_version: FFI_RECORD_VERSION,
+            phase: map_phase(snapshot.phase),
+            cancellation_requested: snapshot.cancellation_requested,
+            revision: snapshot.revision,
+            failure,
+            result,
+        })
+    }
+
+    pub fn cancel(&self) -> Result<RustTargetCleanupCancelOutcome, RustTargetCleanupTaskError> {
+        let outcome = self
+            .engine
+            .cancel_task(self.id)
+            .map_err(map_rust_target_cleanup_task_access_error)?;
+        Ok(map_rust_target_cleanup_cancel_outcome(outcome))
+    }
+}
+
 #[derive(uniffi::Object)]
 pub struct MaintenanceTask {
     engine: EngineHandle,
@@ -3522,6 +3709,24 @@ impl DuxEngine {
         self.register_rust_target_plan_review(review, &parent_review)
     }
 
+    /// Irreversibly consume one exact, engine-bound reviewed plan and start
+    /// core's permanent-safe task. This is the only FFI approval edge: no
+    /// caller path, identifier, timestamp, Boolean, callback, or retry token
+    /// participates in execution admission.
+    pub fn start_permanent_safe_cleanup(
+        &self,
+        review: Arc<RustTargetPlanReviewSession>,
+    ) -> Result<Arc<RustTargetCleanupTask>, RustTargetCleanupStartError> {
+        self.start_permanent_safe_cleanup_with(review, |engine, review| {
+            engine
+                .start_permanent_safe_cleanup(review)
+                .map_err(|failure| {
+                    let error = failure.error();
+                    (error, Box::new(failure.into_review()))
+                })
+        })
+    }
+
     pub fn start_scan(&self, request: ScanRequest) -> Result<ScanStart, ScanError> {
         if request.record_version != FFI_RECORD_VERSION {
             return Err(ScanError::InvalidRecordVersion);
@@ -3927,6 +4132,46 @@ impl DuxEngine {
 }
 
 impl DuxEngine {
+    fn start_permanent_safe_cleanup_with(
+        &self,
+        review: Arc<RustTargetPlanReviewSession>,
+        start: impl FnOnce(
+            &EngineHandle,
+            CoreRustTargetPlanReview,
+        ) -> Result<
+            TaskId,
+            (CoreRustTargetCleanupError, Box<CoreRustTargetPlanReview>),
+        >,
+    ) -> Result<Arc<RustTargetCleanupTask>, RustTargetCleanupStartError> {
+        if !Arc::ptr_eq(&review.engine_closed, &self.closed) {
+            return Err(RustTargetCleanupStartError::WrongEngine);
+        }
+        let _operation = self
+            .rust_target_plan_preparations
+            .enter_operation(&self.closed)
+            .map_err(map_plan_operation_to_cleanup_start_error)?;
+        let engine = {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| RustTargetCleanupStartError::InternalState)?;
+            match &*state {
+                EngineState::Open(engine) => engine.clone(),
+                EngineState::Closing | EngineState::Closed { .. } => {
+                    return Err(RustTargetCleanupStartError::Closed);
+                }
+            }
+        };
+        let core_review = *review.take_for_cleanup_start()?;
+        match start(&engine, core_review) {
+            Ok(id) => Ok(Arc::new(RustTargetCleanupTask { engine, id })),
+            Err((error, review)) => {
+                (*review).release();
+                Err(map_rust_target_cleanup_start_error(error))
+            }
+        }
+    }
+
     fn schedule_background_close(&self) {
         if self.background_close_started.swap(true, Ordering::AcqRel) {
             return;
@@ -5319,6 +5564,224 @@ fn map_candidate_history_error(error: CoreCandidateHistoryError) -> EngineError 
         CoreCandidateHistoryError::Unavailable => EngineError::StorageUnavailable,
         CoreCandidateHistoryError::InternalState => EngineError::InternalState,
         _ => EngineError::InternalState,
+    }
+}
+
+fn project_rust_target_cleanup_result(
+    result: &CoreRustTargetCleanupResult,
+) -> Result<RustTargetCleanupResult, RustTargetCleanupTaskError> {
+    let session_id = result.session_id().as_str();
+    if !is_rust_target_cleanup_session_id(session_id) {
+        return Err(RustTargetCleanupTaskError::InternalState);
+    }
+    let status = map_cleanup_session_status(result.status())
+        .map_err(|_| RustTargetCleanupTaskError::InternalState)?;
+    let projected = RustTargetCleanupResult {
+        record_version: FFI_RECORD_VERSION,
+        session_id: session_id.to_owned(),
+        status,
+        removed_entries: result.removed_entries(),
+        removed_logical_bytes: result.removed_logical_bytes(),
+        verified_capacity_delta_bytes: result.verified_capacity_delta_bytes(),
+    };
+    validate_rust_target_cleanup_result(&projected)?;
+    Ok(projected)
+}
+
+fn is_rust_target_cleanup_session_id(value: &str) -> bool {
+    const PREFIX: &str = "cleanup:rust-target:";
+    value.len() <= MAX_CLEANUP_HISTORY_SESSION_ID_BYTES
+        && value.strip_prefix(PREFIX).is_some_and(|suffix| {
+            suffix.len() == 32
+                && suffix
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+}
+
+fn validate_rust_target_cleanup_result(
+    result: &RustTargetCleanupResult,
+) -> Result<(), RustTargetCleanupTaskError> {
+    if result.record_version != FFI_RECORD_VERSION
+        || !is_rust_target_cleanup_session_id(&result.session_id)
+        || (result.status == CleanupSessionStatus::Recovering
+            && (result.removed_entries != 0
+                || result.removed_logical_bytes != 0
+                || result.verified_capacity_delta_bytes.is_some()))
+    {
+        return Err(RustTargetCleanupTaskError::InternalState);
+    }
+    Ok(())
+}
+
+fn validate_rust_target_cleanup_poll_shape(
+    phase: CoreTaskPhase,
+    failure: Option<RustTargetCleanupTaskFailure>,
+    result: Option<&RustTargetCleanupResult>,
+) -> Result<(), RustTargetCleanupTaskError> {
+    if let Some(result) = result {
+        validate_rust_target_cleanup_result(result)?;
+    }
+    let valid = match phase {
+        CoreTaskPhase::Queued | CoreTaskPhase::Running => failure.is_none() && result.is_none(),
+        CoreTaskPhase::Succeeded => {
+            failure.is_none()
+                && result.is_some_and(|result| {
+                    matches!(
+                        result.status,
+                        CleanupSessionStatus::Completed
+                            | CleanupSessionStatus::PartiallyCompleted
+                            | CleanupSessionStatus::Failed
+                            | CleanupSessionStatus::Interrupted
+                            | CleanupSessionStatus::Rejected
+                    )
+                })
+        }
+        CoreTaskPhase::Cancelled => {
+            failure.is_none()
+                && result.is_none_or(|result| result.status == CleanupSessionStatus::Cancelled)
+        }
+        CoreTaskPhase::Failed => match failure {
+            Some(RustTargetCleanupTaskFailure::OutcomeUnknown) => {
+                result.is_none_or(|result| result.status == CleanupSessionStatus::Recovering)
+            }
+            Some(_) => result.is_none(),
+            None => false,
+        },
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(RustTargetCleanupTaskError::InternalState)
+    }
+}
+
+fn map_rust_target_cleanup_task_failure(
+    failure: TaskFailureKind,
+) -> Result<RustTargetCleanupTaskFailure, RustTargetCleanupTaskError> {
+    let TaskFailureKind::PermanentSafeCleanup(failure) = failure else {
+        return Err(RustTargetCleanupTaskError::InternalState);
+    };
+    Ok(match failure {
+        CorePermanentSafeCleanupFailureKind::ParentReviewUnavailable => {
+            RustTargetCleanupTaskFailure::ParentReviewUnavailable
+        }
+        CorePermanentSafeCleanupFailureKind::ReviewExpired => {
+            RustTargetCleanupTaskFailure::ReviewExpired
+        }
+        CorePermanentSafeCleanupFailureKind::ChangedDuringReview => {
+            RustTargetCleanupTaskFailure::ChangedDuringReview
+        }
+        CorePermanentSafeCleanupFailureKind::BudgetExceeded => {
+            RustTargetCleanupTaskFailure::BudgetExceeded
+        }
+        CorePermanentSafeCleanupFailureKind::Busy => RustTargetCleanupTaskFailure::Busy,
+        CorePermanentSafeCleanupFailureKind::UnsafeStorage => {
+            RustTargetCleanupTaskFailure::UnsafeStorage
+        }
+        CorePermanentSafeCleanupFailureKind::IncompatibleSchema => {
+            RustTargetCleanupTaskFailure::IncompatibleSchema
+        }
+        CorePermanentSafeCleanupFailureKind::CorruptData => {
+            RustTargetCleanupTaskFailure::CorruptData
+        }
+        CorePermanentSafeCleanupFailureKind::OutcomeUnknown => {
+            RustTargetCleanupTaskFailure::OutcomeUnknown
+        }
+        CorePermanentSafeCleanupFailureKind::Unavailable => {
+            RustTargetCleanupTaskFailure::Unavailable
+        }
+        CorePermanentSafeCleanupFailureKind::InternalState => {
+            RustTargetCleanupTaskFailure::InternalState
+        }
+        _ => RustTargetCleanupTaskFailure::InternalState,
+    })
+}
+
+const fn map_rust_target_cleanup_start_error(
+    error: CoreRustTargetCleanupError,
+) -> RustTargetCleanupStartError {
+    match error {
+        CoreRustTargetCleanupError::Closed => RustTargetCleanupStartError::Closed,
+        CoreRustTargetCleanupError::WrongEngine => RustTargetCleanupStartError::WrongEngine,
+        CoreRustTargetCleanupError::ParentReviewUnavailable => {
+            RustTargetCleanupStartError::ParentReviewUnavailable
+        }
+        CoreRustTargetCleanupError::ReviewExpired => RustTargetCleanupStartError::ReviewExpired,
+        CoreRustTargetCleanupError::ChangedDuringReview => {
+            RustTargetCleanupStartError::ChangedDuringReview
+        }
+        CoreRustTargetCleanupError::CancelledBeforeStart => {
+            RustTargetCleanupStartError::CancelledBeforeStart
+        }
+        CoreRustTargetCleanupError::BudgetExceeded => RustTargetCleanupStartError::BudgetExceeded,
+        CoreRustTargetCleanupError::QueueFull => RustTargetCleanupStartError::QueueFull,
+        CoreRustTargetCleanupError::Busy => RustTargetCleanupStartError::Busy,
+        CoreRustTargetCleanupError::UnsafeStorage => RustTargetCleanupStartError::UnsafeStorage,
+        CoreRustTargetCleanupError::IncompatibleSchema => {
+            RustTargetCleanupStartError::IncompatibleSchema
+        }
+        CoreRustTargetCleanupError::CorruptData => RustTargetCleanupStartError::CorruptData,
+        CoreRustTargetCleanupError::OutcomeUnknown => RustTargetCleanupStartError::OutcomeUnknown,
+        CoreRustTargetCleanupError::Unavailable => RustTargetCleanupStartError::Unavailable,
+        CoreRustTargetCleanupError::InternalState => RustTargetCleanupStartError::InternalState,
+    }
+}
+
+const fn map_plan_operation_to_cleanup_start_error(
+    error: RustTargetPlanReviewError,
+) -> RustTargetCleanupStartError {
+    match error {
+        RustTargetPlanReviewError::Closed => RustTargetCleanupStartError::Closed,
+        RustTargetPlanReviewError::WrongEngine => RustTargetCleanupStartError::WrongEngine,
+        RustTargetPlanReviewError::ParentReviewUnavailable => {
+            RustTargetCleanupStartError::ParentReviewUnavailable
+        }
+        RustTargetPlanReviewError::ReviewExpired => RustTargetCleanupStartError::ReviewExpired,
+        RustTargetPlanReviewError::ChangedDuringReview
+        | RustTargetPlanReviewError::CandidateUnavailable
+        | RustTargetPlanReviewError::CargoNotEnrolled
+        | RustTargetPlanReviewError::ActiveProcesses => {
+            RustTargetCleanupStartError::ChangedDuringReview
+        }
+        RustTargetPlanReviewError::BudgetExceeded => RustTargetCleanupStartError::BudgetExceeded,
+        RustTargetPlanReviewError::Busy | RustTargetPlanReviewError::ReviewBusy => {
+            RustTargetCleanupStartError::Busy
+        }
+        RustTargetPlanReviewError::UnsafeStorage => RustTargetCleanupStartError::UnsafeStorage,
+        RustTargetPlanReviewError::CorruptData => RustTargetCleanupStartError::CorruptData,
+        RustTargetPlanReviewError::UnsupportedPlatform | RustTargetPlanReviewError::Unavailable => {
+            RustTargetCleanupStartError::Unavailable
+        }
+        RustTargetPlanReviewError::ReviewUnavailable => {
+            RustTargetCleanupStartError::ReviewUnavailable
+        }
+        RustTargetPlanReviewError::InvalidRecordVersion
+        | RustTargetPlanReviewError::InternalState => RustTargetCleanupStartError::InternalState,
+    }
+}
+
+fn map_rust_target_cleanup_task_access_error(error: TaskAccessError) -> RustTargetCleanupTaskError {
+    match error {
+        TaskAccessError::Closed => RustTargetCleanupTaskError::Closed,
+        TaskAccessError::UnknownTask => RustTargetCleanupTaskError::TaskUnavailable,
+        TaskAccessError::WrongTaskKind => RustTargetCleanupTaskError::WrongTaskKind,
+        TaskAccessError::InvalidEventLimit { .. }
+        | TaskAccessError::InvalidEventCursor
+        | TaskAccessError::InternalState => RustTargetCleanupTaskError::InternalState,
+    }
+}
+
+const fn map_rust_target_cleanup_cancel_outcome(
+    outcome: CoreCancelOutcome,
+) -> RustTargetCleanupCancelOutcome {
+    match outcome {
+        CoreCancelOutcome::CancelledBeforeStart => {
+            RustTargetCleanupCancelOutcome::CancelledBeforeStart
+        }
+        CoreCancelOutcome::Requested => RustTargetCleanupCancelOutcome::Requested,
+        CoreCancelOutcome::AlreadyRequested => RustTargetCleanupCancelOutcome::AlreadyRequested,
+        CoreCancelOutcome::AlreadyTerminal => RustTargetCleanupCancelOutcome::AlreadyTerminal,
     }
 }
 
@@ -7705,7 +8168,11 @@ mod tests {
         std::fs::write(root.join("reviewed.bin"), b"reviewed").unwrap();
         let scan = engine.start_scan(scan_request(&root)).unwrap();
         let terminal = wait_for_scan(&scan.task);
-        assert_eq!(terminal.phase, TaskPhase::Succeeded);
+        assert_eq!(
+            terminal.phase,
+            TaskPhase::Succeeded,
+            "unexpected cleanup terminal state: {terminal:?}"
+        );
         let scan_id = terminal.result.unwrap().scan_id;
         let review = engine.acquire_explorer_snapshot_review(scan_id).unwrap();
         let root_node = review.root_node().unwrap();
@@ -7760,10 +8227,10 @@ mod tests {
     }
 
     #[test]
-    fn reports_contract_thirty_and_preserves_legacy_formatting() {
+    fn reports_contract_thirty_one_and_preserves_legacy_formatting() {
         let _guard = ENGINE_TEST_LOCK.lock().unwrap();
         let (_temp, engine) = engine();
-        assert_eq!(library_version().ffi_contract_version, 30);
+        assert_eq!(library_version().ffi_contract_version, 31);
         assert_eq!(engine.library_version().unwrap(), library_version());
         assert_eq!(engine.format_size(1536).unwrap().display, "1.5 KB");
         assert!(engine.close());
@@ -7831,6 +8298,279 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(1));
         drop(operation);
         assert!(tracker.wait_until(Instant::now() + Duration::from_secs(1)));
+    }
+
+    fn cleanup_result_for_test(
+        status: CleanupSessionStatus,
+        removed_entries: u64,
+        removed_logical_bytes: u64,
+        verified_capacity_delta_bytes: Option<i64>,
+    ) -> RustTargetCleanupResult {
+        RustTargetCleanupResult {
+            record_version: FFI_RECORD_VERSION,
+            session_id: "cleanup:rust-target:0123456789abcdef0123456789abcdef".to_owned(),
+            status,
+            removed_entries,
+            removed_logical_bytes,
+            verified_capacity_delta_bytes,
+        }
+    }
+
+    #[test]
+    fn rust_target_cleanup_poll_shapes_and_correlation_are_fail_closed() {
+        let completed = cleanup_result_for_test(CleanupSessionStatus::Completed, 2, 42, Some(9));
+        let cancelled = cleanup_result_for_test(CleanupSessionStatus::Cancelled, 1, 7, None);
+        let recovering = cleanup_result_for_test(CleanupSessionStatus::Recovering, 0, 0, None);
+        for (phase, failure, result) in [
+            (CoreTaskPhase::Queued, None, None),
+            (CoreTaskPhase::Running, None, None),
+            (CoreTaskPhase::Succeeded, None, Some(&completed)),
+            (CoreTaskPhase::Cancelled, None, None),
+            (CoreTaskPhase::Cancelled, None, Some(&cancelled)),
+            (
+                CoreTaskPhase::Failed,
+                Some(RustTargetCleanupTaskFailure::OutcomeUnknown),
+                None,
+            ),
+            (
+                CoreTaskPhase::Failed,
+                Some(RustTargetCleanupTaskFailure::OutcomeUnknown),
+                Some(&recovering),
+            ),
+            (
+                CoreTaskPhase::Failed,
+                Some(RustTargetCleanupTaskFailure::Busy),
+                None,
+            ),
+        ] {
+            assert!(
+                validate_rust_target_cleanup_poll_shape(phase, failure, result).is_ok(),
+                "expected valid shape for {phase:?}"
+            );
+        }
+
+        for (phase, failure, result) in [
+            (CoreTaskPhase::Succeeded, None, None),
+            (CoreTaskPhase::Succeeded, None, Some(&cancelled)),
+            (CoreTaskPhase::Failed, None, None),
+            (
+                CoreTaskPhase::Failed,
+                Some(RustTargetCleanupTaskFailure::Busy),
+                Some(&completed),
+            ),
+            (CoreTaskPhase::Cancelled, None, Some(&completed)),
+            (
+                CoreTaskPhase::Running,
+                Some(RustTargetCleanupTaskFailure::Busy),
+                None,
+            ),
+        ] {
+            assert_eq!(
+                validate_rust_target_cleanup_poll_shape(phase, failure, result),
+                Err(RustTargetCleanupTaskError::InternalState)
+            );
+        }
+
+        let malformed_recovering =
+            cleanup_result_for_test(CleanupSessionStatus::Recovering, 1, 0, None);
+        assert_eq!(
+            validate_rust_target_cleanup_result(&malformed_recovering),
+            Err(RustTargetCleanupTaskError::InternalState)
+        );
+        for invalid in [
+            "cleanup:rust-target:0123456789ABCDEF0123456789abcdef",
+            "cleanup:rust-target:0123456789abcdef",
+            "cleanup:rust-target:0123456789abcdef0123456789abcdeg",
+            "cleanup:other:0123456789abcdef0123456789abcdef",
+            "cleanup:rust-target:\u{0}123456789abcdef0123456789abcdef",
+        ] {
+            assert!(!is_rust_target_cleanup_session_id(invalid));
+        }
+    }
+
+    #[test]
+    fn rust_target_cleanup_failure_and_cancel_taxonomies_are_exact() {
+        use CorePermanentSafeCleanupFailureKind as CoreFailure;
+        for (core, expected) in [
+            (
+                CoreFailure::ParentReviewUnavailable,
+                RustTargetCleanupTaskFailure::ParentReviewUnavailable,
+            ),
+            (
+                CoreFailure::ReviewExpired,
+                RustTargetCleanupTaskFailure::ReviewExpired,
+            ),
+            (
+                CoreFailure::ChangedDuringReview,
+                RustTargetCleanupTaskFailure::ChangedDuringReview,
+            ),
+            (
+                CoreFailure::BudgetExceeded,
+                RustTargetCleanupTaskFailure::BudgetExceeded,
+            ),
+            (CoreFailure::Busy, RustTargetCleanupTaskFailure::Busy),
+            (
+                CoreFailure::UnsafeStorage,
+                RustTargetCleanupTaskFailure::UnsafeStorage,
+            ),
+            (
+                CoreFailure::IncompatibleSchema,
+                RustTargetCleanupTaskFailure::IncompatibleSchema,
+            ),
+            (
+                CoreFailure::CorruptData,
+                RustTargetCleanupTaskFailure::CorruptData,
+            ),
+            (
+                CoreFailure::OutcomeUnknown,
+                RustTargetCleanupTaskFailure::OutcomeUnknown,
+            ),
+            (
+                CoreFailure::Unavailable,
+                RustTargetCleanupTaskFailure::Unavailable,
+            ),
+            (
+                CoreFailure::InternalState,
+                RustTargetCleanupTaskFailure::InternalState,
+            ),
+        ] {
+            assert_eq!(
+                map_rust_target_cleanup_task_failure(TaskFailureKind::PermanentSafeCleanup(core))
+                    .unwrap(),
+                expected
+            );
+        }
+        assert_eq!(
+            map_rust_target_cleanup_task_failure(TaskFailureKind::InternalFailure),
+            Err(RustTargetCleanupTaskError::InternalState)
+        );
+        for (core, expected) in [
+            (
+                CoreCancelOutcome::CancelledBeforeStart,
+                RustTargetCleanupCancelOutcome::CancelledBeforeStart,
+            ),
+            (
+                CoreCancelOutcome::Requested,
+                RustTargetCleanupCancelOutcome::Requested,
+            ),
+            (
+                CoreCancelOutcome::AlreadyRequested,
+                RustTargetCleanupCancelOutcome::AlreadyRequested,
+            ),
+            (
+                CoreCancelOutcome::AlreadyTerminal,
+                RustTargetCleanupCancelOutcome::AlreadyTerminal,
+            ),
+        ] {
+            assert_eq!(map_rust_target_cleanup_cancel_outcome(core), expected);
+        }
+        for (core, expected) in [
+            (
+                CoreRustTargetCleanupError::Closed,
+                RustTargetCleanupStartError::Closed,
+            ),
+            (
+                CoreRustTargetCleanupError::WrongEngine,
+                RustTargetCleanupStartError::WrongEngine,
+            ),
+            (
+                CoreRustTargetCleanupError::ParentReviewUnavailable,
+                RustTargetCleanupStartError::ParentReviewUnavailable,
+            ),
+            (
+                CoreRustTargetCleanupError::ReviewExpired,
+                RustTargetCleanupStartError::ReviewExpired,
+            ),
+            (
+                CoreRustTargetCleanupError::ChangedDuringReview,
+                RustTargetCleanupStartError::ChangedDuringReview,
+            ),
+            (
+                CoreRustTargetCleanupError::CancelledBeforeStart,
+                RustTargetCleanupStartError::CancelledBeforeStart,
+            ),
+            (
+                CoreRustTargetCleanupError::BudgetExceeded,
+                RustTargetCleanupStartError::BudgetExceeded,
+            ),
+            (
+                CoreRustTargetCleanupError::QueueFull,
+                RustTargetCleanupStartError::QueueFull,
+            ),
+            (
+                CoreRustTargetCleanupError::Busy,
+                RustTargetCleanupStartError::Busy,
+            ),
+            (
+                CoreRustTargetCleanupError::UnsafeStorage,
+                RustTargetCleanupStartError::UnsafeStorage,
+            ),
+            (
+                CoreRustTargetCleanupError::IncompatibleSchema,
+                RustTargetCleanupStartError::IncompatibleSchema,
+            ),
+            (
+                CoreRustTargetCleanupError::CorruptData,
+                RustTargetCleanupStartError::CorruptData,
+            ),
+            (
+                CoreRustTargetCleanupError::OutcomeUnknown,
+                RustTargetCleanupStartError::OutcomeUnknown,
+            ),
+            (
+                CoreRustTargetCleanupError::Unavailable,
+                RustTargetCleanupStartError::Unavailable,
+            ),
+            (
+                CoreRustTargetCleanupError::InternalState,
+                RustTargetCleanupStartError::InternalState,
+            ),
+        ] {
+            assert_eq!(map_rust_target_cleanup_start_error(core), expected);
+        }
+    }
+
+    #[test]
+    fn rust_target_cleanup_start_losing_an_info_race_is_irreversible() {
+        let tracker = Arc::new(RustTargetPlanPreparationTracker::default());
+        let session = RustTargetPlanReviewSession {
+            state: Mutex::new(RustTargetPlanReviewState::Inspecting),
+            parent_review: Weak::new(),
+            operations: tracker,
+            engine_closed: Arc::new(AtomicBool::new(false)),
+        };
+        assert!(matches!(
+            session.take_for_cleanup_start(),
+            Err(RustTargetCleanupStartError::ReviewUnavailable)
+        ));
+        assert!(matches!(
+            *session.state.lock().unwrap(),
+            RustTargetPlanReviewState::ReleasePending
+        ));
+        assert_eq!(
+            session.release().unwrap(),
+            RustTargetPlanReviewReleaseOutcome::AlreadyUnavailable
+        );
+    }
+
+    #[test]
+    fn rust_target_cleanup_task_rejects_a_foreign_task_kind() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (temp, engine) = engine();
+        let root = temp.path().join("cleanup-wrong-kind");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("payload"), b"scan only").unwrap();
+        let scan = engine.start_scan(scan_request(&root)).unwrap();
+        let cleanup = RustTargetCleanupTask {
+            engine: scan.task.engine.clone(),
+            id: scan.task.id,
+        };
+        assert_eq!(
+            cleanup.poll(),
+            Err(RustTargetCleanupTaskError::WrongTaskKind)
+        );
+        let _ = wait_for_scan(&scan.task);
+        assert!(engine.close());
     }
 
     #[test]
@@ -8032,6 +8772,326 @@ mod tests {
             "direct stable Cargo must exist at {cargo:?}"
         );
         cargo
+    }
+
+    #[cfg(target_os = "macos")]
+    struct FfiRustTargetFixture {
+        _temp: TempDir,
+        engine: Arc<DuxEngine>,
+        parent: Arc<SnapshotReviewSession>,
+        review: Arc<RustTargetPlanReviewSession>,
+        candidate_id: String,
+        data_root: PathBuf,
+        target: PathBuf,
+        payload: PathBuf,
+        manifest: PathBuf,
+        lockfile: PathBuf,
+        source: PathBuf,
+    }
+
+    #[cfg(target_os = "macos")]
+    fn ffi_rust_target_fixture() -> FfiRustTargetFixture {
+        const CARGO_CACHE_TAG: &[u8] = b"Signature: 8a477f597d28d172789f06886806bc55\n\
+            # Cargo-generated cache directory\n";
+        let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+        let temp = tempfile::tempdir_in(home).unwrap();
+        let root = temp.path().join("scan-root");
+        let project = root.join("project");
+        let target = project.join("target");
+        let manifest = project.join("Cargo.toml");
+        let lockfile = project.join("Cargo.lock");
+        let source = project.join("src/lib.rs");
+        let payload = target.join("object");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(
+            &manifest,
+            b"[package]\nname = 'fixture'\nversion = '0.1.0'\nedition = '2021'\n\n[workspace]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &lockfile,
+            b"# This file is automatically @generated by Cargo.\n\
+              # It is not intended for manual editing.\n\
+              version = 4\n\
+              \n\
+              [[package]]\n\
+              name = \"fixture\"\n\
+              version = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(&source, b"pub fn fixture() {}\n").unwrap();
+        std::fs::write(target.join("CACHEDIR.TAG"), CARGO_CACHE_TAG).unwrap();
+        std::fs::write(&payload, b"temporary build output").unwrap();
+
+        let data_root = temp.path().join("data");
+        let engine = Arc::new(
+            DuxEngine::new(EngineStorageRoots {
+                data_root: data_root.to_string_lossy().into_owned(),
+                cache_root: temp.path().join("cache").to_string_lossy().into_owned(),
+            })
+            .unwrap(),
+        );
+        let cargo = direct_toolchain_cargo();
+        let enrollment = engine
+            .inspect_direct_cargo_enrollment(direct_cargo_request(&cargo))
+            .unwrap();
+        engine.commit_direct_cargo_enrollment(enrollment).unwrap();
+        let scan = engine.start_scan(scan_request(&root)).unwrap();
+        let terminal = wait_for_scan_with_timeout(&scan.task, Duration::from_secs(60));
+        assert_eq!(terminal.phase, TaskPhase::Succeeded);
+        let scan_id = terminal.result.unwrap().scan_id;
+        let parent = engine.acquire_explorer_snapshot_review(scan_id).unwrap();
+        let candidates = parent.candidate_summaries(0, 64).unwrap();
+        let candidate_id = candidates
+            .candidates
+            .iter()
+            .find(|candidate| candidate.rule_id == "developer.rust.target")
+            .expect("fixture scan should discover one Rust target")
+            .candidate_id
+            .clone();
+        let review = engine
+            .prepare_rust_target_plan_review(
+                Arc::clone(&parent),
+                RustTargetPlanReviewRequest {
+                    record_version: FFI_RECORD_VERSION,
+                    candidate_id: candidate_id.clone(),
+                },
+            )
+            .unwrap();
+        FfiRustTargetFixture {
+            _temp: temp,
+            engine,
+            parent,
+            review,
+            candidate_id,
+            data_root,
+            target,
+            payload,
+            manifest,
+            lockfile,
+            source,
+        }
+    }
+
+    fn wait_for_scan_with_timeout(task: &ScanTask, timeout: Duration) -> ScanPoll {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let poll = task.poll().unwrap();
+            if matches!(
+                poll.phase,
+                TaskPhase::Succeeded | TaskPhase::Failed | TaskPhase::Cancelled
+            ) {
+                return poll;
+            }
+            assert!(Instant::now() < deadline, "scan did not become terminal");
+            std::thread::yield_now();
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn wait_for_rust_target_cleanup(task: &RustTargetCleanupTask) -> RustTargetCleanupPoll {
+        let deadline = Instant::now() + Duration::from_secs(5 * 60);
+        loop {
+            let poll = task.poll().unwrap();
+            if matches!(
+                poll.phase,
+                TaskPhase::Succeeded | TaskPhase::Failed | TaskPhase::Cancelled
+            ) {
+                return poll;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "Rust-target cleanup did not become terminal"
+            );
+            std::thread::yield_now();
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "requires no active cargo/rustc process; run scripts/test_ffi_rust_target_cleanup.sh"]
+    fn rust_target_cleanup_is_engine_bound_consume_once_path_free_and_history_correlated() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let fixture = ffi_rust_target_fixture();
+        let (_foreign_temp, foreign) = engine();
+        let same_store = DuxEngine::new(EngineStorageRoots {
+            data_root: fixture.data_root.to_string_lossy().into_owned(),
+            cache_root: fixture
+                .data_root
+                .parent()
+                .unwrap()
+                .join("peer-cache")
+                .to_string_lossy()
+                .into_owned(),
+        })
+        .unwrap();
+
+        assert!(matches!(
+            foreign.start_permanent_safe_cleanup(Arc::clone(&fixture.review)),
+            Err(RustTargetCleanupStartError::WrongEngine)
+        ));
+        assert!(matches!(
+            same_store.start_permanent_safe_cleanup(Arc::clone(&fixture.review)),
+            Err(RustTargetCleanupStartError::WrongEngine)
+        ));
+        assert_eq!(
+            fixture.review.info().unwrap().candidate_id,
+            fixture.candidate_id
+        );
+
+        let task = fixture
+            .engine
+            .start_permanent_safe_cleanup(Arc::clone(&fixture.review))
+            .unwrap();
+        assert!(matches!(
+            fixture
+                .engine
+                .start_permanent_safe_cleanup(Arc::clone(&fixture.review)),
+            Err(RustTargetCleanupStartError::ReviewUnavailable)
+        ));
+        assert_eq!(
+            fixture.review.release().unwrap(),
+            RustTargetPlanReviewReleaseOutcome::AlreadyUnavailable
+        );
+        assert_eq!(
+            fixture.parent.release().unwrap(),
+            ReviewReleaseOutcome::Released
+        );
+
+        let terminal = wait_for_rust_target_cleanup(&task);
+        assert_eq!(terminal.phase, TaskPhase::Succeeded);
+        assert_eq!(terminal.failure, None);
+        let result = terminal.result.unwrap();
+        assert_eq!(result.status, CleanupSessionStatus::Completed);
+        assert!(result.removed_entries >= 1);
+        assert!(result.removed_logical_bytes > 0);
+        assert!(is_rust_target_cleanup_session_id(&result.session_id));
+        assert!(!fixture.payload.exists());
+        assert!(fixture.target.join("CACHEDIR.TAG").exists());
+        assert!(fixture.manifest.exists());
+        assert!(fixture.lockfile.exists());
+        assert!(fixture.source.exists());
+
+        let history = fixture
+            .engine
+            .cleanup_session_history(CleanupSessionHistoryRequest {
+                record_version: FFI_RECORD_VERSION,
+                session_id: result.session_id.clone(),
+            })
+            .unwrap();
+        assert_eq!(history.summary.session_id, result.session_id);
+        assert_eq!(history.summary.status, result.status);
+        assert_eq!(
+            history.summary.verified_capacity_delta_bytes,
+            result.verified_capacity_delta_bytes
+        );
+        assert_eq!(
+            task.cancel().unwrap(),
+            RustTargetCleanupCancelOutcome::AlreadyTerminal
+        );
+        assert!(same_store.close());
+        assert!(foreign.close());
+        assert!(fixture.engine.close());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "requires no active cargo/rustc process; run scripts/test_ffi_rust_target_cleanup.sh"]
+    fn rust_target_cleanup_refusal_is_one_shot_and_close_drains_start_operation() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let fixture = ffi_rust_target_fixture();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (continue_tx, continue_rx) = std::sync::mpsc::channel();
+        let start_thread = {
+            let engine = Arc::clone(&fixture.engine);
+            let review = Arc::clone(&fixture.review);
+            std::thread::spawn(move || {
+                engine.start_permanent_safe_cleanup_with(review, |_engine, review| {
+                    started_tx.send(()).unwrap();
+                    continue_rx.recv().unwrap();
+                    Err((CoreRustTargetCleanupError::Busy, Box::new(review)))
+                })
+            })
+        };
+        started_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("cleanup start should consume its review");
+        assert_eq!(
+            fixture
+                .engine
+                .rust_target_plan_preparations
+                .state
+                .lock()
+                .unwrap()
+                .active,
+            1,
+            "the admitted cleanup start must enter the shared operation tracker"
+        );
+        assert!(matches!(
+            *fixture.review.state.lock().unwrap(),
+            RustTargetPlanReviewState::Consumed
+        ));
+        continue_tx.send(()).unwrap();
+        assert!(matches!(
+            start_thread.join().unwrap(),
+            Err(RustTargetCleanupStartError::Busy)
+        ));
+        assert_eq!(
+            fixture
+                .engine
+                .rust_target_plan_preparations
+                .state
+                .lock()
+                .unwrap()
+                .active,
+            0
+        );
+        assert!(matches!(
+            fixture
+                .engine
+                .start_permanent_safe_cleanup(Arc::clone(&fixture.review)),
+            Err(RustTargetCleanupStartError::ReviewUnavailable)
+        ));
+        assert_eq!(
+            fixture.review.release().unwrap(),
+            RustTargetPlanReviewReleaseOutcome::AlreadyUnavailable
+        );
+
+        let close_operation = fixture
+            .engine
+            .rust_target_plan_preparations
+            .enter_operation(&fixture.engine.closed)
+            .unwrap();
+        let close_thread = {
+            let engine = Arc::clone(&fixture.engine);
+            std::thread::spawn(move || engine.close())
+        };
+        wait_until("cleanup close admission", || {
+            fixture.engine.closed.load(Ordering::Acquire)
+        });
+        assert!(
+            !close_thread.is_finished(),
+            "engine close must wait for the admitted cleanup operation"
+        );
+        drop(close_operation);
+        assert!(close_thread.join().unwrap());
+        assert_eq!(
+            fixture
+                .engine
+                .rust_target_plan_preparations
+                .state
+                .lock()
+                .unwrap()
+                .active,
+            0
+        );
+        assert!(fixture.payload.exists());
+        assert!(fixture.target.join("CACHEDIR.TAG").exists());
+        assert!(
+            fixture.engine.recent_cleanup_history(None, 64).is_err(),
+            "closed engines must not fabricate cleanup history"
+        );
     }
 
     #[test]

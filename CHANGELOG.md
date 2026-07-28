@@ -1,5 +1,27 @@
 # Changelog
 
+- Exposed the reviewed Rust-target permanent-safe task through UniFFI contract
+  v31. The only start input is the exact engine-bound opaque plan review:
+  paths, identifiers, timestamps, approval flags, callbacks, AI output,
+  commands, and retry tokens cannot nominate cleanup. Foreign-engine refusal
+  leaves the review untouched; every correct-engine attempt is irreversible,
+  including an information-read race or a later core admission refusal. The
+  opaque task supports explicit cancellation and path-free polling with strict
+  phase/failure/result validation and durable history correlation. Dropping it
+  neither cancels nor retries work. Generated Swift bindings include the new
+  transport, while the native service and UI intentionally expose no permanent
+  cleanup action yet. Process-quiescence proof revision 2 continues to read a
+  bounded complete libproc PID/name table but obtains executable identity only
+  for exact guarded `cargo`/`rustc` names; inaccessible guarded identities
+  still fail closed, while unrelated applications no longer block planning
+  solely because macOS withholds their image path. Zero-length and full PID
+  buffers reject as incomplete or possibly truncated. Failed PID inspection is
+  skipped only for `ESRCH` or
+  when a second complete PID table proves that exact PID disappeared.
+  A dedicated production runner compiles the FFI suite, exits Cargo, requires
+  exactly one Cargo-reported test binary, and verifies that each exact named
+  regression ran and passed once, so the real no-active-Cargo guard can be
+  exercised truthfully without a zero-test false green.
 - Added the first engine-owned permanent-safe cleanup task for an exact opaque
   Rust-target plan review. Rejected start admission returns the unconsumed
   review; acceptance synchronously consumes and approves the exact child before

@@ -348,6 +348,34 @@ not remove files, snapshots, scans, candidates, settings, exclusions, capacity
 samples, or AI insights; it does not compact storage, resample capacity, or
 promise free space.
 
+Contract v31 adds the narrow consuming transport for the already engine-owned
+Rust-target permanent-safe task. Its only start argument is the opaque
+`RustTargetPlanReviewSession` produced by v28. No path, candidate or plan ID,
+timestamp, approval Boolean, callback, AI result, command, or retry token
+crosses the edge. FFI checks exact engine affinity before mutation. Every
+owning-engine attempt then consumes the review irreversibly before core
+revalidation; a concurrent `info` operation is converted to release-pending,
+and a core refusal releases rather than restores the returned review. This
+prevents a response, retry, or reconstructed DTO from becoming reusable
+approval.
+
+The returned `RustTargetCleanupTask` is an opaque observer over the existing
+core registry. It can request cancellation or poll only versioned phase,
+cancellation state, revision, bounded failure, path-free aggregates, optional
+verified capacity change, and an exact history-correlating session ID. FFI
+rejects the wrong task kind, unknown failure family, malformed session ID, and
+inconsistent phase/failure/result combinations. Dropping the observer has no
+cancellation or retry semantics. Start uses the existing operation tracker so
+engine close either wins admission or waits for the admitted call without
+holding the FFI engine-state mutex across live revalidation.
+
+The generated Swift module contains this transport, but `EngineService`,
+AppModel, and Explorer intentionally do not invoke it in v31. The product still
+needs explicit native confirmation bound to the visible reviewed plan,
+generation-fenced task observation, changed-since-plan presentation, and the
+remaining permanent-cleanup release gates. AI, CLI, schedules, history rows,
+and display DTOs have no route to the consuming call.
+
 The Swift adapter lazily constructs and synchronizes the engine on its utility
 queue. FFI close invalidates renewal, attempts exact release for every
 still-live registered review, then performs bounded core shutdown; a failed
