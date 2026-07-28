@@ -74,6 +74,228 @@ final class HomeScanAppModelTests: XCTestCase {
         XCTAssertEqual(model.cleanupHistoryRecords, [record])
     }
 
+    func testCleanupHistorySelectionPublishesExactPathFreeDetail() async {
+        let summary = cleanupHistorySummary(sessionID: "session:one")
+        let detail = cleanupHistoryDetail(summary: summary)
+        let service = HomeScanEngineStub(
+            cleanupHistoryPage: CleanupHistoryPageModel(records: [summary], nextCursor: nil),
+            cleanupHistoryDetailResult: .success(detail)
+        )
+        let model = AppModel(
+            engineService: service,
+            volumeMonitor: HomeScanVolumeMonitorStub()
+        )
+        await model.loadCleanupHistory()
+
+        await model.selectCleanupHistorySession(summary.sessionID)
+
+        XCTAssertEqual(model.selectedCleanupHistorySessionID, summary.sessionID)
+        XCTAssertEqual(model.cleanupHistoryDetailState, .loaded(detail))
+    }
+
+    func testCleanupHistoryDetailFailureCanRetry() async {
+        let summary = cleanupHistorySummary(sessionID: "session:retry")
+        let detail = cleanupHistoryDetail(summary: summary)
+        let service = HomeScanEngineStub(
+            cleanupHistoryPage: CleanupHistoryPageModel(records: [summary], nextCursor: nil),
+            controlsCleanupHistoryDetailReplies: true
+        )
+        let model = AppModel(
+            engineService: service,
+            volumeMonitor: HomeScanVolumeMonitorStub()
+        )
+        await model.loadCleanupHistory()
+
+        let first = Task { @MainActor in
+            await model.selectCleanupHistorySession(summary.sessionID)
+        }
+        await service.waitForCleanupHistoryDetailRequestCount(1)
+        await service.resolveCleanupHistoryDetail(
+            at: 0,
+            result: .failure(.retryable)
+        )
+        await first.value
+        XCTAssertEqual(model.cleanupHistoryDetailState, .failed(.retryable))
+
+        let retry = Task { @MainActor in
+            await model.retryCleanupHistorySession()
+        }
+        await service.waitForCleanupHistoryDetailRequestCount(2)
+        await service.resolveCleanupHistoryDetail(at: 1, result: .success(detail))
+        await retry.value
+
+        XCTAssertEqual(model.cleanupHistoryDetailState, .loaded(detail))
+    }
+
+    func testCleanupHistoryRapidSelectionIgnoresLatePreviousReply() async {
+        let firstSummary = cleanupHistorySummary(sessionID: "session:first")
+        let secondSummary = cleanupHistorySummary(sessionID: "session:second")
+        let firstDetail = cleanupHistoryDetail(summary: firstSummary)
+        let secondDetail = cleanupHistoryDetail(summary: secondSummary)
+        let service = HomeScanEngineStub(
+            cleanupHistoryPage: CleanupHistoryPageModel(
+                records: [firstSummary, secondSummary],
+                nextCursor: nil
+            ),
+            controlsCleanupHistoryDetailReplies: true
+        )
+        let model = AppModel(
+            engineService: service,
+            volumeMonitor: HomeScanVolumeMonitorStub()
+        )
+        await model.loadCleanupHistory()
+
+        let first = Task { @MainActor in
+            await model.selectCleanupHistorySession(firstSummary.sessionID)
+        }
+        await service.waitForCleanupHistoryDetailRequestCount(1)
+        let second = Task { @MainActor in
+            await model.selectCleanupHistorySession(secondSummary.sessionID)
+        }
+        await service.waitForCleanupHistoryDetailRequestCount(2)
+
+        await service.resolveCleanupHistoryDetail(at: 0, result: .success(firstDetail))
+        await first.value
+        XCTAssertEqual(model.selectedCleanupHistorySessionID, secondSummary.sessionID)
+        XCTAssertEqual(model.cleanupHistoryDetailState, .loading)
+
+        await service.resolveCleanupHistoryDetail(at: 1, result: .success(secondDetail))
+        await second.value
+        XCTAssertEqual(model.cleanupHistoryDetailState, .loaded(secondDetail))
+    }
+
+    func testCleanupHistoryCloseIgnoresLateReply() async {
+        let summary = cleanupHistorySummary(sessionID: "session:close")
+        let service = HomeScanEngineStub(
+            cleanupHistoryPage: CleanupHistoryPageModel(records: [summary], nextCursor: nil),
+            controlsCleanupHistoryDetailReplies: true
+        )
+        let model = AppModel(
+            engineService: service,
+            volumeMonitor: HomeScanVolumeMonitorStub()
+        )
+        await model.loadCleanupHistory()
+
+        let selection = Task { @MainActor in
+            await model.selectCleanupHistorySession(summary.sessionID)
+        }
+        await service.waitForCleanupHistoryDetailRequestCount(1)
+        model.closeCleanupHistorySession()
+        await service.resolveCleanupHistoryDetail(
+            at: 0,
+            result: .success(cleanupHistoryDetail(summary: summary))
+        )
+        await selection.value
+
+        XCTAssertNil(model.selectedCleanupHistorySessionID)
+        XCTAssertEqual(model.cleanupHistoryDetailState, .idle)
+    }
+
+    func testCleanupHistoryRefreshClearsMissingSelectionAndFencesLateReply() async {
+        let summary = cleanupHistorySummary(sessionID: "session:removed")
+        let service = HomeScanEngineStub(
+            cleanupHistoryPage: CleanupHistoryPageModel(records: [summary], nextCursor: nil),
+            controlsCleanupHistoryDetailReplies: true
+        )
+        let model = AppModel(
+            engineService: service,
+            volumeMonitor: HomeScanVolumeMonitorStub()
+        )
+        await model.loadCleanupHistory()
+
+        let selection = Task { @MainActor in
+            await model.selectCleanupHistorySession(summary.sessionID)
+        }
+        await service.waitForCleanupHistoryDetailRequestCount(1)
+        await service.setCleanupHistoryPage(
+            CleanupHistoryPageModel(records: [], nextCursor: nil)
+        )
+        await model.refreshCleanupHistory()
+        await service.resolveCleanupHistoryDetail(
+            at: 0,
+            result: .success(cleanupHistoryDetail(summary: summary))
+        )
+        await selection.value
+
+        XCTAssertTrue(model.cleanupHistoryRecords.isEmpty)
+        XCTAssertNil(model.selectedCleanupHistorySessionID)
+        XCTAssertEqual(model.cleanupHistoryDetailState, .idle)
+    }
+
+    func testCleanupHistoryRefreshReloadsSelectedDetail() async {
+        let initialSummary = cleanupHistorySummary(
+            sessionID: "session:refresh",
+            estimatedBytes: 512
+        )
+        let refreshedSummary = cleanupHistorySummary(
+            sessionID: initialSummary.sessionID,
+            estimatedBytes: 1_024
+        )
+        let initialDetail = cleanupHistoryDetail(summary: initialSummary)
+        let refreshedDetail = cleanupHistoryDetail(summary: refreshedSummary)
+        let service = HomeScanEngineStub(
+            cleanupHistoryPage: CleanupHistoryPageModel(
+                records: [initialSummary],
+                nextCursor: nil
+            ),
+            controlsCleanupHistoryDetailReplies: true
+        )
+        let model = AppModel(
+            engineService: service,
+            volumeMonitor: HomeScanVolumeMonitorStub()
+        )
+        await model.loadCleanupHistory()
+
+        let selection = Task { @MainActor in
+            await model.selectCleanupHistorySession(initialSummary.sessionID)
+        }
+        await service.waitForCleanupHistoryDetailRequestCount(1)
+        await service.resolveCleanupHistoryDetail(at: 0, result: .success(initialDetail))
+        await selection.value
+        XCTAssertEqual(model.cleanupHistoryDetailState, .loaded(initialDetail))
+
+        await service.setCleanupHistoryPage(
+            CleanupHistoryPageModel(records: [refreshedSummary], nextCursor: nil)
+        )
+        let refresh = Task { @MainActor in
+            await model.refreshCleanupHistory()
+        }
+        await service.waitForCleanupHistoryDetailRequestCount(2)
+        XCTAssertEqual(model.cleanupHistoryDetailState, .loading)
+        await service.resolveCleanupHistoryDetail(at: 1, result: .success(refreshedDetail))
+        await refresh.value
+
+        XCTAssertEqual(model.cleanupHistoryRecords, [refreshedSummary])
+        XCTAssertEqual(model.cleanupHistoryDetailState, .loaded(refreshedDetail))
+    }
+
+    func testCleanupHistoryShutdownInvalidationIgnoresLateReply() async {
+        let summary = cleanupHistorySummary(sessionID: "session:shutdown")
+        let service = HomeScanEngineStub(
+            cleanupHistoryPage: CleanupHistoryPageModel(records: [summary], nextCursor: nil),
+            controlsCleanupHistoryDetailReplies: true
+        )
+        let model = AppModel(
+            engineService: service,
+            volumeMonitor: HomeScanVolumeMonitorStub()
+        )
+        await model.loadCleanupHistory()
+
+        let selection = Task { @MainActor in
+            await model.selectCleanupHistorySession(summary.sessionID)
+        }
+        await service.waitForCleanupHistoryDetailRequestCount(1)
+        model.invalidateCleanupHistoryOperations()
+        await service.resolveCleanupHistoryDetail(
+            at: 0,
+            result: .success(cleanupHistoryDetail(summary: summary))
+        )
+        await selection.value
+
+        XCTAssertNil(model.selectedCleanupHistorySessionID)
+        XCTAssertEqual(model.cleanupHistoryDetailState, .idle)
+    }
+
     func testConcurrentStartsCoalesceAndPublishOnlyMeasuredProgressThenSuccess() async {
         let facts = ScanProgressFacts(
             files: 4,
@@ -495,15 +717,32 @@ private actor ManualHomeScanClock: HomeScanPollingClock {
 }
 
 private actor HomeScanEngineStub: EngineServing {
-    private let cleanupHistoryPage: CleanupHistoryPageModel
+    private struct PendingCleanupHistoryDetailReply {
+        let sessionID: String
+        var continuation:
+            CheckedContinuation<CleanupHistorySessionDetailModel, any Error>?
+    }
+
+    private var cleanupHistoryPage: CleanupHistoryPageModel
+    private let cleanupHistoryDetailResult:
+        Result<CleanupHistorySessionDetailModel, CleanupHistoryServiceError>?
+    private let controlsCleanupHistoryDetailReplies: Bool
+    private var pendingCleanupHistoryDetailReplies:
+        [PendingCleanupHistoryDetailReply] = []
 
     init(
         cleanupHistoryPage: CleanupHistoryPageModel = CleanupHistoryPageModel(
             records: [],
             nextCursor: nil
-        )
+        ),
+        cleanupHistoryDetailResult:
+            Result<CleanupHistorySessionDetailModel, CleanupHistoryServiceError>? = nil,
+        controlsCleanupHistoryDetailReplies: Bool = false
     ) {
         self.cleanupHistoryPage = cleanupHistoryPage
+        self.cleanupHistoryDetailResult = cleanupHistoryDetailResult
+        self.controlsCleanupHistoryDetailReplies =
+            controlsCleanupHistoryDetailReplies
     }
 
     func loadStatus() async throws -> EngineStatus {
@@ -557,6 +796,125 @@ private actor HomeScanEngineStub: EngineServing {
     ) async throws -> CleanupHistoryPageModel {
         cleanupHistoryPage
     }
+
+    func loadCleanupHistorySession(
+        sessionID: String
+    ) async throws -> CleanupHistorySessionDetailModel {
+        if let cleanupHistoryDetailResult {
+            return try cleanupHistoryDetailResult.get()
+        }
+        guard controlsCleanupHistoryDetailReplies else {
+            throw CleanupHistoryServiceError.unavailable
+        }
+        return try await withCheckedThrowingContinuation { continuation in
+            pendingCleanupHistoryDetailReplies.append(
+                PendingCleanupHistoryDetailReply(
+                    sessionID: sessionID,
+                    continuation: continuation
+                )
+            )
+        }
+    }
+
+    func setCleanupHistoryPage(_ page: CleanupHistoryPageModel) {
+        cleanupHistoryPage = page
+    }
+
+    func waitForCleanupHistoryDetailRequestCount(_ expected: Int) async {
+        while pendingCleanupHistoryDetailReplies.count < expected {
+            await Task.yield()
+        }
+    }
+
+    func resolveCleanupHistoryDetail(
+        at index: Int,
+        result: Result<CleanupHistorySessionDetailModel, CleanupHistoryServiceError>
+    ) {
+        guard pendingCleanupHistoryDetailReplies.indices.contains(index),
+              let continuation =
+                  pendingCleanupHistoryDetailReplies[index].continuation else {
+            XCTFail("No pending cleanup-history detail request at index \(index)")
+            return
+        }
+        pendingCleanupHistoryDetailReplies[index].continuation = nil
+        switch result {
+        case let .success(detail):
+            continuation.resume(returning: detail)
+        case let .failure(error):
+            continuation.resume(throwing: error)
+        }
+    }
+}
+
+private func cleanupHistorySummary(
+    sessionID: String,
+    estimatedBytes: UInt64 = 512
+) -> CleanupHistorySessionSummaryModel {
+    let counts = CleanupHistoryStatusCounts(
+        planned: 0,
+        validating: 0,
+        dryRun: 0,
+        effectStarted: 0,
+        trashed: 0,
+        removed: 1,
+        evicted: 0,
+        skipped: 0,
+        rejected: 0,
+        failed: 0,
+        changedSincePlan: 0,
+        interrupted: 0,
+        unavailable: 0,
+        outcomeUnknown: 0,
+        total: 1
+    )
+    return CleanupHistorySessionSummaryModel(
+        sessionID: sessionID,
+        planID: "plan:\(sessionID)",
+        format: .complete,
+        sourceScanID: "scan:\(sessionID)",
+        startedAt: Date(timeIntervalSince1970: 1),
+        completedAt: Date(timeIntervalSince1970: 2),
+        planCreatedAt: Date(timeIntervalSince1970: 1),
+        planExpiresAt: Date(timeIntervalSince1970: 3),
+        mode: .permanentSafe,
+        trigger: .manual,
+        status: .completed,
+        estimatedBytes: estimatedBytes,
+        verifiedCapacityDeltaBytes: Int64(estimatedBytes),
+        cancellationRequested: false,
+        itemTotal: 1,
+        pathTotal: 1,
+        evidenceTotal: 1,
+        itemStatusCounts: counts,
+        pathStatusCounts: counts
+    )
+}
+
+private func cleanupHistoryDetail(
+    summary: CleanupHistorySessionSummaryModel
+) -> CleanupHistorySessionDetailModel {
+    CleanupHistorySessionDetailModel(
+        summary: summary,
+        items: [
+            CleanupHistoryItemModel(
+                ordinal: 0,
+                ruleID: "developer.rust-target",
+                ruleRevision: 1,
+                category: .developerArtifact,
+                safety: .safeRegenerable,
+                action: .removeKnownRegenerableContents,
+                ruleScheduleEligible: false,
+                newestModificationAt: Date(timeIntervalSince1970: 1),
+                estimatedBytes: summary.estimatedBytes,
+                status: .removed,
+                errorRecorded: false,
+                errorCategory: nil,
+                pathCount: 1,
+                evidenceCount: 1
+            ),
+        ],
+        warnings: [.permanentRemovalCannotBeUndone]
+    )
 }
 
 private struct HomeScanVolumeMonitorStub: VolumeMonitoring {

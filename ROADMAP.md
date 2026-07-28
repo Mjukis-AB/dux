@@ -1373,6 +1373,16 @@ transition; Swift rejects malformed or cross-review results. This endpoint is
 not a planner input and cannot create a plan, approval, journal claim, schedule,
 AI request, or filesystem effect.
 
+Contract v29 adds one exact-session cleanup-history observation selected only
+by a bounded stable session ID copied from the recent summary feed. Core fully
+validates the stored graph before FFI independently projects a versioned,
+path-free session summary, ordered item summaries, and warnings. Verified
+capacity delta, typed lifecycle/item statuses, bounded stable error categories,
+complete-versus-legacy policy shape, and aggregate counts are preserved. No
+paths, evidence payloads, candidate IDs, execution fences, claims, journal
+receipts, clear/retry/recovery operation, approval, or executor authority cross
+this endpoint.
+
 Requirements:
 
 - DTOs are immutable/versioned at the boundary.
@@ -5144,6 +5154,29 @@ Tasks:
     Release app builds targeting macOS 14.
 - [ ] Expand production cleanup session/item history with exact-session detail,
   verified capacity outcomes, and separately confirmed history clearing.
+  - [x] 2026-07-28 slice: expose the existing core exact-session observation
+    through UniFFI contract v29 without widening cleanup authority. The request
+    contains only a versioned, bounded, path-free session ID copied from recent
+    summary history. Rust loads and fully validates the bounded durable graph;
+    FFI returns one independently validated session summary, ordered item
+    summaries, and ordered warnings while preserving verified capacity delta,
+    all typed session/item statuses, stable error categories, complete-versus-
+    legacy policy shape, and exact aggregate counts. Paths, evidence payloads,
+    candidate IDs, execution owner/generation, claims, receipts, and all clear,
+    retry, recovery, approval, scheduler, AI, and executor operations remain
+    absent. Swift independently repeats the complete graph, lifecycle,
+    duplicate-ID, checked estimate-sum, aggregate, and derived-warning
+    validation; AppModel generation-fences selection, refresh, read retry,
+    close, and shutdown; and Cleanup History now drills
+    into lifecycle timing, mode/trigger, distinct estimate versus signed
+    verified-capacity outcome, textual/accessibility-backed item and path
+    charts, warnings, and ordered rule/item cards. The only retry control reads
+    history again and cannot repeat cleanup. Verification covers all 51 FFI
+    tests plus the full 376-test native suite. The workspace-wide Rust lane
+    passed 1,015 core tests before one load-sensitive probe-pool case observed
+    `QueueSaturated`; that exact case passed immediately in isolation.
+    Production capacity sampling and separately confirmed history clearing
+    remain open.
 - [ ] Define and test cross-reboot and Windows-unproven cleanup-journal recovery;
   unknown ownership must remain non-executable.
 

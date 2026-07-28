@@ -130,6 +130,9 @@ protocol DuxCleanupHistoryServing: Sendable {
         cursor: CleanupHistoryCursorModel?,
         limit: UInt16
     ) async throws -> CleanupHistoryPageModel
+    func loadCleanupHistorySession(
+        sessionID: String
+    ) async throws -> CleanupHistorySessionDetailModel
 }
 
 extension DuxCleanupHistoryServing {
@@ -137,6 +140,12 @@ extension DuxCleanupHistoryServing {
         cursor _: CleanupHistoryCursorModel?,
         limit _: UInt16
     ) async throws -> CleanupHistoryPageModel {
+        throw CleanupHistoryServiceError.unavailable
+    }
+
+    func loadCleanupHistorySession(
+        sessionID _: String
+    ) async throws -> CleanupHistorySessionDetailModel {
         throw CleanupHistoryServiceError.unavailable
     }
 }
@@ -258,7 +267,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
     DuxSnapshotHistoryServing, DuxCleanupHistoryServing, DuxScanCoverageServing, HomeScanServing,
     Sendable
 {
-    fileprivate static let expectedFFIContractVersion: UInt32 = 28
+    fileprivate static let expectedFFIContractVersion: UInt32 = 29
     fileprivate static let expectedRecordVersion: UInt32 = 1
 
     private let state: EngineServiceState
@@ -827,6 +836,31 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         }
     }
 
+    func loadCleanupHistorySession(
+        sessionID: String
+    ) async throws -> CleanupHistorySessionDetailModel {
+        guard CleanupHistoryAdapter.validStableToken(sessionID) else {
+            throw CleanupHistoryServiceError.invalidSessionID
+        }
+        return try await state.perform { state in
+            precondition(!Thread.isMainThread, "Blocking FFI work reached the main thread")
+            let engine = try Self.resolveCleanupHistoryEngine(state)
+            do {
+                return try CleanupHistoryAdapter.mapSession(
+                    engine.cleanupSessionHistory(
+                        request: CleanupSessionHistoryRequest(
+                            recordVersion: Self.expectedRecordVersion,
+                            sessionId: sessionID
+                        )
+                    ),
+                    requestedSessionID: sessionID
+                )
+            } catch let error as CleanupHistoryError {
+                throw Self.cleanupHistoryError(error)
+            }
+        }
+    }
+
     func loadScanCoverageDetails(scanID: String) async throws -> ExplorerScanCoverageDetails {
         guard ExplorerSnapshotHistoryAdapter.validScanID(scanID) else {
             throw ExplorerScanCoverageError.invalidRequest
@@ -981,6 +1015,8 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
     ) -> CleanupHistoryServiceError {
         switch error {
         case .Closed: .closed
+        case .InvalidRecordVersion: .invalidResponse
+        case .InvalidSessionId: .invalidSessionID
         case .InvalidLimit: .invalidLimit
         case .InvalidCursor: .invalidCursor
         case .SessionNotFound: .sessionNotFound

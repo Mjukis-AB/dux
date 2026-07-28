@@ -1,5 +1,19 @@
 # Changelog
 
+- Added exact, path-free cleanup-session drill-down through UniFFI contract
+  v29 and the native Cleanup History view. Selecting one bounded session ID
+  from the recent summary feed reloads and independently validates the complete
+  stored graph, then shows lifecycle timing, mode/trigger, ordered warnings,
+  signed verified capacity change beside the separate plan estimate, accessible
+  item/path outcome charts, and ordered rule/item cards. Rust and Swift both
+  reject malformed versions, IDs, lifecycle/legacy shapes, ordinals, totals,
+  checked estimate sums, status counts, warning order, duplicate session IDs,
+  and bounded error categories. AppModel
+  generation-fences selection, refresh, retry-read, close, and shutdown races.
+  Missing verified capacity remains explicitly unknown rather than zero. No
+  paths, evidence payloads, candidate IDs, claims, receipts, history clearing,
+  cleanup retry, approval, scheduler, AI, or executor authority crosses this
+  observation-only route.
 - Added an observation-only Rust-target plan preview through UniFFI contract
   v28 and the native Explorer. Rust derives the exact current target, source
   scan, permanent-safe mode, plan identity, estimate, ordered warnings, and

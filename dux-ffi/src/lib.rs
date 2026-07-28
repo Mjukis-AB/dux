@@ -41,15 +41,18 @@ use dux_core::engine::{
     DurableCandidateEvidencePage as CoreCandidateEvidencePage,
     DurableCandidatePathPage as CoreCandidatePathPage,
     DurableCandidateStatus as CoreCandidateStatus, DurableCandidateSummary as CoreCandidateSummary,
-    DurableCleanupHistoryPage as CoreCleanupHistoryPage, DurableCleanupMode as CoreCleanupMode,
+    DurableCleanupHistoryPage as CoreCleanupHistoryPage,
+    DurableCleanupItemStatus as CoreCleanupItemStatus,
+    DurableCleanupItemSummary as CoreCleanupItemSummary, DurableCleanupMode as CoreCleanupMode,
     DurableCleanupRecordFormat as CoreCleanupRecordFormat,
     DurableCleanupSessionId as CoreCleanupSessionId,
+    DurableCleanupSessionObservation as CoreCleanupSessionObservation,
     DurableCleanupSessionStatus as CoreCleanupSessionStatus,
     DurableCleanupStatusCounts as CoreCleanupStatusCounts,
-    DurableCleanupTrigger as CoreCleanupTrigger, DurableObservedPath as CoreObservedPath,
-    DurableScanIssueKind as CoreDurableScanIssueKind, DurableScanStatus as CoreDurableScanStatus,
-    EngineConfig, EngineHandle, EngineOpenError, HistoryMaintenanceStartOutcome,
-    PermanentCleanupPolicy as CorePermanentCleanupPolicy,
+    DurableCleanupTrigger as CoreCleanupTrigger, DurableCleanupWarning as CoreCleanupWarning,
+    DurableObservedPath as CoreObservedPath, DurableScanIssueKind as CoreDurableScanIssueKind,
+    DurableScanStatus as CoreDurableScanStatus, EngineConfig, EngineHandle, EngineOpenError,
+    HistoryMaintenanceStartOutcome, PermanentCleanupPolicy as CorePermanentCleanupPolicy,
     PermanentCleanupPolicyError as CorePermanentCleanupPolicyError,
     PermanentCleanupPolicySource as CorePermanentCleanupPolicySource,
     PermanentCleanupPolicyUpdate as CorePermanentCleanupPolicyUpdate,
@@ -98,7 +101,7 @@ use dux_core::{
     VolumeCapacity, VolumeId,
 };
 
-const FFI_CONTRACT_VERSION: u32 = 28;
+const FFI_CONTRACT_VERSION: u32 = 29;
 const FFI_RECORD_VERSION: u32 = 1;
 const SNAPSHOT_NODE_RECORD_VERSION: u32 = 2;
 const SCAN_EVENT_PAGE_LIMIT: u16 = 64;
@@ -109,6 +112,14 @@ const MAX_CANDIDATE_ENCODED_PATH_BYTES: usize = 65_536;
 const MAX_CANDIDATE_DISPLAY_PATH_BYTES: usize = MAX_CANDIDATE_ENCODED_PATH_BYTES * 4;
 const MAX_CANDIDATE_DETAIL_PAGE_PAYLOAD_BYTES: usize = 24 * 1_024 * 1_024;
 const MAX_CANDIDATE_IDENTIFIER_BYTES: usize = 4_096;
+const MAX_CLEANUP_HISTORY_SESSION_ID_BYTES: usize = 128;
+const MAX_CLEANUP_HISTORY_PLAN_ID_BYTES: usize = 128;
+const MAX_CLEANUP_HISTORY_RULE_ID_BYTES: usize = 128;
+const MAX_CLEANUP_HISTORY_ERROR_CATEGORY_BYTES: usize = 128;
+const MAX_CLEANUP_HISTORY_ITEMS: usize = 64;
+const MAX_CLEANUP_HISTORY_PATHS: u16 = 256;
+const MAX_CLEANUP_HISTORY_EVIDENCE: u16 = 512;
+const MAX_CLEANUP_HISTORY_WARNINGS: usize = 5;
 const MAX_SCAN_ROOT_UTF8_BYTES: usize = 32 * 1_024;
 const MAX_CLEANUP_EXCLUSION_COUNT: usize = 64;
 const MAX_CLEANUP_EXCLUSION_PATH_BYTES: usize = 32 * 1_024;
@@ -941,6 +952,48 @@ pub struct CleanupSessionSummary {
     pub path_status_counts: CleanupStatusCounts,
 }
 
+/// Select one exact path-free history observation by the stable session ID
+/// copied from [`CleanupSessionSummary`]. The token grants no recovery,
+/// approval, journal, or executor authority.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct CleanupSessionHistoryRequest {
+    pub record_version: u32,
+    pub session_id: String,
+}
+
+/// One ordered path-free item observation from a fully validated cleanup
+/// session. Path values, evidence payloads, candidate IDs, and execution
+/// fences remain sealed inside core.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct CleanupItemSummary {
+    pub record_version: u32,
+    pub ordinal: u16,
+    pub rule_id: String,
+    pub rule_revision: u32,
+    pub category: Option<CandidateCategory>,
+    pub safety: Option<CandidateSafety>,
+    pub action: Option<CandidateAction>,
+    pub rule_schedule_eligible: Option<bool>,
+    pub newest_mtime_unix_ms: Option<i64>,
+    pub estimated_bytes: u64,
+    pub status: CleanupItemStatus,
+    pub error_recorded: bool,
+    pub error_category: Option<String>,
+    pub path_count: u16,
+    pub evidence_count: u16,
+}
+
+/// Fully validated exact-session cleanup history. This is immutable,
+/// path-free presentation data and cannot be supplied to any planner,
+/// approval, recovery, journal, retry, or executor operation.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct CleanupSessionHistory {
+    pub record_version: u32,
+    pub summary: CleanupSessionSummary,
+    pub items: Vec<CleanupItemSummary>,
+    pub warnings: Vec<CleanupWarning>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct CleanupHistoryPage {
     pub record_version: u32,
@@ -952,6 +1005,10 @@ pub struct CleanupHistoryPage {
 pub enum CleanupHistoryError {
     #[error("engine session is closed")]
     Closed,
+    #[error("the cleanup-history record version is unsupported")]
+    InvalidRecordVersion,
+    #[error("the cleanup-history session ID is invalid")]
+    InvalidSessionId,
     #[error("cleanup history limit is outside its fixed bound")]
     InvalidLimit,
     #[error("cleanup history cursor is invalid")]
@@ -3379,6 +3436,31 @@ impl DuxEngine {
                 .recent_cleanup_history(cursor.as_ref(), limit)
                 .map_err(map_cleanup_history_error)?;
             cleanup_history_page(page)
+        })
+    }
+
+    /// Return one exact, bounded, path-free cleanup-session observation. The
+    /// supplied ID must come from summary history and is used only to select
+    /// immutable history; it cannot resume, retry, approve, or execute work.
+    pub fn cleanup_session_history(
+        &self,
+        request: CleanupSessionHistoryRequest,
+    ) -> Result<CleanupSessionHistory, CleanupHistoryError> {
+        if request.record_version != FFI_RECORD_VERSION {
+            return Err(CleanupHistoryError::InvalidRecordVersion);
+        }
+        let requested_session_id = request.session_id;
+        let session_id = CoreCleanupSessionId::from_stable_str(requested_session_id.clone())
+            .ok_or(CleanupHistoryError::InvalidSessionId)?;
+        self.with_cleanup_history_engine(|engine| {
+            let observation = engine
+                .cleanup_session_history(&session_id)
+                .map_err(map_cleanup_history_error)?;
+            let projected = cleanup_session_history(observation)?;
+            if projected.summary.session_id != requested_session_id {
+                return Err(CleanupHistoryError::CorruptData);
+            }
+            Ok(projected)
         })
     }
 
@@ -5870,6 +5952,369 @@ fn map_cleanup_session_status(
     })
 }
 
+fn map_cleanup_item_status(
+    status: CoreCleanupItemStatus,
+) -> Result<CleanupItemStatus, CleanupHistoryError> {
+    Ok(match status {
+        CoreCleanupItemStatus::Planned => CleanupItemStatus::Planned,
+        CoreCleanupItemStatus::Validating => CleanupItemStatus::Validating,
+        CoreCleanupItemStatus::DryRun => CleanupItemStatus::DryRun,
+        CoreCleanupItemStatus::EffectStarted => CleanupItemStatus::EffectStarted,
+        CoreCleanupItemStatus::Trashed => CleanupItemStatus::Trashed,
+        CoreCleanupItemStatus::Removed => CleanupItemStatus::Removed,
+        CoreCleanupItemStatus::Evicted => CleanupItemStatus::Evicted,
+        CoreCleanupItemStatus::Skipped => CleanupItemStatus::Skipped,
+        CoreCleanupItemStatus::Rejected => CleanupItemStatus::Rejected,
+        CoreCleanupItemStatus::Failed => CleanupItemStatus::Failed,
+        CoreCleanupItemStatus::ChangedSincePlan => CleanupItemStatus::ChangedSincePlan,
+        CoreCleanupItemStatus::Interrupted => CleanupItemStatus::Interrupted,
+        CoreCleanupItemStatus::Unavailable => CleanupItemStatus::Unavailable,
+        CoreCleanupItemStatus::OutcomeUnknown => CleanupItemStatus::OutcomeUnknown,
+        _ => return Err(CleanupHistoryError::InternalState),
+    })
+}
+
+fn cleanup_item_summary(
+    item: &CoreCleanupItemSummary,
+) -> Result<CleanupItemSummary, CleanupHistoryError> {
+    Ok(CleanupItemSummary {
+        record_version: FFI_RECORD_VERSION,
+        ordinal: item.ordinal(),
+        rule_id: item.rule().id().as_str().to_owned(),
+        rule_revision: item.rule().revision().get(),
+        category: item.category().map(map_candidate_category),
+        safety: item.safety().map(map_candidate_safety),
+        action: item.action().map(map_candidate_action),
+        rule_schedule_eligible: item.rule_schedule_eligible(),
+        newest_mtime_unix_ms: item
+            .newest_mtime()
+            .map(cleanup_history_time_ms)
+            .transpose()?,
+        estimated_bytes: item.estimated_bytes(),
+        status: map_cleanup_item_status(item.status())?,
+        error_recorded: item.error_recorded(),
+        error_category: item
+            .error_category()
+            .map(|category| category.as_str().to_owned()),
+        path_count: item.path_count(),
+        evidence_count: item.evidence_count(),
+    })
+}
+
+const fn cleanup_warning(
+    warning: CoreCleanupWarning,
+) -> Result<CleanupWarning, CleanupHistoryError> {
+    Ok(match warning {
+        CoreCleanupWarning::EstimatedBytesUnverified => CleanupWarning::EstimatedBytesUnverified,
+        CoreCleanupWarning::DryRunDoesNotMutate => CleanupWarning::DryRunDoesNotMutate,
+        CoreCleanupWarning::TrashDoesNotFreeSpaceImmediately => {
+            CleanupWarning::TrashDoesNotFreeSpaceImmediately
+        }
+        CoreCleanupWarning::PermanentRemovalCannotBeUndone => {
+            CleanupWarning::PermanentRemovalCannotBeUndone
+        }
+        CoreCleanupWarning::CloudEvictionRequiresNetworkToRedownload => {
+            CleanupWarning::CloudEvictionRequiresNetworkToRedownload
+        }
+        _ => return Err(CleanupHistoryError::InternalState),
+    })
+}
+
+fn cleanup_session_history(
+    observation: CoreCleanupSessionObservation,
+) -> Result<CleanupSessionHistory, CleanupHistoryError> {
+    let history = CleanupSessionHistory {
+        record_version: FFI_RECORD_VERSION,
+        summary: cleanup_session_summary(observation.summary())?,
+        items: observation
+            .items()
+            .iter()
+            .map(cleanup_item_summary)
+            .collect::<Result<Vec<_>, _>>()?,
+        warnings: observation
+            .warnings()
+            .iter()
+            .copied()
+            .map(cleanup_warning)
+            .collect::<Result<Vec<_>, _>>()?,
+    };
+    validate_cleanup_session_history(&history)?;
+    Ok(history)
+}
+
+fn validate_cleanup_session_history(
+    history: &CleanupSessionHistory,
+) -> Result<(), CleanupHistoryError> {
+    if history.record_version != FFI_RECORD_VERSION
+        || history.summary.record_version != FFI_RECORD_VERSION
+        || history.items.len() > MAX_CLEANUP_HISTORY_ITEMS
+        || history.warnings.len() > MAX_CLEANUP_HISTORY_WARNINGS
+        || history
+            .warnings
+            .iter()
+            .enumerate()
+            .any(|(index, warning)| history.warnings[..index].contains(warning))
+    {
+        return Err(CleanupHistoryError::CorruptData);
+    }
+    validate_cleanup_session_summary(&history.summary)?;
+    if history.warnings != expected_cleanup_warnings(history) {
+        return Err(CleanupHistoryError::CorruptData);
+    }
+
+    let mut path_total = 0_u16;
+    let mut evidence_total = 0_u16;
+    let mut estimated_bytes_total = 0_u64;
+    let mut item_counts = CleanupStatusCounts {
+        planned: 0,
+        validating: 0,
+        dry_run: 0,
+        effect_started: 0,
+        trashed: 0,
+        removed: 0,
+        evicted: 0,
+        skipped: 0,
+        rejected: 0,
+        failed: 0,
+        changed_since_plan: 0,
+        interrupted: 0,
+        unavailable: 0,
+        outcome_unknown: 0,
+        total: 0,
+    };
+    for (expected_ordinal, item) in history.items.iter().enumerate() {
+        validate_cleanup_item_summary(item, history.summary.format)?;
+        if usize::from(item.ordinal) != expected_ordinal {
+            return Err(CleanupHistoryError::CorruptData);
+        }
+        path_total = path_total
+            .checked_add(item.path_count)
+            .ok_or(CleanupHistoryError::CorruptData)?;
+        evidence_total = evidence_total
+            .checked_add(item.evidence_count)
+            .ok_or(CleanupHistoryError::CorruptData)?;
+        estimated_bytes_total = estimated_bytes_total
+            .checked_add(item.estimated_bytes)
+            .ok_or(CleanupHistoryError::CorruptData)?;
+        add_cleanup_status(&mut item_counts, item.status)?;
+    }
+    if history.items.len() != usize::from(history.summary.item_total)
+        || path_total != history.summary.path_total
+        || evidence_total != history.summary.evidence_total
+        || item_counts != history.summary.item_status_counts
+        || (history.summary.format == CleanupRecordFormat::Complete
+            && estimated_bytes_total != history.summary.estimated_bytes)
+    {
+        return Err(CleanupHistoryError::CorruptData);
+    }
+    Ok(())
+}
+
+fn expected_cleanup_warnings(history: &CleanupSessionHistory) -> Vec<CleanupWarning> {
+    if history.summary.format == CleanupRecordFormat::LegacyIncomplete {
+        return Vec::new();
+    }
+
+    let mut warnings = vec![CleanupWarning::EstimatedBytesUnverified];
+    match history.summary.mode {
+        CleanupMode::DryRun => warnings.push(CleanupWarning::DryRunDoesNotMutate),
+        CleanupMode::Trash => warnings.push(CleanupWarning::TrashDoesNotFreeSpaceImmediately),
+        CleanupMode::PermanentSafe => {
+            warnings.push(CleanupWarning::PermanentRemovalCannotBeUndone);
+        }
+        CleanupMode::EvictLocalCopy => {}
+    }
+    if history
+        .items
+        .iter()
+        .any(|item| item.action == Some(CandidateAction::EvictLocalCopy))
+    {
+        warnings.push(CleanupWarning::CloudEvictionRequiresNetworkToRedownload);
+    }
+    warnings
+}
+
+fn validate_cleanup_session_summary(
+    summary: &CleanupSessionSummary,
+) -> Result<(), CleanupHistoryError> {
+    if summary.record_version != FFI_RECORD_VERSION
+        || !is_bounded_cleanup_history_token(
+            &summary.session_id,
+            MAX_CLEANUP_HISTORY_SESSION_ID_BYTES,
+        )
+        || !is_bounded_cleanup_history_token(&summary.plan_id, MAX_CLEANUP_HISTORY_PLAN_ID_BYTES)
+        || summary
+            .source_scan_id
+            .as_deref()
+            .is_some_and(|id| !is_bounded_cleanup_history_token(id, 128))
+        || summary.started_at_unix_ms < 0
+        || summary
+            .completed_at_unix_ms
+            .is_some_and(|completed| completed < summary.started_at_unix_ms)
+        || usize::from(summary.item_total) > MAX_CLEANUP_HISTORY_ITEMS
+        || summary.path_total > MAX_CLEANUP_HISTORY_PATHS
+        || summary.evidence_total > MAX_CLEANUP_HISTORY_EVIDENCE
+    {
+        return Err(CleanupHistoryError::CorruptData);
+    }
+    validate_cleanup_status_counts(&summary.item_status_counts, summary.item_total)?;
+    validate_cleanup_status_counts(&summary.path_status_counts, summary.path_total)?;
+    let complete_fields = (
+        summary.source_scan_id.as_ref(),
+        summary.plan_created_at_unix_ms,
+        summary.plan_expires_at_unix_ms,
+    );
+    match summary.format {
+        CleanupRecordFormat::LegacyIncomplete => {
+            if complete_fields != (None, None, None)
+                || summary.cancellation_requested.is_some()
+                || summary.evidence_total != 0
+                || summary.status == CleanupSessionStatus::Recovering
+            {
+                return Err(CleanupHistoryError::CorruptData);
+            }
+        }
+        CleanupRecordFormat::Complete => {
+            let (Some(_), Some(created), Some(expires)) = complete_fields else {
+                return Err(CleanupHistoryError::CorruptData);
+            };
+            if summary.cancellation_requested.is_none()
+                || created < 0
+                || expires <= summary.started_at_unix_ms
+                || created > summary.started_at_unix_ms
+            {
+                return Err(CleanupHistoryError::CorruptData);
+            }
+            let terminal = !matches!(
+                summary.status,
+                CleanupSessionStatus::Planned
+                    | CleanupSessionStatus::Running
+                    | CleanupSessionStatus::Recovering
+            );
+            if terminal != summary.completed_at_unix_ms.is_some()
+                || (!terminal && summary.verified_capacity_delta_bytes.is_some())
+                || (summary.status == CleanupSessionStatus::Planned
+                    && summary.cancellation_requested != Some(false))
+            {
+                return Err(CleanupHistoryError::CorruptData);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_cleanup_item_summary(
+    item: &CleanupItemSummary,
+    format: CleanupRecordFormat,
+) -> Result<(), CleanupHistoryError> {
+    if item.record_version != FFI_RECORD_VERSION
+        || usize::from(item.ordinal) >= MAX_CLEANUP_HISTORY_ITEMS
+        || !is_bounded_cleanup_history_token(&item.rule_id, MAX_CLEANUP_HISTORY_RULE_ID_BYTES)
+        || item.rule_revision == 0
+        || item.newest_mtime_unix_ms.is_some_and(|value| value < 0)
+        || item.path_count == 0
+        || item.path_count > MAX_CLEANUP_HISTORY_PATHS
+        || item.evidence_count > MAX_CLEANUP_HISTORY_EVIDENCE
+        || (!item.error_recorded && item.error_category.is_some())
+        || item.error_category.as_deref().is_some_and(|category| {
+            !is_bounded_cleanup_history_token(category, MAX_CLEANUP_HISTORY_ERROR_CATEGORY_BYTES)
+        })
+    {
+        return Err(CleanupHistoryError::CorruptData);
+    }
+    let policy_complete = item.category.is_some()
+        && item.safety.is_some()
+        && item.action.is_some()
+        && item.rule_schedule_eligible.is_some();
+    match format {
+        CleanupRecordFormat::LegacyIncomplete => {
+            if policy_complete
+                || item.category.is_some()
+                || item.safety.is_some()
+                || item.action.is_some()
+                || item.rule_schedule_eligible.is_some()
+                || item.newest_mtime_unix_ms.is_some()
+                || item.evidence_count != 0
+                || item.error_category.is_some()
+            {
+                return Err(CleanupHistoryError::CorruptData);
+            }
+        }
+        CleanupRecordFormat::Complete if !policy_complete => {
+            return Err(CleanupHistoryError::CorruptData);
+        }
+        CleanupRecordFormat::Complete => {}
+    }
+    Ok(())
+}
+
+fn validate_cleanup_status_counts(
+    counts: &CleanupStatusCounts,
+    expected_total: u16,
+) -> Result<(), CleanupHistoryError> {
+    let total = [
+        counts.planned,
+        counts.validating,
+        counts.dry_run,
+        counts.effect_started,
+        counts.trashed,
+        counts.removed,
+        counts.evicted,
+        counts.skipped,
+        counts.rejected,
+        counts.failed,
+        counts.changed_since_plan,
+        counts.interrupted,
+        counts.unavailable,
+        counts.outcome_unknown,
+    ]
+    .into_iter()
+    .try_fold(0_u16, u16::checked_add)
+    .ok_or(CleanupHistoryError::CorruptData)?;
+    if total != counts.total || total != expected_total {
+        return Err(CleanupHistoryError::CorruptData);
+    }
+    Ok(())
+}
+
+fn add_cleanup_status(
+    counts: &mut CleanupStatusCounts,
+    status: CleanupItemStatus,
+) -> Result<(), CleanupHistoryError> {
+    counts.total = counts
+        .total
+        .checked_add(1)
+        .ok_or(CleanupHistoryError::CorruptData)?;
+    let count = match status {
+        CleanupItemStatus::Planned => &mut counts.planned,
+        CleanupItemStatus::Validating => &mut counts.validating,
+        CleanupItemStatus::DryRun => &mut counts.dry_run,
+        CleanupItemStatus::EffectStarted => &mut counts.effect_started,
+        CleanupItemStatus::Trashed => &mut counts.trashed,
+        CleanupItemStatus::Removed => &mut counts.removed,
+        CleanupItemStatus::Evicted => &mut counts.evicted,
+        CleanupItemStatus::Skipped => &mut counts.skipped,
+        CleanupItemStatus::Rejected => &mut counts.rejected,
+        CleanupItemStatus::Failed => &mut counts.failed,
+        CleanupItemStatus::ChangedSincePlan => &mut counts.changed_since_plan,
+        CleanupItemStatus::Interrupted => &mut counts.interrupted,
+        CleanupItemStatus::Unavailable => &mut counts.unavailable,
+        CleanupItemStatus::OutcomeUnknown => &mut counts.outcome_unknown,
+    };
+    *count = count
+        .checked_add(1)
+        .ok_or(CleanupHistoryError::CorruptData)?;
+    Ok(())
+}
+
+fn is_bounded_cleanup_history_token(value: &str, maximum: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= maximum
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b':'))
+}
+
 fn cleanup_history_page(
     page: CoreCleanupHistoryPage,
 ) -> Result<CleanupHistoryPage, CleanupHistoryError> {
@@ -6866,10 +7311,10 @@ mod tests {
     }
 
     #[test]
-    fn reports_contract_twenty_eight_and_preserves_legacy_formatting() {
+    fn reports_contract_twenty_nine_and_preserves_legacy_formatting() {
         let _guard = ENGINE_TEST_LOCK.lock().unwrap();
         let (_temp, engine) = engine();
-        assert_eq!(library_version().ffi_contract_version, 28);
+        assert_eq!(library_version().ffi_contract_version, 29);
         assert_eq!(engine.library_version().unwrap(), library_version());
         assert_eq!(engine.format_size(1536).unwrap().display, "1.5 KB");
         assert!(engine.close());
@@ -7910,6 +8355,282 @@ mod tests {
             engine.recent_cleanup_history(None, 1),
             Err(CleanupHistoryError::Closed)
         );
+    }
+
+    #[test]
+    fn cleanup_session_history_is_exact_bounded_path_free_and_strictly_validated() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (temp, engine) = engine();
+        let root = temp.path().join("cleanup-history-detail");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("reviewed.bin"), b"reviewed").unwrap();
+
+        let scan = engine.start_scan(scan_request(&root)).unwrap();
+        let terminal = wait_for_scan(&scan.task);
+        assert_eq!(terminal.phase, TaskPhase::Succeeded);
+        let scan_id = terminal.result.unwrap().scan_id;
+        let review = engine.acquire_explorer_snapshot_review(scan_id).unwrap();
+        let root_node = review.root_node().unwrap();
+        let children = review
+            .child_nodes(root_node.id, SnapshotNodeSort::NameAscending, 0, 10)
+            .unwrap();
+        let selected = children
+            .nodes
+            .iter()
+            .find(|node| node.name.display == "reviewed.bin")
+            .unwrap();
+        let result = engine
+            .execute_explorer_trash(
+                Arc::clone(&review),
+                selected.id,
+                Box::new(RecordingTrashDriver {
+                    calls: Mutex::new(Vec::new()),
+                }),
+            )
+            .unwrap();
+        assert_eq!(result, TrashPlatformResult::Completed);
+
+        let summary_page = engine.recent_cleanup_history(None, 1).unwrap();
+        let summary = summary_page.records.first().unwrap().clone();
+        let history = engine
+            .cleanup_session_history(CleanupSessionHistoryRequest {
+                record_version: FFI_RECORD_VERSION,
+                session_id: summary.session_id.clone(),
+            })
+            .unwrap();
+        assert_eq!(history.record_version, FFI_RECORD_VERSION);
+        assert_eq!(history.summary, summary);
+        assert_eq!(history.items.len(), 1);
+        assert_eq!(history.items[0].ordinal, 0);
+        assert_eq!(history.items[0].status, CleanupItemStatus::Trashed);
+        assert_eq!(history.items[0].path_count, 1);
+        assert_eq!(
+            history.warnings,
+            vec![
+                CleanupWarning::EstimatedBytesUnverified,
+                CleanupWarning::TrashDoesNotFreeSpaceImmediately,
+            ]
+        );
+        assert_eq!(history.summary.verified_capacity_delta_bytes, None);
+        assert!(validate_cleanup_session_history(&history).is_ok());
+
+        let mut wrong_ordinal = history.clone();
+        wrong_ordinal.items[0].ordinal = 1;
+        assert_eq!(
+            validate_cleanup_session_history(&wrong_ordinal),
+            Err(CleanupHistoryError::CorruptData)
+        );
+        let mut leaked_policy_shape = history.clone();
+        leaked_policy_shape.items[0].category = None;
+        assert_eq!(
+            validate_cleanup_session_history(&leaked_policy_shape),
+            Err(CleanupHistoryError::CorruptData)
+        );
+        let mut mismatched_counts = history.clone();
+        mismatched_counts.summary.path_total = 2;
+        assert_eq!(
+            validate_cleanup_session_history(&mismatched_counts),
+            Err(CleanupHistoryError::CorruptData)
+        );
+        let mut mismatched_estimate = history.clone();
+        mismatched_estimate.items[0].estimated_bytes = 1;
+        assert_eq!(
+            validate_cleanup_session_history(&mismatched_estimate),
+            Err(CleanupHistoryError::CorruptData)
+        );
+        let mut overflowing_estimate = history.clone();
+        overflowing_estimate.items[0].estimated_bytes = u64::MAX;
+        let mut second_item = overflowing_estimate.items[0].clone();
+        second_item.ordinal = 1;
+        second_item.estimated_bytes = 1;
+        overflowing_estimate.items.push(second_item);
+        overflowing_estimate.summary.estimated_bytes = u64::MAX;
+        overflowing_estimate.summary.item_total = 2;
+        overflowing_estimate.summary.path_total = 2;
+        overflowing_estimate.summary.evidence_total = 2;
+        overflowing_estimate.summary.item_status_counts.trashed = 2;
+        overflowing_estimate.summary.item_status_counts.total = 2;
+        overflowing_estimate.summary.path_status_counts.trashed = 2;
+        overflowing_estimate.summary.path_status_counts.total = 2;
+        assert_eq!(
+            validate_cleanup_session_history(&overflowing_estimate),
+            Err(CleanupHistoryError::CorruptData)
+        );
+        let mut duplicate_warning = history.clone();
+        duplicate_warning
+            .warnings
+            .push(duplicate_warning.warnings[0]);
+        assert_eq!(
+            validate_cleanup_session_history(&duplicate_warning),
+            Err(CleanupHistoryError::CorruptData)
+        );
+        let mut reordered_warnings = history.clone();
+        reordered_warnings.warnings.reverse();
+        assert_eq!(
+            validate_cleanup_session_history(&reordered_warnings),
+            Err(CleanupHistoryError::CorruptData)
+        );
+        let mut verified_delta = history.clone();
+        verified_delta.summary.status = CleanupSessionStatus::Completed;
+        verified_delta.summary.completed_at_unix_ms =
+            Some(verified_delta.summary.started_at_unix_ms + 1);
+        verified_delta.summary.verified_capacity_delta_bytes = Some(4_096);
+        assert_eq!(validate_cleanup_session_history(&verified_delta), Ok(()));
+        assert_eq!(
+            verified_delta.summary.verified_capacity_delta_bytes,
+            Some(4_096)
+        );
+        verified_delta.summary.verified_capacity_delta_bytes = Some(-4_096);
+        assert_eq!(validate_cleanup_session_history(&verified_delta), Ok(()));
+        assert_eq!(
+            verified_delta.summary.verified_capacity_delta_bytes,
+            Some(-4_096)
+        );
+
+        assert_eq!(
+            engine.cleanup_session_history(CleanupSessionHistoryRequest {
+                record_version: FFI_RECORD_VERSION + 1,
+                session_id: summary.session_id.clone(),
+            }),
+            Err(CleanupHistoryError::InvalidRecordVersion)
+        );
+        assert_eq!(
+            engine.cleanup_session_history(CleanupSessionHistoryRequest {
+                record_version: FFI_RECORD_VERSION,
+                session_id: "../not-a-session".to_owned(),
+            }),
+            Err(CleanupHistoryError::InvalidSessionId)
+        );
+        assert_eq!(
+            engine.cleanup_session_history(CleanupSessionHistoryRequest {
+                record_version: FFI_RECORD_VERSION,
+                session_id: "cleanup:missing".to_owned(),
+            }),
+            Err(CleanupHistoryError::SessionNotFound)
+        );
+        assert!(engine.close());
+        assert_eq!(
+            engine.cleanup_session_history(CleanupSessionHistoryRequest {
+                record_version: FFI_RECORD_VERSION,
+                session_id: summary.session_id,
+            }),
+            Err(CleanupHistoryError::Closed)
+        );
+    }
+
+    #[test]
+    fn cleanup_session_history_maps_every_typed_status_warning_and_error() {
+        let statuses = [
+            (CoreCleanupItemStatus::Planned, CleanupItemStatus::Planned),
+            (
+                CoreCleanupItemStatus::Validating,
+                CleanupItemStatus::Validating,
+            ),
+            (CoreCleanupItemStatus::DryRun, CleanupItemStatus::DryRun),
+            (
+                CoreCleanupItemStatus::EffectStarted,
+                CleanupItemStatus::EffectStarted,
+            ),
+            (CoreCleanupItemStatus::Trashed, CleanupItemStatus::Trashed),
+            (CoreCleanupItemStatus::Removed, CleanupItemStatus::Removed),
+            (CoreCleanupItemStatus::Evicted, CleanupItemStatus::Evicted),
+            (CoreCleanupItemStatus::Skipped, CleanupItemStatus::Skipped),
+            (CoreCleanupItemStatus::Rejected, CleanupItemStatus::Rejected),
+            (CoreCleanupItemStatus::Failed, CleanupItemStatus::Failed),
+            (
+                CoreCleanupItemStatus::ChangedSincePlan,
+                CleanupItemStatus::ChangedSincePlan,
+            ),
+            (
+                CoreCleanupItemStatus::Interrupted,
+                CleanupItemStatus::Interrupted,
+            ),
+            (
+                CoreCleanupItemStatus::Unavailable,
+                CleanupItemStatus::Unavailable,
+            ),
+            (
+                CoreCleanupItemStatus::OutcomeUnknown,
+                CleanupItemStatus::OutcomeUnknown,
+            ),
+        ];
+        for (core, expected) in statuses {
+            assert_eq!(map_cleanup_item_status(core).unwrap(), expected);
+        }
+
+        let warnings = [
+            (
+                CoreCleanupWarning::EstimatedBytesUnverified,
+                CleanupWarning::EstimatedBytesUnverified,
+            ),
+            (
+                CoreCleanupWarning::DryRunDoesNotMutate,
+                CleanupWarning::DryRunDoesNotMutate,
+            ),
+            (
+                CoreCleanupWarning::TrashDoesNotFreeSpaceImmediately,
+                CleanupWarning::TrashDoesNotFreeSpaceImmediately,
+            ),
+            (
+                CoreCleanupWarning::PermanentRemovalCannotBeUndone,
+                CleanupWarning::PermanentRemovalCannotBeUndone,
+            ),
+            (
+                CoreCleanupWarning::CloudEvictionRequiresNetworkToRedownload,
+                CleanupWarning::CloudEvictionRequiresNetworkToRedownload,
+            ),
+        ];
+        for (core, expected) in warnings {
+            assert_eq!(cleanup_warning(core).unwrap(), expected);
+        }
+
+        let errors = [
+            (CoreCleanupHistoryError::Closed, CleanupHistoryError::Closed),
+            (
+                CoreCleanupHistoryError::InvalidLimit { maximum: 64 },
+                CleanupHistoryError::InvalidLimit,
+            ),
+            (
+                CoreCleanupHistoryError::SessionNotFound,
+                CleanupHistoryError::SessionNotFound,
+            ),
+            (
+                CoreCleanupHistoryError::IncompatibleSchema,
+                CleanupHistoryError::IncompatibleSchema,
+            ),
+            (CoreCleanupHistoryError::Busy, CleanupHistoryError::Busy),
+            (
+                CoreCleanupHistoryError::UnsafeStorage,
+                CleanupHistoryError::UnsafeStorage,
+            ),
+            (
+                CoreCleanupHistoryError::QueryLimitExceeded,
+                CleanupHistoryError::BudgetExceeded,
+            ),
+            (
+                CoreCleanupHistoryError::CorruptData,
+                CleanupHistoryError::CorruptData,
+            ),
+            (
+                CoreCleanupHistoryError::Unavailable,
+                CleanupHistoryError::Unavailable,
+            ),
+            (
+                CoreCleanupHistoryError::InternalState,
+                CleanupHistoryError::InternalState,
+            ),
+        ];
+        for (core, expected) in errors {
+            assert_eq!(map_cleanup_history_error(core), expected);
+        }
+        assert!(is_bounded_cleanup_history_token(
+            "permanent_safe_target_changed",
+            MAX_CLEANUP_HISTORY_ERROR_CATEGORY_BYTES
+        ));
+        assert!(!is_bounded_cleanup_history_token(
+            "error category with spaces",
+            MAX_CLEANUP_HISTORY_ERROR_CATEGORY_BYTES
+        ));
     }
 
     #[test]

@@ -734,6 +734,13 @@ public protocol DuxEngineProtocol: AnyObject, Sendable {
     func acquireLatestExplorerSnapshotReview() throws  -> SnapshotReviewSession
 
     /**
+     * Return one exact, bounded, path-free cleanup-session observation. The
+     * supplied ID must come from summary history and is used only to select
+     * immutable history; it cannot resume, retry, approve, or execute work.
+     */
+    func cleanupSessionHistory(request: CleanupSessionHistoryRequest) throws  -> CleanupSessionHistory
+
+    /**
      * Close the engine and wait for at most five seconds for worker quiescence.
      * Returns whether all workers have quiesced; repeated calls return the
      * first call's final observation without reopening storage.
@@ -935,6 +942,20 @@ open func acquireLatestExplorerSnapshotReview()throws  -> SnapshotReviewSession 
     return try  FfiConverterTypeSnapshotReviewSession_lift(try rustCallWithError(FfiConverterTypeEngineError_lift) {
     uniffi_dux_ffi_fn_method_duxengine_acquire_latest_explorer_snapshot_review(
             self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+    /**
+     * Return one exact, bounded, path-free cleanup-session observation. The
+     * supplied ID must come from summary history and is used only to select
+     * immutable history; it cannot resume, retry, approve, or execute work.
+     */
+open func cleanupSessionHistory(request: CleanupSessionHistoryRequest)throws  -> CleanupSessionHistory  {
+    return try  FfiConverterTypeCleanupSessionHistory_lift(try rustCallWithError(FfiConverterTypeCleanupHistoryError_lift) {
+    uniffi_dux_ffi_fn_method_duxengine_cleanup_session_history(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeCleanupSessionHistoryRequest_lower(request),$0
     )
 })
 }
@@ -3339,6 +3360,243 @@ public func FfiConverterTypeCleanupHistoryPage_lift(_ buf: RustBuffer) throws ->
 #endif
 public func FfiConverterTypeCleanupHistoryPage_lower(_ value: CleanupHistoryPage) -> RustBuffer {
     return FfiConverterTypeCleanupHistoryPage.lower(value)
+}
+
+
+/**
+ * One ordered path-free item observation from a fully validated cleanup
+ * session. Path values, evidence payloads, candidate IDs, and execution
+ * fences remain sealed inside core.
+ */
+public struct CleanupItemSummary: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let ordinal: UInt16
+    public let ruleId: String
+    public let ruleRevision: UInt32
+    public let category: CandidateCategory?
+    public let safety: CandidateSafety?
+    public let action: CandidateAction?
+    public let ruleScheduleEligible: Bool?
+    public let newestMtimeUnixMs: Int64?
+    public let estimatedBytes: UInt64
+    public let status: CleanupItemStatus
+    public let errorRecorded: Bool
+    public let errorCategory: String?
+    public let pathCount: UInt16
+    public let evidenceCount: UInt16
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, ordinal: UInt16, ruleId: String, ruleRevision: UInt32, category: CandidateCategory?, safety: CandidateSafety?, action: CandidateAction?, ruleScheduleEligible: Bool?, newestMtimeUnixMs: Int64?, estimatedBytes: UInt64, status: CleanupItemStatus, errorRecorded: Bool, errorCategory: String?, pathCount: UInt16, evidenceCount: UInt16) {
+        self.recordVersion = recordVersion
+        self.ordinal = ordinal
+        self.ruleId = ruleId
+        self.ruleRevision = ruleRevision
+        self.category = category
+        self.safety = safety
+        self.action = action
+        self.ruleScheduleEligible = ruleScheduleEligible
+        self.newestMtimeUnixMs = newestMtimeUnixMs
+        self.estimatedBytes = estimatedBytes
+        self.status = status
+        self.errorRecorded = errorRecorded
+        self.errorCategory = errorCategory
+        self.pathCount = pathCount
+        self.evidenceCount = evidenceCount
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension CleanupItemSummary: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCleanupItemSummary: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CleanupItemSummary {
+        return
+            try CleanupItemSummary(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                ordinal: FfiConverterUInt16.read(from: &buf),
+                ruleId: FfiConverterString.read(from: &buf),
+                ruleRevision: FfiConverterUInt32.read(from: &buf),
+                category: FfiConverterOptionTypeCandidateCategory.read(from: &buf),
+                safety: FfiConverterOptionTypeCandidateSafety.read(from: &buf),
+                action: FfiConverterOptionTypeCandidateAction.read(from: &buf),
+                ruleScheduleEligible: FfiConverterOptionBool.read(from: &buf),
+                newestMtimeUnixMs: FfiConverterOptionInt64.read(from: &buf),
+                estimatedBytes: FfiConverterUInt64.read(from: &buf),
+                status: FfiConverterTypeCleanupItemStatus.read(from: &buf),
+                errorRecorded: FfiConverterBool.read(from: &buf),
+                errorCategory: FfiConverterOptionString.read(from: &buf),
+                pathCount: FfiConverterUInt16.read(from: &buf),
+                evidenceCount: FfiConverterUInt16.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: CleanupItemSummary, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterUInt16.write(value.ordinal, into: &buf)
+        FfiConverterString.write(value.ruleId, into: &buf)
+        FfiConverterUInt32.write(value.ruleRevision, into: &buf)
+        FfiConverterOptionTypeCandidateCategory.write(value.category, into: &buf)
+        FfiConverterOptionTypeCandidateSafety.write(value.safety, into: &buf)
+        FfiConverterOptionTypeCandidateAction.write(value.action, into: &buf)
+        FfiConverterOptionBool.write(value.ruleScheduleEligible, into: &buf)
+        FfiConverterOptionInt64.write(value.newestMtimeUnixMs, into: &buf)
+        FfiConverterUInt64.write(value.estimatedBytes, into: &buf)
+        FfiConverterTypeCleanupItemStatus.write(value.status, into: &buf)
+        FfiConverterBool.write(value.errorRecorded, into: &buf)
+        FfiConverterOptionString.write(value.errorCategory, into: &buf)
+        FfiConverterUInt16.write(value.pathCount, into: &buf)
+        FfiConverterUInt16.write(value.evidenceCount, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCleanupItemSummary_lift(_ buf: RustBuffer) throws -> CleanupItemSummary {
+    return try FfiConverterTypeCleanupItemSummary.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCleanupItemSummary_lower(_ value: CleanupItemSummary) -> RustBuffer {
+    return FfiConverterTypeCleanupItemSummary.lower(value)
+}
+
+
+/**
+ * Fully validated exact-session cleanup history. This is immutable,
+ * path-free presentation data and cannot be supplied to any planner,
+ * approval, recovery, journal, retry, or executor operation.
+ */
+public struct CleanupSessionHistory: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let summary: CleanupSessionSummary
+    public let items: [CleanupItemSummary]
+    public let warnings: [CleanupWarning]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, summary: CleanupSessionSummary, items: [CleanupItemSummary], warnings: [CleanupWarning]) {
+        self.recordVersion = recordVersion
+        self.summary = summary
+        self.items = items
+        self.warnings = warnings
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension CleanupSessionHistory: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCleanupSessionHistory: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CleanupSessionHistory {
+        return
+            try CleanupSessionHistory(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                summary: FfiConverterTypeCleanupSessionSummary.read(from: &buf),
+                items: FfiConverterSequenceTypeCleanupItemSummary.read(from: &buf),
+                warnings: FfiConverterSequenceTypeCleanupWarning.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: CleanupSessionHistory, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterTypeCleanupSessionSummary.write(value.summary, into: &buf)
+        FfiConverterSequenceTypeCleanupItemSummary.write(value.items, into: &buf)
+        FfiConverterSequenceTypeCleanupWarning.write(value.warnings, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCleanupSessionHistory_lift(_ buf: RustBuffer) throws -> CleanupSessionHistory {
+    return try FfiConverterTypeCleanupSessionHistory.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCleanupSessionHistory_lower(_ value: CleanupSessionHistory) -> RustBuffer {
+    return FfiConverterTypeCleanupSessionHistory.lower(value)
+}
+
+
+/**
+ * Select one exact path-free history observation by the stable session ID
+ * copied from [`CleanupSessionSummary`]. The token grants no recovery,
+ * approval, journal, or executor authority.
+ */
+public struct CleanupSessionHistoryRequest: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let sessionId: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, sessionId: String) {
+        self.recordVersion = recordVersion
+        self.sessionId = sessionId
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension CleanupSessionHistoryRequest: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCleanupSessionHistoryRequest: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CleanupSessionHistoryRequest {
+        return
+            try CleanupSessionHistoryRequest(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                sessionId: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: CleanupSessionHistoryRequest, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterString.write(value.sessionId, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCleanupSessionHistoryRequest_lift(_ buf: RustBuffer) throws -> CleanupSessionHistoryRequest {
+    return try FfiConverterTypeCleanupSessionHistoryRequest.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCleanupSessionHistoryRequest_lower(_ value: CleanupSessionHistoryRequest) -> RustBuffer {
+    return FfiConverterTypeCleanupSessionHistoryRequest.lower(value)
 }
 
 
@@ -8350,6 +8608,8 @@ public enum CleanupHistoryError: Swift.Error, Equatable, Hashable, Foundation.Lo
 
 
     case Closed
+    case InvalidRecordVersion
+    case InvalidSessionId
     case InvalidLimit
     case InvalidCursor
     case SessionNotFound
@@ -8390,16 +8650,18 @@ public struct FfiConverterTypeCleanupHistoryError: FfiConverterRustBuffer {
 
 
         case 1: return .Closed
-        case 2: return .InvalidLimit
-        case 3: return .InvalidCursor
-        case 4: return .SessionNotFound
-        case 5: return .IncompatibleSchema
-        case 6: return .Busy
-        case 7: return .UnsafeStorage
-        case 8: return .BudgetExceeded
-        case 9: return .CorruptData
-        case 10: return .Unavailable
-        case 11: return .InternalState
+        case 2: return .InvalidRecordVersion
+        case 3: return .InvalidSessionId
+        case 4: return .InvalidLimit
+        case 5: return .InvalidCursor
+        case 6: return .SessionNotFound
+        case 7: return .IncompatibleSchema
+        case 8: return .Busy
+        case 9: return .UnsafeStorage
+        case 10: return .BudgetExceeded
+        case 11: return .CorruptData
+        case 12: return .Unavailable
+        case 13: return .InternalState
 
          default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -8416,44 +8678,52 @@ public struct FfiConverterTypeCleanupHistoryError: FfiConverterRustBuffer {
             writeInt(&buf, Int32(1))
 
 
-        case .InvalidLimit:
+        case .InvalidRecordVersion:
             writeInt(&buf, Int32(2))
 
 
-        case .InvalidCursor:
+        case .InvalidSessionId:
             writeInt(&buf, Int32(3))
 
 
-        case .SessionNotFound:
+        case .InvalidLimit:
             writeInt(&buf, Int32(4))
 
 
-        case .IncompatibleSchema:
+        case .InvalidCursor:
             writeInt(&buf, Int32(5))
 
 
-        case .Busy:
+        case .SessionNotFound:
             writeInt(&buf, Int32(6))
 
 
-        case .UnsafeStorage:
+        case .IncompatibleSchema:
             writeInt(&buf, Int32(7))
 
 
-        case .BudgetExceeded:
+        case .Busy:
             writeInt(&buf, Int32(8))
 
 
-        case .CorruptData:
+        case .UnsafeStorage:
             writeInt(&buf, Int32(9))
 
 
-        case .Unavailable:
+        case .BudgetExceeded:
             writeInt(&buf, Int32(10))
 
 
-        case .InternalState:
+        case .CorruptData:
             writeInt(&buf, Int32(11))
+
+
+        case .Unavailable:
+            writeInt(&buf, Int32(12))
+
+
+        case .InternalState:
+            writeInt(&buf, Int32(13))
 
         }
     }
@@ -14223,6 +14493,78 @@ fileprivate struct FfiConverterOptionTypeSnapshotNodeTimestamp: FfiConverterRust
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeCandidateAction: FfiConverterRustBuffer {
+    typealias SwiftType = CandidateAction?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeCandidateAction.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeCandidateAction.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeCandidateCategory: FfiConverterRustBuffer {
+    typealias SwiftType = CandidateCategory?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeCandidateCategory.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeCandidateCategory.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeCandidateSafety: FfiConverterRustBuffer {
+    typealias SwiftType = CandidateSafety?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeCandidateSafety.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeCandidateSafety.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeMaintenanceFailure: FfiConverterRustBuffer {
     typealias SwiftType = MaintenanceFailure?
 
@@ -14461,6 +14803,31 @@ fileprivate struct FfiConverterSequenceTypeCleanupExclusionPath: FfiConverterRus
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeCleanupExclusionPath.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeCleanupItemSummary: FfiConverterRustBuffer {
+    typealias SwiftType = [CleanupItemSummary]
+
+    public static func write(_ value: [CleanupItemSummary], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeCleanupItemSummary.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [CleanupItemSummary] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [CleanupItemSummary]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeCleanupItemSummary.read(from: &buf))
         }
         return seq
     }
@@ -14809,6 +15176,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_acquire_latest_explorer_snapshot_review() != 56472) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_duxengine_cleanup_session_history() != 34658) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_close() != 17149) {

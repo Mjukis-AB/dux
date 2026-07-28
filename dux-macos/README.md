@@ -195,6 +195,23 @@ Current paths are lossless byte observations: unsafe/hidden Unicode and
 non-UTF-8 bytes use a deterministic escaped display that Swift validates
 byte-for-byte before presentation.
 
+Cleanup History exposes FFI v29's exact-session, observation-only drill-down.
+The list supplies one bounded stable session ID; Rust reloads and validates the
+complete stored graph, and Swift independently checks the version, exact ID,
+lifecycle and legacy/complete shape, contiguous item ordinals, aggregate and
+status counts, checked complete-session estimate sum, exact derived warning
+order, unique summary IDs, and bounded stable categories. Selection, summary
+refresh, read retry, Back, destination close, and shutdown all
+generation-fence late replies.
+
+The detail view keeps the plan estimate separate from the signed verified
+available-capacity change and labels missing verification as unknown rather
+than zero. Accessible item and path-record charts have textual legends, and
+ordered cards show only rule, policy, status, error-category, and aggregate
+metadata. No path, evidence payload, candidate ID, claim, receipt, history
+clear, cleanup retry, approval, scheduler, AI, or executor input crosses this
+route. **Try reading again** only reloads immutable history.
+
 Private-store maintenance is deliberately separate from user cleanup and from
 Milestone 8 automations. After a 60-second startup grace, the scheduler runs at
 most one sealed Rust batch at a time across scan recovery, terminal temps,

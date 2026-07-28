@@ -134,9 +134,9 @@ enum ExplorerSnapshotHistoryAdapter {
     }
 }
 
-/// Converts the generated cleanup-history feed into bounded app observations.
-/// This boundary intentionally has no path, item, evidence, plan, or effect
-/// mapping, keeping history useful for charts and status without authority.
+/// Converts generated cleanup-history records into bounded app observations.
+/// Exact items remain path-free and omit evidence payloads, candidate IDs,
+/// execution fences, and every mutation capability.
 enum CleanupHistoryAdapter {
     private static let recordVersion: UInt32 = 1
     private static let maximumUnixMilliseconds: Int64 = 253_402_300_799_999
@@ -144,6 +144,7 @@ enum CleanupHistoryAdapter {
     private static let maximumSessionItems: UInt16 = 64
     private static let maximumSessionPaths: UInt16 = 256
     private static let maximumSessionEvidence: UInt16 = 512
+    private static let maximumSessionWarnings = 5
 
     static func map(
         _ page: CleanupHistoryPage
@@ -155,6 +156,9 @@ enum CleanupHistoryAdapter {
         }
 
         let records = try page.records.map(mapSummary)
+        guard Set(records.map(\.sessionID)).count == records.count else {
+            throw CleanupHistoryServiceError.invalidResponse
+        }
         for pair in zip(records, records.dropFirst()) {
             let ordered = pair.0.startedAt > pair.1.startedAt
                 || (pair.0.startedAt == pair.1.startedAt && pair.0.sessionID < pair.1.sessionID)
@@ -176,6 +180,65 @@ enum CleanupHistoryAdapter {
         return CleanupHistoryPageModel(records: records, nextCursor: nextCursor)
     }
 
+    static func mapSession(
+        _ raw: CleanupSessionHistory,
+        requestedSessionID: String
+    ) throws -> CleanupHistorySessionDetailModel {
+        guard
+            raw.recordVersion == recordVersion,
+            validStableToken(requestedSessionID),
+            raw.summary.sessionId == requestedSessionID,
+            raw.items.count <= Int(maximumSessionItems),
+            raw.warnings.count <= maximumSessionWarnings,
+            Set(raw.warnings).count == raw.warnings.count
+        else {
+            throw CleanupHistoryServiceError.invalidResponse
+        }
+
+        let summary = try mapSummary(raw.summary)
+        var pathTotal = 0
+        var evidenceTotal = 0
+        var estimatedBytesTotal: UInt64 = 0
+        var itemStatusCounts = MutableCleanupStatusCounts()
+        let items = try raw.items.enumerated().map { index, item in
+            guard item.ordinal == UInt16(index) else {
+                throw CleanupHistoryServiceError.invalidResponse
+            }
+            pathTotal += Int(item.pathCount)
+            evidenceTotal += Int(item.evidenceCount)
+            let (nextEstimatedBytesTotal, overflowed) =
+                estimatedBytesTotal.addingReportingOverflow(item.estimatedBytes)
+            guard !overflowed else {
+                throw CleanupHistoryServiceError.invalidResponse
+            }
+            estimatedBytesTotal = nextEstimatedBytesTotal
+            itemStatusCounts.add(item.status)
+            return try mapItem(item, format: raw.summary.format)
+        }
+
+        guard
+            items.count == Int(summary.itemTotal),
+            pathTotal == Int(summary.pathTotal),
+            evidenceTotal == Int(summary.evidenceTotal),
+            itemStatusCounts.matches(raw.summary.itemStatusCounts),
+            raw.summary.format != .complete
+                || estimatedBytesTotal == summary.estimatedBytes,
+            raw.warnings == expectedWarnings(
+                format: raw.summary.format,
+                mode: raw.summary.mode,
+                items: raw.items
+            )
+        else {
+            throw CleanupHistoryServiceError.invalidResponse
+        }
+
+        return CleanupHistorySessionDetailModel(
+            summary: summary,
+            items: items,
+            warnings: raw.warnings.map(map)
+        )
+    }
+
     static func mapCursor(_ raw: CleanupHistoryCursor) throws -> CleanupHistoryCursorModel {
         guard raw.recordVersion == recordVersion,
               validStableToken(raw.sessionId),
@@ -189,7 +252,7 @@ enum CleanupHistoryAdapter {
         )
     }
 
-    private static func mapSummary(
+    static func mapSummary(
         _ raw: CleanupSessionSummary
     ) throws -> CleanupHistorySessionSummaryModel {
         guard raw.recordVersion == recordVersion,
@@ -220,14 +283,23 @@ enum CleanupHistoryAdapter {
         case .legacyIncomplete:
             guard raw.sourceScanId == nil,
                   raw.planCreatedAtUnixMs == nil,
-                  raw.planExpiresAtUnixMs == nil
+                  raw.planExpiresAtUnixMs == nil,
+                  raw.cancellationRequested == nil,
+                  raw.evidenceTotal == 0,
+                  raw.status != .recovering
             else {
                 throw CleanupHistoryServiceError.invalidResponse
             }
         case .complete:
             guard raw.sourceScanId != nil,
-                  raw.planCreatedAtUnixMs != nil,
-                  raw.planExpiresAtUnixMs != nil
+                  let created = raw.planCreatedAtUnixMs,
+                  let expires = raw.planExpiresAtUnixMs,
+                  raw.cancellationRequested != nil,
+                  created <= raw.startedAtUnixMs,
+                  expires > raw.startedAtUnixMs,
+                  isTerminal(raw.status) == (raw.completedAtUnixMs != nil),
+                  isTerminal(raw.status) || raw.verifiedCapacityDeltaBytes == nil,
+                  raw.status != .planned || raw.cancellationRequested == false
             else {
                 throw CleanupHistoryServiceError.invalidResponse
             }
@@ -253,6 +325,67 @@ enum CleanupHistoryAdapter {
             evidenceTotal: raw.evidenceTotal,
             itemStatusCounts: map(raw.itemStatusCounts),
             pathStatusCounts: map(raw.pathStatusCounts)
+        )
+    }
+
+    private static func mapItem(
+        _ raw: CleanupItemSummary,
+        format: CleanupRecordFormat
+    ) throws -> CleanupHistoryItemModel {
+        guard
+            raw.recordVersion == recordVersion,
+            raw.ordinal < maximumSessionItems,
+            validStableToken(raw.ruleId),
+            raw.ruleRevision > 0,
+            raw.newestMtimeUnixMs.map(validUnixMilliseconds) ?? true,
+            raw.pathCount > 0,
+            raw.pathCount <= maximumSessionPaths,
+            raw.evidenceCount <= maximumSessionEvidence,
+            raw.errorRecorded || raw.errorCategory == nil,
+            raw.errorCategory.map(validStableToken) ?? true
+        else {
+            throw CleanupHistoryServiceError.invalidResponse
+        }
+
+        switch format {
+        case .legacyIncomplete:
+            guard
+                raw.category == nil,
+                raw.safety == nil,
+                raw.action == nil,
+                raw.ruleScheduleEligible == nil,
+                raw.newestMtimeUnixMs == nil,
+                raw.evidenceCount == 0,
+                raw.errorCategory == nil
+            else {
+                throw CleanupHistoryServiceError.invalidResponse
+            }
+        case .complete:
+            guard
+                raw.category != nil,
+                raw.safety != nil,
+                raw.action != nil,
+                raw.ruleScheduleEligible != nil
+            else {
+                throw CleanupHistoryServiceError.invalidResponse
+            }
+        }
+
+        return CleanupHistoryItemModel(
+            ordinal: raw.ordinal,
+            ruleID: raw.ruleId,
+            ruleRevision: raw.ruleRevision,
+            category: raw.category.map(map),
+            safety: raw.safety.map(map),
+            action: raw.action.map(map),
+            ruleScheduleEligible: raw.ruleScheduleEligible,
+            newestModificationAt: raw.newestMtimeUnixMs.map(date),
+            estimatedBytes: raw.estimatedBytes,
+            status: map(raw.status),
+            errorRecorded: raw.errorRecorded,
+            errorCategory: raw.errorCategory,
+            pathCount: raw.pathCount,
+            evidenceCount: raw.evidenceCount
         )
     }
 
@@ -293,6 +426,71 @@ enum CleanupHistoryAdapter {
         case .interrupted: .interrupted
         case .rejected: .rejected
         case .dryRun: .dryRun
+        }
+    }
+
+    private static func map(_ raw: CleanupItemStatus) -> CleanupHistoryItemStatus {
+        switch raw {
+        case .planned: .planned
+        case .validating: .validating
+        case .dryRun: .dryRun
+        case .effectStarted: .effectStarted
+        case .trashed: .trashed
+        case .removed: .removed
+        case .evicted: .evicted
+        case .skipped: .skipped
+        case .rejected: .rejected
+        case .failed: .failed
+        case .changedSincePlan: .changedSincePlan
+        case .interrupted: .interrupted
+        case .unavailable: .unavailable
+        case .outcomeUnknown: .outcomeUnknown
+        }
+    }
+
+    private static func map(_ raw: CleanupWarning) -> CleanupHistoryWarning {
+        switch raw {
+        case .estimatedBytesUnverified: .estimatedBytesUnverified
+        case .dryRunDoesNotMutate: .dryRunDoesNotMutate
+        case .trashDoesNotFreeSpaceImmediately: .trashDoesNotFreeSpaceImmediately
+        case .permanentRemovalCannotBeUndone: .permanentRemovalCannotBeUndone
+        case .cloudEvictionRequiresNetworkToRedownload:
+            .cloudEvictionRequiresNetworkToRedownload
+        }
+    }
+
+    private static func map(_ raw: CandidateCategory) -> ExplorerCandidateCategory {
+        switch raw {
+        case .developerArtifact: .developerArtifact
+        case .applicationCache: .applicationCache
+        case .browserCache: .browserCache
+        case .logAndDiagnostic: .logAndDiagnostic
+        case .installerAndDownload: .installerAndDownload
+        case .deviceAndSimulatorData: .deviceAndSimulatorData
+        case .cloudFile: .cloudFile
+        case .largeReviewItem: .largeReviewItem
+        case .protectedSystemData: .protectedSystemData
+        case .unknownStorage: .unknownStorage
+        }
+    }
+
+    private static func map(_ raw: CandidateSafety) -> ExplorerCandidateSafety {
+        switch raw {
+        case .safeRegenerable: .safeRegenerable
+        case .safeEvictable: .safeEvictable
+        case .reviewRequired: .reviewRequired
+        case .informational: .informational
+        case .protected: .protected
+        }
+    }
+
+    private static func map(_ raw: CandidateAction) -> ExplorerCandidateAction {
+        switch raw {
+        case .removeKnownRegenerableContents: .removeKnownRegenerableContents
+        case .evictLocalCopy: .evictLocalCopy
+        case .moveToTrash: .moveToTrash
+        case .revealOnly: .revealOnly
+        case .noAction: .noAction
         }
     }
 
@@ -353,6 +551,96 @@ enum CleanupHistoryAdapter {
 
     private static func date(_ unixMilliseconds: Int64) -> Date {
         Date(timeIntervalSince1970: Double(unixMilliseconds) / 1_000)
+    }
+
+    private static func isTerminal(_ status: CleanupSessionStatus) -> Bool {
+        switch status {
+        case .planned, .running, .recovering: false
+        case .completed, .partiallyCompleted, .failed, .cancelled, .interrupted, .rejected,
+             .dryRun:
+            true
+        }
+    }
+
+    private static func expectedWarnings(
+        format: CleanupRecordFormat,
+        mode: CleanupMode,
+        items: [CleanupItemSummary]
+    ) -> [CleanupWarning] {
+        guard format == .complete else {
+            return []
+        }
+        var warnings: [CleanupWarning] = [.estimatedBytesUnverified]
+        switch mode {
+        case .dryRun:
+            warnings.append(.dryRunDoesNotMutate)
+        case .trash:
+            warnings.append(.trashDoesNotFreeSpaceImmediately)
+        case .permanentSafe:
+            warnings.append(.permanentRemovalCannotBeUndone)
+        case .evictLocalCopy:
+            break
+        }
+        if items.contains(where: { $0.action == .evictLocalCopy }) {
+            warnings.append(.cloudEvictionRequiresNetworkToRedownload)
+        }
+        return warnings
+    }
+
+    private struct MutableCleanupStatusCounts {
+        var planned = 0
+        var validating = 0
+        var dryRun = 0
+        var effectStarted = 0
+        var trashed = 0
+        var removed = 0
+        var evicted = 0
+        var skipped = 0
+        var rejected = 0
+        var failed = 0
+        var changedSincePlan = 0
+        var interrupted = 0
+        var unavailable = 0
+        var outcomeUnknown = 0
+
+        mutating func add(_ status: CleanupItemStatus) {
+            switch status {
+            case .planned: planned += 1
+            case .validating: validating += 1
+            case .dryRun: dryRun += 1
+            case .effectStarted: effectStarted += 1
+            case .trashed: trashed += 1
+            case .removed: removed += 1
+            case .evicted: evicted += 1
+            case .skipped: skipped += 1
+            case .rejected: rejected += 1
+            case .failed: failed += 1
+            case .changedSincePlan: changedSincePlan += 1
+            case .interrupted: interrupted += 1
+            case .unavailable: unavailable += 1
+            case .outcomeUnknown: outcomeUnknown += 1
+            }
+        }
+
+        func matches(_ counts: CleanupStatusCounts) -> Bool {
+            planned == Int(counts.planned)
+                && validating == Int(counts.validating)
+                && dryRun == Int(counts.dryRun)
+                && effectStarted == Int(counts.effectStarted)
+                && trashed == Int(counts.trashed)
+                && removed == Int(counts.removed)
+                && evicted == Int(counts.evicted)
+                && skipped == Int(counts.skipped)
+                && rejected == Int(counts.rejected)
+                && failed == Int(counts.failed)
+                && changedSincePlan == Int(counts.changedSincePlan)
+                && interrupted == Int(counts.interrupted)
+                && unavailable == Int(counts.unavailable)
+                && outcomeUnknown == Int(counts.outcomeUnknown)
+                && Int(counts.total) == planned + validating + dryRun + effectStarted + trashed
+                    + removed + evicted + skipped + rejected + failed + changedSincePlan
+                    + interrupted + unavailable + outcomeUnknown
+        }
     }
 }
 

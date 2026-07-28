@@ -364,6 +364,27 @@ cancellation, and shutdown transition. Explorer provides only
 prepare/check-again/close controls and states that the preview is not approval
 and changed no files.
 
+UniFFI contract v29 exposes one exact cleanup-session history observation
+without exposing the journal capability that produced it. Its only request
+field beyond the record version is a bounded stable session ID copied from the
+recent path-free summary feed. Core runs the complete bounded journal decoder;
+FFI independently checks record versions, stable identifiers, lifecycle/time
+shape, complete-versus-legacy policy shape, ordered item ordinals, item/path/
+evidence totals, status counts, warning uniqueness, and bounded error
+categories before returning immutable presentation data. The signed verified
+capacity delta remains distinct from estimated bytes.
+
+The v29 records omit paths, evidence payloads, candidate IDs, execution owners
+and generations, claims, receipts, and mutable journal state. The session ID is
+only a history selector: no clear, cleanup retry, recovery, approval, callback,
+scheduler, AI, or executor operation accepts it. Swift repeats the version,
+identifier, lifecycle, legacy/complete shape, ordinal, aggregate, status-count,
+checked estimate-sum, derived-warning-order, duplicate-session-ID, and
+bounded-category checks before publishing app-owned models. AppModel
+generation-fences selection, summary refresh, read retry, close, and shutdown.
+The native drill-down can only read the same observation; its retry control
+reloads history and cannot repeat an effect.
+
 The admitted macOS metadata case now also has bounded positive Cargo 1.96
 file-configuration provenance. DUX reproduces Cargo's cwd-ancestor lookup
 order, admits one unambiguous `config` or `config.toml` at each non-Cargo-home

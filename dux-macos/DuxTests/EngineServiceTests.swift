@@ -165,7 +165,7 @@ final class EngineServiceTests: XCTestCase {
         // DUX-DESTRUCTIVE: allow=test-swift-retry-obstruction-remove -- remove only this test fixture's deliberate file obstruction
         try FileManager.default.removeItem(at: dataRoot)
         let status = try await service.loadStatus()
-        XCTAssertEqual(status.ffiContractVersion, 28)
+        XCTAssertEqual(status.ffiContractVersion, 29)
         let closed = await service.close()
         XCTAssertTrue(closed)
     }
@@ -175,7 +175,7 @@ final class EngineServiceTests: XCTestCase {
         let result = try await EngineService(engine: fixture.engine).loadStatus()
 
         XCTAssertEqual(result.libraryVersion, "0.5.0")
-        XCTAssertEqual(result.ffiContractVersion, 28)
+        XCTAssertEqual(result.ffiContractVersion, 29)
         XCTAssertTrue(result.executedOffMainThread)
     }
 
@@ -194,11 +194,31 @@ final class EngineServiceTests: XCTestCase {
             XCTAssertEqual(error, .invalidLimit)
         }
 
+        do {
+            _ = try await service.loadCleanupHistorySession(sessionID: "../not-a-token")
+            XCTFail("Expected the history session token to be rejected")
+        } catch let error as CleanupHistoryServiceError {
+            XCTAssertEqual(error, .invalidSessionID)
+        }
+
+        do {
+            _ = try await service.loadCleanupHistorySession(sessionID: "session:missing")
+            XCTFail("Expected the absent history session to be reported")
+        } catch let error as CleanupHistoryServiceError {
+            XCTAssertEqual(error, .sessionNotFound)
+        }
+
         let closed = await service.close()
         XCTAssertTrue(closed)
         do {
             _ = try await service.loadRecentCleanupHistory(cursor: nil, limit: 1)
             XCTFail("Expected the closed engine to reject history reads")
+        } catch let error as CleanupHistoryServiceError {
+            XCTAssertEqual(error, .closed)
+        }
+        do {
+            _ = try await service.loadCleanupHistorySession(sessionID: "session:missing")
+            XCTFail("Expected the closed engine to reject exact-session history reads")
         } catch let error as CleanupHistoryServiceError {
             XCTAssertEqual(error, .closed)
         }
@@ -251,6 +271,40 @@ final class EngineServiceTests: XCTestCase {
         )
         XCTAssertEqual(try CleanupHistoryAdapter.map(validPage).records.count, 1)
 
+        let earlierDuplicate = CleanupSessionSummary(
+            recordVersion: 1,
+            sessionId: "session:test",
+            planId: "plan:test",
+            format: .legacyIncomplete,
+            sourceScanId: nil,
+            startedAtUnixMs: 999,
+            completedAtUnixMs: nil,
+            planCreatedAtUnixMs: nil,
+            planExpiresAtUnixMs: nil,
+            mode: .dryRun,
+            trigger: .manual,
+            status: .dryRun,
+            estimatedBytes: 0,
+            verifiedCapacityDeltaBytes: nil,
+            cancellationRequested: nil,
+            itemTotal: 0,
+            pathTotal: 0,
+            evidenceTotal: 0,
+            itemStatusCounts: emptyCounts,
+            pathStatusCounts: emptyCounts
+        )
+        XCTAssertThrowsError(
+            try CleanupHistoryAdapter.map(
+                CleanupHistoryPage(
+                    recordVersion: 1,
+                    records: [summary, earlierDuplicate],
+                    nextCursor: nil
+                )
+            )
+        ) { error in
+            XCTAssertEqual(error as? CleanupHistoryServiceError, .invalidResponse)
+        }
+
         let malformed = CleanupHistoryPage(
             recordVersion: 2,
             records: [summary],
@@ -302,6 +356,177 @@ final class EngineServiceTests: XCTestCase {
         XCTAssertThrowsError(
             try CleanupHistoryAdapter.map(
                 CleanupHistoryPage(recordVersion: 1, records: [inconsistentSummary], nextCursor: nil)
+            )
+        ) { error in
+            XCTAssertEqual(error as? CleanupHistoryServiceError, .invalidResponse)
+        }
+    }
+
+    func testCleanupHistorySessionAdapterMapsSignedCapacityAndRejectsMalformedGraphs() throws {
+        let valid = generatedCleanupSessionHistory()
+        let mapped = try CleanupHistoryAdapter.mapSession(
+            valid,
+            requestedSessionID: "session:test"
+        )
+        XCTAssertEqual(mapped.summary.verifiedCapacityDeltaBytes, -512)
+        XCTAssertEqual(mapped.items.map(\.ordinal), [0])
+        XCTAssertEqual(mapped.items.first?.category, .developerArtifact)
+        XCTAssertEqual(mapped.items.first?.status, .removed)
+        XCTAssertEqual(mapped.items.first?.pathCount, 2)
+        XCTAssertEqual(
+            mapped.warnings,
+            [
+                .estimatedBytesUnverified,
+                .permanentRemovalCannotBeUndone,
+            ]
+        )
+        let evicted = try CleanupHistoryAdapter.mapSession(
+            generatedCleanupSessionHistory(
+                summary: generatedCleanupSummary(mode: .evictLocalCopy),
+                item: generatedCleanupItem(action: .evictLocalCopy),
+                warnings: [
+                    .estimatedBytesUnverified,
+                    .cloudEvictionRequiresNetworkToRedownload,
+                ]
+            ),
+            requestedSessionID: "session:test"
+        )
+        XCTAssertEqual(evicted.items.first?.action, .evictLocalCopy)
+        XCTAssertEqual(
+            evicted.warnings,
+            [.estimatedBytesUnverified, .cloudEvictionRequiresNetworkToRedownload]
+        )
+        XCTAssertTrue(
+            try CleanupHistoryAdapter.mapSession(
+                generatedLegacyCleanupSessionHistory(),
+                requestedSessionID: "session:legacy"
+            ).warnings.isEmpty
+        )
+
+        assertInvalidCleanupSessionHistory(
+            generatedCleanupSessionHistory(recordVersion: 2)
+        )
+        XCTAssertThrowsError(
+            try CleanupHistoryAdapter.mapSession(
+                valid,
+                requestedSessionID: "session:different"
+            )
+        ) { error in
+            XCTAssertEqual(error as? CleanupHistoryServiceError, .invalidResponse)
+        }
+        assertInvalidCleanupSessionHistory(
+            generatedCleanupSessionHistory(
+                item: generatedCleanupItem(ordinal: 1)
+            )
+        )
+        assertInvalidCleanupSessionHistory(
+            generatedCleanupSessionHistory(
+                item: generatedCleanupItem(category: nil)
+            )
+        )
+        assertInvalidCleanupSessionHistory(
+            generatedCleanupSessionHistory(
+                item: generatedCleanupItem(estimatedBytes: 2_048)
+            )
+        )
+        let overflowingSummary = CleanupSessionSummary(
+            recordVersion: 1,
+            sessionId: "session:test",
+            planId: "plan:test",
+            format: .complete,
+            sourceScanId: "scan:test",
+            startedAtUnixMs: 2_000,
+            completedAtUnixMs: 3_000,
+            planCreatedAtUnixMs: 1_000,
+            planExpiresAtUnixMs: 4_000,
+            mode: .permanentSafe,
+            trigger: .manual,
+            status: .completed,
+            estimatedBytes: .max,
+            verifiedCapacityDeltaBytes: -512,
+            cancellationRequested: false,
+            itemTotal: 2,
+            pathTotal: 4,
+            evidenceTotal: 2,
+            itemStatusCounts: generatedCleanupCounts(removed: 2),
+            pathStatusCounts: generatedCleanupCounts(removed: 4)
+        )
+        assertInvalidCleanupSessionHistory(
+            generatedCleanupSessionHistory(
+                summary: overflowingSummary,
+                items: [
+                    generatedCleanupItem(estimatedBytes: .max),
+                    generatedCleanupItem(ordinal: 1, estimatedBytes: 1),
+                ]
+            )
+        )
+        assertInvalidCleanupSessionHistory(
+            generatedCleanupSessionHistory(
+                item: generatedCleanupItem(errorRecorded: false, errorCategory: "io")
+            )
+        )
+        assertInvalidCleanupSessionHistory(
+            generatedCleanupSessionHistory(
+                item: generatedCleanupItem(errorRecorded: true, errorCategory: "not/typed")
+            )
+        )
+        assertInvalidCleanupSessionHistory(
+            generatedCleanupSessionHistory(
+                summary: generatedCleanupSummary(
+                    itemStatusCounts: generatedCleanupCounts(planned: 1)
+                )
+            )
+        )
+        assertInvalidCleanupSessionHistory(
+            generatedCleanupSessionHistory(
+                summary: generatedCleanupSummary(planExpiresAtUnixMs: 2_000)
+            )
+        )
+        assertInvalidCleanupSessionHistory(
+            generatedCleanupSessionHistory(
+                summary: generatedCleanupSummary(
+                    completedAtUnixMs: nil,
+                    status: .running,
+                    verifiedCapacityDeltaBytes: -512
+                )
+            )
+        )
+        assertInvalidCleanupSessionHistory(
+            generatedCleanupSessionHistory(
+                summary: generatedCleanupSummary(
+                    completedAtUnixMs: nil,
+                    status: .planned,
+                    verifiedCapacityDeltaBytes: nil,
+                    cancellationRequested: true
+                )
+            )
+        )
+        assertInvalidCleanupSessionHistory(
+            generatedCleanupSessionHistory(
+                summary: generatedCleanupSummary(planCreatedAtUnixMs: 2_001)
+            )
+        )
+        assertInvalidCleanupSessionHistory(
+            generatedCleanupSessionHistory(
+                warnings: [.estimatedBytesUnverified, .estimatedBytesUnverified]
+            )
+        )
+        assertInvalidCleanupSessionHistory(
+            generatedCleanupSessionHistory(
+                warnings: [.permanentRemovalCannotBeUndone, .estimatedBytesUnverified]
+            )
+        )
+        assertInvalidCleanupSessionHistory(
+            generatedCleanupSessionHistory(
+                warnings: [.estimatedBytesUnverified, .dryRunDoesNotMutate]
+            )
+        )
+        XCTAssertThrowsError(
+            try CleanupHistoryAdapter.mapSession(
+                generatedLegacyCleanupSessionHistory(
+                    warnings: [.estimatedBytesUnverified]
+                ),
+                requestedSessionID: "session:legacy"
             )
         ) { error in
             XCTAssertEqual(error as? CleanupHistoryServiceError, .invalidResponse)
@@ -1147,7 +1372,7 @@ final class EngineServiceTests: XCTestCase {
             weakEngine = engine
 
             XCTAssertEqual(liveEngineInstanceCount(), baseline + 1)
-            XCTAssertEqual(try engine.libraryVersion().ffiContractVersion, 28)
+            XCTAssertEqual(try engine.libraryVersion().ffiContractVersion, 29)
             XCTAssertTrue(engine.close())
             XCTAssertTrue(engine.close())
             XCTAssertThrowsError(try engine.formatSize(bytes: 1_536)) { error in
@@ -1369,6 +1594,208 @@ final class EngineServiceTests: XCTestCase {
     func testApplicationRunsAsMenuBarAgent() {
         XCTAssertEqual(Bundle.main.object(forInfoDictionaryKey: "LSUIElement") as? Bool, true)
     }
+}
+
+private func assertInvalidCleanupSessionHistory(
+    _ history: CleanupSessionHistory,
+    file: StaticString = #filePath,
+    line: UInt = #line
+) {
+    XCTAssertThrowsError(
+        try CleanupHistoryAdapter.mapSession(
+            history,
+            requestedSessionID: "session:test"
+        ),
+        file: file,
+        line: line
+    ) { error in
+        XCTAssertEqual(
+            error as? CleanupHistoryServiceError,
+            .invalidResponse,
+            file: file,
+            line: line
+        )
+    }
+}
+
+private func generatedCleanupSessionHistory(
+    recordVersion: UInt32 = 1,
+    summary: CleanupSessionSummary = generatedCleanupSummary(),
+    item: CleanupItemSummary = generatedCleanupItem(),
+    items: [CleanupItemSummary]? = nil,
+    warnings: [CleanupWarning] = [
+        .estimatedBytesUnverified,
+        .permanentRemovalCannotBeUndone,
+    ]
+) -> CleanupSessionHistory {
+    CleanupSessionHistory(
+        recordVersion: recordVersion,
+        summary: summary,
+        items: items ?? [item],
+        warnings: warnings
+    )
+}
+
+private func generatedCleanupSummary(
+    completedAtUnixMs: Int64? = 3_000,
+    planCreatedAtUnixMs: Int64? = 1_000,
+    planExpiresAtUnixMs: Int64? = 4_000,
+    itemStatusCounts: CleanupStatusCounts = generatedCleanupCounts(removed: 1),
+    mode: CleanupMode = .permanentSafe,
+    status: CleanupSessionStatus = .completed,
+    verifiedCapacityDeltaBytes: Int64? = -512,
+    cancellationRequested: Bool? = false
+) -> CleanupSessionSummary {
+    CleanupSessionSummary(
+        recordVersion: 1,
+        sessionId: "session:test",
+        planId: "plan:test",
+        format: .complete,
+        sourceScanId: "scan:test",
+        startedAtUnixMs: 2_000,
+        completedAtUnixMs: completedAtUnixMs,
+        planCreatedAtUnixMs: planCreatedAtUnixMs,
+        planExpiresAtUnixMs: planExpiresAtUnixMs,
+        mode: mode,
+        trigger: .manual,
+        status: status,
+        estimatedBytes: 1_024,
+        verifiedCapacityDeltaBytes: verifiedCapacityDeltaBytes,
+        cancellationRequested: cancellationRequested,
+        itemTotal: 1,
+        pathTotal: 2,
+        evidenceTotal: 1,
+        itemStatusCounts: itemStatusCounts,
+        pathStatusCounts: generatedCleanupCounts(removed: 2)
+    )
+}
+
+private func generatedCleanupItem(
+    ordinal: UInt16 = 0,
+    category: CandidateCategory? = .developerArtifact,
+    action: CandidateAction? = .removeKnownRegenerableContents,
+    estimatedBytes: UInt64 = 1_024,
+    errorRecorded: Bool = false,
+    errorCategory: String? = nil
+) -> CleanupItemSummary {
+    CleanupItemSummary(
+        recordVersion: 1,
+        ordinal: ordinal,
+        ruleId: "developer.rust.target",
+        ruleRevision: 2,
+        category: category,
+        safety: .safeRegenerable,
+        action: action,
+        ruleScheduleEligible: true,
+        newestMtimeUnixMs: 1_500,
+        estimatedBytes: estimatedBytes,
+        status: .removed,
+        errorRecorded: errorRecorded,
+        errorCategory: errorCategory,
+        pathCount: 2,
+        evidenceCount: 1
+    )
+}
+
+private func generatedLegacyCleanupSessionHistory(
+    warnings: [CleanupWarning] = []
+) -> CleanupSessionHistory {
+    let summary = CleanupSessionSummary(
+        recordVersion: 1,
+        sessionId: "session:legacy",
+        planId: "plan:legacy",
+        format: .legacyIncomplete,
+        sourceScanId: nil,
+        startedAtUnixMs: 2_000,
+        completedAtUnixMs: 3_000,
+        planCreatedAtUnixMs: nil,
+        planExpiresAtUnixMs: nil,
+        mode: .trash,
+        trigger: .cli,
+        status: .completed,
+        estimatedBytes: 1_024,
+        verifiedCapacityDeltaBytes: -512,
+        cancellationRequested: nil,
+        itemTotal: 1,
+        pathTotal: 2,
+        evidenceTotal: 0,
+        itemStatusCounts: generatedCleanupCounts(removed: 1),
+        pathStatusCounts: generatedCleanupCounts(removed: 2)
+    )
+    let item = CleanupItemSummary(
+        recordVersion: 1,
+        ordinal: 0,
+        ruleId: "legacy.rule",
+        ruleRevision: 1,
+        category: nil,
+        safety: nil,
+        action: nil,
+        ruleScheduleEligible: nil,
+        newestMtimeUnixMs: nil,
+        estimatedBytes: 1_024,
+        status: .removed,
+        errorRecorded: true,
+        errorCategory: nil,
+        pathCount: 2,
+        evidenceCount: 0
+    )
+    return CleanupSessionHistory(
+        recordVersion: 1,
+        summary: summary,
+        items: [item],
+        warnings: warnings
+    )
+}
+
+private func generatedCleanupCounts(
+    planned: UInt16 = 0,
+    validating: UInt16 = 0,
+    dryRun: UInt16 = 0,
+    effectStarted: UInt16 = 0,
+    trashed: UInt16 = 0,
+    removed: UInt16 = 0,
+    evicted: UInt16 = 0,
+    skipped: UInt16 = 0,
+    rejected: UInt16 = 0,
+    failed: UInt16 = 0,
+    changedSincePlan: UInt16 = 0,
+    interrupted: UInt16 = 0,
+    unavailable: UInt16 = 0,
+    outcomeUnknown: UInt16 = 0
+) -> CleanupStatusCounts {
+    let total = [
+        planned,
+        validating,
+        dryRun,
+        effectStarted,
+        trashed,
+        removed,
+        evicted,
+        skipped,
+        rejected,
+        failed,
+        changedSincePlan,
+        interrupted,
+        unavailable,
+        outcomeUnknown,
+    ].reduce(0, +)
+    return CleanupStatusCounts(
+        planned: planned,
+        validating: validating,
+        dryRun: dryRun,
+        effectStarted: effectStarted,
+        trashed: trashed,
+        removed: removed,
+        evicted: evicted,
+        skipped: skipped,
+        rejected: rejected,
+        failed: failed,
+        changedSincePlan: changedSincePlan,
+        interrupted: interrupted,
+        unavailable: unavailable,
+        outcomeUnknown: outcomeUnknown,
+        total: total
+    )
 }
 
 private func generatedRustTargetPlanReviewInfo(

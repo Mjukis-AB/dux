@@ -1,5 +1,5 @@
-import SwiftUI
 import Foundation
+import SwiftUI
 
 struct ExplorerView: View {
     @Environment(\.openSettings) private var openSettings
@@ -188,6 +188,20 @@ private struct ExplorerCleanupHistoryView: View {
     let model: AppModel
 
     var body: some View {
+        Group {
+            if model.selectedCleanupHistorySessionID == nil {
+                historyList
+            } else {
+                historyDetail
+            }
+        }
+        .accessibilityIdentifier(ExplorerAccessibility.cleanupHistory)
+        .task {
+            await model.loadCleanupHistory()
+        }
+    }
+
+    private var historyList: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 VStack(alignment: .leading, spacing: 6) {
@@ -205,9 +219,37 @@ private struct ExplorerCleanupHistoryView: View {
             .frame(maxWidth: 860, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .accessibilityIdentifier(ExplorerAccessibility.cleanupHistory)
-        .task {
-            await model.loadCleanupHistory()
+    }
+
+    private var historyDetail: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                Button {
+                    model.closeCleanupHistorySession()
+                } label: {
+                    Label("Back to cleanup history", systemImage: "chevron.left")
+                }
+                .accessibilityIdentifier(ExplorerAccessibility.cleanupHistoryDetailBack)
+                .accessibilityHint("Returns to the read-only cleanup session list")
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Cleanup session")
+                        .font(.largeTitle.bold())
+                    Text(
+                        "A path-free outcome record. It cannot approve, retry, or repeat cleanup."
+                    )
+                    .foregroundStyle(.secondary)
+                }
+
+                cleanupHistoryDetailContent
+            }
+            .padding(28)
+            .frame(maxWidth: 860, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .accessibilityIdentifier(ExplorerAccessibility.cleanupHistoryDetail)
+        .onDisappear {
+            model.closeCleanupHistorySession()
         }
     }
 
@@ -235,32 +277,42 @@ private struct ExplorerCleanupHistoryView: View {
             }
             .accessibilityIdentifier(ExplorerAccessibility.cleanupHistoryStatus)
         case .loaded, .loading:
-            if model.cleanupHistoryRecords.isEmpty {
-                ContentUnavailableView(
-                    "No cleanup sessions yet",
-                    systemImage: "clock.arrow.circlepath",
-                    description: Text(
-                        "Reviewed cleanup outcomes will appear here. Scanning and explanations never change files."
-                    )
+            CleanupHistoryLoadedList(model: model)
+        }
+    }
+
+    @ViewBuilder
+    private var cleanupHistoryDetailContent: some View {
+        switch model.cleanupHistoryDetailState {
+        case .idle, .loading:
+            ProgressView("Loading session details…")
+                .accessibilityIdentifier(
+                    ExplorerAccessibility.cleanupHistoryDetailStatus
                 )
-                .accessibilityIdentifier(ExplorerAccessibility.cleanupHistoryStatus)
-            } else {
-                VStack(alignment: .leading, spacing: 12) {
-                    ForEach(model.cleanupHistoryRecords) { record in
-                        CleanupHistoryRow(record: record)
+        case let .failed(error):
+            GroupBox {
+                VStack(alignment: .leading, spacing: 10) {
+                    Label("Session details unavailable", systemImage: "exclamationmark.triangle")
+                        .font(.headline)
+                    Text(cleanupHistoryErrorMessage(error))
+                        .foregroundStyle(.secondary)
+                    Button("Try reading again") {
+                        Task { await model.retryCleanupHistorySession() }
                     }
-                    if model.cleanupHistoryNextCursor != nil {
-                        Button {
-                            Task { await model.loadMoreCleanupHistory() }
-                        } label: {
-                            Label("Load more history", systemImage: "chevron.down")
-                                .frame(maxWidth: .infinity)
-                        }
-                        .disabled(model.cleanupHistoryState == .loading)
-                        .accessibilityIdentifier(ExplorerAccessibility.cleanupHistoryLoadMore)
-                    }
+                    .accessibilityIdentifier(
+                        ExplorerAccessibility.cleanupHistoryDetailRetry
+                    )
+                    .accessibilityHint(
+                        "Reads this history record again without retrying cleanup"
+                    )
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
+            .accessibilityIdentifier(
+                ExplorerAccessibility.cleanupHistoryDetailStatus
+            )
+        case let .loaded(detail):
+            CleanupHistoryDetailView(detail: detail)
         }
     }
 
@@ -269,14 +321,85 @@ private struct ExplorerCleanupHistoryView: View {
     ) -> String {
         switch error {
         case .closed: "The storage engine is closed. Reopen Explorer to read history."
+        case .invalidSessionID: "The selected session identifier is invalid."
         case .retryable: "The storage engine is busy. Try again shortly."
         case .incompatibleSchema: "This history was written by a newer DUX version."
         case .unsafeStorage, .corruptData, .internalState:
             "History failed its safety checks and was not shown."
         case .budgetExceeded: "History is temporarily too large to read safely."
-        case .invalidLimit, .invalidCursor, .sessionNotFound, .unavailable, .invalidResponse:
+        case .sessionNotFound: "This cleanup session is no longer available."
+        case .invalidLimit, .invalidCursor, .unavailable, .invalidResponse:
             "History returned an invalid or unavailable response."
         }
+    }
+}
+
+private struct CleanupHistoryLoadedList: View {
+    let model: AppModel
+
+    var body: some View {
+        if model.cleanupHistoryRecords.isEmpty {
+            ContentUnavailableView(
+                "No cleanup sessions yet",
+                systemImage: "clock.arrow.circlepath",
+                description: Text(
+                    "Reviewed cleanup outcomes will appear here. Scanning and explanations never change files."
+                )
+            )
+            .accessibilityIdentifier(ExplorerAccessibility.cleanupHistoryStatus)
+        } else {
+            VStack(alignment: .leading, spacing: 12) {
+                ForEach(model.cleanupHistoryRecords) { record in
+                    CleanupHistorySelectableRow(record: record, model: model)
+                }
+                if model.cleanupHistoryNextCursor != nil {
+                    Button {
+                        Task { await model.loadMoreCleanupHistory() }
+                    } label: {
+                        Label("Load more history", systemImage: "chevron.down")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .disabled(model.cleanupHistoryState == .loading)
+                    .accessibilityIdentifier(
+                        ExplorerAccessibility.cleanupHistoryLoadMore
+                    )
+                }
+            }
+        }
+    }
+}
+
+private struct CleanupHistorySelectableRow: View {
+    let record: CleanupHistorySessionSummaryModel
+    let model: AppModel
+
+    var body: some View {
+        Button {
+            Task {
+                await model.selectCleanupHistorySession(record.sessionID)
+            }
+        } label: {
+            CleanupHistoryRow(record: record)
+        }
+        .buttonStyle(.plain)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(Text(verbatim: accessibilityTitle))
+        .accessibilityValue(Text(verbatim: accessibilityValue))
+        .accessibilityHint("Opens the path-free session outcome details")
+        .accessibilityIdentifier(
+            ExplorerAccessibility.cleanupHistoryRow(sessionID: record.sessionID)
+        )
+    }
+
+    private var accessibilityTitle: String {
+        "\(CleanupHistoryPresentation.sessionStatusTitle(record.status)) cleanup session"
+    }
+
+    private var accessibilityValue: String {
+        "\(CleanupHistoryPresentation.modeTitle(record.mode)), "
+            + "\(CleanupHistoryPresentation.triggerTitle(record.trigger)), "
+            + "\(record.itemTotal) items, "
+            + "\(StorageByteFormatter.string(from: record.estimatedBytes)) estimated"
     }
 }
 
@@ -287,17 +410,22 @@ private struct CleanupHistoryRow: View {
         GroupBox {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(alignment: .firstTextBaseline) {
-                    Label(statusTitle, systemImage: statusSymbol)
-                        .font(.headline)
+                    Label(
+                        CleanupHistoryPresentation.sessionStatusTitle(record.status),
+                        systemImage: CleanupHistoryPresentation.sessionStatusSymbol(
+                            record.status
+                        )
+                    )
+                    .font(.headline)
                     Spacer()
-                    Text(ByteCountFormatter.string(fromByteCount: Int64(clamping: record.estimatedBytes), countStyle: .file))
+                    Text(StorageByteFormatter.string(from: record.estimatedBytes))
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
                 }
                 HStack(spacing: 8) {
-                    Text(modeTitle)
+                    Text(CleanupHistoryPresentation.modeTitle(record.mode))
                     Text("·")
-                    Text(triggerTitle)
+                    Text(CleanupHistoryPresentation.triggerTitle(record.trigger))
                     Text("·")
                     Text(record.startedAt.formatted(date: .abbreviated, time: .shortened))
                 }
@@ -305,60 +433,31 @@ private struct CleanupHistoryRow: View {
                 .foregroundStyle(.secondary)
 
                 CleanupHistoryStatusBar(counts: record.itemStatusCounts)
-                    .accessibilityIdentifier(ExplorerAccessibility.cleanupHistoryChart)
+                    .accessibilityIdentifier(
+                        ExplorerAccessibility.cleanupHistoryRowChart(
+                            sessionID: record.sessionID
+                        )
+                    )
                     .accessibilityLabel(Text("Item outcome distribution"))
                     .accessibilityValue(Text(statusSummary))
+
+                HStack {
+                    Text("\(record.itemTotal) items · \(record.pathTotal) path records")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Label("Open details", systemImage: "chevron.right")
+                        .font(.caption.weight(.semibold))
+                }
             }
             .accessibilityElement(children: .contain)
-        }
-        .accessibilityIdentifier("explorer-cleanup-history-row-\(record.sessionID)")
-    }
-
-    private var statusTitle: String {
-        switch record.status {
-        case .planned: "Planned"
-        case .running: "Running"
-        case .recovering: "Recovering"
-        case .completed: "Completed"
-        case .partiallyCompleted: "Partially completed"
-        case .failed: "Failed"
-        case .cancelled: "Cancelled"
-        case .interrupted: "Interrupted"
-        case .rejected: "Rejected"
-        case .dryRun: "Dry run"
-        }
-    }
-
-    private var statusSymbol: String {
-        switch record.status {
-        case .completed: "checkmark.circle.fill"
-        case .partiallyCompleted, .failed, .cancelled, .interrupted: "exclamationmark.circle.fill"
-        case .running, .recovering: "arrow.triangle.2.circlepath"
-        default: "clock"
-        }
-    }
-
-    private var modeTitle: String {
-        switch record.mode {
-        case .dryRun: "Dry run"
-        case .trash: "Trash"
-        case .permanentSafe: "Permanent-safe"
-        case .evictLocalCopy: "Evict local copy"
-        }
-    }
-
-    private var triggerTitle: String {
-        switch record.trigger {
-        case .manual: "Manual"
-        case .lowDisk: "Low disk"
-        case .scheduled: "Scheduled"
-        case .cli: "CLI"
         }
     }
 
     private var statusSummary: String {
-        let counts = record.itemStatusCounts
-        return "\(counts.total) items; \(counts.removed + counts.trashed + counts.evicted) settled; \(counts.failed + counts.outcomeUnknown) uncertain or failed"
+        CleanupHistoryPresentation.outcomeGroups(
+            record.itemStatusCounts
+        ).accessibilitySummary
     }
 }
 
@@ -367,15 +466,37 @@ private struct CleanupHistoryStatusBar: View {
 
     var body: some View {
         GeometryReader { geometry in
-            let total = max(CGFloat(counts.total), 1)
+            let groups = CleanupHistoryPresentation.outcomeGroups(counts)
+            let total = max(CGFloat(groups.total), 1)
             HStack(spacing: 1) {
-                segment(counts.removed + counts.trashed + counts.evicted, color: .green, total: total, width: geometry.size.width)
-                segment(counts.skipped + counts.rejected, color: .orange, total: total, width: geometry.size.width)
-                segment(counts.failed + counts.outcomeUnknown + counts.changedSincePlan, color: .red, total: total, width: geometry.size.width)
-                segment(counts.planned + counts.validating + counts.dryRun + counts.effectStarted + counts.interrupted + counts.unavailable, color: .gray, total: total, width: geometry.size.width)
+                segment(
+                    groups.changedOnDisk,
+                    color: .green,
+                    total: total,
+                    width: geometry.size.width
+                )
+                segment(
+                    groups.notChanged,
+                    color: .orange,
+                    total: total,
+                    width: geometry.size.width
+                )
+                segment(
+                    groups.needsAttention,
+                    color: .red,
+                    total: total,
+                    width: geometry.size.width
+                )
+                segment(
+                    groups.unresolved,
+                    color: .gray,
+                    total: total,
+                    width: geometry.size.width
+                )
             }
         }
         .frame(height: 8)
+        .background(Color.gray.opacity(0.15))
         .clipShape(Capsule())
     }
 
@@ -391,6 +512,391 @@ private struct CleanupHistoryStatusBar: View {
                 .fill(color)
                 .frame(width: max(2, width * CGFloat(count) / total))
         }
+    }
+}
+
+private struct CleanupHistoryDetailView: View {
+    let detail: CleanupHistorySessionDetailModel
+
+    private var summary: CleanupHistorySessionSummaryModel {
+        detail.summary
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            sessionSummary
+            spaceAccounting
+
+            LazyVGrid(
+                columns: [GridItem(.adaptive(minimum: 300), spacing: 12)],
+                alignment: .leading,
+                spacing: 12
+            ) {
+                CleanupHistoryOutcomeChart(
+                    title: "Item outcomes",
+                    countLabel: "\(summary.itemTotal) items",
+                    counts: summary.itemStatusCounts,
+                    accessibilityIdentifier: ExplorerAccessibility.cleanupHistoryItemChart
+                )
+                CleanupHistoryOutcomeChart(
+                    title: "Path-record outcomes",
+                    countLabel: "\(summary.pathTotal) records",
+                    counts: summary.pathStatusCounts,
+                    accessibilityIdentifier: ExplorerAccessibility.cleanupHistoryPathChart
+                )
+            }
+
+            if !detail.warnings.isEmpty {
+                warningSection
+            }
+
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Ordered items")
+                    .font(.title2.bold())
+                if detail.items.isEmpty {
+                    ContentUnavailableView(
+                        "No item details recorded",
+                        systemImage: "tray",
+                        description: Text(
+                            "This session contains no path-free item records. Missing legacy data is not reconstructed."
+                        )
+                    )
+                } else {
+                    ForEach(detail.items) { item in
+                        CleanupHistoryItemCard(item: item)
+                    }
+                }
+            }
+        }
+        .accessibilityIdentifier(ExplorerAccessibility.cleanupHistoryDetailStatus)
+    }
+
+    private var sessionSummary: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(alignment: .firstTextBaseline) {
+                    Label(
+                        CleanupHistoryPresentation.sessionStatusTitle(summary.status),
+                        systemImage: CleanupHistoryPresentation.sessionStatusSymbol(
+                            summary.status
+                        )
+                    )
+                    .font(.title2.bold())
+                    Spacer()
+                    Text(CleanupHistoryPresentation.modeTitle(summary.mode))
+                        .font(.callout.weight(.semibold))
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 4)
+                        .background(.quaternary, in: Capsule())
+                }
+
+                Text(verbatim: summary.sessionID)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+
+                Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 8) {
+                    detailRow("Started", timestamp(summary.startedAt))
+                    detailRow(
+                        "Completed",
+                        summary.completedAt.map(timestamp) ?? "Not completed"
+                    )
+                    detailRow(
+                        "Plan created",
+                        summary.planCreatedAt.map(timestamp) ?? "Not recorded"
+                    )
+                    detailRow(
+                        "Plan expired",
+                        summary.planExpiresAt.map(timestamp) ?? "Not recorded"
+                    )
+                    detailRow(
+                        "Trigger",
+                        CleanupHistoryPresentation.triggerTitle(summary.trigger)
+                    )
+                    detailRow("Record format", formatTitle)
+                    detailRow("Cancellation requested", cancellationTitle)
+                }
+
+                if summary.format == .legacyIncomplete {
+                    Label(
+                        "This migrated record is incomplete. Missing fields remain explicitly unrecorded.",
+                        systemImage: "archivebox"
+                    )
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .accessibilityIdentifier(ExplorerAccessibility.cleanupHistoryDetailSummary)
+    }
+
+    private var spaceAccounting: some View {
+        let outcome = CleanupHistoryPresentation.capacityOutcome(
+            deltaBytes: summary.verifiedCapacityDeltaBytes
+        )
+        return GroupBox("Space accounting") {
+            LazyVGrid(
+                columns: [GridItem(.adaptive(minimum: 260), spacing: 12)],
+                alignment: .leading,
+                spacing: 12
+            ) {
+                metricCard(
+                    title: "Plan estimate",
+                    value: StorageByteFormatter.string(from: summary.estimatedBytes),
+                    detail: "Estimated before cleanup; not a measured capacity result.",
+                    symbol: "ruler",
+                    color: .secondary
+                )
+                metricCard(
+                    title: "Verified capacity change",
+                    value: outcome.value,
+                    detail: outcome.detail,
+                    symbol: capacitySymbol(outcome.kind),
+                    color: capacityColor(outcome.kind)
+                )
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var warningSection: some View {
+        GroupBox("Important context") {
+            VStack(alignment: .leading, spacing: 10) {
+                ForEach(Array(detail.warnings.enumerated()), id: \.offset) { _, warning in
+                    let presentation = CleanupHistoryPresentation.warning(warning)
+                    Label {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(presentation.title)
+                                .font(.callout.weight(.semibold))
+                            Text(presentation.detail)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    } icon: {
+                        Image(systemName: presentation.symbol)
+                            .foregroundStyle(.orange)
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .accessibilityIdentifier(ExplorerAccessibility.cleanupHistoryWarnings)
+    }
+
+    private func metricCard(
+        title: String,
+        value: String,
+        detail: String,
+        symbol: String,
+        color: Color
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label(title, systemImage: symbol)
+                .font(.headline)
+                .foregroundStyle(color)
+            Text(verbatim: value)
+                .font(.title3.bold())
+                .monospacedDigit()
+            Text(detail)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.quaternary.opacity(0.6), in: RoundedRectangle(cornerRadius: 10))
+        .accessibilityElement(children: .combine)
+    }
+
+    private func detailRow(_ title: String, _ value: String) -> some View {
+        GridRow {
+            Text(title)
+                .foregroundStyle(.secondary)
+            Text(verbatim: value)
+                .textSelection(.enabled)
+        }
+    }
+
+    private func timestamp(_ date: Date) -> String {
+        date.formatted(date: .abbreviated, time: .standard)
+    }
+
+    private var formatTitle: String {
+        switch summary.format {
+        case .complete: "Complete"
+        case .legacyIncomplete: "Legacy · incomplete"
+        }
+    }
+
+    private var cancellationTitle: String {
+        switch summary.cancellationRequested {
+        case true: "Yes"
+        case false: "No"
+        case nil: "Not recorded"
+        }
+    }
+
+    private func capacitySymbol(
+        _ kind: CleanupHistoryCapacityOutcomeKind
+    ) -> String {
+        switch kind {
+        case .unknown: "questionmark.circle"
+        case .increased: "arrow.up.circle.fill"
+        case .unchanged: "equal.circle"
+        case .decreased: "arrow.down.circle.fill"
+        }
+    }
+
+    private func capacityColor(
+        _ kind: CleanupHistoryCapacityOutcomeKind
+    ) -> Color {
+        switch kind {
+        case .unknown, .unchanged: .secondary
+        case .increased: .green
+        case .decreased: .orange
+        }
+    }
+}
+
+private struct CleanupHistoryOutcomeChart: View {
+    let title: String
+    let countLabel: String
+    let counts: CleanupHistoryStatusCounts
+    let accessibilityIdentifier: String
+
+    private var groups: CleanupHistoryOutcomeGroups {
+        CleanupHistoryPresentation.outcomeGroups(counts)
+    }
+
+    var body: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Text(title)
+                        .font(.headline)
+                    Spacer()
+                    Text(countLabel)
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+                CleanupHistoryStatusBar(counts: counts)
+                LazyVGrid(
+                    columns: [GridItem(.adaptive(minimum: 120), alignment: .leading)],
+                    alignment: .leading,
+                    spacing: 6
+                ) {
+                    legend("Changed on disk", count: groups.changedOnDisk, color: .green)
+                    legend("Not changed", count: groups.notChanged, color: .orange)
+                    legend("Needs attention", count: groups.needsAttention, color: .red)
+                    legend("Unresolved", count: groups.unresolved, color: .gray)
+                }
+            }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(Text(verbatim: title))
+        .accessibilityValue(Text(verbatim: groups.accessibilitySummary))
+        .accessibilityIdentifier(accessibilityIdentifier)
+    }
+
+    private func legend(
+        _ title: String,
+        count: UInt16,
+        color: Color
+    ) -> some View {
+        HStack(spacing: 6) {
+            Circle()
+                .fill(color)
+                .frame(width: 8, height: 8)
+                .accessibilityHidden(true)
+            Text("\(title) \(count)")
+                .font(.caption)
+                .monospacedDigit()
+        }
+    }
+}
+
+private struct CleanupHistoryItemCard: View {
+    let item: CleanupHistoryItemModel
+
+    var body: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(alignment: .firstTextBaseline) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Item \(Int(item.ordinal) + 1)")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        Text(verbatim: item.ruleID)
+                            .font(.headline)
+                            .textSelection(.enabled)
+                    }
+                    Spacer()
+                    Label(
+                        CleanupHistoryPresentation.itemStatusTitle(item.status),
+                        systemImage: CleanupHistoryPresentation.itemStatusSymbol(
+                            item.status
+                        )
+                    )
+                    .font(.callout.weight(.semibold))
+                }
+
+                Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 7) {
+                    detailRow("Rule revision", "\(item.ruleRevision)")
+                    detailRow("Category", item.category?.displayName ?? "Not recorded")
+                    detailRow("Safety", item.safety?.displayName ?? "Not recorded")
+                    detailRow("Action", item.action?.displayName ?? "Not recorded")
+                    detailRow(
+                        "Schedule eligible",
+                        item.ruleScheduleEligible.map { $0 ? "Yes" : "No" }
+                            ?? "Not recorded"
+                    )
+                    detailRow(
+                        "Newest observation",
+                        item.newestModificationAt.map(timestamp) ?? "Not recorded"
+                    )
+                    detailRow(
+                        "Estimated size",
+                        StorageByteFormatter.string(from: item.estimatedBytes)
+                    )
+                    detailRow("Path records", "\(item.pathCount)")
+                    detailRow("Evidence records", "\(item.evidenceCount)")
+                    if item.errorRecorded {
+                        detailRow(
+                            "Error category",
+                            item.errorCategory ?? "Recorded without a category"
+                        )
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(
+            Text("Item \(Int(item.ordinal) + 1), rule \(item.ruleID)")
+        )
+        .accessibilityValue(
+            Text(
+                "\(CleanupHistoryPresentation.itemStatusTitle(item.status)), "
+                    + "\(StorageByteFormatter.string(from: item.estimatedBytes)) estimated, "
+                    + "\(item.pathCount) path records, \(item.evidenceCount) evidence records"
+            )
+        )
+        .accessibilityIdentifier(
+            ExplorerAccessibility.cleanupHistoryItem(ordinal: item.ordinal)
+        )
+    }
+
+    private func detailRow(_ title: String, _ value: String) -> some View {
+        GridRow {
+            Text(title)
+                .foregroundStyle(.secondary)
+            Text(verbatim: value)
+                .textSelection(.enabled)
+        }
+    }
+
+    private func timestamp(_ date: Date) -> String {
+        date.formatted(date: .abbreviated, time: .standard)
     }
 }
 

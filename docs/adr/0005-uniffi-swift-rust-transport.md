@@ -293,6 +293,29 @@ authority for an approval, journal, scheduler, AI, Trash, or executor
 endpoint. The existing confirmation-gated Explorer Trash route is separate;
 v28 adds no permanent-safe cleanup endpoint.
 
+Contract v29 exposes the core's already bounded exact-session cleanup-history
+observation without adding an authority edge. The request contains only a
+versioned stable session ID copied from the recent path-free summary feed.
+Rust reloads and completely validates the stored session graph, then projects
+one versioned path-free session summary, ordered item summaries, and ordered
+warnings. The projection preserves the verified capacity delta, every typed
+session/item status, bounded stable error categories, and complete-versus-
+legacy policy shape while independently checking versions, identifiers,
+ordinals, totals, status counts, timestamps, warnings, and lifecycle
+consistency.
+
+No path, evidence payload, candidate ID, execution owner/generation, claim,
+journal receipt, or effect input crosses v29. The endpoint has no clear,
+cleanup-retry, recovery, approval, callback, scheduler, AI, or executor
+operation; the supplied session ID remains a presentation selector rather than
+a capability. Swift independently repeats the complete version, ID, lifecycle,
+legacy/complete shape, ordinal, aggregate, status-count, warning-order, and
+bounded-category validation, including checked estimate sums and unique
+summary-page session IDs, before publishing app-owned immutable models.
+Generation-fenced selection, summary refresh, read retry, close, and shutdown
+feed an in-window, path-free drill-down; its retry action reads the record
+again and cannot repeat cleanup.
+
 The Swift adapter lazily constructs and synchronizes the engine on its utility
 queue. FFI close invalidates renewal, attempts exact release for every
 still-live registered review, then performs bounded core shutdown; a failed

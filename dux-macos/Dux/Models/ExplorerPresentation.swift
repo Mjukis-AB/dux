@@ -12,6 +12,14 @@ enum ExplorerAccessibility {
     static let cleanupHistoryStatus = "explorer-cleanup-history-status"
     static let cleanupHistoryChart = "explorer-cleanup-history-chart"
     static let cleanupHistoryLoadMore = "explorer-cleanup-history-load-more"
+    static let cleanupHistoryDetail = "explorer-cleanup-history-detail"
+    static let cleanupHistoryDetailStatus = "explorer-cleanup-history-detail-status"
+    static let cleanupHistoryDetailBack = "explorer-cleanup-history-detail-back"
+    static let cleanupHistoryDetailRetry = "explorer-cleanup-history-detail-retry"
+    static let cleanupHistoryDetailSummary = "explorer-cleanup-history-detail-summary"
+    static let cleanupHistoryItemChart = "explorer-cleanup-history-item-chart"
+    static let cleanupHistoryPathChart = "explorer-cleanup-history-path-chart"
+    static let cleanupHistoryWarnings = "explorer-cleanup-history-warnings"
     static let settingsShortcut = "explorer-settings-shortcut"
     static let capacityCard = "explorer-capacity-card"
     static let capacityBar = "explorer-capacity-bar"
@@ -101,6 +109,14 @@ enum ExplorerAccessibility {
         cleanupHistoryStatus,
         cleanupHistoryChart,
         cleanupHistoryLoadMore,
+        cleanupHistoryDetail,
+        cleanupHistoryDetailStatus,
+        cleanupHistoryDetailBack,
+        cleanupHistoryDetailRetry,
+        cleanupHistoryDetailSummary,
+        cleanupHistoryItemChart,
+        cleanupHistoryPathChart,
+        cleanupHistoryWarnings,
         settingsShortcut,
         capacityCard,
         capacityBar,
@@ -179,6 +195,18 @@ enum ExplorerAccessibility {
     static func snapshotCategoryLegend(category: ExplorerStorageCategory) -> String {
         "explorer-snapshot-category-legend-\(category.presentation.palette.rawValue)"
     }
+
+    static func cleanupHistoryRow(sessionID: String) -> String {
+        "explorer-cleanup-history-row-\(sessionID)"
+    }
+
+    static func cleanupHistoryRowChart(sessionID: String) -> String {
+        "\(cleanupHistoryChart)-\(sessionID)"
+    }
+
+    static func cleanupHistoryItem(ordinal: UInt16) -> String {
+        "explorer-cleanup-history-item-\(ordinal)"
+    }
 }
 
 enum ExplorerDestination: String, CaseIterable, Identifiable, Sendable {
@@ -196,6 +224,218 @@ enum ExplorerKeyboardShortcut {
     static let settings: Character = ","
 
     static let allKeys = [scanNow, cancelScan, settings]
+}
+
+enum CleanupHistoryCapacityOutcomeKind: Equatable, Sendable {
+    case unknown
+    case increased
+    case unchanged
+    case decreased
+}
+
+struct CleanupHistoryCapacityOutcomePresentation: Equatable, Sendable {
+    let kind: CleanupHistoryCapacityOutcomeKind
+    let value: String
+    let detail: String
+}
+
+struct CleanupHistoryWarningPresentation: Equatable, Sendable {
+    let title: String
+    let detail: String
+    let symbol: String
+}
+
+struct CleanupHistoryOutcomeGroups: Equatable, Sendable {
+    let changedOnDisk: UInt16
+    let notChanged: UInt16
+    let needsAttention: UInt16
+    let unresolved: UInt16
+    let total: UInt16
+
+    var accessibilitySummary: String {
+        "\(total) total; \(changedOnDisk) changed on disk; \(notChanged) not changed; "
+            + "\(needsAttention) need attention; \(unresolved) unresolved"
+    }
+}
+
+/// Copy and visual grouping for immutable cleanup-history observations. None
+/// of these projections can be fed back into planning or execution.
+enum CleanupHistoryPresentation {
+    static func sessionStatusTitle(_ status: CleanupHistorySessionStatus) -> String {
+        switch status {
+        case .planned: "Planned"
+        case .running: "Running"
+        case .recovering: "Recovering"
+        case .completed: "Completed"
+        case .partiallyCompleted: "Partially completed"
+        case .failed: "Failed"
+        case .cancelled: "Cancelled"
+        case .interrupted: "Interrupted"
+        case .rejected: "Rejected"
+        case .dryRun: "Dry run"
+        }
+    }
+
+    static func sessionStatusSymbol(_ status: CleanupHistorySessionStatus) -> String {
+        switch status {
+        case .completed: "checkmark.circle.fill"
+        case .partiallyCompleted, .failed, .cancelled, .interrupted:
+            "exclamationmark.circle.fill"
+        case .running, .recovering: "arrow.triangle.2.circlepath"
+        case .rejected: "xmark.circle.fill"
+        case .planned, .dryRun: "clock"
+        }
+    }
+
+    static func modeTitle(_ mode: CleanupHistoryMode) -> String {
+        switch mode {
+        case .dryRun: "Dry run"
+        case .trash: "Trash"
+        case .permanentSafe: "Permanent-safe"
+        case .evictLocalCopy: "Evict local copy"
+        }
+    }
+
+    static func triggerTitle(_ trigger: CleanupHistoryTrigger) -> String {
+        switch trigger {
+        case .manual: "Manual"
+        case .lowDisk: "Low disk"
+        case .scheduled: "Scheduled"
+        case .cli: "CLI"
+        }
+    }
+
+    static func itemStatusTitle(_ status: CleanupHistoryItemStatus) -> String {
+        switch status {
+        case .planned: "Planned"
+        case .validating: "Validating"
+        case .dryRun: "Dry run"
+        case .effectStarted: "Effect started"
+        case .trashed: "Moved to Trash"
+        case .removed: "Removed"
+        case .evicted: "Local copy evicted"
+        case .skipped: "Skipped"
+        case .rejected: "Rejected"
+        case .failed: "Failed"
+        case .changedSincePlan: "Changed since plan"
+        case .interrupted: "Interrupted"
+        case .unavailable: "Unavailable"
+        case .outcomeUnknown: "Outcome unknown"
+        }
+    }
+
+    static func itemStatusSymbol(_ status: CleanupHistoryItemStatus) -> String {
+        switch status {
+        case .trashed, .removed, .evicted: "checkmark.circle.fill"
+        case .skipped, .rejected, .changedSincePlan: "minus.circle.fill"
+        case .failed, .interrupted, .unavailable, .outcomeUnknown:
+            "exclamationmark.circle.fill"
+        case .planned, .validating, .dryRun, .effectStarted: "clock"
+        }
+    }
+
+    static func capacityOutcome(
+        deltaBytes: Int64?
+    ) -> CleanupHistoryCapacityOutcomePresentation {
+        guard let deltaBytes else {
+            return CleanupHistoryCapacityOutcomePresentation(
+                kind: .unknown,
+                value: "Not verified",
+                detail: "No valid pre- and post-cleanup capacity pair was recorded. This is unknown, not zero."
+            )
+        }
+        if deltaBytes == 0 {
+            return CleanupHistoryCapacityOutcomePresentation(
+                kind: .unchanged,
+                value: "0 bytes",
+                detail: "Verified available capacity did not change during the bounded measurement window."
+            )
+        }
+
+        let formatted = ByteCountFormatter.string(
+            fromByteCount: deltaBytes,
+            countStyle: .file
+        )
+        if deltaBytes > 0 {
+            return CleanupHistoryCapacityOutcomePresentation(
+                kind: .increased,
+                value: "+\(formatted)",
+                detail: "Verified available capacity increased."
+            )
+        }
+        return CleanupHistoryCapacityOutcomePresentation(
+            kind: .decreased,
+            value: formatted,
+            detail: "Verified available capacity decreased."
+        )
+    }
+
+    static func warning(
+        _ warning: CleanupHistoryWarning
+    ) -> CleanupHistoryWarningPresentation {
+        switch warning {
+        case .estimatedBytesUnverified:
+            CleanupHistoryWarningPresentation(
+                title: "Estimate is not measured capacity",
+                detail: "The plan estimate may differ from the verified available-space change.",
+                symbol: "ruler"
+            )
+        case .dryRunDoesNotMutate:
+            CleanupHistoryWarningPresentation(
+                title: "Dry run changed no files",
+                detail: "This session observed what would happen without performing cleanup.",
+                symbol: "eye"
+            )
+        case .trashDoesNotFreeSpaceImmediately:
+            CleanupHistoryWarningPresentation(
+                title: "Trash may still use space",
+                detail: "Moving items to Trash does not guarantee immediate free-space recovery.",
+                symbol: "trash"
+            )
+        case .permanentRemovalCannotBeUndone:
+            CleanupHistoryWarningPresentation(
+                title: "Permanent removal cannot be undone",
+                detail: "This historical result is informational and cannot repeat the action.",
+                symbol: "exclamationmark.triangle"
+            )
+        case .cloudEvictionRequiresNetworkToRedownload:
+            CleanupHistoryWarningPresentation(
+                title: "Cloud data may need downloading",
+                detail: "An evicted local copy requires network access to download again.",
+                symbol: "icloud.and.arrow.down"
+            )
+        }
+    }
+
+    static func outcomeGroups(
+        _ counts: CleanupHistoryStatusCounts
+    ) -> CleanupHistoryOutcomeGroups {
+        CleanupHistoryOutcomeGroups(
+            changedOnDisk: sum(counts.trashed, counts.removed, counts.evicted),
+            notChanged: sum(
+                counts.dryRun,
+                counts.skipped,
+                counts.rejected,
+                counts.changedSincePlan
+            ),
+            needsAttention: sum(
+                counts.failed,
+                counts.interrupted,
+                counts.unavailable,
+                counts.outcomeUnknown
+            ),
+            unresolved: sum(counts.planned, counts.validating, counts.effectStarted),
+            total: counts.total
+        )
+    }
+
+    private static func sum(_ values: UInt16...) -> UInt16 {
+        UInt16(
+            clamping: values.reduce(0) { total, value in
+                total + Int(value)
+            }
+        )
+    }
 }
 
 enum ExplorerCapacityStatus: Equatable, Sendable {

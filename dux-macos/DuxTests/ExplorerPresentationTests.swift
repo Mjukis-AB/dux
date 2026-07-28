@@ -309,6 +309,176 @@ final class ExplorerPresentationTests: XCTestCase {
         )
     }
 
+    func testCleanupHistoryAccessibilityContractsAreStableAndUnique() {
+        XCTAssertEqual(
+            ExplorerAccessibility.cleanupHistoryDetail,
+            "explorer-cleanup-history-detail"
+        )
+        XCTAssertEqual(
+            ExplorerAccessibility.cleanupHistoryDetailBack,
+            "explorer-cleanup-history-detail-back"
+        )
+        XCTAssertEqual(
+            ExplorerAccessibility.cleanupHistoryDetailRetry,
+            "explorer-cleanup-history-detail-retry"
+        )
+        XCTAssertEqual(
+            ExplorerAccessibility.cleanupHistoryRow(sessionID: "session-7"),
+            "explorer-cleanup-history-row-session-7"
+        )
+        XCTAssertEqual(
+            ExplorerAccessibility.cleanupHistoryRowChart(sessionID: "session-7"),
+            "explorer-cleanup-history-chart-session-7"
+        )
+        XCTAssertEqual(
+            ExplorerAccessibility.cleanupHistoryItem(ordinal: 7),
+            "explorer-cleanup-history-item-7"
+        )
+        XCTAssertNotEqual(
+            ExplorerAccessibility.cleanupHistoryItem(ordinal: 0),
+            ExplorerAccessibility.cleanupHistoryItem(ordinal: 1)
+        )
+    }
+
+    func testCleanupHistoryCapacityOutcomeNeverInventsVerification() {
+        XCTAssertEqual(
+            CleanupHistoryPresentation.capacityOutcome(deltaBytes: nil),
+            CleanupHistoryCapacityOutcomePresentation(
+                kind: .unknown,
+                value: "Not verified",
+                detail: "No valid pre- and post-cleanup capacity pair was recorded. This is unknown, not zero."
+            )
+        )
+        XCTAssertEqual(
+            CleanupHistoryPresentation.capacityOutcome(deltaBytes: 0).kind,
+            .unchanged
+        )
+
+        let increased = CleanupHistoryPresentation.capacityOutcome(
+            deltaBytes: 4096
+        )
+        XCTAssertEqual(increased.kind, .increased)
+        XCTAssertTrue(increased.value.hasPrefix("+"))
+        XCTAssertTrue(increased.detail.contains("increased"))
+
+        let decreased = CleanupHistoryPresentation.capacityOutcome(
+            deltaBytes: -4096
+        )
+        XCTAssertEqual(decreased.kind, .decreased)
+        XCTAssertTrue(decreased.value.hasPrefix("-"))
+        XCTAssertTrue(decreased.detail.contains("decreased"))
+
+        let minimum = CleanupHistoryPresentation.capacityOutcome(
+            deltaBytes: .min
+        )
+        XCTAssertEqual(minimum.kind, .decreased)
+        XCTAssertFalse(minimum.value.isEmpty)
+    }
+
+    func testCleanupHistoryOutcomeVisualGroupsAreExhaustiveAndNontrapping() {
+        let counts = CleanupHistoryStatusCounts(
+            planned: 1,
+            validating: 2,
+            dryRun: 3,
+            effectStarted: 4,
+            trashed: 5,
+            removed: 6,
+            evicted: 7,
+            skipped: 8,
+            rejected: 9,
+            failed: 10,
+            changedSincePlan: 11,
+            interrupted: 12,
+            unavailable: 13,
+            outcomeUnknown: 14,
+            total: 105
+        )
+        XCTAssertEqual(
+            CleanupHistoryPresentation.outcomeGroups(counts),
+            CleanupHistoryOutcomeGroups(
+                changedOnDisk: 18,
+                notChanged: 31,
+                needsAttention: 49,
+                unresolved: 7,
+                total: 105
+            )
+        )
+
+        let hostile = CleanupHistoryStatusCounts(
+            planned: .max,
+            validating: .max,
+            dryRun: .max,
+            effectStarted: .max,
+            trashed: .max,
+            removed: .max,
+            evicted: .max,
+            skipped: .max,
+            rejected: .max,
+            failed: .max,
+            changedSincePlan: .max,
+            interrupted: .max,
+            unavailable: .max,
+            outcomeUnknown: .max,
+            total: .max
+        )
+        let hostileGroups = CleanupHistoryPresentation.outcomeGroups(hostile)
+        XCTAssertEqual(hostileGroups.changedOnDisk, .max)
+        XCTAssertEqual(hostileGroups.notChanged, .max)
+        XCTAssertEqual(hostileGroups.needsAttention, .max)
+        XCTAssertEqual(hostileGroups.unresolved, .max)
+    }
+
+    func testCleanupHistoryCopyCoversEveryTypedStatusAndWarning() {
+        let sessionStatuses: [CleanupHistorySessionStatus] = [
+            .planned,
+            .running,
+            .recovering,
+            .completed,
+            .partiallyCompleted,
+            .failed,
+            .cancelled,
+            .interrupted,
+            .rejected,
+            .dryRun,
+        ]
+        XCTAssertEqual(
+            Set(sessionStatuses.map(CleanupHistoryPresentation.sessionStatusTitle)).count,
+            sessionStatuses.count
+        )
+
+        let itemStatuses: [CleanupHistoryItemStatus] = [
+            .planned,
+            .validating,
+            .dryRun,
+            .effectStarted,
+            .trashed,
+            .removed,
+            .evicted,
+            .skipped,
+            .rejected,
+            .failed,
+            .changedSincePlan,
+            .interrupted,
+            .unavailable,
+            .outcomeUnknown,
+        ]
+        XCTAssertEqual(
+            Set(itemStatuses.map(CleanupHistoryPresentation.itemStatusTitle)).count,
+            itemStatuses.count
+        )
+
+        let warnings: [CleanupHistoryWarning] = [
+            .estimatedBytesUnverified,
+            .dryRunDoesNotMutate,
+            .trashDoesNotFreeSpaceImmediately,
+            .permanentRemovalCannotBeUndone,
+            .cloudEvictionRequiresNetworkToRedownload,
+        ]
+        let warningCopy = warnings.map(CleanupHistoryPresentation.warning)
+        XCTAssertEqual(Set(warningCopy.map(\.title)).count, warnings.count)
+        XCTAssertTrue(warningCopy.allSatisfy { !$0.detail.isEmpty && !$0.symbol.isEmpty })
+    }
+
     func testCriticalAccessibilitySummaryLeadsWithAvailableCapacity() throws {
         let snapshot = VolumeCapacitySnapshot(
             stableVolumeID: "startup",

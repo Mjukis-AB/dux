@@ -138,6 +138,61 @@ struct CleanupHistoryPageModel: Equatable, Sendable {
     let nextCursor: CleanupHistoryCursorModel?
 }
 
+enum CleanupHistoryItemStatus: Equatable, Sendable {
+    case planned
+    case validating
+    case dryRun
+    case effectStarted
+    case trashed
+    case removed
+    case evicted
+    case skipped
+    case rejected
+    case failed
+    case changedSincePlan
+    case interrupted
+    case unavailable
+    case outcomeUnknown
+}
+
+enum CleanupHistoryWarning: Equatable, Sendable {
+    case estimatedBytesUnverified
+    case dryRunDoesNotMutate
+    case trashDoesNotFreeSpaceImmediately
+    case permanentRemovalCannotBeUndone
+    case cloudEvictionRequiresNetworkToRedownload
+}
+
+/// One ordered, path-free cleanup-session observation. It cannot be converted
+/// into a candidate, plan, approval, or effect.
+struct CleanupHistoryItemModel: Equatable, Identifiable, Sendable {
+    var id: UInt16 { ordinal }
+
+    let ordinal: UInt16
+    let ruleID: String
+    let ruleRevision: UInt32
+    let category: ExplorerCandidateCategory?
+    let safety: ExplorerCandidateSafety?
+    let action: ExplorerCandidateAction?
+    let ruleScheduleEligible: Bool?
+    let newestModificationAt: Date?
+    let estimatedBytes: UInt64
+    let status: CleanupHistoryItemStatus
+    let errorRecorded: Bool
+    let errorCategory: String?
+    let pathCount: UInt16
+    let evidenceCount: UInt16
+}
+
+/// Exact-session history remains immutable presentation data. In particular,
+/// it deliberately omits paths, evidence payloads, candidate IDs, execution
+/// fences, and every mutation capability.
+struct CleanupHistorySessionDetailModel: Equatable, Sendable {
+    let summary: CleanupHistorySessionSummaryModel
+    let items: [CleanupHistoryItemModel]
+    let warnings: [CleanupHistoryWarning]
+}
+
 enum CleanupHistoryLoadState: Equatable, Sendable {
     case idle
     case loading
@@ -145,8 +200,16 @@ enum CleanupHistoryLoadState: Equatable, Sendable {
     case failed(CleanupHistoryServiceError)
 }
 
+enum CleanupHistoryDetailLoadState: Equatable, Sendable {
+    case idle
+    case loading
+    case loaded(CleanupHistorySessionDetailModel)
+    case failed(CleanupHistoryServiceError)
+}
+
 enum CleanupHistoryServiceError: Error, Equatable, Sendable {
     case closed
+    case invalidSessionID
     case invalidLimit
     case invalidCursor
     case sessionNotFound
