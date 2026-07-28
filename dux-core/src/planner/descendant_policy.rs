@@ -187,7 +187,7 @@ impl DescendantPolicyWitness {
 #[cfg(test)]
 #[allow(clippy::disallowed_methods)]
 mod tests {
-    use std::fs::{create_dir_all, hard_link, rename, write};
+    use std::fs;
 
     use tempfile::tempdir;
 
@@ -203,9 +203,9 @@ mod tests {
     #[test]
     fn captures_and_revalidates_exact_component_paths() {
         let (_directory, root) = root();
-        create_dir_all(root.requested_path().join(".git")).unwrap();
-        write(root.requested_path().join(".git/config"), b"x").unwrap();
-        write(root.requested_path().join(".github"), b"x").unwrap();
+        fs::create_dir_all(root.requested_path().join(".git")).unwrap();
+        fs::write(root.requested_path().join(".git/config"), b"x").unwrap();
+        fs::write(root.requested_path().join(".github"), b"x").unwrap();
         let witness =
             DescendantPolicyWitness::capture(&root, &[".git/config".into()], &[".github".into()])
                 .unwrap();
@@ -216,10 +216,11 @@ mod tests {
     fn replacement_and_removal_fail_closed() {
         let (directory, root) = root();
         let path = directory.path().join("cache");
-        write(&path, b"old").unwrap();
+        fs::write(&path, b"old").unwrap();
         let witness = DescendantPolicyWitness::capture(&root, &["cache".into()], &[]).unwrap();
-        rename(&path, directory.path().join("cache-old")).unwrap();
-        write(&path, b"new").unwrap();
+        // DUX-DESTRUCTIVE: allow=test-descendant-policy-replacement-rename -- rename only the TempDir-owned captured file to prove a replacement fails revalidation
+        fs::rename(&path, directory.path().join("cache-old")).unwrap();
+        fs::write(&path, b"new").unwrap();
         assert!(matches!(
             witness.revalidate(),
             Err(DescendantPolicyError::ChangedSinceCapture)
@@ -229,8 +230,8 @@ mod tests {
     #[test]
     fn rejects_overlap_missing_and_multiply_linked_entries() {
         let (directory, root) = root();
-        create_dir_all(directory.path().join("parent/child")).unwrap();
-        write(directory.path().join("parent/child/file"), b"x").unwrap();
+        fs::create_dir_all(directory.path().join("parent/child")).unwrap();
+        fs::write(directory.path().join("parent/child/file"), b"x").unwrap();
         let overlap =
             DescendantPolicyWitness::capture(&root, &["parent".into()], &["parent/child".into()]);
         assert!(matches!(
@@ -242,8 +243,8 @@ mod tests {
             Err(DescendantPolicyError::MissingSelector)
         ));
         let linked = directory.path().join("linked");
-        write(&linked, b"x").unwrap();
-        hard_link(&linked, directory.path().join("linked-2")).unwrap();
+        fs::write(&linked, b"x").unwrap();
+        fs::hard_link(&linked, directory.path().join("linked-2")).unwrap();
         assert!(matches!(
             DescendantPolicyWitness::capture(&root, &["linked".into()], &[]),
             Err(DescendantPolicyError::MultiplyLinked)

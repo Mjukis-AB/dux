@@ -12,7 +12,8 @@ use super::candidate_evaluation_history::{
     NewCandidateEvaluation, PendingCandidateEvaluation, PreparedCandidateEvaluation,
     insert_candidate_evaluation_pending, load_candidate_evaluation,
     load_candidate_evaluation_for_scan, load_candidate_evaluation_within_budget,
-    load_candidate_validation_source, load_pending_candidate_evaluation,
+    load_candidate_validation_source, load_candidate_validation_source_for_trusted_claim,
+    load_pending_candidate_evaluation,
 };
 use super::candidate_history::{
     CandidateEvaluationTransition, CandidateHistoryStatus, CandidateReviewTransition,
@@ -1541,6 +1542,25 @@ impl StoreCoordinator {
     ) -> Result<super::CandidateValidationSourceRecord, HistoryError> {
         let guard = self.lock_current_history_connection()?;
         load_candidate_validation_source(&guard.connection, scan_id, candidate_id)
+    }
+
+    /// Reopen the exact scan/evaluation/candidate source only while one active
+    /// trusted Rust-target journal owns its revisioned candidate claim.
+    pub(crate) fn load_candidate_validation_source_for_trusted_claim(
+        &self,
+        scan_id: &crate::domain::ScanId,
+        candidate_id: &crate::domain::CandidateId,
+        session_id: &CleanupSessionId,
+        item_ordinal: usize,
+    ) -> Result<super::CandidateValidationSourceRecord, HistoryError> {
+        let guard = self.lock_current_history_connection()?;
+        load_candidate_validation_source_for_trusted_claim(
+            &guard.connection,
+            scan_id,
+            candidate_id,
+            session_id,
+            item_ordinal,
+        )
     }
 
     pub(super) fn load_candidate_evaluation_with_guard(

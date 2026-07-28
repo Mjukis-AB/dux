@@ -383,6 +383,22 @@ pub(crate) struct CompleteCandidateRecord {
 }
 
 impl CompleteCandidateRecord {
+    pub(super) fn immutable_body_matches(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.source_scan_id == other.source_scan_id
+            && self.rule == other.rule
+            && self.category == other.category
+            && self.paths == other.paths
+            && self.estimated_bytes == other.estimated_bytes
+            && self.newest_mtime == other.newest_mtime
+            && self.evidence == other.evidence
+            && self.safety == other.safety
+            && self.action == other.action
+            && self.rule_schedule_eligible == other.rule_schedule_eligible
+            && self.blockers == other.blockers
+            && self.created_at == other.created_at
+    }
+
     pub(crate) fn id(&self) -> &CandidateId {
         &self.id
     }

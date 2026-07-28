@@ -1,5 +1,24 @@
 # Changelog
 
+- Joined the private Rust-target production acquisition chain to its reviewed
+  plan, schema-v12 journal, and descriptor-relative executor in one end-to-end
+  macOS regression. The fixture now enrolls the exact direct Cargo executable,
+  scans a real one-package workspace, and obtains plan facts only through the
+  production engine pipeline; the synthetic facts constructor and Cargo
+  revalidation bypass were removed. The journal's legitimate `Discovered` →
+  `Planned` candidate transition is accepted only after rebinding the retained
+  source to the exact sealed planned session/item graph, complete frozen plan,
+  immutable candidate body, sole `ProtectedPath` blocker, scan, evaluation,
+  and snapshot before owner claim. Binding failure cannot abandon an active
+  session. Success preserves Cargo metadata and source while removing only
+  target contents and settling all claims; post-planning manifest drift still
+  fails before journal insertion or mutation. The bridge remains crate-private
+  and has no FFI, Swift, CLI, scheduler, AI, or app cleanup caller.
+- Reconciled the destructive-call checker with every existing reviewed
+  filesystem-effect suppression. The production Rust-target `unlinkat` remains
+  bound to the descriptor-relative driver and exact primitive; test mutations
+  now use unique one-use path/rule/context bindings instead of broad or reused
+  annotations.
 - Added schema v12's revisioned active-claim seal for the private trusted
   Rust-target cleanup handoff. The seal binds the exact candidate, session, and
   item ordinal, and only the private retained-blocker insertion path can create

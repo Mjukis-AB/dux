@@ -17,7 +17,7 @@ use crate::persistence::snapshot::{
     SnapshotRepository, SnapshotRepositoryErrorKind, SnapshotReviewLease, SnapshotUnixIdentity,
 };
 use crate::persistence::{
-    CandidateValidationSourceRecord, CompleteCandidateRecord, HistoryErrorKind,
+    CandidateValidationSourceRecord, CleanupSessionId, CompleteCandidateRecord, HistoryErrorKind,
     SnapshotReviewPurpose, StoreCoordinator,
 };
 
@@ -37,6 +37,12 @@ pub(crate) struct RustTargetDurableSource {
     record: CandidateValidationSourceRecord,
     lease: AutoReleasingReviewLease,
     bindings: RustTargetSnapshotBindings,
+    trusted_claim: Option<TrustedRustTargetClaimBinding>,
+}
+
+struct TrustedRustTargetClaimBinding {
+    session_id: CleanupSessionId,
+    item_ordinal: usize,
 }
 
 struct AutoReleasingReviewLease(Option<SnapshotReviewLease>);
@@ -193,6 +199,7 @@ fn acquire_rust_target_durable_source_with_clock_and_hook(
         record: after,
         lease,
         bindings,
+        trusted_claim: None,
     })
 }
 
@@ -235,20 +242,59 @@ impl RustTargetDurableSource {
             .lease()
             .validate(SystemTime::now())
             .map_err(map_snapshot)?;
-        let current = load_source(
-            &self.store,
-            self.record.scan().id(),
-            self.record.candidate().id(),
-        )?;
-        if current != self.record
-            || current.scan().snapshot() != Some(self.lease.lease().reference())
-        {
+        let current = match self.trusted_claim.as_ref() {
+            Some(binding) => load_source_for_trusted_claim(
+                &self.store,
+                self.record.scan().id(),
+                self.record.candidate().id(),
+                &binding.session_id,
+                binding.item_ordinal,
+            )?,
+            None => load_source(
+                &self.store,
+                self.record.scan().id(),
+                self.record.candidate().id(),
+            )?,
+        };
+        let source_matches = if self.trusted_claim.is_some() {
+            self.record.exactly_matches_after_trusted_claim(&current)
+        } else {
+            current == self.record
+        };
+        if !source_matches || current.scan().snapshot() != Some(self.lease.lease().reference()) {
             return Err(RustTargetSourceError::SourceChanged);
         }
         self.lease
             .lease()
             .validate(SystemTime::now())
             .map_err(map_snapshot)
+    }
+
+    pub(super) fn bind_trusted_claim(
+        &mut self,
+        session_id: CleanupSessionId,
+        item_ordinal: usize,
+    ) -> Result<(), RustTargetSourceError> {
+        if self.trusted_claim.is_some() {
+            return Err(RustTargetSourceError::SourceChanged);
+        }
+        let current = load_source_for_trusted_claim(
+            &self.store,
+            self.record.scan().id(),
+            self.record.candidate().id(),
+            &session_id,
+            item_ordinal,
+        )?;
+        if !self.record.exactly_matches_after_trusted_claim(&current)
+            || current.scan().snapshot() != Some(self.lease.lease().reference())
+        {
+            return Err(RustTargetSourceError::SourceChanged);
+        }
+        self.trusted_claim = Some(TrustedRustTargetClaimBinding {
+            session_id,
+            item_ordinal,
+        });
+        self.revalidate_current()
     }
 
     pub(crate) fn release(self) -> Result<(), RustTargetSourceError> {
@@ -263,6 +309,23 @@ fn load_source(
 ) -> Result<CandidateValidationSourceRecord, RustTargetSourceError> {
     store
         .load_candidate_validation_source(scan_id, candidate_id)
+        .map_err(|error| RustTargetSourceError::History { kind: error.kind })
+}
+
+fn load_source_for_trusted_claim(
+    store: &StoreCoordinator,
+    scan_id: &ScanId,
+    candidate_id: &CandidateId,
+    session_id: &CleanupSessionId,
+    item_ordinal: usize,
+) -> Result<CandidateValidationSourceRecord, RustTargetSourceError> {
+    store
+        .load_candidate_validation_source_for_trusted_claim(
+            scan_id,
+            candidate_id,
+            session_id,
+            item_ordinal,
+        )
         .map_err(|error| RustTargetSourceError::History { kind: error.kind })
 }
 

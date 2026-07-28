@@ -498,6 +498,7 @@ mod tests {
         let temp = TempDir::new_in(std::env::current_dir().unwrap()).unwrap();
         let target = reviewed_file_target(&temp);
         let path = target.snapshot.object_path().to_path_buf();
+        // DUX-DESTRUCTIVE: allow=test-reviewed-trash-replaced-file-remove -- remove only the reviewed TempDir-owned file before installing an identity-changing replacement
         fs::remove_file(&path).unwrap();
         fs::write(&path, b"replacement").unwrap();
 
@@ -515,6 +516,7 @@ mod tests {
     fn revalidation_rejects_missing_object_without_returning_a_path() {
         let temp = TempDir::new_in(std::env::current_dir().unwrap()).unwrap();
         let target = reviewed_file_target(&temp);
+        // DUX-DESTRUCTIVE: allow=test-reviewed-trash-missing-file-remove -- remove only the reviewed TempDir-owned file to prove missing targets fail without path disclosure
         fs::remove_file(target.snapshot.object_path()).unwrap();
 
         assert_eq!(

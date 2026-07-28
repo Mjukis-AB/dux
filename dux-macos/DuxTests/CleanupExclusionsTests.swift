@@ -22,7 +22,7 @@ final class CleanupExclusionsModelAndServiceTests: XCTestCase {
         )
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
         defer {
-            // DUX-DESTRUCTIVE: allow=test-swift-storage-roots-fixture-remove -- remove only this UUID-named temporary root
+            // DUX-DESTRUCTIVE: allow=test-swift-cleanup-exclusions-fixture-remove -- remove only this UUID-named cleanup-exclusions test root
             try? FileManager.default.removeItem(at: root)
         }
         let engine = try DuxEngine(

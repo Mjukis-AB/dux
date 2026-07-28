@@ -4843,12 +4843,14 @@ Tasks:
     `RustTargetPlanFacts` capability, approval, planned-session persistence,
     owner/generation-fenced claim, and descriptor-relative execution; the
     payload is removed, `CACHEDIR.TAG` is retained, and completed history is
-    observed. The production Cargo/home/protected-root/process/descendant grant
-    chain remains covered by its dedicated planner tests. A second fixture
+    observed. At this checkpoint the production
+    Cargo/home/protected-root/process/descendant grant chain remained covered
+    by dedicated planner tests; the 2026-07-28 integration slice below replaces
+    that shortcut with one real production-chain regression. A second fixture
     mutates the target contents after facts acquisition and proves the handoff
     rejects the path read-set drift before writing a planned journal row or
-    touching the target. Cargo manifest revalidation remains in the production
-    planner tests. This remains private test evidence: no FFI, Swift, CLI,
+    touching the target. Cargo manifest revalidation was still separate at this
+    checkpoint. This remains private test evidence: no FFI, Swift, CLI,
     scheduler, AI, or production cleanup route is enabled.
   - [x] 2026-07-28 slice: close the durable candidate-claim mismatch for the
     trusted Rust-target path without clearing or deleting its discovery
@@ -4995,6 +4997,27 @@ Tasks:
     facts capability repeats grant validation and remains path-private and
     non-cloneable; plan IDs, review, approval, journal, FFI, UI, scheduling,
     AI, and filesystem effects are still handled only by later boundaries.
+  - [x] 2026-07-28 slice: join the real production Rust-target acquisition
+    chain to the reviewed-plan, schema-v12 journal claim, and deterministic
+    executor in one macOS regression. The fixture explicitly enrolls the exact
+    direct Cargo executable, scans a real one-package workspace, and calls
+    `EngineHandle::prepare_rust_target_plan_facts`; the former test-only facts
+    constructor and Cargo-revalidation bypass have been removed. The first
+    full run exposed that the journal's legitimate atomic `Discovered` →
+    `Planned` candidate transition invalidated the retained discovery witness.
+    The source is now rebound after sealed planned-session insertion but before
+    the owner/generation claim, and only when the exact
+    session/item/candidate, trusted coupling seal, complete frozen plan,
+    immutable candidate body, sole `ProtectedPath` blocker, scan, evaluation,
+    and snapshot reference still agree. A binding failure therefore cannot
+    abandon an active owner. Every later revalidation repeats that joined
+    check against the now-active claim. The success path removes only target
+    contents and preserves
+    `CACHEDIR.TAG`, `Cargo.toml`, `Cargo.lock`, and source, settles
+    candidate/history state, and leaves no active claim or seal. A companion
+    manifest-drift run fails before journal insertion and leaves the target
+    untouched. No FFI, Swift, CLI, scheduler, AI, or app cleanup route is
+    enabled; generation-fenced product orchestration remains open.
 - [ ] Expose review intent, plan lifecycle, and path-free cleanup history through
   FFI/Swift UI without turning history into planner authority.
   - [x] 2026-07-19 slice: add the first app-facing history boundary as a

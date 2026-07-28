@@ -725,7 +725,18 @@ missing seals, blocker drift, and unsealed pre-v12 trusted recovery fail
 closed. Terminal candidate-claim settlement cascades the seal away, so
 completed history retains no active coupling. All other blocked candidates
 continue to fail closed, including candidates that merely imitate the safe
-policy fields.
+policy fields. The production discovery witness remains strict while the
+candidate is unclaimed. After exact planned-session insertion atomically moves
+that candidate from `Discovered` to `Planned`, the core rebinds the retained
+source to that sealed session and item before an owner/generation claim can
+make the journal active. Binding failure therefore leaves no active owner.
+This claimed form is accepted only through the complete schema-v12 journal
+decoder: the trusted seal, ordinary claim, planned-or-active lifecycle,
+one-item permanent-safe plan, source scan, complete immutable candidate body,
+sole blocker, current evaluation, and retained snapshot reference must all
+still agree. The source repeats this joined validation before every downstream
+Cargo, grant, approval, and effect check; no other status transition is
+normalized or ignored.
 
 ### 6.3 Protected-root and sensitive-category policy
 
@@ -1255,23 +1266,25 @@ phase; after the validation transition, a terminal prefix is allowed but the
 exact target must be `validating` and every later path must remain `planned`.
 A sub-millisecond start-time mismatch is canonicalized before persistence and
 claiming. This bridge is not exported through FFI, not registered with Swift,
-and has no production caller. The typed Rust-target facts and journal request
+and has no product caller. The typed Rust-target facts and journal request
 now have one additional crate-private engine bridge into this same executor;
 it accepts no paths, callbacks, AI output, CLI request, FFI value, or UI input,
 and performs no effect outside the already-claimed session capability. Its
-macOS regression fixture traverses the complete test-owned trusted-rule
-facts-to-claim path and verifies marker preservation plus completed history;
-the production Cargo/home/protected-root/process/descendant chain remains
-covered by dedicated planner tests. A companion target read-set drift fixture
-fails during the planner/journal handoff before the planned row is written,
-with the target left untouched. Cargo manifest revalidation remains covered by
-the production planner tests. These tests prove the lifecycle wiring
-only; they do not make the private bridge a production caller. The durable
-candidate continues to carry `ProtectedPath`; an insertion-only typed
-Rust-target coupling admits that retained fact only after the complete trusted
-facts/review/approval chain and exact candidate-body comparison. Generic
-blocked candidates remain unable to create a planned session. The optional private
-capacity-aware variant
+macOS regression fixture now traverses the production durable-source,
+enrolled-Cargo, home/mount, protected-root, process-quiescence,
+descendant-policy, facts, reviewed-plan, schema-v12 claim, and
+descriptor-relative executor chain. It verifies that only target contents are
+removed, the Cargo marker, manifest, lockfile, and source remain, candidate and
+history state settle, and active claims disappear. The former test-only facts
+constructor and Cargo-revalidation bypass no longer exist. A companion
+manifest read-set drift fixture fails during the planner/journal handoff before
+the planned row is written, with the target left untouched. These tests prove
+the private production-core chain only; they do not make it a product caller.
+The durable candidate continues to carry `ProtectedPath`; an insertion-only
+typed Rust-target coupling admits that retained fact only after the complete
+trusted facts/review/approval chain and exact candidate-body comparison.
+Generic blocked candidates remain unable to create a planned session. The
+optional private capacity-aware variant
 captures one pre-effect and one post-settlement observation through a
 core-owned sampler; only matching stable-volume, timing, total-capacity,
 headline-source, and availability-shape evidence can persist a signed

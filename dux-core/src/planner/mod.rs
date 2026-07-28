@@ -53,8 +53,6 @@ pub(crate) use rust_target_pipeline::{RustTargetPipelineError, prepare_rust_targ
 pub(crate) use rust_target_pipeline::{
     prepare_rust_target_plan_facts, prepare_rust_target_promotion,
 };
-#[cfg(test)]
-pub(crate) use rust_target_promotion::rust_target_plan_facts_for_test;
 #[cfg(unix)]
 pub(crate) use rust_target_promotion::{RustTargetPlanFacts, RustTargetPromotion};
 

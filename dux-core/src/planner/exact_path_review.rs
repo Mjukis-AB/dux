@@ -294,6 +294,22 @@ impl ApprovedTrustedReviewedCleanupPlan {
         })
     }
 
+    #[cfg(unix)]
+    fn bind_trusted_rust_target_claim(
+        &mut self,
+        session_id: CleanupSessionId,
+    ) -> Result<(), ExactPathApprovalError> {
+        if !self.reviewed.trusted_rust_target_coupling
+            || self.reviewed.plan.items().len() != 1
+            || self.reviewed.authorizations.len() != 1
+        {
+            return Err(ExactPathApprovalError::AuthorizationMismatch);
+        }
+        self.reviewed.authorizations[0]
+            .bind_trusted_rust_target_claim(session_id, 0)
+            .map_err(ExactPathApprovalError::Authorization)
+    }
+
     /// Revalidate only the next ordered authorization in a multi-path
     /// execution. Earlier targets may have been deliberately mutated by the
     /// same approved session, so rechecking their historical identity would
@@ -350,7 +366,7 @@ impl ApprovedTrustedReviewedCleanupPlan {
     /// substitution cannot become an execution input. The returned type is
     /// crate-private and still requires a later effect-specific executor.
     pub(crate) fn begin_cleanup_session(
-        self,
+        mut self,
         store: &Arc<StoreCoordinator>,
         session_id: CleanupSessionId,
         started_at: std::time::SystemTime,
@@ -387,6 +403,12 @@ impl ApprovedTrustedReviewedCleanupPlan {
         lease
             .validate_planned_plan(&session_id, self.plan())
             .map_err(ExactPathHandoffError::Journal)?;
+        #[cfg(unix)]
+        if self.reviewed.trusted_rust_target_coupling {
+            // Bind while the graph is still planned: failure must not abandon a live owner.
+            self.bind_trusted_rust_target_claim(session_id.clone())
+                .map_err(ExactPathHandoffError::Approval)?;
+        }
         let claim = lease
             .claim_planned(&session_id, started_at)
             .map_err(|failure| ExactPathHandoffError::Journal(HistoryError::new(failure.kind())))?;

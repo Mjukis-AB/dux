@@ -25,6 +25,8 @@ use super::candidate_history::{
     ensure_prepared_candidate_batch_budget, insert_candidate,
     load_complete_candidate_batch_within_budget,
 };
+use super::cleanup_history::{CandidateStatusCoupling, CleanupSessionId};
+use super::cleanup_journal::{JournalLifecycle, load_cleanup_journal_within_budget};
 use super::history::{
     HistoryError, HistoryErrorKind, ScanRecord, ScanStatus, load_scan_record_within_budget,
     map_query_sql_error, map_write_sql_error, system_time_to_unix_ms, unix_ms_to_system_time,
@@ -447,6 +449,44 @@ impl CandidateValidationSourceRecord {
     pub(crate) fn evaluation_candidates(&self) -> &[CompleteCandidateRecord] {
         self.evaluation.candidates()
     }
+
+    pub(crate) fn exactly_matches_after_trusted_claim(&self, current: &Self) -> bool {
+        self.scan == current.scan
+            && self
+                .evaluation
+                .exactly_matches_after_trusted_claim(&current.evaluation, self.candidate.id())
+            && self.candidate.immutable_body_matches(&current.candidate)
+            && self.candidate.status() == CandidateHistoryStatus::Discovered
+            && current.candidate.status() == CandidateHistoryStatus::Planned
+    }
+}
+
+impl CandidateEvaluationRecord {
+    fn exactly_matches_after_trusted_claim(
+        &self,
+        current: &Self,
+        claimed_candidate_id: &CandidateId,
+    ) -> bool {
+        self.request == current.request
+            && self.completed_at == current.completed_at
+            && self.status == current.status
+            && self.candidates.len() == current.candidates.len()
+            && self.candidates.iter().all(|retained| {
+                current
+                    .candidates
+                    .iter()
+                    .find(|candidate| candidate.id() == retained.id())
+                    .is_some_and(|candidate| {
+                        if retained.id() == claimed_candidate_id {
+                            retained.immutable_body_matches(candidate)
+                                && retained.status() == CandidateHistoryStatus::Discovered
+                                && candidate.status() == CandidateHistoryStatus::Planned
+                        } else {
+                            retained == candidate
+                        }
+                    })
+            })
+    }
 }
 
 /// Exact, bounded candidate-evaluation history for one requested scan.
@@ -676,39 +716,86 @@ pub(super) fn load_candidate_validation_source(
     candidate_id: &CandidateId,
 ) -> Result<CandidateValidationSourceRecord, HistoryError> {
     run_bounded_evaluation_query(connection, || {
-        let scan = load_scan_record_within_budget(connection, scan_id)?
+        load_candidate_validation_source_with_status(
+            connection,
+            scan_id,
+            candidate_id,
+            CandidateHistoryStatus::Discovered,
+        )
+    })
+}
+
+pub(super) fn load_candidate_validation_source_for_trusted_claim(
+    connection: &Connection,
+    scan_id: &ScanId,
+    candidate_id: &CandidateId,
+    session_id: &CleanupSessionId,
+    item_ordinal: usize,
+) -> Result<CandidateValidationSourceRecord, HistoryError> {
+    run_bounded_evaluation_query(connection, || {
+        let journal = load_cleanup_journal_within_budget(connection, session_id)?
             .ok_or_else(|| HistoryError::new(HistoryErrorKind::NotFound))?;
-        if scan.status() != ScanStatus::Succeeded
-            || scan.coverage().status() != ScanCoverageStatus::Complete
-            || scan.snapshot().is_none()
+        if journal.session_id != *session_id
+            || journal.source_scan_id != *scan_id
+            || journal.candidate_status_coupling
+                != CandidateStatusCoupling::TrustedRustTargetPlanClaimsV1
+            || !matches!(
+                journal.lifecycle,
+                JournalLifecycle::Planned | JournalLifecycle::Active { .. }
+            )
+            || journal.items.len() != 1
+            || journal
+                .items
+                .get(item_ordinal)
+                .is_none_or(|item| item.frozen.candidate_id != *candidate_id)
         {
             return Err(HistoryError::new(HistoryErrorKind::InvalidTransition));
         }
-        let evaluation = load_candidate_evaluation_within_budget(connection, scan_id)?
-            .ok_or_else(|| HistoryError::new(HistoryErrorKind::NotFound))?;
-        if !matches!(
-            evaluation.status(),
-            CandidateEvaluationStatus::Succeeded { .. }
-        ) || !evaluation.matches_current_scan_observation(&scan)
-        {
-            return Err(HistoryError::new(HistoryErrorKind::InvalidTransition));
-        }
-        let candidate = evaluation
-            .candidates()
-            .iter()
-            .find(|candidate| candidate.id() == candidate_id)
-            .cloned()
-            .ok_or_else(|| HistoryError::new(HistoryErrorKind::NotFound))?;
-        if candidate.source_scan_id() != scan_id
-            || candidate.status() != CandidateHistoryStatus::Discovered
-        {
-            return Err(HistoryError::new(HistoryErrorKind::InvalidTransition));
-        }
-        Ok(CandidateValidationSourceRecord {
-            scan,
-            evaluation,
-            candidate,
-        })
+        load_candidate_validation_source_with_status(
+            connection,
+            scan_id,
+            candidate_id,
+            CandidateHistoryStatus::Planned,
+        )
+    })
+}
+
+fn load_candidate_validation_source_with_status(
+    connection: &Connection,
+    scan_id: &ScanId,
+    candidate_id: &CandidateId,
+    required_status: CandidateHistoryStatus,
+) -> Result<CandidateValidationSourceRecord, HistoryError> {
+    let scan = load_scan_record_within_budget(connection, scan_id)?
+        .ok_or_else(|| HistoryError::new(HistoryErrorKind::NotFound))?;
+    if scan.status() != ScanStatus::Succeeded
+        || scan.coverage().status() != ScanCoverageStatus::Complete
+        || scan.snapshot().is_none()
+    {
+        return Err(HistoryError::new(HistoryErrorKind::InvalidTransition));
+    }
+    let evaluation = load_candidate_evaluation_within_budget(connection, scan_id)?
+        .ok_or_else(|| HistoryError::new(HistoryErrorKind::NotFound))?;
+    if !matches!(
+        evaluation.status(),
+        CandidateEvaluationStatus::Succeeded { .. }
+    ) || !evaluation.matches_current_scan_observation(&scan)
+    {
+        return Err(HistoryError::new(HistoryErrorKind::InvalidTransition));
+    }
+    let candidate = evaluation
+        .candidates()
+        .iter()
+        .find(|candidate| candidate.id() == candidate_id)
+        .cloned()
+        .ok_or_else(|| HistoryError::new(HistoryErrorKind::NotFound))?;
+    if candidate.source_scan_id() != scan_id || candidate.status() != required_status {
+        return Err(HistoryError::new(HistoryErrorKind::InvalidTransition));
+    }
+    Ok(CandidateValidationSourceRecord {
+        scan,
+        evaluation,
+        candidate,
     })
 }
 

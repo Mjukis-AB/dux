@@ -13,7 +13,7 @@ use crate::path_validation::{
     FilesystemEntryKind, LexicalPathError, capture_path_snapshot, capture_regular_file_prefix,
     capture_regular_file_sha256, capture_scan_root, validate_cleanup_path, validate_scan_root,
 };
-use crate::persistence::CompleteCandidateRecord;
+use crate::persistence::{CleanupSessionId, CompleteCandidateRecord};
 
 use super::rust_target_source::{
     RustTargetDurableSource, RustTargetSnapshotBindings, RustTargetSourceError,
@@ -463,6 +463,19 @@ impl RustTargetLiveWitness {
                 .map_err(|_| RustTargetLiveValidationError::DurableSourceChanged)?;
         }
         Ok(())
+    }
+
+    pub(super) fn bind_trusted_claim(
+        &mut self,
+        session_id: CleanupSessionId,
+        item_ordinal: usize,
+    ) -> Result<(), RustTargetLiveValidationError> {
+        self.durable_source
+            .as_mut()
+            .ok_or(RustTargetLiveValidationError::DurableSourceChanged)?
+            .bind_trusted_claim(session_id, item_ordinal)
+            .map_err(|_| RustTargetLiveValidationError::DurableSourceChanged)?;
+        self.revalidate_current()
     }
 
     pub(super) fn project_root(&self) -> &Path {

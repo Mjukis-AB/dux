@@ -518,8 +518,7 @@ impl PermanentSafeContentsDriver for DescriptorRelativePermanentSafeDriver {
                 } else {
                     nix::unistd::UnlinkatFlags::NoRemoveDir
                 };
-                // DUX-DESTRUCTIVE: allow=permanent-safe-rust-target-descriptor-contents --
-                // reviewed, journal-fenced, descriptor-relative contents only.
+                // DUX-DESTRUCTIVE: allow=permanent-safe-rust-target-descriptor-contents -- unlink only reviewed journal-fenced entries relative to retained target descriptors
                 nix::unistd::unlinkat(&parent, entry.name.as_os_str(), flags).map_err(|_| {
                     if summary.removed_entries == 0 {
                         PermanentSafePlatformError::Failed

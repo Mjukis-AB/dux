@@ -7,7 +7,7 @@ final class PermanentCleanupPolicyServiceTests: XCTestCase {
             .appending(path: "dux-permanent-cleanup-service-\(UUID().uuidString)", directoryHint: .isDirectory)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
         defer {
-            // DUX-DESTRUCTIVE: allow=test-swift-storage-roots-fixture-remove -- remove only this UUID-named temporary root
+            // DUX-DESTRUCTIVE: allow=test-swift-permanent-policy-fixture-remove -- remove only this UUID-named permanent-policy test root
             try? FileManager.default.removeItem(at: root)
         }
 

@@ -64,7 +64,8 @@ use crate::path_validation::{
 };
 use crate::persistence::{
     CARGO_ENROLLMENT_SUPPORTED_RELEASE, CargoEnrollmentSetting, CargoEnrollmentSettingUpdate,
-    CargoEnrollmentState, CargoExecutableEnrollmentIdentity, HistoryErrorKind, StoreCoordinator,
+    CargoEnrollmentState, CargoExecutableEnrollmentIdentity, CleanupSessionId, HistoryErrorKind,
+    StoreCoordinator,
 };
 
 const VERSION_STDOUT_LIMIT: usize = 16 * 1024;
@@ -380,6 +381,15 @@ impl RustTargetCargoMetadataWitness {
         Ok(())
     }
 
+    pub(crate) fn bind_trusted_claim(
+        &mut self,
+        session_id: CleanupSessionId,
+        item_ordinal: usize,
+    ) -> Result<(), CargoMetadataValidationError> {
+        self.live.bind_trusted_claim(session_id, item_ordinal)?;
+        self.revalidate()
+    }
+
     /// Consume this witness into path-private provenance after a complete
     /// revalidation. The unresolved protected-path marker is deliberately
     /// carried forward; this operation cannot make the result actionable.
@@ -429,6 +439,17 @@ impl RustTargetCargoPlanningProvenance {
         }
         let _ = &self.protected_path_still_unresolved;
         Ok(())
+    }
+
+    pub(crate) fn bind_trusted_claim(
+        &mut self,
+        session_id: CleanupSessionId,
+        item_ordinal: usize,
+    ) -> Result<(), RustTargetCargoPlanningProvenanceError> {
+        self.witness
+            .bind_trusted_claim(session_id, item_ordinal)
+            .map_err(RustTargetCargoPlanningProvenanceError::Revalidation)?;
+        self.revalidate()
     }
 
     pub(crate) fn release(self) -> Result<(), RustTargetSourceError> {
@@ -620,6 +641,17 @@ impl RustTargetRuleBoundaryEvidence {
             return Err(RustTargetRuleBoundaryError::ProtectedPathBlockerMissing);
         }
         Ok(())
+    }
+
+    pub(crate) fn bind_trusted_claim(
+        &mut self,
+        session_id: CleanupSessionId,
+        item_ordinal: usize,
+    ) -> Result<(), RustTargetRuleBoundaryError> {
+        self.provenance
+            .bind_trusted_claim(session_id, item_ordinal)
+            .map_err(RustTargetRuleBoundaryError::Provenance)?;
+        self.revalidate()
     }
 
     pub(crate) fn release(self) -> Result<(), RustTargetSourceError> {

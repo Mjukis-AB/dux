@@ -19,6 +19,8 @@ use crate::path_validation::{
     capture_filesystem_boundary, capture_path_snapshot, capture_scan_root, validate_cleanup_path,
     validate_scan_root,
 };
+#[cfg(unix)]
+use crate::persistence::CleanupSessionId;
 
 const TRUSTED_VOLUME_GRANT_REVISION: u32 = 1;
 const PROTECTED_RULE_GRANT_REVISION: u32 = 1;
@@ -408,6 +410,27 @@ impl RuleScopeAuthorization {
         Ok(self.target.clone())
     }
 
+    #[cfg(unix)]
+    pub(super) fn bind_trusted_rust_target_claim(
+        &mut self,
+        session_id: CleanupSessionId,
+        item_ordinal: usize,
+    ) -> Result<(), RuleScopeGrantError> {
+        if self.rule.id().as_str() != RUST_TARGET_RULE
+            || self.rule.revision().get() != SAFE_RULE_REVISION
+            || self.source_scan_id.is_none()
+            || self.candidate_id.is_none()
+        {
+            return Err(RuleScopeGrantError::CargoBoundaryMismatch);
+        }
+        self.cargo_boundary
+            .as_mut()
+            .ok_or(RuleScopeGrantError::CargoProvenanceMissing)?
+            .bind_trusted_claim(session_id, item_ordinal)
+            .map_err(RuleScopeGrantError::CargoBoundary)?;
+        self.revalidate()
+    }
+
     fn validate_current(&self) -> Result<(), RuleScopeGrantError> {
         if self.revision != TRUSTED_RULE_SCOPE_GRANT_REVISION {
             return Err(RuleScopeGrantError::UnsupportedRevision);
@@ -494,7 +517,7 @@ impl RuleScopeAuthorization {
 #[cfg(test)]
 #[allow(clippy::disallowed_methods)]
 mod tests {
-    use std::fs::{create_dir_all, rename, write};
+    use std::fs;
 
     use tempfile::TempDir;
 
@@ -508,8 +531,8 @@ mod tests {
         let lexical_root = validate_scan_root(&root_path).unwrap();
         let root = capture_scan_root(lexical_root.clone()).unwrap();
         let target_path = root_path.join("target");
-        create_dir_all(&target_path).unwrap();
-        write(
+        fs::create_dir_all(&target_path).unwrap();
+        fs::write(
             target_path.join("CACHEDIR.TAG"),
             b"Signature: 8a477f597d28d172789f06886806bc55",
         )
@@ -554,9 +577,10 @@ mod tests {
         let authorization = authorize_rule_target(&root, target, &rust_rule()).unwrap();
         authorization.revalidate().unwrap();
         let old = temp.path().join("target");
-        rename(&old, temp.path().join("target-old")).unwrap();
-        create_dir_all(&old).unwrap();
-        write(old.join("CACHEDIR.TAG"), b"replacement").unwrap();
+        // DUX-DESTRUCTIVE: allow=test-rule-scope-target-replacement-rename -- rename only the TempDir-owned target to prove exact authorization rejects replacement
+        fs::rename(&old, temp.path().join("target-old")).unwrap();
+        fs::create_dir_all(&old).unwrap();
+        fs::write(old.join("CACHEDIR.TAG"), b"replacement").unwrap();
         assert!(matches!(
             authorization.revalidate(),
             Err(RuleScopeGrantError::ChangedSinceAuthorization)
