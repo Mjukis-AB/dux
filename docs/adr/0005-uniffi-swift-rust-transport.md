@@ -56,7 +56,7 @@ Those capabilities retain their own gates below and in ADR 0004.
 
 ## Current realization
 
-FFI contract v38 now carries the real shared engine session first introduced in
+FFI contract v40 now carries the real shared engine session first introduced in
 v4. The app supplies input-only private data/cache roots; storage paths never
 return across the boundary. Eight maintenance kinds use opaque task objects
 with nonblocking versioned path-free poll/cancel records, and exact Explorer
@@ -147,6 +147,28 @@ user-selected scan root. The combined pass remains capped at 200,000 nodes,
 durable reuse binds the typed root source and retained snapshot identity, and
 the request still carries no caller path, recommendation, plan, approval, AI
 input, cleanup mode, callback, driver, or effect command.
+
+Contract v40 adds one synchronous, observation-only Critical recovery
+finalization over that exact targeted-root pass. The request can only echo the
+retained pressure proof and catalog stamp; Rust privately reselects exact
+retained scans and current terminal candidate evaluations, enforces the
+revision-1 one-hour evidence window, builds groups in the fixed seven-lane
+roadmap order, and repeats the pressure/catalog checkpoint before returning.
+Revision 1 emits only stale safe-regenerable observations, guided exploration,
+and permission/coverage gaps because the other four lanes do not yet have
+authoritative sources. Unavailable roots are a typed count in the permission
+lane, not fake scans or zero-byte observations.
+
+The response is bounded and path-free. It contains completeness counts,
+rule/category grouping, exact scan navigation IDs, observation times, and
+lane-specific finding/blocker/permission counts, but no candidate ID, byte
+forecast, cleanup mode, plan, approval, AI input, callback, provider command,
+driver, or effect capability. FFI and Swift independently validate record and
+policy versions, completeness arithmetic, contiguous ranks, monotonic fixed
+lane priority, semantic uniqueness, lane-specific payloads, roots, timestamps,
+and unsupported lanes. Swift consumes the retained exact proof only after the
+entire graph validates. Native actions can therefore open exact read-only
+Candidates, Browse, or Coverage state, but cannot enter a planner or executor.
 
 Contract v9 adds one path-free newest-available review acquisition. The core
 selects the deterministic newest succeeded, non-tombstoned snapshot and then

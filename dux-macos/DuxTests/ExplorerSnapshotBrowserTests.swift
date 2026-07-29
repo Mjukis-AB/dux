@@ -721,6 +721,49 @@ final class ExplorerSnapshotBrowserTests: XCTestCase {
         XCTAssertFalse(calls.contains(.acquireLatest))
     }
 
+    func testPreparedLargeFilesReviewOpensExactModeWithoutLoadingLatestHome() async {
+        let reviews = BrowserReviewStub()
+        let browser = ExplorerSnapshotBrowserModel(reviews: reviews)
+        let scanID = "scan:home:large-files"
+
+        browser.prepareExactLargeFilesReview(scanID: scanID)
+        await browser.present(id: UUID())
+
+        XCTAssertEqual(browser.phase, .ready)
+        XCTAssertEqual(browser.scanID, scanID)
+        XCTAssertEqual(browser.contentMode, .largeFiles)
+        XCTAssertEqual(browser.largeFilesPage?.files.count, 2)
+        let calls = await reviews.recordedCalls()
+        XCTAssertTrue(calls.contains(.acquire(scanID: scanID)))
+        XCTAssertTrue(calls.contains(.largeFiles(
+            scanID: scanID,
+            minimumLogicalBytes: ExplorerSnapshotLargeFileThreshold.gibibyte1.rawValue,
+            modifiedBefore: nil,
+            maxResults: ExplorerSnapshotBrowserModel.largeFileResultLimit
+        )))
+        XCTAssertFalse(calls.contains(.acquireLatest))
+    }
+
+    func testPreparedCoverageReviewOpensExactModeWithoutLoadingLatestHome() async {
+        let reviews = BrowserReviewStub()
+        let coverage = BrowserCoverageStub()
+        let browser = ExplorerSnapshotBrowserModel(reviews: reviews, coverage: coverage)
+        let scanID = "scan:home:coverage"
+
+        browser.prepareExactCoverageReview(scanID: scanID)
+        await browser.present(id: UUID())
+
+        XCTAssertEqual(browser.phase, .ready)
+        XCTAssertEqual(browser.scanID, scanID)
+        XCTAssertEqual(browser.contentMode, .coverage)
+        XCTAssertEqual(browser.coverageDetails?.scanID, scanID)
+        let requestedScanIDs = await coverage.requestedScanIDs()
+        XCTAssertEqual(requestedScanIDs, [scanID])
+        let calls = await reviews.recordedCalls()
+        XCTAssertTrue(calls.contains(.acquire(scanID: scanID)))
+        XCTAssertFalse(calls.contains(.acquireLatest))
+    }
+
     func testHistoryFailureLeavesConfirmedSnapshotReady() async {
         let reviews = BrowserReviewStub()
         let history = BrowserHistoryStub(fails: true)

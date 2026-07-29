@@ -30,13 +30,14 @@ private func generatedTargetedRootCatalog() -> TargetedReclaimRootCatalog {
 }
 
 private func generatedTargetedPressure(
-    anchorUnixMS: Int64 = 4_000
+    anchorUnixMS: Int64 = 4_000,
+    pressure: TargetedProjectScanPressure = .warning
 ) -> TargetedProjectScanPressureContext {
     TargetedProjectScanPressureContext(
         recordVersion: 1,
         stableVolumeId: targetedTestVolumeID,
         capacityAnchorUnixMs: anchorUnixMS,
-        pressure: .warning,
+        pressure: pressure,
         currentEpisodeStartedAtUnixMs: 2_000,
         pressureStartedAtUnixMs: 1_000,
         policyRevision: 9
@@ -104,6 +105,74 @@ private func generatedTargetedCurrentResult() -> ScanTaskResult {
             candidateCount: 2,
             failure: nil
         )
+    )
+}
+
+private func generatedEmergencyRecoveryOrdering(
+    pressure: TargetedProjectScanPressureContext,
+    recordVersion: UInt32 = 1,
+    observedAtUnixMS: Int64 = 5_000
+) -> EmergencyRecoveryOrdering {
+    EmergencyRecoveryOrdering(
+        recordVersion: recordVersion,
+        policyRevision: 1,
+        pressure: pressure,
+        rootCatalog: generatedTargetedRootCatalog(),
+        observedRootCount: 3,
+        candidateEvaluatedRootCount: 2,
+        unavailableRootCount: 1,
+        groups: [
+            EmergencyRecoveryGroup(
+                recordVersion: 1,
+                rank: 0,
+                lane: .staleSafeRegenerable,
+                ruleId: "cargo-target",
+                ruleRevision: 3,
+                category: .developerArtifact,
+                unavailableRootCount: 0,
+                sources: [
+                    EmergencyRecoverySource(
+                        recordVersion: 1,
+                        rootOrdinal: 0,
+                        scanId: "scan:targeted:cargo",
+                        observedAtUnixMs: observedAtUnixMS,
+                        candidateCount: 4,
+                        blockedCandidateCount: 1,
+                        permissionIssueCount: nil
+                    ),
+                ]
+            ),
+            EmergencyRecoveryGroup(
+                recordVersion: 1,
+                rank: 1,
+                lane: .guidedExploration,
+                ruleId: nil,
+                ruleRevision: nil,
+                category: nil,
+                unavailableRootCount: 0,
+                sources: [
+                    EmergencyRecoverySource(
+                        recordVersion: 1,
+                        rootOrdinal: 1,
+                        scanId: "scan:targeted:explore",
+                        observedAtUnixMs: observedAtUnixMS + 500,
+                        candidateCount: nil,
+                        blockedCandidateCount: nil,
+                        permissionIssueCount: nil
+                    ),
+                ]
+            ),
+            EmergencyRecoveryGroup(
+                recordVersion: 1,
+                rank: 2,
+                lane: .permissionGap,
+                ruleId: nil,
+                ruleRevision: nil,
+                category: nil,
+                unavailableRootCount: 1,
+                sources: []
+            ),
+        ]
     )
 }
 
@@ -493,7 +562,7 @@ final class EngineServiceTests: XCTestCase {
         // DUX-DESTRUCTIVE: allow=test-swift-retry-obstruction-remove -- remove only this test fixture's deliberate file obstruction
         try FileManager.default.removeItem(at: dataRoot)
         let status = try await service.loadStatus()
-        XCTAssertEqual(status.ffiContractVersion, 39)
+        XCTAssertEqual(status.ffiContractVersion, 40)
         let closed = await service.close()
         XCTAssertTrue(closed)
     }
@@ -503,7 +572,7 @@ final class EngineServiceTests: XCTestCase {
         let result = try await EngineService(engine: fixture.engine).loadStatus()
 
         XCTAssertEqual(result.libraryVersion, "0.5.0")
-        XCTAssertEqual(result.ffiContractVersion, 39)
+        XCTAssertEqual(result.ffiContractVersion, 40)
         XCTAssertTrue(result.executedOffMainThread)
     }
 
@@ -1524,6 +1593,178 @@ final class EngineServiceTests: XCTestCase {
         }
     }
 
+    func testEmergencyRecoveryBridgeMapsExactCriticalOrderingAndRequest() async throws {
+        let pressure = generatedTargetedPressure(pressure: .critical)
+        let engine = RecordingTargetedScanEngine(
+            admissions: [
+                generatedTargetedAdmission(
+                    pressure: pressure,
+                    disposition: .rootUnavailable,
+                    rootUnavailableReason: .accessDenied
+                ),
+            ],
+            emergencyRecoveryOrderings: [
+                generatedEmergencyRecoveryOrdering(pressure: pressure),
+            ]
+        )
+        let service = EngineService(engine: engine)
+        let admission = try await service.startTargetedReclaimScan(
+            stableVolumeID: targetedTestVolumeID,
+            anchorAt: Date(timeIntervalSince1970: 4),
+            ordinal: 0,
+            expectedRootsRevision: 7,
+            expectedRootCatalogDigestSHA256: targetedTestCatalogDigest
+        )
+        let context = try XCTUnwrap(admission.context)
+
+        let ordering = try await service.finalizeEmergencyRecovery(context)
+
+        XCTAssertEqual(
+            engine.emergencyRecoveryRequests,
+            [
+                EmergencyRecoveryRequest(
+                    recordVersion: 1,
+                    expectedPressure: pressure,
+                    expectedRootCatalog: generatedTargetedRootCatalog()
+                ),
+            ]
+        )
+        XCTAssertEqual(engine.emergencyRecoveryCalledOnMain, false)
+        XCTAssertEqual(ordering.policyRevision, 1)
+        XCTAssertEqual(ordering.context, context)
+        XCTAssertEqual(ordering.observedRootCount, 3)
+        XCTAssertEqual(ordering.candidateEvaluatedRootCount, 2)
+        XCTAssertEqual(ordering.unavailableRootCount, 1)
+        XCTAssertEqual(ordering.groups.map(\.rank), [0, 1, 2])
+        XCTAssertEqual(
+            ordering.groups.map(\.lane),
+            [.staleSafeRegenerable, .guidedExploration, .permissionGap]
+        )
+        XCTAssertEqual(ordering.groups[0].ruleID, "cargo-target")
+        XCTAssertEqual(ordering.groups[0].ruleRevision, 3)
+        XCTAssertEqual(ordering.groups[0].category, .developerArtifact)
+        XCTAssertEqual(ordering.groups[0].sources[0].rootOrdinal, 0)
+        XCTAssertEqual(ordering.groups[0].sources[0].scanID, "scan:targeted:cargo")
+        XCTAssertEqual(
+            ordering.groups[0].sources[0].observedAt,
+            Date(timeIntervalSince1970: 5)
+        )
+        XCTAssertEqual(ordering.groups[0].sources[0].candidateCount, 4)
+        XCTAssertEqual(ordering.groups[0].sources[0].blockedCandidateCount, 1)
+        XCTAssertEqual(ordering.groups[2].unavailableRootCount, 1)
+        XCTAssertTrue(ordering.groups[2].sources.isEmpty)
+    }
+
+    func testEmergencyRecoveryMalformedResponseDoesNotConsumeProof() async throws {
+        let pressure = generatedTargetedPressure(pressure: .critical)
+        let engine = RecordingTargetedScanEngine(
+            admissions: [
+                generatedTargetedAdmission(
+                    pressure: pressure,
+                    disposition: .rootUnavailable,
+                    rootUnavailableReason: .accessDenied
+                ),
+            ],
+            emergencyRecoveryOrderings: [
+                generatedEmergencyRecoveryOrdering(
+                    pressure: pressure,
+                    observedAtUnixMS: Int64.max - 500
+                ),
+                generatedEmergencyRecoveryOrdering(pressure: pressure),
+            ]
+        )
+        let service = EngineService(engine: engine)
+        let admission = try await service.startTargetedReclaimScan(
+            stableVolumeID: targetedTestVolumeID,
+            anchorAt: Date(timeIntervalSince1970: 4),
+            ordinal: 0,
+            expectedRootsRevision: 7,
+            expectedRootCatalogDigestSHA256: nil
+        )
+        let context = try XCTUnwrap(admission.context)
+
+        do {
+            _ = try await service.finalizeEmergencyRecovery(context)
+            XCTFail("Expected malformed emergency recovery response to fail closed")
+        } catch {
+            XCTAssertEqual(
+                error as? TargetedReclaimScanServiceError,
+                .invalidResponse
+            )
+        }
+
+        let retry = try await service.finalizeEmergencyRecovery(context)
+        XCTAssertEqual(retry.context, context)
+        XCTAssertEqual(engine.emergencyRecoveryRequests.count, 2)
+
+        do {
+            _ = try await service.finalizeEmergencyRecovery(context)
+            XCTFail("Expected successful retry to consume the exact proof")
+        } catch {
+            XCTAssertEqual(
+                error as? TargetedReclaimScanServiceError,
+                .invalidResponse
+            )
+        }
+        XCTAssertEqual(engine.emergencyRecoveryRequests.count, 2)
+    }
+
+    func testEmergencyRecoveryBridgeMapsEveryTypedEngineError() async {
+        let cases: [(EmergencyRecoveryError, TargetedReclaimScanServiceError)] = [
+            (.Closed, .closed),
+            (.InvalidRecordVersion, .invalidRecordVersion),
+            (.InvalidPressureProof, .pressureChanged),
+            (.InvalidCatalog, .invalidResponse),
+            (.NotCritical, .pressureChanged),
+            (.RegistryChanged, .configuredRootsChanged),
+            (.CatalogChanged, .configuredRootsChanged),
+            (.PressureChanged, .pressureChanged),
+            (.ReadOnlyStore, .readOnlyStore),
+            (.IncompatibleSchema, .incompatibleSchema),
+            (.Busy, .busy),
+            (.UnsafeStorage, .unsafeStorage),
+            (.BudgetExceeded, .budgetExceeded),
+            (.CorruptData, .corruptData),
+            (.Unavailable, .storageUnavailable),
+            (.OutcomeUnknown, .outcomeUnknown),
+            (.InternalState, .internalState),
+        ]
+
+        for (ffiError, expected) in cases {
+            let pressure = generatedTargetedPressure(pressure: .critical)
+            let engine = RecordingTargetedScanEngine(
+                admissions: [
+                    generatedTargetedAdmission(
+                        pressure: pressure,
+                        disposition: .rootUnavailable,
+                        rootUnavailableReason: .accessDenied
+                    ),
+                ],
+                emergencyRecoveryError: ffiError
+            )
+            let service = EngineService(engine: engine)
+
+            do {
+                let admission = try await service.startTargetedReclaimScan(
+                    stableVolumeID: targetedTestVolumeID,
+                    anchorAt: Date(timeIntervalSince1970: 4),
+                    ordinal: 0,
+                    expectedRootsRevision: nil,
+                    expectedRootCatalogDigestSHA256: nil
+                )
+                let context = try XCTUnwrap(admission.context)
+                _ = try await service.finalizeEmergencyRecovery(context)
+                XCTFail("Expected \(ffiError) to be mapped")
+            } catch {
+                XCTAssertEqual(
+                    error as? TargetedReclaimScanServiceError,
+                    expected,
+                    "Unexpected mapping for \(ffiError)"
+                )
+            }
+        }
+    }
+
     func testHomeScanAdapterPassesOnlyResolvedHomeAndRunsAllFFIOffMain() async throws {
         let generatedTask = RecordingGeneratedScanTask(
             polls: [generatedActivePoll(revision: 1)]
@@ -2314,7 +2555,7 @@ final class EngineServiceTests: XCTestCase {
             weakEngine = engine
 
             XCTAssertEqual(liveEngineInstanceCount(), baseline + 1)
-            XCTAssertEqual(try engine.libraryVersion().ffiContractVersion, 39)
+            XCTAssertEqual(try engine.libraryVersion().ffiContractVersion, 40)
             XCTAssertTrue(engine.close())
             XCTAssertTrue(engine.close())
             XCTAssertThrowsError(try engine.formatSize(bytes: 1_536)) { error in
@@ -3217,10 +3458,14 @@ private final class RecordingTargetedScanEngine: DuxEngine, @unchecked Sendable 
     private var admissions: [TargetedProjectScanAdmission]
     private let checkpoint: TargetedProjectScanCheckpoint?
     private let startError: TargetedProjectScanError?
+    private var emergencyRecoveryOrderings: [EmergencyRecoveryOrdering]
+    private let emergencyRecoveryError: EmergencyRecoveryError?
     private(set) var startRequest: TargetedProjectScanRequest?
     private(set) var checkpointRequest: TargetedProjectScanCheckpointRequest?
+    private(set) var emergencyRecoveryRequests: [EmergencyRecoveryRequest] = []
     private(set) var startCalledOnMain: Bool?
     private(set) var checkpointCalledOnMain: Bool?
+    private(set) var emergencyRecoveryCalledOnMain: Bool?
 
     required init(unsafeFromHandle handle: UInt64) {
         fatalError("RecordingTargetedScanEngine cannot be lifted from handle: \(handle)")
@@ -3229,11 +3474,15 @@ private final class RecordingTargetedScanEngine: DuxEngine, @unchecked Sendable 
     init(
         admissions: [TargetedProjectScanAdmission],
         checkpoint: TargetedProjectScanCheckpoint? = nil,
-        startError: TargetedProjectScanError? = nil
+        startError: TargetedProjectScanError? = nil,
+        emergencyRecoveryOrderings: [EmergencyRecoveryOrdering] = [],
+        emergencyRecoveryError: EmergencyRecoveryError? = nil
     ) {
         self.admissions = admissions
         self.checkpoint = checkpoint
         self.startError = startError
+        self.emergencyRecoveryOrderings = emergencyRecoveryOrderings
+        self.emergencyRecoveryError = emergencyRecoveryError
         super.init(noHandle: NoHandle())
     }
 
@@ -3260,6 +3509,20 @@ private final class RecordingTargetedScanEngine: DuxEngine, @unchecked Sendable 
             throw TargetedProjectScanError.InternalState
         }
         return checkpoint
+    }
+
+    override func finalizeEmergencyRecovery(
+        request: EmergencyRecoveryRequest
+    ) throws -> EmergencyRecoveryOrdering {
+        emergencyRecoveryRequests.append(request)
+        emergencyRecoveryCalledOnMain = Thread.isMainThread
+        if let emergencyRecoveryError {
+            throw emergencyRecoveryError
+        }
+        guard !emergencyRecoveryOrderings.isEmpty else {
+            throw EmergencyRecoveryError.InternalState
+        }
+        return emergencyRecoveryOrderings.removeFirst()
     }
 }
 

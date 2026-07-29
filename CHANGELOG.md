@@ -1,5 +1,29 @@
 # Changelog
 
+- Added deterministic Critical-pressure recovery guidance through UniFFI
+  contract v40. Rust owns the fixed seven-lane §13.3 order and emits only
+  currently supported evidence-backed stale-regenerable, guided-exploration,
+  and permission/coverage groups. Finalization is bound to the exact Critical
+  pressure episode and targeted-root catalog, reselects exact immutable scans
+  plus current terminal evaluations, enforces a one-hour evidence window, and
+  repeats the pressure/catalog checkpoint after projection. Root-level
+  unavailable evidence remains a typed count with no fake scan ID or hidden
+  byte estimate. The path-free contract contains no candidate ID, byte
+  forecast, cleanup mode, plan, approval, AI input, schedule, callback,
+  provider command, driver, or effect capability. FFI and Swift independently
+  reject malformed versions, counts, ranks, lane order, semantic duplicates,
+  unsupported lanes, contradictory lane fields, invalid roots, and timestamps;
+  a malformed response cannot consume the retained exact proof. Explorer adds
+  an accessible Critical recovery hero and ordered review-only cards that open
+  exact Candidates, Browse, or Coverage views. The menu bar mirrors the first
+  three core-ranked cards, preserves the real roadmap step numbers, and
+  discloses Current/Updating/Earlier freshness. Complete-zero, incomplete,
+  stale, and unavailable states stay distinct, overlapping estimates are never
+  totaled, and neither surface claims cleanup approval or bytes freed. The
+  checkpoint passes the serialized Rust/FFI suites (including both isolated
+  effect regressions), 460 native tests, policy and destructive-call gates,
+  byte-identical Debug/Release bindings, and universal arm64/x86_64 Debug and
+  Release apps targeting macOS 14.
 - Completed the Warning/Critical targeted-reclaim scan with deterministic,
   read-only Homebrew and pip findings. Candidate evaluator revision 4 and the
   reviewed 13-rule catalog add exact direct-child

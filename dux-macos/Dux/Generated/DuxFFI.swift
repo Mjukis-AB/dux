@@ -909,6 +909,13 @@ public protocol DuxEngineProtocol: AnyObject, Sendable {
      */
     func executeExplorerTrash(review: SnapshotReviewSession, nodeId: UInt64, driver: TrashPlatformDriver) throws  -> TrashPlatformResult
 
+    /**
+     * Atomically finalize the exact Critical targeted pass into a bounded,
+     * path-free recovery ordering. This starts no scan and exposes no target,
+     * candidate identifier, plan, approval, action, or effect authority.
+     */
+    func finalizeEmergencyRecovery(request: EmergencyRecoveryRequest) throws  -> EmergencyRecoveryOrdering
+
     func formatSize(bytes: UInt64) throws  -> FormattedSize
 
     /**
@@ -1223,6 +1230,20 @@ open func executeExplorerTrash(review: SnapshotReviewSession, nodeId: UInt64, dr
         FfiConverterTypeSnapshotReviewSession_lower(review),
         FfiConverterUInt64.lower(nodeId),
         FfiConverterCallbackInterfaceTrashPlatformDriver_lower(driver),$0
+    )
+})
+}
+
+    /**
+     * Atomically finalize the exact Critical targeted pass into a bounded,
+     * path-free recovery ordering. This starts no scan and exposes no target,
+     * candidate identifier, plan, approval, action, or effect authority.
+     */
+open func finalizeEmergencyRecovery(request: EmergencyRecoveryRequest)throws  -> EmergencyRecoveryOrdering  {
+    return try  FfiConverterTypeEmergencyRecoveryOrdering_lift(try rustCallWithError(FfiConverterTypeEmergencyRecoveryError_lift) {
+    uniffi_dux_ffi_fn_method_duxengine_finalize_emergency_recovery(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeEmergencyRecoveryRequest_lower(request),$0
     )
 })
 }
@@ -5325,6 +5346,307 @@ public func FfiConverterTypeDirectCargoExecutablePath_lift(_ buf: RustBuffer) th
 #endif
 public func FfiConverterTypeDirectCargoExecutablePath_lower(_ value: DirectCargoExecutablePath) -> RustBuffer {
     return FfiConverterTypeDirectCargoExecutablePath.lower(value)
+}
+
+
+/**
+ * Bounded display-only recovery group. Optional shapes are lane-specific and
+ * validated before crossing the boundary.
+ */
+public struct EmergencyRecoveryGroup: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let rank: UInt16
+    public let lane: EmergencyRecoveryLane
+    public let ruleId: String?
+    public let ruleRevision: UInt32?
+    public let category: CandidateCategory?
+    public let unavailableRootCount: UInt16
+    public let sources: [EmergencyRecoverySource]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, rank: UInt16, lane: EmergencyRecoveryLane, ruleId: String?, ruleRevision: UInt32?, category: CandidateCategory?, unavailableRootCount: UInt16, sources: [EmergencyRecoverySource]) {
+        self.recordVersion = recordVersion
+        self.rank = rank
+        self.lane = lane
+        self.ruleId = ruleId
+        self.ruleRevision = ruleRevision
+        self.category = category
+        self.unavailableRootCount = unavailableRootCount
+        self.sources = sources
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension EmergencyRecoveryGroup: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeEmergencyRecoveryGroup: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> EmergencyRecoveryGroup {
+        return
+            try EmergencyRecoveryGroup(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                rank: FfiConverterUInt16.read(from: &buf),
+                lane: FfiConverterTypeEmergencyRecoveryLane.read(from: &buf),
+                ruleId: FfiConverterOptionString.read(from: &buf),
+                ruleRevision: FfiConverterOptionUInt32.read(from: &buf),
+                category: FfiConverterOptionTypeCandidateCategory.read(from: &buf),
+                unavailableRootCount: FfiConverterUInt16.read(from: &buf),
+                sources: FfiConverterSequenceTypeEmergencyRecoverySource.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: EmergencyRecoveryGroup, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterUInt16.write(value.rank, into: &buf)
+        FfiConverterTypeEmergencyRecoveryLane.write(value.lane, into: &buf)
+        FfiConverterOptionString.write(value.ruleId, into: &buf)
+        FfiConverterOptionUInt32.write(value.ruleRevision, into: &buf)
+        FfiConverterOptionTypeCandidateCategory.write(value.category, into: &buf)
+        FfiConverterUInt16.write(value.unavailableRootCount, into: &buf)
+        FfiConverterSequenceTypeEmergencyRecoverySource.write(value.sources, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEmergencyRecoveryGroup_lift(_ buf: RustBuffer) throws -> EmergencyRecoveryGroup {
+    return try FfiConverterTypeEmergencyRecoveryGroup.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEmergencyRecoveryGroup_lower(_ value: EmergencyRecoveryGroup) -> RustBuffer {
+    return FfiConverterTypeEmergencyRecoveryGroup.lower(value)
+}
+
+
+/**
+ * Atomic path-free projection tied to the exact returned Critical proof.
+ */
+public struct EmergencyRecoveryOrdering: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let policyRevision: UInt32
+    public let pressure: TargetedProjectScanPressureContext
+    public let rootCatalog: TargetedReclaimRootCatalog
+    public let observedRootCount: UInt16
+    public let candidateEvaluatedRootCount: UInt16
+    public let unavailableRootCount: UInt16
+    public let groups: [EmergencyRecoveryGroup]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, policyRevision: UInt32, pressure: TargetedProjectScanPressureContext, rootCatalog: TargetedReclaimRootCatalog, observedRootCount: UInt16, candidateEvaluatedRootCount: UInt16, unavailableRootCount: UInt16, groups: [EmergencyRecoveryGroup]) {
+        self.recordVersion = recordVersion
+        self.policyRevision = policyRevision
+        self.pressure = pressure
+        self.rootCatalog = rootCatalog
+        self.observedRootCount = observedRootCount
+        self.candidateEvaluatedRootCount = candidateEvaluatedRootCount
+        self.unavailableRootCount = unavailableRootCount
+        self.groups = groups
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension EmergencyRecoveryOrdering: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeEmergencyRecoveryOrdering: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> EmergencyRecoveryOrdering {
+        return
+            try EmergencyRecoveryOrdering(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                policyRevision: FfiConverterUInt32.read(from: &buf),
+                pressure: FfiConverterTypeTargetedProjectScanPressureContext.read(from: &buf),
+                rootCatalog: FfiConverterTypeTargetedReclaimRootCatalog.read(from: &buf),
+                observedRootCount: FfiConverterUInt16.read(from: &buf),
+                candidateEvaluatedRootCount: FfiConverterUInt16.read(from: &buf),
+                unavailableRootCount: FfiConverterUInt16.read(from: &buf),
+                groups: FfiConverterSequenceTypeEmergencyRecoveryGroup.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: EmergencyRecoveryOrdering, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterUInt32.write(value.policyRevision, into: &buf)
+        FfiConverterTypeTargetedProjectScanPressureContext.write(value.pressure, into: &buf)
+        FfiConverterTypeTargetedReclaimRootCatalog.write(value.rootCatalog, into: &buf)
+        FfiConverterUInt16.write(value.observedRootCount, into: &buf)
+        FfiConverterUInt16.write(value.candidateEvaluatedRootCount, into: &buf)
+        FfiConverterUInt16.write(value.unavailableRootCount, into: &buf)
+        FfiConverterSequenceTypeEmergencyRecoveryGroup.write(value.groups, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEmergencyRecoveryOrdering_lift(_ buf: RustBuffer) throws -> EmergencyRecoveryOrdering {
+    return try FfiConverterTypeEmergencyRecoveryOrdering.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEmergencyRecoveryOrdering_lower(_ value: EmergencyRecoveryOrdering) -> RustBuffer {
+    return FfiConverterTypeEmergencyRecoveryOrdering.lower(value)
+}
+
+
+/**
+ * Exact path-free proof echoed into atomic Critical recovery finalization.
+ */
+public struct EmergencyRecoveryRequest: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let expectedPressure: TargetedProjectScanPressureContext
+    public let expectedRootCatalog: TargetedReclaimRootCatalog
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, expectedPressure: TargetedProjectScanPressureContext, expectedRootCatalog: TargetedReclaimRootCatalog) {
+        self.recordVersion = recordVersion
+        self.expectedPressure = expectedPressure
+        self.expectedRootCatalog = expectedRootCatalog
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension EmergencyRecoveryRequest: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeEmergencyRecoveryRequest: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> EmergencyRecoveryRequest {
+        return
+            try EmergencyRecoveryRequest(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                expectedPressure: FfiConverterTypeTargetedProjectScanPressureContext.read(from: &buf),
+                expectedRootCatalog: FfiConverterTypeTargetedReclaimRootCatalog.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: EmergencyRecoveryRequest, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterTypeTargetedProjectScanPressureContext.write(value.expectedPressure, into: &buf)
+        FfiConverterTypeTargetedReclaimRootCatalog.write(value.expectedRootCatalog, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEmergencyRecoveryRequest_lift(_ buf: RustBuffer) throws -> EmergencyRecoveryRequest {
+    return try FfiConverterTypeEmergencyRecoveryRequest.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEmergencyRecoveryRequest_lower(_ value: EmergencyRecoveryRequest) -> RustBuffer {
+    return FfiConverterTypeEmergencyRecoveryRequest.lower(value)
+}
+
+
+/**
+ * One path-free exact-scan navigation source.
+ */
+public struct EmergencyRecoverySource: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let rootOrdinal: UInt16
+    public let scanId: String
+    public let observedAtUnixMs: Int64
+    public let candidateCount: UInt32?
+    public let blockedCandidateCount: UInt32?
+    public let permissionIssueCount: UInt64?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, rootOrdinal: UInt16, scanId: String, observedAtUnixMs: Int64, candidateCount: UInt32?, blockedCandidateCount: UInt32?, permissionIssueCount: UInt64?) {
+        self.recordVersion = recordVersion
+        self.rootOrdinal = rootOrdinal
+        self.scanId = scanId
+        self.observedAtUnixMs = observedAtUnixMs
+        self.candidateCount = candidateCount
+        self.blockedCandidateCount = blockedCandidateCount
+        self.permissionIssueCount = permissionIssueCount
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension EmergencyRecoverySource: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeEmergencyRecoverySource: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> EmergencyRecoverySource {
+        return
+            try EmergencyRecoverySource(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                rootOrdinal: FfiConverterUInt16.read(from: &buf),
+                scanId: FfiConverterString.read(from: &buf),
+                observedAtUnixMs: FfiConverterInt64.read(from: &buf),
+                candidateCount: FfiConverterOptionUInt32.read(from: &buf),
+                blockedCandidateCount: FfiConverterOptionUInt32.read(from: &buf),
+                permissionIssueCount: FfiConverterOptionUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: EmergencyRecoverySource, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterUInt16.write(value.rootOrdinal, into: &buf)
+        FfiConverterString.write(value.scanId, into: &buf)
+        FfiConverterInt64.write(value.observedAtUnixMs, into: &buf)
+        FfiConverterOptionUInt32.write(value.candidateCount, into: &buf)
+        FfiConverterOptionUInt32.write(value.blockedCandidateCount, into: &buf)
+        FfiConverterOptionUInt64.write(value.permissionIssueCount, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEmergencyRecoverySource_lift(_ buf: RustBuffer) throws -> EmergencyRecoverySource {
+    return try FfiConverterTypeEmergencyRecoverySource.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEmergencyRecoverySource_lower(_ value: EmergencyRecoverySource) -> RustBuffer {
+    return FfiConverterTypeEmergencyRecoverySource.lower(value)
 }
 
 
@@ -12161,6 +12483,278 @@ public func FfiConverterTypeDirectCargoSignatureClass_lift(_ buf: RustBuffer) th
 #endif
 public func FfiConverterTypeDirectCargoSignatureClass_lower(_ value: DirectCargoSignatureClass) -> RustBuffer {
     return FfiConverterTypeDirectCargoSignatureClass.lower(value)
+}
+
+
+
+public enum EmergencyRecoveryError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
+
+
+
+    case Closed
+    case InvalidRecordVersion
+    case InvalidPressureProof
+    case InvalidCatalog
+    case NotCritical
+    case RegistryChanged
+    case CatalogChanged
+    case PressureChanged
+    case ReadOnlyStore
+    case IncompatibleSchema
+    case Busy
+    case UnsafeStorage
+    case BudgetExceeded
+    case CorruptData
+    case Unavailable
+    case OutcomeUnknown
+    case InternalState
+
+
+
+
+
+
+    public var errorDescription: String? {
+        String(reflecting: self)
+    }
+
+}
+
+#if compiler(>=6)
+extension EmergencyRecoveryError: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeEmergencyRecoveryError: FfiConverterRustBuffer {
+    typealias SwiftType = EmergencyRecoveryError
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> EmergencyRecoveryError {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+
+
+
+        case 1: return .Closed
+        case 2: return .InvalidRecordVersion
+        case 3: return .InvalidPressureProof
+        case 4: return .InvalidCatalog
+        case 5: return .NotCritical
+        case 6: return .RegistryChanged
+        case 7: return .CatalogChanged
+        case 8: return .PressureChanged
+        case 9: return .ReadOnlyStore
+        case 10: return .IncompatibleSchema
+        case 11: return .Busy
+        case 12: return .UnsafeStorage
+        case 13: return .BudgetExceeded
+        case 14: return .CorruptData
+        case 15: return .Unavailable
+        case 16: return .OutcomeUnknown
+        case 17: return .InternalState
+
+         default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: EmergencyRecoveryError, into buf: inout [UInt8]) {
+        switch value {
+
+
+
+
+
+        case .Closed:
+            writeInt(&buf, Int32(1))
+
+
+        case .InvalidRecordVersion:
+            writeInt(&buf, Int32(2))
+
+
+        case .InvalidPressureProof:
+            writeInt(&buf, Int32(3))
+
+
+        case .InvalidCatalog:
+            writeInt(&buf, Int32(4))
+
+
+        case .NotCritical:
+            writeInt(&buf, Int32(5))
+
+
+        case .RegistryChanged:
+            writeInt(&buf, Int32(6))
+
+
+        case .CatalogChanged:
+            writeInt(&buf, Int32(7))
+
+
+        case .PressureChanged:
+            writeInt(&buf, Int32(8))
+
+
+        case .ReadOnlyStore:
+            writeInt(&buf, Int32(9))
+
+
+        case .IncompatibleSchema:
+            writeInt(&buf, Int32(10))
+
+
+        case .Busy:
+            writeInt(&buf, Int32(11))
+
+
+        case .UnsafeStorage:
+            writeInt(&buf, Int32(12))
+
+
+        case .BudgetExceeded:
+            writeInt(&buf, Int32(13))
+
+
+        case .CorruptData:
+            writeInt(&buf, Int32(14))
+
+
+        case .Unavailable:
+            writeInt(&buf, Int32(15))
+
+
+        case .OutcomeUnknown:
+            writeInt(&buf, Int32(16))
+
+
+        case .InternalState:
+            writeInt(&buf, Int32(17))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEmergencyRecoveryError_lift(_ buf: RustBuffer) throws -> EmergencyRecoveryError {
+    return try FfiConverterTypeEmergencyRecoveryError.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEmergencyRecoveryError_lower(_ value: EmergencyRecoveryError) -> RustBuffer {
+    return FfiConverterTypeEmergencyRecoveryError.lower(value)
+}
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * Fixed §13.3 taxonomy. Rust supplies explicit ranks; discriminants are not
+ * policy and clients must not infer priority from declaration order.
+ */
+
+public enum EmergencyRecoveryLane: Equatable, Hashable {
+
+    case evictableCloud
+    case staleSafeRegenerable
+    case trashInformation
+    case reviewableInstallerArchive
+    case largeFile
+    case guidedExploration
+    case permissionGap
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension EmergencyRecoveryLane: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeEmergencyRecoveryLane: FfiConverterRustBuffer {
+    typealias SwiftType = EmergencyRecoveryLane
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> EmergencyRecoveryLane {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .evictableCloud
+
+        case 2: return .staleSafeRegenerable
+
+        case 3: return .trashInformation
+
+        case 4: return .reviewableInstallerArchive
+
+        case 5: return .largeFile
+
+        case 6: return .guidedExploration
+
+        case 7: return .permissionGap
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: EmergencyRecoveryLane, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .evictableCloud:
+            writeInt(&buf, Int32(1))
+
+
+        case .staleSafeRegenerable:
+            writeInt(&buf, Int32(2))
+
+
+        case .trashInformation:
+            writeInt(&buf, Int32(3))
+
+
+        case .reviewableInstallerArchive:
+            writeInt(&buf, Int32(4))
+
+
+        case .largeFile:
+            writeInt(&buf, Int32(5))
+
+
+        case .guidedExploration:
+            writeInt(&buf, Int32(6))
+
+
+        case .permissionGap:
+            writeInt(&buf, Int32(7))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEmergencyRecoveryLane_lift(_ buf: RustBuffer) throws -> EmergencyRecoveryLane {
+    return try FfiConverterTypeEmergencyRecoveryLane.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEmergencyRecoveryLane_lower(_ value: EmergencyRecoveryLane) -> RustBuffer {
+    return FfiConverterTypeEmergencyRecoveryLane.lower(value)
 }
 
 
@@ -19108,6 +19702,56 @@ fileprivate struct FfiConverterSequenceTypeDirectCargoCodeDirectoryHash: FfiConv
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeEmergencyRecoveryGroup: FfiConverterRustBuffer {
+    typealias SwiftType = [EmergencyRecoveryGroup]
+
+    public static func write(_ value: [EmergencyRecoveryGroup], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeEmergencyRecoveryGroup.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [EmergencyRecoveryGroup] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [EmergencyRecoveryGroup]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeEmergencyRecoveryGroup.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeEmergencyRecoverySource: FfiConverterRustBuffer {
+    typealias SwiftType = [EmergencyRecoverySource]
+
+    public static func write(_ value: [EmergencyRecoverySource], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeEmergencyRecoverySource.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [EmergencyRecoverySource] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [EmergencyRecoverySource]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeEmergencyRecoverySource.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeHistoricalScanIssue: FfiConverterRustBuffer {
     typealias SwiftType = [HistoricalScanIssue]
 
@@ -19447,6 +20091,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_execute_explorer_trash() != 27346) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_duxengine_finalize_emergency_recovery() != 55798) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_format_size() != 55932) {

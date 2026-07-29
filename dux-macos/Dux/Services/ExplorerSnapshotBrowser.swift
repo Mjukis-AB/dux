@@ -690,6 +690,22 @@ final class ExplorerSnapshotBrowserModel {
         pendingExactContentMode = .candidates
     }
 
+    /// Queue one exact retained scan directly in its historical large-files
+    /// view. The intent changes presentation only and never selects a file or
+    /// cleanup action.
+    func prepareExactLargeFilesReview(scanID: String) {
+        pendingExactScanID = scanID
+        pendingExactContentMode = .largeFiles
+    }
+
+    /// Queue one exact retained scan directly in its recorded-coverage view.
+    /// Coverage remains historical evidence and does not infer current
+    /// permission state.
+    func prepareExactCoverageReview(scanID: String) {
+        pendingExactScanID = scanID
+        pendingExactContentMode = .coverage
+    }
+
     func dismiss(id: UUID) async {
         guard activePresentationID == id else {
             return

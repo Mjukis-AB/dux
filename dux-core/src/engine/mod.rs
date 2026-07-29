@@ -10,6 +10,7 @@ mod candidate_history;
 mod cleanup_history;
 mod cleanup_history_clear;
 mod config;
+mod emergency_recovery;
 mod registry;
 mod rust_target_cleanup;
 mod rust_target_dry_run;
@@ -42,6 +43,11 @@ pub use cleanup_history_clear::{
     CleanupHistoryClearResult,
 };
 pub use config::{EngineConfig, EngineConfigError, EngineConfigField, EngineConfigReason};
+pub use emergency_recovery::{
+    EMERGENCY_RECOVERY_MAX_EVIDENCE_AGE, EMERGENCY_RECOVERY_POLICY_REVISION,
+    EmergencyRecoveryError, EmergencyRecoveryGroup, EmergencyRecoveryLane,
+    EmergencyRecoveryOrdering, EmergencyRecoverySource, MAX_EMERGENCY_RECOVERY_GROUPS,
+};
 pub use registry::EngineHandle;
 pub use rust_target_cleanup::{
     RustTargetCleanupError, RustTargetCleanupResult, RustTargetCleanupStartFailure,

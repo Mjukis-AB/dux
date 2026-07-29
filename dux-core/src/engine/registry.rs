@@ -29,6 +29,11 @@ use super::cleanup_history_clear::{
     CleanupHistoryClearError, CleanupHistoryClearPreview, CleanupHistoryClearResult,
 };
 use super::config::EngineConfig;
+use super::emergency_recovery::{
+    EMERGENCY_RECOVERY_POLICY_REVISION, EmergencyRecoveryError, EmergencyRecoveryOrdering,
+    EmergencyRecoveryScanObservation, build_emergency_recovery_groups,
+    emergency_recovery_evidence_is_fresh,
+};
 use super::rust_target_cleanup::{
     RustTargetCleanupError, RustTargetCleanupResult, RustTargetCleanupStartFailure,
 };
@@ -77,9 +82,10 @@ use super::snapshot_review::{
 use super::targeted_project_scan::{
     MAX_TARGETED_PRESSURE_CHAIN_EPISODES, TARGETED_RECLAIM_ROOT_POLICY_REVISION,
     TargetedProjectScanAdmission, TargetedProjectScanCheckpoint, TargetedProjectScanCurrent,
-    TargetedProjectScanDisposition, TargetedProjectScanError, TargetedProjectScanPressureContext,
-    TargetedProjectScanSelection, TargetedReclaimRootCatalogStamp, TargetedReclaimRootKind,
-    derive_low_pressure_chain, targeted_reclaim_root_catalog_layout,
+    TargetedProjectScanDisposition, TargetedProjectScanError, TargetedProjectScanPressure,
+    TargetedProjectScanPressureContext, TargetedProjectScanSelection,
+    TargetedReclaimRootCatalogStamp, TargetedReclaimRootKind, derive_low_pressure_chain,
+    targeted_reclaim_root_catalog_layout,
 };
 use super::task::{
     CancelOutcome, CandidateEvaluationRecoveryError,
@@ -128,7 +134,7 @@ use crate::cleanup::{TrashEffectRequest, TrashPlatformResult, TrashSelectionErro
 use crate::domain::{
     CANDIDATE_CATALOG_SCHEMA_VERSION, CANDIDATE_CATALOG_SHA256, CANDIDATE_CONTEXT_FORMAT_VERSION,
     CANDIDATE_EVALUATOR_REVISION, CandidateEvaluationError, CandidateEvaluationScope, CandidateId,
-    CandidateSnapshotReplayError, CleanupPlanId, Evidence, ScanCoverage, ScanId,
+    CandidateSnapshotReplayError, CleanupPlanId, Evidence, ScanCoverage, ScanId, ScanIssueKind,
     candidate_evaluation_context_digest_sha256, evaluate_completed_scan_candidates,
     replay_snapshot_candidate_evaluation, validate_bundled_candidate_catalog,
 };
@@ -4604,6 +4610,160 @@ impl EngineHandle {
         )
     }
 
+    /// Atomically finalize a path-free Critical-pressure recovery ordering.
+    ///
+    /// The caller can only echo the exact pressure and catalog observations
+    /// returned by targeted admission. Rust privately reselects every current
+    /// exact-root scan, validates its snapshot and terminal evaluator
+    /// observation, builds a bounded display projection, and revalidates the
+    /// proof before returning. This starts no work and grants no plan, path,
+    /// approval, or effect authority.
+    pub fn finalize_emergency_recovery(
+        &self,
+        expected_pressure: &TargetedProjectScanPressureContext,
+        expected_root_catalog: &TargetedReclaimRootCatalogStamp,
+    ) -> Result<EmergencyRecoveryOrdering, EmergencyRecoveryError> {
+        let checkpoint = self
+            .validate_targeted_reclaim_scan_context(expected_pressure, expected_root_catalog)
+            .map_err(map_targeted_project_scan_to_emergency_recovery_error)?;
+        if checkpoint.pressure.pressure != TargetedProjectScanPressure::Critical {
+            return Err(EmergencyRecoveryError::NotCritical);
+        }
+
+        let configured = self
+            .inner
+            .store
+            .load_configured_project_roots()
+            .map_err(|error| map_emergency_recovery_history_error(error.kind))?;
+        let catalog = build_targeted_reclaim_catalog(&self.inner.config, &configured)
+            .map_err(map_targeted_project_scan_to_emergency_recovery_error)?;
+        if catalog.stamp != checkpoint.root_catalog {
+            return Err(EmergencyRecoveryError::CatalogChanged);
+        }
+
+        let mut observations = Vec::new();
+        let mut candidate_evaluated_root_count = 0_u16;
+        observations
+            .try_reserve_exact(catalog.roots.len())
+            .map_err(|_| EmergencyRecoveryError::BudgetExceeded)?;
+        for root in &catalog.roots {
+            let Ok((canonical_root, expected_identity)) = &root.prepared else {
+                continue;
+            };
+            let Some(record) = self
+                .inner
+                .store
+                .load_latest_scan_for_exact_root_since(
+                    canonical_root,
+                    checkpoint.pressure.current_episode_started_at,
+                )
+                .map_err(|error| map_emergency_recovery_history_error(error.kind))?
+                .filter(|record| targeted_scan_record_matches_kind(record.id(), root.kind))
+                .filter(|record| {
+                    targeted_scan_snapshot_matches_root(
+                        &self.inner.snapshots,
+                        record,
+                        canonical_root,
+                        *expected_identity,
+                    )
+                })
+            else {
+                continue;
+            };
+            let Some(completed_at) = record.completed_at() else {
+                return Err(EmergencyRecoveryError::CorruptData);
+            };
+            if !emergency_recovery_evidence_is_fresh(
+                completed_at,
+                checkpoint.pressure.capacity_anchor,
+            ) {
+                continue;
+            }
+            let candidate_observation = self
+                .inner
+                .store
+                .load_candidate_evaluation_for_scan(record.id())
+                .map_err(|error| map_emergency_recovery_history_error(error.kind))?;
+            let evaluation = match candidate_observation {
+                CandidateEvaluationObservation::Succeeded(evaluation)
+                | CandidateEvaluationObservation::Failed(evaluation)
+                    if evaluation.matches_current_scan_observation(&record) =>
+                {
+                    evaluation
+                }
+                CandidateEvaluationObservation::MissingScan
+                | CandidateEvaluationObservation::NotRun { .. }
+                | CandidateEvaluationObservation::Pending(_)
+                | CandidateEvaluationObservation::Succeeded(_)
+                | CandidateEvaluationObservation::Failed(_) => continue,
+            };
+            let candidate_evaluated = matches!(
+                evaluation.status(),
+                CandidateEvaluationStatus::Succeeded { .. }
+            );
+            let candidates = if candidate_evaluated {
+                candidate_evaluated_root_count = candidate_evaluated_root_count
+                    .checked_add(1)
+                    .ok_or(EmergencyRecoveryError::BudgetExceeded)?;
+                evaluation
+                    .candidates()
+                    .iter()
+                    .map(|candidate| {
+                        public_candidate_summary(record.id(), candidate)
+                            .map_err(map_candidate_history_to_emergency_recovery_error)
+                    })
+                    .collect::<Result<Vec<_>, EmergencyRecoveryError>>()?
+            } else {
+                Vec::new()
+            };
+            let permission_issue_count = record
+                .coverage()
+                .issues()
+                .iter()
+                .filter(|issue| issue.kind() == ScanIssueKind::PermissionDenied)
+                .try_fold(0_u64, |total, issue| {
+                    total
+                        .checked_add(u64::from(issue.occurrence_count()))
+                        .ok_or(EmergencyRecoveryError::BudgetExceeded)
+                })?;
+            observations.push(EmergencyRecoveryScanObservation {
+                root_ordinal: root.ordinal,
+                scan_id: record.id().clone(),
+                observed_at: completed_at,
+                permission_issue_count,
+                candidates,
+            });
+        }
+
+        let observed_root_count = u16::try_from(observations.len())
+            .map_err(|_| EmergencyRecoveryError::BudgetExceeded)?;
+        if observed_root_count > checkpoint.root_count
+            || candidate_evaluated_root_count > observed_root_count
+        {
+            return Err(EmergencyRecoveryError::CorruptData);
+        }
+        let unavailable_root_count = checkpoint
+            .root_count
+            .checked_sub(observed_root_count)
+            .ok_or(EmergencyRecoveryError::CorruptData)?;
+        let groups = build_emergency_recovery_groups(observations, unavailable_root_count)?;
+        let final_checkpoint = self
+            .validate_targeted_reclaim_scan_context(expected_pressure, expected_root_catalog)
+            .map_err(map_targeted_project_scan_to_emergency_recovery_error)?;
+        if final_checkpoint != checkpoint {
+            return Err(EmergencyRecoveryError::PressureChanged);
+        }
+        Ok(EmergencyRecoveryOrdering {
+            policy_revision: EMERGENCY_RECOVERY_POLICY_REVISION,
+            pressure: final_checkpoint.pressure,
+            root_catalog: final_checkpoint.root_catalog,
+            observed_root_count,
+            candidate_evaluated_root_count,
+            unavailable_root_count,
+            groups,
+        })
+    }
+
     fn validate_targeted_reclaim_scan_context_inner(
         &self,
         expected_pressure: &TargetedProjectScanPressureContext,
@@ -7796,6 +7956,67 @@ const fn map_targeted_candidate_history_error(
         CandidateHistoryError::QueryLimitExceeded => TargetedProjectScanError::BudgetExceeded,
         CandidateHistoryError::Unavailable => TargetedProjectScanError::Unavailable,
         CandidateHistoryError::InternalState => TargetedProjectScanError::InternalState,
+    }
+}
+
+const fn map_targeted_project_scan_to_emergency_recovery_error(
+    error: TargetedProjectScanError,
+) -> EmergencyRecoveryError {
+    match error {
+        TargetedProjectScanError::Closed => EmergencyRecoveryError::Closed,
+        TargetedProjectScanError::ReadOnlyStore => EmergencyRecoveryError::ReadOnlyStore,
+        TargetedProjectScanError::RegistryChanged { .. } => EmergencyRecoveryError::RegistryChanged,
+        TargetedProjectScanError::InvalidCatalog => EmergencyRecoveryError::InvalidCatalog,
+        TargetedProjectScanError::CatalogChanged => EmergencyRecoveryError::CatalogChanged,
+        TargetedProjectScanError::InvalidAnchor | TargetedProjectScanError::PressureChanged => {
+            EmergencyRecoveryError::PressureChanged
+        }
+        TargetedProjectScanError::IncompatibleSchema => EmergencyRecoveryError::IncompatibleSchema,
+        TargetedProjectScanError::Busy => EmergencyRecoveryError::Busy,
+        TargetedProjectScanError::UnsafeStorage => EmergencyRecoveryError::UnsafeStorage,
+        TargetedProjectScanError::BudgetExceeded => EmergencyRecoveryError::BudgetExceeded,
+        TargetedProjectScanError::CorruptData => EmergencyRecoveryError::CorruptData,
+        TargetedProjectScanError::Unavailable => EmergencyRecoveryError::Unavailable,
+        TargetedProjectScanError::OutcomeUnknown => EmergencyRecoveryError::OutcomeUnknown,
+        TargetedProjectScanError::InvalidOrdinal { .. }
+        | TargetedProjectScanError::QueueFull
+        | TargetedProjectScanError::TaskIdExhausted
+        | TargetedProjectScanError::InternalState => EmergencyRecoveryError::InternalState,
+    }
+}
+
+const fn map_emergency_recovery_history_error(kind: HistoryErrorKind) -> EmergencyRecoveryError {
+    match kind {
+        HistoryErrorKind::IncompatibleSchema => EmergencyRecoveryError::IncompatibleSchema,
+        HistoryErrorKind::QueryLimitExceeded => EmergencyRecoveryError::BudgetExceeded,
+        HistoryErrorKind::Busy => EmergencyRecoveryError::Busy,
+        HistoryErrorKind::UnsafeStorage => EmergencyRecoveryError::UnsafeStorage,
+        HistoryErrorKind::CorruptData | HistoryErrorKind::NotFound => {
+            EmergencyRecoveryError::CorruptData
+        }
+        HistoryErrorKind::DatabaseUnavailable => EmergencyRecoveryError::Unavailable,
+        HistoryErrorKind::OutcomeUnknown => EmergencyRecoveryError::OutcomeUnknown,
+        HistoryErrorKind::InvalidInput
+        | HistoryErrorKind::AlreadyExists
+        | HistoryErrorKind::InvalidTransition
+        | HistoryErrorKind::InternalState => EmergencyRecoveryError::InternalState,
+    }
+}
+
+const fn map_candidate_history_to_emergency_recovery_error(
+    error: CandidateHistoryError,
+) -> EmergencyRecoveryError {
+    match error {
+        CandidateHistoryError::Closed => EmergencyRecoveryError::Closed,
+        CandidateHistoryError::ScanNotFound | CandidateHistoryError::CorruptData => {
+            EmergencyRecoveryError::CorruptData
+        }
+        CandidateHistoryError::IncompatibleSchema => EmergencyRecoveryError::IncompatibleSchema,
+        CandidateHistoryError::Busy => EmergencyRecoveryError::Busy,
+        CandidateHistoryError::UnsafeStorage => EmergencyRecoveryError::UnsafeStorage,
+        CandidateHistoryError::QueryLimitExceeded => EmergencyRecoveryError::BudgetExceeded,
+        CandidateHistoryError::Unavailable => EmergencyRecoveryError::Unavailable,
+        CandidateHistoryError::InternalState => EmergencyRecoveryError::InternalState,
     }
 }
 

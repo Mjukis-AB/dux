@@ -5841,7 +5841,61 @@ Tasks:
     Swift bindings, and unsigned universal arm64/x86_64 Debug and Release apps
     targeting macOS 14. Critical recommendation ordering remains the next
     separate slice.
-- [ ] Add emergency recovery ordering.
+- [x] Add emergency recovery ordering.
+  - [x] 2026-07-30 slice: add Rust-owned, revision-1 Critical recovery
+    ordering through UniFFI contract v40. The engine atomically finalizes only
+    against the exact current Critical pressure proof and targeted-root catalog,
+    privately reselects retained exact-root scans and current terminal candidate
+    evaluations, and revalidates the pressure/catalog checkpoint after the
+    bounded projection. A one-hour core freshness policy excludes older scans;
+    a scan completed exactly one hour before the capacity anchor remains
+    eligible, and a newly triggered scan may complete after its admitting
+    capacity sample. Warning, changed episode/catalog/identity, stale evaluator,
+    missing snapshot, malformed record, or unsupported policy data fail closed.
+
+    The complete §13.3 lane priority is explicit and stable in Rust:
+    cloud eviction, stale safe-regenerable observations, Trash information,
+    installers/archives, large files, guided exploration, then coverage and
+    permission gaps. Revision 1 emits only evidence-backed lanes 2, 6, and 7;
+    unsupported lanes are omitted rather than shown as zero or invented
+    actions. Stale-regenerable membership requires discovered/selected status,
+    the exact safe-regenerable action pair, `MinimumAge`, and no contradictory
+    recent/missing-mtime blocker. Existing Homebrew and pip findings remain
+    review-only behind their mandatory blockers. Root-level unavailable
+    observations appear as a typed count in the permission lane without fake
+    scan IDs or hidden-byte estimates. Complete-zero, incomplete, stale,
+    updating, and unavailable states remain distinct.
+
+    The path-free ordering contains only policy/pressure/catalog proofs,
+    bounded completeness counts, deterministic rule/category groups, exact scan
+    navigation IDs, observation times, candidate counts, blocker counts, and
+    permission-issue counts. It carries no path, candidate ID, byte forecast,
+    combined reclaim total, cleanup mode, plan, approval, AI input, schedule,
+    callback, provider command, filesystem handle, or executor capability.
+    Core, FFI, and Swift independently validate bounds, strict ranks, fixed lane
+    order, semantic uniqueness, lane-specific field shape, root ordinals,
+    timestamps, completeness arithmetic, and the unavailable-root permission
+    group. Malformed Swift responses do not consume the exact retained proof.
+
+    Explorer Recommendations now leads with a pressure-aware recovery hero and
+    accessible vertically ordered review cards. Supported cards open only the
+    exact Candidates, snapshot Browse, or Coverage views. The menu bar mirrors
+    at most the first three core-ranked cards without reordering, labels the
+    actual §13.3 step numbers (including omitted-lane gaps), and always exposes
+    Current, Updating, or Earlier evidence plus freshness. Copy says
+    “review only,” reports observation age and incompleteness, never sums
+    overlapping estimates, and never promises bytes freed. Focused verification
+    covers the core freshness/order/shape boundary, the generated FFI
+    projection, all typed adapter failures, post-anchor scan completion,
+    proof-consumption fencing, native AppModel integration, navigation,
+    stale-state rendering, accessibility, and malformed/duplicate response
+    rejection. Final checkpoint verification passes formatting, workspace
+    Clippy with warnings denied, the serialized Rust suites (34 CLI unit, 3 CLI
+    integration, 1,130 core with 2 performance tests ignored, 13 projection,
+    and 79 FFI with the 2 effect regressions run separately and passing), all
+    31 policy-checker tests, the 253-source destructive-call boundary, and all
+    460 native tests. Generated Debug/Release bindings are byte-identical, and
+    unsigned universal arm64/x86_64 Debug and Release apps target macOS 14.
 - [ ] Add rule outcome/regrowth measurement.
 - [ ] Add recurring “storage thief” ranking.
 - [ ] Add iCloud evictable candidates and an eviction executor (non-destructive; disclosed as re-download-on-demand). MAY ship after the first beta.

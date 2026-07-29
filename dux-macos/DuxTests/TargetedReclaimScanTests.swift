@@ -173,6 +173,34 @@ final class TargetedReclaimScanAppModelTests: XCTestCase {
         XCTAssertEqual(callCount, 2)
     }
 
+    func testHealthySampleClearsCompletedLowSpaceGuidance() async {
+        let context = scanContext(rootCount: 1)
+        let result = successfulResult(scanID: "scan:warning-complete", candidateCount: 1)
+        let service = TargetedReclaimScanServiceSpy(
+            admissions: [
+                TargetedReclaimScanAdmission(
+                    context: context,
+                    ordinal: 0,
+                    root: configuredRoot("/Users/example/Alpha", ordinal: 0),
+                    disposition: .current(result)
+                ),
+            ]
+        )
+        let model = AppModel(
+            engineService: TargetedEngineStub(),
+            targetedReclaimScanService: service
+        )
+
+        await model.reconcileTargetedReclaimScan(for: lowSpaceSnapshot())
+        guard case .completed = model.targetedReclaimScanState else {
+            return XCTFail("Expected completed Warning observations")
+        }
+
+        await model.reconcileTargetedReclaimScan(for: healthySnapshot())
+
+        XCTAssertEqual(model.targetedReclaimScanState, .idle)
+    }
+
     func testUnavailableRootDoesNotPreventLaterRootScan() async {
         let context = scanContext(rootCount: 2)
         let missing = configuredRoot("/Users/example/Missing", ordinal: 0)
@@ -440,6 +468,9 @@ final class TargetedReclaimScanAppModelTests: XCTestCase {
             return XCTFail("Expected revalidated Critical focused batch")
         }
         XCTAssertEqual(batch.context.pressure, .critical)
+        XCTAssertEqual(batch.emergencyRecovery?.context, criticalContext)
+        let finalizations = await service.finalizations()
+        XCTAssertEqual(finalizations, 1)
         let calls = await service.calls()
         XCTAssertEqual(calls.map(\.anchorAt), [
             lowSpaceSnapshot().sampledAt,
@@ -463,6 +494,7 @@ private actor TargetedReclaimScanServiceSpy: DuxTargetedReclaimScanServing {
     private let checkpointContext: TargetedReclaimScanContext?
     private let checkpointError: TargetedReclaimScanServiceError?
     private var checkpointCount = 0
+    private var finalizationCount = 0
 
     init(
         admissions: [TargetedReclaimScanAdmission],
@@ -519,6 +551,27 @@ private actor TargetedReclaimScanServiceSpy: DuxTargetedReclaimScanServing {
 
     func checkpoints() -> Int {
         checkpointCount
+    }
+
+    func finalizeEmergencyRecovery(
+        _ context: TargetedReclaimScanContext
+    ) async throws -> AppEmergencyRecoveryOrdering {
+        finalizationCount += 1
+        guard checkpointContext == context, context.pressure == .critical else {
+            throw TargetedReclaimScanServiceError.invalidResponse
+        }
+        return AppEmergencyRecoveryOrdering(
+            policyRevision: AppEmergencyRecoveryOrdering.supportedPolicyRevision,
+            context: context,
+            observedRootCount: context.rootCount,
+            candidateEvaluatedRootCount: context.rootCount,
+            unavailableRootCount: 0,
+            groups: []
+        )
+    }
+
+    func finalizations() -> Int {
+        finalizationCount
     }
 }
 

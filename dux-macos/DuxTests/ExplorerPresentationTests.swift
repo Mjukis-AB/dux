@@ -297,6 +297,26 @@ final class ExplorerPresentationTests: XCTestCase {
             "explorer-snapshot-subtree-scan-status"
         )
         XCTAssertEqual(
+            ExplorerAccessibility.emergencyRecoveryHero,
+            "explorer-emergency-recovery-hero"
+        )
+        XCTAssertEqual(
+            ExplorerAccessibility.emergencyRecoveryCard(kind: "cache-findings"),
+            "explorer-emergency-recovery-card-cache-findings"
+        )
+        XCTAssertEqual(
+            ExplorerAccessibility.emergencyRecoveryCardAction(kind: "cache-findings"),
+            "explorer-emergency-recovery-card-action-cache-findings"
+        )
+        XCTAssertNotEqual(
+            ExplorerAccessibility.emergencyRecoveryCard(kind: "cache-findings"),
+            ExplorerAccessibility.emergencyRecoveryCard(kind: "large-files")
+        )
+        XCTAssertNotEqual(
+            ExplorerAccessibility.emergencyRecoveryCard(kind: "cache-findings"),
+            ExplorerAccessibility.emergencyRecoveryCardAction(kind: "cache-findings")
+        )
+        XCTAssertEqual(
             Set(ExplorerAccessibility.allIdentifiers).count,
             ExplorerAccessibility.allIdentifiers.count
         )

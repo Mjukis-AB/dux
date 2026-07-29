@@ -76,12 +76,19 @@ struct ExplorerView: View {
             case .recommendations:
                 ExplorerRecommendationsView(
                     model: model,
-                    reviewScan: { scanID in
-                        snapshotBrowser.prepareExactCandidateReview(scanID: scanID)
+                    openRecoveryAction: { action in
+                        switch action {
+                        case let .reviewCandidates(scanID):
+                            snapshotBrowser.prepareExactCandidateReview(scanID: scanID)
+                        case let .exploreSnapshot(scanID):
+                            snapshotBrowser.prepareExactScanReview(scanID: scanID)
+                        case let .reviewCoverage(scanID):
+                            snapshotBrowser.prepareExactCoverageReview(scanID: scanID)
+                        }
                         selection = .snapshot
                     }
                 )
-                    .navigationTitle("Recommendations")
+                .navigationTitle("Recommendations")
             case .cleanupHistory:
                 ExplorerCleanupHistoryView(model: model)
                     .navigationTitle("Cleanup history")
@@ -160,34 +167,75 @@ private struct ExplorerRecommendationsView: View {
     @Environment(\.openSettings) private var openSettings
 
     let model: AppModel
-    let reviewScan: (String) -> Void
+    let openRecoveryAction: (ExplorerEmergencyRecoveryAction) -> Void
 
     var body: some View {
         let focused = TargetedReclaimScanPresentation.make(
             model.targetedReclaimScanState
         )
+        let recovery = ExplorerEmergencyRecoveryPresentation.make(
+            volumeState: model.volumeState,
+            targetedState: model.targetedReclaimScanState
+        )
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                Label("Safe ways to reclaim space", systemImage: "checkmark.shield")
-                    .font(.largeTitle.bold())
-                Text("DUX can explain storage and group reviewable cleanup ideas. It never lets an AI model delete files, and this view does not perform cleanup by itself.")
-                    .foregroundStyle(.secondary)
-
                 GroupBox {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Label("Review before changing anything", systemImage: "hand.raised")
-                            .font(.headline)
-                        Text("Recommendations will appear after a completed, read-only scan. Verify each item in Finder or the Explorer before taking action.")
-                            .foregroundStyle(.secondary)
-                        if model.volumeState.snapshot == nil {
-                            Text("Capacity is not available yet. Refresh the overview to continue.")
-                                .font(.callout)
-                                .foregroundStyle(.orange)
+                    HStack(alignment: .top, spacing: 14) {
+                        Image(systemName: recovery.symbol)
+                            .font(.title2)
+                            .foregroundStyle(color(recovery.tone))
+                            .accessibilityHidden(true)
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(recovery.title)
+                                .font(.largeTitle.bold())
+                            if let available = recovery.availableText {
+                                Text(available)
+                                    .font(.title2.weight(.semibold))
+                            }
+                            Text(recovery.detail)
+                                .foregroundStyle(.secondary)
+                            Text(recovery.freshnessText)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .accessibilityIdentifier(
+                                    ExplorerAccessibility.emergencyRecoveryFreshness
+                                )
                         }
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     .accessibilityElement(children: .combine)
                 }
-                .accessibilityIdentifier(ExplorerAccessibility.recommendations)
+                .accessibilityIdentifier(ExplorerAccessibility.emergencyRecoveryHero)
+
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Image(systemName: recovery.evidenceState == .current
+                        ? "checkmark.seal"
+                        : "clock.badge.exclamationmark")
+                        .accessibilityHidden(true)
+                    Text(recovery.statusText)
+                        .font(.callout)
+                }
+                .foregroundStyle(recovery.evidenceState == .current ? .primary : .secondary)
+                .accessibilityElement(children: .combine)
+                .accessibilityIdentifier(ExplorerAccessibility.emergencyRecoveryStatus)
+
+                if !recovery.cards.isEmpty {
+                    VStack(alignment: .leading, spacing: 12) {
+                        ForEach(recovery.cards) { card in
+                            emergencyRecoveryCard(card)
+                        }
+                    }
+                    .accessibilityIdentifier(ExplorerAccessibility.emergencyRecoveryCards)
+                }
+
+                Label(recovery.limitationsText, systemImage: "hand.raised.fill")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier(
+                        ExplorerAccessibility.emergencyRecoveryLimitations
+                    )
+
+                Divider()
 
                 GroupBox {
                     VStack(alignment: .leading, spacing: 12) {
@@ -245,7 +293,9 @@ private struct ExplorerRecommendationsView: View {
                                                 .foregroundStyle(.secondary)
                                             if let scanID = row.scanID {
                                                 Button("Review findings") {
-                                                    reviewScan(scanID)
+                                                    openRecoveryAction(
+                                                        .reviewCandidates(scanID: scanID)
+                                                    )
                                                 }
                                                 .buttonStyle(.link)
                                                 .help(
@@ -314,6 +364,69 @@ private struct ExplorerRecommendationsView: View {
             .padding(28)
             .frame(maxWidth: 860, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .accessibilityIdentifier(ExplorerAccessibility.recommendations)
+    }
+
+    private func emergencyRecoveryCard(
+        _ card: ExplorerEmergencyRecoveryCard
+    ) -> some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(alignment: .top, spacing: 12) {
+                    Text("\(card.lane.rawValue)")
+                        .font(.caption.bold().monospacedDigit())
+                        .foregroundStyle(.white)
+                        .frame(width: 24, height: 24)
+                        .background(.blue, in: Circle())
+                        .accessibilityHidden(true)
+                    Image(systemName: card.symbol)
+                        .foregroundStyle(.blue)
+                        .accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(card.title)
+                            .font(.headline)
+                        Text(card.detail)
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                        Text(card.observationText)
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(card.accessibilitySummary)
+
+                if !card.actions.isEmpty {
+                    HStack(spacing: 12) {
+                        ForEach(card.actions) { source in
+                            Button(source.label) {
+                                openRecoveryAction(source.action)
+                            }
+                            .buttonStyle(.link)
+                            .help(source.accessibilitySummary)
+                            .accessibilityLabel(source.accessibilitySummary)
+                            .accessibilityIdentifier(
+                                ExplorerAccessibility.emergencyRecoveryCardAction(
+                                    kind: "\(card.accessibilityKey)-\(source.rootOrdinal)"
+                                )
+                            )
+                        }
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .accessibilityIdentifier(
+            ExplorerAccessibility.emergencyRecoveryCard(kind: card.accessibilityKey)
+        )
+    }
+
+    private func color(_ tone: ExplorerEmergencyRecoveryTone) -> Color {
+        switch tone {
+        case .critical: .red
+        case .warning: .orange
+        case .neutral: .secondary
         }
     }
 

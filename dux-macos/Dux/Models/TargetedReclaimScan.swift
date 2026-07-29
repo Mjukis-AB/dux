@@ -100,6 +100,245 @@ struct TargetedReclaimRootResult: Equatable, Sendable, Identifiable {
     let result: HomeScanTaskResult
 }
 
+/// Core-owned §13.3 recovery order. Raw values are presentation-independent
+/// policy positions used only to validate that Swift did not receive a
+/// reordered projection.
+enum AppEmergencyRecoveryLane: UInt16, Equatable, Hashable, Sendable {
+    case evictableCloud = 1
+    case staleSafeRegenerable = 2
+    case trashInformation = 3
+    case reviewableInstallerArchive = 4
+    case largeFile = 5
+    case guidedExploration = 6
+    case permissionGap = 7
+}
+
+/// One exact, path-free observation behind a recovery card. A source can open
+/// an existing read-only review; it cannot select a candidate or authorize an
+/// effect.
+struct AppEmergencyRecoverySource: Equatable, Sendable {
+    let rootOrdinal: UInt16
+    let scanID: String
+    let observedAt: Date
+    let candidateCount: UInt32?
+    let blockedCandidateCount: UInt32?
+    let permissionIssueCount: UInt64?
+}
+
+/// One core-ranked observation group. Optional fields are validated against
+/// the lane before this reaches render state.
+struct AppEmergencyRecoveryGroup: Equatable, Sendable, Identifiable {
+    var id: String {
+        [
+            String(rank),
+            String(lane.rawValue),
+            ruleID ?? "-",
+            ruleRevision.map(String.init) ?? "-",
+        ].joined(separator: ":")
+    }
+
+    let rank: UInt16
+    let lane: AppEmergencyRecoveryLane
+    let ruleID: String?
+    let ruleRevision: UInt32?
+    let category: ExplorerCandidateCategory?
+    let unavailableRootCount: UInt16
+    let sources: [AppEmergencyRecoverySource]
+
+    var candidateCount: UInt64? {
+        guard lane == .staleSafeRegenerable else {
+            return nil
+        }
+        return sources.reduce(into: 0) { total, source in
+            total = total.saturatingAdding(UInt64(source.candidateCount ?? 0))
+        }
+    }
+
+    var blockedCandidateCount: UInt64? {
+        guard lane == .staleSafeRegenerable else {
+            return nil
+        }
+        return sources.reduce(into: 0) { total, source in
+            total = total.saturatingAdding(UInt64(source.blockedCandidateCount ?? 0))
+        }
+    }
+
+    var permissionIssueCount: UInt64? {
+        guard lane == .permissionGap else {
+            return nil
+        }
+        return sources.reduce(into: 0) { total, source in
+            total = total.saturatingAdding(source.permissionIssueCount ?? 0)
+        }
+    }
+
+    var newestObservationAt: Date? {
+        sources.map(\.observedAt).max()
+    }
+}
+
+private struct AppEmergencyRecoveryGroupIdentity: Hashable {
+    let lane: AppEmergencyRecoveryLane
+    let ruleID: String?
+    let ruleRevision: UInt32?
+    let category: ExplorerCandidateCategory?
+}
+
+/// Immutable observation-only result of atomically finalizing one exact
+/// Critical targeted pass. It contains no paths, candidate IDs, byte forecast,
+/// plan, approval, schedule, or executor capability.
+struct AppEmergencyRecoveryOrdering: Equatable, Sendable {
+    static let supportedPolicyRevision: UInt32 = 1
+    static let maximumGroupCount = 64
+
+    let policyRevision: UInt32
+    let context: TargetedReclaimScanContext
+    let observedRootCount: UInt16
+    let candidateEvaluatedRootCount: UInt16
+    let unavailableRootCount: UInt16
+    let groups: [AppEmergencyRecoveryGroup]
+
+    var hasValidPresentationShape: Bool {
+        let permissionGroupCount = groups.filter({
+            $0.lane == .permissionGap
+        }).count
+        guard
+            policyRevision == Self.supportedPolicyRevision,
+            context.pressure == .critical,
+            UInt32(observedRootCount) + UInt32(unavailableRootCount)
+                == UInt32(context.rootCount),
+            candidateEvaluatedRootCount <= observedRootCount,
+            groups.count <= Self.maximumGroupCount,
+            groups.enumerated().allSatisfy({ index, group in
+                group.rank == UInt16(index)
+            }),
+            zip(groups, groups.dropFirst()).allSatisfy({ pair in
+                pair.0.lane.rawValue <= pair.1.lane.rawValue
+            }),
+            (
+                unavailableRootCount > 0
+                    ? permissionGroupCount == 1
+                    : permissionGroupCount <= 1
+            )
+        else {
+            return false
+        }
+
+        var identities = Set<AppEmergencyRecoveryGroupIdentity>()
+        for group in groups {
+            let identity = AppEmergencyRecoveryGroupIdentity(
+                lane: group.lane,
+                ruleID: group.ruleID,
+                ruleRevision: group.ruleRevision,
+                category: group.category
+            )
+            guard
+                group.sources.count <= Int(context.rootCount),
+                identities.insert(identity).inserted,
+                validSources(group.sources)
+            else {
+                return false
+            }
+            switch group.lane {
+            case .staleSafeRegenerable:
+                guard
+                    let ruleID = group.ruleID,
+                    !ruleID.isEmpty,
+                    ruleID.utf8.count <= 256,
+                    group.ruleRevision.map({ $0 > 0 }) == true,
+                    group.category != nil,
+                    group.unavailableRootCount == 0,
+                    !group.sources.isEmpty,
+                    group.sources.allSatisfy({
+                        guard
+                            let candidates = $0.candidateCount,
+                            let blocked = $0.blockedCandidateCount
+                        else {
+                            return false
+                        }
+                        return candidates > 0
+                            && blocked <= candidates
+                            && $0.permissionIssueCount == nil
+                    })
+                else {
+                    return false
+                }
+            case .guidedExploration:
+                guard
+                    group.ruleID == nil,
+                    group.ruleRevision == nil,
+                    group.category == nil,
+                    group.unavailableRootCount == 0,
+                    !group.sources.isEmpty,
+                    group.sources.allSatisfy({
+                        $0.candidateCount == nil
+                            && $0.blockedCandidateCount == nil
+                            && $0.permissionIssueCount == nil
+                    })
+                else {
+                    return false
+                }
+            case .permissionGap:
+                guard
+                    group.ruleID == nil,
+                    group.ruleRevision == nil,
+                    group.category == nil,
+                    group.unavailableRootCount == unavailableRootCount,
+                    !group.sources.isEmpty || group.unavailableRootCount > 0,
+                    group.sources.allSatisfy({
+                        $0.candidateCount == nil
+                            && $0.blockedCandidateCount == nil
+                            && ($0.permissionIssueCount ?? 0) > 0
+                    })
+                else {
+                    return false
+                }
+            case .evictableCloud, .trashInformation, .reviewableInstallerArchive, .largeFile:
+                // Policy revision 1 has no authoritative source for these
+                // lanes. A future source must increment the policy revision.
+                return false
+            }
+        }
+        return true
+    }
+
+    private func validSources(
+        _ sources: [AppEmergencyRecoverySource]
+    ) -> Bool {
+        var identities = Set<String>()
+        var previous: AppEmergencyRecoverySource?
+        let latestPlausibleObservation = Date().addingTimeInterval(5 * 60)
+        for source in sources {
+            guard
+                source.rootOrdinal < context.rootCount,
+                !source.scanID.isEmpty,
+                source.scanID.utf8.count <= 4_096,
+                !source.scanID.unicodeScalars.contains(where: {
+                    CharacterSet.controlCharacters.contains($0)
+                }),
+                source.observedAt >= context.pressureEpisodeStartedAt,
+                source.observedAt <= latestPlausibleObservation,
+                identities.insert("\(source.rootOrdinal):\(source.scanID)").inserted
+            else {
+                return false
+            }
+            if let previous {
+                guard
+                    previous.rootOrdinal < source.rootOrdinal
+                    || (
+                        previous.rootOrdinal == source.rootOrdinal
+                            && previous.scanID < source.scanID
+                    )
+                else {
+                    return false
+                }
+            }
+            previous = source
+        }
+        return true
+    }
+}
+
 enum TargetedReclaimRootFailure: Equatable, Sendable {
     case invalidRoot
     case rootMissing
@@ -142,6 +381,19 @@ struct TargetedReclaimScanBatch: Equatable, Sendable {
     let context: TargetedReclaimScanContext
     let completed: [TargetedReclaimRootResult]
     let failed: [TargetedReclaimFailedRoot]
+    let emergencyRecovery: AppEmergencyRecoveryOrdering?
+
+    init(
+        context: TargetedReclaimScanContext,
+        completed: [TargetedReclaimRootResult],
+        failed: [TargetedReclaimFailedRoot],
+        emergencyRecovery: AppEmergencyRecoveryOrdering? = nil
+    ) {
+        self.context = context
+        self.completed = completed
+        self.failed = failed
+        self.emergencyRecovery = emergencyRecovery
+    }
 
     var candidateCount: UInt64 {
         completed.reduce(into: 0) { total, root in
@@ -619,6 +871,9 @@ protocol DuxTargetedReclaimScanServing: Sendable {
     func validateTargetedReclaimScan(
         _ context: TargetedReclaimScanContext
     ) async throws -> TargetedReclaimScanContext
+    func finalizeEmergencyRecovery(
+        _ context: TargetedReclaimScanContext
+    ) async throws -> AppEmergencyRecoveryOrdering
 }
 
 extension DuxTargetedReclaimScanServing {
@@ -635,6 +890,12 @@ extension DuxTargetedReclaimScanServing {
     func validateTargetedReclaimScan(
         _: TargetedReclaimScanContext
     ) async throws -> TargetedReclaimScanContext {
+        throw TargetedReclaimScanServiceError.storageUnavailable
+    }
+
+    func finalizeEmergencyRecovery(
+        _: TargetedReclaimScanContext
+    ) async throws -> AppEmergencyRecoveryOrdering {
         throw TargetedReclaimScanServiceError.storageUnavailable
     }
 }

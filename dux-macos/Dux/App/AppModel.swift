@@ -1862,6 +1862,7 @@ final class AppModel: DuxCapacitySampling {
             if targetedReclaimScanState.isActive {
                 await cancelTargetedReclaimScan(preservingCompleted: true)
             }
+            targetedReclaimScanState = .idle
             return
         }
         let expectedPressure: TargetedReclaimPressure =
@@ -2358,16 +2359,35 @@ final class AppModel: DuxCapacitySampling {
                     completed: completed,
                     failed: failed
                 )
+                let emergencyRecovery: AppEmergencyRecoveryOrdering?
                 do {
-                    let checkpoint = try await service.validateTargetedReclaimScan(context)
-                    guard
-                        isCurrentTargetedReclaimScan(generation),
-                        checkpoint == context
-                    else {
-                        targetedReclaimScanState = .failed(
-                            .invalidResponse,
-                            previous: partial
-                        )
+                    if expectedPressure == .critical {
+                        let ordering = try await service.finalizeEmergencyRecovery(context)
+                        let supportedPolicyRevision =
+                            AppEmergencyRecoveryOrdering.supportedPolicyRevision
+                        guard
+                            ordering.policyRevision == supportedPolicyRevision,
+                            ordering.context == context
+                        else {
+                            targetedReclaimScanState = .failed(
+                                .invalidResponse,
+                                previous: partial
+                            )
+                            return
+                        }
+                        emergencyRecovery = ordering
+                    } else {
+                        let checkpoint = try await service.validateTargetedReclaimScan(context)
+                        guard checkpoint == context else {
+                            targetedReclaimScanState = .failed(
+                                .invalidResponse,
+                                previous: partial
+                            )
+                            return
+                        }
+                        emergencyRecovery = nil
+                    }
+                    guard isCurrentTargetedReclaimScan(generation) else {
                         return
                     }
                 } catch {
@@ -2378,7 +2398,12 @@ final class AppModel: DuxCapacitySampling {
                     return
                 }
                 targetedReclaimScanState = .completed(
-                    partial
+                    TargetedReclaimScanBatch(
+                        context: context,
+                        completed: completed,
+                        failed: failed,
+                        emergencyRecovery: emergencyRecovery
+                    )
                 )
                 return
             }

@@ -61,8 +61,14 @@ use dux_core::engine::{
     DurableCleanupStatusCounts as CoreCleanupStatusCounts,
     DurableCleanupTrigger as CoreCleanupTrigger, DurableCleanupWarning as CoreCleanupWarning,
     DurableObservedPath as CoreObservedPath, DurableScanIssueKind as CoreDurableScanIssueKind,
-    DurableScanStatus as CoreDurableScanStatus, EngineConfig, EngineHandle, EngineOpenError,
-    HistoryMaintenanceStartOutcome, PermanentCleanupPolicy as CorePermanentCleanupPolicy,
+    DurableScanStatus as CoreDurableScanStatus, EMERGENCY_RECOVERY_POLICY_REVISION,
+    EmergencyRecoveryError as CoreEmergencyRecoveryError,
+    EmergencyRecoveryGroup as CoreEmergencyRecoveryGroup,
+    EmergencyRecoveryLane as CoreEmergencyRecoveryLane,
+    EmergencyRecoveryOrdering as CoreEmergencyRecoveryOrdering,
+    EmergencyRecoverySource as CoreEmergencyRecoverySource, EngineConfig, EngineHandle,
+    EngineOpenError, HistoryMaintenanceStartOutcome,
+    PermanentCleanupPolicy as CorePermanentCleanupPolicy,
     PermanentCleanupPolicyError as CorePermanentCleanupPolicyError,
     PermanentCleanupPolicySource as CorePermanentCleanupPolicySource,
     PermanentCleanupPolicyUpdate as CorePermanentCleanupPolicyUpdate,
@@ -130,7 +136,7 @@ use dux_core::{
     VolumeCapacity, VolumeId,
 };
 
-const FFI_CONTRACT_VERSION: u32 = 39;
+const FFI_CONTRACT_VERSION: u32 = 40;
 const FFI_RECORD_VERSION: u32 = 1;
 const RUST_TARGET_MINIMUM_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const SNAPSHOT_NODE_RECORD_VERSION: u32 = 2;
@@ -673,6 +679,104 @@ pub struct TargetedProjectScanCheckpoint {
     pub root_count: u16,
     pub root_catalog: TargetedReclaimRootCatalog,
     pub pressure: TargetedProjectScanPressureContext,
+}
+
+/// Exact path-free proof echoed into atomic Critical recovery finalization.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct EmergencyRecoveryRequest {
+    pub record_version: u32,
+    pub expected_pressure: TargetedProjectScanPressureContext,
+    pub expected_root_catalog: TargetedReclaimRootCatalog,
+}
+
+/// Fixed §13.3 taxonomy. Rust supplies explicit ranks; discriminants are not
+/// policy and clients must not infer priority from declaration order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum EmergencyRecoveryLane {
+    EvictableCloud,
+    StaleSafeRegenerable,
+    TrashInformation,
+    ReviewableInstallerArchive,
+    LargeFile,
+    GuidedExploration,
+    PermissionGap,
+}
+
+/// One path-free exact-scan navigation source.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct EmergencyRecoverySource {
+    pub record_version: u32,
+    pub root_ordinal: u16,
+    pub scan_id: String,
+    pub observed_at_unix_ms: i64,
+    pub candidate_count: Option<u32>,
+    pub blocked_candidate_count: Option<u32>,
+    pub permission_issue_count: Option<u64>,
+}
+
+/// Bounded display-only recovery group. Optional shapes are lane-specific and
+/// validated before crossing the boundary.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct EmergencyRecoveryGroup {
+    pub record_version: u32,
+    pub rank: u16,
+    pub lane: EmergencyRecoveryLane,
+    pub rule_id: Option<String>,
+    pub rule_revision: Option<u32>,
+    pub category: Option<CandidateCategory>,
+    pub unavailable_root_count: u16,
+    pub sources: Vec<EmergencyRecoverySource>,
+}
+
+/// Atomic path-free projection tied to the exact returned Critical proof.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct EmergencyRecoveryOrdering {
+    pub record_version: u32,
+    pub policy_revision: u32,
+    pub pressure: TargetedProjectScanPressureContext,
+    pub root_catalog: TargetedReclaimRootCatalog,
+    pub observed_root_count: u16,
+    pub candidate_evaluated_root_count: u16,
+    pub unavailable_root_count: u16,
+    pub groups: Vec<EmergencyRecoveryGroup>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error, uniffi::Error)]
+pub enum EmergencyRecoveryError {
+    #[error("engine session is closed")]
+    Closed,
+    #[error("emergency-recovery record version is unsupported")]
+    InvalidRecordVersion,
+    #[error("the exact pressure proof is malformed")]
+    InvalidPressureProof,
+    #[error("the targeted-reclaim root catalog proof is malformed")]
+    InvalidCatalog,
+    #[error("emergency recovery ordering requires Critical pressure")]
+    NotCritical,
+    #[error("configured project roots changed")]
+    RegistryChanged,
+    #[error("the targeted-reclaim root catalog changed")]
+    CatalogChanged,
+    #[error("the exact pressure proof changed")]
+    PressureChanged,
+    #[error("the durable engine store is read-only")]
+    ReadOnlyStore,
+    #[error("durable schema is incompatible")]
+    IncompatibleSchema,
+    #[error("operation is temporarily busy")]
+    Busy,
+    #[error("storage failed its safety checks")]
+    UnsafeStorage,
+    #[error("bounded operation exceeded its resource budget")]
+    BudgetExceeded,
+    #[error("durable emergency-recovery state is corrupt")]
+    CorruptData,
+    #[error("durable emergency-recovery state is unavailable")]
+    Unavailable,
+    #[error("operation outcome is unknown")]
+    OutcomeUnknown,
+    #[error("internal emergency-recovery state is invalid")]
+    InternalState,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error, uniffi::Error)]
@@ -4182,6 +4286,29 @@ impl DuxEngine {
         })
     }
 
+    /// Atomically finalize the exact Critical targeted pass into a bounded,
+    /// path-free recovery ordering. This starts no scan and exposes no target,
+    /// candidate identifier, plan, approval, action, or effect authority.
+    pub fn finalize_emergency_recovery(
+        &self,
+        request: EmergencyRecoveryRequest,
+    ) -> Result<EmergencyRecoveryOrdering, EmergencyRecoveryError> {
+        if request.record_version != FFI_RECORD_VERSION {
+            return Err(EmergencyRecoveryError::InvalidRecordVersion);
+        }
+        let expected_pressure =
+            core_targeted_project_scan_pressure_context(request.expected_pressure)
+                .map_err(map_targeted_project_scan_request_to_emergency_recovery_error)?;
+        let expected_catalog = core_targeted_reclaim_root_catalog(request.expected_root_catalog)
+            .map_err(map_targeted_project_scan_request_to_emergency_recovery_error)?;
+        self.with_emergency_recovery_engine(|engine| {
+            let ordering = engine
+                .finalize_emergency_recovery(&expected_pressure, &expected_catalog)
+                .map_err(map_emergency_recovery_error)?;
+            emergency_recovery_ordering(ordering, &expected_pressure, &expected_catalog)
+        })
+    }
+
     /// Statically inspect one exact Cargo file and return an engine-bound,
     /// consume-once preview. Inspection does not run the selected bytes or
     /// change durable enrollment.
@@ -5252,6 +5379,22 @@ impl DuxEngine {
             EngineState::Open(engine) if !self.closed.load(Ordering::Acquire) => operation(engine),
             EngineState::Open(_) | EngineState::Closing | EngineState::Closed { .. } => {
                 Err(TargetedProjectScanError::Closed)
+            }
+        }
+    }
+
+    fn with_emergency_recovery_engine<T>(
+        &self,
+        operation: impl FnOnce(&EngineHandle) -> Result<T, EmergencyRecoveryError>,
+    ) -> Result<T, EmergencyRecoveryError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| EmergencyRecoveryError::InternalState)?;
+        match &*state {
+            EngineState::Open(engine) if !self.closed.load(Ordering::Acquire) => operation(engine),
+            EngineState::Open(_) | EngineState::Closing | EngineState::Closed { .. } => {
+                Err(EmergencyRecoveryError::Closed)
             }
         }
     }
@@ -9505,6 +9648,254 @@ fn targeted_project_scan_checkpoint(
     })
 }
 
+fn emergency_recovery_ordering(
+    ordering: CoreEmergencyRecoveryOrdering,
+    expected_pressure: &CoreTargetedProjectScanPressureContext,
+    expected_catalog: &CoreTargetedReclaimRootCatalogStamp,
+) -> Result<EmergencyRecoveryOrdering, EmergencyRecoveryError> {
+    if ordering.policy_revision != EMERGENCY_RECOVERY_POLICY_REVISION
+        || &ordering.pressure != expected_pressure
+        || &ordering.root_catalog != expected_catalog
+        || ordering.groups.len() > dux_core::engine::MAX_EMERGENCY_RECOVERY_GROUPS
+        || ordering.observed_root_count > ordering.root_catalog.root_count
+        || ordering.candidate_evaluated_root_count > ordering.observed_root_count
+        || ordering
+            .observed_root_count
+            .checked_add(ordering.unavailable_root_count)
+            != Some(ordering.root_catalog.root_count)
+    {
+        return Err(EmergencyRecoveryError::InternalState);
+    }
+    let mut previous_lane_priority = None;
+    let permission_group_count = ordering
+        .groups
+        .iter()
+        .filter(|group| group.lane == CoreEmergencyRecoveryLane::PermissionGap)
+        .count();
+    if (ordering.unavailable_root_count > 0 && permission_group_count != 1)
+        || permission_group_count > 1
+    {
+        return Err(EmergencyRecoveryError::InternalState);
+    }
+    let groups = ordering
+        .groups
+        .iter()
+        .enumerate()
+        .map(|(index, group)| {
+            let expected_rank =
+                u16::try_from(index).map_err(|_| EmergencyRecoveryError::InternalState)?;
+            if group.rank != expected_rank {
+                return Err(EmergencyRecoveryError::InternalState);
+            }
+            let lane_priority = group.lane.priority();
+            if previous_lane_priority.is_some_and(|previous| previous > lane_priority) {
+                return Err(EmergencyRecoveryError::InternalState);
+            }
+            previous_lane_priority = Some(lane_priority);
+            if ordering.groups[..index].iter().any(|previous| {
+                previous.lane == group.lane
+                    && previous.rule == group.rule
+                    && previous.category == group.category
+            }) {
+                return Err(EmergencyRecoveryError::InternalState);
+            }
+            emergency_recovery_group(
+                group,
+                ordering.root_catalog.root_count,
+                ordering.unavailable_root_count,
+            )
+        })
+        .collect::<Result<Vec<_>, EmergencyRecoveryError>>()?;
+    Ok(EmergencyRecoveryOrdering {
+        record_version: FFI_RECORD_VERSION,
+        policy_revision: ordering.policy_revision,
+        pressure: targeted_project_scan_pressure_context(&ordering.pressure)
+            .map_err(map_targeted_project_scan_request_to_emergency_recovery_error)?,
+        root_catalog: targeted_reclaim_root_catalog(&ordering.root_catalog)
+            .map_err(map_targeted_project_scan_request_to_emergency_recovery_error)?,
+        observed_root_count: ordering.observed_root_count,
+        candidate_evaluated_root_count: ordering.candidate_evaluated_root_count,
+        unavailable_root_count: ordering.unavailable_root_count,
+        groups,
+    })
+}
+
+fn emergency_recovery_group(
+    group: &CoreEmergencyRecoveryGroup,
+    root_count: u16,
+    ordering_unavailable_root_count: u16,
+) -> Result<EmergencyRecoveryGroup, EmergencyRecoveryError> {
+    if group.sources.len() > usize::from(dux_core::engine::MAX_TARGETED_RECLAIM_ROOTS)
+        || group
+            .sources
+            .windows(2)
+            .any(|pair| pair[0].root_ordinal >= pair[1].root_ordinal)
+        || group
+            .sources
+            .iter()
+            .any(|source| source.root_ordinal >= root_count)
+    {
+        return Err(EmergencyRecoveryError::InternalState);
+    }
+    let stable_rule_shape = group.rule.is_some() && group.category.is_some();
+    match group.lane {
+        CoreEmergencyRecoveryLane::StaleSafeRegenerable
+            if stable_rule_shape
+                && group.unavailable_root_count == 0
+                && !group.sources.is_empty() => {}
+        CoreEmergencyRecoveryLane::GuidedExploration | CoreEmergencyRecoveryLane::PermissionGap
+            if group.rule.is_none()
+                && group.category.is_none()
+                && match group.lane {
+                    CoreEmergencyRecoveryLane::GuidedExploration => {
+                        group.unavailable_root_count == 0 && !group.sources.is_empty()
+                    }
+                    CoreEmergencyRecoveryLane::PermissionGap => {
+                        group.unavailable_root_count == ordering_unavailable_root_count
+                            && (!group.sources.is_empty() || group.unavailable_root_count > 0)
+                    }
+                    _ => false,
+                } => {}
+        CoreEmergencyRecoveryLane::EvictableCloud
+        | CoreEmergencyRecoveryLane::TrashInformation
+        | CoreEmergencyRecoveryLane::ReviewableInstallerArchive
+        | CoreEmergencyRecoveryLane::LargeFile
+        | CoreEmergencyRecoveryLane::StaleSafeRegenerable
+        | CoreEmergencyRecoveryLane::GuidedExploration
+        | CoreEmergencyRecoveryLane::PermissionGap => {
+            return Err(EmergencyRecoveryError::InternalState);
+        }
+    }
+    let sources = group
+        .sources
+        .iter()
+        .map(|source| emergency_recovery_source(group.lane, source))
+        .collect::<Result<Vec<_>, EmergencyRecoveryError>>()?;
+    Ok(EmergencyRecoveryGroup {
+        record_version: FFI_RECORD_VERSION,
+        rank: group.rank,
+        lane: map_emergency_recovery_lane(group.lane),
+        rule_id: group
+            .rule
+            .as_ref()
+            .map(|rule| rule.id().as_str().to_owned()),
+        rule_revision: group.rule.as_ref().map(|rule| rule.revision().get()),
+        category: group.category.map(map_candidate_category),
+        unavailable_root_count: group.unavailable_root_count,
+        sources,
+    })
+}
+
+fn emergency_recovery_source(
+    lane: CoreEmergencyRecoveryLane,
+    source: &CoreEmergencyRecoverySource,
+) -> Result<EmergencyRecoverySource, EmergencyRecoveryError> {
+    let shape_is_valid = match lane {
+        CoreEmergencyRecoveryLane::StaleSafeRegenerable => {
+            source.candidate_count.is_some_and(|count| count > 0)
+                && source.blocked_candidate_count.is_some_and(|blocked| {
+                    source.candidate_count.is_some_and(|count| blocked <= count)
+                })
+                && source.permission_issue_count.is_none()
+        }
+        CoreEmergencyRecoveryLane::GuidedExploration => {
+            source.candidate_count.is_none()
+                && source.blocked_candidate_count.is_none()
+                && source.permission_issue_count.is_none()
+        }
+        CoreEmergencyRecoveryLane::PermissionGap => {
+            source.candidate_count.is_none()
+                && source.blocked_candidate_count.is_none()
+                && source.permission_issue_count.is_some_and(|count| count > 0)
+        }
+        CoreEmergencyRecoveryLane::EvictableCloud
+        | CoreEmergencyRecoveryLane::TrashInformation
+        | CoreEmergencyRecoveryLane::ReviewableInstallerArchive
+        | CoreEmergencyRecoveryLane::LargeFile => false,
+    };
+    if !shape_is_valid {
+        return Err(EmergencyRecoveryError::InternalState);
+    }
+    Ok(EmergencyRecoverySource {
+        record_version: FFI_RECORD_VERSION,
+        root_ordinal: source.root_ordinal,
+        scan_id: source.scan_id.as_str().to_owned(),
+        observed_at_unix_ms: targeted_project_scan_time_ms(source.observed_at)
+            .map_err(map_targeted_project_scan_request_to_emergency_recovery_error)?,
+        candidate_count: source.candidate_count,
+        blocked_candidate_count: source.blocked_candidate_count,
+        permission_issue_count: source.permission_issue_count,
+    })
+}
+
+const fn map_emergency_recovery_lane(lane: CoreEmergencyRecoveryLane) -> EmergencyRecoveryLane {
+    match lane {
+        CoreEmergencyRecoveryLane::EvictableCloud => EmergencyRecoveryLane::EvictableCloud,
+        CoreEmergencyRecoveryLane::StaleSafeRegenerable => {
+            EmergencyRecoveryLane::StaleSafeRegenerable
+        }
+        CoreEmergencyRecoveryLane::TrashInformation => EmergencyRecoveryLane::TrashInformation,
+        CoreEmergencyRecoveryLane::ReviewableInstallerArchive => {
+            EmergencyRecoveryLane::ReviewableInstallerArchive
+        }
+        CoreEmergencyRecoveryLane::LargeFile => EmergencyRecoveryLane::LargeFile,
+        CoreEmergencyRecoveryLane::GuidedExploration => EmergencyRecoveryLane::GuidedExploration,
+        CoreEmergencyRecoveryLane::PermissionGap => EmergencyRecoveryLane::PermissionGap,
+    }
+}
+
+const fn map_emergency_recovery_error(error: CoreEmergencyRecoveryError) -> EmergencyRecoveryError {
+    match error {
+        CoreEmergencyRecoveryError::Closed => EmergencyRecoveryError::Closed,
+        CoreEmergencyRecoveryError::ReadOnlyStore => EmergencyRecoveryError::ReadOnlyStore,
+        CoreEmergencyRecoveryError::NotCritical => EmergencyRecoveryError::NotCritical,
+        CoreEmergencyRecoveryError::RegistryChanged => EmergencyRecoveryError::RegistryChanged,
+        CoreEmergencyRecoveryError::InvalidCatalog => EmergencyRecoveryError::InvalidCatalog,
+        CoreEmergencyRecoveryError::CatalogChanged => EmergencyRecoveryError::CatalogChanged,
+        CoreEmergencyRecoveryError::PressureChanged => EmergencyRecoveryError::PressureChanged,
+        CoreEmergencyRecoveryError::IncompatibleSchema => {
+            EmergencyRecoveryError::IncompatibleSchema
+        }
+        CoreEmergencyRecoveryError::Busy => EmergencyRecoveryError::Busy,
+        CoreEmergencyRecoveryError::UnsafeStorage => EmergencyRecoveryError::UnsafeStorage,
+        CoreEmergencyRecoveryError::BudgetExceeded => EmergencyRecoveryError::BudgetExceeded,
+        CoreEmergencyRecoveryError::CorruptData => EmergencyRecoveryError::CorruptData,
+        CoreEmergencyRecoveryError::Unavailable => EmergencyRecoveryError::Unavailable,
+        CoreEmergencyRecoveryError::OutcomeUnknown => EmergencyRecoveryError::OutcomeUnknown,
+        CoreEmergencyRecoveryError::InternalState => EmergencyRecoveryError::InternalState,
+        _ => EmergencyRecoveryError::InternalState,
+    }
+}
+
+const fn map_targeted_project_scan_request_to_emergency_recovery_error(
+    error: TargetedProjectScanError,
+) -> EmergencyRecoveryError {
+    match error {
+        TargetedProjectScanError::InvalidRecordVersion => {
+            EmergencyRecoveryError::InvalidRecordVersion
+        }
+        TargetedProjectScanError::InvalidVolumeIdentity
+        | TargetedProjectScanError::InvalidAnchor
+        | TargetedProjectScanError::PressureChanged => EmergencyRecoveryError::InvalidPressureProof,
+        TargetedProjectScanError::InvalidCatalog => EmergencyRecoveryError::InvalidCatalog,
+        TargetedProjectScanError::RegistryChanged => EmergencyRecoveryError::RegistryChanged,
+        TargetedProjectScanError::CatalogChanged => EmergencyRecoveryError::CatalogChanged,
+        TargetedProjectScanError::Closed => EmergencyRecoveryError::Closed,
+        TargetedProjectScanError::ReadOnlyStore => EmergencyRecoveryError::ReadOnlyStore,
+        TargetedProjectScanError::IncompatibleSchema => EmergencyRecoveryError::IncompatibleSchema,
+        TargetedProjectScanError::Busy => EmergencyRecoveryError::Busy,
+        TargetedProjectScanError::UnsafeStorage => EmergencyRecoveryError::UnsafeStorage,
+        TargetedProjectScanError::BudgetExceeded => EmergencyRecoveryError::BudgetExceeded,
+        TargetedProjectScanError::CorruptData => EmergencyRecoveryError::CorruptData,
+        TargetedProjectScanError::Unavailable => EmergencyRecoveryError::Unavailable,
+        TargetedProjectScanError::OutcomeUnknown => EmergencyRecoveryError::OutcomeUnknown,
+        TargetedProjectScanError::InvalidOrdinal
+        | TargetedProjectScanError::QueueFull
+        | TargetedProjectScanError::TaskIdExhausted
+        | TargetedProjectScanError::InternalState => EmergencyRecoveryError::InternalState,
+    }
+}
+
 fn map_targeted_project_scan_error(
     error: CoreTargetedProjectScanError,
 ) -> TargetedProjectScanError {
@@ -10127,10 +10518,10 @@ mod tests {
     }
 
     #[test]
-    fn reports_contract_thirty_nine_and_preserves_legacy_formatting() {
+    fn reports_contract_forty_and_preserves_legacy_formatting() {
         let _guard = ENGINE_TEST_LOCK.lock().unwrap();
         let (_temp, engine) = engine();
-        assert_eq!(library_version().ffi_contract_version, 39);
+        assert_eq!(library_version().ffi_contract_version, 40);
         assert_eq!(engine.library_version().unwrap(), library_version());
         assert_eq!(engine.format_size(1536).unwrap().display, "1.5 KB");
         assert!(engine.close());
@@ -13848,6 +14239,85 @@ mod tests {
         assert_eq!(checkpoint.root_count, 1);
         assert_eq!(checkpoint.root_catalog, root_catalog);
         assert_eq!(checkpoint.pressure, pressure);
+
+        let ordering = engine
+            .finalize_emergency_recovery(EmergencyRecoveryRequest {
+                record_version: FFI_RECORD_VERSION,
+                expected_pressure: pressure.clone(),
+                expected_root_catalog: root_catalog.clone(),
+            })
+            .unwrap();
+        assert_eq!(ordering.record_version, FFI_RECORD_VERSION);
+        assert_eq!(ordering.policy_revision, EMERGENCY_RECOVERY_POLICY_REVISION);
+        assert_eq!(ordering.pressure, pressure);
+        assert_eq!(ordering.root_catalog, root_catalog);
+        assert_eq!(ordering.observed_root_count, 1);
+        assert_eq!(ordering.candidate_evaluated_root_count, 1);
+        assert_eq!(ordering.unavailable_root_count, 0);
+        assert_eq!(ordering.groups.len(), 1);
+        assert_eq!(
+            ordering.groups[0].lane,
+            EmergencyRecoveryLane::GuidedExploration
+        );
+        assert_eq!(ordering.groups[0].rank, 0);
+        assert_eq!(ordering.groups[0].sources.len(), 1);
+        assert_eq!(
+            ordering.groups[0].sources[0].scan_id,
+            terminal_result.scan_id
+        );
+        assert!(ordering.groups[0].rule_id.is_none());
+        assert!(ordering.groups[0].category.is_none());
+        assert!(ordering.groups[0].sources[0].candidate_count.is_none());
+        assert!(
+            ordering.groups[0].sources[0]
+                .permission_issue_count
+                .is_none()
+        );
+        engine.reset_configured_project_roots().unwrap();
+        assert_eq!(
+            engine.finalize_emergency_recovery(EmergencyRecoveryRequest {
+                record_version: FFI_RECORD_VERSION,
+                expected_pressure: pressure,
+                expected_root_catalog: root_catalog,
+            }),
+            Err(EmergencyRecoveryError::RegistryChanged)
+        );
+    }
+
+    #[test]
+    fn emergency_recovery_rejects_warning_pressure() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (temp, engine) = engine();
+        let root = temp.path().join("warning-project");
+        std::fs::create_dir_all(&root).unwrap();
+        let configured = engine
+            .set_configured_project_roots(ConfiguredProjectRootsInput {
+                record_version: FFI_RECORD_VERSION,
+                roots: vec![configured_project_root_path(&root).unwrap()],
+            })
+            .unwrap()
+            .roots;
+        let gib = 1_024 * 1_024 * 1_024;
+        let anchor = system_time_ms(SystemTime::now()).unwrap();
+        let status = engine
+            .observe_startup_volume(startup_observation(anchor, Some(20 * gib), Some(20 * gib)))
+            .unwrap();
+        assert_eq!(status.pressure, VolumePressure::Warning);
+        let admission = engine
+            .start_targeted_project_scan(targeted_project_scan_request(
+                anchor,
+                0,
+                Some(configured.revision),
+            ))
+            .unwrap();
+        assert_eq!(
+            engine.finalize_emergency_recovery(EmergencyRecoveryRequest {
+                record_version: FFI_RECORD_VERSION,
+                expected_pressure: admission.pressure.unwrap(),
+                expected_root_catalog: admission.root_catalog,
+            }),
+            Err(EmergencyRecoveryError::NotCritical)
+        );
     }
 
     #[test]
@@ -13939,6 +14409,23 @@ mod tests {
         assert!(unavailable.current_result.is_none());
         assert!(unavailable.task.is_none());
         assert!(unavailable.existing_task_observed_phase.is_none());
+        let incomplete = missing_engine
+            .finalize_emergency_recovery(EmergencyRecoveryRequest {
+                record_version: FFI_RECORD_VERSION,
+                expected_pressure: unavailable.pressure.unwrap(),
+                expected_root_catalog: unavailable.root_catalog,
+            })
+            .unwrap();
+        assert_eq!(incomplete.observed_root_count, 0);
+        assert_eq!(incomplete.candidate_evaluated_root_count, 0);
+        assert_eq!(incomplete.unavailable_root_count, 1);
+        assert_eq!(incomplete.groups.len(), 1);
+        assert_eq!(
+            incomplete.groups[0].lane,
+            EmergencyRecoveryLane::PermissionGap
+        );
+        assert_eq!(incomplete.groups[0].unavailable_root_count, 1);
+        assert!(incomplete.groups[0].sources.is_empty());
     }
 
     #[test]
@@ -14000,6 +14487,21 @@ mod tests {
             .unwrap();
         let pressure = admission.pressure.unwrap();
         let root_catalog = admission.root_catalog;
+        let mut malformed_recovery = EmergencyRecoveryRequest {
+            record_version: FFI_RECORD_VERSION + 1,
+            expected_pressure: pressure.clone(),
+            expected_root_catalog: root_catalog.clone(),
+        };
+        assert_eq!(
+            engine.finalize_emergency_recovery(malformed_recovery.clone()),
+            Err(EmergencyRecoveryError::InvalidRecordVersion)
+        );
+        malformed_recovery.record_version = FFI_RECORD_VERSION;
+        malformed_recovery.expected_root_catalog.digest_sha256.pop();
+        assert_eq!(
+            engine.finalize_emergency_recovery(malformed_recovery),
+            Err(EmergencyRecoveryError::InvalidCatalog)
+        );
         let mut invalid_ordinal =
             targeted_project_scan_request(anchor, 1, Some(configured.revision));
         invalid_ordinal.expected_root_catalog_digest_sha256 =
@@ -14029,6 +14531,180 @@ mod tests {
             }),
             Err(TargetedProjectScanError::InvalidAnchor)
         ));
+    }
+
+    #[test]
+    fn emergency_recovery_projection_is_bounded_path_free_and_shape_checked() {
+        use dux_core::{RuleId, RuleRef, RuleRevision};
+
+        let pressure = CoreTargetedProjectScanPressureContext {
+            volume_id: VolumeId::new("volume:emergency-projection").unwrap(),
+            capacity_anchor: UNIX_EPOCH + Duration::from_secs(10),
+            pressure: CoreTargetedProjectScanPressure::Critical,
+            current_episode_started_at: UNIX_EPOCH + Duration::from_secs(5),
+            pressure_started_at: UNIX_EPOCH + Duration::from_secs(1),
+            policy_revision: 3,
+        };
+        let catalog = CoreTargetedReclaimRootCatalogStamp {
+            known_roots_policy_revision: 1,
+            configured_roots_revision: 7,
+            known_user_library_caches_included: false,
+            root_count: 1,
+            digest_sha256: [9; 32],
+        };
+        let source = |candidate_count, blocked_candidate_count, permission_issue_count| {
+            CoreEmergencyRecoverySource {
+                root_ordinal: 0,
+                scan_id: ScanId::new("scan:emergency:projection").unwrap(),
+                observed_at: UNIX_EPOCH + Duration::from_secs(9),
+                candidate_count,
+                blocked_candidate_count,
+                permission_issue_count,
+            }
+        };
+        let ordering = CoreEmergencyRecoveryOrdering {
+            policy_revision: EMERGENCY_RECOVERY_POLICY_REVISION,
+            pressure: pressure.clone(),
+            root_catalog: catalog.clone(),
+            observed_root_count: 1,
+            candidate_evaluated_root_count: 1,
+            unavailable_root_count: 0,
+            groups: vec![
+                CoreEmergencyRecoveryGroup {
+                    rank: 0,
+                    lane: CoreEmergencyRecoveryLane::StaleSafeRegenerable,
+                    rule: Some(RuleRef::new(
+                        RuleId::new("developer.rust.target").unwrap(),
+                        RuleRevision::new(3).unwrap(),
+                    )),
+                    category: Some(CoreCandidateCategory::DeveloperArtifact),
+                    unavailable_root_count: 0,
+                    sources: vec![source(Some(2), Some(1), None)],
+                },
+                CoreEmergencyRecoveryGroup {
+                    rank: 1,
+                    lane: CoreEmergencyRecoveryLane::GuidedExploration,
+                    rule: None,
+                    category: None,
+                    unavailable_root_count: 0,
+                    sources: vec![source(None, None, None)],
+                },
+                CoreEmergencyRecoveryGroup {
+                    rank: 2,
+                    lane: CoreEmergencyRecoveryLane::PermissionGap,
+                    rule: None,
+                    category: None,
+                    unavailable_root_count: 0,
+                    sources: vec![source(None, None, Some(4))],
+                },
+            ],
+        };
+        let projected = emergency_recovery_ordering(ordering.clone(), &pressure, &catalog).unwrap();
+        assert_eq!(projected.observed_root_count, 1);
+        assert_eq!(projected.candidate_evaluated_root_count, 1);
+        assert_eq!(projected.unavailable_root_count, 0);
+        assert_eq!(projected.groups.len(), 3);
+        assert_eq!(
+            projected
+                .groups
+                .iter()
+                .map(|group| group.lane)
+                .collect::<Vec<_>>(),
+            vec![
+                EmergencyRecoveryLane::StaleSafeRegenerable,
+                EmergencyRecoveryLane::GuidedExploration,
+                EmergencyRecoveryLane::PermissionGap,
+            ]
+        );
+        assert_eq!(
+            projected.groups[0].rule_id.as_deref(),
+            Some("developer.rust.target")
+        );
+        assert_eq!(projected.groups[0].rule_revision, Some(3));
+        assert_eq!(projected.groups[0].sources[0].candidate_count, Some(2));
+        assert_eq!(
+            projected.groups[0].sources[0].blocked_candidate_count,
+            Some(1)
+        );
+        assert_eq!(
+            projected.groups[2].sources[0].permission_issue_count,
+            Some(4)
+        );
+        assert_eq!(projected.groups[2].unavailable_root_count, 0);
+
+        let mut invalid_shape = ordering.clone();
+        invalid_shape.groups[1].sources[0].candidate_count = Some(1);
+        assert_eq!(
+            emergency_recovery_ordering(invalid_shape, &pressure, &catalog),
+            Err(EmergencyRecoveryError::InternalState)
+        );
+        let mut invalid_group_count = ordering.clone();
+        invalid_group_count.groups[1].unavailable_root_count = 1;
+        assert_eq!(
+            emergency_recovery_ordering(invalid_group_count, &pressure, &catalog),
+            Err(EmergencyRecoveryError::InternalState)
+        );
+        let mut invalid_rank = ordering.clone();
+        invalid_rank.groups[1].rank = 7;
+        assert_eq!(
+            emergency_recovery_ordering(invalid_rank, &pressure, &catalog),
+            Err(EmergencyRecoveryError::InternalState)
+        );
+        let mut unavailable_only = ordering.clone();
+        unavailable_only.observed_root_count = 0;
+        unavailable_only.candidate_evaluated_root_count = 0;
+        unavailable_only.unavailable_root_count = 1;
+        unavailable_only.groups = vec![CoreEmergencyRecoveryGroup {
+            rank: 0,
+            lane: CoreEmergencyRecoveryLane::PermissionGap,
+            rule: None,
+            category: None,
+            unavailable_root_count: 1,
+            sources: vec![],
+        }];
+        let projected_unavailable =
+            emergency_recovery_ordering(unavailable_only.clone(), &pressure, &catalog).unwrap();
+        assert_eq!(projected_unavailable.groups.len(), 1);
+        assert_eq!(projected_unavailable.groups[0].unavailable_root_count, 1);
+        assert!(projected_unavailable.groups[0].sources.is_empty());
+        let mut mismatched_unavailable = unavailable_only;
+        mismatched_unavailable.groups[0].unavailable_root_count = 0;
+        assert_eq!(
+            emergency_recovery_ordering(mismatched_unavailable, &pressure, &catalog),
+            Err(EmergencyRecoveryError::InternalState)
+        );
+        let mut duplicate_semantic_group = ordering.clone();
+        let mut duplicate = duplicate_semantic_group.groups[0].clone();
+        duplicate.rank = 1;
+        duplicate_semantic_group.groups.insert(1, duplicate);
+        for (index, group) in duplicate_semantic_group.groups.iter_mut().enumerate() {
+            group.rank = u16::try_from(index).unwrap();
+        }
+        assert_eq!(
+            emergency_recovery_ordering(duplicate_semantic_group, &pressure, &catalog),
+            Err(EmergencyRecoveryError::InternalState)
+        );
+        let mut invalid_counts = ordering.clone();
+        invalid_counts.unavailable_root_count = 1;
+        assert_eq!(
+            emergency_recovery_ordering(invalid_counts, &pressure, &catalog),
+            Err(EmergencyRecoveryError::InternalState)
+        );
+        let mut over_bound = ordering;
+        over_bound.groups = (0..=dux_core::engine::MAX_EMERGENCY_RECOVERY_GROUPS)
+            .map(|index| CoreEmergencyRecoveryGroup {
+                rank: u16::try_from(index).unwrap(),
+                lane: CoreEmergencyRecoveryLane::GuidedExploration,
+                rule: None,
+                category: None,
+                unavailable_root_count: 0,
+                sources: vec![source(None, None, None)],
+            })
+            .collect();
+        assert_eq!(
+            emergency_recovery_ordering(over_bound, &pressure, &catalog),
+            Err(EmergencyRecoveryError::InternalState)
+        );
     }
 
     #[test]

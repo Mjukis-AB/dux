@@ -350,7 +350,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
     DuxSnapshotHistoryServing, DuxCleanupHistoryServing, DuxScanCoverageServing, HomeScanServing,
     Sendable
 {
-    fileprivate static let expectedFFIContractVersion: UInt32 = 39
+    fileprivate static let expectedFFIContractVersion: UInt32 = 40
     fileprivate static let expectedRecordVersion: UInt32 = 1
     private static let maximumTargetedProjectScanNodes: UInt32 = 50_000
     private static let maximumTargetedProjectScanPassNodes: UInt32 = 200_000
@@ -992,6 +992,46 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
             )
             state.consumeTargetedProjectScanProof(proof)
             return validated
+        }
+    }
+
+    func finalizeEmergencyRecovery(
+        _ context: TargetedReclaimScanContext
+    ) async throws -> AppEmergencyRecoveryOrdering {
+        try await state.perform { state in
+            precondition(!Thread.isMainThread, "Blocking FFI work reached the main thread")
+            guard
+                context.rootCount > 0,
+                context.pressure == .critical
+            else {
+                throw TargetedReclaimScanServiceError.pressureChanged
+            }
+            let proof = try state.targetedProjectScanProof(for: context)
+            let engine: DuxEngine
+            do {
+                engine = try state.resolveEngine()
+            } catch let error as EngineServiceError {
+                throw Self.targetedReclaimScanError(error)
+            }
+
+            let response: EmergencyRecoveryOrdering
+            do {
+                response = try engine.finalizeEmergencyRecovery(
+                    request: EmergencyRecoveryRequest(
+                        recordVersion: Self.expectedRecordVersion,
+                        expectedPressure: proof.pressure,
+                        expectedRootCatalog: Self.targetedReclaimRootCatalog(context)
+                    )
+                )
+            } catch let error as EmergencyRecoveryError {
+                throw Self.emergencyRecoveryError(error)
+            }
+            let ordering = try Self.emergencyRecoveryOrdering(
+                response,
+                expected: proof
+            )
+            state.consumeTargetedProjectScanProof(proof)
+            return ordering
         }
     }
 
@@ -2231,6 +2271,179 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
             throw TargetedReclaimScanServiceError.invalidResponse
         }
         return context
+    }
+
+    private static func emergencyRecoveryOrdering(
+        _ response: EmergencyRecoveryOrdering,
+        expected proof: TargetedProjectScanCheckpointProof
+    ) throws -> AppEmergencyRecoveryOrdering {
+        let catalog = try targetedReclaimRootCatalog(response.rootCatalog)
+        guard
+            response.recordVersion == expectedRecordVersion,
+            response.policyRevision == AppEmergencyRecoveryOrdering.supportedPolicyRevision,
+            response.pressure == proof.pressure,
+            catalog == targetedReclaimRootCatalog(proof.context),
+            response.groups.count <= AppEmergencyRecoveryOrdering.maximumGroupCount,
+            UInt32(response.observedRootCount) + UInt32(response.unavailableRootCount)
+                == UInt32(catalog.rootCount),
+            response.candidateEvaluatedRootCount <= response.observedRootCount
+        else {
+            throw TargetedReclaimScanServiceError.invalidResponse
+        }
+        let context = try targetedReclaimContext(
+            response.pressure,
+            expectedStableVolumeID: proof.context.stableVolumeID,
+            expectedAnchorAtUnixMS: proof.pressure.capacityAnchorUnixMs,
+            catalog: catalog
+        )
+        guard context == proof.context else {
+            throw TargetedReclaimScanServiceError.invalidResponse
+        }
+        let groups = try response.groups.enumerated().map { index, group in
+            try emergencyRecoveryGroup(
+                group,
+                expectedRank: UInt16(index),
+                context: context
+            )
+        }
+        let ordering = AppEmergencyRecoveryOrdering(
+            policyRevision: response.policyRevision,
+            context: context,
+            observedRootCount: response.observedRootCount,
+            candidateEvaluatedRootCount: response.candidateEvaluatedRootCount,
+            unavailableRootCount: response.unavailableRootCount,
+            groups: groups
+        )
+        guard ordering.hasValidPresentationShape else {
+            throw TargetedReclaimScanServiceError.invalidResponse
+        }
+        return ordering
+    }
+
+    private static func emergencyRecoveryGroup(
+        _ group: EmergencyRecoveryGroup,
+        expectedRank: UInt16,
+        context: TargetedReclaimScanContext
+    ) throws -> AppEmergencyRecoveryGroup {
+        let permitsUnavailableOnlyGroup =
+            group.lane == .permissionGap && group.unavailableRootCount > 0
+        guard
+            group.recordVersion == expectedRecordVersion,
+            group.rank == expectedRank,
+            !group.sources.isEmpty || permitsUnavailableOnlyGroup,
+            group.sources.count <= Int(context.rootCount)
+        else {
+            throw TargetedReclaimScanServiceError.invalidResponse
+        }
+        let lane: AppEmergencyRecoveryLane = switch group.lane {
+        case .evictableCloud: .evictableCloud
+        case .staleSafeRegenerable: .staleSafeRegenerable
+        case .trashInformation: .trashInformation
+        case .reviewableInstallerArchive: .reviewableInstallerArchive
+        case .largeFile: .largeFile
+        case .guidedExploration: .guidedExploration
+        case .permissionGap: .permissionGap
+        }
+        let category = group.category.map(emergencyRecoveryCategory)
+        let sources = try group.sources.map {
+            try emergencyRecoverySource($0, context: context)
+        }
+        return AppEmergencyRecoveryGroup(
+            rank: group.rank,
+            lane: lane,
+            ruleID: group.ruleId,
+            ruleRevision: group.ruleRevision,
+            category: category,
+            unavailableRootCount: group.unavailableRootCount,
+            sources: sources
+        )
+    }
+
+    private static func emergencyRecoverySource(
+        _ source: EmergencyRecoverySource,
+        context: TargetedReclaimScanContext
+    ) throws -> AppEmergencyRecoverySource {
+        let episodeStartedAtUnixMS = try targetedTimestamp(
+            context.pressureEpisodeStartedAt
+        )
+        let latestPlausibleObservationUnixMS = try targetedTimestamp(
+            Date().addingTimeInterval(5 * 60)
+        )
+        guard
+            source.recordVersion == expectedRecordVersion,
+            source.rootOrdinal < context.rootCount,
+            source.scanId.hasPrefix("scan:targeted:"),
+            !source.scanId.isEmpty,
+            source.scanId.utf8.count <= 4_096,
+            !source.scanId.unicodeScalars.contains(where: {
+                CharacterSet.controlCharacters.contains($0)
+            }),
+            source.observedAtUnixMs >= 0,
+            source.observedAtUnixMs >= episodeStartedAtUnixMS,
+            source.observedAtUnixMs <= latestPlausibleObservationUnixMS
+        else {
+            throw TargetedReclaimScanServiceError.invalidResponse
+        }
+        return AppEmergencyRecoverySource(
+            rootOrdinal: source.rootOrdinal,
+            scanID: source.scanId,
+            observedAt: Date(
+                timeIntervalSince1970: Double(source.observedAtUnixMs) / 1_000
+            ),
+            candidateCount: source.candidateCount,
+            blockedCandidateCount: source.blockedCandidateCount,
+            permissionIssueCount: source.permissionIssueCount
+        )
+    }
+
+    private static func emergencyRecoveryCategory(
+        _ category: CandidateCategory
+    ) -> ExplorerCandidateCategory {
+        switch category {
+        case .developerArtifact: .developerArtifact
+        case .applicationCache: .applicationCache
+        case .browserCache: .browserCache
+        case .logAndDiagnostic: .logAndDiagnostic
+        case .installerAndDownload: .installerAndDownload
+        case .deviceAndSimulatorData: .deviceAndSimulatorData
+        case .cloudFile: .cloudFile
+        case .largeReviewItem: .largeReviewItem
+        case .protectedSystemData: .protectedSystemData
+        case .unknownStorage: .unknownStorage
+        }
+    }
+
+    private static func emergencyRecoveryError(
+        _ error: EmergencyRecoveryError
+    ) -> TargetedReclaimScanServiceError {
+        switch error {
+        case .Closed: .closed
+        case .InvalidRecordVersion: .invalidRecordVersion
+        case .InvalidPressureProof, .NotCritical, .PressureChanged:
+            .pressureChanged
+        case .InvalidCatalog:
+            .invalidResponse
+        case .RegistryChanged, .CatalogChanged:
+            .configuredRootsChanged
+        case .ReadOnlyStore:
+            .readOnlyStore
+        case .IncompatibleSchema:
+            .incompatibleSchema
+        case .Busy:
+            .busy
+        case .UnsafeStorage:
+            .unsafeStorage
+        case .BudgetExceeded:
+            .budgetExceeded
+        case .CorruptData:
+            .corruptData
+        case .Unavailable:
+            .storageUnavailable
+        case .OutcomeUnknown:
+            .outcomeUnknown
+        case .InternalState:
+            .internalState
+        }
     }
 
     private static func targetedReclaimScanError(

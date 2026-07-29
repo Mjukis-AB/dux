@@ -13,6 +13,10 @@ struct MenuBarContentView: View {
             trend: model.capacityTrend,
             pressureHistory: model.pressureHistoryState.history
         )
+        let emergencyRecovery = ExplorerEmergencyRecoveryPresentation.make(
+            volumeState: model.volumeState,
+            targetedState: model.targetedReclaimScanState
+        )
 
         VStack(alignment: .leading, spacing: 14) {
             if model.showsStorageAccessIntroduction {
@@ -24,6 +28,10 @@ struct MenuBarContentView: View {
 
             if let scan = presentation.scan {
                 scanSummary(scan, actions: presentation.actions)
+            }
+
+            if !emergencyRecovery.cards.isEmpty {
+                emergencyRecoverySummary(emergencyRecovery)
             }
 
             if model.volumeState.snapshot.map({
@@ -336,6 +344,60 @@ struct MenuBarContentView: View {
         .background(.quaternary, in: RoundedRectangle(cornerRadius: 9))
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(MenuBarPopoverAccessibility.targetedReclaim)
+    }
+
+    private func emergencyRecoverySummary(
+        _ recovery: ExplorerEmergencyRecoveryPresentation
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Label("Recovery order", systemImage: "list.number")
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                Text(recovery.compactEvidenceLabel)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(
+                        recovery.evidenceState == .current ? .primary : .secondary
+                    )
+            }
+            Text(recovery.statusText)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+            Text(recovery.freshnessText)
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+            ForEach(recovery.menuBarCards) { card in
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text("\(card.lane.rawValue)")
+                        .font(.caption.bold().monospacedDigit())
+                        .foregroundStyle(.secondary)
+                    Text(card.title)
+                        .font(.caption)
+                        .lineLimit(1)
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel(card.accessibilitySummary)
+                .accessibilityIdentifier(
+                    MenuBarPopoverAccessibility.emergencyRecoveryCard(rank: card.rank)
+                )
+            }
+            Button("Review recovery order") {
+                model.requestExplorerDestination(.recommendations)
+                AppActivation.openExplorer(using: openWindow)
+            }
+            .controlSize(.small)
+            .accessibilityIdentifier(
+                MenuBarPopoverAccessibility.emergencyRecoveryAction
+            )
+            .accessibilityHint(
+                "Opens the evidence-backed read-only recovery order in Explorer"
+            )
+        }
+        .padding(10)
+        .background(.quaternary, in: RoundedRectangle(cornerRadius: 9))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier(MenuBarPopoverAccessibility.emergencyRecovery)
     }
 
     private func scanSummary(

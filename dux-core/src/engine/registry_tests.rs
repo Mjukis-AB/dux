@@ -13,6 +13,7 @@ use crate::cleanup::capacity::{CleanupCapacityObservation, CleanupCapacitySample
 #[cfg(unix)]
 use crate::domain::{VolumeCapacity, VolumeId};
 use crate::engine::{
+    EMERGENCY_RECOVERY_MAX_EVIDENCE_AGE, EmergencyRecoveryLane,
     MAX_SNAPSHOT_REVIEW_LARGE_FILE_RESULTS, MAX_SNAPSHOT_REVIEW_NODE_PAGE_LIMIT,
     MAX_SNAPSHOT_REVIEW_PARENT_CONTEXT_COMPONENTS, MAX_SNAPSHOT_REVIEW_TREEMAP_CELLS,
     SnapshotReviewCategory, SnapshotReviewLiveTargetKind, SnapshotReviewLiveTargetPurpose,
@@ -5239,6 +5240,280 @@ fn targeted_project_scan_starts_joins_and_reuses_only_terminal_targeted_evidence
             expected_revision: revision,
             actual_revision: 0,
         })
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn emergency_recovery_finalization_is_critical_exact_and_observation_only() {
+    let temp = TempDir::new().unwrap();
+    let engine = EngineHandle::open(config(&temp)).unwrap();
+    let root = std::fs::canonicalize(temp.path()).unwrap().join("project");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("file"), b"payload").unwrap();
+    let revision = engine
+        .set_configured_project_roots(vec![root])
+        .unwrap()
+        .settings
+        .revision;
+    let volume_id = VolumeId::new("volume:emergency-finalization").unwrap();
+    let critical_anchor = SystemTime::now();
+    targeted_capacity_anchor(&engine, &temp, &volume_id, critical_anchor, 1);
+
+    let admission = engine
+        .start_targeted_reclaim_scan(&volume_id, critical_anchor, 0, Some(revision), None)
+        .unwrap();
+    let pressure = admission.pressure.clone().unwrap();
+    let catalog = admission.root_catalog.clone();
+    let TargetedProjectScanDisposition::Started { task_id } = admission.disposition else {
+        panic!("expected a new exact targeted scan");
+    };
+    assert_eq!(wait_terminal(&engine, task_id).phase, TaskPhase::Succeeded);
+    let scan_id = engine
+        .scan_result(task_id)
+        .unwrap()
+        .unwrap()
+        .scan_id()
+        .clone();
+    let candidate_before = engine.candidate_history_for_scan(&scan_id).unwrap();
+
+    let ordering = engine
+        .finalize_emergency_recovery(&pressure, &catalog)
+        .unwrap();
+    assert_eq!(ordering.pressure, pressure);
+    assert_eq!(ordering.root_catalog, catalog);
+    assert_eq!(ordering.observed_root_count, 1);
+    assert_eq!(ordering.candidate_evaluated_root_count, 1);
+    assert_eq!(ordering.unavailable_root_count, 0);
+    assert_eq!(
+        ordering
+            .groups
+            .iter()
+            .map(|group| group.lane)
+            .collect::<Vec<_>>(),
+        vec![EmergencyRecoveryLane::GuidedExploration]
+    );
+    assert_eq!(ordering.groups[0].sources[0].scan_id, scan_id);
+    assert_eq!(
+        engine.candidate_history_for_scan(&scan_id).unwrap(),
+        candidate_before,
+        "finalization must not mutate candidate review state"
+    );
+
+    let recovered_anchor = critical_anchor + Duration::from_millis(1);
+    targeted_capacity_anchor(&engine, &temp, &volume_id, recovered_anchor, 1_000);
+    assert_eq!(
+        engine.finalize_emergency_recovery(&pressure, &catalog),
+        Err(EmergencyRecoveryError::PressureChanged),
+        "an earlier Critical proof cannot survive a newer capacity observation"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn emergency_recovery_distinguishes_complete_zero_from_unavailable_root() {
+    let temp = TempDir::new().unwrap();
+    let engine = EngineHandle::open(config(&temp)).unwrap();
+    let missing = temp.path().join("missing-project");
+    let revision = engine
+        .set_configured_project_roots(vec![missing])
+        .unwrap()
+        .settings
+        .revision;
+    let volume_id = VolumeId::new("volume:emergency-unavailable").unwrap();
+    let anchor = SystemTime::now();
+    targeted_capacity_anchor(&engine, &temp, &volume_id, anchor, 1);
+    let admission = engine
+        .start_targeted_reclaim_scan(&volume_id, anchor, 0, Some(revision), None)
+        .unwrap();
+    assert!(matches!(
+        admission.disposition,
+        TargetedProjectScanDisposition::RootUnavailable { .. }
+    ));
+    let ordering = engine
+        .finalize_emergency_recovery(
+            admission.pressure.as_ref().unwrap(),
+            &admission.root_catalog,
+        )
+        .unwrap();
+    assert_eq!(ordering.root_catalog.root_count, 1);
+    assert_eq!(ordering.observed_root_count, 0);
+    assert_eq!(ordering.candidate_evaluated_root_count, 0);
+    assert_eq!(ordering.unavailable_root_count, 1);
+    assert_eq!(ordering.groups.len(), 1);
+    assert_eq!(
+        ordering.groups[0].lane,
+        EmergencyRecoveryLane::PermissionGap
+    );
+    assert_eq!(ordering.groups[0].unavailable_root_count, 1);
+    assert!(ordering.groups[0].sources.is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn emergency_recovery_keeps_failed_evaluator_guidance_but_marks_it_incomplete() {
+    let temp = TempDir::new().unwrap();
+    let engine = EngineHandle::open(config(&temp)).unwrap();
+    let root = std::fs::canonicalize(temp.path()).unwrap().join("project");
+    std::fs::create_dir(&root).unwrap();
+    let revision = engine
+        .set_configured_project_roots(vec![root])
+        .unwrap()
+        .settings
+        .revision;
+    let volume_id = VolumeId::new("volume:emergency-failed-evaluator").unwrap();
+    let anchor = SystemTime::now();
+    targeted_capacity_anchor(&engine, &temp, &volume_id, anchor, 1);
+    let admission = engine
+        .start_targeted_reclaim_scan(&volume_id, anchor, 0, Some(revision), None)
+        .unwrap();
+    let pressure = admission.pressure.clone().unwrap();
+    let catalog = admission.root_catalog.clone();
+    let TargetedProjectScanDisposition::Started { task_id } = admission.disposition else {
+        panic!("expected a targeted task");
+    };
+    assert_eq!(wait_terminal(&engine, task_id).phase, TaskPhase::Succeeded);
+    let scan_id = engine
+        .scan_result(task_id)
+        .unwrap()
+        .unwrap()
+        .scan_id()
+        .clone();
+    engine.inner.store.with_connection(|connection| {
+        connection
+            .execute(
+                "UPDATE candidate_evaluations
+                 SET status = 'failed', candidate_count = NULL,
+                     failure_kind = 'evaluation_failed'
+                 WHERE scan_id = ?1 AND status = 'succeeded'
+                   AND candidate_count = 0",
+                [scan_id.as_str()],
+            )
+            .unwrap();
+    });
+
+    let ordering = engine
+        .finalize_emergency_recovery(&pressure, &catalog)
+        .unwrap();
+    assert_eq!(ordering.observed_root_count, 1);
+    assert_eq!(ordering.candidate_evaluated_root_count, 0);
+    assert_eq!(ordering.unavailable_root_count, 0);
+    assert_eq!(ordering.groups.len(), 1);
+    assert_eq!(
+        ordering.groups[0].lane,
+        EmergencyRecoveryLane::GuidedExploration
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn emergency_recovery_applies_the_anchor_relative_freshness_boundary() {
+    let temp = TempDir::new().unwrap();
+    let engine = EngineHandle::open(config(&temp)).unwrap();
+    let root = std::fs::canonicalize(temp.path()).unwrap().join("project");
+    std::fs::create_dir(&root).unwrap();
+    let revision = engine
+        .set_configured_project_roots(vec![root])
+        .unwrap()
+        .settings
+        .revision;
+    let volume_id = VolumeId::new("volume:emergency-freshness").unwrap();
+    let first_anchor = SystemTime::now();
+    targeted_capacity_anchor(&engine, &temp, &volume_id, first_anchor, 1);
+    let admission = engine
+        .start_targeted_reclaim_scan(&volume_id, first_anchor, 0, Some(revision), None)
+        .unwrap();
+    let catalog = admission.root_catalog.clone();
+    let TargetedProjectScanDisposition::Started { task_id } = admission.disposition else {
+        panic!("expected a targeted task");
+    };
+    assert_eq!(wait_terminal(&engine, task_id).phase, TaskPhase::Succeeded);
+    let current = engine
+        .start_targeted_reclaim_scan(
+            &volume_id,
+            first_anchor,
+            0,
+            Some(revision),
+            Some(catalog.digest_sha256),
+        )
+        .unwrap();
+    let TargetedProjectScanDisposition::Current(current) = current.disposition else {
+        panic!("expected durable current evidence");
+    };
+    let completed_at = current.scan.completed_at.unwrap();
+
+    let boundary_anchor = completed_at + EMERGENCY_RECOVERY_MAX_EVIDENCE_AGE;
+    targeted_capacity_anchor(&engine, &temp, &volume_id, boundary_anchor, 1);
+    let boundary = engine
+        .start_targeted_reclaim_scan(
+            &volume_id,
+            boundary_anchor,
+            0,
+            Some(revision),
+            Some(catalog.digest_sha256),
+        )
+        .unwrap();
+    let boundary_ordering = engine
+        .finalize_emergency_recovery(boundary.pressure.as_ref().unwrap(), &boundary.root_catalog)
+        .unwrap();
+    assert_eq!(boundary_ordering.observed_root_count, 1);
+    assert_eq!(boundary_ordering.unavailable_root_count, 0);
+
+    let stale_anchor = boundary_anchor + Duration::from_millis(1);
+    targeted_capacity_anchor(&engine, &temp, &volume_id, stale_anchor, 1);
+    let stale = engine
+        .start_targeted_reclaim_scan(
+            &volume_id,
+            stale_anchor,
+            0,
+            Some(revision),
+            Some(catalog.digest_sha256),
+        )
+        .unwrap();
+    let stale_ordering = engine
+        .finalize_emergency_recovery(stale.pressure.as_ref().unwrap(), &stale.root_catalog)
+        .unwrap();
+    assert_eq!(stale_ordering.observed_root_count, 0);
+    assert_eq!(stale_ordering.candidate_evaluated_root_count, 0);
+    assert_eq!(stale_ordering.unavailable_root_count, 1);
+    assert_eq!(
+        stale_ordering.groups[0].lane,
+        EmergencyRecoveryLane::PermissionGap
+    );
+    assert_eq!(stale_ordering.groups[0].unavailable_root_count, 1);
+    assert!(stale_ordering.groups[0].sources.is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn emergency_recovery_rejects_warning_and_changed_catalog() {
+    let temp = TempDir::new().unwrap();
+    let engine = EngineHandle::open(config(&temp)).unwrap();
+    let root = std::fs::canonicalize(temp.path()).unwrap().join("project");
+    std::fs::create_dir(&root).unwrap();
+    let revision = engine
+        .set_configured_project_roots(vec![root])
+        .unwrap()
+        .settings
+        .revision;
+    let volume_id = VolumeId::new("volume:emergency-warning").unwrap();
+    let warning_anchor = SystemTime::now();
+    targeted_capacity_anchor(&engine, &temp, &volume_id, warning_anchor, 75);
+    let admission = engine
+        .start_targeted_reclaim_scan(&volume_id, warning_anchor, 0, Some(revision), None)
+        .unwrap();
+    let pressure = admission.pressure.unwrap();
+    let catalog = admission.root_catalog;
+    assert_eq!(pressure.pressure, TargetedProjectScanPressure::Warning);
+    assert_eq!(
+        engine.finalize_emergency_recovery(&pressure, &catalog),
+        Err(EmergencyRecoveryError::NotCritical)
+    );
+
+    engine.reset_configured_project_roots().unwrap();
+    assert_eq!(
+        engine.finalize_emergency_recovery(&pressure, &catalog),
+        Err(EmergencyRecoveryError::RegistryChanged)
     );
 }
 

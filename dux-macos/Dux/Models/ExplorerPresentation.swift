@@ -7,6 +7,11 @@ enum ExplorerAccessibility {
     static let snapshotDestination = "explorer-destination-snapshot"
     static let recommendationsDestination = "explorer-destination-recommendations"
     static let recommendations = "explorer-recommendations"
+    static let emergencyRecoveryHero = "explorer-emergency-recovery-hero"
+    static let emergencyRecoveryStatus = "explorer-emergency-recovery-status"
+    static let emergencyRecoveryCards = "explorer-emergency-recovery-cards"
+    static let emergencyRecoveryFreshness = "explorer-emergency-recovery-freshness"
+    static let emergencyRecoveryLimitations = "explorer-emergency-recovery-limitations"
     static let targetedReclaimScan = "explorer-targeted-reclaim-scan"
     static let targetedReclaimScanStatus = "explorer-targeted-reclaim-scan-status"
     static let targetedReclaimScanProgress = "explorer-targeted-reclaim-scan-progress"
@@ -139,6 +144,11 @@ enum ExplorerAccessibility {
         snapshotDestination,
         recommendationsDestination,
         recommendations,
+        emergencyRecoveryHero,
+        emergencyRecoveryStatus,
+        emergencyRecoveryCards,
+        emergencyRecoveryFreshness,
+        emergencyRecoveryLimitations,
         targetedReclaimScan,
         targetedReclaimScanStatus,
         targetedReclaimScanProgress,
@@ -273,6 +283,14 @@ enum ExplorerAccessibility {
 
     static func targetedReclaimScanReview(ordinal: UInt16) -> String {
         "explorer-targeted-reclaim-scan-review-\(ordinal)"
+    }
+
+    static func emergencyRecoveryCard(kind: String) -> String {
+        "explorer-emergency-recovery-card-\(kind)"
+    }
+
+    static func emergencyRecoveryCardAction(kind: String) -> String {
+        "explorer-emergency-recovery-card-action-\(kind)"
     }
 }
 
