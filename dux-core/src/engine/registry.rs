@@ -59,13 +59,14 @@ use super::scan_coverage_details::{
 };
 use super::settings::{
     CleanupExclusionSource, CleanupExclusions, CleanupExclusionsError, CleanupExclusionsUpdate,
-    DirectCargoCodeSignature, DirectCargoEnrollmentError, DirectCargoEnrollmentPreview,
-    DirectCargoEnrollmentState, DirectCargoEnrollmentStatus, DirectCargoEnrollmentUpdate,
-    DirectCargoSignatureClass, DiskPressurePolicy, DiskPressurePolicyError,
-    DiskPressurePolicySource, DiskPressurePolicyUpdate, PermanentCleanupPolicy,
-    PermanentCleanupPolicyError, PermanentCleanupPolicySource, PermanentCleanupPolicyUpdate,
-    SnapshotRetentionCap, SnapshotRetentionCapError, SnapshotRetentionCapSource,
-    SnapshotRetentionCapUpdate,
+    ConfiguredProjectRoots, ConfiguredProjectRootsError, ConfiguredProjectRootsSource,
+    ConfiguredProjectRootsUpdate, DirectCargoCodeSignature, DirectCargoEnrollmentError,
+    DirectCargoEnrollmentPreview, DirectCargoEnrollmentState, DirectCargoEnrollmentStatus,
+    DirectCargoEnrollmentUpdate, DirectCargoSignatureClass, DiskPressurePolicy,
+    DiskPressurePolicyError, DiskPressurePolicySource, DiskPressurePolicyUpdate,
+    PermanentCleanupPolicy, PermanentCleanupPolicyError, PermanentCleanupPolicySource,
+    PermanentCleanupPolicyUpdate, SnapshotRetentionCap, SnapshotRetentionCapError,
+    SnapshotRetentionCapSource, SnapshotRetentionCapUpdate,
 };
 use super::snapshot_review::{
     MAX_SNAPSHOT_REVIEW_CATEGORY_BYTES, MAX_SNAPSHOT_REVIEW_CATEGORY_ROOTS,
@@ -148,10 +149,12 @@ use crate::persistence::{
 use crate::persistence::{
     CargoCodeSignatureRecord, CargoEnrollmentSetting, CargoEnrollmentSettingUpdate,
     CargoEnrollmentState, CargoSignatureClass, CleanupExclusionSetting,
-    CleanupExclusionSettingSource, CleanupExclusionSettingUpdate, DiskPressurePolicySetting,
-    DiskPressurePolicySettingSource, DiskPressurePolicySettingUpdate, PermanentCleanupSetting,
-    PermanentCleanupSettingSource, PermanentCleanupSettingUpdate, SnapshotRetentionCapSetting,
-    SnapshotRetentionCapSettingSource, SnapshotRetentionCapSettingUpdate,
+    CleanupExclusionSettingSource, CleanupExclusionSettingUpdate, ConfiguredProjectRootSetting,
+    ConfiguredProjectRootSettingSource, ConfiguredProjectRootSettingUpdate,
+    DiskPressurePolicySetting, DiskPressurePolicySettingSource, DiskPressurePolicySettingUpdate,
+    PermanentCleanupSetting, PermanentCleanupSettingSource, PermanentCleanupSettingUpdate,
+    SnapshotRetentionCapSetting, SnapshotRetentionCapSettingSource,
+    SnapshotRetentionCapSettingUpdate, validate_configured_project_roots,
 };
 use crate::persistence::{CleanupJournalLease, DatabaseStatus, StoreCoordinator};
 #[cfg(test)]
@@ -1698,6 +1701,22 @@ impl EngineHandle {
             .map_err(|error| map_cleanup_exclusions_error(error.kind))
     }
 
+    /// Load the bounded, discovery-only configured project-root registry.
+    ///
+    /// Roots are scan hints and never authorize filesystem access or cleanup.
+    pub fn configured_project_roots(
+        &self,
+    ) -> Result<ConfiguredProjectRoots, ConfiguredProjectRootsError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(ConfiguredProjectRootsError::Closed);
+        }
+        self.inner
+            .store
+            .load_configured_project_roots()
+            .map(public_configured_project_roots)
+            .map_err(|error| map_configured_project_roots_error(error.kind))
+    }
+
     /// Execute one explicit Explorer Trash selection through the core-owned
     /// journal fence. The callback receives only a one-shot request created
     /// after the retained review target has been revalidated; it cannot choose
@@ -2493,6 +2512,39 @@ impl EngineHandle {
             .reset_cleanup_exclusions()
             .map(public_cleanup_exclusions_update)
             .map_err(|error| map_cleanup_exclusions_error(error.kind))
+    }
+
+    /// Replace the bounded configured project-root registry. The core stores
+    /// normalized paths losslessly, but does not start a scan or create cleanup
+    /// authority from them.
+    pub fn set_configured_project_roots(
+        &self,
+        roots: Vec<std::path::PathBuf>,
+    ) -> Result<ConfiguredProjectRootsUpdate, ConfiguredProjectRootsError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(ConfiguredProjectRootsError::Closed);
+        }
+        validate_configured_project_roots(&roots)
+            .map_err(|_| ConfiguredProjectRootsError::InvalidInput)?;
+        self.inner
+            .store
+            .set_configured_project_roots(roots)
+            .map(public_configured_project_roots_update)
+            .map_err(|error| map_configured_project_roots_error(error.kind))
+    }
+
+    /// Delete the stored registry and restore the empty Default revision zero.
+    pub fn reset_configured_project_roots(
+        &self,
+    ) -> Result<ConfiguredProjectRootsUpdate, ConfiguredProjectRootsError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(ConfiguredProjectRootsError::Closed);
+        }
+        self.inner
+            .store
+            .reset_configured_project_roots()
+            .map(public_configured_project_roots_update)
+            .map_err(|error| map_configured_project_roots_error(error.kind))
     }
 
     /// Load a bounded, path-free page of durable scan observations. This reads
@@ -6890,6 +6942,46 @@ fn public_cleanup_exclusions_update(
     CleanupExclusionsUpdate {
         exclusions: public_cleanup_exclusions(update.settings),
         changed: update.changed,
+    }
+}
+
+fn public_configured_project_roots(
+    setting: ConfiguredProjectRootSetting,
+) -> ConfiguredProjectRoots {
+    ConfiguredProjectRoots {
+        roots: setting.roots,
+        source: match setting.source {
+            ConfiguredProjectRootSettingSource::Default => ConfiguredProjectRootsSource::Default,
+            ConfiguredProjectRootSettingSource::Stored => ConfiguredProjectRootsSource::Stored,
+        },
+        revision: setting.revision,
+        updated_at: setting.updated_at,
+    }
+}
+
+fn public_configured_project_roots_update(
+    update: ConfiguredProjectRootSettingUpdate,
+) -> ConfiguredProjectRootsUpdate {
+    ConfiguredProjectRootsUpdate {
+        settings: public_configured_project_roots(update.settings),
+        changed: update.changed,
+    }
+}
+
+const fn map_configured_project_roots_error(kind: HistoryErrorKind) -> ConfiguredProjectRootsError {
+    match kind {
+        HistoryErrorKind::InvalidInput => ConfiguredProjectRootsError::InvalidClock,
+        HistoryErrorKind::InvalidTransition => ConfiguredProjectRootsError::RevisionExhausted,
+        HistoryErrorKind::IncompatibleSchema => ConfiguredProjectRootsError::IncompatibleSchema,
+        HistoryErrorKind::QueryLimitExceeded => ConfiguredProjectRootsError::QueryLimitExceeded,
+        HistoryErrorKind::Busy => ConfiguredProjectRootsError::Busy,
+        HistoryErrorKind::UnsafeStorage => ConfiguredProjectRootsError::UnsafeStorage,
+        HistoryErrorKind::CorruptData => ConfiguredProjectRootsError::CorruptData,
+        HistoryErrorKind::DatabaseUnavailable => ConfiguredProjectRootsError::Unavailable,
+        HistoryErrorKind::OutcomeUnknown => ConfiguredProjectRootsError::OutcomeUnknown,
+        HistoryErrorKind::AlreadyExists
+        | HistoryErrorKind::NotFound
+        | HistoryErrorKind::InternalState => ConfiguredProjectRootsError::InternalState,
     }
 }
 

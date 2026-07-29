@@ -74,6 +74,31 @@ enum CleanupExclusionsAccessibility {
     }
 }
 
+enum ProjectDiscoveryRootsAccessibility {
+    static let section = "project-discovery-roots-section"
+    static let add = "project-discovery-roots-add"
+    static let reset = "project-discovery-roots-reset"
+    static let list = "project-discovery-roots-list"
+    static let removePrefix = "project-discovery-roots-remove-"
+    static let error = "project-discovery-roots-error"
+    static let progress = "project-discovery-roots-progress"
+    static let status = "project-discovery-roots-status"
+
+    static let allStaticControlIdentifiers = [
+        section,
+        add,
+        reset,
+        list,
+        error,
+        progress,
+        status,
+    ]
+
+    static func remove(_ index: Int) -> String {
+        removePrefix + String(index)
+    }
+}
+
 enum DirectCargoEnrollmentAccessibility {
     static let section = "direct-cargo-section"
     static let choose = "direct-cargo-choose"
@@ -144,6 +169,12 @@ private enum DirectCargoExecutablePickerResult {
     case cancelled
     case invalid
     case selected(DirectCargoExecutableSelection)
+}
+
+private enum ProjectDiscoveryRootPickerResult {
+    case cancelled
+    case invalid
+    case selected(ProjectDiscoveryRoot)
 }
 
 struct DuxSettingsView: View {
@@ -489,6 +520,8 @@ struct DuxSettingsView: View {
                 }
             }
 
+            projectDiscoveryRootSettings(model: model)
+
             directCargoEnrollmentSettings(model: model)
 
             cleanupExclusionSettings(model: model)
@@ -526,6 +559,7 @@ struct DuxSettingsView: View {
             await model.loadDiskPressurePolicy()
             await model.loadPermanentCleanupPolicy()
             await model.loadCleanupExclusions()
+            await model.loadProjectDiscoveryRoots()
             await model.loadDirectCargoEnrollmentStatus()
             await model.loadInitialState()
         }
@@ -676,6 +710,168 @@ struct DuxSettingsView: View {
                 await model.dismissCleanupHistoryClearPresentation()
             }
         }
+    }
+
+    @ViewBuilder
+    private func projectDiscoveryRootSettings(model: AppModel) -> some View {
+        Section("Project discovery roots") {
+            Text(
+                "Save project folders for future focused, read-only recommendation scans. "
+                    + "The targeted runner is not active yet. These roots are discovery scope "
+                    + "only: adding one does not start a scan and never approves or performs "
+                    + "cleanup."
+            )
+            .foregroundStyle(.secondary)
+
+            Text(
+                "DUX stores at most \(ProjectDiscoveryRoot.maximumCount) exact local paths. "
+                    + "Nested or overlapping roots are rejected so a targeted run does not "
+                    + "scan the same files twice."
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+
+            if let roots = model.projectDiscoveryRoots {
+                LabeledContent("Root source") {
+                    Text(roots.source == .default ? "Empty DUX default" : "Stored choice")
+                }
+                LabeledContent("Root revision") {
+                    Text(verbatim: String(roots.revision))
+                }
+                if let milliseconds = roots.updatedAtUnixMilliseconds {
+                    LabeledContent("Roots updated") {
+                        Text(
+                            Date(timeIntervalSince1970: Double(milliseconds) / 1_000),
+                            format: .dateTime
+                        )
+                    }
+                }
+
+                if roots.roots.isEmpty {
+                    Label("No project roots configured", systemImage: "folder.badge.questionmark")
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier(ProjectDiscoveryRootsAccessibility.status)
+                } else {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(Array(roots.roots.enumerated()), id: \.element) { index, root in
+                            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                                Text(verbatim: root.displayText)
+                                    .font(.system(.body, design: .monospaced))
+                                    .textSelection(.enabled)
+                                    .lineLimit(2)
+                                    .truncationMode(.middle)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                Button("Remove") {
+                                    Task { await model.removeProjectDiscoveryRoot(root) }
+                                }
+                                .disabled(
+                                    model.projectDiscoveryRootsState.isBusy
+                                        || model
+                                            .projectDiscoveryRootsRequiresAuthoritativeReload
+                                )
+                                .accessibilityIdentifier(
+                                    ProjectDiscoveryRootsAccessibility.remove(index)
+                                )
+                                .accessibilityLabel("Remove project discovery root")
+                                .accessibilityHint(
+                                    "Stops future targeted discovery from scanning \(root.displayText)"
+                                )
+                            }
+                        }
+                    }
+                    .accessibilityElement(children: .contain)
+                    .accessibilityIdentifier(ProjectDiscoveryRootsAccessibility.list)
+                }
+
+                HStack {
+                    Button("Add project folder…") {
+                        switch selectProjectDiscoveryRoot() {
+                        case .cancelled:
+                            break
+                        case .invalid:
+                            model.rejectProjectDiscoveryRootSelection()
+                        case let .selected(root):
+                            Task { await model.addProjectDiscoveryRoot(root) }
+                        }
+                    }
+                    .disabled(
+                        model.projectDiscoveryRootsState.isBusy
+                            || model.projectDiscoveryRootsRequiresAuthoritativeReload
+                            || roots.roots.count >= ProjectDiscoveryRoot.maximumCount
+                    )
+                    .accessibilityIdentifier(ProjectDiscoveryRootsAccessibility.add)
+                    .accessibilityHint(
+                        "Selects one local folder for future read-only targeted scans"
+                    )
+
+                    Button(
+                        roots.roots.isEmpty ? "Restore DUX default" : "Remove all roots"
+                    ) {
+                        Task { await model.resetProjectDiscoveryRoots() }
+                    }
+                    .disabled(
+                        model.projectDiscoveryRootsState.isBusy
+                            || model.projectDiscoveryRootsRequiresAuthoritativeReload
+                            || roots.source == .default
+                    )
+                    .accessibilityIdentifier(ProjectDiscoveryRootsAccessibility.reset)
+                    .accessibilityHint(
+                        "Restores the empty project-root default without deleting files"
+                    )
+
+                    if model.projectDiscoveryRootsState.isBusy {
+                        ProgressView()
+                            .controlSize(.small)
+                            .accessibilityIdentifier(ProjectDiscoveryRootsAccessibility.progress)
+                            .accessibilityLabel("Updating project discovery roots")
+                    }
+                }
+            } else if model.projectDiscoveryRootsState.isBusy {
+                ProgressView("Loading project discovery roots")
+                    .accessibilityIdentifier(ProjectDiscoveryRootsAccessibility.progress)
+            }
+
+            if case let .failed(failure) = model.projectDiscoveryRootsState {
+                Label(Self.message(for: failure), systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.red)
+                    .accessibilityIdentifier(ProjectDiscoveryRootsAccessibility.error)
+                if model.projectDiscoveryRootsRequiresAuthoritativeReload {
+                    Button("Reload saved roots") {
+                        Task { await model.loadProjectDiscoveryRoots() }
+                    }
+                    .accessibilityHint(
+                        "Reloads authoritative project roots before another change"
+                    )
+                }
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier(ProjectDiscoveryRootsAccessibility.section)
+    }
+
+    private func selectProjectDiscoveryRoot() -> ProjectDiscoveryRootPickerResult {
+        let panel = NSOpenPanel()
+        panel.title = "Choose a project folder for read-only discovery"
+        panel.message =
+            "DUX will store this exact folder as scan scope. This does not start cleanup."
+        panel.prompt = "Add Root"
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = false
+        panel.resolvesAliases = false
+        guard panel.runModal() == .OK, let url = panel.url else {
+            return .cancelled
+        }
+        let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+        guard
+            values?.isDirectory == true,
+            values?.isSymbolicLink != true,
+            let root = ProjectDiscoveryRoot(fileURL: url)
+        else {
+            return .invalid
+        }
+        return .selected(root)
     }
 
     @ViewBuilder
@@ -1552,6 +1748,54 @@ struct DuxSettingsView: View {
         case .unexpected:
             String(
                 localized: "Cleanup exclusions are unavailable. Your last saved exclusions are unchanged."
+            )
+        }
+    }
+
+    static func message(for failure: ProjectDiscoveryRootsFailure) -> String {
+        switch failure {
+        case .invalidSelection:
+            String(localized: "Choose an absolute local folder that is not a symbolic link.")
+        case .overlappingSelection:
+            String(
+                localized:
+                    "That folder overlaps a configured project root. Choose one non-nested root."
+            )
+        case let .service(error):
+            switch error {
+            case .closed:
+                String(localized: "The storage engine session is closed.")
+            case .invalidPath:
+                String(localized: "That folder cannot be stored as a project discovery root.")
+            case .tooManyPaths:
+                String(
+                    localized:
+                        "DUX supports at most \(ProjectDiscoveryRoot.maximumCount) project roots."
+                )
+            case .overlappingPaths:
+                String(
+                    localized:
+                        "Project discovery roots must be unique and must not contain one another."
+                )
+            case .invalidRecordVersion, .incompatibleSchema:
+                String(localized: "This project-root format is incompatible with this app.")
+            case .outcomeUnknown, .internalState, .invalidResponse:
+                String(
+                    localized:
+                        "DUX could not confirm the saved roots. Reload them before another change."
+                )
+            case .retryable, .invalidClock:
+                String(localized: "Project roots could not be changed safely. Try again.")
+            case .revisionExhausted, .unsafeStorage, .budgetExceeded, .corruptData,
+                 .unavailable:
+                String(
+                    localized:
+                        "Project roots are unavailable. Your last saved roots are unchanged."
+                )
+            }
+        case .unexpected:
+            String(
+                localized: "Project roots are unavailable. Your last saved roots are unchanged."
             )
         }
     }

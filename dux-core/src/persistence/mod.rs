@@ -48,6 +48,7 @@ mod cleanup_journal;
     )
 )]
 mod codec;
+mod configured_project_roots;
 mod history;
 mod migrations;
 mod permanent_cleanup;
@@ -126,6 +127,10 @@ pub(crate) use cleanup_journal::{
     fail_next_write_after_commit_and_two_reconcile_reads_for_test,
 };
 pub(crate) use codec::{HostPathObservationEncoding, observe_host_path};
+pub(crate) use configured_project_roots::{
+    ConfiguredProjectRootSetting, ConfiguredProjectRootSettingSource,
+    ConfiguredProjectRootSettingUpdate, validate_configured_project_roots,
+};
 pub(crate) use history::{
     HistoryError, HistoryErrorKind, MAX_RECENT_SCAN_HISTORY_LIMIT, NewScanRecord,
     ScanCompletionRecord, ScanCounts, ScanStatus, TerminalScanStatus,

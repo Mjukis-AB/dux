@@ -48,9 +48,10 @@ pub use domain::{
 pub use engine::{
     CancelOutcome, CandidateEvaluationTaskFailureKind, CandidateEvaluationTaskStatus,
     CapacityHistoryDisposition, CleanupExclusionSource, CleanupExclusions, CleanupExclusionsError,
-    CleanupExclusionsUpdate, CloseOutcome, DiskPressurePolicy, DiskPressurePolicyError,
-    DiskPressurePolicySource, DiskPressurePolicyUpdate, DurableScanCounts, DurableScanCoverage,
-    DurableScanCoverageDetailsPage, DurableScanIssue, DurableScanIssueKind,
+    CleanupExclusionsUpdate, CloseOutcome, ConfiguredProjectRoots, ConfiguredProjectRootsError,
+    ConfiguredProjectRootsSource, ConfiguredProjectRootsUpdate, DiskPressurePolicy,
+    DiskPressurePolicyError, DiskPressurePolicySource, DiskPressurePolicyUpdate, DurableScanCounts,
+    DurableScanCoverage, DurableScanCoverageDetailsPage, DurableScanIssue, DurableScanIssueKind,
     DurableScanIssueLocation, DurableScanStatus, DurableScanSummary, EngineConfig,
     EngineConfigError, EngineConfigField, EngineConfigReason, EngineHandle, EngineLifecycle,
     EngineOpenError, FormatSizeBatchResult, FormattedSizeEntry, MAX_PRESSURE_EPISODE_HISTORY_LIMIT,

@@ -56,7 +56,7 @@ Those capabilities retain their own gates below and in ADR 0004.
 
 ## Current realization
 
-FFI contract v36 now carries the real shared engine session first introduced in
+FFI contract v37 now carries the real shared engine session first introduced in
 v4. The app supplies input-only private data/cache roots; storage paths never
 return across the boundary. Eight maintenance kinds use opaque task objects
 with nonblocking versioned path-free poll/cancel records, and exact Explorer
@@ -95,6 +95,15 @@ open-state, and truncation checks off the main actor. The query cannot express
 a path, candidate, recommendation, plan, approval, AI input, or mutation
 command. Explorer and the menu-bar popover therefore consume it only as
 anchored presentation telemetry.
+
+Contract v37 adds one synchronous, bounded configured-project-root settings
+surface. It accepts and returns at most 16 lossless path-byte observations with
+explicit source, revision, timestamp, and changed state. Rust and Swift both
+reject unsupported record versions, invalid encodings, relative/root/control
+paths, duplicates, nested or overlapping roots, noncanonical order, oversized
+input, and contradictory Default/Stored state. The methods only load, replace,
+or reset durable discovery scope. They cannot start a scan, open a path,
+produce a candidate or plan, approve cleanup, invoke AI, or reach an executor.
 
 Contract v9 adds one path-free newest-available review acquisition. The core
 selects the deterministic newest succeeded, non-tombstoned snapshot and then

@@ -5734,6 +5734,23 @@ Tasks:
     execution authority. The affected-volume identity is retained in the
     validated payload but is never used as a filesystem path.
 - [ ] Add targeted reclaim scan on Warning/Critical.
+  - [x] 2026-07-29 prerequisite slice: add the durable configured-project-root
+    registry required to scope focused project discovery before pressure
+    orchestration exists. Core stores at most 16 absolute, normalized,
+    non-root host paths losslessly in deterministic order, rejects duplicates,
+    nested/overlapping roots, control bytes, oversized input, corrupt rows, and
+    newer value schemas, and preserves explicit empty Stored state separately
+    from the rowless empty Default. Revisioned replace/reset operations
+    reconcile ambiguous writes and remain synchronous settings changes only.
+    UniFFI contract v37 and Swift independently validate record/source/time,
+    ordering, bounds, encoding, and overlap. Native Settings provides a
+    directory-only, non-symlink picker plus accessible add/remove/reset/error
+    states; uncertain writes block further edits until an authoritative reload
+    succeeds. A configured root is discovery scope only: adding it starts no
+    scan, grants no access, and cannot become a candidate, plan, approval, AI
+    input, or cleanup effect. The next slice must add the bounded multi-root
+    Warning/Critical scan runner and its priority/cancellation policy; this
+    parent task intentionally remains open.
 - [ ] Add emergency recovery ordering.
 - [ ] Add rule outcome/regrowth measurement.
 - [ ] Add recurring “storage thief” ranking.

@@ -31,6 +31,9 @@ final class AppModel: DuxCapacitySampling {
     private(set) var permanentCleanupPolicyState = PermanentCleanupPolicyState.idle
     private(set) var cleanupExclusions: CleanupExclusionsPolicy?
     private(set) var cleanupExclusionsState = CleanupExclusionsState.idle
+    private(set) var projectDiscoveryRoots: ProjectDiscoveryRoots?
+    private(set) var projectDiscoveryRootsState = ProjectDiscoveryRootsState.idle
+    private(set) var projectDiscoveryRootsRequiresAuthoritativeReload = false
     private(set) var directCargoEnrollmentStatus: DirectCargoEnrollmentStatusModel?
     private(set) var directCargoEnrollmentPreview: DirectCargoEnrollmentPreviewModel?
     private(set) var directCargoEnrollmentConfirmation:
@@ -117,6 +120,12 @@ final class AppModel: DuxCapacitySampling {
     private var cleanupExclusionsGeneration: UInt64 = 0
     @ObservationIgnored
     private var cleanupExclusionsIsInvalidated = false
+    @ObservationIgnored
+    private var projectDiscoveryRootsTask: Task<Void, Never>?
+    @ObservationIgnored
+    private var projectDiscoveryRootsGeneration: UInt64 = 0
+    @ObservationIgnored
+    private var projectDiscoveryRootsIsInvalidated = false
     @ObservationIgnored
     private var directCargoEnrollmentTask: Task<Void, Never>?
     @ObservationIgnored
@@ -220,6 +229,7 @@ final class AppModel: DuxCapacitySampling {
         capacityTrend = nil
         permanentCleanupPolicy = nil
         cleanupExclusions = nil
+        projectDiscoveryRoots = nil
         directCargoEnrollmentStatus = nil
         directCargoEnrollmentPreview = nil
         directCargoEnrollmentConfirmation = nil
@@ -239,7 +249,8 @@ final class AppModel: DuxCapacitySampling {
         async let engineLoad: Void = loadEngineStatus()
         async let volumeLoad: Void = loadVolumeCapacity()
         async let cleanupHistoryLoad: Void = loadCleanupHistory()
-        _ = await (engineLoad, volumeLoad, cleanupHistoryLoad)
+        async let projectRootsLoad: Void = loadProjectDiscoveryRoots()
+        _ = await (engineLoad, volumeLoad, cleanupHistoryLoad, projectRootsLoad)
         async let trendLoad: Void = loadCapacityTrend()
         async let pressureHistoryLoad: Void = loadPressureHistory()
         _ = await (trendLoad, pressureHistoryLoad)
@@ -736,6 +747,119 @@ final class AppModel: DuxCapacitySampling {
         cleanupExclusionsTask?.cancel()
         cleanupExclusionsTask = nil
         cleanupExclusionsState = cleanupExclusions == nil ? .idle : .ready
+    }
+
+    func loadProjectDiscoveryRoots() async {
+        guard !projectDiscoveryRootsIsInvalidated else {
+            return
+        }
+        if let projectDiscoveryRootsTask {
+            await projectDiscoveryRootsTask.value
+            return
+        }
+
+        projectDiscoveryRootsGeneration &+= 1
+        let generation = projectDiscoveryRootsGeneration
+        projectDiscoveryRootsState = .loading
+        let service = engineService
+        let task = Task { @MainActor [weak self] in
+            let result: Result<ProjectDiscoveryRoots, Error>
+            do {
+                result = .success(try await service.loadProjectDiscoveryRoots())
+            } catch {
+                result = .failure(error)
+            }
+            guard !Task.isCancelled else {
+                return
+            }
+            self?.publishProjectDiscoveryRootsLoad(result, generation: generation)
+        }
+        projectDiscoveryRootsTask = task
+        await task.value
+    }
+
+    func addProjectDiscoveryRoot(_ root: ProjectDiscoveryRoot) async {
+        guard
+            !projectDiscoveryRootsIsInvalidated,
+            projectDiscoveryRootsTask == nil,
+            !projectDiscoveryRootsState.isBusy,
+            !projectDiscoveryRootsRequiresAuthoritativeReload,
+            let current = projectDiscoveryRoots
+        else {
+            return
+        }
+        guard
+            root.encoding == .unixBytes,
+            ProjectDiscoveryRoot.hasValidUnixShape(root.encodedBytes)
+        else {
+            projectDiscoveryRootsState = .failed(.invalidSelection)
+            return
+        }
+        guard !current.roots.contains(root) else {
+            projectDiscoveryRootsState = .ready
+            return
+        }
+        guard current.roots.count < ProjectDiscoveryRoot.maximumCount else {
+            projectDiscoveryRootsState = .failed(.service(.tooManyPaths))
+            return
+        }
+        guard !current.roots.contains(where: { $0.overlaps(root) }) else {
+            projectDiscoveryRootsState = .failed(.overlappingSelection)
+            return
+        }
+        await mutateProjectDiscoveryRoots(state: .adding) { service in
+            try await service.setProjectDiscoveryRoots(current.roots + [root])
+        }
+    }
+
+    func rejectProjectDiscoveryRootSelection() {
+        guard !projectDiscoveryRootsState.isBusy else {
+            return
+        }
+        projectDiscoveryRootsState = .failed(.invalidSelection)
+    }
+
+    func removeProjectDiscoveryRoot(_ root: ProjectDiscoveryRoot) async {
+        guard
+            !projectDiscoveryRootsIsInvalidated,
+            projectDiscoveryRootsTask == nil,
+            !projectDiscoveryRootsState.isBusy,
+            !projectDiscoveryRootsRequiresAuthoritativeReload,
+            let current = projectDiscoveryRoots,
+            current.roots.contains(root)
+        else {
+            return
+        }
+        await mutateProjectDiscoveryRoots(state: .removing) { service in
+            try await service.setProjectDiscoveryRoots(current.roots.filter { $0 != root })
+        }
+    }
+
+    func resetProjectDiscoveryRoots() async {
+        guard
+            !projectDiscoveryRootsIsInvalidated,
+            projectDiscoveryRootsTask == nil,
+            !projectDiscoveryRootsState.isBusy,
+            !projectDiscoveryRootsRequiresAuthoritativeReload,
+            let current = projectDiscoveryRoots
+        else {
+            return
+        }
+        guard current.source != .default else {
+            projectDiscoveryRootsState = .ready
+            return
+        }
+        await mutateProjectDiscoveryRoots(state: .resetting) { service in
+            try await service.resetProjectDiscoveryRoots()
+        }
+    }
+
+    func invalidateProjectDiscoveryRootsOperations() {
+        projectDiscoveryRootsIsInvalidated = true
+        projectDiscoveryRootsGeneration &+= 1
+        projectDiscoveryRootsTask?.cancel()
+        projectDiscoveryRootsTask = nil
+        projectDiscoveryRootsState = projectDiscoveryRoots == nil ? .idle : .ready
     }
 
     func loadDirectCargoEnrollmentStatus() async {
@@ -2111,6 +2235,34 @@ final class AppModel: DuxCapacitySampling {
         }
     }
 
+    private func publishProjectDiscoveryRootsLoad(
+        _ result: Result<ProjectDiscoveryRoots, Error>,
+        generation: UInt64
+    ) {
+        guard
+            generation == projectDiscoveryRootsGeneration,
+            !projectDiscoveryRootsIsInvalidated
+        else {
+            return
+        }
+        projectDiscoveryRootsTask = nil
+        switch result {
+        case let .success(roots):
+            projectDiscoveryRoots = roots
+            projectDiscoveryRootsRequiresAuthoritativeReload = false
+            projectDiscoveryRootsState = .ready
+        case let .failure(error):
+            if error is CancellationError {
+                projectDiscoveryRootsState =
+                    projectDiscoveryRoots == nil ? .idle : .ready
+            } else {
+                projectDiscoveryRootsState = .failed(
+                    Self.projectDiscoveryRootsFailure(for: error)
+                )
+            }
+        }
+    }
+
     private func publishDirectCargoEnrollmentLoad(
         _ result: Result<DirectCargoEnrollmentStatusModel, Error>,
         generation: UInt64
@@ -2321,6 +2473,91 @@ final class AppModel: DuxCapacitySampling {
             return .service(error)
         }
         return .unexpected
+    }
+
+    private func mutateProjectDiscoveryRoots(
+        state: ProjectDiscoveryRootsState,
+        _ operation: @escaping @Sendable (
+            any DuxProjectDiscoveryRootsServing
+        ) async throws -> ProjectDiscoveryRootsUpdateResult
+    ) async {
+        projectDiscoveryRootsGeneration &+= 1
+        let generation = projectDiscoveryRootsGeneration
+        precondition(state == .adding || state == .removing || state == .resetting)
+        projectDiscoveryRootsState = state
+        let service = engineService
+        let task = Task { @MainActor [weak self] in
+            let result: Result<ProjectDiscoveryRootsUpdateResult, Error>
+            do {
+                result = .success(try await operation(service))
+            } catch {
+                result = .failure(error)
+            }
+            guard !Task.isCancelled, let self,
+                  generation == self.projectDiscoveryRootsGeneration else {
+                return
+            }
+            switch result {
+            case let .success(update):
+                self.projectDiscoveryRoots = update.roots
+                self.projectDiscoveryRootsState = .ready
+            case let .failure(mutationError):
+                if mutationError is CancellationError {
+                    self.projectDiscoveryRootsState =
+                        self.projectDiscoveryRoots == nil ? .idle : .ready
+                } else if Self.projectDiscoveryRootsRequiresReload(after: mutationError) {
+                    self.projectDiscoveryRootsRequiresAuthoritativeReload = true
+                    self.projectDiscoveryRootsState = .loading
+                    do {
+                        let authoritative = try await service.loadProjectDiscoveryRoots()
+                        guard
+                            !Task.isCancelled,
+                            generation == self.projectDiscoveryRootsGeneration
+                        else {
+                            return
+                        }
+                        self.projectDiscoveryRoots = authoritative
+                        self.projectDiscoveryRootsRequiresAuthoritativeReload = false
+                        self.projectDiscoveryRootsState = .ready
+                    } catch {
+                        self.projectDiscoveryRootsState = .failed(
+                            Self.projectDiscoveryRootsFailure(for: mutationError)
+                        )
+                    }
+                } else {
+                    self.projectDiscoveryRootsState = .failed(
+                        Self.projectDiscoveryRootsFailure(for: mutationError)
+                    )
+                }
+            }
+            self.projectDiscoveryRootsTask = nil
+        }
+        projectDiscoveryRootsTask = task
+        await task.value
+    }
+
+    private static func projectDiscoveryRootsFailure(
+        for error: Error
+    ) -> ProjectDiscoveryRootsFailure {
+        if let error = error as? ProjectDiscoveryRootsServiceError {
+            return .service(error)
+        }
+        return .unexpected
+    }
+
+    private static func projectDiscoveryRootsRequiresReload(after error: Error) -> Bool {
+        guard let error = error as? ProjectDiscoveryRootsServiceError else {
+            return true
+        }
+        return switch error {
+        case .outcomeUnknown, .internalState, .invalidResponse:
+            true
+        case .closed, .invalidRecordVersion, .invalidPath, .tooManyPaths,
+             .overlappingPaths, .revisionExhausted, .invalidClock,
+             .incompatibleSchema, .retryable, .unsafeStorage, .budgetExceeded,
+             .corruptData, .unavailable:
+            false
+        }
     }
 
     private static func directCargoEnrollmentFailure(

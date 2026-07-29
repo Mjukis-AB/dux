@@ -183,6 +183,7 @@ final class AppRuntime {
             model.invalidatePressurePolicyOperations()
             model.invalidatePermanentCleanupPolicyOperations()
             model.invalidateCleanupExclusionsOperations()
+            model.invalidateProjectDiscoveryRootsOperations()
             model.invalidateStorageAccessProbeOperations()
             await model.shutdownDirectCargoEnrollment()
             await model.shutdownCleanupHistoryClear()

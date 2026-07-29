@@ -58,13 +58,14 @@ pub use scan_coverage_details::{
 };
 pub use settings::{
     CleanupExclusionSource, CleanupExclusions, CleanupExclusionsError, CleanupExclusionsUpdate,
-    DirectCargoCodeSignature, DirectCargoEnrollmentError, DirectCargoEnrollmentPreview,
-    DirectCargoEnrollmentState, DirectCargoEnrollmentStatus, DirectCargoEnrollmentUpdate,
-    DirectCargoSignatureClass, DiskPressurePolicy, DiskPressurePolicyError,
-    DiskPressurePolicySource, DiskPressurePolicyUpdate, PermanentCleanupPolicy,
-    PermanentCleanupPolicyError, PermanentCleanupPolicySource, PermanentCleanupPolicyUpdate,
-    SnapshotRetentionCap, SnapshotRetentionCapError, SnapshotRetentionCapSource,
-    SnapshotRetentionCapUpdate,
+    ConfiguredProjectRoots, ConfiguredProjectRootsError, ConfiguredProjectRootsSource,
+    ConfiguredProjectRootsUpdate, DirectCargoCodeSignature, DirectCargoEnrollmentError,
+    DirectCargoEnrollmentPreview, DirectCargoEnrollmentState, DirectCargoEnrollmentStatus,
+    DirectCargoEnrollmentUpdate, DirectCargoSignatureClass, DiskPressurePolicy,
+    DiskPressurePolicyError, DiskPressurePolicySource, DiskPressurePolicyUpdate,
+    PermanentCleanupPolicy, PermanentCleanupPolicyError, PermanentCleanupPolicySource,
+    PermanentCleanupPolicyUpdate, SnapshotRetentionCap, SnapshotRetentionCapError,
+    SnapshotRetentionCapSource, SnapshotRetentionCapUpdate,
 };
 pub use snapshot_review::{
     MAX_SNAPSHOT_REVIEW_LARGE_FILE_RESULTS, MAX_SNAPSHOT_REVIEW_NODE_PAGE_LIMIT,

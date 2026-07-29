@@ -59,6 +59,14 @@ protocol DuxCleanupExclusionsServing: Sendable {
     func resetCleanupExclusions() async throws -> CleanupExclusionsUpdateResult
 }
 
+protocol DuxProjectDiscoveryRootsServing: Sendable {
+    func loadProjectDiscoveryRoots() async throws -> ProjectDiscoveryRoots
+    func setProjectDiscoveryRoots(
+        _ roots: [ProjectDiscoveryRoot]
+    ) async throws -> ProjectDiscoveryRootsUpdateResult
+    func resetProjectDiscoveryRoots() async throws -> ProjectDiscoveryRootsUpdateResult
+}
+
 protocol DuxDirectCargoEnrollmentServing: Sendable {
     func loadDirectCargoEnrollmentStatus() async throws
         -> DirectCargoEnrollmentStatusModel
@@ -111,6 +119,22 @@ extension DuxCleanupExclusionsServing {
     }
 }
 
+extension DuxProjectDiscoveryRootsServing {
+    func loadProjectDiscoveryRoots() async throws -> ProjectDiscoveryRoots {
+        throw ProjectDiscoveryRootsServiceError.unavailable
+    }
+
+    func setProjectDiscoveryRoots(
+        _: [ProjectDiscoveryRoot]
+    ) async throws -> ProjectDiscoveryRootsUpdateResult {
+        throw ProjectDiscoveryRootsServiceError.unavailable
+    }
+
+    func resetProjectDiscoveryRoots() async throws -> ProjectDiscoveryRootsUpdateResult {
+        throw ProjectDiscoveryRootsServiceError.unavailable
+    }
+}
+
 extension DuxPermanentCleanupPolicyServing {
     func loadPermanentCleanupPolicy() async throws -> PermanentCleanupPolicy {
         throw PermanentCleanupPolicyServiceError.unavailable
@@ -129,7 +153,7 @@ extension DuxPermanentCleanupPolicyServing {
 
 protocol EngineServing: DuxVolumeStatusServing, DuxCapacityTrendServing,
     DuxPressureEpisodeServing, DuxPressurePolicyServing, DuxPermanentCleanupPolicyServing,
-    DuxCleanupExclusionsServing,
+    DuxCleanupExclusionsServing, DuxProjectDiscoveryRootsServing,
     DuxDirectCargoEnrollmentServing, DuxCleanupHistoryServing,
     DuxCleanupHistoryClearing, Sendable
 {
@@ -326,7 +350,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
     DuxSnapshotHistoryServing, DuxCleanupHistoryServing, DuxScanCoverageServing, HomeScanServing,
     Sendable
 {
-    fileprivate static let expectedFFIContractVersion: UInt32 = 36
+    fileprivate static let expectedFFIContractVersion: UInt32 = 37
     fileprivate static let expectedRecordVersion: UInt32 = 1
 
     private let state: EngineServiceState
@@ -664,6 +688,60 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
                 return update
             } catch let error as CleanupExclusionsError {
                 throw Self.cleanupExclusionsError(error)
+            }
+        }
+    }
+
+    func loadProjectDiscoveryRoots() async throws -> ProjectDiscoveryRoots {
+        try await state.perform { state in
+            precondition(!Thread.isMainThread, "Blocking FFI work reached the main thread")
+            let engine = try Self.resolveProjectDiscoveryRootsEngine(state)
+            do {
+                return try Self.projectDiscoveryRoots(engine.getConfiguredProjectRoots())
+            } catch let error as ConfiguredProjectRootsError {
+                throw Self.projectDiscoveryRootsError(error)
+            }
+        }
+    }
+
+    func setProjectDiscoveryRoots(
+        _ roots: [ProjectDiscoveryRoot]
+    ) async throws -> ProjectDiscoveryRootsUpdateResult {
+        try await state.perform { state in
+            precondition(!Thread.isMainThread, "Blocking FFI work reached the main thread")
+            let engine = try Self.resolveProjectDiscoveryRootsEngine(state)
+            do {
+                let input = ConfiguredProjectRootsInput(
+                    recordVersion: Self.expectedRecordVersion,
+                    roots: roots.map(Self.configuredProjectRootPath)
+                )
+                let update = try Self.projectDiscoveryRootsUpdate(
+                    engine.setConfiguredProjectRoots(input: input)
+                )
+                guard update.roots.roots == Self.canonicalProjectDiscoveryRoots(roots) else {
+                    throw ProjectDiscoveryRootsServiceError.invalidResponse
+                }
+                return update
+            } catch let error as ConfiguredProjectRootsError {
+                throw Self.projectDiscoveryRootsError(error)
+            }
+        }
+    }
+
+    func resetProjectDiscoveryRoots() async throws -> ProjectDiscoveryRootsUpdateResult {
+        try await state.perform { state in
+            precondition(!Thread.isMainThread, "Blocking FFI work reached the main thread")
+            let engine = try Self.resolveProjectDiscoveryRootsEngine(state)
+            do {
+                let update = try Self.projectDiscoveryRootsUpdate(
+                    engine.resetConfiguredProjectRoots()
+                )
+                guard update.roots.roots.isEmpty, update.roots.source == .default else {
+                    throw ProjectDiscoveryRootsServiceError.invalidResponse
+                }
+                return update
+            } catch let error as ConfiguredProjectRootsError {
+                throw Self.projectDiscoveryRootsError(error)
             }
         }
     }
@@ -1547,6 +1625,123 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         }
     }
 
+    private static func projectDiscoveryRoots(
+        _ status: ConfiguredProjectRootsStatus
+    ) throws -> ProjectDiscoveryRoots {
+        let source: ProjectDiscoveryRootsOrigin = switch status.source {
+        case .default: .default
+        case .stored: .stored
+        }
+        let roots = try status.roots.map(projectDiscoveryRoot)
+        let hasOverlap = roots.indices.contains { index in
+            roots.indices.dropFirst(index + 1).contains { otherIndex in
+                roots[index].overlaps(roots[otherIndex])
+            }
+        }
+        guard
+            status.recordVersion == expectedRecordVersion,
+            roots.count <= ProjectDiscoveryRoot.maximumCount,
+            Set(roots).count == roots.count,
+            roots == canonicalProjectDiscoveryRoots(roots),
+            !hasOverlap,
+            (status.revision == 0
+                && roots.isEmpty
+                && source == .default
+                && status.updatedAtUnixMs == nil)
+                || (status.revision > 0
+                    && source == .stored
+                    && status.updatedAtUnixMs.map { $0 >= 0 } == true)
+        else {
+            throw ProjectDiscoveryRootsServiceError.invalidResponse
+        }
+        return ProjectDiscoveryRoots(
+            roots: roots,
+            source: source,
+            revision: status.revision,
+            updatedAtUnixMilliseconds: status.updatedAtUnixMs
+        )
+    }
+
+    private static func projectDiscoveryRootsUpdate(
+        _ response: ConfiguredProjectRootsUpdate
+    ) throws -> ProjectDiscoveryRootsUpdateResult {
+        guard response.recordVersion == expectedRecordVersion else {
+            throw ProjectDiscoveryRootsServiceError.invalidResponse
+        }
+        return ProjectDiscoveryRootsUpdateResult(
+            roots: try projectDiscoveryRoots(response.roots),
+            changed: response.changed
+        )
+    }
+
+    private static func projectDiscoveryRoot(
+        _ path: ConfiguredProjectRootPath
+    ) throws -> ProjectDiscoveryRoot {
+        let encoding: ProjectDiscoveryRoot.Encoding = switch path.encoding {
+        case .unixBytes: .unixBytes
+        case .windowsUtf16LittleEndian: .windowsUTF16LittleEndian
+        }
+        let root = ProjectDiscoveryRoot(
+            encoding: encoding,
+            encodedBytes: path.encodedBytes
+        )
+        guard
+            path.encoding == .unixBytes,
+            ProjectDiscoveryRoot.hasValidUnixShape(path.encodedBytes)
+        else {
+            throw ProjectDiscoveryRootsServiceError.invalidResponse
+        }
+        return root
+    }
+
+    private static func configuredProjectRootPath(
+        _ root: ProjectDiscoveryRoot
+    ) -> ConfiguredProjectRootPath {
+        let encoding: SnapshotNameEncoding = switch root.encoding {
+        case .unixBytes: .unixBytes
+        case .windowsUTF16LittleEndian: .windowsUtf16LittleEndian
+        }
+        return ConfiguredProjectRootPath(
+            encoding: encoding,
+            encodedBytes: root.encodedBytes
+        )
+    }
+
+    private static func canonicalProjectDiscoveryRoots(
+        _ roots: [ProjectDiscoveryRoot]
+    ) -> [ProjectDiscoveryRoot] {
+        roots.sorted { left, right in
+            let leftEncoding = left.encoding == .unixBytes ? UInt8(0) : UInt8(1)
+            let rightEncoding = right.encoding == .unixBytes ? UInt8(0) : UInt8(1)
+            if leftEncoding != rightEncoding {
+                return leftEncoding < rightEncoding
+            }
+            return left.encodedBytes.lexicographicallyPrecedes(right.encodedBytes)
+        }
+    }
+
+    private static func projectDiscoveryRootsError(
+        _ error: ConfiguredProjectRootsError
+    ) -> ProjectDiscoveryRootsServiceError {
+        switch error {
+        case .Closed: .closed
+        case .InvalidRecordVersion: .invalidRecordVersion
+        case .InvalidPath: .invalidPath
+        case .TooManyPaths: .tooManyPaths
+        case .OverlappingPaths: .overlappingPaths
+        case .RevisionExhausted: .revisionExhausted
+        case .InvalidClock: .invalidClock
+        case .IncompatibleSchema: .incompatibleSchema
+        case .Busy: .retryable
+        case .UnsafeStorage: .unsafeStorage
+        case .BudgetExceeded: .budgetExceeded
+        case .CorruptData: .corruptData
+        case .Unavailable: .unavailable
+        case .OutcomeUnknown: .outcomeUnknown
+        case .InternalState: .internalState
+        }
+    }
+
     private static func directCargoEnrollmentPreview(
         _ info: DirectCargoEnrollmentPreviewInfo
     ) throws -> DirectCargoEnrollmentPreviewModel {
@@ -1835,6 +2030,23 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
             case .invalidCapacityObservation, .conflictingCapacityObservation,
                  .supersededCapacityObservation, .unexpected:
                 CleanupExclusionsServiceError.invalidResponse
+            }
+        }
+    }
+
+    private static func resolveProjectDiscoveryRootsEngine(
+        _ state: EngineServiceState
+    ) throws -> DuxEngine {
+        do {
+            return try state.resolveEngine()
+        } catch let error as EngineServiceError {
+            throw switch error {
+            case .closed: ProjectDiscoveryRootsServiceError.closed
+            case .retryable: ProjectDiscoveryRootsServiceError.retryable
+            case .unavailable: ProjectDiscoveryRootsServiceError.unavailable
+            case .invalidCapacityObservation, .conflictingCapacityObservation,
+                 .supersededCapacityObservation, .unexpected:
+                ProjectDiscoveryRootsServiceError.invalidResponse
             }
         }
     }

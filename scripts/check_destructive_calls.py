@@ -669,6 +669,11 @@ EXCEPTIONS = {
         "swift-filesystem-effect",
         "test",
     ),
+    "test-project-roots-fixture-remove": ExceptionSpec(
+        "dux-macos/DuxTests/ProjectDiscoveryRootsTests.swift",
+        "swift-filesystem-effect",
+        "test",
+    ),
     "macos-trash-platform-adapter": ExceptionSpec(
         "dux-macos/Dux/Services/ExplorerLiveFileActions.swift",
         "swift-filesystem-effect",
@@ -811,6 +816,7 @@ EXCEPTION_PRIMITIVES = {
     "test-swift-cargo-inspection-fixture-remove": "removeItem",
     "test-swift-retry-obstruction-remove": "removeItem",
     "test-swift-home-scan-fixture-write": "write",
+    "test-project-roots-fixture-remove": "removeItem",
     "macos-trash-platform-adapter": "trashItem",
     "release-checksum-sidecars-remove": "rm",
     "lint-list-repository-sources": "subprocess.run",

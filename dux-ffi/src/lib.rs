@@ -32,6 +32,10 @@ use dux_core::engine::{
     CleanupHistoryClearResult as CoreCleanupHistoryClearResult,
     CleanupHistoryCursor as CoreCleanupHistoryCursor,
     CleanupHistoryError as CoreCleanupHistoryError,
+    ConfiguredProjectRoots as CoreConfiguredProjectRoots,
+    ConfiguredProjectRootsError as CoreConfiguredProjectRootsError,
+    ConfiguredProjectRootsSource as CoreConfiguredProjectRootsSource,
+    ConfiguredProjectRootsUpdate as CoreConfiguredProjectRootsUpdate,
     DirectCargoCodeSignature as CoreDirectCargoCodeSignature,
     DirectCargoEnrollmentError as CoreDirectCargoEnrollmentError,
     DirectCargoEnrollmentPreview as CoreDirectCargoEnrollmentPreview,
@@ -116,7 +120,7 @@ use dux_core::{
     VolumeCapacity, VolumeId,
 };
 
-const FFI_CONTRACT_VERSION: u32 = 36;
+const FFI_CONTRACT_VERSION: u32 = 37;
 const FFI_RECORD_VERSION: u32 = 1;
 const RUST_TARGET_MINIMUM_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const SNAPSHOT_NODE_RECORD_VERSION: u32 = 2;
@@ -139,6 +143,8 @@ const MAX_CLEANUP_HISTORY_WARNINGS: usize = 5;
 const MAX_SCAN_ROOT_UTF8_BYTES: usize = 32 * 1_024;
 const MAX_CLEANUP_EXCLUSION_COUNT: usize = 64;
 const MAX_CLEANUP_EXCLUSION_PATH_BYTES: usize = 32 * 1_024;
+const MAX_CONFIGURED_PROJECT_ROOT_COUNT: usize = 16;
+const MAX_CONFIGURED_PROJECT_ROOT_PATH_BYTES: usize = 32 * 1_024;
 const MAX_DIRECT_CARGO_EXECUTABLE_PATH_BYTES: usize = 32 * 1_024;
 const MAX_DIRECT_CARGO_CODE_DIRECTORY_HASHES: usize = 16;
 const MIN_DIRECT_CARGO_CODE_DIRECTORY_HASH_BYTES: usize = 20;
@@ -460,6 +466,77 @@ pub enum CleanupExclusionsError {
     #[error("cleanup exclusions are corrupt")]
     CorruptData,
     #[error("cleanup exclusions are unavailable")]
+    Unavailable,
+    #[error("the settings write outcome could not be proven")]
+    OutcomeUnknown,
+    #[error("engine settings state is unavailable")]
+    InternalState,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum ConfiguredProjectRootsSource {
+    Default,
+    Stored,
+}
+
+/// Lossless local path selected only as read-only project discovery scope.
+///
+/// These bytes cannot become a cleanup target, plan, approval, or effect.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct ConfiguredProjectRootPath {
+    pub encoding: SnapshotNameEncoding,
+    pub encoded_bytes: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct ConfiguredProjectRootsInput {
+    pub record_version: u32,
+    pub roots: Vec<ConfiguredProjectRootPath>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct ConfiguredProjectRootsStatus {
+    pub record_version: u32,
+    pub roots: Vec<ConfiguredProjectRootPath>,
+    pub source: ConfiguredProjectRootsSource,
+    pub revision: u64,
+    pub updated_at_unix_ms: Option<i64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct ConfiguredProjectRootsUpdate {
+    pub record_version: u32,
+    pub roots: ConfiguredProjectRootsStatus,
+    pub changed: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error, uniffi::Error)]
+pub enum ConfiguredProjectRootsError {
+    #[error("engine session is closed")]
+    Closed,
+    #[error("configured-project-root record version is unsupported")]
+    InvalidRecordVersion,
+    #[error("configured project root path bytes are invalid")]
+    InvalidPath,
+    #[error("the configured project root set exceeds its fixed bound")]
+    TooManyPaths,
+    #[error("configured project roots overlap")]
+    OverlappingPaths,
+    #[error("the configured-project-root revision cannot advance")]
+    RevisionExhausted,
+    #[error("the system clock cannot be represented by the settings store")]
+    InvalidClock,
+    #[error("the durable store schema is newer than this engine")]
+    IncompatibleSchema,
+    #[error("the durable store is busy")]
+    Busy,
+    #[error("the durable store is unsafe")]
+    UnsafeStorage,
+    #[error("the settings query exceeded its fixed resource budget")]
+    BudgetExceeded,
+    #[error("configured project roots are corrupt")]
+    CorruptData,
+    #[error("configured project roots are unavailable")]
     Unavailable,
     #[error("the settings write outcome could not be proven")]
     OutcomeUnknown,
@@ -3828,6 +3905,46 @@ impl DuxEngine {
         })
     }
 
+    /// Load the bounded project-root registry used only by read-only discovery.
+    pub fn get_configured_project_roots(
+        &self,
+    ) -> Result<ConfiguredProjectRootsStatus, ConfiguredProjectRootsError> {
+        self.with_configured_project_roots_engine(|engine| {
+            engine
+                .configured_project_roots()
+                .map_err(map_configured_project_roots_error)
+                .and_then(configured_project_roots_status)
+        })
+    }
+
+    /// Replace the complete configured-project-root registry. The roots grant
+    /// discovery scope only; this endpoint starts no scan or cleanup.
+    pub fn set_configured_project_roots(
+        &self,
+        input: ConfiguredProjectRootsInput,
+    ) -> Result<ConfiguredProjectRootsUpdate, ConfiguredProjectRootsError> {
+        let roots = decode_configured_project_roots_input(input)?;
+        self.with_configured_project_roots_engine(|engine| {
+            engine
+                .set_configured_project_roots(roots)
+                .map_err(map_configured_project_roots_error)
+                .and_then(configured_project_roots_update)
+        })
+    }
+
+    /// Restore the empty versioned project-root default without touching any
+    /// project or filesystem content.
+    pub fn reset_configured_project_roots(
+        &self,
+    ) -> Result<ConfiguredProjectRootsUpdate, ConfiguredProjectRootsError> {
+        self.with_configured_project_roots_engine(|engine| {
+            engine
+                .reset_configured_project_roots()
+                .map_err(map_configured_project_roots_error)
+                .and_then(configured_project_roots_update)
+        })
+    }
+
     /// Statically inspect one exact Cargo file and return an engine-bound,
     /// consume-once preview. Inspection does not run the selected bytes or
     /// change durable enrollment.
@@ -4866,6 +4983,22 @@ impl DuxEngine {
             EngineState::Open(engine) if !self.closed.load(Ordering::Acquire) => operation(engine),
             EngineState::Open(_) | EngineState::Closing | EngineState::Closed { .. } => {
                 Err(CleanupExclusionsError::Closed)
+            }
+        }
+    }
+
+    fn with_configured_project_roots_engine<T>(
+        &self,
+        operation: impl FnOnce(&EngineHandle) -> Result<T, ConfiguredProjectRootsError>,
+    ) -> Result<T, ConfiguredProjectRootsError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| ConfiguredProjectRootsError::InternalState)?;
+        match &*state {
+            EngineState::Open(engine) if !self.closed.load(Ordering::Acquire) => operation(engine),
+            EngineState::Open(_) | EngineState::Closing | EngineState::Closed { .. } => {
+                Err(ConfiguredProjectRootsError::Closed)
             }
         }
     }
@@ -8382,6 +8515,282 @@ fn encode_cleanup_exclusion_path(
     Err(CleanupExclusionsError::InternalState)
 }
 
+fn map_configured_project_roots_error(
+    error: CoreConfiguredProjectRootsError,
+) -> ConfiguredProjectRootsError {
+    match error {
+        CoreConfiguredProjectRootsError::Closed => ConfiguredProjectRootsError::Closed,
+        CoreConfiguredProjectRootsError::InvalidInput => ConfiguredProjectRootsError::InvalidPath,
+        CoreConfiguredProjectRootsError::RevisionExhausted => {
+            ConfiguredProjectRootsError::RevisionExhausted
+        }
+        CoreConfiguredProjectRootsError::InvalidClock => ConfiguredProjectRootsError::InvalidClock,
+        CoreConfiguredProjectRootsError::IncompatibleSchema => {
+            ConfiguredProjectRootsError::IncompatibleSchema
+        }
+        CoreConfiguredProjectRootsError::Busy => ConfiguredProjectRootsError::Busy,
+        CoreConfiguredProjectRootsError::UnsafeStorage => {
+            ConfiguredProjectRootsError::UnsafeStorage
+        }
+        CoreConfiguredProjectRootsError::QueryLimitExceeded => {
+            ConfiguredProjectRootsError::BudgetExceeded
+        }
+        CoreConfiguredProjectRootsError::CorruptData => ConfiguredProjectRootsError::CorruptData,
+        CoreConfiguredProjectRootsError::Unavailable => ConfiguredProjectRootsError::Unavailable,
+        CoreConfiguredProjectRootsError::OutcomeUnknown => {
+            ConfiguredProjectRootsError::OutcomeUnknown
+        }
+        CoreConfiguredProjectRootsError::InternalState => {
+            ConfiguredProjectRootsError::InternalState
+        }
+        _ => ConfiguredProjectRootsError::InternalState,
+    }
+}
+
+fn configured_project_roots_status(
+    settings: CoreConfiguredProjectRoots,
+) -> Result<ConfiguredProjectRootsStatus, ConfiguredProjectRootsError> {
+    if settings.roots.len() > MAX_CONFIGURED_PROJECT_ROOT_COUNT {
+        return Err(ConfiguredProjectRootsError::InternalState);
+    }
+    let updated_at_unix_ms = settings
+        .updated_at
+        .map(configured_project_roots_time_ms)
+        .transpose()?;
+    if (settings.revision == 0) != updated_at_unix_ms.is_none()
+        || (settings.revision == 0
+            && (settings.source != CoreConfiguredProjectRootsSource::Default
+                || !settings.roots.is_empty()))
+        || (settings.revision > 0 && settings.source != CoreConfiguredProjectRootsSource::Stored)
+    {
+        return Err(ConfiguredProjectRootsError::InternalState);
+    }
+    let roots = settings
+        .roots
+        .iter()
+        .map(|path| configured_project_root_path(path.as_path()))
+        .collect::<Result<Vec<_>, _>>()?;
+    if roots.windows(2).any(|pair| {
+        configured_project_root_order_key(&pair[0]) >= configured_project_root_order_key(&pair[1])
+    }) || settings.roots.iter().enumerate().any(|(index, root)| {
+        settings
+            .roots
+            .iter()
+            .skip(index + 1)
+            .any(|other| root.starts_with(other) || other.starts_with(root))
+    }) {
+        return Err(ConfiguredProjectRootsError::InternalState);
+    }
+    Ok(ConfiguredProjectRootsStatus {
+        record_version: FFI_RECORD_VERSION,
+        roots,
+        source: match settings.source {
+            CoreConfiguredProjectRootsSource::Default => ConfiguredProjectRootsSource::Default,
+            CoreConfiguredProjectRootsSource::Stored => ConfiguredProjectRootsSource::Stored,
+        },
+        revision: settings.revision,
+        updated_at_unix_ms,
+    })
+}
+
+fn configured_project_root_order_key(path: &ConfiguredProjectRootPath) -> (u8, &[u8]) {
+    let encoding = match path.encoding {
+        SnapshotNameEncoding::UnixBytes => 0,
+        SnapshotNameEncoding::WindowsUtf16LittleEndian => 1,
+    };
+    (encoding, path.encoded_bytes.as_slice())
+}
+
+fn configured_project_roots_update(
+    update: CoreConfiguredProjectRootsUpdate,
+) -> Result<ConfiguredProjectRootsUpdate, ConfiguredProjectRootsError> {
+    Ok(ConfiguredProjectRootsUpdate {
+        record_version: FFI_RECORD_VERSION,
+        roots: configured_project_roots_status(update.settings)?,
+        changed: update.changed,
+    })
+}
+
+fn configured_project_roots_time_ms(value: SystemTime) -> Result<i64, ConfiguredProjectRootsError> {
+    i64::try_from(
+        value
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| ConfiguredProjectRootsError::InternalState)?
+            .as_millis(),
+    )
+    .map_err(|_| ConfiguredProjectRootsError::InternalState)
+}
+
+fn decode_configured_project_roots_input(
+    input: ConfiguredProjectRootsInput,
+) -> Result<Vec<PathBuf>, ConfiguredProjectRootsError> {
+    if input.record_version != FFI_RECORD_VERSION {
+        return Err(ConfiguredProjectRootsError::InvalidRecordVersion);
+    }
+    if input.roots.len() > MAX_CONFIGURED_PROJECT_ROOT_COUNT {
+        return Err(ConfiguredProjectRootsError::TooManyPaths);
+    }
+    let roots = input
+        .roots
+        .into_iter()
+        .map(decode_configured_project_root_path)
+        .collect::<Result<Vec<_>, _>>()?;
+    if roots.iter().enumerate().any(|(index, root)| {
+        roots
+            .iter()
+            .skip(index + 1)
+            .any(|other| root.starts_with(other) || other.starts_with(root))
+    }) {
+        return Err(ConfiguredProjectRootsError::OverlappingPaths);
+    }
+    Ok(roots)
+}
+
+fn decode_configured_project_root_path(
+    encoded: ConfiguredProjectRootPath,
+) -> Result<PathBuf, ConfiguredProjectRootsError> {
+    if encoded.encoded_bytes.is_empty()
+        || encoded.encoded_bytes.len() > MAX_CONFIGURED_PROJECT_ROOT_PATH_BYTES
+    {
+        return Err(ConfiguredProjectRootsError::InvalidPath);
+    }
+    let path = match encoded.encoding {
+        SnapshotNameEncoding::UnixBytes => {
+            #[cfg(unix)]
+            {
+                if !is_normalized_absolute_unix_project_root(&encoded.encoded_bytes) {
+                    return Err(ConfiguredProjectRootsError::InvalidPath);
+                }
+                PathBuf::from(std::ffi::OsString::from_vec(encoded.encoded_bytes))
+            }
+            #[cfg(not(unix))]
+            {
+                return Err(ConfiguredProjectRootsError::InvalidPath);
+            }
+        }
+        SnapshotNameEncoding::WindowsUtf16LittleEndian => {
+            #[cfg(windows)]
+            {
+                if encoded.encoded_bytes.len() % 2 != 0 {
+                    return Err(ConfiguredProjectRootsError::InvalidPath);
+                }
+                let units = encoded
+                    .encoded_bytes
+                    .chunks_exact(2)
+                    .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]))
+                    .collect::<Vec<_>>();
+                if units.contains(&0) {
+                    return Err(ConfiguredProjectRootsError::InvalidPath);
+                }
+                let path = PathBuf::from(std::ffi::OsString::from_wide(&units));
+                if !is_supported_windows_project_root(&path) {
+                    return Err(ConfiguredProjectRootsError::InvalidPath);
+                }
+                path
+            }
+            #[cfg(not(windows))]
+            {
+                return Err(ConfiguredProjectRootsError::InvalidPath);
+            }
+        }
+    };
+    let normalized: PathBuf = path.components().collect();
+    if !path.is_absolute()
+        || path.parent().is_none()
+        || normalized.as_os_str() != path.as_os_str()
+        || path.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::CurDir | std::path::Component::ParentDir
+            )
+        })
+    {
+        return Err(ConfiguredProjectRootsError::InvalidPath);
+    }
+    Ok(path)
+}
+
+#[cfg(unix)]
+fn is_normalized_absolute_unix_project_root(bytes: &[u8]) -> bool {
+    bytes.len() > 1
+        && bytes[0] == b'/'
+        && bytes.last() != Some(&b'/')
+        && !bytes.contains(&0)
+        && bytes[1..].split(|byte| *byte == b'/').all(|component| {
+            !component.is_empty()
+                && component != b"."
+                && component != b".."
+                && !component.iter().any(|byte| byte.is_ascii_control())
+        })
+}
+
+#[cfg(windows)]
+fn is_supported_windows_project_root(path: &Path) -> bool {
+    use std::path::{Component, Prefix};
+
+    !path
+        .as_os_str()
+        .encode_wide()
+        .any(|unit| unit <= 0x1f || unit == 0x7f)
+        && matches!(
+            path.components().next(),
+            Some(Component::Prefix(prefix))
+                if matches!(prefix.kind(), Prefix::Disk(_) | Prefix::UNC(_, _))
+        )
+}
+
+fn configured_project_root_path(
+    path: &Path,
+) -> Result<ConfiguredProjectRootPath, ConfiguredProjectRootsError> {
+    #[cfg(unix)]
+    {
+        let bytes = path.as_os_str().as_bytes();
+        if bytes.len() > MAX_CONFIGURED_PROJECT_ROOT_PATH_BYTES
+            || !is_normalized_absolute_unix_project_root(bytes)
+        {
+            return Err(ConfiguredProjectRootsError::InternalState);
+        }
+        return Ok(ConfiguredProjectRootPath {
+            encoding: SnapshotNameEncoding::UnixBytes,
+            encoded_bytes: bytes.to_vec(),
+        });
+    }
+    #[cfg(windows)]
+    {
+        let normalized: PathBuf = path.components().collect();
+        if !is_supported_windows_project_root(path)
+            || !path.is_absolute()
+            || path.parent().is_none()
+            || normalized.as_os_str() != path.as_os_str()
+            || path.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::CurDir | std::path::Component::ParentDir
+                )
+            })
+        {
+            return Err(ConfiguredProjectRootsError::InternalState);
+        }
+        let units = path.as_os_str().encode_wide().collect::<Vec<_>>();
+        if units.is_empty()
+            || units.len().saturating_mul(2) > MAX_CONFIGURED_PROJECT_ROOT_PATH_BYTES
+            || units.contains(&0)
+        {
+            return Err(ConfiguredProjectRootsError::InternalState);
+        }
+        let mut bytes = Vec::with_capacity(units.len().saturating_mul(2));
+        for unit in units {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        return Ok(ConfiguredProjectRootPath {
+            encoding: SnapshotNameEncoding::WindowsUtf16LittleEndian,
+            encoded_bytes: bytes,
+        });
+    }
+    #[allow(unreachable_code)]
+    Err(ConfiguredProjectRootsError::InternalState)
+}
+
 fn decode_direct_cargo_executable_path(
     request: DirectCargoEnrollmentInspectionRequest,
 ) -> Result<PathBuf, DirectCargoEnrollmentError> {
@@ -8975,7 +9384,7 @@ mod tests {
     fn reports_contract_thirty_six_and_preserves_legacy_formatting() {
         let _guard = ENGINE_TEST_LOCK.lock().unwrap();
         let (_temp, engine) = engine();
-        assert_eq!(library_version().ffi_contract_version, 36);
+        assert_eq!(library_version().ffi_contract_version, 37);
         assert_eq!(engine.library_version().unwrap(), library_version());
         assert_eq!(engine.format_size(1536).unwrap().display, "1.5 KB");
         assert!(engine.close());
@@ -12908,6 +13317,197 @@ mod tests {
         assert_eq!(
             cleanup_exclusions_status(oversized_path),
             Err(CleanupExclusionsError::InternalState)
+        );
+    }
+
+    #[test]
+    fn configured_project_roots_round_trip_is_lossless_ordered_and_discovery_only() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (temp, engine) = engine();
+        let first = temp.path().join("project-first");
+        let second = temp.path().join("project-second");
+        let input_path = |path: &Path| configured_project_root_path(path).unwrap();
+
+        let initial = engine.get_configured_project_roots().unwrap();
+        assert_eq!(initial.record_version, FFI_RECORD_VERSION);
+        assert!(initial.roots.is_empty());
+        assert_eq!(initial.source, ConfiguredProjectRootsSource::Default);
+        assert_eq!(initial.revision, 0);
+        assert_eq!(initial.updated_at_unix_ms, None);
+
+        let stored = engine
+            .set_configured_project_roots(ConfiguredProjectRootsInput {
+                record_version: FFI_RECORD_VERSION,
+                roots: vec![input_path(&second), input_path(&first)],
+            })
+            .unwrap();
+        assert!(stored.changed);
+        assert_eq!(stored.record_version, FFI_RECORD_VERSION);
+        assert_eq!(stored.roots.source, ConfiguredProjectRootsSource::Stored);
+        assert_eq!(stored.roots.revision, 1);
+        assert!(stored.roots.updated_at_unix_ms.is_some());
+        assert_eq!(
+            stored.roots.roots,
+            vec![input_path(&first), input_path(&second)]
+        );
+        assert_eq!(engine.get_configured_project_roots().unwrap(), stored.roots);
+
+        let exact = engine
+            .set_configured_project_roots(ConfiguredProjectRootsInput {
+                record_version: FFI_RECORD_VERSION,
+                roots: vec![input_path(&first), input_path(&second)],
+            })
+            .unwrap();
+        assert!(!exact.changed);
+        assert_eq!(exact.roots, stored.roots);
+
+        let reset = engine.reset_configured_project_roots().unwrap();
+        assert!(reset.changed);
+        assert_eq!(reset.roots.source, ConfiguredProjectRootsSource::Default);
+        assert_eq!(reset.roots.revision, 0);
+        assert!(reset.roots.roots.is_empty());
+        assert_eq!(reset.roots.updated_at_unix_ms, None);
+        assert!(!engine.reset_configured_project_roots().unwrap().changed);
+
+        #[cfg(unix)]
+        {
+            let mut bytes = temp.path().as_os_str().as_bytes().to_vec();
+            bytes.extend_from_slice(b"/project-\xff");
+            let non_utf8 = ConfiguredProjectRootPath {
+                encoding: SnapshotNameEncoding::UnixBytes,
+                encoded_bytes: bytes,
+            };
+            let stored = engine
+                .set_configured_project_roots(ConfiguredProjectRootsInput {
+                    record_version: FFI_RECORD_VERSION,
+                    roots: vec![non_utf8.clone()],
+                })
+                .unwrap();
+            assert_eq!(stored.roots.roots, vec![non_utf8]);
+            assert_eq!(engine.get_configured_project_roots().unwrap(), stored.roots);
+        }
+
+        assert!(engine.close());
+        assert_eq!(
+            engine.get_configured_project_roots(),
+            Err(ConfiguredProjectRootsError::Closed)
+        );
+        assert_eq!(
+            engine.reset_configured_project_roots(),
+            Err(ConfiguredProjectRootsError::Closed)
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn configured_project_roots_reject_malformed_overlapping_and_unbounded_input() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (_temp, engine) = engine();
+        let path = |bytes: &[u8]| ConfiguredProjectRootPath {
+            encoding: SnapshotNameEncoding::UnixBytes,
+            encoded_bytes: bytes.to_vec(),
+        };
+
+        assert_eq!(
+            engine.set_configured_project_roots(ConfiguredProjectRootsInput {
+                record_version: FFI_RECORD_VERSION + 1,
+                roots: Vec::new(),
+            }),
+            Err(ConfiguredProjectRootsError::InvalidRecordVersion)
+        );
+        for invalid in [
+            b"".as_slice(),
+            b"/",
+            b"relative",
+            b"/tmp/trailing/",
+            b"/tmp//duplicate",
+            b"/tmp/./current",
+            b"/tmp/../parent",
+            b"/tmp/control\npath",
+        ] {
+            assert_eq!(
+                engine.set_configured_project_roots(ConfiguredProjectRootsInput {
+                    record_version: FFI_RECORD_VERSION,
+                    roots: vec![path(invalid)],
+                }),
+                Err(ConfiguredProjectRootsError::InvalidPath),
+                "accepted {invalid:?}"
+            );
+        }
+        assert_eq!(
+            engine.set_configured_project_roots(ConfiguredProjectRootsInput {
+                record_version: FFI_RECORD_VERSION,
+                roots: vec![path(b"/tmp/project"), path(b"/tmp/project/nested")],
+            }),
+            Err(ConfiguredProjectRootsError::OverlappingPaths)
+        );
+        assert_eq!(
+            engine.set_configured_project_roots(ConfiguredProjectRootsInput {
+                record_version: FFI_RECORD_VERSION,
+                roots: vec![path(b"/tmp/project"), path(b"/tmp/project")],
+            }),
+            Err(ConfiguredProjectRootsError::OverlappingPaths)
+        );
+        assert_eq!(
+            engine.set_configured_project_roots(ConfiguredProjectRootsInput {
+                record_version: FFI_RECORD_VERSION,
+                roots: (0..=MAX_CONFIGURED_PROJECT_ROOT_COUNT)
+                    .map(|index| path(format!("/tmp/project-{index}").as_bytes()))
+                    .collect(),
+            }),
+            Err(ConfiguredProjectRootsError::TooManyPaths)
+        );
+        let oversized = std::iter::once(b'/')
+            .chain(std::iter::repeat_n(
+                b'x',
+                MAX_CONFIGURED_PROJECT_ROOT_PATH_BYTES,
+            ))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            engine.set_configured_project_roots(ConfiguredProjectRootsInput {
+                record_version: FFI_RECORD_VERSION,
+                roots: vec![path(&oversized)],
+            }),
+            Err(ConfiguredProjectRootsError::InvalidPath)
+        );
+    }
+
+    #[test]
+    fn configured_project_roots_projection_rejects_malformed_core_shapes() {
+        let malformed_default = CoreConfiguredProjectRoots {
+            roots: vec![PathBuf::from("/tmp/project")],
+            source: CoreConfiguredProjectRootsSource::Default,
+            revision: 0,
+            updated_at: None,
+        };
+        assert_eq!(
+            configured_project_roots_status(malformed_default),
+            Err(ConfiguredProjectRootsError::InternalState)
+        );
+
+        let malformed_revision = CoreConfiguredProjectRoots {
+            roots: Vec::new(),
+            source: CoreConfiguredProjectRootsSource::Stored,
+            revision: 0,
+            updated_at: None,
+        };
+        assert_eq!(
+            configured_project_roots_status(malformed_revision),
+            Err(ConfiguredProjectRootsError::InternalState)
+        );
+
+        let overlapping = CoreConfiguredProjectRoots {
+            roots: vec![
+                PathBuf::from("/tmp/project"),
+                PathBuf::from("/tmp/project/nested"),
+            ],
+            source: CoreConfiguredProjectRootsSource::Stored,
+            revision: 1,
+            updated_at: Some(UNIX_EPOCH),
+        };
+        assert_eq!(
+            configured_project_roots_status(overlapping),
+            Err(ConfiguredProjectRootsError::InternalState)
         );
     }
 

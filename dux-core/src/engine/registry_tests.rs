@@ -4871,6 +4871,76 @@ fn snapshot_retention_cap_is_shared_versioned_and_closed_with_typed_errors() {
 }
 
 #[test]
+fn configured_project_roots_are_shared_discovery_only_settings_with_typed_errors() {
+    let temp = TempDir::new().unwrap();
+    let config = config(&temp);
+    let first = EngineHandle::open(config.clone()).unwrap();
+    let second = EngineHandle::open(config).unwrap();
+
+    assert_eq!(
+        first.configured_project_roots().unwrap(),
+        ConfiguredProjectRoots {
+            roots: Vec::new(),
+            source: ConfiguredProjectRootsSource::Default,
+            revision: 0,
+            updated_at: None,
+        }
+    );
+    let later = temp.path().join("z-project");
+    let earlier = temp.path().join("a-project");
+    let stored = first
+        .set_configured_project_roots(vec![later.clone(), earlier.clone()])
+        .unwrap();
+    assert!(stored.changed);
+    assert_eq!(stored.settings.roots, vec![earlier.clone(), later.clone()]);
+    assert_eq!(stored.settings.source, ConfiguredProjectRootsSource::Stored);
+    assert_eq!(stored.settings.revision, 1);
+    assert_eq!(second.configured_project_roots().unwrap(), stored.settings);
+
+    assert_eq!(
+        second
+            .set_configured_project_roots(vec![earlier.clone(), earlier.join("nested")])
+            .unwrap_err(),
+        ConfiguredProjectRootsError::InvalidInput
+    );
+    let exact = second
+        .set_configured_project_roots(vec![later, earlier])
+        .unwrap();
+    assert!(!exact.changed);
+    assert_eq!(exact.settings, stored.settings);
+
+    let reset = first.reset_configured_project_roots().unwrap();
+    assert!(reset.changed);
+    assert_eq!(
+        reset.settings,
+        ConfiguredProjectRoots {
+            roots: Vec::new(),
+            source: ConfiguredProjectRootsSource::Default,
+            revision: 0,
+            updated_at: None,
+        }
+    );
+    assert_eq!(second.configured_project_roots().unwrap(), reset.settings);
+
+    first.close();
+    assert!(first.wait_until_closed(TEST_TIMEOUT));
+    assert_eq!(
+        first.configured_project_roots(),
+        Err(ConfiguredProjectRootsError::Closed)
+    );
+    assert_eq!(
+        first.set_configured_project_roots(Vec::new()),
+        Err(ConfiguredProjectRootsError::Closed)
+    );
+    assert_eq!(
+        first.reset_configured_project_roots(),
+        Err(ConfiguredProjectRootsError::Closed)
+    );
+    second.close();
+    assert!(second.wait_until_closed(TEST_TIMEOUT));
+}
+
+#[test]
 fn ambiguous_terminal_persistence_disarms_changed_fact_fallback() {
     let (_temp, engine) = engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
     let start = NewScanRecord::try_new(

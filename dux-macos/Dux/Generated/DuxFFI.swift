@@ -925,6 +925,11 @@ public protocol DuxEngineProtocol: AnyObject, Sendable {
      */
     func getCleanupExclusions() throws  -> CleanupExclusionsStatus
 
+    /**
+     * Load the bounded project-root registry used only by read-only discovery.
+     */
+    func getConfiguredProjectRoots() throws  -> ConfiguredProjectRootsStatus
+
     func getDiskPressurePolicy() throws  -> PressurePolicyStatus
 
     /**
@@ -981,6 +986,12 @@ public protocol DuxEngineProtocol: AnyObject, Sendable {
      */
     func resetCleanupExclusions() throws  -> CleanupExclusionsUpdate
 
+    /**
+     * Restore the empty versioned project-root default without touching any
+     * project or filesystem content.
+     */
+    func resetConfiguredProjectRoots() throws  -> ConfiguredProjectRootsUpdate
+
     func resetDiskPressurePolicy() throws  -> PressurePolicyUpdate
 
     func resetPermanentCleanup() throws  -> PermanentCleanupPolicyUpdate
@@ -1003,6 +1014,12 @@ public protocol DuxEngineProtocol: AnyObject, Sendable {
      * persisting the exact lexical prefixes.
      */
     func setCleanupExclusions(input: CleanupExclusionsInput) throws  -> CleanupExclusionsUpdate
+
+    /**
+     * Replace the complete configured-project-root registry. The roots grant
+     * discovery scope only; this endpoint starts no scan or cleanup.
+     */
+    func setConfiguredProjectRoots(input: ConfiguredProjectRootsInput) throws  -> ConfiguredProjectRootsUpdate
 
     func setDiskPressurePolicy(input: PressurePolicyInput) throws  -> PressurePolicyUpdate
 
@@ -1234,6 +1251,17 @@ open func getCleanupExclusions()throws  -> CleanupExclusionsStatus  {
 })
 }
 
+    /**
+     * Load the bounded project-root registry used only by read-only discovery.
+     */
+open func getConfiguredProjectRoots()throws  -> ConfiguredProjectRootsStatus  {
+    return try  FfiConverterTypeConfiguredProjectRootsStatus_lift(try rustCallWithError(FfiConverterTypeConfiguredProjectRootsError_lift) {
+    uniffi_dux_ffi_fn_method_duxengine_get_configured_project_roots(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
 open func getDiskPressurePolicy()throws  -> PressurePolicyStatus  {
     return try  FfiConverterTypePressurePolicyStatus_lift(try rustCallWithError(FfiConverterTypePressurePolicyError_lift) {
     uniffi_dux_ffi_fn_method_duxengine_get_disk_pressure_policy(
@@ -1364,6 +1392,18 @@ open func resetCleanupExclusions()throws  -> CleanupExclusionsUpdate  {
 })
 }
 
+    /**
+     * Restore the empty versioned project-root default without touching any
+     * project or filesystem content.
+     */
+open func resetConfiguredProjectRoots()throws  -> ConfiguredProjectRootsUpdate  {
+    return try  FfiConverterTypeConfiguredProjectRootsUpdate_lift(try rustCallWithError(FfiConverterTypeConfiguredProjectRootsError_lift) {
+    uniffi_dux_ffi_fn_method_duxengine_reset_configured_project_roots(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
 open func resetDiskPressurePolicy()throws  -> PressurePolicyUpdate  {
     return try  FfiConverterTypePressurePolicyUpdate_lift(try rustCallWithError(FfiConverterTypePressurePolicyError_lift) {
     uniffi_dux_ffi_fn_method_duxengine_reset_disk_pressure_policy(
@@ -1416,6 +1456,19 @@ open func setCleanupExclusions(input: CleanupExclusionsInput)throws  -> CleanupE
     uniffi_dux_ffi_fn_method_duxengine_set_cleanup_exclusions(
             self.uniffiCloneHandle(),
         FfiConverterTypeCleanupExclusionsInput_lower(input),$0
+    )
+})
+}
+
+    /**
+     * Replace the complete configured-project-root registry. The roots grant
+     * discovery scope only; this endpoint starts no scan or cleanup.
+     */
+open func setConfiguredProjectRoots(input: ConfiguredProjectRootsInput)throws  -> ConfiguredProjectRootsUpdate  {
+    return try  FfiConverterTypeConfiguredProjectRootsUpdate_lift(try rustCallWithError(FfiConverterTypeConfiguredProjectRootsError_lift) {
+    uniffi_dux_ffi_fn_method_duxengine_set_configured_project_roots(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeConfiguredProjectRootsInput_lower(input),$0
     )
 })
 }
@@ -4466,6 +4519,243 @@ public func FfiConverterTypeCleanupStatusCounts_lift(_ buf: RustBuffer) throws -
 #endif
 public func FfiConverterTypeCleanupStatusCounts_lower(_ value: CleanupStatusCounts) -> RustBuffer {
     return FfiConverterTypeCleanupStatusCounts.lower(value)
+}
+
+
+/**
+ * Lossless local path selected only as read-only project discovery scope.
+ *
+ * These bytes cannot become a cleanup target, plan, approval, or effect.
+ */
+public struct ConfiguredProjectRootPath: Equatable, Hashable {
+    public let encoding: SnapshotNameEncoding
+    public let encodedBytes: Data
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(encoding: SnapshotNameEncoding, encodedBytes: Data) {
+        self.encoding = encoding
+        self.encodedBytes = encodedBytes
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension ConfiguredProjectRootPath: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeConfiguredProjectRootPath: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ConfiguredProjectRootPath {
+        return
+            try ConfiguredProjectRootPath(
+                encoding: FfiConverterTypeSnapshotNameEncoding.read(from: &buf),
+                encodedBytes: FfiConverterData.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ConfiguredProjectRootPath, into buf: inout [UInt8]) {
+        FfiConverterTypeSnapshotNameEncoding.write(value.encoding, into: &buf)
+        FfiConverterData.write(value.encodedBytes, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeConfiguredProjectRootPath_lift(_ buf: RustBuffer) throws -> ConfiguredProjectRootPath {
+    return try FfiConverterTypeConfiguredProjectRootPath.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeConfiguredProjectRootPath_lower(_ value: ConfiguredProjectRootPath) -> RustBuffer {
+    return FfiConverterTypeConfiguredProjectRootPath.lower(value)
+}
+
+
+public struct ConfiguredProjectRootsInput: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let roots: [ConfiguredProjectRootPath]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, roots: [ConfiguredProjectRootPath]) {
+        self.recordVersion = recordVersion
+        self.roots = roots
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension ConfiguredProjectRootsInput: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeConfiguredProjectRootsInput: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ConfiguredProjectRootsInput {
+        return
+            try ConfiguredProjectRootsInput(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                roots: FfiConverterSequenceTypeConfiguredProjectRootPath.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ConfiguredProjectRootsInput, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterSequenceTypeConfiguredProjectRootPath.write(value.roots, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeConfiguredProjectRootsInput_lift(_ buf: RustBuffer) throws -> ConfiguredProjectRootsInput {
+    return try FfiConverterTypeConfiguredProjectRootsInput.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeConfiguredProjectRootsInput_lower(_ value: ConfiguredProjectRootsInput) -> RustBuffer {
+    return FfiConverterTypeConfiguredProjectRootsInput.lower(value)
+}
+
+
+public struct ConfiguredProjectRootsStatus: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let roots: [ConfiguredProjectRootPath]
+    public let source: ConfiguredProjectRootsSource
+    public let revision: UInt64
+    public let updatedAtUnixMs: Int64?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, roots: [ConfiguredProjectRootPath], source: ConfiguredProjectRootsSource, revision: UInt64, updatedAtUnixMs: Int64?) {
+        self.recordVersion = recordVersion
+        self.roots = roots
+        self.source = source
+        self.revision = revision
+        self.updatedAtUnixMs = updatedAtUnixMs
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension ConfiguredProjectRootsStatus: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeConfiguredProjectRootsStatus: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ConfiguredProjectRootsStatus {
+        return
+            try ConfiguredProjectRootsStatus(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                roots: FfiConverterSequenceTypeConfiguredProjectRootPath.read(from: &buf),
+                source: FfiConverterTypeConfiguredProjectRootsSource.read(from: &buf),
+                revision: FfiConverterUInt64.read(from: &buf),
+                updatedAtUnixMs: FfiConverterOptionInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ConfiguredProjectRootsStatus, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterSequenceTypeConfiguredProjectRootPath.write(value.roots, into: &buf)
+        FfiConverterTypeConfiguredProjectRootsSource.write(value.source, into: &buf)
+        FfiConverterUInt64.write(value.revision, into: &buf)
+        FfiConverterOptionInt64.write(value.updatedAtUnixMs, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeConfiguredProjectRootsStatus_lift(_ buf: RustBuffer) throws -> ConfiguredProjectRootsStatus {
+    return try FfiConverterTypeConfiguredProjectRootsStatus.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeConfiguredProjectRootsStatus_lower(_ value: ConfiguredProjectRootsStatus) -> RustBuffer {
+    return FfiConverterTypeConfiguredProjectRootsStatus.lower(value)
+}
+
+
+public struct ConfiguredProjectRootsUpdate: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let roots: ConfiguredProjectRootsStatus
+    public let changed: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, roots: ConfiguredProjectRootsStatus, changed: Bool) {
+        self.recordVersion = recordVersion
+        self.roots = roots
+        self.changed = changed
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension ConfiguredProjectRootsUpdate: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeConfiguredProjectRootsUpdate: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ConfiguredProjectRootsUpdate {
+        return
+            try ConfiguredProjectRootsUpdate(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                roots: FfiConverterTypeConfiguredProjectRootsStatus.read(from: &buf),
+                changed: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ConfiguredProjectRootsUpdate, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterTypeConfiguredProjectRootsStatus.write(value.roots, into: &buf)
+        FfiConverterBool.write(value.changed, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeConfiguredProjectRootsUpdate_lift(_ buf: RustBuffer) throws -> ConfiguredProjectRootsUpdate {
+    return try FfiConverterTypeConfiguredProjectRootsUpdate.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeConfiguredProjectRootsUpdate_lower(_ value: ConfiguredProjectRootsUpdate) -> RustBuffer {
+    return FfiConverterTypeConfiguredProjectRootsUpdate.lower(value)
 }
 
 
@@ -10685,6 +10975,227 @@ public func FfiConverterTypeCleanupWarning_lift(_ buf: RustBuffer) throws -> Cle
 #endif
 public func FfiConverterTypeCleanupWarning_lower(_ value: CleanupWarning) -> RustBuffer {
     return FfiConverterTypeCleanupWarning.lower(value)
+}
+
+
+
+public enum ConfiguredProjectRootsError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
+
+
+
+    case Closed
+    case InvalidRecordVersion
+    case InvalidPath
+    case TooManyPaths
+    case OverlappingPaths
+    case RevisionExhausted
+    case InvalidClock
+    case IncompatibleSchema
+    case Busy
+    case UnsafeStorage
+    case BudgetExceeded
+    case CorruptData
+    case Unavailable
+    case OutcomeUnknown
+    case InternalState
+
+
+
+
+
+
+    public var errorDescription: String? {
+        String(reflecting: self)
+    }
+
+}
+
+#if compiler(>=6)
+extension ConfiguredProjectRootsError: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeConfiguredProjectRootsError: FfiConverterRustBuffer {
+    typealias SwiftType = ConfiguredProjectRootsError
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ConfiguredProjectRootsError {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+
+
+
+        case 1: return .Closed
+        case 2: return .InvalidRecordVersion
+        case 3: return .InvalidPath
+        case 4: return .TooManyPaths
+        case 5: return .OverlappingPaths
+        case 6: return .RevisionExhausted
+        case 7: return .InvalidClock
+        case 8: return .IncompatibleSchema
+        case 9: return .Busy
+        case 10: return .UnsafeStorage
+        case 11: return .BudgetExceeded
+        case 12: return .CorruptData
+        case 13: return .Unavailable
+        case 14: return .OutcomeUnknown
+        case 15: return .InternalState
+
+         default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: ConfiguredProjectRootsError, into buf: inout [UInt8]) {
+        switch value {
+
+
+
+
+
+        case .Closed:
+            writeInt(&buf, Int32(1))
+
+
+        case .InvalidRecordVersion:
+            writeInt(&buf, Int32(2))
+
+
+        case .InvalidPath:
+            writeInt(&buf, Int32(3))
+
+
+        case .TooManyPaths:
+            writeInt(&buf, Int32(4))
+
+
+        case .OverlappingPaths:
+            writeInt(&buf, Int32(5))
+
+
+        case .RevisionExhausted:
+            writeInt(&buf, Int32(6))
+
+
+        case .InvalidClock:
+            writeInt(&buf, Int32(7))
+
+
+        case .IncompatibleSchema:
+            writeInt(&buf, Int32(8))
+
+
+        case .Busy:
+            writeInt(&buf, Int32(9))
+
+
+        case .UnsafeStorage:
+            writeInt(&buf, Int32(10))
+
+
+        case .BudgetExceeded:
+            writeInt(&buf, Int32(11))
+
+
+        case .CorruptData:
+            writeInt(&buf, Int32(12))
+
+
+        case .Unavailable:
+            writeInt(&buf, Int32(13))
+
+
+        case .OutcomeUnknown:
+            writeInt(&buf, Int32(14))
+
+
+        case .InternalState:
+            writeInt(&buf, Int32(15))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeConfiguredProjectRootsError_lift(_ buf: RustBuffer) throws -> ConfiguredProjectRootsError {
+    return try FfiConverterTypeConfiguredProjectRootsError.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeConfiguredProjectRootsError_lower(_ value: ConfiguredProjectRootsError) -> RustBuffer {
+    return FfiConverterTypeConfiguredProjectRootsError.lower(value)
+}
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum ConfiguredProjectRootsSource: Equatable, Hashable {
+
+    case `default`
+    case stored
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension ConfiguredProjectRootsSource: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeConfiguredProjectRootsSource: FfiConverterRustBuffer {
+    typealias SwiftType = ConfiguredProjectRootsSource
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ConfiguredProjectRootsSource {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .`default`
+
+        case 2: return .stored
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: ConfiguredProjectRootsSource, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .`default`:
+            writeInt(&buf, Int32(1))
+
+
+        case .stored:
+            writeInt(&buf, Int32(2))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeConfiguredProjectRootsSource_lift(_ buf: RustBuffer) throws -> ConfiguredProjectRootsSource {
+    return try FfiConverterTypeConfiguredProjectRootsSource.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeConfiguredProjectRootsSource_lower(_ value: ConfiguredProjectRootsSource) -> RustBuffer {
+    return FfiConverterTypeConfiguredProjectRootsSource.lower(value)
 }
 
 
@@ -17329,6 +17840,31 @@ fileprivate struct FfiConverterSequenceTypeCleanupSessionSummary: FfiConverterRu
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeConfiguredProjectRootPath: FfiConverterRustBuffer {
+    typealias SwiftType = [ConfiguredProjectRootPath]
+
+    public static func write(_ value: [ConfiguredProjectRootPath], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeConfiguredProjectRootPath.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [ConfiguredProjectRootPath] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [ConfiguredProjectRootPath]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeConfiguredProjectRootPath.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeDirectCargoCodeDirectoryHash: FfiConverterRustBuffer {
     typealias SwiftType = [DirectCargoCodeDirectoryHash]
 
@@ -17704,6 +18240,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_dux_ffi_checksum_method_duxengine_get_cleanup_exclusions() != 17969) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_dux_ffi_checksum_method_duxengine_get_configured_project_roots() != 53926) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_dux_ffi_checksum_method_duxengine_get_disk_pressure_policy() != 6278) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -17737,6 +18276,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_dux_ffi_checksum_method_duxengine_reset_cleanup_exclusions() != 15740) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_dux_ffi_checksum_method_duxengine_reset_configured_project_roots() != 51583) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_dux_ffi_checksum_method_duxengine_reset_disk_pressure_policy() != 23462) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -17750,6 +18292,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_set_cleanup_exclusions() != 35166) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_duxengine_set_configured_project_roots() != 18041) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_set_disk_pressure_policy() != 62356) {

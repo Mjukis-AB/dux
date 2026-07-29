@@ -1,5 +1,20 @@
 # Changelog
 
+- Added the durable configured-project-root registry needed by the future
+  targeted low-disk scan. Core now stores at most 16 lossless absolute,
+  normalized, non-root host paths in canonical byte order, rejects duplicates,
+  nesting/overlap, control bytes, oversized input, corrupt rows, and newer
+  value schemas, and distinguishes a rowless empty Default from an explicitly
+  stored empty set. Revisioned replace/reset writes are exact-no-op aware and
+  reconcile uncertain commits. UniFFI contract v37 and the native adapter
+  independently validate bounds, encoding, ordering, overlap, source,
+  revision, and timestamp shape. Ambiguous writes and post-write projection
+  failures block more edits until an authoritative reload succeeds. Settings
+  adds accessible folder-only add/remove/reset controls and keeps the registry
+  explicitly read-only:
+  selecting a root starts no scan, grants no filesystem access, and creates no
+  candidate, plan, approval, AI request, or cleanup effect. The pressure
+  runner remains a later Milestone 6 slice.
 - Completed the first reviewable disk-pressure history surface through UniFFI
   contract v36. Core now returns at most 64 newest-first Warning/Critical
   episodes for one validated startup-volume identity at one exact capacity

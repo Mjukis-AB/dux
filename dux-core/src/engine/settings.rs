@@ -278,6 +278,64 @@ pub enum CleanupExclusionsError {
     InternalState,
 }
 
+/// Origin of the effective configured-project-root registry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConfiguredProjectRootsSource {
+    /// No registry row exists, so the empty versioned default is effective.
+    Default,
+    /// The user explicitly stored this root set, including an empty set.
+    Stored,
+}
+
+/// Bounded project roots used only to discover content for scanning.
+///
+/// These paths grant no filesystem access and carry no cleanup authority.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConfiguredProjectRoots {
+    pub roots: Vec<PathBuf>,
+    pub source: ConfiguredProjectRootsSource,
+    pub revision: u64,
+    pub updated_at: Option<SystemTime>,
+}
+
+/// Result of explicitly replacing or resetting the project-root registry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConfiguredProjectRootsUpdate {
+    pub settings: ConfiguredProjectRoots,
+    /// False only when the exact requested source and root set were effective.
+    pub changed: bool,
+}
+
+/// Stable failure taxonomy for the discovery-only project-root registry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum ConfiguredProjectRootsError {
+    #[error("engine session is closed")]
+    Closed,
+    #[error("configured project roots are invalid or exceed their fixed bound")]
+    InvalidInput,
+    #[error("the configured-project-root revision cannot advance")]
+    RevisionExhausted,
+    #[error("the system clock cannot be represented by the settings store")]
+    InvalidClock,
+    #[error("the durable store schema is newer than this engine")]
+    IncompatibleSchema,
+    #[error("the durable store is busy")]
+    Busy,
+    #[error("the durable store is unsafe")]
+    UnsafeStorage,
+    #[error("the settings query exceeded its fixed resource budget")]
+    QueryLimitExceeded,
+    #[error("configured project roots are corrupt")]
+    CorruptData,
+    #[error("configured project roots are unavailable")]
+    Unavailable,
+    #[error("the settings write outcome could not be proven")]
+    OutcomeUnknown,
+    #[error("engine settings state is unavailable")]
+    InternalState,
+}
+
 /// Stable, path-free failure taxonomy for pressure-policy settings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
