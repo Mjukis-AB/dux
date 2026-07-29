@@ -74,6 +74,9 @@ protocol DuxSnapshotReviewBrowsing: Sendable {
     func startRustTargetCleanup(
         _ handle: ExplorerRustTargetPlanReviewHandle
     ) async throws -> any DuxRustTargetCleanupTask
+    func startRustTargetDryRun(
+        _ handle: ExplorerRustTargetPlanReviewHandle
+    ) async throws -> any DuxRustTargetDryRunTask
     func resolveLiveItem(
         scanID: String,
         nodeID: UInt64,
@@ -112,6 +115,12 @@ extension DuxSnapshotReviewBrowsing {
         _: ExplorerRustTargetPlanReviewHandle
     ) async throws -> any DuxRustTargetCleanupTask {
         throw ExplorerRustTargetCleanupStartError.unavailable
+    }
+
+    func startRustTargetDryRun(
+        _: ExplorerRustTargetPlanReviewHandle
+    ) async throws -> any DuxRustTargetDryRunTask {
+        throw ExplorerRustTargetDryRunStartError.unavailable
     }
 
     func resolveLiveItem(
@@ -386,6 +395,7 @@ final class ExplorerSnapshotBrowserModel {
     private(set) var isCandidateEvidencePaging = false
     private(set) var rustTargetPlanReviewState = ExplorerRustTargetPlanReviewState.idle
     private(set) var rustTargetCleanupState = ExplorerRustTargetCleanupState.idle
+    private(set) var rustTargetDryRunState = ExplorerRustTargetDryRunState.idle
     private(set) var largeFileThreshold = ExplorerSnapshotLargeFileThreshold.gibibyte1
     private(set) var largeFileAge = ExplorerSnapshotLargeFileAge.any
     private(set) var largeFilesPage: ExplorerSnapshotLargeFilesPage?
@@ -409,6 +419,9 @@ final class ExplorerSnapshotBrowserModel {
     private let scanDriver: (any ExplorerSubtreeScanDriving)?
     private let rustTargetPlanReviewClock: any ExplorerRustTargetPlanReviewClock
     private let rustTargetCleanupPollingClock: any ExplorerRustTargetCleanupPollingClock
+    private let rustTargetDryRunPollingClock: any ExplorerRustTargetDryRunPollingClock
+    private let rustTargetDryRunTerminalObserver:
+        (@MainActor @Sendable () async -> Void)?
 
     @ObservationIgnored
     private var generation: UInt64 = 0
@@ -441,6 +454,14 @@ final class ExplorerSnapshotBrowserModel {
     @ObservationIgnored
     private var rustTargetCleanupCancellationRequested = false
     @ObservationIgnored
+    private var rustTargetDryRunGeneration: UInt64 = 0
+    @ObservationIgnored
+    private var rustTargetDryRunTask: (any DuxRustTargetDryRunTask)?
+    @ObservationIgnored
+    private var rustTargetDryRunDriverTask: Task<Void, Never>?
+    @ObservationIgnored
+    private var rustTargetDryRunCancellationRequested = false
+    @ObservationIgnored
     private var coverageGeneration: UInt64 = 0
     @ObservationIgnored
     private var liveActionGeneration: UInt64 = 0
@@ -459,7 +480,11 @@ final class ExplorerSnapshotBrowserModel {
         rustTargetPlanReviewClock: any ExplorerRustTargetPlanReviewClock =
             ContinuousExplorerRustTargetPlanReviewClock(),
         rustTargetCleanupPollingClock: any ExplorerRustTargetCleanupPollingClock =
-            ContinuousExplorerRustTargetCleanupPollingClock()
+            ContinuousExplorerRustTargetCleanupPollingClock(),
+        rustTargetDryRunPollingClock: any ExplorerRustTargetDryRunPollingClock =
+            ContinuousExplorerRustTargetDryRunPollingClock(),
+        rustTargetDryRunTerminalObserver:
+            (@MainActor @Sendable () async -> Void)? = nil
     ) {
         self.reviews = reviews
         self.history = history
@@ -469,6 +494,8 @@ final class ExplorerSnapshotBrowserModel {
         self.scanDriver = scanDriver
         self.rustTargetPlanReviewClock = rustTargetPlanReviewClock
         self.rustTargetCleanupPollingClock = rustTargetCleanupPollingClock
+        self.rustTargetDryRunPollingClock = rustTargetDryRunPollingClock
+        self.rustTargetDryRunTerminalObserver = rustTargetDryRunTerminalObserver
     }
 
     var currentDirectory: ExplorerSnapshotNode? {
@@ -555,6 +582,8 @@ final class ExplorerSnapshotBrowserModel {
             && rustTargetPlanReviewState != .preparing
             && !rustTargetCleanupState.isActive
             && rustTargetCleanupState == .idle
+            && !rustTargetDryRunState.isActive
+            && rustTargetDryRunState == .idle
     }
 
     var hasPreviousCandidatePathPage: Bool {
@@ -1355,6 +1384,7 @@ final class ExplorerSnapshotBrowserModel {
     {
         guard
             rustTargetCleanupState == .idle,
+            rustTargetDryRunState == .idle,
             case let .ready(info) = rustTargetPlanReviewState,
             let handle = rustTargetPlanReviewHandle,
             handle.info == info
@@ -1376,6 +1406,7 @@ final class ExplorerSnapshotBrowserModel {
     ) async {
         guard
             rustTargetCleanupState == .idle,
+            rustTargetDryRunState == .idle,
             confirmation.generation == rustTargetCleanupGeneration,
             case let .ready(info) = rustTargetPlanReviewState,
             info == confirmation.info,
@@ -1499,6 +1530,133 @@ final class ExplorerSnapshotBrowserModel {
         }
         rustTargetCleanupTask = nil
         rustTargetCleanupDriverTask = nil
+    }
+
+    /// Consumes the exact displayed plan review into read-only validation.
+    /// Unlike permanent cleanup, this requires no destructive confirmation and
+    /// publishes only path-free task observations.
+    func startRustTargetDryRun() async {
+        guard
+            rustTargetDryRunState == .idle,
+            rustTargetCleanupState == .idle,
+            case let .ready(info) = rustTargetPlanReviewState,
+            let handle = rustTargetPlanReviewHandle,
+            handle.info == info
+        else {
+            return
+        }
+
+        rustTargetPlanReviewGeneration &+= 1
+        rustTargetPlanReviewExpiryTask?.cancel()
+        rustTargetPlanReviewExpiryTask = nil
+        rustTargetPlanReviewHandle = nil
+        rustTargetPlanReviewState = .idle
+
+        rustTargetDryRunGeneration &+= 1
+        let operation = rustTargetDryRunGeneration
+        rustTargetDryRunCancellationRequested = false
+        rustTargetDryRunState = .starting(info)
+        let reviews = reviews
+        let clock = rustTargetDryRunPollingClock
+        let driver = Task { @MainActor [weak self] in
+            guard let self else {
+                return
+            }
+            do {
+                let task = try await reviews.startRustTargetDryRun(handle)
+                guard operation == self.rustTargetDryRunGeneration else {
+                    _ = try? await task.requestCancellation()
+                    return
+                }
+                self.rustTargetDryRunTask = task
+                if self.rustTargetDryRunCancellationRequested {
+                    _ = try? await task.requestCancellation()
+                }
+
+                while operation == self.rustTargetDryRunGeneration {
+                    let poll = try await task.poll()
+                    guard operation == self.rustTargetDryRunGeneration else {
+                        _ = try? await task.requestCancellation()
+                        return
+                    }
+                    self.rustTargetDryRunState = .observing(info, poll)
+                    if poll.phase.isTerminal {
+                        await self.rustTargetDryRunTerminalObserver?()
+                        self.finishRustTargetDryRunDriver(operation: operation)
+                        return
+                    }
+                    do {
+                        try await clock.sleepUntilNextPoll()
+                    } catch {
+                        // Once admitted, keep observing the core task even if
+                        // the initiating Swift task is cancelled.
+                        continue
+                    }
+                }
+                _ = try? await task.requestCancellation()
+            } catch {
+                guard operation == self.rustTargetDryRunGeneration else {
+                    return
+                }
+                if self.rustTargetDryRunTask == nil {
+                    let startError = (error as? ExplorerRustTargetDryRunStartError)
+                        ?? .invalidResponse
+                    self.rustTargetDryRunState = .startFailed(
+                        info,
+                        startError.failure
+                    )
+                } else {
+                    self.rustTargetDryRunState = .observationFailed(info)
+                }
+                self.finishRustTargetDryRunDriver(operation: operation)
+            }
+        }
+        rustTargetDryRunDriverTask = driver
+        await driver.value
+    }
+
+    func cancelRustTargetDryRun() async {
+        guard rustTargetDryRunState.isActive else {
+            return
+        }
+        rustTargetDryRunCancellationRequested = true
+        guard let task = rustTargetDryRunTask else {
+            return
+        }
+        _ = try? await task.requestCancellation()
+    }
+
+    func dismissRustTargetDryRunResult() async {
+        guard
+            !rustTargetDryRunState.isActive,
+            rustTargetDryRunDriverTask == nil
+        else {
+            return
+        }
+        rustTargetDryRunGeneration &+= 1
+        rustTargetDryRunState = .idle
+        rustTargetDryRunCancellationRequested = false
+        if phase == .ready, contentMode == .candidates {
+            await reloadCandidates()
+        }
+    }
+
+    func shutdownRustTargetDryRun() async {
+        rustTargetDryRunCancellationRequested = true
+        if let task = rustTargetDryRunTask {
+            _ = try? await task.requestCancellation()
+        }
+        if let driver = rustTargetDryRunDriverTask {
+            await driver.value
+        }
+    }
+
+    private func finishRustTargetDryRunDriver(operation: UInt64) {
+        guard operation == rustTargetDryRunGeneration else {
+            return
+        }
+        rustTargetDryRunTask = nil
+        rustTargetDryRunDriverTask = nil
     }
 
     private func loadCandidatePathPage(cursor: UInt16) async {

@@ -84,7 +84,10 @@ final class AppRuntime {
             coverage: engineService,
             liveActions: liveActions,
             subtreeScans: reviewController,
-            scanDriver: model
+            scanDriver: model,
+            rustTargetDryRunTerminalObserver: {
+                await model.refreshCleanupHistory()
+            }
         )
         scans = model
         capacityScheduler = DuxCapacitySamplingScheduler(sampler: model)
@@ -185,6 +188,7 @@ final class AppRuntime {
             model.invalidateCleanupHistoryOperations()
             await scans.shutdownHomeScan()
             await explorerSnapshotBrowser.shutdownRustTargetCleanup()
+            await explorerSnapshotBrowser.shutdownRustTargetDryRun()
             await explorerSnapshotBrowser.close()
             await capacityResampleRouter?.invalidate()
             await capacityScheduler.stop()

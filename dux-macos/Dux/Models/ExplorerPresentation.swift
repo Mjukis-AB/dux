@@ -82,6 +82,14 @@ enum ExplorerAccessibility {
         "explorer-snapshot-candidate-plan-review-refresh"
     static let snapshotCandidatePlanReviewClose =
         "explorer-snapshot-candidate-plan-review-close"
+    static let snapshotCandidateDryRunStart =
+        "explorer-snapshot-candidate-dry-run-start"
+    static let snapshotCandidateDryRunStatus =
+        "explorer-snapshot-candidate-dry-run-status"
+    static let snapshotCandidateDryRunCancel =
+        "explorer-snapshot-candidate-dry-run-cancel"
+    static let snapshotCandidateDryRunDismiss =
+        "explorer-snapshot-candidate-dry-run-dismiss"
     static let snapshotCandidateCleanupPrepare =
         "explorer-snapshot-candidate-cleanup-prepare"
     static let snapshotCandidateCleanupConfirm =
@@ -184,6 +192,10 @@ enum ExplorerAccessibility {
         snapshotCandidatePlanReviewWarnings,
         snapshotCandidatePlanReviewRefresh,
         snapshotCandidatePlanReviewClose,
+        snapshotCandidateDryRunStart,
+        snapshotCandidateDryRunStatus,
+        snapshotCandidateDryRunCancel,
+        snapshotCandidateDryRunDismiss,
         snapshotCandidateCleanupPrepare,
         snapshotCandidateCleanupConfirm,
         snapshotCandidateCleanupConfirmation,

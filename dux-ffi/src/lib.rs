@@ -65,6 +65,9 @@ use dux_core::engine::{
     PermanentSafeCleanupFailureKind as CorePermanentSafeCleanupFailureKind,
     RustTargetCleanupError as CoreRustTargetCleanupError,
     RustTargetCleanupResult as CoreRustTargetCleanupResult,
+    RustTargetDryRunError as CoreRustTargetDryRunError,
+    RustTargetDryRunFailureKind as CoreRustTargetDryRunFailureKind,
+    RustTargetDryRunResult as CoreRustTargetDryRunResult,
     RustTargetPlanReview as CoreRustTargetPlanReview,
     RustTargetPlanReviewError as CoreRustTargetPlanReviewError,
     RustTargetPlanReviewInfo as CoreRustTargetPlanReviewInfo,
@@ -110,7 +113,7 @@ use dux_core::{
     VolumeCapacity, VolumeId,
 };
 
-const FFI_CONTRACT_VERSION: u32 = 34;
+const FFI_CONTRACT_VERSION: u32 = 35;
 const FFI_RECORD_VERSION: u32 = 1;
 const RUST_TARGET_MINIMUM_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const SNAPSHOT_NODE_RECORD_VERSION: u32 = 2;
@@ -1470,6 +1473,98 @@ pub enum RustTargetCleanupTaskError {
     InternalState,
 }
 
+/// Path-free terminal observation for one exact reviewed Rust-target dry run.
+///
+/// The session identifier correlates read-only Cleanup History. It cannot
+/// authorize, resume, retry, or identify a filesystem target.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct RustTargetDryRunResult {
+    pub record_version: u32,
+    pub session_id: String,
+    pub status: CleanupSessionStatus,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum RustTargetDryRunTaskFailure {
+    ParentReviewUnavailable,
+    ReviewExpired,
+    ChangedDuringReview,
+    BudgetExceeded,
+    Busy,
+    UnsafeStorage,
+    IncompatibleSchema,
+    CorruptData,
+    HistoryUnresolved,
+    Unavailable,
+    InternalState,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct RustTargetDryRunPoll {
+    pub record_version: u32,
+    pub phase: TaskPhase,
+    pub cancellation_requested: bool,
+    pub revision: u64,
+    pub failure: Option<RustTargetDryRunTaskFailure>,
+    pub result: Option<RustTargetDryRunResult>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum RustTargetDryRunCancelOutcome {
+    CancelledBeforeStart,
+    Requested,
+    AlreadyRequested,
+    AlreadyTerminal,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error, uniffi::Error)]
+pub enum RustTargetDryRunStartError {
+    #[error("the engine session is closed")]
+    Closed,
+    #[error("the supplied plan review belongs to another engine")]
+    WrongEngine,
+    #[error("the exact Rust-target plan review is no longer available")]
+    ReviewUnavailable,
+    #[error("the exact parent snapshot review is released or expired")]
+    ParentReviewUnavailable,
+    #[error("the exact Rust-target plan review expired")]
+    ReviewExpired,
+    #[error("the Rust-target plan evidence changed before or during validation")]
+    ChangedDuringReview,
+    #[error("the dry run was cancelled before durable validation began")]
+    CancelledBeforeStart,
+    #[error("the dry run exceeded its bounded resource budget")]
+    BudgetExceeded,
+    #[error("the engine task queue is full")]
+    QueueFull,
+    #[error("another cleanup operation is active")]
+    Busy,
+    #[error("the dry-run history store is unsafe")]
+    UnsafeStorage,
+    #[error("the dry-run history schema is incompatible")]
+    IncompatibleSchema,
+    #[error("the dry-run history journal is corrupt")]
+    CorruptData,
+    #[error("the dry-run history outcome could not be reconciled")]
+    HistoryUnresolved,
+    #[error("the dry run is unavailable")]
+    Unavailable,
+    #[error("the dry-run state is internally unavailable")]
+    InternalState,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error, uniffi::Error)]
+pub enum RustTargetDryRunTaskError {
+    #[error("the engine session is closed")]
+    Closed,
+    #[error("the dry-run task is no longer available")]
+    TaskUnavailable,
+    #[error("the retained task is not a Rust-target dry run")]
+    WrongTaskKind,
+    #[error("the dry-run task state is internally unavailable")]
+    InternalState,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct CandidateSummary {
     pub record_version: u32,
@@ -2463,6 +2558,37 @@ impl RustTargetPlanReviewSession {
         }
     }
 
+    /// Irreversibly consume this FFI review for one correct-engine dry-run
+    /// start attempt. This remains a separate authority edge from permanent
+    /// cleanup even though both consume the same opaque reviewed plan.
+    fn take_for_dry_run_start(
+        &self,
+    ) -> Result<Box<CoreRustTargetPlanReview>, RustTargetDryRunStartError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| RustTargetDryRunStartError::InternalState)?;
+        match &*state {
+            RustTargetPlanReviewState::Available(_) => {
+                let RustTargetPlanReviewState::Available(review) =
+                    std::mem::replace(&mut *state, RustTargetPlanReviewState::Consumed)
+                else {
+                    unreachable!("available state was just matched")
+                };
+                Ok(review)
+            }
+            RustTargetPlanReviewState::Inspecting => {
+                *state = RustTargetPlanReviewState::ReleasePending;
+                Err(RustTargetDryRunStartError::ReviewUnavailable)
+            }
+            RustTargetPlanReviewState::ReleasePending
+            | RustTargetPlanReviewState::Consumed
+            | RustTargetPlanReviewState::Released => {
+                Err(RustTargetDryRunStartError::ReviewUnavailable)
+            }
+        }
+    }
+
     fn release_inner(
         &self,
     ) -> Result<RustTargetPlanReviewReleaseOutcome, RustTargetPlanReviewError> {
@@ -3294,6 +3420,57 @@ impl RustTargetCleanupTask {
     }
 }
 
+/// Opaque observer for one engine-owned, effect-free Rust-target dry-run task.
+/// Dropping this object does not cancel the task.
+#[derive(uniffi::Object)]
+pub struct RustTargetDryRunTask {
+    engine: EngineHandle,
+    id: TaskId,
+}
+
+#[uniffi::export]
+impl RustTargetDryRunTask {
+    pub fn poll(&self) -> Result<RustTargetDryRunPoll, RustTargetDryRunTaskError> {
+        let snapshot = self
+            .engine
+            .task_snapshot(self.id)
+            .map_err(map_rust_target_dry_run_task_access_error)?;
+        if snapshot.kind != CoreTaskKind::RustTargetDryRun {
+            return Err(RustTargetDryRunTaskError::WrongTaskKind);
+        }
+        let result = if snapshot.result_available {
+            self.engine
+                .rust_target_dry_run_result(self.id)
+                .map_err(map_rust_target_dry_run_task_access_error)?
+                .map(|result| project_rust_target_dry_run_result(&result))
+                .transpose()?
+        } else {
+            None
+        };
+        let failure = snapshot
+            .failure
+            .map(map_rust_target_dry_run_task_failure)
+            .transpose()?;
+        validate_rust_target_dry_run_poll_shape(snapshot.phase, failure, result.as_ref())?;
+        Ok(RustTargetDryRunPoll {
+            record_version: FFI_RECORD_VERSION,
+            phase: map_phase(snapshot.phase),
+            cancellation_requested: snapshot.cancellation_requested,
+            revision: snapshot.revision,
+            failure,
+            result,
+        })
+    }
+
+    pub fn cancel(&self) -> Result<RustTargetDryRunCancelOutcome, RustTargetDryRunTaskError> {
+        let outcome = self
+            .engine
+            .cancel_task(self.id)
+            .map_err(map_rust_target_dry_run_task_access_error)?;
+        Ok(map_rust_target_dry_run_cancel_outcome(outcome))
+    }
+}
+
 #[derive(uniffi::Object)]
 pub struct MaintenanceTask {
     engine: EngineHandle,
@@ -3749,6 +3926,21 @@ impl DuxEngine {
         })
     }
 
+    /// Consume one exact, engine-bound reviewed plan for an effect-free dry
+    /// run. No path, effect witness, or permanent-cleanup task is exposed
+    /// across this boundary.
+    pub fn start_rust_target_dry_run(
+        &self,
+        review: Arc<RustTargetPlanReviewSession>,
+    ) -> Result<Arc<RustTargetDryRunTask>, RustTargetDryRunStartError> {
+        self.start_rust_target_dry_run_with(review, |engine, review| {
+            engine.start_rust_target_dry_run(review).map_err(|failure| {
+                let error = failure.error();
+                (error, Box::new(failure.into_review()))
+            })
+        })
+    }
+
     pub fn start_scan(&self, request: ScanRequest) -> Result<ScanStart, ScanError> {
         if request.record_version != FFI_RECORD_VERSION {
             return Err(ScanError::InvalidRecordVersion);
@@ -4154,6 +4346,44 @@ impl DuxEngine {
 }
 
 impl DuxEngine {
+    fn start_rust_target_dry_run_with(
+        &self,
+        review: Arc<RustTargetPlanReviewSession>,
+        start: impl FnOnce(
+            &EngineHandle,
+            CoreRustTargetPlanReview,
+        )
+            -> Result<TaskId, (CoreRustTargetDryRunError, Box<CoreRustTargetPlanReview>)>,
+    ) -> Result<Arc<RustTargetDryRunTask>, RustTargetDryRunStartError> {
+        if !Arc::ptr_eq(&review.engine_closed, &self.closed) {
+            return Err(RustTargetDryRunStartError::WrongEngine);
+        }
+        let _operation = self
+            .rust_target_plan_preparations
+            .enter_operation(&self.closed)
+            .map_err(map_plan_operation_to_dry_run_start_error)?;
+        let engine = {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| RustTargetDryRunStartError::InternalState)?;
+            match &*state {
+                EngineState::Open(engine) => engine.clone(),
+                EngineState::Closing | EngineState::Closed { .. } => {
+                    return Err(RustTargetDryRunStartError::Closed);
+                }
+            }
+        };
+        let core_review = *review.take_for_dry_run_start()?;
+        match start(&engine, core_review) {
+            Ok(id) => Ok(Arc::new(RustTargetDryRunTask { engine, id })),
+            Err((error, review)) => {
+                (*review).release();
+                Err(map_rust_target_dry_run_start_error(error))
+            }
+        }
+    }
+
     fn start_permanent_safe_cleanup_with(
         &self,
         review: Arc<RustTargetPlanReviewSession>,
@@ -5972,6 +6202,216 @@ const fn map_rust_target_cleanup_cancel_outcome(
         CoreCancelOutcome::Requested => RustTargetCleanupCancelOutcome::Requested,
         CoreCancelOutcome::AlreadyRequested => RustTargetCleanupCancelOutcome::AlreadyRequested,
         CoreCancelOutcome::AlreadyTerminal => RustTargetCleanupCancelOutcome::AlreadyTerminal,
+    }
+}
+
+fn project_rust_target_dry_run_result(
+    result: &CoreRustTargetDryRunResult,
+) -> Result<RustTargetDryRunResult, RustTargetDryRunTaskError> {
+    let session_id = result.session_id().as_str();
+    if !is_rust_target_dry_run_session_id(session_id) {
+        return Err(RustTargetDryRunTaskError::InternalState);
+    }
+    let status = map_cleanup_session_status(result.status())
+        .map_err(|_| RustTargetDryRunTaskError::InternalState)?;
+    let projected = RustTargetDryRunResult {
+        record_version: FFI_RECORD_VERSION,
+        session_id: session_id.to_owned(),
+        status,
+    };
+    validate_rust_target_dry_run_result(&projected)?;
+    Ok(projected)
+}
+
+fn is_rust_target_dry_run_session_id(value: &str) -> bool {
+    const PREFIX: &str = "cleanup:rust-target-dry-run:";
+    value.len() <= MAX_CLEANUP_HISTORY_SESSION_ID_BYTES
+        && value.strip_prefix(PREFIX).is_some_and(|suffix| {
+            suffix.len() == 32
+                && suffix
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+}
+
+fn validate_rust_target_dry_run_result(
+    result: &RustTargetDryRunResult,
+) -> Result<(), RustTargetDryRunTaskError> {
+    if result.record_version != FFI_RECORD_VERSION
+        || !is_rust_target_dry_run_session_id(&result.session_id)
+        || !matches!(
+            result.status,
+            CleanupSessionStatus::DryRun
+                | CleanupSessionStatus::Rejected
+                | CleanupSessionStatus::Failed
+                | CleanupSessionStatus::Interrupted
+                | CleanupSessionStatus::Cancelled
+        )
+    {
+        return Err(RustTargetDryRunTaskError::InternalState);
+    }
+    Ok(())
+}
+
+fn validate_rust_target_dry_run_poll_shape(
+    phase: CoreTaskPhase,
+    failure: Option<RustTargetDryRunTaskFailure>,
+    result: Option<&RustTargetDryRunResult>,
+) -> Result<(), RustTargetDryRunTaskError> {
+    if let Some(result) = result {
+        validate_rust_target_dry_run_result(result)?;
+    }
+    let valid = match phase {
+        CoreTaskPhase::Queued | CoreTaskPhase::Running => failure.is_none() && result.is_none(),
+        CoreTaskPhase::Succeeded => {
+            failure.is_none()
+                && result.is_some_and(|result| {
+                    matches!(
+                        result.status,
+                        CleanupSessionStatus::DryRun
+                            | CleanupSessionStatus::Rejected
+                            | CleanupSessionStatus::Failed
+                            | CleanupSessionStatus::Interrupted
+                    )
+                })
+        }
+        CoreTaskPhase::Cancelled => {
+            failure.is_none()
+                && result.is_none_or(|result| result.status == CleanupSessionStatus::Cancelled)
+        }
+        CoreTaskPhase::Failed => failure.is_some() && result.is_none(),
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(RustTargetDryRunTaskError::InternalState)
+    }
+}
+
+fn map_rust_target_dry_run_task_failure(
+    failure: TaskFailureKind,
+) -> Result<RustTargetDryRunTaskFailure, RustTargetDryRunTaskError> {
+    let TaskFailureKind::RustTargetDryRun(failure) = failure else {
+        return Err(RustTargetDryRunTaskError::InternalState);
+    };
+    Ok(match failure {
+        CoreRustTargetDryRunFailureKind::ParentReviewUnavailable => {
+            RustTargetDryRunTaskFailure::ParentReviewUnavailable
+        }
+        CoreRustTargetDryRunFailureKind::ReviewExpired => {
+            RustTargetDryRunTaskFailure::ReviewExpired
+        }
+        CoreRustTargetDryRunFailureKind::ChangedDuringReview => {
+            RustTargetDryRunTaskFailure::ChangedDuringReview
+        }
+        CoreRustTargetDryRunFailureKind::BudgetExceeded => {
+            RustTargetDryRunTaskFailure::BudgetExceeded
+        }
+        CoreRustTargetDryRunFailureKind::Busy => RustTargetDryRunTaskFailure::Busy,
+        CoreRustTargetDryRunFailureKind::UnsafeStorage => {
+            RustTargetDryRunTaskFailure::UnsafeStorage
+        }
+        CoreRustTargetDryRunFailureKind::IncompatibleSchema => {
+            RustTargetDryRunTaskFailure::IncompatibleSchema
+        }
+        CoreRustTargetDryRunFailureKind::CorruptData => RustTargetDryRunTaskFailure::CorruptData,
+        CoreRustTargetDryRunFailureKind::HistoryUnresolved => {
+            RustTargetDryRunTaskFailure::HistoryUnresolved
+        }
+        CoreRustTargetDryRunFailureKind::Unavailable => RustTargetDryRunTaskFailure::Unavailable,
+        CoreRustTargetDryRunFailureKind::InternalState => {
+            RustTargetDryRunTaskFailure::InternalState
+        }
+        _ => RustTargetDryRunTaskFailure::InternalState,
+    })
+}
+
+const fn map_rust_target_dry_run_start_error(
+    error: CoreRustTargetDryRunError,
+) -> RustTargetDryRunStartError {
+    match error {
+        CoreRustTargetDryRunError::Closed => RustTargetDryRunStartError::Closed,
+        CoreRustTargetDryRunError::WrongEngine => RustTargetDryRunStartError::WrongEngine,
+        CoreRustTargetDryRunError::ParentReviewUnavailable => {
+            RustTargetDryRunStartError::ParentReviewUnavailable
+        }
+        CoreRustTargetDryRunError::ReviewExpired => RustTargetDryRunStartError::ReviewExpired,
+        CoreRustTargetDryRunError::ChangedDuringReview => {
+            RustTargetDryRunStartError::ChangedDuringReview
+        }
+        CoreRustTargetDryRunError::CancelledBeforeStart => {
+            RustTargetDryRunStartError::CancelledBeforeStart
+        }
+        CoreRustTargetDryRunError::BudgetExceeded => RustTargetDryRunStartError::BudgetExceeded,
+        CoreRustTargetDryRunError::QueueFull => RustTargetDryRunStartError::QueueFull,
+        CoreRustTargetDryRunError::Busy => RustTargetDryRunStartError::Busy,
+        CoreRustTargetDryRunError::UnsafeStorage => RustTargetDryRunStartError::UnsafeStorage,
+        CoreRustTargetDryRunError::IncompatibleSchema => {
+            RustTargetDryRunStartError::IncompatibleSchema
+        }
+        CoreRustTargetDryRunError::CorruptData => RustTargetDryRunStartError::CorruptData,
+        CoreRustTargetDryRunError::HistoryUnresolved => {
+            RustTargetDryRunStartError::HistoryUnresolved
+        }
+        CoreRustTargetDryRunError::Unavailable => RustTargetDryRunStartError::Unavailable,
+        CoreRustTargetDryRunError::InternalState => RustTargetDryRunStartError::InternalState,
+    }
+}
+
+const fn map_plan_operation_to_dry_run_start_error(
+    error: RustTargetPlanReviewError,
+) -> RustTargetDryRunStartError {
+    match error {
+        RustTargetPlanReviewError::Closed => RustTargetDryRunStartError::Closed,
+        RustTargetPlanReviewError::WrongEngine => RustTargetDryRunStartError::WrongEngine,
+        RustTargetPlanReviewError::ParentReviewUnavailable => {
+            RustTargetDryRunStartError::ParentReviewUnavailable
+        }
+        RustTargetPlanReviewError::ReviewExpired => RustTargetDryRunStartError::ReviewExpired,
+        RustTargetPlanReviewError::ChangedDuringReview
+        | RustTargetPlanReviewError::CandidateUnavailable
+        | RustTargetPlanReviewError::CargoNotEnrolled
+        | RustTargetPlanReviewError::ActiveProcesses => {
+            RustTargetDryRunStartError::ChangedDuringReview
+        }
+        RustTargetPlanReviewError::BudgetExceeded => RustTargetDryRunStartError::BudgetExceeded,
+        RustTargetPlanReviewError::Busy | RustTargetPlanReviewError::ReviewBusy => {
+            RustTargetDryRunStartError::Busy
+        }
+        RustTargetPlanReviewError::UnsafeStorage => RustTargetDryRunStartError::UnsafeStorage,
+        RustTargetPlanReviewError::CorruptData => RustTargetDryRunStartError::CorruptData,
+        RustTargetPlanReviewError::UnsupportedPlatform | RustTargetPlanReviewError::Unavailable => {
+            RustTargetDryRunStartError::Unavailable
+        }
+        RustTargetPlanReviewError::ReviewUnavailable => {
+            RustTargetDryRunStartError::ReviewUnavailable
+        }
+        RustTargetPlanReviewError::InvalidRecordVersion
+        | RustTargetPlanReviewError::InternalState => RustTargetDryRunStartError::InternalState,
+    }
+}
+
+fn map_rust_target_dry_run_task_access_error(error: TaskAccessError) -> RustTargetDryRunTaskError {
+    match error {
+        TaskAccessError::Closed => RustTargetDryRunTaskError::Closed,
+        TaskAccessError::UnknownTask => RustTargetDryRunTaskError::TaskUnavailable,
+        TaskAccessError::WrongTaskKind => RustTargetDryRunTaskError::WrongTaskKind,
+        TaskAccessError::InvalidEventLimit { .. }
+        | TaskAccessError::InvalidEventCursor
+        | TaskAccessError::InternalState => RustTargetDryRunTaskError::InternalState,
+    }
+}
+
+const fn map_rust_target_dry_run_cancel_outcome(
+    outcome: CoreCancelOutcome,
+) -> RustTargetDryRunCancelOutcome {
+    match outcome {
+        CoreCancelOutcome::CancelledBeforeStart => {
+            RustTargetDryRunCancelOutcome::CancelledBeforeStart
+        }
+        CoreCancelOutcome::Requested => RustTargetDryRunCancelOutcome::Requested,
+        CoreCancelOutcome::AlreadyRequested => RustTargetDryRunCancelOutcome::AlreadyRequested,
+        CoreCancelOutcome::AlreadyTerminal => RustTargetDryRunCancelOutcome::AlreadyTerminal,
     }
 }
 
@@ -8420,10 +8860,10 @@ mod tests {
     }
 
     #[test]
-    fn reports_contract_thirty_four_and_preserves_legacy_formatting() {
+    fn reports_contract_thirty_five_and_preserves_legacy_formatting() {
         let _guard = ENGINE_TEST_LOCK.lock().unwrap();
         let (_temp, engine) = engine();
-        assert_eq!(library_version().ffi_contract_version, 34);
+        assert_eq!(library_version().ffi_contract_version, 35);
         assert_eq!(engine.library_version().unwrap(), library_version());
         assert_eq!(engine.format_size(1536).unwrap().display, "1.5 KB");
         assert!(engine.close());
@@ -8808,6 +9248,300 @@ mod tests {
             session.release().unwrap(),
             RustTargetPlanReviewReleaseOutcome::AlreadyUnavailable
         );
+    }
+
+    fn dry_run_result_for_test(status: CleanupSessionStatus) -> RustTargetDryRunResult {
+        RustTargetDryRunResult {
+            record_version: FFI_RECORD_VERSION,
+            session_id: "cleanup:rust-target-dry-run:0123456789abcdef0123456789abcdef".to_owned(),
+            status,
+        }
+    }
+
+    #[test]
+    fn rust_target_dry_run_poll_shapes_and_correlation_are_fail_closed() {
+        let dry_run = dry_run_result_for_test(CleanupSessionStatus::DryRun);
+        let rejected = dry_run_result_for_test(CleanupSessionStatus::Rejected);
+        let failed = dry_run_result_for_test(CleanupSessionStatus::Failed);
+        let interrupted = dry_run_result_for_test(CleanupSessionStatus::Interrupted);
+        let cancelled = dry_run_result_for_test(CleanupSessionStatus::Cancelled);
+        for (phase, failure, result) in [
+            (CoreTaskPhase::Queued, None, None),
+            (CoreTaskPhase::Running, None, None),
+            (CoreTaskPhase::Succeeded, None, Some(&dry_run)),
+            (CoreTaskPhase::Succeeded, None, Some(&rejected)),
+            (CoreTaskPhase::Succeeded, None, Some(&failed)),
+            (CoreTaskPhase::Succeeded, None, Some(&interrupted)),
+            (CoreTaskPhase::Cancelled, None, None),
+            (CoreTaskPhase::Cancelled, None, Some(&cancelled)),
+            (
+                CoreTaskPhase::Failed,
+                Some(RustTargetDryRunTaskFailure::HistoryUnresolved),
+                None,
+            ),
+            (
+                CoreTaskPhase::Failed,
+                Some(RustTargetDryRunTaskFailure::Busy),
+                None,
+            ),
+        ] {
+            assert!(
+                validate_rust_target_dry_run_poll_shape(phase, failure, result).is_ok(),
+                "expected valid shape for {phase:?}"
+            );
+        }
+
+        for (phase, failure, result) in [
+            (CoreTaskPhase::Succeeded, None, None),
+            (CoreTaskPhase::Succeeded, None, Some(&cancelled)),
+            (CoreTaskPhase::Failed, None, None),
+            (
+                CoreTaskPhase::Failed,
+                Some(RustTargetDryRunTaskFailure::Busy),
+                Some(&dry_run),
+            ),
+            (CoreTaskPhase::Cancelled, None, Some(&dry_run)),
+            (
+                CoreTaskPhase::Running,
+                Some(RustTargetDryRunTaskFailure::Busy),
+                None,
+            ),
+        ] {
+            assert_eq!(
+                validate_rust_target_dry_run_poll_shape(phase, failure, result),
+                Err(RustTargetDryRunTaskError::InternalState)
+            );
+        }
+
+        for status in [
+            CleanupSessionStatus::Planned,
+            CleanupSessionStatus::Running,
+            CleanupSessionStatus::Recovering,
+            CleanupSessionStatus::Completed,
+            CleanupSessionStatus::PartiallyCompleted,
+        ] {
+            assert_eq!(
+                validate_rust_target_dry_run_result(&dry_run_result_for_test(status)),
+                Err(RustTargetDryRunTaskError::InternalState)
+            );
+        }
+        for invalid in [
+            "cleanup:rust-target-dry-run:0123456789ABCDEF0123456789abcdef",
+            "cleanup:rust-target-dry-run:0123456789abcdef",
+            "cleanup:rust-target-dry-run:0123456789abcdef0123456789abcdeg",
+            "cleanup:rust-target:0123456789abcdef0123456789abcdef",
+            "cleanup:rust-target-dry-run:\u{0}123456789abcdef0123456789abcdef",
+        ] {
+            assert!(!is_rust_target_dry_run_session_id(invalid));
+        }
+    }
+
+    #[test]
+    fn rust_target_dry_run_failure_start_and_cancel_taxonomies_are_exact() {
+        use CoreRustTargetDryRunFailureKind as CoreFailure;
+        for (core, expected) in [
+            (
+                CoreFailure::ParentReviewUnavailable,
+                RustTargetDryRunTaskFailure::ParentReviewUnavailable,
+            ),
+            (
+                CoreFailure::ReviewExpired,
+                RustTargetDryRunTaskFailure::ReviewExpired,
+            ),
+            (
+                CoreFailure::ChangedDuringReview,
+                RustTargetDryRunTaskFailure::ChangedDuringReview,
+            ),
+            (
+                CoreFailure::BudgetExceeded,
+                RustTargetDryRunTaskFailure::BudgetExceeded,
+            ),
+            (CoreFailure::Busy, RustTargetDryRunTaskFailure::Busy),
+            (
+                CoreFailure::UnsafeStorage,
+                RustTargetDryRunTaskFailure::UnsafeStorage,
+            ),
+            (
+                CoreFailure::IncompatibleSchema,
+                RustTargetDryRunTaskFailure::IncompatibleSchema,
+            ),
+            (
+                CoreFailure::CorruptData,
+                RustTargetDryRunTaskFailure::CorruptData,
+            ),
+            (
+                CoreFailure::HistoryUnresolved,
+                RustTargetDryRunTaskFailure::HistoryUnresolved,
+            ),
+            (
+                CoreFailure::Unavailable,
+                RustTargetDryRunTaskFailure::Unavailable,
+            ),
+            (
+                CoreFailure::InternalState,
+                RustTargetDryRunTaskFailure::InternalState,
+            ),
+        ] {
+            assert_eq!(
+                map_rust_target_dry_run_task_failure(TaskFailureKind::RustTargetDryRun(core))
+                    .unwrap(),
+                expected
+            );
+        }
+        assert_eq!(
+            map_rust_target_dry_run_task_failure(TaskFailureKind::InternalFailure),
+            Err(RustTargetDryRunTaskError::InternalState)
+        );
+
+        for (core, expected) in [
+            (
+                CoreCancelOutcome::CancelledBeforeStart,
+                RustTargetDryRunCancelOutcome::CancelledBeforeStart,
+            ),
+            (
+                CoreCancelOutcome::Requested,
+                RustTargetDryRunCancelOutcome::Requested,
+            ),
+            (
+                CoreCancelOutcome::AlreadyRequested,
+                RustTargetDryRunCancelOutcome::AlreadyRequested,
+            ),
+            (
+                CoreCancelOutcome::AlreadyTerminal,
+                RustTargetDryRunCancelOutcome::AlreadyTerminal,
+            ),
+        ] {
+            assert_eq!(map_rust_target_dry_run_cancel_outcome(core), expected);
+        }
+
+        for (core, expected) in [
+            (
+                CoreRustTargetDryRunError::Closed,
+                RustTargetDryRunStartError::Closed,
+            ),
+            (
+                CoreRustTargetDryRunError::WrongEngine,
+                RustTargetDryRunStartError::WrongEngine,
+            ),
+            (
+                CoreRustTargetDryRunError::ParentReviewUnavailable,
+                RustTargetDryRunStartError::ParentReviewUnavailable,
+            ),
+            (
+                CoreRustTargetDryRunError::ReviewExpired,
+                RustTargetDryRunStartError::ReviewExpired,
+            ),
+            (
+                CoreRustTargetDryRunError::ChangedDuringReview,
+                RustTargetDryRunStartError::ChangedDuringReview,
+            ),
+            (
+                CoreRustTargetDryRunError::CancelledBeforeStart,
+                RustTargetDryRunStartError::CancelledBeforeStart,
+            ),
+            (
+                CoreRustTargetDryRunError::BudgetExceeded,
+                RustTargetDryRunStartError::BudgetExceeded,
+            ),
+            (
+                CoreRustTargetDryRunError::QueueFull,
+                RustTargetDryRunStartError::QueueFull,
+            ),
+            (
+                CoreRustTargetDryRunError::Busy,
+                RustTargetDryRunStartError::Busy,
+            ),
+            (
+                CoreRustTargetDryRunError::UnsafeStorage,
+                RustTargetDryRunStartError::UnsafeStorage,
+            ),
+            (
+                CoreRustTargetDryRunError::IncompatibleSchema,
+                RustTargetDryRunStartError::IncompatibleSchema,
+            ),
+            (
+                CoreRustTargetDryRunError::CorruptData,
+                RustTargetDryRunStartError::CorruptData,
+            ),
+            (
+                CoreRustTargetDryRunError::HistoryUnresolved,
+                RustTargetDryRunStartError::HistoryUnresolved,
+            ),
+            (
+                CoreRustTargetDryRunError::Unavailable,
+                RustTargetDryRunStartError::Unavailable,
+            ),
+            (
+                CoreRustTargetDryRunError::InternalState,
+                RustTargetDryRunStartError::InternalState,
+            ),
+        ] {
+            assert_eq!(map_rust_target_dry_run_start_error(core), expected);
+        }
+    }
+
+    #[test]
+    fn rust_target_dry_run_start_losing_an_info_race_is_irreversible() {
+        let tracker = Arc::new(RustTargetPlanPreparationTracker::default());
+        let session = RustTargetPlanReviewSession {
+            state: Mutex::new(RustTargetPlanReviewState::Inspecting),
+            parent_review: Weak::new(),
+            operations: tracker,
+            engine_closed: Arc::new(AtomicBool::new(false)),
+        };
+        assert!(matches!(
+            session.take_for_dry_run_start(),
+            Err(RustTargetDryRunStartError::ReviewUnavailable)
+        ));
+        assert!(matches!(
+            *session.state.lock().unwrap(),
+            RustTargetPlanReviewState::ReleasePending
+        ));
+        assert_eq!(
+            session.release().unwrap(),
+            RustTargetPlanReviewReleaseOutcome::AlreadyUnavailable
+        );
+    }
+
+    #[test]
+    fn rust_target_dry_run_wrong_engine_rejects_before_consuming_review() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (_temp, engine) = engine();
+        let review = Arc::new(RustTargetPlanReviewSession {
+            state: Mutex::new(RustTargetPlanReviewState::Inspecting),
+            parent_review: Weak::new(),
+            operations: Arc::new(RustTargetPlanPreparationTracker::default()),
+            engine_closed: Arc::new(AtomicBool::new(false)),
+        });
+        assert!(matches!(
+            engine.start_rust_target_dry_run(Arc::clone(&review)),
+            Err(RustTargetDryRunStartError::WrongEngine)
+        ));
+        assert!(matches!(
+            *review.state.lock().unwrap(),
+            RustTargetPlanReviewState::Inspecting
+        ));
+        assert!(engine.close());
+    }
+
+    #[test]
+    fn rust_target_dry_run_task_rejects_a_foreign_task_kind() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (temp, engine) = engine();
+        let root = temp.path().join("dry-run-wrong-kind");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("payload"), b"scan only").unwrap();
+        let scan = engine.start_scan(scan_request(&root)).unwrap();
+        let dry_run = RustTargetDryRunTask {
+            engine: scan.task.engine.clone(),
+            id: scan.task.id,
+        };
+        assert_eq!(
+            dry_run.poll(),
+            Err(RustTargetDryRunTaskError::WrongTaskKind)
+        );
+        let _ = wait_for_scan(&scan.task);
+        assert!(engine.close());
     }
 
     #[test]

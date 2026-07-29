@@ -5062,9 +5062,46 @@ Tasks:
     exclusion-refused, cancellation-during-validation, and manifest-drift task
     paths in 797.72 seconds with the target unchanged; the committed regression
     retains the complete successful mutation detector while focused layers
-    keep the ordinary suite bounded. The core API is not yet exposed through
-    UniFFI or Swift, so this does not enable Release cleanup or close the parent
-    orchestration item.
+    keep the ordinary suite bounded. At this core-only checkpoint the API had
+    no UniFFI or Swift exposure and did not enable Release cleanup.
+  - [x] 2026-07-29 slice: expose the production Rust-target dry run as a
+    complete non-destructive native vertical through UniFFI contract v35.
+    `DuxEngine.start_rust_target_dry_run` accepts only the exact engine-bound,
+    consume-once opaque review and returns a distinct task; it has no path,
+    candidate/plan/session identifier, mode flag, approval, driver, callback,
+    capacity sampler, or permanent-policy input. Wrong-engine refusal occurs
+    before consumption, while every owning-engine start attempt is one-shot
+    and mutually exclusive with permanent cleanup. The path-free result
+    contains only record version, a strict
+    `cleanup:rust-target-dry-run:<32 lowercase hex>` correlation identifier,
+    and a bounded terminal status. Separate start/task/failure/cancellation
+    taxonomies preserve `HistoryUnresolved` as uncertain read-only metadata
+    rather than permanent cleanup's unknown-effect state. Both Rust and Swift
+    reject wrong task kinds, invalid identifiers/statuses, impossible
+    phase/failure/result envelopes, regressing revisions, and cancellation
+    rollback.
+
+    Swift owns distinct dry-run DTOs, exact-handle controller consumption,
+    generation-fenced observation, explicit cancellation, dismissal, and
+    shutdown quiescence. The Explorer Release UI offers **Run dry check** from
+    the exact ready preview, describes it as point-in-time validation, and
+    always reports **No files changed · 0 B freed**. A terminal result explains
+    that the preview was consumed and a fresh preview is required before any
+    later dry run or cleanup. Permanent cleanup remains separately typed,
+    confirmation-gated, and absent from Release behind
+    `DUX_INTERNAL_PERMANENT_SAFE_CLEANUP`; the dry-run surface cannot chain or
+    upgrade itself into an effect.
+
+    Verification includes five focused UniFFI mapping/shape/consume-once
+    regressions; the complete FFI package passed 69 tests with only the two
+    intentional real-process cleanup fixtures ignored. Native boundary,
+    controller replay, browser lifecycle, and exact-once history-refresh tests
+    pass; the complete Debug Xcode scheme passed after an unrelated close
+    timing test failed once and immediately passed in isolation and on the
+    complete rerun. Locked all-target workspace check, warnings-denied Clippy,
+    formatting, generated arm64/x86_64 bindings, and an unsigned universal
+    Release build pass. The exact commit-stamped Release artifact is launched
+    after this checkpoint is committed.
 - [ ] Implement execution-time revalidation.
   - [x] 2026-07-19 slice: make the approved-session handoff use one canonical
     millisecond start time for persistence and journal claiming, and recheck

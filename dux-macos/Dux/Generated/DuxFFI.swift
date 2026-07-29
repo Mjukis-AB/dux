@@ -1012,6 +1012,13 @@ public protocol DuxEngineProtocol: AnyObject, Sendable {
      */
     func startPermanentSafeCleanup(review: RustTargetPlanReviewSession) throws  -> RustTargetCleanupTask
 
+    /**
+     * Consume one exact, engine-bound reviewed plan for an effect-free dry
+     * run. No path, effect witness, or permanent-cleanup task is exposed
+     * across this boundary.
+     */
+    func startRustTargetDryRun(review: RustTargetPlanReviewSession) throws  -> RustTargetDryRunTask
+
     func startScan(request: ScanRequest) throws  -> ScanStart
 
     /**
@@ -1436,6 +1443,20 @@ open func startPermanentSafeCleanup(review: RustTargetPlanReviewSession)throws  
 })
 }
 
+    /**
+     * Consume one exact, engine-bound reviewed plan for an effect-free dry
+     * run. No path, effect witness, or permanent-cleanup task is exposed
+     * across this boundary.
+     */
+open func startRustTargetDryRun(review: RustTargetPlanReviewSession)throws  -> RustTargetDryRunTask  {
+    return try  FfiConverterTypeRustTargetDryRunTask_lift(try rustCallWithError(FfiConverterTypeRustTargetDryRunStartError_lift) {
+    uniffi_dux_ffi_fn_method_duxengine_start_rust_target_dry_run(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeRustTargetPlanReviewSession_lower(review),$0
+    )
+})
+}
+
 open func startScan(request: ScanRequest)throws  -> ScanStart  {
     return try  FfiConverterTypeScanStart_lift(try rustCallWithError(FfiConverterTypeScanError_lift) {
     uniffi_dux_ffi_fn_method_duxengine_start_scan(
@@ -1766,6 +1787,140 @@ public func FfiConverterTypeRustTargetCleanupTask_lift(_ handle: UInt64) throws 
 #endif
 public func FfiConverterTypeRustTargetCleanupTask_lower(_ value: RustTargetCleanupTask) -> UInt64 {
     return FfiConverterTypeRustTargetCleanupTask.lower(value)
+}
+
+
+
+
+
+
+/**
+ * Opaque observer for one engine-owned, effect-free Rust-target dry-run task.
+ * Dropping this object does not cancel the task.
+ */
+public protocol RustTargetDryRunTaskProtocol: AnyObject, Sendable {
+
+    func cancel() throws  -> RustTargetDryRunCancelOutcome
+
+    func poll() throws  -> RustTargetDryRunPoll
+
+}
+/**
+ * Opaque observer for one engine-owned, effect-free Rust-target dry-run task.
+ * Dropping this object does not cancel the task.
+ */
+open class RustTargetDryRunTask: RustTargetDryRunTaskProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_dux_ffi_fn_clone_rusttargetdryruntask(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_dux_ffi_fn_free_rusttargetdryruntask(handle, $0) }
+    }
+
+
+
+
+open func cancel()throws  -> RustTargetDryRunCancelOutcome  {
+    return try  FfiConverterTypeRustTargetDryRunCancelOutcome_lift(try rustCallWithError(FfiConverterTypeRustTargetDryRunTaskError_lift) {
+    uniffi_dux_ffi_fn_method_rusttargetdryruntask_cancel(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+open func poll()throws  -> RustTargetDryRunPoll  {
+    return try  FfiConverterTypeRustTargetDryRunPoll_lift(try rustCallWithError(FfiConverterTypeRustTargetDryRunTaskError_lift) {
+    uniffi_dux_ffi_fn_method_rusttargetdryruntask_poll(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+
+
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRustTargetDryRunTask: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = RustTargetDryRunTask
+
+    public static func lift(_ handle: UInt64) throws -> RustTargetDryRunTask {
+        return RustTargetDryRunTask(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: RustTargetDryRunTask) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RustTargetDryRunTask {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: RustTargetDryRunTask, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRustTargetDryRunTask_lift(_ handle: UInt64) throws -> RustTargetDryRunTask {
+    return try FfiConverterTypeRustTargetDryRunTask.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRustTargetDryRunTask_lower(_ value: RustTargetDryRunTask) -> UInt64 {
+    return FfiConverterTypeRustTargetDryRunTask.lower(value)
 }
 
 
@@ -6026,6 +6181,140 @@ public func FfiConverterTypeRustTargetCleanupResult_lift(_ buf: RustBuffer) thro
 #endif
 public func FfiConverterTypeRustTargetCleanupResult_lower(_ value: RustTargetCleanupResult) -> RustBuffer {
     return FfiConverterTypeRustTargetCleanupResult.lower(value)
+}
+
+
+public struct RustTargetDryRunPoll: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let phase: TaskPhase
+    public let cancellationRequested: Bool
+    public let revision: UInt64
+    public let failure: RustTargetDryRunTaskFailure?
+    public let result: RustTargetDryRunResult?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, phase: TaskPhase, cancellationRequested: Bool, revision: UInt64, failure: RustTargetDryRunTaskFailure?, result: RustTargetDryRunResult?) {
+        self.recordVersion = recordVersion
+        self.phase = phase
+        self.cancellationRequested = cancellationRequested
+        self.revision = revision
+        self.failure = failure
+        self.result = result
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension RustTargetDryRunPoll: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRustTargetDryRunPoll: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RustTargetDryRunPoll {
+        return
+            try RustTargetDryRunPoll(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                phase: FfiConverterTypeTaskPhase.read(from: &buf),
+                cancellationRequested: FfiConverterBool.read(from: &buf),
+                revision: FfiConverterUInt64.read(from: &buf),
+                failure: FfiConverterOptionTypeRustTargetDryRunTaskFailure.read(from: &buf),
+                result: FfiConverterOptionTypeRustTargetDryRunResult.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: RustTargetDryRunPoll, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterTypeTaskPhase.write(value.phase, into: &buf)
+        FfiConverterBool.write(value.cancellationRequested, into: &buf)
+        FfiConverterUInt64.write(value.revision, into: &buf)
+        FfiConverterOptionTypeRustTargetDryRunTaskFailure.write(value.failure, into: &buf)
+        FfiConverterOptionTypeRustTargetDryRunResult.write(value.result, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRustTargetDryRunPoll_lift(_ buf: RustBuffer) throws -> RustTargetDryRunPoll {
+    return try FfiConverterTypeRustTargetDryRunPoll.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRustTargetDryRunPoll_lower(_ value: RustTargetDryRunPoll) -> RustBuffer {
+    return FfiConverterTypeRustTargetDryRunPoll.lower(value)
+}
+
+
+/**
+ * Path-free terminal observation for one exact reviewed Rust-target dry run.
+ *
+ * The session identifier correlates read-only Cleanup History. It cannot
+ * authorize, resume, retry, or identify a filesystem target.
+ */
+public struct RustTargetDryRunResult: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let sessionId: String
+    public let status: CleanupSessionStatus
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, sessionId: String, status: CleanupSessionStatus) {
+        self.recordVersion = recordVersion
+        self.sessionId = sessionId
+        self.status = status
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension RustTargetDryRunResult: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRustTargetDryRunResult: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RustTargetDryRunResult {
+        return
+            try RustTargetDryRunResult(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                sessionId: FfiConverterString.read(from: &buf),
+                status: FfiConverterTypeCleanupSessionStatus.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: RustTargetDryRunResult, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterString.write(value.sessionId, into: &buf)
+        FfiConverterTypeCleanupSessionStatus.write(value.status, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRustTargetDryRunResult_lift(_ buf: RustBuffer) throws -> RustTargetDryRunResult {
+    return try FfiConverterTypeRustTargetDryRunResult.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRustTargetDryRunResult_lower(_ value: RustTargetDryRunResult) -> RustBuffer {
+    return FfiConverterTypeRustTargetDryRunResult.lower(value)
 }
 
 
@@ -12789,6 +13078,465 @@ public func FfiConverterTypeRustTargetCleanupTaskFailure_lower(_ value: RustTarg
 }
 
 
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum RustTargetDryRunCancelOutcome: Equatable, Hashable {
+
+    case cancelledBeforeStart
+    case requested
+    case alreadyRequested
+    case alreadyTerminal
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension RustTargetDryRunCancelOutcome: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRustTargetDryRunCancelOutcome: FfiConverterRustBuffer {
+    typealias SwiftType = RustTargetDryRunCancelOutcome
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RustTargetDryRunCancelOutcome {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .cancelledBeforeStart
+
+        case 2: return .requested
+
+        case 3: return .alreadyRequested
+
+        case 4: return .alreadyTerminal
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: RustTargetDryRunCancelOutcome, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .cancelledBeforeStart:
+            writeInt(&buf, Int32(1))
+
+
+        case .requested:
+            writeInt(&buf, Int32(2))
+
+
+        case .alreadyRequested:
+            writeInt(&buf, Int32(3))
+
+
+        case .alreadyTerminal:
+            writeInt(&buf, Int32(4))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRustTargetDryRunCancelOutcome_lift(_ buf: RustBuffer) throws -> RustTargetDryRunCancelOutcome {
+    return try FfiConverterTypeRustTargetDryRunCancelOutcome.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRustTargetDryRunCancelOutcome_lower(_ value: RustTargetDryRunCancelOutcome) -> RustBuffer {
+    return FfiConverterTypeRustTargetDryRunCancelOutcome.lower(value)
+}
+
+
+
+public enum RustTargetDryRunStartError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
+
+
+
+    case Closed
+    case WrongEngine
+    case ReviewUnavailable
+    case ParentReviewUnavailable
+    case ReviewExpired
+    case ChangedDuringReview
+    case CancelledBeforeStart
+    case BudgetExceeded
+    case QueueFull
+    case Busy
+    case UnsafeStorage
+    case IncompatibleSchema
+    case CorruptData
+    case HistoryUnresolved
+    case Unavailable
+    case InternalState
+
+
+
+
+
+
+    public var errorDescription: String? {
+        String(reflecting: self)
+    }
+
+}
+
+#if compiler(>=6)
+extension RustTargetDryRunStartError: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRustTargetDryRunStartError: FfiConverterRustBuffer {
+    typealias SwiftType = RustTargetDryRunStartError
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RustTargetDryRunStartError {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+
+
+
+        case 1: return .Closed
+        case 2: return .WrongEngine
+        case 3: return .ReviewUnavailable
+        case 4: return .ParentReviewUnavailable
+        case 5: return .ReviewExpired
+        case 6: return .ChangedDuringReview
+        case 7: return .CancelledBeforeStart
+        case 8: return .BudgetExceeded
+        case 9: return .QueueFull
+        case 10: return .Busy
+        case 11: return .UnsafeStorage
+        case 12: return .IncompatibleSchema
+        case 13: return .CorruptData
+        case 14: return .HistoryUnresolved
+        case 15: return .Unavailable
+        case 16: return .InternalState
+
+         default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: RustTargetDryRunStartError, into buf: inout [UInt8]) {
+        switch value {
+
+
+
+
+
+        case .Closed:
+            writeInt(&buf, Int32(1))
+
+
+        case .WrongEngine:
+            writeInt(&buf, Int32(2))
+
+
+        case .ReviewUnavailable:
+            writeInt(&buf, Int32(3))
+
+
+        case .ParentReviewUnavailable:
+            writeInt(&buf, Int32(4))
+
+
+        case .ReviewExpired:
+            writeInt(&buf, Int32(5))
+
+
+        case .ChangedDuringReview:
+            writeInt(&buf, Int32(6))
+
+
+        case .CancelledBeforeStart:
+            writeInt(&buf, Int32(7))
+
+
+        case .BudgetExceeded:
+            writeInt(&buf, Int32(8))
+
+
+        case .QueueFull:
+            writeInt(&buf, Int32(9))
+
+
+        case .Busy:
+            writeInt(&buf, Int32(10))
+
+
+        case .UnsafeStorage:
+            writeInt(&buf, Int32(11))
+
+
+        case .IncompatibleSchema:
+            writeInt(&buf, Int32(12))
+
+
+        case .CorruptData:
+            writeInt(&buf, Int32(13))
+
+
+        case .HistoryUnresolved:
+            writeInt(&buf, Int32(14))
+
+
+        case .Unavailable:
+            writeInt(&buf, Int32(15))
+
+
+        case .InternalState:
+            writeInt(&buf, Int32(16))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRustTargetDryRunStartError_lift(_ buf: RustBuffer) throws -> RustTargetDryRunStartError {
+    return try FfiConverterTypeRustTargetDryRunStartError.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRustTargetDryRunStartError_lower(_ value: RustTargetDryRunStartError) -> RustBuffer {
+    return FfiConverterTypeRustTargetDryRunStartError.lower(value)
+}
+
+
+public enum RustTargetDryRunTaskError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
+
+
+
+    case Closed
+    case TaskUnavailable
+    case WrongTaskKind
+    case InternalState
+
+
+
+
+
+
+    public var errorDescription: String? {
+        String(reflecting: self)
+    }
+
+}
+
+#if compiler(>=6)
+extension RustTargetDryRunTaskError: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRustTargetDryRunTaskError: FfiConverterRustBuffer {
+    typealias SwiftType = RustTargetDryRunTaskError
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RustTargetDryRunTaskError {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+
+
+
+        case 1: return .Closed
+        case 2: return .TaskUnavailable
+        case 3: return .WrongTaskKind
+        case 4: return .InternalState
+
+         default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: RustTargetDryRunTaskError, into buf: inout [UInt8]) {
+        switch value {
+
+
+
+
+
+        case .Closed:
+            writeInt(&buf, Int32(1))
+
+
+        case .TaskUnavailable:
+            writeInt(&buf, Int32(2))
+
+
+        case .WrongTaskKind:
+            writeInt(&buf, Int32(3))
+
+
+        case .InternalState:
+            writeInt(&buf, Int32(4))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRustTargetDryRunTaskError_lift(_ buf: RustBuffer) throws -> RustTargetDryRunTaskError {
+    return try FfiConverterTypeRustTargetDryRunTaskError.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRustTargetDryRunTaskError_lower(_ value: RustTargetDryRunTaskError) -> RustBuffer {
+    return FfiConverterTypeRustTargetDryRunTaskError.lower(value)
+}
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum RustTargetDryRunTaskFailure: Equatable, Hashable {
+
+    case parentReviewUnavailable
+    case reviewExpired
+    case changedDuringReview
+    case budgetExceeded
+    case busy
+    case unsafeStorage
+    case incompatibleSchema
+    case corruptData
+    case historyUnresolved
+    case unavailable
+    case internalState
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension RustTargetDryRunTaskFailure: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRustTargetDryRunTaskFailure: FfiConverterRustBuffer {
+    typealias SwiftType = RustTargetDryRunTaskFailure
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RustTargetDryRunTaskFailure {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .parentReviewUnavailable
+
+        case 2: return .reviewExpired
+
+        case 3: return .changedDuringReview
+
+        case 4: return .budgetExceeded
+
+        case 5: return .busy
+
+        case 6: return .unsafeStorage
+
+        case 7: return .incompatibleSchema
+
+        case 8: return .corruptData
+
+        case 9: return .historyUnresolved
+
+        case 10: return .unavailable
+
+        case 11: return .internalState
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: RustTargetDryRunTaskFailure, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .parentReviewUnavailable:
+            writeInt(&buf, Int32(1))
+
+
+        case .reviewExpired:
+            writeInt(&buf, Int32(2))
+
+
+        case .changedDuringReview:
+            writeInt(&buf, Int32(3))
+
+
+        case .budgetExceeded:
+            writeInt(&buf, Int32(4))
+
+
+        case .busy:
+            writeInt(&buf, Int32(5))
+
+
+        case .unsafeStorage:
+            writeInt(&buf, Int32(6))
+
+
+        case .incompatibleSchema:
+            writeInt(&buf, Int32(7))
+
+
+        case .corruptData:
+            writeInt(&buf, Int32(8))
+
+
+        case .historyUnresolved:
+            writeInt(&buf, Int32(9))
+
+
+        case .unavailable:
+            writeInt(&buf, Int32(10))
+
+
+        case .internalState:
+            writeInt(&buf, Int32(11))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRustTargetDryRunTaskFailure_lift(_ buf: RustBuffer) throws -> RustTargetDryRunTaskFailure {
+    return try FfiConverterTypeRustTargetDryRunTaskFailure.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRustTargetDryRunTaskFailure_lower(_ value: RustTargetDryRunTaskFailure) -> RustBuffer {
+    return FfiConverterTypeRustTargetDryRunTaskFailure.lower(value)
+}
+
+
 
 public enum RustTargetPlanReviewError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
 
@@ -15775,6 +16523,30 @@ fileprivate struct FfiConverterOptionTypeRustTargetCleanupResult: FfiConverterRu
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeRustTargetDryRunResult: FfiConverterRustBuffer {
+    typealias SwiftType = RustTargetDryRunResult?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeRustTargetDryRunResult.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeRustTargetDryRunResult.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeScanProgress: FfiConverterRustBuffer {
     typealias SwiftType = ScanProgress?
 
@@ -15959,6 +16731,30 @@ fileprivate struct FfiConverterOptionTypeRustTargetCleanupTaskFailure: FfiConver
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeRustTargetCleanupTaskFailure.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeRustTargetDryRunTaskFailure: FfiConverterRustBuffer {
+    typealias SwiftType = RustTargetDryRunTaskFailure?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeRustTargetDryRunTaskFailure.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeRustTargetDryRunTaskFailure.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -16646,6 +17442,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_dux_ffi_checksum_method_duxengine_start_permanent_safe_cleanup() != 43458) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_dux_ffi_checksum_method_duxengine_start_rust_target_dry_run() != 50381) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_dux_ffi_checksum_method_duxengine_start_scan() != 56895) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -16662,6 +17461,12 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_rusttargetcleanuptask_poll() != 1277) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_rusttargetdryruntask_cancel() != 37081) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_rusttargetdryruntask_poll() != 18120) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_rusttargetplanreviewsession_info() != 44073) {

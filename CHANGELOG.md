@@ -1,5 +1,17 @@
 # Changelog
 
+- Exposed the effect-free Rust-target validation path end to end in the native
+  app through UniFFI contract v35. The new endpoint consumes only the exact
+  opaque reviewed-plan child and returns a separate path-free dry-run task;
+  it accepts no path, identifier, mode flag, approval, callback, driver,
+  capacity input, or permanent-cleanup policy. Rust and Swift independently
+  validate task kind, correlation prefix, terminal status, poll shape,
+  monotonic revision, and cancellation state. Explorer now offers a
+  Release-visible **Run dry check** action with point-in-time wording,
+  **No files changed · 0 B freed** accounting, cancellation, durable history
+  correlation, and an explicit fresh-preview requirement. Permanent cleanup
+  remains a distinct Debug-only, confirmation-gated action and cannot be
+  reached or chained from the dry-run result.
 - Added the first production-core Rust-target dry run. It consumes the same
   exact opaque reviewed-plan child as permanent cleanup, projects that frozen
   plan internally to `DryRun`, and repeats the shared Cargo/read-set,
@@ -18,8 +30,8 @@
   irrelevant. A real stale Cargo fixture proves the complete project tree is
   byte- and identity-stable, and focused parity, refusal, cancellation-state,
   exclusion, and ambiguous-write tests cover the non-mutating path. This core
-  API is not yet exposed through UniFFI or the native app, and it does not open
-  the public cleanup Release gate.
+  At that core-only checkpoint the API was not exposed through UniFFI or the
+  native app and did not open the public cleanup Release gate.
 - Made permanent-safe cleanup explicitly opt-in before its Release gate can be
   considered. Fresh and reset state is now core-owned disabled Default state;
   only durable Stored consent can admit an effect. Typed setting value schema

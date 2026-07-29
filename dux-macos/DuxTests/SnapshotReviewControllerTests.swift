@@ -75,6 +75,55 @@ final class SnapshotReviewControllerTests: XCTestCase {
         await controller.shutdown()
     }
 
+    func testDryRunStartConsumesExactChildAndCannotRaceCleanup() async throws {
+        let dryRun = ControllerDryRunTaskSpy()
+        let plan = StubRustTargetPlanReviewSession(
+            scanID: "scan:one",
+            candidateID: "candidate:one",
+            dryRunTask: dryRun
+        )
+        let lease = StubSnapshotReviewLease(
+            scanID: "scan:one",
+            planReview: plan
+        )
+        let controller = DuxSnapshotReviewController(
+            service: StubSnapshotReviewService(leases: [lease]),
+            clock: SuspendedSnapshotReviewClock()
+        )
+        try await controller.acquire(scanID: "scan:one")
+        let handle = try await controller.prepareRustTargetPlanReview(
+            scanID: "scan:one",
+            candidateID: "candidate:one"
+        )
+
+        let task = try await controller.startRustTargetDryRun(handle)
+        do {
+            _ = try await controller.startRustTargetCleanup(handle)
+            XCTFail("Expected dry run to consume the exact child")
+        } catch {
+            XCTAssertEqual(
+                error as? ExplorerRustTargetCleanupStartError,
+                .reviewUnavailable
+            )
+        }
+        do {
+            _ = try await controller.startRustTargetDryRun(handle)
+            XCTFail("Expected the exact child to be consume-once")
+        } catch {
+            XCTAssertEqual(
+                error as? ExplorerRustTargetDryRunStartError,
+                .reviewUnavailable
+            )
+        }
+
+        let dryRunStartCount = await plan.dryRunStartCount()
+        let cleanupStartCount = await plan.cleanupStartCount()
+        XCTAssertTrue((task as AnyObject) === dryRun)
+        XCTAssertEqual(dryRunStartCount, 1)
+        XCTAssertEqual(cleanupStartCount, 0)
+        await controller.shutdown()
+    }
+
     func testCleanupStartRejectsAlteredInfoWithoutConsumingExactChild() async throws {
         let cleanup = ControllerCleanupTaskSpy()
         let plan = StubRustTargetPlanReviewSession(
@@ -966,10 +1015,12 @@ private actor StubRustTargetPlanReviewSession: DuxRustTargetPlanReviewSession {
     private let infoError: ExplorerRustTargetPlanReviewError?
     private let refreshInfoError: ExplorerRustTargetPlanReviewError?
     private let cleanupTask: (any DuxRustTargetCleanupTask)?
+    private let dryRunTask: (any DuxRustTargetDryRunTask)?
     private let record: ExplorerRustTargetPlanReviewRecord
     private var infos = 0
     private var releases = 0
     private var cleanupStarts = 0
+    private var dryRunStarts = 0
 
     init(
         scanID: String,
@@ -978,6 +1029,7 @@ private actor StubRustTargetPlanReviewSession: DuxRustTargetPlanReviewSession {
         infoError: ExplorerRustTargetPlanReviewError? = nil,
         refreshInfoError: ExplorerRustTargetPlanReviewError? = nil,
         cleanupTask: (any DuxRustTargetCleanupTask)? = nil,
+        dryRunTask: (any DuxRustTargetDryRunTask)? = nil,
         events: ControllerReleaseEvents? = nil
     ) {
         self.scanID = scanID
@@ -985,6 +1037,7 @@ private actor StubRustTargetPlanReviewSession: DuxRustTargetPlanReviewSession {
         self.infoError = infoError
         self.refreshInfoError = refreshInfoError
         self.cleanupTask = cleanupTask
+        self.dryRunTask = dryRunTask
         self.events = events
         let now = Date()
         record = controllerPlanReviewRecord(
@@ -1019,6 +1072,14 @@ private actor StubRustTargetPlanReviewSession: DuxRustTargetPlanReviewSession {
         return cleanupTask
     }
 
+    func startDryRun() throws -> any DuxRustTargetDryRunTask {
+        dryRunStarts += 1
+        guard let dryRunTask else {
+            throw ExplorerRustTargetDryRunStartError.unavailable
+        }
+        return dryRunTask
+    }
+
     func infoCount() -> Int {
         infos
     }
@@ -1029,6 +1090,10 @@ private actor StubRustTargetPlanReviewSession: DuxRustTargetPlanReviewSession {
 
     func cleanupStartCount() -> Int {
         cleanupStarts
+    }
+
+    func dryRunStartCount() -> Int {
+        dryRunStarts
     }
 }
 
@@ -1047,6 +1112,25 @@ private final class ControllerCleanupTaskSpy:
     }
 
     func requestCancellation() async throws -> ExplorerRustTargetCleanupCancelOutcome {
+        .alreadyTerminal
+    }
+}
+
+private final class ControllerDryRunTaskSpy:
+    DuxRustTargetDryRunTask,
+    @unchecked Sendable
+{
+    func poll() async throws -> ExplorerRustTargetDryRunPoll {
+        ExplorerRustTargetDryRunPoll(
+            phase: .cancelled,
+            cancellationRequested: true,
+            revision: 1,
+            failure: nil,
+            result: nil
+        )
+    }
+
+    func requestCancellation() async throws -> ExplorerRustTargetDryRunCancelOutcome {
         .alreadyTerminal
     }
 }

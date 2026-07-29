@@ -33,7 +33,7 @@ struct ExplorerRustTargetPlanReviewPath: Equatable, Sendable {
     let display: String
 }
 
-/// Transport-neutral contract-v34 record. Generated-FFI values are projected into this
+/// Transport-neutral contract-v35 record. Generated-FFI values are projected into this
 /// app-owned shape at the EngineService boundary before strict validation.
 struct ExplorerRustTargetPlanReviewRecord: Equatable, Sendable {
     let recordVersion: UInt32
@@ -650,6 +650,191 @@ protocol ExplorerRustTargetCleanupPollingClock: Sendable {
 
 struct ContinuousExplorerRustTargetCleanupPollingClock:
     ExplorerRustTargetCleanupPollingClock
+{
+    func sleepUntilNextPoll() async throws {
+        try await Task.sleep(for: .milliseconds(250))
+    }
+}
+
+enum ExplorerRustTargetDryRunPhase: Equatable, Sendable {
+    case queued
+    case running
+    case succeeded
+    case failed
+    case cancelled
+
+    var isTerminal: Bool {
+        switch self {
+        case .succeeded, .failed, .cancelled:
+            true
+        case .queued, .running:
+            false
+        }
+    }
+}
+
+/// Failures from effect-free validation and its durable observation record.
+/// `historyUnresolved` never implies an unknown filesystem outcome because a
+/// dry run has no mutation capability.
+enum ExplorerRustTargetDryRunFailure: Equatable, Sendable {
+    case parentReviewUnavailable
+    case reviewExpired
+    case changedSincePlan
+    case budgetExceeded
+    case busy
+    case unsafeStorage
+    case incompatibleSchema
+    case corruptData
+    case historyUnresolved
+    case unavailable
+    case internalState
+
+    var title: String {
+        switch self {
+        case .changedSincePlan:
+            "Storage changed since review"
+        case .reviewExpired, .parentReviewUnavailable:
+            "Review expired"
+        case .budgetExceeded, .busy:
+            "Dry run is busy"
+        case .historyUnresolved:
+            "Dry-run history is uncertain"
+        case .unsafeStorage, .incompatibleSchema, .corruptData:
+            "Dry run is blocked"
+        case .unavailable, .internalState:
+            "Dry run is unavailable"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .changedSincePlan:
+            "DUX refused the changed target. Run a new scan and review a fresh plan. No files were changed."
+        case .reviewExpired, .parentReviewUnavailable:
+            "The exact reviewed plan ended before validation could start. Prepare a fresh plan. No files were changed."
+        case .budgetExceeded:
+            "DUX refused to exceed its bounded validation budget. No files were changed."
+        case .busy:
+            "Another cleanup-history operation is active. No files were changed."
+        case .historyUnresolved:
+            "DUX could not reconcile the read-only history record. The dry run never had permission to change files."
+        case .unsafeStorage:
+            "DUX cannot trust its history store, so it refused the dry run. No files were changed."
+        case .incompatibleSchema:
+            "Cleanup history uses an incompatible schema. Update DUX before trying again. No files were changed."
+        case .corruptData:
+            "DUX rejected inconsistent history state. No files were changed."
+        case .unavailable:
+            "The validation engine is unavailable. No files were changed."
+        case .internalState:
+            "DUX rejected an inconsistent dry-run response. No files were changed."
+        }
+    }
+}
+
+enum ExplorerRustTargetDryRunStartError: Error, Equatable, Sendable {
+    case closed
+    case reviewUnavailable
+    case parentReviewUnavailable
+    case reviewExpired
+    case changedSincePlan
+    case cancelledBeforeStart
+    case budgetExceeded
+    case queueFull
+    case busy
+    case unsafeStorage
+    case incompatibleSchema
+    case corruptData
+    case historyUnresolved
+    case unavailable
+    case invalidResponse
+
+    var failure: ExplorerRustTargetDryRunFailure {
+        switch self {
+        case .parentReviewUnavailable:
+            .parentReviewUnavailable
+        case .reviewExpired, .reviewUnavailable:
+            .reviewExpired
+        case .changedSincePlan:
+            .changedSincePlan
+        case .budgetExceeded:
+            .budgetExceeded
+        case .queueFull, .busy:
+            .busy
+        case .unsafeStorage:
+            .unsafeStorage
+        case .incompatibleSchema:
+            .incompatibleSchema
+        case .corruptData:
+            .corruptData
+        case .historyUnresolved:
+            .historyUnresolved
+        case .closed, .cancelledBeforeStart, .unavailable:
+            .unavailable
+        case .invalidResponse:
+            .internalState
+        }
+    }
+}
+
+enum ExplorerRustTargetDryRunTaskError: Error, Equatable, Sendable {
+    case closed
+    case taskUnavailable
+    case invalidResponse
+}
+
+enum ExplorerRustTargetDryRunCancelOutcome: Equatable, Sendable {
+    case cancelledBeforeStart
+    case requested
+    case alreadyRequested
+    case alreadyTerminal
+}
+
+/// Path-free correlation for a completed observation. This deliberately has
+/// no removal counters, capacity delta, target, or retry authority.
+struct ExplorerRustTargetDryRunResult: Equatable, Sendable {
+    let sessionID: String
+    let status: CleanupHistorySessionStatus
+}
+
+struct ExplorerRustTargetDryRunPoll: Equatable, Sendable {
+    let phase: ExplorerRustTargetDryRunPhase
+    let cancellationRequested: Bool
+    let revision: UInt64
+    let failure: ExplorerRustTargetDryRunFailure?
+    let result: ExplorerRustTargetDryRunResult?
+}
+
+enum ExplorerRustTargetDryRunState: Equatable, Sendable {
+    case idle
+    case starting(ExplorerRustTargetPlanReviewInfo)
+    case observing(ExplorerRustTargetPlanReviewInfo, ExplorerRustTargetDryRunPoll)
+    case startFailed(ExplorerRustTargetPlanReviewInfo, ExplorerRustTargetDryRunFailure)
+    case observationFailed(ExplorerRustTargetPlanReviewInfo)
+
+    var isActive: Bool {
+        switch self {
+        case .starting:
+            true
+        case let .observing(_, poll):
+            !poll.phase.isTerminal
+        case .idle, .startFailed, .observationFailed:
+            false
+        }
+    }
+}
+
+protocol DuxRustTargetDryRunTask: AnyObject, Sendable {
+    func poll() async throws -> ExplorerRustTargetDryRunPoll
+    func requestCancellation() async throws -> ExplorerRustTargetDryRunCancelOutcome
+}
+
+protocol ExplorerRustTargetDryRunPollingClock: Sendable {
+    func sleepUntilNextPoll() async throws
+}
+
+struct ContinuousExplorerRustTargetDryRunPollingClock:
+    ExplorerRustTargetDryRunPollingClock
 {
     func sleepUntilNextPoll() async throws {
         try await Task.sleep(for: .milliseconds(250))

@@ -14,6 +14,7 @@ struct ExplorerSnapshotBrowserView: View {
         VStack(alignment: .leading, spacing: 16) {
             header
             subtreeScanStatus
+            rustTargetDryRunBanner
             rustTargetCleanupBanner
             content
         }
@@ -1167,6 +1168,167 @@ struct ExplorerSnapshotBrowserView: View {
     }
 
     @ViewBuilder
+    private var rustTargetDryRunBanner: some View {
+        if browser.rustTargetDryRunState != .idle {
+            GroupBox("Dry check — no files changed") {
+                VStack(alignment: .leading, spacing: 8) {
+                    switch browser.rustTargetDryRunState {
+                    case .idle:
+                        EmptyView()
+                    case let .starting(info):
+                        ProgressView("Checking current Rust target…")
+                        Text(
+                            "Repeating every deterministic safety check for \(info.target.display). This task has no filesystem mutation authority."
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        dryRunCancelButton
+                    case let .observing(_, poll):
+                        dryRunPollBanner(poll)
+                    case let .startFailed(_, failure):
+                        Label(
+                            failure.title,
+                            systemImage: "exclamationmark.triangle.fill"
+                        )
+                        .foregroundStyle(.orange)
+                        Text(verbatim: failure.detail)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Text("No files changed · 0 B freed.")
+                            .font(.caption.weight(.semibold))
+                        dryRunConsumedPreviewNote
+                        dryRunDismissButton
+                    case .observationFailed:
+                        Label(
+                            "Dry-check status unavailable",
+                            systemImage: "exclamationmark.triangle.fill"
+                        )
+                        .foregroundStyle(.orange)
+                        Text(
+                            "DUX could not continue observing the path-free task status. The task had no permission to change files; inspect Cleanup History before trying again."
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        Text("No files changed · 0 B freed.")
+                            .font(.caption.weight(.semibold))
+                        dryRunConsumedPreviewNote
+                        dryRunDismissButton
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .accessibilityIdentifier(
+                    ExplorerAccessibility.snapshotCandidateDryRunStatus
+                )
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func dryRunPollBanner(_ poll: ExplorerRustTargetDryRunPoll) -> some View {
+        switch poll.phase {
+        case .queued, .running:
+            ProgressView(
+                poll.cancellationRequested
+                    ? "Cancelling dry check…"
+                    : "Checking current Rust target…"
+            )
+            Text(
+                "This is a point-in-time validation. Closing Explorer does not cancel the core-owned task."
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            if !poll.cancellationRequested {
+                dryRunCancelButton
+            }
+        case .succeeded:
+            if let result = poll.result {
+                Label(
+                    dryRunResultTitle(result.status),
+                    systemImage: result.status == .dryRun
+                        ? "checkmark.shield.fill"
+                        : "exclamationmark.triangle.fill"
+                )
+                .foregroundStyle(result.status == .dryRun ? .green : .orange)
+                Text("No files changed · 0 B freed.")
+                    .font(.caption.weight(.semibold))
+                Text(
+                    result.status == .dryRun
+                        ? "The reviewed target would pass the safety checks at that moment. This is not approval for a later cleanup."
+                        : "The validation result was recorded without changing the target."
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                Text(verbatim: "History session \(result.sessionID)")
+                    .font(.caption.monospaced())
+                    .textSelection(.enabled)
+            }
+            dryRunConsumedPreviewNote
+            dryRunDismissButton
+        case .failed:
+            let failure = poll.failure ?? .internalState
+            Label(failure.title, systemImage: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+            Text(verbatim: failure.detail)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text("No files changed · 0 B freed.")
+                .font(.caption.weight(.semibold))
+            dryRunConsumedPreviewNote
+            dryRunDismissButton
+        case .cancelled:
+            Label("Dry check cancelled", systemImage: "stop.circle.fill")
+                .foregroundStyle(.orange)
+            Text("No files changed · 0 B freed.")
+                .font(.caption.weight(.semibold))
+            dryRunConsumedPreviewNote
+            dryRunDismissButton
+        }
+    }
+
+    private var dryRunCancelButton: some View {
+        Button("Cancel dry check") {
+            Task { await browser.cancelRustTargetDryRun() }
+        }
+        .accessibilityIdentifier(
+            ExplorerAccessibility.snapshotCandidateDryRunCancel
+        )
+    }
+
+    private var dryRunDismissButton: some View {
+        Button("Dismiss result") {
+            Task { await browser.dismissRustTargetDryRunResult() }
+        }
+        .accessibilityIdentifier(
+            ExplorerAccessibility.snapshotCandidateDryRunDismiss
+        )
+    }
+
+    private var dryRunConsumedPreviewNote: some View {
+        Text(
+            "This preview was consumed. Prepare a fresh preview before another dry check or cleanup."
+        )
+        .font(.caption)
+        .foregroundStyle(.secondary)
+    }
+
+    private func dryRunResultTitle(_ status: CleanupHistorySessionStatus) -> String {
+        switch status {
+        case .dryRun:
+            "Checks passed at that moment"
+        case .rejected:
+            "Dry check rejected"
+        case .failed:
+            "Dry check could not validate the target"
+        case .interrupted:
+            "Dry check was interrupted"
+        case .cancelled:
+            "Dry check cancelled"
+        case .planned, .running, .recovering, .completed, .partiallyCompleted:
+            "Dry-check result rejected"
+        }
+    }
+
+    @ViewBuilder
     private var rustTargetCleanupBanner: some View {
         if browser.rustTargetCleanupState != .idle {
             GroupBox("Permanent-safe cleanup") {
@@ -1560,7 +1722,13 @@ private struct ExplorerCandidateInspectorView: View {
             VStack(alignment: .leading, spacing: 10) {
                 switch browser.rustTargetPlanReviewState {
                 case .idle:
-                    if browser.rustTargetCleanupState == .idle {
+                    if browser.rustTargetDryRunState != .idle {
+                        Label(
+                            "The dry-check result is shown above the snapshot browser.",
+                            systemImage: "arrow.up.circle"
+                        )
+                        .foregroundStyle(.secondary)
+                    } else if browser.rustTargetCleanupState == .idle {
                         Label(
                             "DUX can revalidate this exact Rust target and prepare a short-lived in-memory preview. Preparing it changes no files and records no approval.",
                             systemImage: "checkmark.shield"
@@ -1643,6 +1811,15 @@ private struct ExplorerCandidateInspectorView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     HStack {
+                        Button("Run dry check") {
+                            Task { await browser.startRustTargetDryRun() }
+                        }
+                        .accessibilityIdentifier(
+                            ExplorerAccessibility.snapshotCandidateDryRunStart
+                        )
+                        .accessibilityHint(
+                            "Repeats all current safety checks and records the result. Changes no files."
+                        )
 #if DUX_INTERNAL_PERMANENT_SAFE_CLEANUP
                         Button("Remove build output…", role: .destructive) {
                             if let confirmation =

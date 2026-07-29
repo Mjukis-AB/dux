@@ -235,11 +235,16 @@ protocol DuxRustTargetPlanReviewSession: AnyObject, Sendable {
     var scanID: String { get }
     var candidateID: String { get }
     func info() async throws -> ExplorerRustTargetPlanReviewRecord
+    func startDryRun() async throws -> any DuxRustTargetDryRunTask
     func startCleanup() async throws -> any DuxRustTargetCleanupTask
     func release() async
 }
 
 extension DuxRustTargetPlanReviewSession {
+    func startDryRun() async throws -> any DuxRustTargetDryRunTask {
+        throw ExplorerRustTargetDryRunStartError.unavailable
+    }
+
     func startCleanup() async throws -> any DuxRustTargetCleanupTask {
         throw ExplorerRustTargetCleanupStartError.unavailable
     }
@@ -302,7 +307,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
     DuxSnapshotHistoryServing, DuxCleanupHistoryServing, DuxScanCoverageServing, HomeScanServing,
     Sendable
 {
-    fileprivate static let expectedFFIContractVersion: UInt32 = 34
+    fileprivate static let expectedFFIContractVersion: UInt32 = 35
     fileprivate static let expectedRecordVersion: UInt32 = 1
 
     private let state: EngineServiceState
@@ -3709,6 +3714,208 @@ enum EngineRustTargetCleanupAdapter {
     }
 }
 
+private enum EngineRustTargetDryRunResponseViolation: Error {
+    case envelope
+    case phaseShape
+    case result
+    case transition
+}
+
+enum EngineRustTargetDryRunAdapter {
+    static func map(
+        _ raw: RustTargetDryRunPoll,
+        after previous: ExplorerRustTargetDryRunPoll?
+    ) throws -> ExplorerRustTargetDryRunPoll {
+        guard raw.recordVersion == EngineService.expectedRecordVersion, raw.revision > 0 else {
+            throw EngineRustTargetDryRunResponseViolation.envelope
+        }
+        let mapped = ExplorerRustTargetDryRunPoll(
+            phase: map(raw.phase),
+            cancellationRequested: raw.cancellationRequested,
+            revision: raw.revision,
+            failure: raw.failure.map(map),
+            result: try raw.result.map(map)
+        )
+        guard validShape(mapped) else {
+            throw EngineRustTargetDryRunResponseViolation.phaseShape
+        }
+        if let previous, !validTransition(from: previous, to: mapped) {
+            throw EngineRustTargetDryRunResponseViolation.transition
+        }
+        return mapped
+    }
+
+    static func map(
+        _ error: RustTargetDryRunStartError
+    ) -> ExplorerRustTargetDryRunStartError {
+        switch error {
+        case .Closed:
+            .closed
+        case .WrongEngine, .InternalState:
+            .invalidResponse
+        case .ReviewUnavailable:
+            .reviewUnavailable
+        case .ParentReviewUnavailable:
+            .parentReviewUnavailable
+        case .ReviewExpired:
+            .reviewExpired
+        case .ChangedDuringReview:
+            .changedSincePlan
+        case .CancelledBeforeStart:
+            .cancelledBeforeStart
+        case .BudgetExceeded:
+            .budgetExceeded
+        case .QueueFull:
+            .queueFull
+        case .Busy:
+            .busy
+        case .UnsafeStorage:
+            .unsafeStorage
+        case .IncompatibleSchema:
+            .incompatibleSchema
+        case .CorruptData:
+            .corruptData
+        case .HistoryUnresolved:
+            .historyUnresolved
+        case .Unavailable:
+            .unavailable
+        }
+    }
+
+    static func map(
+        _ error: RustTargetDryRunTaskError
+    ) -> ExplorerRustTargetDryRunTaskError {
+        switch error {
+        case .Closed:
+            .closed
+        case .TaskUnavailable:
+            .taskUnavailable
+        case .WrongTaskKind, .InternalState:
+            .invalidResponse
+        }
+    }
+
+    private static func map(_ phase: TaskPhase) -> ExplorerRustTargetDryRunPhase {
+        switch phase {
+        case .queued: .queued
+        case .running: .running
+        case .succeeded: .succeeded
+        case .failed: .failed
+        case .cancelled: .cancelled
+        }
+    }
+
+    private static func map(
+        _ failure: RustTargetDryRunTaskFailure
+    ) -> ExplorerRustTargetDryRunFailure {
+        switch failure {
+        case .parentReviewUnavailable: .parentReviewUnavailable
+        case .reviewExpired: .reviewExpired
+        case .changedDuringReview: .changedSincePlan
+        case .budgetExceeded: .budgetExceeded
+        case .busy: .busy
+        case .unsafeStorage: .unsafeStorage
+        case .incompatibleSchema: .incompatibleSchema
+        case .corruptData: .corruptData
+        case .historyUnresolved: .historyUnresolved
+        case .unavailable: .unavailable
+        case .internalState: .internalState
+        }
+    }
+
+    private static func map(
+        _ raw: RustTargetDryRunResult
+    ) throws -> ExplorerRustTargetDryRunResult {
+        let status: CleanupHistorySessionStatus = switch raw.status {
+        case .planned: .planned
+        case .running: .running
+        case .recovering: .recovering
+        case .completed: .completed
+        case .partiallyCompleted: .partiallyCompleted
+        case .failed: .failed
+        case .cancelled: .cancelled
+        case .interrupted: .interrupted
+        case .rejected: .rejected
+        case .dryRun: .dryRun
+        }
+        let isAllowedStatus = switch status {
+        case .dryRun, .failed, .rejected, .interrupted, .cancelled:
+            true
+        case .planned, .running, .recovering, .completed, .partiallyCompleted:
+            false
+        }
+        guard
+            raw.recordVersion == EngineService.expectedRecordVersion,
+            validSessionID(raw.sessionId),
+            isAllowedStatus
+        else {
+            throw EngineRustTargetDryRunResponseViolation.result
+        }
+        return ExplorerRustTargetDryRunResult(
+            sessionID: raw.sessionId,
+            status: status
+        )
+    }
+
+    private static func validShape(_ poll: ExplorerRustTargetDryRunPoll) -> Bool {
+        switch poll.phase {
+        case .queued, .running:
+            poll.failure == nil && poll.result == nil
+        case .succeeded:
+            poll.failure == nil
+                && poll.result.map {
+                    switch $0.status {
+                    case .dryRun, .failed, .rejected, .interrupted:
+                        true
+                    case .planned, .running, .recovering, .completed,
+                         .partiallyCompleted, .cancelled:
+                        false
+                    }
+                } == true
+        case .cancelled:
+            poll.failure == nil
+                && poll.result.map { $0.status == .cancelled } ?? true
+        case .failed:
+            poll.failure != nil && poll.result == nil
+        }
+    }
+
+    private static func validTransition(
+        from previous: ExplorerRustTargetDryRunPoll,
+        to current: ExplorerRustTargetDryRunPoll
+    ) -> Bool {
+        guard
+            current.revision >= previous.revision,
+            !previous.cancellationRequested || current.cancellationRequested
+        else {
+            return false
+        }
+        if current.revision == previous.revision {
+            return current == previous
+        }
+        switch previous.phase {
+        case .queued:
+            return true
+        case .running:
+            return current.phase != .queued
+        case .succeeded, .failed, .cancelled:
+            return current == previous
+        }
+    }
+
+    private static func validSessionID(_ value: String) -> Bool {
+        let prefix = "cleanup:rust-target-dry-run:"
+        guard value.utf8.count <= 128, value.hasPrefix(prefix) else {
+            return false
+        }
+        let suffix = value.dropFirst(prefix.count)
+        return suffix.utf8.count == 32
+            && suffix.utf8.allSatisfy {
+                (0x30 ... 0x39).contains($0) || (0x61 ... 0x66).contains($0)
+            }
+    }
+}
+
 private final class FFIDuxRustTargetPlanReviewSession:
     DuxRustTargetPlanReviewSession,
     @unchecked Sendable
@@ -3765,6 +3972,24 @@ private final class FFIDuxRustTargetPlanReviewSession:
         return FFIDuxRustTargetCleanupTask(task: task, state: state)
     }
 
+    func startDryRun() async throws -> any DuxRustTargetDryRunTask {
+        let engine = try await state.perform { state in
+            try state.resolveEngine()
+        }
+        let task = try await state.performPlanReview {
+            guard self.isAvailable else {
+                throw ExplorerRustTargetDryRunStartError.reviewUnavailable
+            }
+            self.isAvailable = false
+            do {
+                return try engine.startRustTargetDryRun(review: self.session)
+            } catch let error as RustTargetDryRunStartError {
+                throw EngineRustTargetDryRunAdapter.map(error)
+            }
+        }
+        return FFIDuxRustTargetDryRunTask(task: task, state: state)
+    }
+
     func release() async {
         _ = try? await state.performPlanReview {
             guard self.isAvailable else {
@@ -3778,6 +4003,52 @@ private final class FFIDuxRustTargetPlanReviewSession:
                 }
             } catch {
                 // Release is consuming, idempotent best effort during teardown.
+            }
+        }
+    }
+}
+
+private final class FFIDuxRustTargetDryRunTask:
+    DuxRustTargetDryRunTask,
+    @unchecked Sendable
+{
+    private let task: RustTargetDryRunTask
+    private let state: EngineServiceState
+    private var lastPoll: ExplorerRustTargetDryRunPoll?
+
+    init(task: RustTargetDryRunTask, state: EngineServiceState) {
+        self.task = task
+        self.state = state
+    }
+
+    func poll() async throws -> ExplorerRustTargetDryRunPoll {
+        try await state.perform { _ in
+            do {
+                let poll = try EngineRustTargetDryRunAdapter.map(
+                    try self.task.poll(),
+                    after: self.lastPoll
+                )
+                self.lastPoll = poll
+                return poll
+            } catch is EngineRustTargetDryRunResponseViolation {
+                throw ExplorerRustTargetDryRunTaskError.invalidResponse
+            } catch let error as RustTargetDryRunTaskError {
+                throw EngineRustTargetDryRunAdapter.map(error)
+            }
+        }
+    }
+
+    func requestCancellation() async throws -> ExplorerRustTargetDryRunCancelOutcome {
+        try await state.perform { _ in
+            do {
+                return switch try self.task.cancel() {
+                case .cancelledBeforeStart: .cancelledBeforeStart
+                case .requested: .requested
+                case .alreadyRequested: .alreadyRequested
+                case .alreadyTerminal: .alreadyTerminal
+                }
+            } catch let error as RustTargetDryRunTaskError {
+                throw EngineRustTargetDryRunAdapter.map(error)
             }
         }
     }

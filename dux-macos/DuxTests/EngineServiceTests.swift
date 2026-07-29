@@ -182,6 +182,115 @@ final class EngineServiceTests: XCTestCase {
         )
     }
 
+    func testRustTargetDryRunBridgeConsumesExactReviewAndMapsPathFreeResult() async throws {
+        let parent = RecordingGeneratedSnapshotReview()
+        let plan = RecordingGeneratedRustTargetPlanReview(
+            info: generatedRustTargetPlanReviewInfo()
+        )
+        let dryRun = RecordingGeneratedRustTargetDryRunTask(
+            polls: [
+                RustTargetDryRunPoll(
+                    recordVersion: 1,
+                    phase: .succeeded,
+                    cancellationRequested: false,
+                    revision: 3,
+                    failure: nil,
+                    result: RustTargetDryRunResult(
+                        recordVersion: 1,
+                        sessionId: "cleanup:rust-target-dry-run:0123456789abcdef0123456789abcdef",
+                        status: .dryRun
+                    )
+                ),
+            ]
+        )
+        let engine = RecordingRustTargetPlanReviewEngine(
+            parent: parent,
+            plan: plan,
+            dryRunTask: dryRun
+        )
+        let service = EngineService(engine: engine)
+        let lease = try await service.acquireExplorerReview(scanID: "scan:example")
+        let session = try await lease.prepareRustTargetPlanReview(
+            candidateID: "candidate:example"
+        )
+
+        let task = try await session.startDryRun()
+        let poll = try await task.poll()
+        await session.release()
+
+        XCTAssertTrue(engine.receivedDryRunReview === plan)
+        XCTAssertEqual(plan.releaseCount, 0)
+        XCTAssertEqual(poll.phase, .succeeded)
+        XCTAssertEqual(poll.result?.status, .dryRun)
+        XCTAssertEqual(
+            poll.result?.sessionID,
+            "cleanup:rust-target-dry-run:0123456789abcdef0123456789abcdef"
+        )
+        let closed = await service.close()
+        XCTAssertTrue(closed)
+    }
+
+    func testRustTargetDryRunAdapterRejectsMalformedAndRegressingPolls() throws {
+        let running = try EngineRustTargetDryRunAdapter.map(
+            RustTargetDryRunPoll(
+                recordVersion: 1,
+                phase: .running,
+                cancellationRequested: true,
+                revision: 2,
+                failure: nil,
+                result: nil
+            ),
+            after: nil
+        )
+        XCTAssertThrowsError(
+            try EngineRustTargetDryRunAdapter.map(
+                RustTargetDryRunPoll(
+                    recordVersion: 1,
+                    phase: .queued,
+                    cancellationRequested: false,
+                    revision: 3,
+                    failure: nil,
+                    result: nil
+                ),
+                after: running
+            )
+        )
+        XCTAssertThrowsError(
+            try EngineRustTargetDryRunAdapter.map(
+                RustTargetDryRunPoll(
+                    recordVersion: 1,
+                    phase: .succeeded,
+                    cancellationRequested: false,
+                    revision: 1,
+                    failure: nil,
+                    result: RustTargetDryRunResult(
+                        recordVersion: 1,
+                        sessionId: "cleanup:rust-target:0123456789abcdef0123456789abcdef",
+                        status: .dryRun
+                    )
+                ),
+                after: nil
+            )
+        )
+        XCTAssertThrowsError(
+            try EngineRustTargetDryRunAdapter.map(
+                RustTargetDryRunPoll(
+                    recordVersion: 1,
+                    phase: .failed,
+                    cancellationRequested: false,
+                    revision: 1,
+                    failure: .historyUnresolved,
+                    result: RustTargetDryRunResult(
+                        recordVersion: 1,
+                        sessionId: "cleanup:rust-target-dry-run:0123456789abcdef0123456789abcdef",
+                        status: .dryRun
+                    )
+                ),
+                after: nil
+            )
+        )
+    }
+
     func testRustTargetPlanReviewBridgeRejectsInvalidGeneratedTimestamp() {
         XCTAssertThrowsError(
             try EngineRustTargetPlanReviewAdapter.map(
@@ -290,7 +399,7 @@ final class EngineServiceTests: XCTestCase {
         // DUX-DESTRUCTIVE: allow=test-swift-retry-obstruction-remove -- remove only this test fixture's deliberate file obstruction
         try FileManager.default.removeItem(at: dataRoot)
         let status = try await service.loadStatus()
-        XCTAssertEqual(status.ffiContractVersion, 34)
+        XCTAssertEqual(status.ffiContractVersion, 35)
         let closed = await service.close()
         XCTAssertTrue(closed)
     }
@@ -300,7 +409,7 @@ final class EngineServiceTests: XCTestCase {
         let result = try await EngineService(engine: fixture.engine).loadStatus()
 
         XCTAssertEqual(result.libraryVersion, "0.5.0")
-        XCTAssertEqual(result.ffiContractVersion, 34)
+        XCTAssertEqual(result.ffiContractVersion, 35)
         XCTAssertTrue(result.executedOffMainThread)
     }
 
@@ -1641,7 +1750,7 @@ final class EngineServiceTests: XCTestCase {
             weakEngine = engine
 
             XCTAssertEqual(liveEngineInstanceCount(), baseline + 1)
-            XCTAssertEqual(try engine.libraryVersion().ffiContractVersion, 34)
+            XCTAssertEqual(try engine.libraryVersion().ffiContractVersion, 35)
             XCTAssertTrue(engine.close())
             XCTAssertTrue(engine.close())
             XCTAssertThrowsError(try engine.formatSize(bytes: 1_536)) { error in
@@ -2116,10 +2225,12 @@ private final class RecordingRustTargetPlanReviewEngine: DuxEngine, @unchecked S
     private let parent: SnapshotReviewSession
     private let plan: RustTargetPlanReviewSession
     private let cleanupTask: RustTargetCleanupTask?
+    private let dryRunTask: RustTargetDryRunTask?
     private(set) var receivedScanID: String?
     private(set) var receivedParent: SnapshotReviewSession?
     private(set) var receivedRequest: RustTargetPlanReviewRequest?
     private(set) var receivedCleanupReview: RustTargetPlanReviewSession?
+    private(set) var receivedDryRunReview: RustTargetPlanReviewSession?
 
     required init(unsafeFromHandle handle: UInt64) {
         fatalError("RecordingRustTargetPlanReviewEngine cannot be lifted: \(handle)")
@@ -2128,11 +2239,13 @@ private final class RecordingRustTargetPlanReviewEngine: DuxEngine, @unchecked S
     init(
         parent: SnapshotReviewSession,
         plan: RustTargetPlanReviewSession,
-        cleanupTask: RustTargetCleanupTask? = nil
+        cleanupTask: RustTargetCleanupTask? = nil,
+        dryRunTask: RustTargetDryRunTask? = nil
     ) {
         self.parent = parent
         self.plan = plan
         self.cleanupTask = cleanupTask
+        self.dryRunTask = dryRunTask
         super.init(noHandle: NoHandle())
     }
 
@@ -2162,8 +2275,46 @@ private final class RecordingRustTargetPlanReviewEngine: DuxEngine, @unchecked S
         return cleanupTask
     }
 
+    override func startRustTargetDryRun(
+        review: RustTargetPlanReviewSession
+    ) throws -> RustTargetDryRunTask {
+        receivedDryRunReview = review
+        guard let dryRunTask else {
+            throw RustTargetDryRunStartError.Unavailable
+        }
+        return dryRunTask
+    }
+
     override func close() -> Bool {
         true
+    }
+}
+
+private final class RecordingGeneratedRustTargetDryRunTask:
+    RustTargetDryRunTask,
+    @unchecked Sendable
+{
+    private let polls: [RustTargetDryRunPoll]
+    private var index = 0
+
+    required init(unsafeFromHandle handle: UInt64) {
+        fatalError("RecordingGeneratedRustTargetDryRunTask cannot be lifted: \(handle)")
+    }
+
+    init(polls: [RustTargetDryRunPoll]) {
+        precondition(!polls.isEmpty)
+        self.polls = polls
+        super.init(noHandle: NoHandle())
+    }
+
+    override func poll() throws -> RustTargetDryRunPoll {
+        let poll = polls[min(index, polls.count - 1)]
+        index += 1
+        return poll
+    }
+
+    override func cancel() throws -> RustTargetDryRunCancelOutcome {
+        .requested
     }
 }
 

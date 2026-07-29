@@ -461,6 +461,27 @@ actor DuxSnapshotReviewController {
         return try await review.session.startCleanup()
     }
 
+    /// Irreversibly transfers one exact controller-owned plan review into an
+    /// effect-free validation task. Removing the handle before suspension
+    /// makes dry run and cleanup mutually consume-once at the authority edge.
+    func startRustTargetDryRun(
+        _ handle: ExplorerRustTargetPlanReviewHandle
+    ) async throws -> any DuxRustTargetDryRunTask {
+        guard !isShuttingDown else {
+            throw ExplorerRustTargetDryRunStartError.closed
+        }
+        guard
+            let review = planReviews[handle.id],
+            review.info == handle.info,
+            let parent = leases[review.scanID],
+            parent.generation == review.parentGeneration
+        else {
+            throw ExplorerRustTargetDryRunStartError.reviewUnavailable
+        }
+        planReviews.removeValue(forKey: handle.id)
+        return try await review.session.startDryRun()
+    }
+
     func refreshRustTargetPlanReview(
         _ handle: ExplorerRustTargetPlanReviewHandle
     ) async throws -> ExplorerRustTargetPlanReviewHandle {
