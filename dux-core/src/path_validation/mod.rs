@@ -78,9 +78,10 @@ pub(crate) use lexical::WindowsComponentError;
 pub(crate) use lexical::{LexicalCleanupPath, LexicalPathError, LexicalScanRoot};
 #[allow(unused_imports)]
 pub(crate) use protected::{
-    PROTECTED_ROOT_POLICY_REVISION, ProtectedPathForm, ProtectedPathKind, ProtectedRootDisposition,
-    ProtectedRootError, ProtectedRootRegistry, TRUSTED_HOME_MOUNT_PROOF_REVISION,
-    TrustedHomeMountError, TrustedHomeMountWitness,
+    KNOWN_USER_LIBRARY_CACHES_PROOF_REVISION, KnownUserLibraryCachesError,
+    KnownUserLibraryCachesPath, PROTECTED_ROOT_POLICY_REVISION, ProtectedPathForm,
+    ProtectedPathKind, ProtectedRootDisposition, ProtectedRootError, ProtectedRootRegistry,
+    TRUSTED_HOME_MOUNT_PROOF_REVISION, TrustedHomeMountError, TrustedHomeMountWitness,
 };
 
 #[cfg(unix)]

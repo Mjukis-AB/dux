@@ -2140,6 +2140,7 @@ final class AppModel: DuxCapacitySampling {
     ) async {
         var ordinal: UInt16 = 0
         var expectedRootsRevision: UInt64?
+        var expectedRootCatalogDigestSHA256: Data?
         var context: TargetedReclaimScanContext?
         var completed: [TargetedReclaimRootResult] = []
         var failed: [TargetedReclaimFailedRoot] = []
@@ -2159,7 +2160,8 @@ final class AppModel: DuxCapacitySampling {
                     stableVolumeID: stableVolumeID,
                     anchorAt: anchorAt,
                     ordinal: ordinal,
-                    expectedRootsRevision: expectedRootsRevision
+                    expectedRootsRevision: expectedRootsRevision,
+                    expectedRootCatalogDigestSHA256: expectedRootCatalogDigestSHA256
                 )
             } catch {
                 guard isCurrentTargetedReclaimScan(generation) else {
@@ -2190,12 +2192,12 @@ final class AppModel: DuxCapacitySampling {
                 }
                 targetedReclaimScanState = previous.map(TargetedReclaimScanState.completed) ?? .idle
                 return
-            case .noConfiguredRoots:
+            case .noEligibleRoots:
                 guard admission.ordinal == nil, admission.root == nil else {
                     targetedReclaimScanState = .failed(.invalidResponse, previous: previous)
                     return
                 }
-                targetedReclaimScanState = .noConfiguredRoots
+                targetedReclaimScanState = .noEligibleRoots
                 return
             case .unavailable, .current, .started, .observing:
                 break
@@ -2206,6 +2208,12 @@ final class AppModel: DuxCapacitySampling {
                 let admittedOrdinal = admission.ordinal,
                 let root = admission.root,
                 admittedOrdinal == ordinal,
+                root.ordinal == admittedOrdinal,
+                root.kind == (
+                    admittedContext.knownUserLibraryCachesIncluded && admittedOrdinal == 0
+                        ? .knownUserLibraryCaches
+                        : .configuredProject
+                ),
                 admittedContext.stableVolumeID == stableVolumeID,
                 admittedContext.capacityAnchorAt == anchorAt,
                 admittedContext.pressure == expectedPressure,
@@ -2229,6 +2237,7 @@ final class AppModel: DuxCapacitySampling {
             }
             context = admittedContext
             expectedRootsRevision = admittedContext.rootsRevision
+            expectedRootCatalogDigestSHA256 = admittedContext.rootCatalogDigestSHA256
 
             switch admission.disposition {
             case let .unavailable(failure):
@@ -2263,7 +2272,7 @@ final class AppModel: DuxCapacitySampling {
                 let ownsTask: Bool = switch admission.disposition {
                 case .started: true
                 case .observing: false
-                case .pressureNotActive, .noConfiguredRoots, .unavailable, .current:
+                case .pressureNotActive, .noEligibleRoots, .unavailable, .current:
                     preconditionFailure("unreachable targeted scan disposition")
                 }
                 if ownsTask {
@@ -2275,7 +2284,7 @@ final class AppModel: DuxCapacitySampling {
                 let source: TargetedReclaimScanResultSource = switch admission.disposition {
                 case .started: .focusedRun
                 case .observing: .joinedActive
-                case .pressureNotActive, .noConfiguredRoots, .unavailable, .current:
+                case .pressureNotActive, .noEligibleRoots, .unavailable, .current:
                     preconditionFailure("unreachable targeted scan disposition")
                 }
                 let terminal = await observeTargetedReclaimTask(
@@ -2324,7 +2333,7 @@ final class AppModel: DuxCapacitySampling {
                 case .superseded:
                     return
                 }
-            case .pressureNotActive, .noConfiguredRoots:
+            case .pressureNotActive, .noEligibleRoots:
                 preconditionFailure("handled before targeted root validation")
             }
 

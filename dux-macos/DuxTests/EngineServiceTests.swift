@@ -16,6 +16,19 @@ private func canonicalTestPath(_ url: URL) -> String {
 private let targetedTestVolumeID =
     "volume:macos:01234567-89ab-cdef-0123-456789abcdef"
 
+private let targetedTestCatalogDigest = Data(repeating: 0xA5, count: 32)
+
+private func generatedTargetedRootCatalog() -> TargetedReclaimRootCatalog {
+    TargetedReclaimRootCatalog(
+        recordVersion: 1,
+        knownRootsPolicyRevision: 1,
+        configuredRootsRevision: 7,
+        knownUserLibraryCachesIncluded: false,
+        rootCount: 4,
+        digestSha256: targetedTestCatalogDigest
+    )
+}
+
 private func generatedTargetedPressure(
     anchorUnixMS: Int64 = 4_000
 ) -> TargetedProjectScanPressureContext {
@@ -37,18 +50,23 @@ private func generatedTargetedAdmission(
     existingPhase: TaskPhase? = nil,
     rootUnavailableReason: TargetedProjectScanRootUnavailableReason? = nil,
     currentResult: ScanTaskResult? = nil,
-    maxNodes: UInt32 = 50_000
+    maxNodes: UInt32 = 50_000,
+    rootCatalog: TargetedReclaimRootCatalog = generatedTargetedRootCatalog(),
+    kind: TargetedReclaimRootKind = .configuredProject,
+    rootPath: String = "/Users/example/project"
 ) -> TargetedProjectScanAdmission {
     TargetedProjectScanAdmission(
         recordVersion: 1,
-        configuredRootsRevision: 7,
-        rootCount: 4,
+        configuredRootsRevision: rootCatalog.configuredRootsRevision,
+        rootCount: rootCatalog.rootCount,
+        rootCatalog: rootCatalog,
         selection: TargetedProjectScanSelection(
             recordVersion: 1,
             ordinal: 0,
+            kind: kind,
             root: ConfiguredProjectRootPath(
                 encoding: .unixBytes,
-                encodedBytes: Data("/Users/example/project".utf8)
+                encodedBytes: Data(rootPath.utf8)
             ),
             maxNodes: maxNodes
         ),
@@ -475,7 +493,7 @@ final class EngineServiceTests: XCTestCase {
         // DUX-DESTRUCTIVE: allow=test-swift-retry-obstruction-remove -- remove only this test fixture's deliberate file obstruction
         try FileManager.default.removeItem(at: dataRoot)
         let status = try await service.loadStatus()
-        XCTAssertEqual(status.ffiContractVersion, 38)
+        XCTAssertEqual(status.ffiContractVersion, 39)
         let closed = await service.close()
         XCTAssertTrue(closed)
     }
@@ -485,7 +503,7 @@ final class EngineServiceTests: XCTestCase {
         let result = try await EngineService(engine: fixture.engine).loadStatus()
 
         XCTAssertEqual(result.libraryVersion, "0.5.0")
-        XCTAssertEqual(result.ffiContractVersion, 38)
+        XCTAssertEqual(result.ffiContractVersion, 39)
         XCTAssertTrue(result.executedOffMainThread)
     }
 
@@ -1255,6 +1273,7 @@ final class EngineServiceTests: XCTestCase {
                 recordVersion: 1,
                 configuredRootsRevision: 7,
                 rootCount: 4,
+                rootCatalog: generatedTargetedRootCatalog(),
                 pressure: pressure
             )
         )
@@ -1264,7 +1283,8 @@ final class EngineServiceTests: XCTestCase {
             stableVolumeID: targetedTestVolumeID,
             anchorAt: Date(timeIntervalSince1970: 4),
             ordinal: 0,
-            expectedRootsRevision: 7
+            expectedRootsRevision: 7,
+            expectedRootCatalogDigestSHA256: nil
         )
 
         guard
@@ -1274,7 +1294,10 @@ final class EngineServiceTests: XCTestCase {
             return XCTFail("Expected one owned targeted scan task")
         }
         XCTAssertEqual(admission.ordinal, 0)
-        XCTAssertEqual(admission.root?.encodedBytes, Data("/Users/example/project".utf8))
+        XCTAssertEqual(
+            admission.root?.path.encodedBytes,
+            Data("/Users/example/project".utf8)
+        )
         XCTAssertEqual(context.stableVolumeID, targetedTestVolumeID)
         XCTAssertEqual(context.capacityAnchorAt, Date(timeIntervalSince1970: 4))
         XCTAssertEqual(context.pressure, .warning)
@@ -1290,7 +1313,8 @@ final class EngineServiceTests: XCTestCase {
                 stableVolumeId: targetedTestVolumeID,
                 capacityAnchorUnixMs: 4_000,
                 selectedRootOrdinal: 0,
-                expectedConfiguredRootsRevision: 7
+                expectedConfiguredRootsRevision: 7,
+                expectedRootCatalogDigestSha256: nil
             )
         )
         XCTAssertEqual(engine.startCalledOnMain, false)
@@ -1303,8 +1327,7 @@ final class EngineServiceTests: XCTestCase {
             TargetedProjectScanCheckpointRequest(
                 recordVersion: 1,
                 expectedPressure: pressure,
-                expectedConfiguredRootsRevision: 7,
-                expectedRootCount: 4
+                expectedRootCatalog: generatedTargetedRootCatalog()
             )
         )
         XCTAssertEqual(engine.checkpointCalledOnMain, false)
@@ -1345,7 +1368,8 @@ final class EngineServiceTests: XCTestCase {
             stableVolumeID: targetedTestVolumeID,
             anchorAt: Date(timeIntervalSince1970: 4),
             ordinal: 0,
-            expectedRootsRevision: 7
+            expectedRootsRevision: 7,
+            expectedRootCatalogDigestSHA256: nil
         )
         guard case .observing = observed.disposition else {
             return XCTFail("Expected an existing targeted task to be non-owning")
@@ -1357,7 +1381,8 @@ final class EngineServiceTests: XCTestCase {
             stableVolumeID: targetedTestVolumeID,
             anchorAt: Date(timeIntervalSince1970: 4),
             ordinal: 0,
-            expectedRootsRevision: 7
+            expectedRootsRevision: 7,
+            expectedRootCatalogDigestSHA256: targetedTestCatalogDigest
         )
         guard case let .unavailable(failure) = unavailable.disposition else {
             return XCTFail("Expected a root-local failure")
@@ -1380,7 +1405,8 @@ final class EngineServiceTests: XCTestCase {
             stableVolumeID: targetedTestVolumeID,
             anchorAt: Date(timeIntervalSince1970: 4),
             ordinal: 0,
-            expectedRootsRevision: 7
+            expectedRootsRevision: 7,
+            expectedRootCatalogDigestSHA256: nil
         )
         guard case let .current(result) = admission.disposition else {
             return XCTFail("Expected validated durable targeted evidence")
@@ -1388,6 +1414,45 @@ final class EngineServiceTests: XCTestCase {
         XCTAssertTrue(result.succeeded)
         XCTAssertEqual(result.scanID, "scan:targeted:fixture")
         XCTAssertEqual(result.candidateEvaluation, .succeeded(candidateCount: 2))
+
+        let knownCatalog = TargetedReclaimRootCatalog(
+            recordVersion: 1,
+            knownRootsPolicyRevision: 1,
+            configuredRootsRevision: 7,
+            knownUserLibraryCachesIncluded: true,
+            rootCount: 2,
+            digestSha256: Data(repeating: 0xC3, count: 32)
+        )
+        let knownAdmission = try await EngineService(
+            engine: RecordingTargetedScanEngine(
+                admissions: [
+                    generatedTargetedAdmission(
+                        pressure: pressure,
+                        disposition: .rootUnavailable,
+                        rootUnavailableReason: .accessDenied,
+                        maxNodes: 100_000,
+                        rootCatalog: knownCatalog,
+                        kind: .knownUserLibraryCaches,
+                        rootPath: "/Users/example/Library/Caches"
+                    ),
+                ]
+            )
+        ).startTargetedReclaimScan(
+            stableVolumeID: targetedTestVolumeID,
+            anchorAt: Date(timeIntervalSince1970: 4),
+            ordinal: 0,
+            expectedRootsRevision: 7,
+            expectedRootCatalogDigestSHA256: nil
+        )
+        XCTAssertEqual(knownAdmission.root?.kind, .knownUserLibraryCaches)
+        XCTAssertEqual(
+            knownAdmission.root?.path.displayText,
+            "/Users/example/Library/Caches"
+        )
+        XCTAssertEqual(
+            knownAdmission.context?.rootCatalogDigestSHA256,
+            knownCatalog.digestSha256
+        )
 
         let malformed = generatedTargetedAdmission(
             pressure: pressure,
@@ -1402,7 +1467,8 @@ final class EngineServiceTests: XCTestCase {
                 stableVolumeID: targetedTestVolumeID,
                 anchorAt: Date(timeIntervalSince1970: 4),
                 ordinal: 0,
-                expectedRootsRevision: 7
+                expectedRootsRevision: 7,
+                expectedRootCatalogDigestSHA256: nil
             )
             XCTFail("Expected a contradictory Rust node budget to fail closed")
         } catch {
@@ -1420,7 +1486,9 @@ final class EngineServiceTests: XCTestCase {
             (.InvalidVolumeIdentity, .invalidVolumeIdentity),
             (.InvalidAnchor, .invalidAnchor),
             (.InvalidOrdinal, .invalidOrdinal),
+            (.InvalidCatalog, .invalidResponse),
             (.RegistryChanged, .configuredRootsChanged),
+            (.CatalogChanged, .configuredRootsChanged),
             (.PressureChanged, .pressureChanged),
             (.ReadOnlyStore, .readOnlyStore),
             (.IncompatibleSchema, .incompatibleSchema),
@@ -1446,7 +1514,8 @@ final class EngineServiceTests: XCTestCase {
                     stableVolumeID: targetedTestVolumeID,
                     anchorAt: Date(timeIntervalSince1970: 4),
                     ordinal: 0,
-                    expectedRootsRevision: nil
+                    expectedRootsRevision: nil,
+                    expectedRootCatalogDigestSHA256: nil
                 )
                 XCTFail("Expected \(ffiError) to be mapped")
             } catch {
@@ -2245,7 +2314,7 @@ final class EngineServiceTests: XCTestCase {
             weakEngine = engine
 
             XCTAssertEqual(liveEngineInstanceCount(), baseline + 1)
-            XCTAssertEqual(try engine.libraryVersion().ffiContractVersion, 38)
+            XCTAssertEqual(try engine.libraryVersion().ffiContractVersion, 39)
             XCTAssertTrue(engine.close())
             XCTAssertTrue(engine.close())
             XCTAssertThrowsError(try engine.formatSize(bytes: 1_536)) { error in

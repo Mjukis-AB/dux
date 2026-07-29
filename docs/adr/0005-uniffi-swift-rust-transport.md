@@ -123,6 +123,31 @@ Neither call accepts a caller path, candidate, recommendation group, plan,
 approval, AI request, cleanup mode, callback, platform driver, or effect
 command.
 
+Contract v39 generalizes that pressure-scan surface to one Rust-owned targeted
+root catalog. Rust may prepend the fixed current-account
+`Library/Caches` root derived from OS account evidence; no cache path crosses
+into Rust from Swift or the request. Each admission returns a versioned,
+path-free catalog stamp containing the known-root policy revision, configured
+root revision, cache-inclusion bit, total count, and SHA-256 digest. The digest
+binds the effective root kinds and order, lossless/canonical paths, captured
+filesystem identities or unavailable reasons, budgets, and exact exclusions.
+After the first admission, Swift must echo that digest for every later ordinal
+and repeat the complete catalog at finalization; omitting it on a later
+ordinal is an invalid-catalog request. Rust rejects a changed
+account, path, identity, overlap, exclusion, availability, settings revision,
+or policy as a catalog change rather than silently retargeting an ordinal.
+An already active task is joined only when root kind and ordinal, live
+identity, catalog digest, node budget, exclusions, and the complete pressure
+episode are equal. A catalog edit, same-path filesystem-object replacement, or
+new pressure episode returns busy rather than attaching the caller to stale
+work.
+Known caches are scanned first under a separate evaluator scope, with DUX's own
+cache subtree excluded; they cannot borrow candidate rules intended for a
+user-selected scan root. The combined pass remains capped at 200,000 nodes,
+durable reuse binds the typed root source and retained snapshot identity, and
+the request still carries no caller path, recommendation, plan, approval, AI
+input, cleanup mode, callback, driver, or effect command.
+
 Contract v9 adds one path-free newest-available review acquisition. The core
 selects the deterministic newest succeeded, non-tombstoned snapshot and then
 uses the same exact scan-bound lease acquisition, which repeats catalog,

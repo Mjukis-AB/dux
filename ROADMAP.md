@@ -5774,6 +5774,39 @@ Tasks:
     counts, partial failures, cancel/retry state, and an exact-scan
     **Review findings** action. The parent remains open for bounded known
     user-cache roots and the resulting Critical recommendation ordering.
+  - [x] 2026-07-29 known user-cache targeting foundation: extend the focused
+    pass with one Rust-derived `<OS account home>/Library/Caches` root ahead of
+    every configured project root. Discovery never accepts `HOME`, a Swift
+    path, or an FFI path; it retains and revalidates the current account's
+    no-follow home identity and mount witness before traversal, after
+    traversal, and before candidate publication. DUX's own
+    `~/Library/Caches/Dux` subtree is excluded by an exact component-aware
+    scanner policy that fails closed on malformed, overlapping, or unbounded
+    exclusions. Lexical or canonical overlap removes later configured roots.
+    A versioned SHA-256 catalog binds root kind/order, configured revision,
+    known-root policy revision, lossless and canonical paths, live identity,
+    unavailable reason, per-root budget, and exclusions; Swift must echo that
+    digest for every ordinal after zero and again at the final checkpoint.
+    Missing later-ordinal digests fail as invalid catalog input. An in-process
+    active task is reusable only when its root kind and ordinal, live identity,
+    catalog digest, node budget, exclusions, and exact pressure episode all
+    match; catalog edits, same-path root replacement, and a new episode return
+    `Busy` rather than joining stale work.
+    UniFFI contract v39 exposes only the typed catalog and root kind. It still
+    accepts no caller path, cleanup plan, approval, AI input, or effect
+    authority. One global 200,000-node pass reserves up to 100,000 nodes for
+    user caches and keeps 10,000–50,000 nodes for each remaining configured
+    root. Durable reuse additionally requires the exact root source, retained
+    snapshot root identity, and terminal candidate evaluation. Automatic
+    user-cache observations deliberately use a separate evaluator scope and
+    currently publish an honest zero-candidate result rather than borrowing
+    user-selected Rust-target rules. Native progress labels the first row
+    **User caches**, propagates the exact catalog digest, and keeps all
+    findings read-only. Focused core/FFI and native adapter/runner tests cover
+    budget bounds, cache-first order, exclusion behavior, catalog echo, and
+    the evaluator authority boundary. The parent remains open until
+    deterministic cache-specific rules can turn this evidence into reviewable
+    safe findings; emergency ordering remains the next separate slice.
 - [ ] Add emergency recovery ordering.
 - [ ] Add rule outcome/regrowth measurement.
 - [ ] Add recurring “storage thief” ranking.

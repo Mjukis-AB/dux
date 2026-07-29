@@ -5,7 +5,7 @@ import XCTest
 final class TargetedReclaimScanPresentationTests: XCTestCase {
     func testProgressAndCompletedCopyExposeTextAlternatives() {
         let context = scanContext(rootCount: 2)
-        let root = observedRoot("/Users/example/Project")
+        let root = configuredRoot("/Users/example/Project", ordinal: 0)
         let result = successfulResult(scanID: "scan:one", candidateCount: 3)
         let progress = TargetedReclaimScanProgress(
             context: context,
@@ -24,7 +24,7 @@ final class TargetedReclaimScanPresentationTests: XCTestCase {
 
         let active = TargetedReclaimScanPresentation.make(.scanning(progress))
         XCTAssertEqual(active.progressValue, 0.5)
-        XCTAssertEqual(active.progressLabel, "1 of 2 folders finished")
+        XCTAssertEqual(active.progressLabel, "1 of 2 locations finished")
         XCTAssertTrue(active.canCancel)
 
         let batch = TargetedReclaimScanBatch(
@@ -33,7 +33,7 @@ final class TargetedReclaimScanPresentationTests: XCTestCase {
             failed: [
                 TargetedReclaimFailedRoot(
                     ordinal: 1,
-                    root: observedRoot("/Users/example/Other"),
+                    root: configuredRoot("/Users/example/Other", ordinal: 1),
                     failure: .accessDenied
                 ),
             ]
@@ -72,10 +72,13 @@ final class TargetedReclaimScanPresentationTests: XCTestCase {
 
 @MainActor
 final class TargetedReclaimScanAppModelTests: XCTestCase {
-    func testWarningRunsRootsSequentiallyAndReusesDurableResult() async {
-        let context = scanContext(rootCount: 2)
-        let firstRoot = observedRoot("/Users/example/Alpha")
-        let secondRoot = observedRoot("/Users/example/Beta")
+    func testWarningRunsKnownCacheBeforeConfiguredRootAndReusesDurableResult() async {
+        let context = scanContext(
+            rootCount: 2,
+            knownUserLibraryCachesIncluded: true
+        )
+        let firstRoot = knownUserCacheRoot()
+        let secondRoot = configuredRoot("/Users/example/Beta", ordinal: 1)
         let firstResult = successfulResult(scanID: "scan:current", candidateCount: 2)
         let secondResult = successfulResult(scanID: "scan:new", candidateCount: 4)
         let task = TargetedHomeScanTaskSpy(
@@ -113,12 +116,21 @@ final class TargetedReclaimScanAppModelTests: XCTestCase {
         }
         XCTAssertEqual(batch.context, context)
         XCTAssertEqual(batch.completed.map(\.source), [.currentDurable, .focusedRun])
+        XCTAssertEqual(
+            batch.completed.map(\.root.kind),
+            [.knownUserLibraryCaches, .configuredProject]
+        )
         XCTAssertEqual(batch.candidateCount, 6)
         XCTAssertTrue(batch.failed.isEmpty)
         let calls = await service.calls()
         XCTAssertEqual(calls.count, 2)
         XCTAssertNil(calls[0].expectedRootsRevision)
         XCTAssertEqual(calls[1].expectedRootsRevision, context.rootsRevision)
+        XCTAssertNil(calls[0].expectedRootCatalogDigestSHA256)
+        XCTAssertEqual(
+            calls[1].expectedRootCatalogDigestSHA256,
+            context.rootCatalogDigestSHA256
+        )
         XCTAssertEqual(calls.map(\.ordinal), [0, 1])
         let checkpoints = await service.checkpoints()
         XCTAssertEqual(checkpoints, 1)
@@ -126,7 +138,7 @@ final class TargetedReclaimScanAppModelTests: XCTestCase {
 
     func testRepeatedSampleForSameDurableBatchDoesNotRepeatTraversal() async {
         let context = scanContext(rootCount: 1)
-        let root = observedRoot("/Users/example/Alpha")
+        let root = configuredRoot("/Users/example/Alpha", ordinal: 0)
         let result = successfulResult(scanID: "scan:current", candidateCount: 1)
         let service = TargetedReclaimScanServiceSpy(
             admissions: [
@@ -163,8 +175,8 @@ final class TargetedReclaimScanAppModelTests: XCTestCase {
 
     func testUnavailableRootDoesNotPreventLaterRootScan() async {
         let context = scanContext(rootCount: 2)
-        let missing = observedRoot("/Users/example/Missing")
-        let available = observedRoot("/Users/example/Available")
+        let missing = configuredRoot("/Users/example/Missing", ordinal: 0)
+        let available = configuredRoot("/Users/example/Available", ordinal: 1)
         let result = successfulResult(scanID: "scan:available", candidateCount: 2)
         let service = TargetedReclaimScanServiceSpy(
             admissions: [
@@ -198,7 +210,7 @@ final class TargetedReclaimScanAppModelTests: XCTestCase {
 
     func testRetryRechecksPreviouslyUnavailableRoot() async {
         let context = scanContext(rootCount: 1)
-        let root = observedRoot("/Users/example/Retry")
+        let root = configuredRoot("/Users/example/Retry", ordinal: 0)
         let result = successfulResult(scanID: "scan:retry", candidateCount: 2)
         let service = TargetedReclaimScanServiceSpy(
             admissions: [
@@ -242,7 +254,7 @@ final class TargetedReclaimScanAppModelTests: XCTestCase {
                 TargetedReclaimScanAdmission(
                     context: context,
                     ordinal: 0,
-                    root: observedRoot("/Users/example/Alpha"),
+                    root: configuredRoot("/Users/example/Alpha", ordinal: 0),
                     disposition: .started(task)
                 ),
             ]
@@ -274,7 +286,7 @@ final class TargetedReclaimScanAppModelTests: XCTestCase {
                 TargetedReclaimScanAdmission(
                     context: context,
                     ordinal: 0,
-                    root: observedRoot("/Users/example/Alpha"),
+                    root: configuredRoot("/Users/example/Alpha", ordinal: 0),
                     disposition: .observing(task)
                 ),
             ]
@@ -320,7 +332,7 @@ final class TargetedReclaimScanAppModelTests: XCTestCase {
                 TargetedReclaimScanAdmission(
                     context: scanContext(rootCount: 1, pressure: .critical),
                     ordinal: 0,
-                    root: observedRoot("/Users/example/Alpha"),
+                    root: configuredRoot("/Users/example/Alpha", ordinal: 0),
                     disposition: .current(
                         successfulResult(
                             scanID: "scan:wrong-pressure",
@@ -354,7 +366,7 @@ final class TargetedReclaimScanAppModelTests: XCTestCase {
                 TargetedReclaimScanAdmission(
                     context: context,
                     ordinal: 0,
-                    root: observedRoot("/Users/example/Alpha"),
+                    root: configuredRoot("/Users/example/Alpha", ordinal: 0),
                     disposition: .current(result)
                 ),
             ],
@@ -377,7 +389,7 @@ final class TargetedReclaimScanAppModelTests: XCTestCase {
     func testCriticalSampleRevalidatesAfterWarningBatchFinishes() async {
         let warningContext = scanContext(rootCount: 1)
         let criticalContext = scanContext(rootCount: 1, pressure: .critical)
-        let root = observedRoot("/Users/example/Alpha")
+        let root = configuredRoot("/Users/example/Alpha", ordinal: 0)
         let warningResult = successfulResult(scanID: "scan:warning", candidateCount: 1)
         let criticalResult = successfulResult(
             scanID: "scan:critical",
@@ -442,6 +454,7 @@ private actor TargetedReclaimScanServiceSpy: DuxTargetedReclaimScanServing {
         let anchorAt: Date
         let ordinal: UInt16
         let expectedRootsRevision: UInt64?
+        let expectedRootCatalogDigestSHA256: Data?
     }
 
     private var admissions: [TargetedReclaimScanAdmission]
@@ -466,14 +479,16 @@ private actor TargetedReclaimScanServiceSpy: DuxTargetedReclaimScanServing {
         stableVolumeID: String,
         anchorAt: Date,
         ordinal: UInt16,
-        expectedRootsRevision: UInt64?
+        expectedRootsRevision: UInt64?,
+        expectedRootCatalogDigestSHA256: Data?
     ) async throws -> TargetedReclaimScanAdmission {
         recordedCalls.append(
             Call(
                 stableVolumeID: stableVolumeID,
                 anchorAt: anchorAt,
                 ordinal: ordinal,
-                expectedRootsRevision: expectedRootsRevision
+                expectedRootsRevision: expectedRootsRevision,
+                expectedRootCatalogDigestSHA256: expectedRootCatalogDigestSHA256
             )
         )
         if !errors.isEmpty {
@@ -646,7 +661,8 @@ private struct TargetedEngineStub: EngineServing {
 
 private func scanContext(
     rootCount: UInt16,
-    pressure: TargetedReclaimPressure = .warning
+    pressure: TargetedReclaimPressure = .warning,
+    knownUserLibraryCachesIncluded: Bool = false
 ) -> TargetedReclaimScanContext {
     TargetedReclaimScanContext(
         stableVolumeID: "volume:test",
@@ -660,11 +676,37 @@ private func scanContext(
         lowPressureSequenceStartedAt: Date(timeIntervalSince1970: 1_700_000_000),
         policyRevision: 3,
         rootsRevision: 7,
+        knownRootsPolicyRevision: 1,
+        knownUserLibraryCachesIncluded: knownUserLibraryCachesIncluded,
+        rootCatalogDigestSHA256: targetedRootCatalogDigest,
         rootCount: rootCount
     )
 }
 
-private func observedRoot(_ path: String) -> ProjectDiscoveryRoot {
+private let targetedRootCatalogDigest = Data((0 ..< 32).map(UInt8.init))
+
+private func configuredRoot(
+    _ path: String,
+    ordinal: UInt16
+) -> TargetedReclaimScanRoot {
+    TargetedReclaimScanRoot(
+        ordinal: ordinal,
+        kind: .configuredProject,
+        path: observedPath(path)
+    )
+}
+
+private func knownUserCacheRoot(
+    _ path: String = "/Users/example/Library/Caches"
+) -> TargetedReclaimScanRoot {
+    TargetedReclaimScanRoot(
+        ordinal: 0,
+        kind: .knownUserLibraryCaches,
+        path: observedPath(path)
+    )
+}
+
+private func observedPath(_ path: String) -> ProjectDiscoveryRoot {
     ProjectDiscoveryRoot(encoding: .unixBytes, encodedBytes: Data(path.utf8))
 }
 

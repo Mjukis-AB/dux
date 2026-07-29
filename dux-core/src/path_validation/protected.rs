@@ -1,4 +1,4 @@
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 use thiserror::Error;
 
@@ -16,6 +16,12 @@ pub(crate) const PROTECTED_ROOT_POLICY_REVISION: u32 = 2;
 
 /// Revision of the current-account-home mount/location observation.
 pub(crate) const TRUSTED_HOME_MOUNT_PROOF_REVISION: u32 = 1;
+
+/// Revision of the fixed, OS-account-derived macOS user-cache root.
+///
+/// This proof identifies only `Library/Caches` below the current account home.
+/// It is discovery scope, not cleanup or protected-root authority.
+pub(crate) const KNOWN_USER_LIBRARY_CACHES_PROOF_REVISION: u32 = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum ProtectedPathKind {
@@ -174,6 +180,133 @@ impl CurrentAccountHomeEvidence {
     fn boundary(&self) -> &FilesystemBoundarySnapshot {
         &self.boundary
     }
+
+    fn matches(&self, other: &Self) -> bool {
+        self.uid == other.uid
+            && self.root.requested_path() == other.root.requested_path()
+            && self.root.canonical_path() == other.root.canonical_path()
+            && self.root.identity() == other.root.identity()
+            && self.boundary == other.boundary
+    }
+}
+
+/// OS-account-derived location of the fixed macOS user cache root.
+///
+/// Construction never consults `HOME`, `USER`, Foundation search paths, or a
+/// caller-supplied path. The derived path may not exist yet; callers that need
+/// to scan it must capture a [`CanonicalScanRoot`] and consume
+/// [`Self::capture_mount_witness`] before admission.
+pub(crate) struct KnownUserLibraryCachesPath {
+    home: CurrentAccountHomeEvidence,
+    path: PathBuf,
+    proof_revision: u32,
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum KnownUserLibraryCachesError {
+    #[error("known user-cache discovery is unsupported on this platform")]
+    UnsupportedPlatform,
+    #[error("current-account home evidence could not be captured: {0}")]
+    HomeEvidence(#[source] ProtectedRootError),
+    #[error("the fixed user-cache path could not be represented safely")]
+    InvalidDerivedPath,
+    #[error("the known user-cache proof revision is unsupported")]
+    UnsupportedRevision,
+    #[error("the current-account home changed")]
+    HomeChanged,
+    #[error("the supplied scan root is not the fixed current-account user-cache root")]
+    RootMismatch,
+    #[error("the fixed user-cache mount evidence could not be captured: {0}")]
+    MountEvidence(#[source] TrustedHomeMountError),
+}
+
+impl KnownUserLibraryCachesPath {
+    /// Derive `<current account home>/Library/Caches` from the OS account
+    /// database and retain the exact no-follow home observation.
+    pub(crate) fn capture() -> Result<Self, KnownUserLibraryCachesError> {
+        #[cfg(not(target_os = "macos"))]
+        {
+            return Err(KnownUserLibraryCachesError::UnsupportedPlatform);
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let home = CurrentAccountHomeEvidence::capture()
+                .map_err(KnownUserLibraryCachesError::HomeEvidence)?;
+            Self::from_home_evidence(home)
+        }
+    }
+
+    #[cfg(any(target_os = "macos", test))]
+    fn from_home_evidence(
+        home: CurrentAccountHomeEvidence,
+    ) -> Result<Self, KnownUserLibraryCachesError> {
+        let path = derive_user_library_caches_path(home.root().requested_path())?;
+        let value = Self {
+            home,
+            path,
+            proof_revision: KNOWN_USER_LIBRARY_CACHES_PROOF_REVISION,
+        };
+        value.revalidate()?;
+        Ok(value)
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Revalidate the exact OS-account home observation retained while deriving
+    /// this path. This does not require the cache child itself to exist.
+    pub(crate) fn revalidate(&self) -> Result<(), KnownUserLibraryCachesError> {
+        if self.proof_revision != KNOWN_USER_LIBRARY_CACHES_PROOF_REVISION {
+            return Err(KnownUserLibraryCachesError::UnsupportedRevision);
+        }
+        let current = CurrentAccountHomeEvidence::capture()
+            .map_err(KnownUserLibraryCachesError::HomeEvidence)?;
+        if !self.home.matches(&current)
+            || derive_user_library_caches_path(current.root().requested_path())? != self.path
+        {
+            return Err(KnownUserLibraryCachesError::HomeChanged);
+        }
+        Ok(())
+    }
+
+    /// Bind an existing, already no-follow-captured cache child to the retained
+    /// current-account home and mount. The returned witness must remain inside
+    /// core and be revalidated by the scan worker.
+    pub(crate) fn capture_mount_witness(
+        &self,
+        scan_root: &CanonicalScanRoot,
+    ) -> Result<TrustedHomeMountWitness, KnownUserLibraryCachesError> {
+        self.revalidate()?;
+        if scan_root.requested_path() != self.path {
+            return Err(KnownUserLibraryCachesError::RootMismatch);
+        }
+        let witness = TrustedHomeMountWitness::capture(scan_root)
+            .map_err(KnownUserLibraryCachesError::MountEvidence)?;
+        if witness.proof_revision != TRUSTED_HOME_MOUNT_PROOF_REVISION
+            || witness.uid != self.home.uid()
+            || witness.home_root.requested_path() != self.home.root().requested_path()
+            || witness.home_root.canonical_path() != self.home.root().canonical_path()
+            || witness.home_root.identity() != self.home.root().identity()
+        {
+            return Err(KnownUserLibraryCachesError::HomeChanged);
+        }
+        witness
+            .revalidate()
+            .map_err(KnownUserLibraryCachesError::MountEvidence)?;
+        Ok(witness)
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn derive_user_library_caches_path(home: &Path) -> Result<PathBuf, KnownUserLibraryCachesError> {
+    let path = home.join("Library").join("Caches");
+    let lexical =
+        validate_scan_root(&path).map_err(|_| KnownUserLibraryCachesError::InvalidDerivedPath)?;
+    if lexical.as_path() != path {
+        return Err(KnownUserLibraryCachesError::InvalidDerivedPath);
+    }
+    Ok(path)
 }
 
 /// A macOS-first, non-cloneable location witness for a scan root at or below
@@ -2125,6 +2258,38 @@ mod tests {
         assert!(TrustedHomeMountWitness::capture(&root).is_err());
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn known_user_library_caches_is_derived_from_the_os_account_home() {
+        let expected_home = User::from_uid(geteuid()).unwrap().unwrap().dir;
+        let known = KnownUserLibraryCachesPath::capture().unwrap();
+        assert_eq!(known.path(), expected_home.join("Library").join("Caches"));
+        assert_eq!(
+            known.proof_revision,
+            KNOWN_USER_LIBRARY_CACHES_PROOF_REVISION
+        );
+        known.revalidate().unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn known_user_library_caches_retains_a_revalidatable_home_mount_witness() {
+        let known = KnownUserLibraryCachesPath::capture().unwrap();
+        let Ok(root) = capture_scan_root(validate_scan_root(known.path()).unwrap()) else {
+            eprintln!("skipping known-cache witness test because Library/Caches is unavailable");
+            return;
+        };
+        let witness = known.capture_mount_witness(&root).unwrap();
+        assert_eq!(witness.proof_revision(), TRUSTED_HOME_MOUNT_PROOF_REVISION);
+        witness.revalidate().unwrap();
+
+        let home = CurrentAccountHomeEvidence::capture().unwrap();
+        assert!(matches!(
+            known.capture_mount_witness(home.root()),
+            Err(KnownUserLibraryCachesError::RootMismatch)
+        ));
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn trusted_home_mount_witness_fails_closed_outside_macos() {
@@ -2132,6 +2297,15 @@ mod tests {
         assert!(matches!(
             TrustedHomeMountWitness::capture(&root),
             Err(TrustedHomeMountError::UnsupportedPlatform)
+        ));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn known_user_library_caches_fails_closed_outside_macos() {
+        assert!(matches!(
+            KnownUserLibraryCachesPath::capture(),
+            Err(KnownUserLibraryCachesError::UnsupportedPlatform)
         ));
     }
 

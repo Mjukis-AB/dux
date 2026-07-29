@@ -5027,6 +5027,49 @@ fn targeted_project_scan_validates_current_anchor_registry_and_root_locally() {
 
 #[cfg(unix)]
 #[test]
+fn targeted_reclaim_scan_requires_the_catalog_digest_after_ordinal_zero() {
+    let temp = TempDir::new().unwrap();
+    let engine = EngineHandle::open(config(&temp)).unwrap();
+    let roots = [
+        temp.path().join("missing-project-a"),
+        temp.path().join("missing-project-b"),
+    ];
+    let stored = engine
+        .set_configured_project_roots(roots.to_vec())
+        .unwrap()
+        .settings;
+    let volume_id = VolumeId::new("volume:targeted-catalog-echo").unwrap();
+    let anchor = SystemTime::now();
+    targeted_capacity_anchor(&engine, &temp, &volume_id, anchor, 1);
+
+    let first = engine
+        .start_targeted_reclaim_scan(&volume_id, anchor, 0, Some(stored.revision), None)
+        .unwrap();
+    assert_eq!(first.root_count, 2);
+    assert_eq!(
+        engine.start_targeted_reclaim_scan(&volume_id, anchor, 1, Some(stored.revision), None,),
+        Err(TargetedProjectScanError::InvalidCatalog)
+    );
+    let second = engine
+        .start_targeted_reclaim_scan(
+            &volume_id,
+            anchor,
+            1,
+            Some(stored.revision),
+            Some(first.root_catalog.digest_sha256),
+        )
+        .unwrap();
+    assert_eq!(second.selection.unwrap().ordinal, 1);
+    assert!(matches!(
+        second.disposition,
+        TargetedProjectScanDisposition::RootUnavailable {
+            reason: ScanRootErrorKind::Missing,
+        }
+    ));
+}
+
+#[cfg(unix)]
+#[test]
 fn targeted_project_scan_rejects_symlinked_roots_and_other_volumes() {
     use std::os::unix::fs::MetadataExt;
 
@@ -5197,6 +5240,174 @@ fn targeted_project_scan_starts_joins_and_reuses_only_terminal_targeted_evidence
             actual_revision: 0,
         })
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn targeted_scan_join_requires_the_exact_pressure_episode() {
+    let temp = TempDir::new().unwrap();
+    let engine = EngineHandle::open(config(&temp)).unwrap();
+    let root = std::fs::canonicalize(temp.path()).unwrap().join("project");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("file"), b"payload").unwrap();
+    let revision = engine
+        .set_configured_project_roots(vec![root])
+        .unwrap()
+        .settings
+        .revision;
+    let volume_id = VolumeId::new("volume:targeted-episode-join").unwrap();
+    let anchor = SystemTime::now();
+    targeted_capacity_anchor(&engine, &temp, &volume_id, anchor, 1);
+
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let started = engine
+        .start_targeted_project_scan_with_test_hooks(
+            &volume_id,
+            anchor,
+            0,
+            Some(revision),
+            move |_| {
+                entered_tx.send(()).unwrap();
+                release_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+            },
+            || {},
+            || {},
+        )
+        .unwrap();
+    let TargetedProjectScanDisposition::Started { task_id } = started.disposition else {
+        panic!("expected a new targeted task");
+    };
+    entered_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+
+    let recovered_at = anchor + Duration::from_millis(1);
+    targeted_capacity_anchor(&engine, &temp, &volume_id, recovered_at, 1_000);
+    let new_episode_anchor = anchor + Duration::from_millis(2);
+    targeted_capacity_anchor(&engine, &temp, &volume_id, new_episode_anchor, 1);
+    assert_eq!(
+        engine.start_targeted_reclaim_scan(
+            &volume_id,
+            new_episode_anchor,
+            0,
+            Some(revision),
+            Some(started.root_catalog.digest_sha256),
+        ),
+        Err(TargetedProjectScanError::Busy),
+        "an active task from a previous pressure episode must not be joined"
+    );
+
+    release_tx.send(()).unwrap();
+    assert!(wait_terminal(&engine, task_id).phase.is_terminal());
+}
+
+#[cfg(unix)]
+#[test]
+fn targeted_scan_join_requires_the_exact_root_catalog() {
+    let temp = TempDir::new().unwrap();
+    let engine = EngineHandle::open(config(&temp)).unwrap();
+    let root = std::fs::canonicalize(temp.path()).unwrap().join("project");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("file"), b"payload").unwrap();
+    let initial_revision = engine
+        .set_configured_project_roots(vec![root.clone()])
+        .unwrap()
+        .settings
+        .revision;
+    let volume_id = VolumeId::new("volume:targeted-catalog-join").unwrap();
+    let anchor = SystemTime::now();
+    targeted_capacity_anchor(&engine, &temp, &volume_id, anchor, 1);
+
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let started = engine
+        .start_targeted_project_scan_with_test_hooks(
+            &volume_id,
+            anchor,
+            0,
+            Some(initial_revision),
+            move |_| {
+                entered_tx.send(()).unwrap();
+                release_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+            },
+            || {},
+            || {},
+        )
+        .unwrap();
+    let TargetedProjectScanDisposition::Started { task_id } = started.disposition else {
+        panic!("expected a new targeted task");
+    };
+    entered_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+
+    let changed_revision = engine
+        .set_configured_project_roots(vec![root, temp.path().join("missing-project")])
+        .unwrap()
+        .settings
+        .revision;
+    assert_eq!(
+        engine.start_targeted_reclaim_scan(&volume_id, anchor, 0, Some(changed_revision), None,),
+        Err(TargetedProjectScanError::Busy),
+        "an active task from a different derived catalog must not be joined"
+    );
+
+    release_tx.send(()).unwrap();
+    assert!(wait_terminal(&engine, task_id).phase.is_terminal());
+}
+
+#[cfg(unix)]
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test renames only a TempDir-owned root to prove an active targeted task cannot be joined after same-path identity replacement"
+)]
+fn targeted_scan_join_requires_the_exact_root_identity() {
+    let temp = TempDir::new().unwrap();
+    let engine = EngineHandle::open(config(&temp)).unwrap();
+    let root = std::fs::canonicalize(temp.path()).unwrap().join("project");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("file"), b"payload").unwrap();
+    let revision = engine
+        .set_configured_project_roots(vec![root.clone()])
+        .unwrap()
+        .settings
+        .revision;
+    let volume_id = VolumeId::new("volume:targeted-identity-join").unwrap();
+    let anchor = SystemTime::now();
+    targeted_capacity_anchor(&engine, &temp, &volume_id, anchor, 1);
+
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let started = engine
+        .start_targeted_project_scan_with_test_hooks(
+            &volume_id,
+            anchor,
+            0,
+            Some(revision),
+            move |_| {
+                entered_tx.send(()).unwrap();
+                release_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+            },
+            || {},
+            || {},
+        )
+        .unwrap();
+    let TargetedProjectScanDisposition::Started { task_id } = started.disposition else {
+        panic!("expected a new targeted task");
+    };
+    entered_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+
+    let displaced = temp.path().join("displaced-project");
+    // DUX-DESTRUCTIVE: allow=test-targeted-scan-root-replacement-rename -- move only this TempDir-owned fixture to prove active-task joins bind filesystem identity
+    std::fs::rename(&root, &displaced).unwrap();
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("replacement"), b"different inode").unwrap();
+    assert_eq!(
+        engine.start_targeted_reclaim_scan(&volume_id, anchor, 0, Some(revision), None),
+        Err(TargetedProjectScanError::Busy),
+        "an active task for a replaced root must not be joined by path alone"
+    );
+
+    release_tx.send(()).unwrap();
+    assert!(wait_terminal(&engine, task_id).phase.is_terminal());
 }
 
 #[test]

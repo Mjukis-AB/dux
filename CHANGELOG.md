@@ -1,5 +1,26 @@
 # Changelog
 
+- Added the Rust-owned known-user-cache foundation to the Warning/Critical
+  focused scanner through UniFFI contract v39. The engine derives the single
+  current account `Library/Caches` root from OS account evidence, never from
+  `HOME`, Swift, or FFI input, and revalidates retained no-follow home, mount,
+  and root identity evidence through publication. DUX's own cache subtree is
+  excluded at the scanner boundary with exact component matching. Known
+  caches run before non-overlapping configured project roots under one
+  deterministic 200,000-node pass: at most 100,000 nodes for caches and
+  10,000–50,000 for each project root. A versioned catalog digest binds the
+  exact root kinds, order, identities, availability, budgets, and exclusions;
+  every ordinal after zero and the final checkpoint must echo it. Active-task
+  reuse additionally requires the exact catalog, root identity, scan budget,
+  exclusions, and pressure episode; a same-path replacement or changed
+  context returns busy instead of joining stale work. Durable reuse also binds
+  the root source and retained snapshot identity. Swift repeats the
+  full catalog, root-kind, budget, and digest validation and labels the cache
+  row distinctly. Automatic cache observations use a separate evaluator scope
+  and intentionally yield zero candidates until deterministic cache-specific
+  rules exist, so they cannot inherit user-selected Rust-target eligibility.
+  The transport remains observation-only and accepts no caller path, candidate,
+  plan, approval, AI input, cleanup mode, or executor authority.
 - Added the configured-project-root portion of the Warning/Critical focused
   reclaim scanner through UniFFI contract v38. At each exact latest durable
   capacity anchor, Rust rereads the revisioned root registry and current open

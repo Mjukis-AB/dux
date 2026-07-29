@@ -8970,6 +8970,7 @@ public struct TargetedProjectScanAdmission {
     public let recordVersion: UInt32
     public let configuredRootsRevision: UInt64
     public let rootCount: UInt16
+    public let rootCatalog: TargetedReclaimRootCatalog
     public let selection: TargetedProjectScanSelection?
     public let pressure: TargetedProjectScanPressureContext?
     public let disposition: TargetedProjectScanDisposition
@@ -8980,10 +8981,11 @@ public struct TargetedProjectScanAdmission {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(recordVersion: UInt32, configuredRootsRevision: UInt64, rootCount: UInt16, selection: TargetedProjectScanSelection?, pressure: TargetedProjectScanPressureContext?, disposition: TargetedProjectScanDisposition, rootUnavailableReason: TargetedProjectScanRootUnavailableReason?, currentResult: ScanTaskResult?, task: ScanTask?, existingTaskObservedPhase: TaskPhase?) {
+    public init(recordVersion: UInt32, configuredRootsRevision: UInt64, rootCount: UInt16, rootCatalog: TargetedReclaimRootCatalog, selection: TargetedProjectScanSelection?, pressure: TargetedProjectScanPressureContext?, disposition: TargetedProjectScanDisposition, rootUnavailableReason: TargetedProjectScanRootUnavailableReason?, currentResult: ScanTaskResult?, task: ScanTask?, existingTaskObservedPhase: TaskPhase?) {
         self.recordVersion = recordVersion
         self.configuredRootsRevision = configuredRootsRevision
         self.rootCount = rootCount
+        self.rootCatalog = rootCatalog
         self.selection = selection
         self.pressure = pressure
         self.disposition = disposition
@@ -9012,6 +9014,7 @@ public struct FfiConverterTypeTargetedProjectScanAdmission: FfiConverterRustBuff
                 recordVersion: FfiConverterUInt32.read(from: &buf),
                 configuredRootsRevision: FfiConverterUInt64.read(from: &buf),
                 rootCount: FfiConverterUInt16.read(from: &buf),
+                rootCatalog: FfiConverterTypeTargetedReclaimRootCatalog.read(from: &buf),
                 selection: FfiConverterOptionTypeTargetedProjectScanSelection.read(from: &buf),
                 pressure: FfiConverterOptionTypeTargetedProjectScanPressureContext.read(from: &buf),
                 disposition: FfiConverterTypeTargetedProjectScanDisposition.read(from: &buf),
@@ -9026,6 +9029,7 @@ public struct FfiConverterTypeTargetedProjectScanAdmission: FfiConverterRustBuff
         FfiConverterUInt32.write(value.recordVersion, into: &buf)
         FfiConverterUInt64.write(value.configuredRootsRevision, into: &buf)
         FfiConverterUInt16.write(value.rootCount, into: &buf)
+        FfiConverterTypeTargetedReclaimRootCatalog.write(value.rootCatalog, into: &buf)
         FfiConverterOptionTypeTargetedProjectScanSelection.write(value.selection, into: &buf)
         FfiConverterOptionTypeTargetedProjectScanPressureContext.write(value.pressure, into: &buf)
         FfiConverterTypeTargetedProjectScanDisposition.write(value.disposition, into: &buf)
@@ -9056,14 +9060,16 @@ public struct TargetedProjectScanCheckpoint: Equatable, Hashable {
     public let recordVersion: UInt32
     public let configuredRootsRevision: UInt64
     public let rootCount: UInt16
+    public let rootCatalog: TargetedReclaimRootCatalog
     public let pressure: TargetedProjectScanPressureContext
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(recordVersion: UInt32, configuredRootsRevision: UInt64, rootCount: UInt16, pressure: TargetedProjectScanPressureContext) {
+    public init(recordVersion: UInt32, configuredRootsRevision: UInt64, rootCount: UInt16, rootCatalog: TargetedReclaimRootCatalog, pressure: TargetedProjectScanPressureContext) {
         self.recordVersion = recordVersion
         self.configuredRootsRevision = configuredRootsRevision
         self.rootCount = rootCount
+        self.rootCatalog = rootCatalog
         self.pressure = pressure
     }
 
@@ -9086,6 +9092,7 @@ public struct FfiConverterTypeTargetedProjectScanCheckpoint: FfiConverterRustBuf
                 recordVersion: FfiConverterUInt32.read(from: &buf),
                 configuredRootsRevision: FfiConverterUInt64.read(from: &buf),
                 rootCount: FfiConverterUInt16.read(from: &buf),
+                rootCatalog: FfiConverterTypeTargetedReclaimRootCatalog.read(from: &buf),
                 pressure: FfiConverterTypeTargetedProjectScanPressureContext.read(from: &buf)
         )
     }
@@ -9094,6 +9101,7 @@ public struct FfiConverterTypeTargetedProjectScanCheckpoint: FfiConverterRustBuf
         FfiConverterUInt32.write(value.recordVersion, into: &buf)
         FfiConverterUInt64.write(value.configuredRootsRevision, into: &buf)
         FfiConverterUInt16.write(value.rootCount, into: &buf)
+        FfiConverterTypeTargetedReclaimRootCatalog.write(value.rootCatalog, into: &buf)
         FfiConverterTypeTargetedProjectScanPressureContext.write(value.pressure, into: &buf)
     }
 }
@@ -9121,16 +9129,14 @@ public func FfiConverterTypeTargetedProjectScanCheckpoint_lower(_ value: Targete
 public struct TargetedProjectScanCheckpointRequest: Equatable, Hashable {
     public let recordVersion: UInt32
     public let expectedPressure: TargetedProjectScanPressureContext
-    public let expectedConfiguredRootsRevision: UInt64
-    public let expectedRootCount: UInt16
+    public let expectedRootCatalog: TargetedReclaimRootCatalog
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(recordVersion: UInt32, expectedPressure: TargetedProjectScanPressureContext, expectedConfiguredRootsRevision: UInt64, expectedRootCount: UInt16) {
+    public init(recordVersion: UInt32, expectedPressure: TargetedProjectScanPressureContext, expectedRootCatalog: TargetedReclaimRootCatalog) {
         self.recordVersion = recordVersion
         self.expectedPressure = expectedPressure
-        self.expectedConfiguredRootsRevision = expectedConfiguredRootsRevision
-        self.expectedRootCount = expectedRootCount
+        self.expectedRootCatalog = expectedRootCatalog
     }
 
 
@@ -9151,16 +9157,14 @@ public struct FfiConverterTypeTargetedProjectScanCheckpointRequest: FfiConverter
             try TargetedProjectScanCheckpointRequest(
                 recordVersion: FfiConverterUInt32.read(from: &buf),
                 expectedPressure: FfiConverterTypeTargetedProjectScanPressureContext.read(from: &buf),
-                expectedConfiguredRootsRevision: FfiConverterUInt64.read(from: &buf),
-                expectedRootCount: FfiConverterUInt16.read(from: &buf)
+                expectedRootCatalog: FfiConverterTypeTargetedReclaimRootCatalog.read(from: &buf)
         )
     }
 
     public static func write(_ value: TargetedProjectScanCheckpointRequest, into buf: inout [UInt8]) {
         FfiConverterUInt32.write(value.recordVersion, into: &buf)
         FfiConverterTypeTargetedProjectScanPressureContext.write(value.expectedPressure, into: &buf)
-        FfiConverterUInt64.write(value.expectedConfiguredRootsRevision, into: &buf)
-        FfiConverterUInt16.write(value.expectedRootCount, into: &buf)
+        FfiConverterTypeTargetedReclaimRootCatalog.write(value.expectedRootCatalog, into: &buf)
     }
 }
 
@@ -9270,15 +9274,17 @@ public struct TargetedProjectScanRequest: Equatable, Hashable {
     public let capacityAnchorUnixMs: Int64
     public let selectedRootOrdinal: UInt16
     public let expectedConfiguredRootsRevision: UInt64?
+    public let expectedRootCatalogDigestSha256: Data?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(recordVersion: UInt32, stableVolumeId: String, capacityAnchorUnixMs: Int64, selectedRootOrdinal: UInt16, expectedConfiguredRootsRevision: UInt64?) {
+    public init(recordVersion: UInt32, stableVolumeId: String, capacityAnchorUnixMs: Int64, selectedRootOrdinal: UInt16, expectedConfiguredRootsRevision: UInt64?, expectedRootCatalogDigestSha256: Data?) {
         self.recordVersion = recordVersion
         self.stableVolumeId = stableVolumeId
         self.capacityAnchorUnixMs = capacityAnchorUnixMs
         self.selectedRootOrdinal = selectedRootOrdinal
         self.expectedConfiguredRootsRevision = expectedConfiguredRootsRevision
+        self.expectedRootCatalogDigestSha256 = expectedRootCatalogDigestSha256
     }
 
 
@@ -9301,7 +9307,8 @@ public struct FfiConverterTypeTargetedProjectScanRequest: FfiConverterRustBuffer
                 stableVolumeId: FfiConverterString.read(from: &buf),
                 capacityAnchorUnixMs: FfiConverterInt64.read(from: &buf),
                 selectedRootOrdinal: FfiConverterUInt16.read(from: &buf),
-                expectedConfiguredRootsRevision: FfiConverterOptionUInt64.read(from: &buf)
+                expectedConfiguredRootsRevision: FfiConverterOptionUInt64.read(from: &buf),
+                expectedRootCatalogDigestSha256: FfiConverterOptionData.read(from: &buf)
         )
     }
 
@@ -9311,6 +9318,7 @@ public struct FfiConverterTypeTargetedProjectScanRequest: FfiConverterRustBuffer
         FfiConverterInt64.write(value.capacityAnchorUnixMs, into: &buf)
         FfiConverterUInt16.write(value.selectedRootOrdinal, into: &buf)
         FfiConverterOptionUInt64.write(value.expectedConfiguredRootsRevision, into: &buf)
+        FfiConverterOptionData.write(value.expectedRootCatalogDigestSha256, into: &buf)
     }
 }
 
@@ -9337,14 +9345,16 @@ public func FfiConverterTypeTargetedProjectScanRequest_lower(_ value: TargetedPr
 public struct TargetedProjectScanSelection: Equatable, Hashable {
     public let recordVersion: UInt32
     public let ordinal: UInt16
+    public let kind: TargetedReclaimRootKind
     public let root: ConfiguredProjectRootPath
     public let maxNodes: UInt32
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(recordVersion: UInt32, ordinal: UInt16, root: ConfiguredProjectRootPath, maxNodes: UInt32) {
+    public init(recordVersion: UInt32, ordinal: UInt16, kind: TargetedReclaimRootKind, root: ConfiguredProjectRootPath, maxNodes: UInt32) {
         self.recordVersion = recordVersion
         self.ordinal = ordinal
+        self.kind = kind
         self.root = root
         self.maxNodes = maxNodes
     }
@@ -9367,6 +9377,7 @@ public struct FfiConverterTypeTargetedProjectScanSelection: FfiConverterRustBuff
             try TargetedProjectScanSelection(
                 recordVersion: FfiConverterUInt32.read(from: &buf),
                 ordinal: FfiConverterUInt16.read(from: &buf),
+                kind: FfiConverterTypeTargetedReclaimRootKind.read(from: &buf),
                 root: FfiConverterTypeConfiguredProjectRootPath.read(from: &buf),
                 maxNodes: FfiConverterUInt32.read(from: &buf)
         )
@@ -9375,6 +9386,7 @@ public struct FfiConverterTypeTargetedProjectScanSelection: FfiConverterRustBuff
     public static func write(_ value: TargetedProjectScanSelection, into buf: inout [UInt8]) {
         FfiConverterUInt32.write(value.recordVersion, into: &buf)
         FfiConverterUInt16.write(value.ordinal, into: &buf)
+        FfiConverterTypeTargetedReclaimRootKind.write(value.kind, into: &buf)
         FfiConverterTypeConfiguredProjectRootPath.write(value.root, into: &buf)
         FfiConverterUInt32.write(value.maxNodes, into: &buf)
     }
@@ -9393,6 +9405,76 @@ public func FfiConverterTypeTargetedProjectScanSelection_lift(_ buf: RustBuffer)
 #endif
 public func FfiConverterTypeTargetedProjectScanSelection_lower(_ value: TargetedProjectScanSelection) -> RustBuffer {
     return FfiConverterTypeTargetedProjectScanSelection.lower(value)
+}
+
+
+public struct TargetedReclaimRootCatalog: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let knownRootsPolicyRevision: UInt32
+    public let configuredRootsRevision: UInt64
+    public let knownUserLibraryCachesIncluded: Bool
+    public let rootCount: UInt16
+    public let digestSha256: Data
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, knownRootsPolicyRevision: UInt32, configuredRootsRevision: UInt64, knownUserLibraryCachesIncluded: Bool, rootCount: UInt16, digestSha256: Data) {
+        self.recordVersion = recordVersion
+        self.knownRootsPolicyRevision = knownRootsPolicyRevision
+        self.configuredRootsRevision = configuredRootsRevision
+        self.knownUserLibraryCachesIncluded = knownUserLibraryCachesIncluded
+        self.rootCount = rootCount
+        self.digestSha256 = digestSha256
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension TargetedReclaimRootCatalog: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTargetedReclaimRootCatalog: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TargetedReclaimRootCatalog {
+        return
+            try TargetedReclaimRootCatalog(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                knownRootsPolicyRevision: FfiConverterUInt32.read(from: &buf),
+                configuredRootsRevision: FfiConverterUInt64.read(from: &buf),
+                knownUserLibraryCachesIncluded: FfiConverterBool.read(from: &buf),
+                rootCount: FfiConverterUInt16.read(from: &buf),
+                digestSha256: FfiConverterData.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: TargetedReclaimRootCatalog, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterUInt32.write(value.knownRootsPolicyRevision, into: &buf)
+        FfiConverterUInt64.write(value.configuredRootsRevision, into: &buf)
+        FfiConverterBool.write(value.knownUserLibraryCachesIncluded, into: &buf)
+        FfiConverterUInt16.write(value.rootCount, into: &buf)
+        FfiConverterData.write(value.digestSha256, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTargetedReclaimRootCatalog_lift(_ buf: RustBuffer) throws -> TargetedReclaimRootCatalog {
+    return try FfiConverterTypeTargetedReclaimRootCatalog.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTargetedReclaimRootCatalog_lower(_ value: TargetedReclaimRootCatalog) -> RustBuffer {
+    return FfiConverterTypeTargetedReclaimRootCatalog.lower(value)
 }
 
 // Note that we don't yet support `indirect` for enums.
@@ -16705,7 +16787,9 @@ public enum TargetedProjectScanError: Swift.Error, Equatable, Hashable, Foundati
     case InvalidVolumeIdentity
     case InvalidAnchor
     case InvalidOrdinal
+    case InvalidCatalog
     case RegistryChanged
+    case CatalogChanged
     case PressureChanged
     case ReadOnlyStore
     case IncompatibleSchema
@@ -16752,19 +16836,21 @@ public struct FfiConverterTypeTargetedProjectScanError: FfiConverterRustBuffer {
         case 3: return .InvalidVolumeIdentity
         case 4: return .InvalidAnchor
         case 5: return .InvalidOrdinal
-        case 6: return .RegistryChanged
-        case 7: return .PressureChanged
-        case 8: return .ReadOnlyStore
-        case 9: return .IncompatibleSchema
-        case 10: return .Busy
-        case 11: return .UnsafeStorage
-        case 12: return .BudgetExceeded
-        case 13: return .CorruptData
-        case 14: return .Unavailable
-        case 15: return .OutcomeUnknown
-        case 16: return .QueueFull
-        case 17: return .TaskIdExhausted
-        case 18: return .InternalState
+        case 6: return .InvalidCatalog
+        case 7: return .RegistryChanged
+        case 8: return .CatalogChanged
+        case 9: return .PressureChanged
+        case 10: return .ReadOnlyStore
+        case 11: return .IncompatibleSchema
+        case 12: return .Busy
+        case 13: return .UnsafeStorage
+        case 14: return .BudgetExceeded
+        case 15: return .CorruptData
+        case 16: return .Unavailable
+        case 17: return .OutcomeUnknown
+        case 18: return .QueueFull
+        case 19: return .TaskIdExhausted
+        case 20: return .InternalState
 
          default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -16797,56 +16883,64 @@ public struct FfiConverterTypeTargetedProjectScanError: FfiConverterRustBuffer {
             writeInt(&buf, Int32(5))
 
 
-        case .RegistryChanged:
+        case .InvalidCatalog:
             writeInt(&buf, Int32(6))
 
 
-        case .PressureChanged:
+        case .RegistryChanged:
             writeInt(&buf, Int32(7))
 
 
-        case .ReadOnlyStore:
+        case .CatalogChanged:
             writeInt(&buf, Int32(8))
 
 
-        case .IncompatibleSchema:
+        case .PressureChanged:
             writeInt(&buf, Int32(9))
 
 
-        case .Busy:
+        case .ReadOnlyStore:
             writeInt(&buf, Int32(10))
 
 
-        case .UnsafeStorage:
+        case .IncompatibleSchema:
             writeInt(&buf, Int32(11))
 
 
-        case .BudgetExceeded:
+        case .Busy:
             writeInt(&buf, Int32(12))
 
 
-        case .CorruptData:
+        case .UnsafeStorage:
             writeInt(&buf, Int32(13))
 
 
-        case .Unavailable:
+        case .BudgetExceeded:
             writeInt(&buf, Int32(14))
 
 
-        case .OutcomeUnknown:
+        case .CorruptData:
             writeInt(&buf, Int32(15))
 
 
-        case .QueueFull:
+        case .Unavailable:
             writeInt(&buf, Int32(16))
 
 
-        case .TaskIdExhausted:
+        case .OutcomeUnknown:
             writeInt(&buf, Int32(17))
 
 
-        case .InternalState:
+        case .QueueFull:
             writeInt(&buf, Int32(18))
+
+
+        case .TaskIdExhausted:
+            writeInt(&buf, Int32(19))
+
+
+        case .InternalState:
+            writeInt(&buf, Int32(20))
 
         }
     }
@@ -17061,6 +17155,73 @@ public func FfiConverterTypeTargetedProjectScanRootUnavailableReason_lift(_ buf:
 #endif
 public func FfiConverterTypeTargetedProjectScanRootUnavailableReason_lower(_ value: TargetedProjectScanRootUnavailableReason) -> RustBuffer {
     return FfiConverterTypeTargetedProjectScanRootUnavailableReason.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum TargetedReclaimRootKind: Equatable, Hashable {
+
+    case knownUserLibraryCaches
+    case configuredProject
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension TargetedReclaimRootKind: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTargetedReclaimRootKind: FfiConverterRustBuffer {
+    typealias SwiftType = TargetedReclaimRootKind
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TargetedReclaimRootKind {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .knownUserLibraryCaches
+
+        case 2: return .configuredProject
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: TargetedReclaimRootKind, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .knownUserLibraryCaches:
+            writeInt(&buf, Int32(1))
+
+
+        case .configuredProject:
+            writeInt(&buf, Int32(2))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTargetedReclaimRootKind_lift(_ buf: RustBuffer) throws -> TargetedReclaimRootKind {
+    return try FfiConverterTypeTargetedReclaimRootKind.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTargetedReclaimRootKind_lower(_ value: TargetedReclaimRootKind) -> RustBuffer {
+    return FfiConverterTypeTargetedReclaimRootKind.lower(value)
 }
 
 

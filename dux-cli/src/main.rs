@@ -101,6 +101,7 @@ fn run_app(
         follow_symlinks: args.follow_symlinks,
         max_depth: args.max_depth,
         max_nodes: None,
+        excluded_subtrees: Vec::new(),
         same_filesystem: !args.cross_filesystems,
         num_threads: 0,
     };

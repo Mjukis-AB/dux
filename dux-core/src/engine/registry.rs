@@ -7,6 +7,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use sha2::{Digest, Sha256};
 #[cfg(all(test, target_os = "macos"))]
 use thiserror::Error;
 
@@ -74,10 +75,11 @@ use super::snapshot_review::{
     category_path_bytes, map_repository_error as map_snapshot_review_error,
 };
 use super::targeted_project_scan::{
-    MAX_TARGETED_PRESSURE_CHAIN_EPISODES, TargetedProjectScanAdmission,
-    TargetedProjectScanCheckpoint, TargetedProjectScanCurrent, TargetedProjectScanDisposition,
-    TargetedProjectScanError, TargetedProjectScanPressureContext, TargetedProjectScanSelection,
-    derive_low_pressure_chain, targeted_scan_node_limit,
+    MAX_TARGETED_PRESSURE_CHAIN_EPISODES, TARGETED_RECLAIM_ROOT_POLICY_REVISION,
+    TargetedProjectScanAdmission, TargetedProjectScanCheckpoint, TargetedProjectScanCurrent,
+    TargetedProjectScanDisposition, TargetedProjectScanError, TargetedProjectScanPressureContext,
+    TargetedProjectScanSelection, TargetedReclaimRootCatalogStamp, TargetedReclaimRootKind,
+    derive_low_pressure_chain, targeted_reclaim_root_catalog_layout,
 };
 use super::task::{
     CancelOutcome, CandidateEvaluationRecoveryError,
@@ -131,7 +133,8 @@ use crate::domain::{
     replay_snapshot_candidate_evaluation, validate_bundled_candidate_catalog,
 };
 use crate::path_validation::{
-    CanonicalPathError, FilesystemIdentity, capture_scan_root, validate_scan_root,
+    CanonicalPathError, FilesystemIdentity, KnownUserLibraryCachesPath, TrustedHomeMountWitness,
+    capture_scan_root, validate_scan_root,
 };
 #[cfg(any(test, target_os = "macos"))]
 use crate::persistence::CleanupTrigger;
@@ -658,11 +661,40 @@ enum TargetedScanSubmission {
     Existing { task_id: TaskId, phase: TaskPhase },
 }
 
+struct TargetedReclaimCatalog {
+    stamp: TargetedReclaimRootCatalogStamp,
+    roots: Vec<TargetedReclaimCatalogRoot>,
+}
+
+struct TargetedReclaimCatalogRoot {
+    ordinal: u16,
+    kind: TargetedReclaimRootKind,
+    configured_root_ordinal: Option<u16>,
+    display_root: PathBuf,
+    prepared: Result<(PathBuf, FilesystemIdentity), ScanRootErrorKind>,
+    known_user_cache: Option<KnownUserLibraryCachesPath>,
+    excluded_subtrees: Vec<PathBuf>,
+    max_nodes: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TargetedScanAdmissionIdentity {
+    root_kind: TargetedReclaimRootKind,
+    root_ordinal: u16,
+    root_identity: FilesystemIdentity,
+    root_catalog_digest_sha256: [u8; 32],
+    max_nodes: u32,
+    excluded_subtrees: Vec<PathBuf>,
+    pressure: TargetedProjectScanPressureContext,
+}
+
 struct TaskRecord {
     id: TaskId,
     kind: TaskKind,
     priority: TaskPriority,
     scan_origin: Option<ScanTaskOrigin>,
+    targeted_root_kind: Option<TargetedReclaimRootKind>,
+    targeted_admission: Option<TargetedScanAdmissionIdentity>,
     phase: TaskPhase,
     cancellation_requested: bool,
     cancellation_closed: bool,
@@ -729,6 +761,8 @@ impl TaskRecord {
             kind,
             priority,
             scan_origin,
+            targeted_root_kind: None,
+            targeted_admission: None,
             phase: TaskPhase::Queued,
             cancellation_requested: false,
             cancellation_closed: false,
@@ -4179,6 +4213,7 @@ impl EngineHandle {
     /// during the exact contiguous low-pressure interval proven at
     /// `capacity_anchor`. The caller selects only a stored ordinal; no caller
     /// path, cleanup plan, or effect authority crosses this boundary.
+    #[cfg(test)]
     pub fn start_targeted_project_scan(
         &self,
         volume_id: &crate::domain::VolumeId,
@@ -4191,6 +4226,31 @@ impl EngineHandle {
             capacity_anchor,
             selected_root_ordinal,
             expected_configured_roots_revision,
+            None,
+            |_| {},
+            || {},
+            || {},
+        )
+    }
+
+    /// Contract-v39 targeted admission. After the first response, callers must
+    /// echo the exact path-free catalog digest so an OS-account, identity,
+    /// overlap, exclusion, or settings change cannot silently retarget a later
+    /// ordinal.
+    pub fn start_targeted_reclaim_scan(
+        &self,
+        volume_id: &crate::domain::VolumeId,
+        capacity_anchor: SystemTime,
+        selected_root_ordinal: u16,
+        expected_configured_roots_revision: Option<u64>,
+        expected_root_catalog_digest_sha256: Option<[u8; 32]>,
+    ) -> Result<TargetedProjectScanAdmission, TargetedProjectScanError> {
+        self.start_targeted_project_scan_with_hooks(
+            volume_id,
+            capacity_anchor,
+            selected_root_ordinal,
+            expected_configured_roots_revision,
+            expected_root_catalog_digest_sha256,
             |_| {},
             || {},
             || {},
@@ -4214,6 +4274,7 @@ impl EngineHandle {
             capacity_anchor,
             selected_root_ordinal,
             expected_configured_roots_revision,
+            None,
             before_traversal,
             before_candidate_evaluation,
             before_candidate_persistence,
@@ -4227,6 +4288,7 @@ impl EngineHandle {
         capacity_anchor: SystemTime,
         selected_root_ordinal: u16,
         expected_configured_roots_revision: Option<u64>,
+        expected_root_catalog_digest_sha256: Option<[u8; 32]>,
         before_traversal: impl FnOnce(&ScanId) + Send + 'static,
         before_candidate_evaluation: impl FnOnce() + Send + 'static,
         before_candidate_persistence: impl FnOnce() + Send + 'static,
@@ -4259,8 +4321,14 @@ impl EngineHandle {
                 actual_revision: configured.revision,
             });
         }
-        let root_count = u16::try_from(configured.roots.len())
-            .map_err(|_| TargetedProjectScanError::CorruptData)?;
+        let catalog = build_targeted_reclaim_catalog(&self.inner.config, &configured)?;
+        if expected_root_catalog_digest_sha256
+            .is_some_and(|expected| expected != catalog.stamp.digest_sha256)
+        {
+            return Err(TargetedProjectScanError::CatalogChanged);
+        }
+        let root_count = catalog.stamp.root_count;
+        let root_catalog = catalog.stamp.clone();
 
         let episodes = self
             .inner
@@ -4290,60 +4358,90 @@ impl EngineHandle {
             policy_revision: chain.policy_revision,
         });
 
-        if configured.roots.is_empty() {
+        if catalog.roots.is_empty() {
             return Ok(TargetedProjectScanAdmission {
                 configured_roots_revision: configured.revision,
                 root_count,
+                root_catalog,
                 selection: None,
                 pressure,
                 disposition: TargetedProjectScanDisposition::EmptyRegistry,
             });
         }
-        let Some(selected_root) = configured
-            .roots
-            .get(usize::from(selected_root_ordinal))
-            .cloned()
-        else {
+        let Some(selected) = catalog.roots.get(usize::from(selected_root_ordinal)) else {
             return Err(TargetedProjectScanError::InvalidOrdinal {
                 ordinal: selected_root_ordinal,
                 root_count,
             });
         };
+        if selected_root_ordinal > 0 && expected_root_catalog_digest_sha256.is_none() {
+            return Err(TargetedProjectScanError::InvalidCatalog);
+        }
         let selection = TargetedProjectScanSelection {
             ordinal: selected_root_ordinal,
-            root: selected_root.clone(),
-            max_nodes: u32::try_from(targeted_scan_node_limit(root_count))
-                .map_err(|_| TargetedProjectScanError::InternalState)?,
+            kind: selected.kind,
+            root: selected.display_root.clone(),
+            max_nodes: selected.max_nodes,
         };
+        let selected_kind = selected.kind;
+        let selected_root = selected.display_root.clone();
+        let prepared_root = selected.prepared.clone();
+        let excluded_subtrees = selected.excluded_subtrees.clone();
         let targeted_max_nodes = usize::try_from(selection.max_nodes)
             .map_err(|_| TargetedProjectScanError::InternalState)?;
         let Some(pressure) = pressure else {
             return Ok(TargetedProjectScanAdmission {
                 configured_roots_revision: configured.revision,
                 root_count,
+                root_catalog,
                 selection: Some(selection),
                 pressure: None,
                 disposition: TargetedProjectScanDisposition::NoPressure,
             });
         };
-        let (canonical_root, expected_identity) = match prepare_targeted_scan_root(&selected_root) {
+        let (canonical_root, expected_identity) = match prepared_root {
             Ok(root) => root,
             Err(reason) => {
-                self.ensure_configured_roots_unchanged(&configured)?;
+                self.ensure_targeted_reclaim_catalog_unchanged(&configured, &root_catalog)?;
                 return Ok(TargetedProjectScanAdmission {
                     configured_roots_revision: configured.revision,
                     root_count,
+                    root_catalog,
                     selection: Some(selection),
                     pressure: Some(pressure),
                     disposition: TargetedProjectScanDisposition::RootUnavailable { reason },
                 });
             }
         };
+        let trusted_home_mount = if selected_kind == TargetedReclaimRootKind::KnownUserLibraryCaches
+        {
+            let known = selected
+                .known_user_cache
+                .as_ref()
+                .ok_or(TargetedProjectScanError::InternalState)?;
+            let lexical = validate_scan_root(&selected_root)
+                .map_err(|_| TargetedProjectScanError::CatalogChanged)?;
+            let captured =
+                capture_scan_root(lexical).map_err(|_| TargetedProjectScanError::CatalogChanged)?;
+            if captured.canonical_path() != canonical_root
+                || captured.identity() != expected_identity
+            {
+                return Err(TargetedProjectScanError::CatalogChanged);
+            }
+            Some(
+                known
+                    .capture_mount_witness(&captured)
+                    .map_err(|_| TargetedProjectScanError::CatalogChanged)?,
+            )
+        } else {
+            None
+        };
         if let Err(reason) = prove_root_on_affected_volume(&canonical_root, &volume_mount_path) {
-            self.ensure_configured_roots_unchanged(&configured)?;
+            self.ensure_targeted_reclaim_catalog_unchanged(&configured, &root_catalog)?;
             return Ok(TargetedProjectScanAdmission {
                 configured_roots_revision: configured.revision,
                 root_count,
+                root_catalog,
                 selection: Some(selection),
                 pressure: Some(pressure),
                 disposition: TargetedProjectScanDisposition::RootUnavailable { reason },
@@ -4352,9 +4450,9 @@ impl EngineHandle {
 
         // Close the settings/read-to-filesystem gap before using the selected
         // root. A concurrent registry edit never silently retargets admission.
-        self.ensure_configured_roots_unchanged(&configured)?;
+        self.ensure_targeted_reclaim_catalog_unchanged(&configured, &root_catalog)?;
 
-        if let Some(record) = self
+        let reusable_record = self
             .inner
             .store
             .load_latest_scan_for_exact_root_since(
@@ -4362,7 +4460,16 @@ impl EngineHandle {
                 pressure.current_episode_started_at,
             )
             .map_err(|error| map_targeted_project_scan_history_error(error.kind))?
-        {
+            .filter(|record| targeted_scan_record_matches_kind(record.id(), selected_kind))
+            .filter(|record| {
+                targeted_scan_snapshot_matches_root(
+                    &self.inner.snapshots,
+                    record,
+                    &canonical_root,
+                    expected_identity,
+                )
+            });
+        if let Some(record) = reusable_record {
             let scan = public_scan_summary(&record);
             let candidate_evaluation = self
                 .inner
@@ -4383,6 +4490,7 @@ impl EngineHandle {
             return Ok(TargetedProjectScanAdmission {
                 configured_roots_revision: configured.revision,
                 root_count,
+                root_catalog,
                 selection: Some(selection),
                 pressure: Some(pressure),
                 disposition: TargetedProjectScanDisposition::Current(Box::new(
@@ -4394,10 +4502,19 @@ impl EngineHandle {
             });
         }
 
-        self.ensure_configured_roots_unchanged(&configured)?;
+        self.ensure_targeted_reclaim_catalog_unchanged(&configured, &root_catalog)?;
         let store = Arc::clone(&self.inner.store);
         let snapshots = Arc::clone(&self.inner.snapshots);
         let work_root = canonical_root.clone();
+        let targeted_admission = TargetedScanAdmissionIdentity {
+            root_kind: selected_kind,
+            root_ordinal: selected_root_ordinal,
+            root_identity: expected_identity,
+            root_catalog_digest_sha256: root_catalog.digest_sha256,
+            max_nodes: selection.max_nodes,
+            excluded_subtrees: excluded_subtrees.clone(),
+            pressure: pressure.clone(),
+        };
         let work = Box::new(move |context| {
             run_scan_task(
                 context,
@@ -4406,6 +4523,9 @@ impl EngineHandle {
                     expected_identity: Some(expected_identity),
                     origin: ScanTaskOrigin::TargetedRecommendation,
                     max_nodes: targeted_max_nodes,
+                    excluded_subtrees,
+                    trusted_home_mount,
+                    targeted_root_kind: Some(selected_kind),
                 },
                 store,
                 snapshots,
@@ -4414,17 +4534,19 @@ impl EngineHandle {
                 before_candidate_persistence,
             )
         });
-        let disposition = match self.submit_targeted_scan(canonical_root, work)? {
-            TargetedScanSubmission::Started(task_id) => {
-                TargetedProjectScanDisposition::Started { task_id }
-            }
-            TargetedScanSubmission::Existing { task_id, phase } => {
-                TargetedProjectScanDisposition::ExistingTask { task_id, phase }
-            }
-        };
+        let disposition =
+            match self.submit_targeted_scan(canonical_root, targeted_admission, work)? {
+                TargetedScanSubmission::Started(task_id) => {
+                    TargetedProjectScanDisposition::Started { task_id }
+                }
+                TargetedScanSubmission::Existing { task_id, phase } => {
+                    TargetedProjectScanDisposition::ExistingTask { task_id, phase }
+                }
+            };
         Ok(TargetedProjectScanAdmission {
             configured_roots_revision: configured.revision,
             root_count,
+            root_catalog,
             selection: Some(selection),
             pressure: Some(pressure),
             disposition,
@@ -4433,11 +4555,40 @@ impl EngineHandle {
 
     /// Revalidate the path-free registry and pressure facts after a bounded
     /// selected-root pass. This starts no task and grants no cleanup authority.
+    #[cfg(test)]
     pub fn validate_targeted_project_scan_context(
         &self,
         expected_pressure: &TargetedProjectScanPressureContext,
         expected_configured_roots_revision: u64,
         expected_root_count: u16,
+    ) -> Result<TargetedProjectScanCheckpoint, TargetedProjectScanError> {
+        self.validate_targeted_reclaim_scan_context_inner(
+            expected_pressure,
+            expected_configured_roots_revision,
+            expected_root_count,
+            None,
+        )
+    }
+
+    pub fn validate_targeted_reclaim_scan_context(
+        &self,
+        expected_pressure: &TargetedProjectScanPressureContext,
+        expected_root_catalog: &TargetedReclaimRootCatalogStamp,
+    ) -> Result<TargetedProjectScanCheckpoint, TargetedProjectScanError> {
+        self.validate_targeted_reclaim_scan_context_inner(
+            expected_pressure,
+            expected_root_catalog.configured_roots_revision,
+            expected_root_catalog.root_count,
+            Some(expected_root_catalog),
+        )
+    }
+
+    fn validate_targeted_reclaim_scan_context_inner(
+        &self,
+        expected_pressure: &TargetedProjectScanPressureContext,
+        expected_configured_roots_revision: u64,
+        expected_root_count: u16,
+        expected_root_catalog: Option<&TargetedReclaimRootCatalogStamp>,
     ) -> Result<TargetedProjectScanCheckpoint, TargetedProjectScanError> {
         if self.lifecycle() != EngineLifecycle::Open {
             return Err(TargetedProjectScanError::Closed);
@@ -4458,16 +4609,19 @@ impl EngineHandle {
             .store
             .load_configured_project_roots()
             .map_err(|error| map_targeted_project_scan_history_error(error.kind))?;
-        let root_count = u16::try_from(configured.roots.len())
-            .map_err(|_| TargetedProjectScanError::CorruptData)?;
         if configured.revision != expected_configured_roots_revision {
             return Err(TargetedProjectScanError::RegistryChanged {
                 expected_revision: expected_configured_roots_revision,
                 actual_revision: configured.revision,
             });
         }
+        let catalog = build_targeted_reclaim_catalog(&self.inner.config, &configured)?;
+        let root_count = catalog.stamp.root_count;
         if root_count != expected_root_count {
-            return Err(TargetedProjectScanError::CorruptData);
+            return Err(TargetedProjectScanError::CatalogChanged);
+        }
+        if expected_root_catalog.is_some_and(|expected| *expected != catalog.stamp) {
+            return Err(TargetedProjectScanError::CatalogChanged);
         }
         let episodes = self
             .inner
@@ -4503,6 +4657,7 @@ impl EngineHandle {
         Ok(TargetedProjectScanCheckpoint {
             configured_roots_revision: configured.revision,
             root_count,
+            root_catalog: catalog.stamp,
             pressure: current,
         })
     }
@@ -4523,6 +4678,20 @@ impl EngineHandle {
                 expected_revision: expected.revision,
                 actual_revision: current.revision,
             })
+        }
+    }
+
+    fn ensure_targeted_reclaim_catalog_unchanged(
+        &self,
+        expected_configured: &ConfiguredProjectRootSetting,
+        expected_catalog: &TargetedReclaimRootCatalogStamp,
+    ) -> Result<(), TargetedProjectScanError> {
+        self.ensure_configured_roots_unchanged(expected_configured)?;
+        let current = build_targeted_reclaim_catalog(&self.inner.config, expected_configured)?;
+        if current.stamp == *expected_catalog {
+            Ok(())
+        } else {
+            Err(TargetedProjectScanError::CatalogChanged)
         }
     }
 
@@ -4604,6 +4773,9 @@ impl EngineHandle {
                         expected_identity: Some(expected_identity),
                         origin: ScanTaskOrigin::UserSubtree,
                         max_nodes: MAX_HOME_SCAN_NODES,
+                        excluded_subtrees: Vec::new(),
+                        trusted_home_mount: None,
+                        targeted_root_kind: None,
                     },
                     store,
                     snapshots,
@@ -4657,6 +4829,9 @@ impl EngineHandle {
                         expected_identity: None,
                         origin: ScanTaskOrigin::UserFull,
                         max_nodes: MAX_HOME_SCAN_NODES,
+                        excluded_subtrees: Vec::new(),
+                        trusted_home_mount: None,
+                        targeted_root_kind: None,
                     },
                     store,
                     snapshots,
@@ -5349,6 +5524,7 @@ impl EngineHandle {
     fn submit_targeted_scan(
         &self,
         scan_scope: PathBuf,
+        admission: TargetedScanAdmissionIdentity,
         work: Work,
     ) -> Result<TargetedScanSubmission, TargetedProjectScanError> {
         let mut registry = self
@@ -5373,6 +5549,8 @@ impl EngineHandle {
                 .ok_or(TargetedProjectScanError::InternalState)?;
             if active_scope != scan_scope
                 || record.scan_origin != Some(ScanTaskOrigin::TargetedRecommendation)
+                || record.targeted_root_kind != Some(admission.root_kind)
+                || record.targeted_admission.as_ref() != Some(&admission)
             {
                 return Err(TargetedProjectScanError::Busy);
             }
@@ -5388,12 +5566,14 @@ impl EngineHandle {
             StartTaskError::TaskIdExhausted => TargetedProjectScanError::TaskIdExhausted,
             _ => TargetedProjectScanError::InternalState,
         })?;
-        let record = TaskRecord::new_scan(
+        let mut record = TaskRecord::new_scan(
             id,
             ScanTaskOrigin::TargetedRecommendation,
             scan_scope.clone(),
             self.inner.shared.limits.events_per_task,
         );
+        record.targeted_root_kind = Some(admission.root_kind);
+        record.targeted_admission = Some(admission);
         registry.active_scan_roots.insert(scan_scope, id);
         registry.records.insert(id, record);
         registry.enqueue(Job {
@@ -5819,6 +5999,250 @@ fn prepare_targeted_scan_root(
     ))
 }
 
+fn build_targeted_reclaim_catalog(
+    config: &EngineConfig,
+    configured: &ConfiguredProjectRootSetting,
+) -> Result<TargetedReclaimCatalog, TargetedProjectScanError> {
+    let known_user_cache = KnownUserLibraryCachesPath::capture()
+        .ok()
+        .filter(|known| config.cache_directory() == known.path().join("Dux"));
+    let known_path = known_user_cache
+        .as_ref()
+        .map(|known| known.path().to_path_buf());
+
+    let mut roots = Vec::with_capacity(
+        configured
+            .roots
+            .len()
+            .saturating_add(usize::from(known_user_cache.is_some())),
+    );
+    if let Some(known) = known_user_cache {
+        let display_root = known.path().to_path_buf();
+        let prepared = prepare_targeted_scan_root(&display_root);
+        let excluded_subtrees = prepared
+            .as_ref()
+            .ok()
+            .and_then(|(canonical, _)| {
+                let cache = config.cache_directory();
+                cache
+                    .strip_prefix(&display_root)
+                    .ok()
+                    .filter(|relative| !relative.as_os_str().is_empty())
+                    .map(|relative| canonical.join(relative))
+            })
+            .into_iter()
+            .collect();
+        roots.push(TargetedReclaimCatalogRoot {
+            ordinal: 0,
+            kind: TargetedReclaimRootKind::KnownUserLibraryCaches,
+            configured_root_ordinal: None,
+            display_root,
+            prepared,
+            known_user_cache: Some(known),
+            excluded_subtrees,
+            max_nodes: 0,
+        });
+    }
+
+    for (configured_index, root) in configured.roots.iter().enumerate() {
+        if known_path
+            .as_deref()
+            .is_some_and(|known| super::config::paths_overlap(known, root))
+        {
+            continue;
+        }
+        let prepared = prepare_targeted_scan_root(root);
+        let canonical_overlap = prepared.as_ref().ok().is_some_and(|(canonical, _)| {
+            roots.iter().any(|existing| {
+                existing
+                    .prepared
+                    .as_ref()
+                    .ok()
+                    .is_some_and(|(other, _)| super::config::paths_overlap(canonical, other))
+            })
+        });
+        if canonical_overlap {
+            continue;
+        }
+        roots.push(TargetedReclaimCatalogRoot {
+            ordinal: 0,
+            kind: TargetedReclaimRootKind::ConfiguredProject,
+            configured_root_ordinal: Some(
+                u16::try_from(configured_index)
+                    .map_err(|_| TargetedProjectScanError::CorruptData)?,
+            ),
+            display_root: root.clone(),
+            prepared,
+            known_user_cache: None,
+            excluded_subtrees: Vec::new(),
+            max_nodes: 0,
+        });
+    }
+
+    let include_known = roots
+        .first()
+        .is_some_and(|root| root.kind == TargetedReclaimRootKind::KnownUserLibraryCaches);
+    let configured_count = u16::try_from(
+        roots
+            .iter()
+            .filter(|root| root.kind == TargetedReclaimRootKind::ConfiguredProject)
+            .count(),
+    )
+    .map_err(|_| TargetedProjectScanError::CorruptData)?;
+    let layout = targeted_reclaim_root_catalog_layout(configured_count, include_known)
+        .map_err(|_| TargetedProjectScanError::CorruptData)?;
+    if layout.len() != roots.len() {
+        return Err(TargetedProjectScanError::InternalState);
+    }
+    for (root, slot) in roots.iter_mut().zip(layout) {
+        if root.kind != slot.kind {
+            return Err(TargetedProjectScanError::InternalState);
+        }
+        root.ordinal = slot.ordinal;
+        root.max_nodes = slot.max_nodes;
+    }
+
+    let root_count =
+        u16::try_from(roots.len()).map_err(|_| TargetedProjectScanError::CorruptData)?;
+    let digest_sha256 = targeted_reclaim_catalog_digest(configured.revision, &roots)?;
+    Ok(TargetedReclaimCatalog {
+        stamp: TargetedReclaimRootCatalogStamp {
+            known_roots_policy_revision: TARGETED_RECLAIM_ROOT_POLICY_REVISION,
+            configured_roots_revision: configured.revision,
+            known_user_library_caches_included: include_known,
+            root_count,
+            digest_sha256,
+        },
+        roots,
+    })
+}
+
+fn targeted_reclaim_catalog_digest(
+    configured_roots_revision: u64,
+    roots: &[TargetedReclaimCatalogRoot],
+) -> Result<[u8; 32], TargetedProjectScanError> {
+    let mut digest = Sha256::new();
+    digest.update(b"dux-targeted-reclaim-root-catalog-v1\0");
+    digest.update(TARGETED_RECLAIM_ROOT_POLICY_REVISION.to_le_bytes());
+    digest.update(configured_roots_revision.to_le_bytes());
+    digest.update(
+        u16::try_from(roots.len())
+            .map_err(|_| TargetedProjectScanError::CorruptData)?
+            .to_le_bytes(),
+    );
+    for root in roots {
+        digest.update(root.ordinal.to_le_bytes());
+        digest.update([match root.kind {
+            TargetedReclaimRootKind::KnownUserLibraryCaches => 1,
+            TargetedReclaimRootKind::ConfiguredProject => 2,
+        }]);
+        match root.configured_root_ordinal {
+            Some(ordinal) => {
+                digest.update([1]);
+                digest.update(ordinal.to_le_bytes());
+            }
+            None => digest.update([0]),
+        }
+        update_targeted_catalog_path(&mut digest, &root.display_root)?;
+        match &root.prepared {
+            Ok((canonical, identity)) => {
+                digest.update([1]);
+                update_targeted_catalog_path(&mut digest, canonical)?;
+                digest.update(identity.volume().to_le_bytes());
+                digest.update(identity.object().to_le_bytes());
+            }
+            Err(reason) => {
+                digest.update([0, targeted_root_reason_rank(*reason)]);
+            }
+        }
+        digest.update(root.max_nodes.to_le_bytes());
+        digest.update(
+            u16::try_from(root.excluded_subtrees.len())
+                .map_err(|_| TargetedProjectScanError::CorruptData)?
+                .to_le_bytes(),
+        );
+        for excluded in &root.excluded_subtrees {
+            update_targeted_catalog_path(&mut digest, excluded)?;
+        }
+    }
+    Ok(digest.finalize().into())
+}
+
+fn update_targeted_catalog_path(
+    digest: &mut Sha256,
+    path: &Path,
+) -> Result<(), TargetedProjectScanError> {
+    let value = HostValue::from_root(path).map_err(|_| TargetedProjectScanError::CorruptData)?;
+    digest.update([value.encoding() as u8]);
+    digest.update(
+        u64::try_from(value.bytes().len())
+            .map_err(|_| TargetedProjectScanError::CorruptData)?
+            .to_le_bytes(),
+    );
+    digest.update(value.bytes());
+    Ok(())
+}
+
+const fn targeted_root_reason_rank(reason: ScanRootErrorKind) -> u8 {
+    match reason {
+        ScanRootErrorKind::InvalidPath => 1,
+        ScanRootErrorKind::Missing => 2,
+        ScanRootErrorKind::AccessDenied => 3,
+        ScanRootErrorKind::NotDirectory => 4,
+        ScanRootErrorKind::Symlink => 5,
+        ScanRootErrorKind::ChangedDuringValidation => 6,
+        ScanRootErrorKind::IdentityUnavailable => 7,
+        ScanRootErrorKind::VolumeMismatch => 8,
+        ScanRootErrorKind::VolumeUnproven => 9,
+        ScanRootErrorKind::UnsupportedPlatform => 10,
+        ScanRootErrorKind::Unavailable => 11,
+    }
+}
+
+fn targeted_scan_record_matches_kind(scan_id: &ScanId, kind: TargetedReclaimRootKind) -> bool {
+    let is_known = scan_id
+        .as_str()
+        .starts_with(crate::domain::KNOWN_USER_CACHE_SCAN_ID_PREFIX);
+    match kind {
+        TargetedReclaimRootKind::KnownUserLibraryCaches => is_known,
+        TargetedReclaimRootKind::ConfiguredProject => {
+            scan_id.as_str().starts_with("scan:targeted:") && !is_known
+        }
+    }
+}
+
+fn targeted_scan_snapshot_matches_root(
+    snapshots: &SnapshotRepository,
+    record: &ScanRecord,
+    canonical_root: &Path,
+    expected_identity: FilesystemIdentity,
+) -> bool {
+    let Some(reference) = record.snapshot() else {
+        return false;
+    };
+    let Ok(document) = snapshots.load_for_candidate_recovery(reference) else {
+        return false;
+    };
+    if document.metadata.scan_id != *record.id()
+        || !document.metadata.root.matches_path(canonical_root)
+    {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        let Some(identity) = document.nodes.first().and_then(|node| node.unix_identity) else {
+            return false;
+        };
+        identity.device() == expected_identity.volume()
+            && u128::from(identity.inode()) == expected_identity.object()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = expected_identity;
+        false
+    }
+}
+
 fn normalize_macos_system_path_alias(root: &Path) -> PathBuf {
     #[cfg(target_os = "macos")]
     {
@@ -5900,12 +6324,19 @@ fn prove_root_on_affected_volume(
     }
 }
 
-fn generate_scan_id(origin: ScanTaskOrigin) -> Result<ScanId, TaskFailureKind> {
+fn generate_scan_id(
+    origin: ScanTaskOrigin,
+    targeted_root_kind: Option<TargetedReclaimRootKind>,
+) -> Result<ScanId, TaskFailureKind> {
     let mut random = [0_u8; 16];
     getrandom::fill(&mut random).map_err(|_| TaskFailureKind::InternalFailure)?;
-    let prefix = match origin {
-        ScanTaskOrigin::TargetedRecommendation => "scan:targeted:",
-        ScanTaskOrigin::UserFull | ScanTaskOrigin::UserSubtree => "scan:",
+    let prefix = match (origin, targeted_root_kind) {
+        (
+            ScanTaskOrigin::TargetedRecommendation,
+            Some(TargetedReclaimRootKind::KnownUserLibraryCaches),
+        ) => crate::domain::KNOWN_USER_CACHE_SCAN_ID_PREFIX,
+        (ScanTaskOrigin::TargetedRecommendation, _) => "scan:targeted:",
+        (ScanTaskOrigin::UserFull | ScanTaskOrigin::UserSubtree, _) => "scan:",
     };
     let mut value = String::with_capacity(prefix.len() + random.len() * 2);
     value.push_str(prefix);
@@ -6420,10 +6851,11 @@ fn start_durable_scan(
     store: &StoreCoordinator,
     root: &Path,
     origin: ScanTaskOrigin,
+    targeted_root_kind: Option<TargetedReclaimRootKind>,
 ) -> Result<NewScanRecord, TaskFailureKind> {
     const COLLISION_RETRIES: usize = 4;
     for _ in 0..COLLISION_RETRIES {
-        let id = generate_scan_id(origin)?;
+        let id = generate_scan_id(origin, targeted_root_kind)?;
         let start = NewScanRecord::try_new(id, root.to_path_buf(), SystemTime::now())
             .map_err(|_| TaskFailureKind::PersistenceUnavailable)?;
         match store.record_scan_started_reconciled(&start) {
@@ -8445,6 +8877,9 @@ struct AdmittedScanRoot {
     expected_identity: Option<FilesystemIdentity>,
     origin: ScanTaskOrigin,
     max_nodes: usize,
+    excluded_subtrees: Vec<PathBuf>,
+    trusted_home_mount: Option<TrustedHomeMountWitness>,
+    targeted_root_kind: Option<TargetedReclaimRootKind>,
 }
 
 // Home scans feed a retained DiskTree and path index. Keep the interactive
@@ -8466,13 +8901,19 @@ fn run_scan_task(
         expected_identity: expected_root_identity,
         origin,
         max_nodes,
+        excluded_subtrees,
+        trusted_home_mount,
+        targeted_root_kind,
     } = admitted;
     if prepare_scan_root(&admitted_root).ok().as_deref() != Some(admitted_root.as_path())
         || !current_root_matches(&admitted_root, expected_root_identity)
+        || trusted_home_mount
+            .as_ref()
+            .is_some_and(|witness| witness.revalidate().is_err())
     {
         return WorkOutcome::Failed(TaskFailureKind::ScanRootChanged, None);
     }
-    let start = match start_durable_scan(&store, &admitted_root, origin) {
+    let start = match start_durable_scan(&store, &admitted_root, origin, targeted_root_kind) {
         Ok(start) => start,
         Err(failure) => return WorkOutcome::Failed(failure, None),
     };
@@ -8484,11 +8925,18 @@ fn run_scan_task(
     if !current_root_matches(&admitted_root, expected_root_identity) {
         return settle_changed_scan_root(&mut durable, start.started_at());
     }
+    if trusted_home_mount
+        .as_ref()
+        .is_some_and(|witness| witness.revalidate().is_err())
+    {
+        return settle_changed_scan_root(&mut durable, start.started_at());
+    }
 
     let scanner = Scanner::new(ScanConfig {
         follow_symlinks: false,
         max_depth: None,
         max_nodes: Some(max_nodes),
+        excluded_subtrees,
         same_filesystem: true,
         // A single traversal worker avoids an additional unbounded jwalk
         // prefetch queue while the main thread retains each node/path.
@@ -8553,6 +9001,9 @@ fn run_scan_task(
             };
             if !current_root_matches(&admitted_root, expected_root_identity)
                 || !artifact_root_matches(&artifact, expected_root_identity)
+                || trusted_home_mount
+                    .as_ref()
+                    .is_some_and(|witness| witness.revalidate().is_err())
             {
                 return settle_changed_scan_root(&mut durable, completed_at);
             }
@@ -8590,7 +9041,11 @@ fn run_scan_task(
             // passed. Requests after this point remain truthful task intent
             // but cannot rewrite the immutable terminal batch being committed.
             before_candidate_persistence();
-            if !current_root_matches(&admitted_root, expected_root_identity) {
+            if !current_root_matches(&admitted_root, expected_root_identity)
+                || trusted_home_mount
+                    .as_ref()
+                    .is_some_and(|witness| witness.revalidate().is_err())
+            {
                 return settle_changed_scan_root(&mut durable, completed_at);
             }
             match snapshots.complete_scan_with_candidate_evaluation(

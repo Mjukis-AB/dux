@@ -109,7 +109,9 @@ use dux_core::engine::{
     TargetedProjectScanDisposition as CoreTargetedProjectScanDisposition,
     TargetedProjectScanError as CoreTargetedProjectScanError,
     TargetedProjectScanPressure as CoreTargetedProjectScanPressure,
-    TargetedProjectScanPressureContext as CoreTargetedProjectScanPressureContext, TaskAccessError,
+    TargetedProjectScanPressureContext as CoreTargetedProjectScanPressureContext,
+    TargetedReclaimRootCatalogStamp as CoreTargetedReclaimRootCatalogStamp,
+    TargetedReclaimRootKind as CoreTargetedReclaimRootKind, TaskAccessError,
     TaskEventBatch as CoreTaskEventBatch, TaskEventKind as CoreTaskEventKind, TaskFailureKind,
     TaskId, TaskKind as CoreTaskKind, TaskPhase as CoreTaskPhase, TaskPriority as CoreTaskPriority,
     VolumeCapacityObservation as CoreVolumeObservation,
@@ -128,7 +130,7 @@ use dux_core::{
     VolumeCapacity, VolumeId,
 };
 
-const FFI_CONTRACT_VERSION: u32 = 38;
+const FFI_CONTRACT_VERSION: u32 = 39;
 const FFI_RECORD_VERSION: u32 = 1;
 const RUST_TARGET_MINIMUM_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const SNAPSHOT_NODE_RECORD_VERSION: u32 = 2;
@@ -564,6 +566,7 @@ pub struct TargetedProjectScanRequest {
     pub capacity_anchor_unix_ms: i64,
     pub selected_root_ordinal: u16,
     pub expected_configured_roots_revision: Option<u64>,
+    pub expected_root_catalog_digest_sha256: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
@@ -590,8 +593,25 @@ pub struct TargetedProjectScanPressureContext {
 pub struct TargetedProjectScanSelection {
     pub record_version: u32,
     pub ordinal: u16,
+    pub kind: TargetedReclaimRootKind,
     pub root: ConfiguredProjectRootPath,
     pub max_nodes: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum TargetedReclaimRootKind {
+    KnownUserLibraryCaches,
+    ConfiguredProject,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct TargetedReclaimRootCatalog {
+    pub record_version: u32,
+    pub known_roots_policy_revision: u32,
+    pub configured_roots_revision: u64,
+    pub known_user_library_caches_included: bool,
+    pub root_count: u16,
+    pub digest_sha256: Vec<u8>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
@@ -627,6 +647,7 @@ pub struct TargetedProjectScanAdmission {
     pub record_version: u32,
     pub configured_roots_revision: u64,
     pub root_count: u16,
+    pub root_catalog: TargetedReclaimRootCatalog,
     pub selection: Option<TargetedProjectScanSelection>,
     pub pressure: Option<TargetedProjectScanPressureContext>,
     pub disposition: TargetedProjectScanDisposition,
@@ -642,8 +663,7 @@ pub struct TargetedProjectScanAdmission {
 pub struct TargetedProjectScanCheckpointRequest {
     pub record_version: u32,
     pub expected_pressure: TargetedProjectScanPressureContext,
-    pub expected_configured_roots_revision: u64,
-    pub expected_root_count: u16,
+    pub expected_root_catalog: TargetedReclaimRootCatalog,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
@@ -651,6 +671,7 @@ pub struct TargetedProjectScanCheckpoint {
     pub record_version: u32,
     pub configured_roots_revision: u64,
     pub root_count: u16,
+    pub root_catalog: TargetedReclaimRootCatalog,
     pub pressure: TargetedProjectScanPressureContext,
 }
 
@@ -666,8 +687,12 @@ pub enum TargetedProjectScanError {
     InvalidAnchor,
     #[error("configured project root ordinal is outside the current registry")]
     InvalidOrdinal,
+    #[error("the targeted-reclaim root catalog proof is malformed")]
+    InvalidCatalog,
     #[error("configured project roots changed during the targeted scan pass")]
     RegistryChanged,
+    #[error("the derived targeted-reclaim root catalog changed during the scan pass")]
+    CatalogChanged,
     #[error("disk pressure changed during the targeted scan pass")]
     PressureChanged,
     #[error("the durable engine store is read-only")]
@@ -4106,13 +4131,23 @@ impl DuxEngine {
         }
         let volume_id = parse_targeted_project_scan_volume_id(&request.stable_volume_id)?;
         let capacity_anchor = targeted_project_scan_time(request.capacity_anchor_unix_ms, false)?;
+        let expected_catalog_digest = request
+            .expected_root_catalog_digest_sha256
+            .map(|digest| {
+                <[u8; 32]>::try_from(digest).map_err(|_| TargetedProjectScanError::InvalidCatalog)
+            })
+            .transpose()?;
+        if request.selected_root_ordinal > 0 && expected_catalog_digest.is_none() {
+            return Err(TargetedProjectScanError::InvalidCatalog);
+        }
         self.with_targeted_project_scan_engine(|engine| {
             let admission = engine
-                .start_targeted_project_scan(
+                .start_targeted_reclaim_scan(
                     &volume_id,
                     capacity_anchor,
                     request.selected_root_ordinal,
                     request.expected_configured_roots_revision,
+                    expected_catalog_digest,
                 )
                 .map_err(map_targeted_project_scan_error)?;
             targeted_project_scan_admission(
@@ -4122,6 +4157,7 @@ impl DuxEngine {
                 capacity_anchor,
                 request.selected_root_ordinal,
                 request.expected_configured_roots_revision,
+                expected_catalog_digest,
             )
         })
     }
@@ -4137,20 +4173,12 @@ impl DuxEngine {
         }
         let expected_pressure =
             core_targeted_project_scan_pressure_context(request.expected_pressure)?;
+        let expected_catalog = core_targeted_reclaim_root_catalog(request.expected_root_catalog)?;
         self.with_targeted_project_scan_engine(|engine| {
             let checkpoint = engine
-                .validate_targeted_project_scan_context(
-                    &expected_pressure,
-                    request.expected_configured_roots_revision,
-                    request.expected_root_count,
-                )
+                .validate_targeted_reclaim_scan_context(&expected_pressure, &expected_catalog)
                 .map_err(map_targeted_project_scan_error)?;
-            targeted_project_scan_checkpoint(
-                checkpoint,
-                &expected_pressure,
-                request.expected_configured_roots_revision,
-                request.expected_root_count,
-            )
+            targeted_project_scan_checkpoint(checkpoint, &expected_pressure, &expected_catalog)
         })
     }
 
@@ -9117,18 +9145,26 @@ fn targeted_project_scan_pressure_context(
 
 fn targeted_project_scan_selection(
     selection: &dux_core::engine::TargetedProjectScanSelection,
-    root_count: u16,
+    catalog: &CoreTargetedReclaimRootCatalogStamp,
     expected_ordinal: u16,
 ) -> Result<TargetedProjectScanSelection, TargetedProjectScanError> {
-    let expected_max_nodes = if root_count == 0 {
-        0
-    } else {
-        (dux_core::MAX_TARGETED_PROJECT_SCAN_PASS_NODES / usize::from(root_count))
-            .clamp(1, dux_core::MAX_TARGETED_PROJECT_SCAN_NODES)
-    };
+    let known_count = u16::from(catalog.known_user_library_caches_included);
+    let configured_count = catalog
+        .root_count
+        .checked_sub(known_count)
+        .ok_or(TargetedProjectScanError::InternalState)?;
+    let layout = dux_core::targeted_reclaim_root_catalog_layout(
+        configured_count,
+        catalog.known_user_library_caches_included,
+    )
+    .map_err(|_| TargetedProjectScanError::InternalState)?;
+    let slot = layout
+        .get(usize::from(expected_ordinal))
+        .ok_or(TargetedProjectScanError::InternalState)?;
     if selection.ordinal != expected_ordinal
-        || selection.ordinal >= root_count
-        || usize::try_from(selection.max_nodes).ok() != Some(expected_max_nodes)
+        || selection.ordinal >= catalog.root_count
+        || selection.kind != slot.kind
+        || selection.max_nodes != slot.max_nodes
     {
         return Err(TargetedProjectScanError::InternalState);
     }
@@ -9137,8 +9173,56 @@ fn targeted_project_scan_selection(
     Ok(TargetedProjectScanSelection {
         record_version: FFI_RECORD_VERSION,
         ordinal: selection.ordinal,
+        kind: match selection.kind {
+            CoreTargetedReclaimRootKind::KnownUserLibraryCaches => {
+                TargetedReclaimRootKind::KnownUserLibraryCaches
+            }
+            CoreTargetedReclaimRootKind::ConfiguredProject => {
+                TargetedReclaimRootKind::ConfiguredProject
+            }
+        },
         root,
         max_nodes: selection.max_nodes,
+    })
+}
+
+fn targeted_reclaim_root_catalog(
+    catalog: &CoreTargetedReclaimRootCatalogStamp,
+) -> Result<TargetedReclaimRootCatalog, TargetedProjectScanError> {
+    if catalog.known_roots_policy_revision != dux_core::TARGETED_RECLAIM_ROOT_POLICY_REVISION
+        || catalog.root_count > dux_core::MAX_TARGETED_RECLAIM_ROOTS
+        || catalog.root_count < u16::from(catalog.known_user_library_caches_included)
+    {
+        return Err(TargetedProjectScanError::InternalState);
+    }
+    Ok(TargetedReclaimRootCatalog {
+        record_version: FFI_RECORD_VERSION,
+        known_roots_policy_revision: catalog.known_roots_policy_revision,
+        configured_roots_revision: catalog.configured_roots_revision,
+        known_user_library_caches_included: catalog.known_user_library_caches_included,
+        root_count: catalog.root_count,
+        digest_sha256: catalog.digest_sha256.to_vec(),
+    })
+}
+
+fn core_targeted_reclaim_root_catalog(
+    catalog: TargetedReclaimRootCatalog,
+) -> Result<CoreTargetedReclaimRootCatalogStamp, TargetedProjectScanError> {
+    let digest_sha256 = <[u8; 32]>::try_from(catalog.digest_sha256)
+        .map_err(|_| TargetedProjectScanError::InvalidCatalog)?;
+    if catalog.record_version != FFI_RECORD_VERSION
+        || catalog.known_roots_policy_revision != dux_core::TARGETED_RECLAIM_ROOT_POLICY_REVISION
+        || catalog.root_count > dux_core::MAX_TARGETED_RECLAIM_ROOTS
+        || catalog.root_count < u16::from(catalog.known_user_library_caches_included)
+    {
+        return Err(TargetedProjectScanError::InvalidCatalog);
+    }
+    Ok(CoreTargetedReclaimRootCatalogStamp {
+        known_roots_policy_revision: catalog.known_roots_policy_revision,
+        configured_roots_revision: catalog.configured_roots_revision,
+        known_user_library_caches_included: catalog.known_user_library_caches_included,
+        root_count: catalog.root_count,
+        digest_sha256,
     })
 }
 
@@ -9149,9 +9233,14 @@ fn targeted_project_scan_admission(
     expected_capacity_anchor: SystemTime,
     expected_ordinal: u16,
     expected_revision: Option<u64>,
+    expected_catalog_digest: Option<[u8; 32]>,
 ) -> Result<TargetedProjectScanAdmission, TargetedProjectScanError> {
-    if usize::from(admission.root_count) > MAX_CONFIGURED_PROJECT_ROOT_COUNT
+    if admission.root_count > dux_core::MAX_TARGETED_RECLAIM_ROOTS
         || expected_revision.is_some_and(|value| value != admission.configured_roots_revision)
+        || admission.configured_roots_revision != admission.root_catalog.configured_roots_revision
+        || admission.root_count != admission.root_catalog.root_count
+        || expected_catalog_digest
+            .is_some_and(|expected| expected != admission.root_catalog.digest_sha256)
     {
         return Err(TargetedProjectScanError::InternalState);
     }
@@ -9159,7 +9248,7 @@ fn targeted_project_scan_admission(
         .selection
         .as_ref()
         .map(|selection| {
-            targeted_project_scan_selection(selection, admission.root_count, expected_ordinal)
+            targeted_project_scan_selection(selection, &admission.root_catalog, expected_ordinal)
         })
         .transpose()?;
     let pressure = admission
@@ -9178,6 +9267,7 @@ fn targeted_project_scan_admission(
         record_version: FFI_RECORD_VERSION,
         configured_roots_revision: admission.configured_roots_revision,
         root_count: admission.root_count,
+        root_catalog: targeted_reclaim_root_catalog(&admission.root_catalog)?,
         selection,
         pressure,
         disposition: TargetedProjectScanDisposition::EmptyRegistry,
@@ -9215,7 +9305,12 @@ fn targeted_project_scan_admission(
         CoreTargetedProjectScanDisposition::Current(current) => {
             require_targeted_project_scan_selection_and_pressure(&response)?;
             response.disposition = TargetedProjectScanDisposition::Current;
-            response.current_result = Some(targeted_project_scan_current_result(&current)?);
+            let kind = response
+                .selection
+                .as_ref()
+                .ok_or(TargetedProjectScanError::InternalState)?
+                .kind;
+            response.current_result = Some(targeted_project_scan_current_result(&current, kind)?);
         }
         CoreTargetedProjectScanDisposition::Started { task_id } => {
             require_targeted_project_scan_selection_and_pressure(&response)?;
@@ -9299,6 +9394,7 @@ fn map_targeted_project_scan_task_access_error(error: TaskAccessError) -> Target
 
 fn targeted_project_scan_current_result(
     current: &CoreTargetedProjectScanCurrent,
+    expected_kind: TargetedReclaimRootKind,
 ) -> Result<ScanTaskResult, TargetedProjectScanError> {
     let scan = &current.scan;
     let evaluation = &current.candidate_evaluation;
@@ -9306,9 +9402,19 @@ fn targeted_project_scan_current_result(
         .completed_at
         .ok_or(TargetedProjectScanError::InternalState)?;
     let counts = scan.counts.ok_or(TargetedProjectScanError::InternalState)?;
+    let is_known_cache = scan
+        .scan_id
+        .as_str()
+        .starts_with("scan:targeted:known-user-cache:");
+    let kind_matches = match expected_kind {
+        TargetedReclaimRootKind::KnownUserLibraryCaches => is_known_cache,
+        TargetedReclaimRootKind::ConfiguredProject => {
+            scan.scan_id.as_str().starts_with("scan:targeted:") && !is_known_cache
+        }
+    };
     if scan.status != CoreDurableScanStatus::Succeeded
         || !scan.snapshot_recorded
-        || !scan.scan_id.as_str().starts_with("scan:targeted:")
+        || !kind_matches
         || completed_at < scan.started_at
         || evaluation.scan_id() != &scan.scan_id
         || evaluation.source_scan_status() != CoreDurableScanStatus::Succeeded
@@ -9380,12 +9486,12 @@ fn targeted_project_scan_current_result(
 fn targeted_project_scan_checkpoint(
     checkpoint: CoreTargetedProjectScanCheckpoint,
     expected_pressure: &CoreTargetedProjectScanPressureContext,
-    expected_revision: u64,
-    expected_root_count: u16,
+    expected_catalog: &CoreTargetedReclaimRootCatalogStamp,
 ) -> Result<TargetedProjectScanCheckpoint, TargetedProjectScanError> {
-    if checkpoint.configured_roots_revision != expected_revision
-        || checkpoint.root_count != expected_root_count
-        || usize::from(checkpoint.root_count) > MAX_CONFIGURED_PROJECT_ROOT_COUNT
+    if checkpoint.configured_roots_revision != expected_catalog.configured_roots_revision
+        || checkpoint.root_count != expected_catalog.root_count
+        || checkpoint.root_catalog != *expected_catalog
+        || checkpoint.root_count > dux_core::MAX_TARGETED_RECLAIM_ROOTS
         || checkpoint.pressure != *expected_pressure
     {
         return Err(TargetedProjectScanError::InternalState);
@@ -9394,6 +9500,7 @@ fn targeted_project_scan_checkpoint(
         record_version: FFI_RECORD_VERSION,
         configured_roots_revision: checkpoint.configured_roots_revision,
         root_count: checkpoint.root_count,
+        root_catalog: targeted_reclaim_root_catalog(&checkpoint.root_catalog)?,
         pressure: targeted_project_scan_pressure_context(&checkpoint.pressure)?,
     })
 }
@@ -9407,6 +9514,8 @@ fn map_targeted_project_scan_error(
         CoreTargetedProjectScanError::RegistryChanged { .. } => {
             TargetedProjectScanError::RegistryChanged
         }
+        CoreTargetedProjectScanError::InvalidCatalog => TargetedProjectScanError::InvalidCatalog,
+        CoreTargetedProjectScanError::CatalogChanged => TargetedProjectScanError::CatalogChanged,
         CoreTargetedProjectScanError::InvalidOrdinal { .. } => {
             TargetedProjectScanError::InvalidOrdinal
         }
@@ -10018,10 +10127,10 @@ mod tests {
     }
 
     #[test]
-    fn reports_contract_thirty_eight_and_preserves_legacy_formatting() {
+    fn reports_contract_thirty_nine_and_preserves_legacy_formatting() {
         let _guard = ENGINE_TEST_LOCK.lock().unwrap();
         let (_temp, engine) = engine();
-        assert_eq!(library_version().ffi_contract_version, 38);
+        assert_eq!(library_version().ffi_contract_version, 39);
         assert_eq!(engine.library_version().unwrap(), library_version());
         assert_eq!(engine.format_size(1536).unwrap().display, "1.5 KB");
         assert!(engine.close());
@@ -13634,6 +13743,7 @@ mod tests {
             capacity_anchor_unix_ms: anchor_unix_ms,
             selected_root_ordinal: ordinal,
             expected_configured_roots_revision: revision,
+            expected_root_catalog_digest_sha256: None,
         }
     }
 
@@ -13674,12 +13784,14 @@ mod tests {
         assert_eq!(started.record_version, FFI_RECORD_VERSION);
         assert_eq!(started.configured_roots_revision, configured.revision);
         assert_eq!(started.root_count, 1);
+        let root_catalog = started.root_catalog.clone();
         assert_eq!(started.disposition, TargetedProjectScanDisposition::Started);
         assert_eq!(
             started.selection,
             Some(TargetedProjectScanSelection {
                 record_version: FFI_RECORD_VERSION,
                 ordinal: 0,
+                kind: TargetedReclaimRootKind::ConfiguredProject,
                 root: encoded_root.clone(),
                 max_nodes: u32::try_from(dux_core::MAX_TARGETED_PROJECT_SCAN_NODES).unwrap(),
             })
@@ -13703,13 +13815,11 @@ mod tests {
         assert_eq!(terminal.phase, TaskPhase::Succeeded);
         let terminal_result = terminal.result.unwrap();
 
-        let current = engine
-            .start_targeted_project_scan(targeted_project_scan_request(
-                anchor,
-                0,
-                Some(configured.revision),
-            ))
-            .unwrap();
+        let mut current_request =
+            targeted_project_scan_request(anchor, 0, Some(configured.revision));
+        current_request.expected_root_catalog_digest_sha256 =
+            Some(root_catalog.digest_sha256.clone());
+        let current = engine.start_targeted_project_scan(current_request).unwrap();
         assert_eq!(current.disposition, TargetedProjectScanDisposition::Current);
         assert_eq!(current.selection.unwrap().root, encoded_root);
         assert_eq!(current.pressure.as_ref(), Some(&pressure));
@@ -13730,13 +13840,13 @@ mod tests {
             .validate_targeted_project_scan_context(TargetedProjectScanCheckpointRequest {
                 record_version: FFI_RECORD_VERSION,
                 expected_pressure: pressure.clone(),
-                expected_configured_roots_revision: configured.revision,
-                expected_root_count: 1,
+                expected_root_catalog: root_catalog.clone(),
             })
             .unwrap();
         assert_eq!(checkpoint.record_version, FFI_RECORD_VERSION);
         assert_eq!(checkpoint.configured_roots_revision, configured.revision);
         assert_eq!(checkpoint.root_count, 1);
+        assert_eq!(checkpoint.root_catalog, root_catalog);
         assert_eq!(checkpoint.pressure, pressure);
     }
 
@@ -13870,7 +13980,7 @@ mod tests {
                 1,
                 Some(configured.revision),
             )),
-            Err(TargetedProjectScanError::InvalidOrdinal)
+            Err(TargetedProjectScanError::InvalidCatalog)
         ));
         assert!(matches!(
             engine.start_targeted_project_scan(targeted_project_scan_request(
@@ -13881,23 +13991,30 @@ mod tests {
             Err(TargetedProjectScanError::RegistryChanged)
         ));
 
-        let pressure = engine
+        let admission = engine
             .start_targeted_project_scan(targeted_project_scan_request(
                 anchor,
                 0,
                 Some(configured.revision),
             ))
-            .unwrap()
-            .pressure
             .unwrap();
+        let pressure = admission.pressure.unwrap();
+        let root_catalog = admission.root_catalog;
+        let mut invalid_ordinal =
+            targeted_project_scan_request(anchor, 1, Some(configured.revision));
+        invalid_ordinal.expected_root_catalog_digest_sha256 =
+            Some(root_catalog.digest_sha256.clone());
+        assert!(matches!(
+            engine.start_targeted_project_scan(invalid_ordinal),
+            Err(TargetedProjectScanError::InvalidOrdinal)
+        ));
         let mut malformed_pressure = pressure.clone();
         malformed_pressure.record_version += 1;
         assert!(matches!(
             engine.validate_targeted_project_scan_context(TargetedProjectScanCheckpointRequest {
                 record_version: FFI_RECORD_VERSION,
                 expected_pressure: malformed_pressure,
-                expected_configured_roots_revision: configured.revision,
-                expected_root_count: 1,
+                expected_root_catalog: root_catalog.clone(),
             }),
             Err(TargetedProjectScanError::InvalidRecordVersion)
         ));
@@ -13908,8 +14025,7 @@ mod tests {
             engine.validate_targeted_project_scan_context(TargetedProjectScanCheckpointRequest {
                 record_version: FFI_RECORD_VERSION,
                 expected_pressure: malformed_pressure,
-                expected_configured_roots_revision: configured.revision,
-                expected_root_count: 1,
+                expected_root_catalog: root_catalog,
             }),
             Err(TargetedProjectScanError::InvalidAnchor)
         ));

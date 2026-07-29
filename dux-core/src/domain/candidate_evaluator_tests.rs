@@ -805,6 +805,31 @@ fn output_limit_fails_as_a_typed_error_instead_of_silently_truncating() {
 }
 
 #[test]
+fn automatic_user_cache_scope_cannot_borrow_selected_root_rules() {
+    let mut tree = DiskTree::new(PathBuf::from("/Users/example/Library/Caches"));
+    add_rust_project(&mut tree, "plausible-project", 10);
+    let coverage = complete_coverage();
+    let selected_id = ScanId::new("scan:targeted:selected-fixture").unwrap();
+    let known_cache_id = ScanId::new(format!("{KNOWN_USER_CACHE_SCAN_ID_PREFIX}fixture")).unwrap();
+
+    let selected =
+        evaluate_artifact_candidates(&selected_id, &tree, &coverage, evaluated_at()).unwrap();
+    let automatic =
+        evaluate_artifact_candidates(&known_cache_id, &tree, &coverage, evaluated_at()).unwrap();
+
+    assert_eq!(selected.observed_match_count(), 1);
+    assert_eq!(automatic.observed_match_count(), 0);
+    assert_ne!(
+        selected.context_digest_sha256(),
+        automatic.context_digest_sha256()
+    );
+    assert_eq!(
+        candidate_evaluation_scope(&known_cache_id),
+        CandidateEvaluationScope::UserCacheDirectory
+    );
+}
+
+#[test]
 fn native_path_byte_helper_is_lossless_for_fixture_paths() {
     let path = Path::new("/fixture/project/target");
     assert!(!native_path_bytes(path).is_empty());

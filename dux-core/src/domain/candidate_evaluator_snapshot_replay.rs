@@ -5,7 +5,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
 use super::{
-    CandidateBatch, CandidateEvaluationError, MAX_EVALUATED_CANDIDATES, ObservedArtifact,
+    CandidateBatch, CandidateEvaluationError, CandidateEvaluationScope, MAX_EVALUATED_CANDIDATES,
+    ObservedArtifact, candidate_evaluation_scope, empty_candidate_batch,
     evaluate_observed_artifacts,
 };
 use crate::domain::{Candidate, ScanCoverage, ScanCoverageStatus};
@@ -88,6 +89,16 @@ pub(crate) fn replay_snapshot_candidate_evaluation(
         .root
         .to_path_buf()
         .map_err(|_| CandidateSnapshotReplayError::InvalidSnapshot)?;
+    if candidate_evaluation_scope(&document.metadata.scan_id)
+        == CandidateEvaluationScope::UserCacheDirectory
+    {
+        return Ok(empty_candidate_batch(
+            &document.metadata.scan_id,
+            &root,
+            coverage,
+            evaluated_at,
+        ));
+    }
     let mut frames = Vec::new();
     frames
         .try_reserve_exact(

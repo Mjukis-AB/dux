@@ -27,6 +27,9 @@ struct TargetedReclaimScanContext: Equatable, Sendable {
     let lowPressureSequenceStartedAt: Date
     let policyRevision: UInt64
     let rootsRevision: UInt64
+    let knownRootsPolicyRevision: UInt32
+    let knownUserLibraryCachesIncluded: Bool
+    let rootCatalogDigestSHA256: Data
     let rootCount: UInt16
 
     var identity: TargetedReclaimScanIdentity {
@@ -36,6 +39,9 @@ struct TargetedReclaimScanContext: Equatable, Sendable {
             pressureEpisodeStartedAt: pressureEpisodeStartedAt,
             policyRevision: policyRevision,
             rootsRevision: rootsRevision,
+            knownRootsPolicyRevision: knownRootsPolicyRevision,
+            knownUserLibraryCachesIncluded: knownUserLibraryCachesIncluded,
+            rootCatalogDigestSHA256: rootCatalogDigestSHA256,
             rootCount: rootCount
         )
     }
@@ -47,7 +53,32 @@ struct TargetedReclaimScanIdentity: Equatable, Sendable {
     let pressureEpisodeStartedAt: Date
     let policyRevision: UInt64
     let rootsRevision: UInt64
+    let knownRootsPolicyRevision: UInt32
+    let knownUserLibraryCachesIncluded: Bool
+    let rootCatalogDigestSHA256: Data
     let rootCount: UInt16
+}
+
+enum TargetedReclaimScanRootKind: Equatable, Sendable {
+    case knownUserLibraryCaches
+    case configuredProject
+}
+
+struct TargetedReclaimScanRoot: Equatable, Sendable, Identifiable {
+    var id: UInt16 { ordinal }
+
+    let ordinal: UInt16
+    let kind: TargetedReclaimScanRootKind
+    let path: ProjectDiscoveryRoot
+
+    var displayName: String {
+        switch kind {
+        case .knownUserLibraryCaches:
+            "User caches"
+        case .configuredProject:
+            "Project folder"
+        }
+    }
 }
 
 enum TargetedReclaimScanResultSource: Equatable, Sendable {
@@ -64,7 +95,7 @@ struct TargetedReclaimRootResult: Equatable, Sendable, Identifiable {
     var id: UInt16 { ordinal }
 
     let ordinal: UInt16
-    let root: ProjectDiscoveryRoot
+    let root: TargetedReclaimScanRoot
     let source: TargetedReclaimScanResultSource
     let result: HomeScanTaskResult
 }
@@ -91,7 +122,7 @@ struct TargetedReclaimFailedRoot: Equatable, Sendable, Identifiable {
     var id: UInt16 { ordinal }
 
     let ordinal: UInt16
-    let root: ProjectDiscoveryRoot?
+    let root: TargetedReclaimScanRoot?
     let failure: TargetedReclaimRootFailure
 }
 
@@ -153,7 +184,7 @@ enum TargetedReclaimScanFailure: Equatable, Sendable {
 enum TargetedReclaimScanState: Equatable, Sendable {
     case idle
     case checking(previous: TargetedReclaimScanBatch?)
-    case noConfiguredRoots
+    case noEligibleRoots
     case deferred(TargetedReclaimScanDeferral, previous: TargetedReclaimScanBatch?)
     case scanning(TargetedReclaimScanProgress)
     case completed(TargetedReclaimScanBatch)
@@ -175,7 +206,7 @@ enum TargetedReclaimScanState: Equatable, Sendable {
                 completed: progress.completed,
                 failed: progress.failed
             )
-        case .idle, .noConfiguredRoots:
+        case .idle, .noEligibleRoots:
             nil
         }
     }
@@ -184,7 +215,7 @@ enum TargetedReclaimScanState: Equatable, Sendable {
         switch self {
         case .checking, .scanning:
             true
-        case .idle, .noConfiguredRoots, .deferred, .completed, .cancelled, .failed:
+        case .idle, .noEligibleRoots, .deferred, .completed, .cancelled, .failed:
             false
         }
     }
@@ -194,7 +225,7 @@ enum TargetedReclaimScanState: Equatable, Sendable {
 /// proved the pressure anchor and selected a root from the current registry.
 enum TargetedReclaimScanDisposition: Sendable {
     case pressureNotActive
-    case noConfiguredRoots
+    case noEligibleRoots
     case unavailable(TargetedReclaimRootFailure)
     case current(HomeScanTaskResult)
     case started(any HomeScanTask)
@@ -206,7 +237,7 @@ enum TargetedReclaimScanDisposition: Sendable {
         switch self {
         case let .started(task), let .observing(task):
             task
-        case .pressureNotActive, .noConfiguredRoots, .unavailable, .current:
+        case .pressureNotActive, .noEligibleRoots, .unavailable, .current:
             nil
         }
     }
@@ -222,7 +253,7 @@ enum TargetedReclaimScanDisposition: Sendable {
 struct TargetedReclaimScanAdmission: Sendable {
     let context: TargetedReclaimScanContext?
     let ordinal: UInt16?
-    let root: ProjectDiscoveryRoot?
+    let root: TargetedReclaimScanRoot?
     let disposition: TargetedReclaimScanDisposition
 }
 
@@ -290,7 +321,7 @@ struct TargetedReclaimScanPresentation: Equatable, Sendable {
         case .idle:
             return Self(
                 title: "Focused storage scan is standing by",
-                detail: "DUX checks configured project folders read-only while the startup disk is in Warning or Critical pressure.",
+                detail: "DUX checks known user caches and configured project folders read-only while the startup disk is in Warning or Critical pressure.",
                 symbol: "scope",
                 tone: .neutral,
                 progressValue: nil,
@@ -303,7 +334,7 @@ struct TargetedReclaimScanPresentation: Equatable, Sendable {
         case let .checking(previous):
             return Self(
                 title: "Checking focused scan evidence",
-                detail: "Verifying the current low-space period and saved project folders.",
+                detail: "Verifying the current low-space period and focused storage locations.",
                 symbol: "scope",
                 tone: .active,
                 progressValue: nil,
@@ -313,10 +344,10 @@ struct TargetedReclaimScanPresentation: Equatable, Sendable {
                 canRetry: false,
                 showsConfigureRoots: false
             )
-        case .noConfiguredRoots:
+        case .noEligibleRoots:
             return Self(
-                title: "Choose project folders for focused discovery",
-                detail: "No focused roots are configured. Add project folders in Settings; DUX will only scan them read-only.",
+                title: "No focused locations are available",
+                detail: "Known user-cache discovery is unavailable on this system. Add project folders in Settings for read-only focused discovery.",
                 symbol: "folder.badge.plus",
                 tone: .warning,
                 progressValue: nil,
@@ -344,13 +375,13 @@ struct TargetedReclaimScanPresentation: Equatable, Sendable {
             let count = progress.context.rootCount
             return Self(
                 title: progress.context.pressure == .critical
-                    ? "Scanning configured folders during Critical pressure"
-                    : "Scanning configured folders during Warning pressure",
+                    ? "Scanning focused locations during Critical pressure"
+                    : "Scanning focused locations during Warning pressure",
                 detail: "Recording bounded, read-only observations. Candidate counts are review aids, not guaranteed reclaimable space.",
                 symbol: "magnifyingglass",
                 tone: .active,
                 progressValue: count == 0 ? nil : Double(finished) / Double(count),
-                progressLabel: "\(finished) of \(count) folders finished",
+                progressLabel: "\(finished) of \(count) locations finished",
                 rows: rows,
                 canCancel: true,
                 canRetry: false,
@@ -369,7 +400,7 @@ struct TargetedReclaimScanPresentation: Equatable, Sendable {
                 symbol: failures == 0 ? "checkmark.circle" : "exclamationmark.circle",
                 tone: failures == 0 ? .success : .warning,
                 progressValue: 1,
-                progressLabel: "All configured folders checked",
+                progressLabel: "All focused locations checked",
                 rows: rows,
                 canCancel: false,
                 canRetry: failures > 0,
@@ -445,8 +476,10 @@ struct TargetedReclaimScanPresentation: Equatable, Sendable {
             return TargetedReclaimScanRootPresentation(
                 ordinal: root.ordinal,
                 scanID: root.result.scanID,
-                path: root.root.displayText,
-                title: root.result.succeeded ? "Observed \(observedAt)" : "Scan incomplete",
+                path: root.root.path.displayText,
+                title: root.result.succeeded
+                    ? "\(root.root.displayName) observed \(observedAt)"
+                    : "\(root.root.displayName) scan incomplete",
                 detail: "\(sourceText); \(sizeText); \(coverageText); \(root.result.issueCount) coverage issue\(root.result.issueCount == 1 ? "" : "s"); \(candidateText)",
                 tone: root.result.succeeded ? .success : .warning
             )
@@ -455,7 +488,7 @@ struct TargetedReclaimScanPresentation: Equatable, Sendable {
             TargetedReclaimScanRootPresentation(
                 ordinal: root.ordinal,
                 scanID: nil,
-                path: root.root?.displayText ?? "Configured folder \(root.ordinal + 1)",
+                path: root.root?.path.displayText ?? "Focused location \(root.ordinal + 1)",
                 title: "Could not scan",
                 detail: rootFailureDetail(root.failure),
                 tone: .failure
@@ -580,7 +613,8 @@ protocol DuxTargetedReclaimScanServing: Sendable {
         stableVolumeID: String,
         anchorAt: Date,
         ordinal: UInt16,
-        expectedRootsRevision: UInt64?
+        expectedRootsRevision: UInt64?,
+        expectedRootCatalogDigestSHA256: Data?
     ) async throws -> TargetedReclaimScanAdmission
     func validateTargetedReclaimScan(
         _ context: TargetedReclaimScanContext
@@ -592,7 +626,8 @@ extension DuxTargetedReclaimScanServing {
         stableVolumeID _: String,
         anchorAt _: Date,
         ordinal _: UInt16,
-        expectedRootsRevision _: UInt64?
+        expectedRootsRevision _: UInt64?,
+        expectedRootCatalogDigestSHA256 _: Data?
     ) async throws -> TargetedReclaimScanAdmission {
         throw TargetedReclaimScanServiceError.storageUnavailable
     }

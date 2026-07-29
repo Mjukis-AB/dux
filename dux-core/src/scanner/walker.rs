@@ -25,6 +25,8 @@ use super::progress::{ScanMessage, ScanProgress};
 use crate::ScanIssueKind;
 use crate::tree::{DiskTree, NodeId, NodeKind};
 
+const MAX_EXCLUDED_SUBTREES: usize = 16;
+
 /// Scanner configuration
 #[derive(Debug, Clone)]
 pub struct ScanConfig {
@@ -42,6 +44,13 @@ pub struct ScanConfig {
     pub same_filesystem: bool,
     /// Number of parallel threads (0 = auto)
     pub num_threads: usize,
+    /// Exact absolute subtrees omitted from this scan.
+    ///
+    /// The scanner validates this bounded list against the canonical scan root
+    /// before traversal. Every entry must be a strict normal-component
+    /// descendant; roots, ancestors, aliases, and unrelated paths fail the scan
+    /// rather than weakening the exclusion.
+    pub excluded_subtrees: Vec<PathBuf>,
 }
 
 impl Default for ScanConfig {
@@ -52,6 +61,7 @@ impl Default for ScanConfig {
             max_nodes: None,
             same_filesystem: true,
             num_threads: 0, // auto
+            excluded_subtrees: Vec::new(),
         }
     }
 }
@@ -349,6 +359,16 @@ impl Scanner {
             }
         };
         let mut tree = DiskTree::new(root_path.clone());
+        let excluded_subtrees =
+            match validate_excluded_subtrees(&root_path, &self.config.excluded_subtrees) {
+                Ok(excluded_subtrees) => Arc::new(excluded_subtrees),
+                Err(()) => {
+                    let _ = tx.try_send(ScanMessage::Error(
+                        "scan subtree exclusions are invalid".to_owned(),
+                    ));
+                    return ScanOutcome::failed(tree, crate::ScanCoverage::unknown());
+                }
+            };
 
         let root_metadata = match std::fs::metadata(&root_path) {
             Ok(metadata) if metadata.is_dir() => metadata,
@@ -439,6 +459,7 @@ impl Scanner {
         let root_for_filter = root_path.clone();
         let cancel_for_filter = self.cancel_token.clone();
         let issues_for_filter = Arc::clone(&issues);
+        let excluded_subtrees_for_filter = Arc::clone(&excluded_subtrees);
         let node_limit_reached =
             Arc::new(AtomicBool::new(max_nodes.is_some_and(|limit| limit <= 1)));
         if node_limit_reached.load(Ordering::Relaxed) {
@@ -467,6 +488,18 @@ impl Scanner {
                     return;
                 }
 
+                if let Some(boundary) =
+                    excluded_subtree_boundary(path, &excluded_subtrees_for_filter)
+                {
+                    record_issue_once(
+                        &issues_for_filter,
+                        ScanIssueKind::PolicyExcluded,
+                        Some(boundary.to_path_buf()),
+                    );
+                    children.clear();
+                    return;
+                }
+
                 // Skip children in virtual/slow directories
                 if is_virtual_or_slow_path(path, &root_for_filter) {
                     record_issue(
@@ -486,6 +519,16 @@ impl Scanner {
 
                     if let Ok(e) = entry {
                         let child_path = e.path();
+                        if let Some(boundary) =
+                            excluded_subtree_boundary(&child_path, &excluded_subtrees_for_filter)
+                        {
+                            record_issue_once(
+                                &issues_for_filter,
+                                ScanIssueKind::PolicyExcluded,
+                                Some(boundary.to_path_buf()),
+                            );
+                            return false;
+                        }
                         if e.file_type().is_dir()
                             && max_depth.is_some_and(|maximum| e.depth() >= maximum)
                         {
@@ -891,6 +934,53 @@ fn absolute_requested_path(requested_root: PathBuf) -> PathBuf {
     }
 }
 
+fn validate_excluded_subtrees(
+    scan_root: &Path,
+    configured: &[PathBuf],
+) -> Result<Vec<PathBuf>, ()> {
+    if configured.len() > MAX_EXCLUDED_SUBTREES {
+        return Err(());
+    }
+
+    let mut validated = Vec::with_capacity(configured.len());
+    for excluded in configured {
+        if !excluded.is_absolute()
+            || excluded.components().any(|component| {
+                !matches!(
+                    component,
+                    Component::Prefix(_) | Component::RootDir | Component::Normal(_)
+                )
+            })
+        {
+            return Err(());
+        }
+        let relative = excluded.strip_prefix(scan_root).map_err(|_| ())?;
+        if relative.as_os_str().is_empty() {
+            return Err(());
+        }
+        validated.push(excluded.clone());
+    }
+
+    validated.sort();
+    if validated
+        .windows(2)
+        .any(|pair| pair[0] == pair[1] || pair[1].starts_with(&pair[0]))
+    {
+        return Err(());
+    }
+    Ok(validated)
+}
+
+fn excluded_subtree_boundary<'a>(
+    path: &Path,
+    excluded_subtrees: &'a [PathBuf],
+) -> Option<&'a Path> {
+    excluded_subtrees
+        .iter()
+        .find(|excluded| path == excluded.as_path() || path.starts_with(excluded.as_path()))
+        .map(PathBuf::as_path)
+}
+
 fn reserve_node_budget(counter: &AtomicU64, limit: usize, requested: u64) -> u64 {
     let limit = limit as u64;
     loop {
@@ -1293,6 +1383,131 @@ mod tests {
         }));
         assert!(outcome.tree().find_by_path(&observed_excluded).is_none());
         assert!(outcome.tree().find_by_path(&observed_payload).is_some());
+    }
+
+    #[test]
+    fn configured_exclusion_omits_one_exact_subtree_and_reports_its_boundary() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let excluded = root.join("Dux");
+        let included = root.join("Other");
+        fs::create_dir(&excluded).unwrap();
+        fs::create_dir(&included).unwrap();
+        fs::write(excluded.join("private-cache"), b"excluded").unwrap();
+        fs::write(included.join("payload"), b"included").unwrap();
+
+        let scanner = Scanner::new(ScanConfig {
+            excluded_subtrees: vec![excluded.clone()],
+            ..ScanConfig::default()
+        });
+        let (rx, handle) = scanner.scan(root.clone());
+        for _ in rx {}
+        let outcome = handle.join().unwrap();
+
+        assert_eq!(outcome.termination(), ScanTermination::Completed);
+        assert!(outcome.tree().find_by_path(&excluded).is_none());
+        assert!(
+            outcome
+                .tree()
+                .find_by_path(&included.join("payload"))
+                .is_some()
+        );
+        let exclusions = outcome
+            .coverage()
+            .issues()
+            .iter()
+            .filter(|issue| issue.kind() == ScanIssueKind::PolicyExcluded)
+            .collect::<Vec<_>>();
+        assert_eq!(exclusions.len(), 1);
+        assert_eq!(exclusions[0].path(), Some(excluded.as_path()));
+        assert_eq!(exclusions[0].occurrence_count(), 1);
+    }
+
+    #[test]
+    fn configured_exclusion_matches_components_not_names_or_substrings() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let excluded = root.join("cache");
+        let suffix = root.join("cache-copy");
+        let nested_same_name = root.join("nested/cache");
+        for directory in [&excluded, &suffix, &nested_same_name] {
+            fs::create_dir_all(directory).unwrap();
+            fs::write(directory.join("payload"), b"payload").unwrap();
+        }
+
+        let scanner = Scanner::new(ScanConfig {
+            excluded_subtrees: vec![excluded.clone()],
+            ..ScanConfig::default()
+        });
+        let (rx, handle) = scanner.scan(root);
+        for _ in rx {}
+        let outcome = handle.join().unwrap();
+
+        assert!(outcome.tree().find_by_path(&excluded).is_none());
+        assert!(
+            outcome
+                .tree()
+                .find_by_path(&suffix.join("payload"))
+                .is_some()
+        );
+        assert!(
+            outcome
+                .tree()
+                .find_by_path(&nested_same_name.join("payload"))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn configured_exclusions_reject_roots_ancestors_and_non_normal_paths() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let ancestor = root.parent().unwrap();
+
+        assert!(validate_excluded_subtrees(&root, std::slice::from_ref(&root)).is_err());
+        assert!(validate_excluded_subtrees(&root, &[ancestor.to_path_buf()]).is_err());
+        assert!(validate_excluded_subtrees(&root, &[PathBuf::from("relative/cache")]).is_err());
+        assert!(validate_excluded_subtrees(&root, &[root.join("child/../cache")]).is_err());
+    }
+
+    #[test]
+    fn configured_exclusions_are_bounded_and_non_overlapping() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let too_many = (0..=MAX_EXCLUDED_SUBTREES)
+            .map(|index| root.join(format!("cache-{index}")))
+            .collect::<Vec<_>>();
+        assert!(validate_excluded_subtrees(&root, &too_many).is_err());
+
+        let parent = root.join("cache");
+        assert!(
+            validate_excluded_subtrees(&root, &[parent.clone(), parent.join("nested")]).is_err()
+        );
+        assert!(validate_excluded_subtrees(&root, &[parent.clone(), parent]).is_err());
+    }
+
+    #[test]
+    fn invalid_exclusion_configuration_fails_before_traversal() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let payload = root.join("payload");
+        fs::write(&payload, b"payload").unwrap();
+        let scanner = Scanner::new(ScanConfig {
+            excluded_subtrees: vec![root.clone()],
+            ..ScanConfig::default()
+        });
+
+        let (rx, handle) = scanner.scan(root.clone());
+        let messages = rx.into_iter().collect::<Vec<_>>();
+        let outcome = handle.join().unwrap();
+
+        assert_eq!(outcome.termination(), ScanTermination::Failed);
+        assert_eq!(outcome.tree().len(), 1);
+        assert!(outcome.tree().find_by_path(&payload).is_none());
+        assert!(messages.iter().any(|message| matches!(
+            message,
+            ScanMessage::Error(error) if error == "scan subtree exclusions are invalid"
+        )));
     }
 
     #[test]

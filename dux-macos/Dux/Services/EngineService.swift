@@ -350,10 +350,14 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
     DuxSnapshotHistoryServing, DuxCleanupHistoryServing, DuxScanCoverageServing, HomeScanServing,
     Sendable
 {
-    fileprivate static let expectedFFIContractVersion: UInt32 = 38
+    fileprivate static let expectedFFIContractVersion: UInt32 = 39
     fileprivate static let expectedRecordVersion: UInt32 = 1
     private static let maximumTargetedProjectScanNodes: UInt32 = 50_000
     private static let maximumTargetedProjectScanPassNodes: UInt32 = 200_000
+    private static let maximumTargetedReclaimRootCount: UInt16 = 17
+    private static let maximumKnownUserCacheScanNodes: UInt32 = 100_000
+    private static let minimumTargetedProjectScanNodes: UInt32 = 10_000
+    private static let expectedKnownRootsPolicyRevision: UInt32 = 1
 
     private let state: EngineServiceState
 
@@ -902,7 +906,8 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         stableVolumeID: String,
         anchorAt: Date,
         ordinal: UInt16,
-        expectedRootsRevision: UInt64?
+        expectedRootsRevision: UInt64?,
+        expectedRootCatalogDigestSHA256: Data?
     ) async throws -> TargetedReclaimScanAdmission {
         try await state.perform { state in
             precondition(!Thread.isMainThread, "Blocking FFI work reached the main thread")
@@ -923,7 +928,8 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
                         stableVolumeId: canonicalVolumeID,
                         capacityAnchorUnixMs: anchorAtUnixMS,
                         selectedRootOrdinal: ordinal,
-                        expectedConfiguredRootsRevision: expectedRootsRevision
+                        expectedConfiguredRootsRevision: expectedRootsRevision,
+                        expectedRootCatalogDigestSha256: expectedRootCatalogDigestSHA256
                     )
                 )
             } catch let error as TargetedProjectScanError {
@@ -936,6 +942,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
                 expectedAnchorAtUnixMS: anchorAtUnixMS,
                 expectedOrdinal: ordinal,
                 expectedRootsRevision: expectedRootsRevision,
+                expectedRootCatalogDigestSHA256: expectedRootCatalogDigestSHA256,
                 state: state
             )
             if let context = admission.context,
@@ -973,8 +980,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
                     request: TargetedProjectScanCheckpointRequest(
                         recordVersion: Self.expectedRecordVersion,
                         expectedPressure: proof.pressure,
-                        expectedConfiguredRootsRevision: context.rootsRevision,
-                        expectedRootCount: context.rootCount
+                        expectedRootCatalog: Self.targetedReclaimRootCatalog(context)
                     )
                 )
             } catch let error as TargetedProjectScanError {
@@ -1870,12 +1876,17 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         expectedAnchorAtUnixMS: Int64,
         expectedOrdinal: UInt16,
         expectedRootsRevision: UInt64?,
+        expectedRootCatalogDigestSHA256: Data?,
         state: EngineServiceState
     ) throws -> TargetedReclaimScanAdmission {
+        let rootCatalog = try targetedReclaimRootCatalog(response.rootCatalog)
         guard
             response.recordVersion == expectedRecordVersion,
-            response.rootCount <= UInt16(ProjectDiscoveryRoot.maximumCount),
-            expectedRootsRevision.map({ $0 == response.configuredRootsRevision }) ?? true
+            response.rootCount <= maximumTargetedReclaimRootCount,
+            response.rootCount == rootCatalog.rootCount,
+            response.configuredRootsRevision == rootCatalog.configuredRootsRevision,
+            expectedRootsRevision.map({ $0 == response.configuredRootsRevision }) ?? true,
+            expectedRootCatalogDigestSHA256.map({ $0 == rootCatalog.digestSha256 }) ?? true
         else {
             throw TargetedReclaimScanServiceError.invalidResponse
         }
@@ -1884,7 +1895,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
             try targetedReclaimSelection(
                 $0,
                 expectedOrdinal: expectedOrdinal,
-                rootCount: response.rootCount
+                catalog: rootCatalog
             )
         }
         let context = try response.pressure.map {
@@ -1892,8 +1903,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
                 $0,
                 expectedStableVolumeID: expectedStableVolumeID,
                 expectedAnchorAtUnixMS: expectedAnchorAtUnixMS,
-                rootsRevision: response.configuredRootsRevision,
-                rootCount: response.rootCount
+                catalog: rootCatalog
             )
         }
         let hasNoTaggedPayload =
@@ -1915,12 +1925,11 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
                 context: context,
                 ordinal: nil,
                 root: nil,
-                disposition: .noConfiguredRoots
+                disposition: .noEligibleRoots
             )
         case .noPressure:
             guard
                 response.rootCount > 0,
-                response.configuredRootsRevision > 0,
                 selection != nil,
                 context == nil,
                 hasNoTaggedPayload
@@ -1936,7 +1945,6 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         case .rootUnavailable:
             guard
                 response.rootCount > 0,
-                response.configuredRootsRevision > 0,
                 let selection,
                 let context,
                 let reason = response.rootUnavailableReason,
@@ -1949,13 +1957,12 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
             return TargetedReclaimScanAdmission(
                 context: context,
                 ordinal: selection.ordinal,
-                root: selection.root,
+                root: selection,
                 disposition: .unavailable(targetedRootFailure(reason))
             )
         case .current:
             guard
                 response.rootCount > 0,
-                response.configuredRootsRevision > 0,
                 let selection,
                 let context,
                 let rawResult = response.currentResult,
@@ -1977,13 +1984,12 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
             return TargetedReclaimScanAdmission(
                 context: context,
                 ordinal: selection.ordinal,
-                root: selection.root,
+                root: selection,
                 disposition: .current(result)
             )
         case .existingTask:
             guard
                 response.rootCount > 0,
-                response.configuredRootsRevision > 0,
                 let selection,
                 let context,
                 let task = response.task,
@@ -1997,7 +2003,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
             return TargetedReclaimScanAdmission(
                 context: context,
                 ordinal: selection.ordinal,
-                root: selection.root,
+                root: selection,
                 disposition: .observing(
                     FFIHomeScanTask(
                         task: task,
@@ -2009,7 +2015,6 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         case .started:
             guard
                 response.rootCount > 0,
-                response.configuredRootsRevision > 0,
                 let selection,
                 let context,
                 let task = response.task,
@@ -2022,7 +2027,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
             return TargetedReclaimScanAdmission(
                 context: context,
                 ordinal: selection.ordinal,
-                root: selection.root,
+                root: selection,
                 disposition: .started(
                     FFIHomeScanTask(
                         task: task,
@@ -2034,19 +2039,83 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         }
     }
 
+    private static func targetedReclaimRootCatalog(
+        _ catalog: TargetedReclaimRootCatalog
+    ) throws -> TargetedReclaimRootCatalog {
+        let knownCount: UInt16 = catalog.knownUserLibraryCachesIncluded ? 1 : 0
+        guard
+            catalog.recordVersion == expectedRecordVersion,
+            catalog.knownRootsPolicyRevision == expectedKnownRootsPolicyRevision,
+            catalog.rootCount <= maximumTargetedReclaimRootCount,
+            catalog.rootCount >= knownCount,
+            catalog.rootCount - knownCount <= UInt16(ProjectDiscoveryRoot.maximumCount),
+            catalog.digestSha256.count == 32
+        else {
+            throw TargetedReclaimScanServiceError.invalidResponse
+        }
+        return catalog
+    }
+
+    private static func targetedReclaimRootCatalog(
+        _ context: TargetedReclaimScanContext
+    ) -> TargetedReclaimRootCatalog {
+        TargetedReclaimRootCatalog(
+            recordVersion: expectedRecordVersion,
+            knownRootsPolicyRevision: context.knownRootsPolicyRevision,
+            configuredRootsRevision: context.rootsRevision,
+            knownUserLibraryCachesIncluded: context.knownUserLibraryCachesIncluded,
+            rootCount: context.rootCount,
+            digestSha256: context.rootCatalogDigestSHA256
+        )
+    }
+
     private static func targetedReclaimSelection(
         _ selection: TargetedProjectScanSelection,
         expectedOrdinal: UInt16,
-        rootCount: UInt16
-    ) throws -> (ordinal: UInt16, root: ProjectDiscoveryRoot) {
-        guard rootCount > 0 else {
+        catalog: TargetedReclaimRootCatalog
+    ) throws -> TargetedReclaimScanRoot {
+        guard catalog.rootCount > 0 else {
             throw TargetedReclaimScanServiceError.invalidResponse
         }
-        let divisor = UInt32(rootCount)
-        let expectedMaxNodes = min(
-            maximumTargetedProjectScanNodes,
-            max(1, maximumTargetedProjectScanPassNodes / divisor)
-        )
+        let knownCount: UInt16 = catalog.knownUserLibraryCachesIncluded ? 1 : 0
+        guard catalog.rootCount >= knownCount else {
+            throw TargetedReclaimScanServiceError.invalidResponse
+        }
+        let configuredCount = catalog.rootCount - knownCount
+        let configuredReservation =
+            UInt32(configuredCount) * minimumTargetedProjectScanNodes
+        guard configuredReservation <= maximumTargetedProjectScanPassNodes else {
+            throw TargetedReclaimScanServiceError.invalidResponse
+        }
+        let knownMaxNodes: UInt32 = catalog.knownUserLibraryCachesIncluded
+            ? min(
+                maximumKnownUserCacheScanNodes,
+                maximumTargetedProjectScanPassNodes - configuredReservation
+            )
+            : 0
+        let configuredMaxNodes: UInt32 = configuredCount == 0
+            ? 0
+            : min(
+                maximumTargetedProjectScanNodes,
+                max(
+                    1,
+                    (maximumTargetedProjectScanPassNodes - knownMaxNodes)
+                        / UInt32(configuredCount)
+                )
+            )
+        let expectedKind: TargetedReclaimScanRootKind
+        let expectedMaxNodes: UInt32
+        if catalog.knownUserLibraryCachesIncluded, expectedOrdinal == 0 {
+            expectedKind = .knownUserLibraryCaches
+            expectedMaxNodes = knownMaxNodes
+        } else {
+            expectedKind = .configuredProject
+            expectedMaxNodes = configuredMaxNodes
+        }
+        let kind: TargetedReclaimScanRootKind = switch selection.kind {
+        case .knownUserLibraryCaches: .knownUserLibraryCaches
+        case .configuredProject: .configuredProject
+        }
         let root: ProjectDiscoveryRoot
         do {
             root = try projectDiscoveryRoot(selection.root)
@@ -2056,22 +2125,27 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         guard
             selection.recordVersion == expectedRecordVersion,
             selection.ordinal == expectedOrdinal,
-            selection.ordinal < rootCount,
+            selection.ordinal < catalog.rootCount,
+            kind == expectedKind,
             selection.maxNodes == expectedMaxNodes,
-            UInt64(selection.maxNodes) * UInt64(rootCount)
+            UInt64(knownMaxNodes)
+                + UInt64(configuredMaxNodes) * UInt64(configuredCount)
                 <= UInt64(maximumTargetedProjectScanPassNodes)
         else {
             throw TargetedReclaimScanServiceError.invalidResponse
         }
-        return (selection.ordinal, root)
+        return TargetedReclaimScanRoot(
+            ordinal: selection.ordinal,
+            kind: kind,
+            path: root
+        )
     }
 
     private static func targetedReclaimContext(
         _ pressure: TargetedProjectScanPressureContext,
         expectedStableVolumeID: String,
         expectedAnchorAtUnixMS: Int64,
-        rootsRevision: UInt64,
-        rootCount: UInt16
+        catalog: TargetedReclaimRootCatalog
     ) throws -> TargetedReclaimScanContext {
         guard
             pressure.recordVersion == expectedRecordVersion,
@@ -2080,7 +2154,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
             pressure.pressureStartedAtUnixMs >= 0,
             pressure.currentEpisodeStartedAtUnixMs >= pressure.pressureStartedAtUnixMs,
             pressure.capacityAnchorUnixMs >= pressure.currentEpisodeStartedAtUnixMs,
-            rootCount <= UInt16(ProjectDiscoveryRoot.maximumCount)
+            catalog.rootCount <= maximumTargetedReclaimRootCount
         else {
             throw TargetedReclaimScanServiceError.invalidResponse
         }
@@ -2102,8 +2176,11 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
                 timeIntervalSince1970: Double(pressure.pressureStartedAtUnixMs) / 1_000
             ),
             policyRevision: pressure.policyRevision,
-            rootsRevision: rootsRevision,
-            rootCount: rootCount
+            rootsRevision: catalog.configuredRootsRevision,
+            knownRootsPolicyRevision: catalog.knownRootsPolicyRevision,
+            knownUserLibraryCachesIncluded: catalog.knownUserLibraryCachesIncluded,
+            rootCatalogDigestSHA256: catalog.digestSha256,
+            rootCount: catalog.rootCount
         )
     }
 
@@ -2132,12 +2209,14 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         _ response: TargetedProjectScanCheckpoint,
         expected proof: TargetedProjectScanCheckpointProof
     ) throws -> TargetedReclaimScanContext {
+        let catalog = try targetedReclaimRootCatalog(response.rootCatalog)
         guard
             response.recordVersion == expectedRecordVersion,
             response.configuredRootsRevision == proof.context.rootsRevision,
             response.rootCount == proof.context.rootCount,
             response.rootCount > 0,
-            response.rootCount <= UInt16(ProjectDiscoveryRoot.maximumCount),
+            response.rootCount <= maximumTargetedReclaimRootCount,
+            catalog == targetedReclaimRootCatalog(proof.context),
             response.pressure == proof.pressure
         else {
             throw TargetedReclaimScanServiceError.invalidResponse
@@ -2146,8 +2225,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
             response.pressure,
             expectedStableVolumeID: proof.context.stableVolumeID,
             expectedAnchorAtUnixMS: proof.pressure.capacityAnchorUnixMs,
-            rootsRevision: response.configuredRootsRevision,
-            rootCount: response.rootCount
+            catalog: catalog
         )
         guard context == proof.context else {
             throw TargetedReclaimScanServiceError.invalidResponse
@@ -2164,7 +2242,9 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         case .InvalidVolumeIdentity: .invalidVolumeIdentity
         case .InvalidAnchor: .invalidAnchor
         case .InvalidOrdinal: .invalidOrdinal
+        case .InvalidCatalog: .invalidResponse
         case .RegistryChanged: .configuredRootsChanged
+        case .CatalogChanged: .configuredRootsChanged
         case .PressureChanged: .pressureChanged
         case .ReadOnlyStore: .readOnlyStore
         case .IncompatibleSchema: .incompatibleSchema

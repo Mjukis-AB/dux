@@ -440,6 +440,11 @@ EXCEPTIONS = {
         "rust-filesystem-effect",
         "test:subtree_scan_revalidates_identity_immediately_before_publication",
     ),
+    "test-targeted-scan-root-replacement-rename": ExceptionSpec(
+        "dux-core/src/engine/registry_tests.rs",
+        "rust-filesystem-effect",
+        "test:targeted_scan_join_requires_the_exact_root_identity",
+    ),
     "test-live-target-replace-rename": ExceptionSpec(
         "dux-core/src/engine/registry_tests.rs",
         "rust-filesystem-effect",
@@ -764,6 +769,7 @@ EXCEPTION_PRIMITIVES = {
     "test-engine-move-scan-root": "rename",
     "test-subtree-traversal-root-rename": "rename",
     "test-subtree-publication-root-rename": "rename",
+    "test-targeted-scan-root-replacement-rename": "rename",
     "test-live-target-replace-rename": "rename",
     "test-live-target-missing-remove": "remove_file",
     "test-live-target-symlink-ancestor-rename": "rename",
@@ -846,7 +852,7 @@ CLIPPY_SUPPRESSION_COUNTS = {
     "dux-core/src/planner/cargo_workspace_glob.rs": 2,
     "dux-core/src/planner/rust_target_cargo_tests.rs": 1,
     "dux-core/src/planner/rust_target_source_tests.rs": 2,
-    "dux-core/src/engine/registry_tests.rs": 6,
+    "dux-core/src/engine/registry_tests.rs": 7,
     "dux-core/src/engine/volume_status.rs": 1,
     "dux-core/src/persistence/persistence_tests.rs": 3,
     "dux-core/src/persistence/cleanup_journal/tests.rs": 1,
@@ -918,6 +924,7 @@ def _strip_c_like_comments_and_literals(source: str) -> str:
     output = list(source)
     index = 0
     length = len(source)
+    raw_string_prefix = re.compile(r'r(#+)?"')
 
     def blank(start: int, end: int) -> None:
         for position in range(start, end):
@@ -952,7 +959,7 @@ def _strip_c_like_comments_and_literals(source: str) -> str:
             blank(index, end)
             index = end
             continue
-        raw = re.match(r"r(#+)?\"", source[index:])
+        raw = raw_string_prefix.match(source, index)
         if raw:
             hashes = raw.group(1) or ""
             delimiter = '"' + hashes

@@ -79,11 +79,15 @@ pub use snapshot_review::{
     SnapshotReviewTimestamp, SnapshotReviewTreemap, SnapshotReviewTreemapCell,
 };
 pub use targeted_project_scan::{
-    MAX_TARGETED_PRESSURE_CHAIN_EPISODES, MAX_TARGETED_PROJECT_SCAN_NODES,
-    MAX_TARGETED_PROJECT_SCAN_PASS_NODES, TargetedProjectScanAdmission,
-    TargetedProjectScanCheckpoint, TargetedProjectScanCurrent, TargetedProjectScanDisposition,
-    TargetedProjectScanError, TargetedProjectScanPressure, TargetedProjectScanPressureContext,
-    TargetedProjectScanSelection,
+    MAX_TARGETED_CONFIGURED_PROJECT_ROOTS, MAX_TARGETED_PRESSURE_CHAIN_EPISODES,
+    MAX_TARGETED_PROJECT_SCAN_NODES, MAX_TARGETED_PROJECT_SCAN_PASS_NODES,
+    MAX_TARGETED_RECLAIM_ROOTS, MAX_TARGETED_USER_LIBRARY_CACHES_SCAN_NODES,
+    MIN_TARGETED_CONFIGURED_PROJECT_SCAN_NODES, TARGETED_RECLAIM_ROOT_POLICY_REVISION,
+    TargetedProjectScanAdmission, TargetedProjectScanCheckpoint, TargetedProjectScanCurrent,
+    TargetedProjectScanDisposition, TargetedProjectScanError, TargetedProjectScanPressure,
+    TargetedProjectScanPressureContext, TargetedProjectScanSelection, TargetedReclaimCatalogError,
+    TargetedReclaimRootCatalogSlot, TargetedReclaimRootCatalogStamp, TargetedReclaimRootKind,
+    TargetedReclaimScanBudget, targeted_reclaim_root_catalog_layout, targeted_reclaim_scan_budget,
 };
 pub use task::{
     CancelOutcome, CandidateEvaluationRecoveryMaintenanceFailureKind,

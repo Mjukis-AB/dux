@@ -38,7 +38,14 @@ static VALIDATED_BUNDLED_CATALOG: OnceLock<Result<RuleRegistry, CandidateEvaluat
 const CANDIDATE_ID_DOMAIN: &[u8] = b"dux-candidate-id-v1\0";
 const EVALUATION_CONTEXT_DOMAIN: &[u8] = b"dux-candidate-evaluation-context-v1\0";
 const SELECTED_SCAN_ROOT_SCOPE: &[u8] = b"scope:selected_scan_root";
+const USER_CACHE_DIRECTORY_SCOPE: &[u8] = b"scope:user_cache_directory";
 const UNRESOLVED_PROTECTION: &[u8] = b"protected_path_authority:unresolved";
+
+/// Engine-minted scan IDs carrying this prefix are automatic observations of
+/// the current account's code-owned user-cache root. They must never borrow
+/// the bundled selected-root rules merely because the same directory names
+/// happen to appear below that root.
+pub(crate) const KNOWN_USER_CACHE_SCAN_ID_PREFIX: &str = "scan:targeted:known-user-cache:";
 
 pub(crate) const CANDIDATE_EVALUATOR_REVISION: u32 = 3;
 pub(crate) const CANDIDATE_CATALOG_SCHEMA_VERSION: u32 = 1;
@@ -205,6 +212,14 @@ pub(crate) fn evaluate_completed_scan_candidates(
     evaluated_at: SystemTime,
 ) -> Result<CandidateBatch, CandidateEvaluationError> {
     let (tree, _, coverage) = artifact.parts();
+    if candidate_evaluation_scope(source_scan_id) == CandidateEvaluationScope::UserCacheDirectory {
+        return Ok(empty_candidate_batch(
+            source_scan_id,
+            tree.root_path(),
+            coverage,
+            evaluated_at,
+        ));
+    }
     evaluate_artifact_candidates(source_scan_id, tree, coverage, evaluated_at)
 }
 
@@ -215,6 +230,14 @@ fn evaluate_artifact_candidates(
     coverage: &ScanCoverage,
     evaluated_at: SystemTime,
 ) -> Result<CandidateBatch, CandidateEvaluationError> {
+    if candidate_evaluation_scope(source_scan_id) == CandidateEvaluationScope::UserCacheDirectory {
+        return Ok(empty_candidate_batch(
+            source_scan_id,
+            tree.root_path(),
+            coverage,
+            evaluated_at,
+        ));
+    }
     let entries = project_build_artifacts_bounded_at(
         tree,
         StaleThreshold::All,
@@ -260,6 +283,14 @@ pub(super) fn evaluate_observed_artifacts(
     entries: Vec<ObservedArtifact>,
     evaluated_at: SystemTime,
 ) -> Result<CandidateBatch, CandidateEvaluationError> {
+    if candidate_evaluation_scope(source_scan_id) == CandidateEvaluationScope::UserCacheDirectory {
+        return Ok(empty_candidate_batch(
+            source_scan_id,
+            root,
+            coverage,
+            evaluated_at,
+        ));
+    }
     let catalog = load_and_validate_catalog()?;
     let catalog_digest_sha256 = bundled_candidate_catalog_digest_sha256();
     let context_digest_sha256 = candidate_evaluation_context_digest_for_observation(
@@ -348,6 +379,44 @@ pub(super) fn evaluate_observed_artifacts(
         context_digest_sha256,
         candidates,
     })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum CandidateEvaluationScope {
+    SelectedScanRoot,
+    UserCacheDirectory,
+}
+
+pub(super) fn candidate_evaluation_scope(source_scan_id: &ScanId) -> CandidateEvaluationScope {
+    if source_scan_id
+        .as_str()
+        .starts_with(KNOWN_USER_CACHE_SCAN_ID_PREFIX)
+    {
+        CandidateEvaluationScope::UserCacheDirectory
+    } else {
+        CandidateEvaluationScope::SelectedScanRoot
+    }
+}
+
+pub(super) fn empty_candidate_batch(
+    source_scan_id: &ScanId,
+    root: &Path,
+    coverage: &ScanCoverage,
+    evaluated_at: SystemTime,
+) -> CandidateBatch {
+    CandidateBatch {
+        evaluator_revision: CANDIDATE_EVALUATOR_REVISION,
+        catalog_schema_version: CANDIDATE_CATALOG_SCHEMA_VERSION,
+        catalog_digest_sha256: CANDIDATE_CATALOG_SHA256,
+        context_format_version: CANDIDATE_CONTEXT_FORMAT_VERSION,
+        context_digest_sha256: candidate_evaluation_context_digest_for_observation(
+            source_scan_id,
+            root,
+            coverage,
+            evaluated_at,
+        ),
+        candidates: Vec::new(),
+    }
 }
 
 /// Validate the exact catalog compiled into this process before publishing an
@@ -517,7 +586,11 @@ pub(crate) fn candidate_evaluation_context_digest_for_observation(
     hasher.update(CANDIDATE_EVALUATOR_REVISION.to_le_bytes());
     hasher.update(CANDIDATE_CATALOG_SCHEMA_VERSION.to_le_bytes());
     hasher.update(CANDIDATE_CATALOG_SHA256);
-    update_length_prefixed(&mut hasher, SELECTED_SCAN_ROOT_SCOPE);
+    let scope = match candidate_evaluation_scope(source_scan_id) {
+        CandidateEvaluationScope::SelectedScanRoot => SELECTED_SCAN_ROOT_SCOPE,
+        CandidateEvaluationScope::UserCacheDirectory => USER_CACHE_DIRECTORY_SCOPE,
+    };
+    update_length_prefixed(&mut hasher, scope);
     update_length_prefixed(&mut hasher, UNRESOLVED_PROTECTION);
     update_length_prefixed(&mut hasher, source_scan_id.as_str().as_bytes());
     update_length_prefixed(&mut hasher, &native_path_bytes(root));
