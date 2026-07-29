@@ -23,7 +23,12 @@ protocol DuxReviewManaging: Sendable {
 
 @MainActor
 protocol DuxScanManaging: AnyObject {
+    func shutdownTargetedReclaimScan() async
     func shutdownHomeScan() async
+}
+
+extension DuxScanManaging {
+    func shutdownTargetedReclaimScan() async {}
 }
 
 struct SystemDuxMaintenanceEnergyPolicy: DuxMaintenanceEnergyPolicy {
@@ -188,6 +193,7 @@ final class AppRuntime {
             await model.shutdownDirectCargoEnrollment()
             await model.shutdownCleanupHistoryClear()
             model.invalidateCleanupHistoryOperations()
+            await scans.shutdownTargetedReclaimScan()
             await scans.shutdownHomeScan()
             await explorerSnapshotBrowser.shutdownRustTargetCleanup()
             await explorerSnapshotBrowser.shutdownRustTargetDryRun()

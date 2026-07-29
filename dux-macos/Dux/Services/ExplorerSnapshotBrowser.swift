@@ -428,6 +428,8 @@ final class ExplorerSnapshotBrowserModel {
     @ObservationIgnored
     private var activePresentationID: UUID?
     @ObservationIgnored
+    private var pendingExactScanID: String?
+    @ObservationIgnored
     private var historyGeneration: UInt64 = 0
     @ObservationIgnored
     private var largeFilesGeneration: UInt64 = 0
@@ -645,9 +647,23 @@ final class ExplorerSnapshotBrowserModel {
             return
         }
         activePresentationID = id
-        async let snapshot: Void = reloadLatest()
+        let requestedScanID = pendingExactScanID
+        pendingExactScanID = nil
         async let history: Void = reloadHistory()
-        _ = await (snapshot, history)
+        if let requestedScanID {
+            await openExactScan(requestedScanID)
+        } else {
+            await reloadLatest()
+        }
+        _ = await history
+    }
+
+    /// Queue one exact durable scan for the next Snapshot presentation.
+    ///
+    /// Targeted pressure scans are deliberately excluded from generic Home
+    /// history, so their trusted scan IDs must be opened explicitly.
+    func prepareExactScanReview(scanID: String) {
+        pendingExactScanID = scanID
     }
 
     func dismiss(id: UUID) async {
@@ -709,9 +725,17 @@ final class ExplorerSnapshotBrowserModel {
             return
         }
 
+        await openExactScan(historicalScan.scanID, markUnavailableInHistory: true)
+    }
+
+    private func openExactScan(
+        _ requestedScanID: String,
+        markUnavailableInHistory: Bool = false
+    ) async {
         await releaseRustTargetPlanReview()
         guard
-            historicalScan.scanID != scanID,
+            requestedScanID != scanID,
+            phase != .loading,
             !isSwitchingSnapshot,
             !isNavigating,
             !isPaging
@@ -721,7 +745,6 @@ final class ExplorerSnapshotBrowserModel {
         invalidateLiveAction()
         generation &+= 1
         let operation = generation
-        let requestedScanID = historicalScan.scanID
         let previousScanID = scanID
         isSwitchingSnapshot = true
         operationFailure = nil
@@ -793,7 +816,9 @@ final class ExplorerSnapshotBrowserModel {
             }
             isSwitchingSnapshot = false
             let failure = Self.failure(for: error)
-            if failure == .noSnapshot || failure == .expired || failure == .unavailable {
+            if markUnavailableInHistory,
+               failure == .noSnapshot || failure == .expired || failure == .unavailable
+            {
                 unavailableHistoricalScanIDs.insert(requestedScanID)
             }
             operationFailure = failure == .noSnapshot ? .unavailable : failure
@@ -2164,6 +2189,7 @@ final class ExplorerSnapshotBrowserModel {
 
     func close() async {
         activePresentationID = nil
+        pendingExactScanID = nil
         generation &+= 1
         historyGeneration &+= 1
         subtreeRefreshGeneration &+= 1

@@ -34,6 +34,7 @@ final class AppModel: DuxCapacitySampling {
     private(set) var projectDiscoveryRoots: ProjectDiscoveryRoots?
     private(set) var projectDiscoveryRootsState = ProjectDiscoveryRootsState.idle
     private(set) var projectDiscoveryRootsRequiresAuthoritativeReload = false
+    private(set) var targetedReclaimScanState = TargetedReclaimScanState.idle
     private(set) var directCargoEnrollmentStatus: DirectCargoEnrollmentStatusModel?
     private(set) var directCargoEnrollmentPreview: DirectCargoEnrollmentPreviewModel?
     private(set) var directCargoEnrollmentConfirmation:
@@ -66,6 +67,7 @@ final class AppModel: DuxCapacitySampling {
     private let capacityResampleRequester: any DuxCapacityResampleRequesting
     private let menuBarLabelPreferenceStore: any MenuBarLabelPreferenceStoring
     private let homeScanService: any HomeScanServing
+    private let targetedReclaimScanService: any DuxTargetedReclaimScanServing
     private let homeScanClock: any HomeScanPollingClock
     private let loginItemService: any LoginItemServing
     private let notificationService: any NotificationServing
@@ -126,6 +128,20 @@ final class AppModel: DuxCapacitySampling {
     private var projectDiscoveryRootsGeneration: UInt64 = 0
     @ObservationIgnored
     private var projectDiscoveryRootsIsInvalidated = false
+    @ObservationIgnored
+    private var targetedReclaimScanDriverTask: Task<Void, Never>?
+    @ObservationIgnored
+    private var activeTargetedReclaimScanTask: (any HomeScanTask)?
+    @ObservationIgnored
+    private var targetedReclaimScanGeneration: UInt64 = 0
+    @ObservationIgnored
+    private var targetedReclaimScanIsInvalidated = false
+    @ObservationIgnored
+    private var targetedReclaimScanShutdownInProgress = false
+    @ObservationIgnored
+    private var targetedReclaimScanCancellationRequested = false
+    @ObservationIgnored
+    private var targetedReclaimScanVolumeID: String?
     @ObservationIgnored
     private var directCargoEnrollmentTask: Task<Void, Never>?
     @ObservationIgnored
@@ -197,6 +213,7 @@ final class AppModel: DuxCapacitySampling {
         menuBarLabelPreferenceStore: any MenuBarLabelPreferenceStoring =
             UserDefaultsMenuBarLabelPreferenceStore(),
         homeScanService: (any HomeScanServing)? = nil,
+        targetedReclaimScanService: (any DuxTargetedReclaimScanServing)? = nil,
         homeScanClock: any HomeScanPollingClock = ContinuousHomeScanPollingClock(),
         loginItemService: any LoginItemServing = LoginItemService(),
         notificationService: any NotificationServing = NotificationService(),
@@ -218,6 +235,7 @@ final class AppModel: DuxCapacitySampling {
             engineService: engineService,
             override: homeScanService
         )
+        self.targetedReclaimScanService = targetedReclaimScanService ?? engineService
         self.homeScanClock = homeScanClock
         self.loginItemService = loginItemService
         self.notificationService = notificationService
@@ -1830,7 +1848,98 @@ final class AppModel: DuxCapacitySampling {
         } ?? .idle
     }
 
+    func reconcileTargetedReclaimScan(for snapshot: VolumeCapacitySnapshot) async {
+        guard
+            !targetedReclaimScanIsInvalidated,
+            !targetedReclaimScanShutdownInProgress
+        else {
+            return
+        }
+        guard
+            let stableVolumeID = snapshot.stableVolumeID,
+            snapshot.pressure == .warning || snapshot.pressure == .critical
+        else {
+            if targetedReclaimScanState.isActive {
+                await cancelTargetedReclaimScan(preservingCompleted: true)
+            }
+            return
+        }
+        let expectedPressure: TargetedReclaimPressure =
+            snapshot.pressure == .critical ? .critical : .warning
+        if scanState.phase.isActive {
+            if targetedReclaimScanState.isActive {
+                await cancelTargetedReclaimScan(preservingCompleted: true)
+            }
+            targetedReclaimScanState = .deferred(
+                .userScanActive,
+                previous: targetedReclaimScanState.batch
+            )
+            return
+        }
+        if let targetedReclaimScanDriverTask {
+            if targetedReclaimScanVolumeID == stableVolumeID {
+                await targetedReclaimScanDriverTask.value
+            } else {
+                await cancelTargetedReclaimScan(preservingCompleted: true)
+            }
+            guard
+                !targetedReclaimScanIsInvalidated,
+                !scanState.phase.isActive
+            else {
+                return
+            }
+        }
+
+        targetedReclaimScanGeneration &+= 1
+        let generation = targetedReclaimScanGeneration
+        targetedReclaimScanCancellationRequested = false
+        targetedReclaimScanVolumeID = stableVolumeID
+        let previous = targetedReclaimScanState.batch
+        targetedReclaimScanState = .checking(previous: previous)
+        let service = targetedReclaimScanService
+        let clock = homeScanClock
+        let anchorAt = snapshot.sampledAt
+        let driver = Task { @MainActor [weak self] in
+            guard let self else {
+                return
+            }
+            await self.runTargetedReclaimScan(
+                service: service,
+                clock: clock,
+                stableVolumeID: stableVolumeID,
+                anchorAt: anchorAt,
+                expectedPressure: expectedPressure,
+                generation: generation,
+                previous: previous
+            )
+        }
+        targetedReclaimScanDriverTask = driver
+        await driver.value
+    }
+
+    func cancelTargetedReclaimScan() async {
+        await cancelTargetedReclaimScan(preservingCompleted: true)
+    }
+
+    func shutdownTargetedReclaimScan() async {
+        guard
+            !targetedReclaimScanIsInvalidated,
+            !targetedReclaimScanShutdownInProgress
+        else {
+            if let targetedReclaimScanDriverTask {
+                await targetedReclaimScanDriverTask.value
+            }
+            return
+        }
+        targetedReclaimScanShutdownInProgress = true
+        await cancelTargetedReclaimScan(preservingCompleted: false)
+        targetedReclaimScanIsInvalidated = true
+        targetedReclaimScanShutdownInProgress = false
+        targetedReclaimScanState = .idle
+    }
+
     func startHomeScan() async {
+        await cancelTargetedReclaimScan(preservingCompleted: true)
         let service = homeScanService
         _ = await startScan(request: .home, scope: .home) {
             try await service.startHomeScan()
@@ -1843,7 +1952,8 @@ final class AppModel: DuxCapacitySampling {
         displayName: String,
         using service: any DuxSnapshotSubtreeScanServing
     ) async -> AppScanRunOutcome {
-        await startScan(
+        await cancelTargetedReclaimScan(preservingCompleted: true)
+        return await startScan(
             request: .subtree(sourceScanID: sourceScanID, nodeID: nodeID),
             scope: .subtree(displayName: displayName)
         ) {
@@ -2005,6 +2115,9 @@ final class AppModel: DuxCapacitySampling {
             Task { @MainActor [weak self] in
                 await self?.loadPressureHistory()
             }
+            Task { @MainActor [weak self] in
+                await self?.reconcileTargetedReclaimScan(for: snapshot)
+            }
         case let .failure(error):
             if error is CancellationError {
                 volumeState = volumeStateBeforeRefresh
@@ -2013,6 +2126,421 @@ final class AppModel: DuxCapacitySampling {
             } else {
                 volumeState = .failed(Self.volumeFailure(for: error))
             }
+        }
+    }
+
+    private func runTargetedReclaimScan(
+        service: any DuxTargetedReclaimScanServing,
+        clock: any HomeScanPollingClock,
+        stableVolumeID: String,
+        anchorAt: Date,
+        expectedPressure: TargetedReclaimPressure,
+        generation: UInt64,
+        previous: TargetedReclaimScanBatch?
+    ) async {
+        var ordinal: UInt16 = 0
+        var expectedRootsRevision: UInt64?
+        var context: TargetedReclaimScanContext?
+        var completed: [TargetedReclaimRootResult] = []
+        var failed: [TargetedReclaimFailedRoot] = []
+
+        defer {
+            if generation == targetedReclaimScanGeneration {
+                activeTargetedReclaimScanTask = nil
+                targetedReclaimScanDriverTask = nil
+                targetedReclaimScanVolumeID = nil
+            }
+        }
+
+        while isCurrentTargetedReclaimScan(generation) {
+            let admission: TargetedReclaimScanAdmission
+            do {
+                admission = try await service.startTargetedReclaimScan(
+                    stableVolumeID: stableVolumeID,
+                    anchorAt: anchorAt,
+                    ordinal: ordinal,
+                    expectedRootsRevision: expectedRootsRevision
+                )
+            } catch {
+                guard isCurrentTargetedReclaimScan(generation) else {
+                    return
+                }
+                publishTargetedReclaimStartFailure(
+                    error,
+                    previous: batch(
+                        context: context,
+                        completed: completed,
+                        failed: failed
+                    ) ?? previous
+                )
+                return
+            }
+            guard isCurrentTargetedReclaimScan(generation) else {
+                if let task = admission.disposition.ownedTask {
+                    _ = try? await task.requestCancellation()
+                }
+                return
+            }
+
+            switch admission.disposition {
+            case .pressureNotActive:
+                guard admission.context == nil, admission.ordinal == nil, admission.root == nil else {
+                    targetedReclaimScanState = .failed(.invalidResponse, previous: previous)
+                    return
+                }
+                targetedReclaimScanState = previous.map(TargetedReclaimScanState.completed) ?? .idle
+                return
+            case .noConfiguredRoots:
+                guard admission.ordinal == nil, admission.root == nil else {
+                    targetedReclaimScanState = .failed(.invalidResponse, previous: previous)
+                    return
+                }
+                targetedReclaimScanState = .noConfiguredRoots
+                return
+            case .unavailable, .current, .started, .observing:
+                break
+            }
+
+            guard
+                let admittedContext = admission.context,
+                let admittedOrdinal = admission.ordinal,
+                let root = admission.root,
+                admittedOrdinal == ordinal,
+                admittedContext.stableVolumeID == stableVolumeID,
+                admittedContext.capacityAnchorAt == anchorAt,
+                admittedContext.pressure == expectedPressure,
+                admittedContext.rootCount > 0,
+                admittedOrdinal < admittedContext.rootCount,
+                admittedContext.pressureEpisodeStartedAt <= anchorAt,
+                admittedContext.lowPressureSequenceStartedAt
+                    <= admittedContext.pressureEpisodeStartedAt,
+                expectedRootsRevision.map({ $0 == admittedContext.rootsRevision }) ?? true,
+                context.map({ $0.identity == admittedContext.identity }) ?? true
+            else {
+                if let task = admission.disposition.ownedTask {
+                    _ = try? await task.requestCancellation()
+                }
+                targetedReclaimScanState = .failed(
+                    .invalidResponse,
+                    previous: batch(context: context, completed: completed, failed: failed)
+                        ?? previous
+                )
+                return
+            }
+            context = admittedContext
+            expectedRootsRevision = admittedContext.rootsRevision
+
+            switch admission.disposition {
+            case let .unavailable(failure):
+                failed.append(
+                    TargetedReclaimFailedRoot(
+                        ordinal: ordinal,
+                        root: root,
+                        failure: failure
+                    )
+                )
+            case let .current(result):
+                guard validTargetedResult(result, context: admittedContext) else {
+                    targetedReclaimScanState = .failed(
+                        .invalidResponse,
+                        previous: batch(
+                            context: context,
+                            completed: completed,
+                            failed: failed
+                        ) ?? previous
+                    )
+                    return
+                }
+                completed.append(
+                    TargetedReclaimRootResult(
+                        ordinal: ordinal,
+                        root: root,
+                        source: .currentDurable,
+                        result: result
+                    )
+                )
+            case let .started(task), let .observing(task):
+                let ownsTask: Bool = switch admission.disposition {
+                case .started: true
+                case .observing: false
+                case .pressureNotActive, .noConfiguredRoots, .unavailable, .current:
+                    preconditionFailure("unreachable targeted scan disposition")
+                }
+                if ownsTask {
+                    activeTargetedReclaimScanTask = task
+                }
+                if targetedReclaimScanCancellationRequested, ownsTask {
+                    _ = try? await task.requestCancellation()
+                }
+                let source: TargetedReclaimScanResultSource = switch admission.disposition {
+                case .started: .focusedRun
+                case .observing: .joinedActive
+                case .pressureNotActive, .noConfiguredRoots, .unavailable, .current:
+                    preconditionFailure("unreachable targeted scan disposition")
+                }
+                let terminal = await observeTargetedReclaimTask(
+                    task,
+                    clock: clock,
+                    context: admittedContext,
+                    ordinal: ordinal,
+                    completed: completed,
+                    failed: failed,
+                    generation: generation,
+                    ownsTask: ownsTask
+                )
+                if ownsTask {
+                    activeTargetedReclaimScanTask = nil
+                }
+                guard isCurrentTargetedReclaimScan(generation) else {
+                    return
+                }
+                switch terminal {
+                case let .succeeded(result):
+                    completed.append(
+                        TargetedReclaimRootResult(
+                            ordinal: ordinal,
+                            root: root,
+                            source: source,
+                            result: result
+                        )
+                    )
+                case let .failed(failure):
+                    failed.append(
+                        TargetedReclaimFailedRoot(
+                            ordinal: ordinal,
+                            root: root,
+                            failure: failure
+                        )
+                    )
+                case .cancelled:
+                    targetedReclaimScanState = .cancelled(
+                        previous: batch(
+                            context: context,
+                            completed: completed,
+                            failed: failed
+                        ) ?? previous
+                    )
+                    return
+                case .superseded:
+                    return
+                }
+            case .pressureNotActive, .noConfiguredRoots:
+                preconditionFailure("handled before targeted root validation")
+            }
+
+            if targetedReclaimScanCancellationRequested {
+                targetedReclaimScanState = .cancelled(
+                    previous: batch(
+                        context: context,
+                        completed: completed,
+                        failed: failed
+                    ) ?? previous
+                )
+                return
+            }
+
+            guard let context else {
+                targetedReclaimScanState = .failed(.invalidResponse, previous: previous)
+                return
+            }
+            if ordinal + 1 >= context.rootCount {
+                let partial = TargetedReclaimScanBatch(
+                    context: context,
+                    completed: completed,
+                    failed: failed
+                )
+                do {
+                    let checkpoint = try await service.validateTargetedReclaimScan(context)
+                    guard
+                        isCurrentTargetedReclaimScan(generation),
+                        checkpoint == context
+                    else {
+                        targetedReclaimScanState = .failed(
+                            .invalidResponse,
+                            previous: partial
+                        )
+                        return
+                    }
+                } catch {
+                    guard isCurrentTargetedReclaimScan(generation) else {
+                        return
+                    }
+                    publishTargetedReclaimStartFailure(error, previous: partial)
+                    return
+                }
+                targetedReclaimScanState = .completed(
+                    partial
+                )
+                return
+            }
+            ordinal += 1
+            targetedReclaimScanState = .scanning(
+                TargetedReclaimScanProgress(
+                    context: context,
+                    completed: completed,
+                    failed: failed,
+                    activeOrdinal: nil,
+                    activeProgress: nil
+                )
+            )
+        }
+    }
+
+    private enum TargetedReclaimTaskTerminal {
+        case succeeded(HomeScanTaskResult)
+        case failed(TargetedReclaimRootFailure)
+        case cancelled
+        case superseded
+    }
+
+    private func observeTargetedReclaimTask(
+        _ task: any HomeScanTask,
+        clock: any HomeScanPollingClock,
+        context: TargetedReclaimScanContext,
+        ordinal: UInt16,
+        completed: [TargetedReclaimRootResult],
+        failed: [TargetedReclaimFailedRoot],
+        generation: UInt64,
+        ownsTask: Bool
+    ) async -> TargetedReclaimTaskTerminal {
+        while isCurrentTargetedReclaimScan(generation) {
+            do {
+                let poll = try await task.poll()
+                guard isCurrentTargetedReclaimScan(generation) else {
+                    if ownsTask {
+                        _ = try? await task.requestCancellation()
+                    }
+                    return .superseded
+                }
+                targetedReclaimScanState = .scanning(
+                    TargetedReclaimScanProgress(
+                        context: context,
+                        completed: completed,
+                        failed: failed,
+                        activeOrdinal: ordinal,
+                        activeProgress: poll.progress
+                    )
+                )
+                switch poll.phase {
+                case .queued, .running:
+                    try await clock.sleepUntilNextPoll()
+                case .succeeded:
+                    guard let result = poll.result,
+                          poll.failure == nil,
+                          validTargetedResult(result, context: context) else {
+                        return .failed(.invalidResponse)
+                    }
+                    return .succeeded(result)
+                case .failed:
+                    guard let failure = poll.failure else {
+                        return .failed(.invalidResponse)
+                    }
+                    return .failed(.scan(failure))
+                case .cancelled:
+                    return .cancelled
+                }
+            } catch is CancellationError {
+                if ownsTask {
+                    _ = try? await task.requestCancellation()
+                }
+                return .superseded
+            } catch let error as HomeScanServiceError {
+                return .failed(Self.targetedRootFailure(for: error))
+            } catch {
+                return .failed(.unexpected)
+            }
+        }
+        if ownsTask {
+            _ = try? await task.requestCancellation()
+        }
+        return .superseded
+    }
+
+    private func cancelTargetedReclaimScan(preservingCompleted: Bool) async {
+        let previous = targetedReclaimScanState.batch
+        guard let driver = targetedReclaimScanDriverTask else {
+            if !preservingCompleted {
+                targetedReclaimScanState = .idle
+            }
+            return
+        }
+        targetedReclaimScanCancellationRequested = true
+        if let activeTargetedReclaimScanTask {
+            _ = try? await activeTargetedReclaimScanTask.requestCancellation()
+            // Keep polling the owned task until Rust publishes a terminal
+            // outcome and releases its scope. Foreground scans must never
+            // infer quiescence from cancellation intent alone.
+            _ = await driver.value
+        } else {
+            // Checking and non-owning observation carry no task authority.
+            // Detach locally without cancelling someone else's work.
+            targetedReclaimScanGeneration &+= 1
+            driver.cancel()
+            _ = await driver.value
+        }
+        targetedReclaimScanGeneration &+= 1
+        self.activeTargetedReclaimScanTask = nil
+        targetedReclaimScanDriverTask = nil
+        targetedReclaimScanVolumeID = nil
+        targetedReclaimScanState = if preservingCompleted {
+            .cancelled(previous: previous)
+        } else {
+            .idle
+        }
+    }
+
+    private func isCurrentTargetedReclaimScan(_ generation: UInt64) -> Bool {
+        !targetedReclaimScanIsInvalidated
+            && generation == targetedReclaimScanGeneration
+            && !Task.isCancelled
+    }
+
+    private func batch(
+        context: TargetedReclaimScanContext?,
+        completed: [TargetedReclaimRootResult],
+        failed: [TargetedReclaimFailedRoot]
+    ) -> TargetedReclaimScanBatch? {
+        context.map {
+            TargetedReclaimScanBatch(context: $0, completed: completed, failed: failed)
+        }
+    }
+
+    private func validTargetedResult(
+        _ result: HomeScanTaskResult,
+        context: TargetedReclaimScanContext
+    ) -> Bool {
+        !result.scanID.isEmpty
+            && result.startedAt >= context.pressureEpisodeStartedAt
+            && result.completedAt >= result.startedAt
+            && result.succeeded
+            && result.snapshotAvailable
+    }
+
+    private func publishTargetedReclaimStartFailure(
+        _ error: Error,
+        previous: TargetedReclaimScanBatch?
+    ) {
+        if let error = error as? TargetedReclaimScanServiceError {
+            switch error {
+            case .busy:
+                targetedReclaimScanState = .deferred(
+                    .overlappingExternalScan,
+                    previous: previous
+                )
+            case .queueFull:
+                targetedReclaimScanState = .deferred(.queueFull, previous: previous)
+            case .outcomeUnknown:
+                targetedReclaimScanState = .deferred(.storageBusy, previous: previous)
+            default:
+                targetedReclaimScanState = .failed(
+                    Self.targetedFailure(for: error),
+                    previous: previous
+                )
+            }
+        } else if error is CancellationError {
+            targetedReclaimScanState = .cancelled(previous: previous)
+        } else {
+            targetedReclaimScanState = .failed(.unexpected, previous: previous)
         }
     }
 
@@ -2686,6 +3214,13 @@ final class AppModel: DuxCapacitySampling {
         homeScanDriverTask = nil
         activeScanRequest = nil
         homeScanCancellationRequested = false
+        if let snapshot = volumeState.snapshot,
+           snapshot.pressure == .warning || snapshot.pressure == .critical
+        {
+            Task { @MainActor [weak self] in
+                await self?.reconcileTargetedReclaimScan(for: snapshot)
+            }
+        }
     }
 
     private static func homeScanFailure(for failure: HomeScanTaskFailure?) -> AppScanFailure {
@@ -2716,6 +3251,59 @@ final class AppModel: DuxCapacitySampling {
         case .taskExpired: .taskExpired
         case .outcomeUnknown: .outcomeUnknown
         case .wrongTaskKind, .internalState, .invalidResponse: .invalidResponse
+        }
+    }
+
+    private static func targetedRootFailure(
+        for error: HomeScanServiceError
+    ) -> TargetedReclaimRootFailure {
+        switch error {
+        case .invalidRoot, .inputTooLarge, .rootNotDirectory, .rootSymlink,
+             .rootIdentityUnavailable, .unsupportedPlatform:
+            .invalidRoot
+        case .rootMissing:
+            .rootMissing
+        case .rootAccessDenied:
+            .accessDenied
+        case .rootChanged, .rootUnavailable:
+            .rootChanged
+        case .queueFull:
+            .queueFull
+        case .busy:
+            .busy
+        case .closed, .persistenceUnavailable, .readOnlyStore, .incompatibleSchema,
+             .unsafeStorage, .budgetExceeded, .corruptData, .taskExpired,
+             .outcomeUnknown:
+            .storageUnavailable
+        case .wrongTaskKind, .internalState, .invalidResponse:
+            .invalidResponse
+        }
+    }
+
+    private static func targetedFailure(
+        for error: TargetedReclaimScanServiceError
+    ) -> TargetedReclaimScanFailure {
+        switch error {
+        case .invalidVolumeIdentity:
+            .missingStableVolumeIdentity
+        case .invalidAnchor, .pressureChanged:
+            .invalidPressureEvidence
+        case .configuredRootsChanged:
+            .configuredRootsChanged
+        case .incompatibleSchema, .readOnlyStore:
+            .incompatibleSchema
+        case .unsafeStorage:
+            .unsafeStorage
+        case .budgetExceeded:
+            .budgetExceeded
+        case .corruptData:
+            .corruptData
+        case .closed, .rootUnavailable, .storageUnavailable, .outcomeUnknown:
+            .unavailable
+        case .invalidRecordVersion, .invalidOrdinal, .rootMissing, .rootAccessDenied,
+             .rootNotDirectory, .rootSymlink, .rootChanged, .queueFull, .busy,
+             .internalState, .invalidResponse:
+            .invalidResponse
         }
     }
 

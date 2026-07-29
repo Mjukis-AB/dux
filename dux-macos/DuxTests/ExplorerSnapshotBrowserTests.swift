@@ -680,6 +680,24 @@ final class ExplorerSnapshotBrowserTests: XCTestCase {
         XCTAssertEqual(limits, [ExplorerSnapshotBrowserModel.historyLimit])
     }
 
+    func testPreparedTargetedScanOpensExactSnapshotWithoutLoadingLatestHome() async {
+        let reviews = BrowserReviewStub()
+        let history = BrowserHistoryStub()
+        let browser = ExplorerSnapshotBrowserModel(reviews: reviews, history: history)
+        let targetedScanID = "scan:targeted:focused"
+
+        browser.prepareExactScanReview(scanID: targetedScanID)
+        await browser.present(id: UUID())
+
+        XCTAssertEqual(browser.phase, .ready)
+        XCTAssertEqual(browser.scanID, targetedScanID)
+        XCTAssertFalse(browser.isLatestSnapshot)
+        XCTAssertNil(browser.selectedHistoricalScan)
+        let calls = await reviews.recordedCalls()
+        XCTAssertTrue(calls.contains(.acquire(scanID: targetedScanID)))
+        XCTAssertFalse(calls.contains(.acquireLatest))
+    }
+
     func testHistoryFailureLeavesConfirmedSnapshotReady() async {
         let reviews = BrowserReviewStub()
         let history = BrowserHistoryStub(fails: true)

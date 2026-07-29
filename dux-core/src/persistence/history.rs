@@ -603,6 +603,74 @@ pub(super) fn load_scan_record_within_budget(
     raw.map(|raw| decode_scan_row(connection, raw)).transpose()
 }
 
+/// Load the newest fully validated succeeded snapshot scan for one exact
+/// host-path byte sequence at or after a canonical millisecond boundary.
+/// Failed, running, or snapshotless newer rows cannot mask an older qualifying
+/// observation. Selection is bounded to one stable ID; the complete parent and
+/// coverage graph is then decoded under the same fixed query budget.
+pub(super) fn load_latest_scan_record_for_exact_root_since(
+    connection: &Connection,
+    root: &Path,
+    started_at_or_after: SystemTime,
+) -> Result<Option<ScanRecord>, HistoryError> {
+    if !root.is_absolute() {
+        return Err(HistoryError::new(HistoryErrorKind::InvalidInput));
+    }
+    let encoded_root =
+        encode_host_path(root).map_err(|_| HistoryError::new(HistoryErrorKind::InvalidInput))?;
+    let started_at_unix_ms =
+        system_time_to_unix_ms(started_at_or_after, HistoryErrorKind::InvalidInput)?;
+    run_bounded_query(connection, || {
+        let raw_id = connection
+            .query_row(
+                "SELECT typeof(scan_id), length(CAST(scan_id AS BLOB)), scan_id
+                 FROM scans
+                 WHERE root_path = ?1
+                   AND root_path_encoding = ?2
+                   AND started_at_unix_ms >= ?3
+                   AND scan_id GLOB 'scan:targeted:*'
+                   AND status = 'succeeded'
+                   AND snapshot_version IS NOT NULL
+                   AND snapshot_relative_path IS NOT NULL
+                   AND snapshot_relative_path_encoding IS NOT NULL
+                   AND snapshot_checksum_sha256 IS NOT NULL
+                   AND EXISTS (
+                     SELECT 1 FROM candidate_evaluations AS evaluation
+                     WHERE evaluation.scan_id = scans.scan_id
+                       AND evaluation.status IN ('succeeded', 'failed')
+                   )
+                 ORDER BY started_at_unix_ms DESC, scan_id ASC
+                 LIMIT 1",
+                params![
+                    encoded_root.bytes,
+                    encoded_root.encoding as i64,
+                    started_at_unix_ms
+                ],
+                |row| {
+                    validate_stored_value(row, 0, 1, "text", 1, MAX_STORED_ID_BYTES)?;
+                    row.get::<_, String>(2)
+                },
+            )
+            .optional()
+            .map_err(map_query_sql_error)?;
+        let Some(raw_id) = raw_id else {
+            return Ok(None);
+        };
+        let id =
+            ScanId::new(raw_id).map_err(|_| HistoryError::new(HistoryErrorKind::CorruptData))?;
+        let record = load_scan_record_within_budget(connection, &id)?
+            .ok_or_else(|| HistoryError::new(HistoryErrorKind::CorruptData))?;
+        if record.root() != root
+            || record.started_at() < started_at_or_after
+            || record.status() != ScanStatus::Succeeded
+            || record.snapshot().is_none()
+        {
+            return Err(HistoryError::new(HistoryErrorKind::CorruptData));
+        }
+        Ok(Some(record))
+    })
+}
+
 /// Load one bounded recent-history page. The parent rows are selected in one
 /// query, then each selected raw row is passed through the same full decoder as
 /// an exact-ID read. Coverage child queries therefore share one VM/time budget.
@@ -637,6 +705,7 @@ pub(super) fn load_recent_scan_records(
                         typeof(snapshot_checksum_sha256), length(snapshot_checksum_sha256),
                         snapshot_checksum_sha256
                  FROM scans
+                 WHERE scan_id NOT GLOB 'scan:targeted:*'
                  ORDER BY started_at_unix_ms DESC, scan_id ASC
                  LIMIT ?1",
             )
@@ -678,6 +747,7 @@ pub(super) fn load_latest_available_snapshot_scan_record(
                  LEFT JOIN snapshot_retention_tombstones AS tombstone
                    ON tombstone.scan_id = scan.scan_id
                  WHERE scan.status = 'succeeded'
+                   AND scan.scan_id NOT GLOB 'scan:targeted:*'
                    AND tombstone.scan_id IS NULL
                    AND (
                      scan.snapshot_version IS NOT NULL OR
@@ -1210,6 +1280,89 @@ mod tests {
         assert_eq!(completed.status(), ScanStatus::Succeeded);
         assert_eq!(completed.completed_at(), Some(finish.completed_at()));
         assert_eq!(completed.counts(), finish.counts());
+    }
+
+    #[test]
+    fn exact_root_since_query_is_bounded_newest_and_byte_exact() {
+        let temp = TempDir::new().unwrap();
+        let store = StoreCoordinator::open(&temp.path().join("store/dux.sqlite3")).unwrap();
+        let selected = temp.path().join("selected");
+        let other = temp.path().join("other");
+        let older = started("scan:targeted:exact-root-older", selected.clone(), 10);
+        let newer = started("scan:targeted:exact-root-newer", selected.clone(), 30);
+        let failed_newest = started("scan:exact-root-failed", selected.clone(), 40);
+        let unrelated = started("scan:exact-root-other", other, 40);
+        for scan in [&older, &newer, &failed_newest, &unrelated] {
+            store.record_scan_started(scan).unwrap();
+        }
+        for scan in [&older, &newer] {
+            store
+                .record_scan_finished(
+                    &ScanCompletionRecord::try_succeeded_with_snapshot(
+                        scan.id().clone(),
+                        scan.started_at() + Duration::from_millis(1),
+                        ScanCounts::default(),
+                        snapshot_reference(scan.id()),
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+        }
+        store.with_connection(|connection| {
+            for scan in [&older, &newer] {
+                let scheduled =
+                    system_time_to_unix_ms(scan.started_at(), HistoryErrorKind::InvalidInput)
+                        .unwrap();
+                connection
+                    .execute(
+                        "INSERT INTO candidate_evaluations (
+                           scan_id, record_format_version, evaluator_revision,
+                           rule_catalog_schema_version, rule_catalog_sha256,
+                           context_format_version, context_sha256,
+                           snapshot_version, snapshot_sha256,
+                           scheduled_at_unix_ms, completed_at_unix_ms,
+                           status, candidate_count, failure_kind
+                         ) VALUES (
+                           ?1, 1, 1, 1, zeroblob(32), 1, zeroblob(32),
+                           1, zeroblob(32), ?2, ?3, 'failed', NULL, 'cancelled'
+                         )",
+                        params![scan.id().as_str(), scheduled, scheduled + 1],
+                    )
+                    .unwrap();
+            }
+        });
+        store
+            .record_scan_finished(
+                &ScanCompletionRecord::try_new(
+                    failed_newest.id().clone(),
+                    failed_newest.started_at() + Duration::from_millis(1),
+                    TerminalScanStatus::Failed,
+                    ScanCounts::default(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+
+        assert_eq!(
+            store
+                .load_latest_scan_for_exact_root_since(
+                    &selected,
+                    UNIX_EPOCH + Duration::from_millis(1_750_000_000_020),
+                )
+                .unwrap()
+                .unwrap()
+                .id(),
+            newer.id()
+        );
+        assert!(
+            store
+                .load_latest_scan_for_exact_root_since(
+                    &selected,
+                    UNIX_EPOCH + Duration::from_millis(1_750_000_000_031),
+                )
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

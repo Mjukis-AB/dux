@@ -133,7 +133,7 @@ pub(crate) use configured_project_roots::{
 };
 pub(crate) use history::{
     HistoryError, HistoryErrorKind, MAX_RECENT_SCAN_HISTORY_LIMIT, NewScanRecord,
-    ScanCompletionRecord, ScanCounts, ScanStatus, TerminalScanStatus,
+    ScanCompletionRecord, ScanCounts, ScanRecord, ScanStatus, TerminalScanStatus,
 };
 pub(crate) use permanent_cleanup::{
     PermanentCleanupSetting, PermanentCleanupSettingSource, PermanentCleanupSettingUpdate,

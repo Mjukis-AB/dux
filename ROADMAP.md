@@ -5751,6 +5751,29 @@ Tasks:
     input, or cleanup effect. The next slice must add the bounded multi-root
     Warning/Critical scan runner and its priority/cancellation policy; this
     parent task intentionally remains open.
+  - [x] 2026-07-29 configured-root runner slice: add one path-free,
+    ordinal-selected pressure runner over the durable project-root registry.
+    Rust requires the exact latest accepted capacity anchor and current open
+    Warning/Critical episode, rereads the registry at every admission, scans
+    one root at a time with a 50,000-node per-root and 200,000-node aggregate
+    ceiling, and performs a final path-free pressure/anchor/revision/count
+    checkpoint before Swift may call the batch complete. Roots retain
+    no-follow identity through publication, must belong to the pressured
+    startup volume, and treat macOS's sealed `/` plus
+    `/System/Volumes/Data` devices as one startup-volume pair without admitting
+    external devices. Exact successful targeted evidence is restart-safe and
+    reusable only for the current pressure level/episode with a retained
+    snapshot and terminal candidate evaluation; targeted snapshots are
+    excluded from generic Home latest/history queries. Interactive work
+    preempts queued targeted work, cancellation of owned running work is
+    observed through terminal scope release, and an existing task is exposed
+    only when it is the exact targeted root. UniFFI contract v38 carries no
+    caller path or cleanup/AI authority and Swift independently validates the
+    full response graph. Explorer/menu presentation shows timestamped
+    allocated/logical observations, coverage, issues, deterministic candidate
+    counts, partial failures, cancel/retry state, and an exact-scan
+    **Review findings** action. The parent remains open for bounded known
+    user-cache roots and the resulting Critical recommendation ordering.
 - [ ] Add emergency recovery ordering.
 - [ ] Add rule outcome/regrowth measurement.
 - [ ] Add recurring “storage thief” ranking.

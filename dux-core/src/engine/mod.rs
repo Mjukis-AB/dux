@@ -17,6 +17,7 @@ mod rust_target_plan_review;
 mod scan_coverage_details;
 mod settings;
 mod snapshot_review;
+mod targeted_project_scan;
 
 pub(crate) use snapshot_review::SnapshotReviewTrashTarget;
 mod task;
@@ -77,6 +78,13 @@ pub use snapshot_review::{
     SnapshotReviewReleaseOutcome, SnapshotReviewScanFlags, SnapshotReviewSession,
     SnapshotReviewTimestamp, SnapshotReviewTreemap, SnapshotReviewTreemapCell,
 };
+pub use targeted_project_scan::{
+    MAX_TARGETED_PRESSURE_CHAIN_EPISODES, MAX_TARGETED_PROJECT_SCAN_NODES,
+    MAX_TARGETED_PROJECT_SCAN_PASS_NODES, TargetedProjectScanAdmission,
+    TargetedProjectScanCheckpoint, TargetedProjectScanCurrent, TargetedProjectScanDisposition,
+    TargetedProjectScanError, TargetedProjectScanPressure, TargetedProjectScanPressureContext,
+    TargetedProjectScanSelection,
+};
 pub use task::{
     CancelOutcome, CandidateEvaluationRecoveryMaintenanceFailureKind,
     CandidateEvaluationRecoveryMaintenanceOutcome, CandidateEvaluationRecoveryMaintenanceResult,
@@ -89,18 +97,19 @@ pub use task::{
     RecentScanHistory, RustTargetDryRunFailureKind, ScanHistoryError,
     ScanRecoveryMaintenanceFailureKind, ScanRecoveryMaintenanceOutcome,
     ScanRecoveryMaintenanceResult, ScanRecoveryMaintenanceStartOutcome, ScanRootErrorKind,
-    ScanTaskCounts, ScanTaskResult, ScanTaskStatus, SnapshotOrphanMaintenanceFailureKind,
-    SnapshotOrphanMaintenanceOutcome, SnapshotOrphanMaintenanceResult,
-    SnapshotOrphanMaintenanceStartOutcome, SnapshotProvisioningStageMaintenanceFailureKind,
-    SnapshotProvisioningStageMaintenanceOutcome, SnapshotProvisioningStageMaintenanceResult,
-    SnapshotProvisioningStageMaintenanceStartOutcome, SnapshotRetentionFailureKind,
-    SnapshotRetentionOutcome, SnapshotRetentionResult, SnapshotRetentionStartOutcome,
-    SnapshotTerminalTempMaintenanceFailureKind, SnapshotTerminalTempMaintenanceOutcome,
-    SnapshotTerminalTempMaintenanceResult, SnapshotTerminalTempMaintenanceStartOutcome,
-    SnapshotUnleasedTempMaintenanceFailureKind, SnapshotUnleasedTempMaintenanceOutcome,
-    SnapshotUnleasedTempMaintenanceResult, SnapshotUnleasedTempMaintenanceStartOutcome,
-    StartSubtreeScanError, StartTaskError, TaskAccessError, TaskEvent, TaskEventBatch,
-    TaskEventKind, TaskFailureKind, TaskId, TaskKind, TaskPhase, TaskSnapshot,
+    ScanTaskCounts, ScanTaskOrigin, ScanTaskResult, ScanTaskStatus,
+    SnapshotOrphanMaintenanceFailureKind, SnapshotOrphanMaintenanceOutcome,
+    SnapshotOrphanMaintenanceResult, SnapshotOrphanMaintenanceStartOutcome,
+    SnapshotProvisioningStageMaintenanceFailureKind, SnapshotProvisioningStageMaintenanceOutcome,
+    SnapshotProvisioningStageMaintenanceResult, SnapshotProvisioningStageMaintenanceStartOutcome,
+    SnapshotRetentionFailureKind, SnapshotRetentionOutcome, SnapshotRetentionResult,
+    SnapshotRetentionStartOutcome, SnapshotTerminalTempMaintenanceFailureKind,
+    SnapshotTerminalTempMaintenanceOutcome, SnapshotTerminalTempMaintenanceResult,
+    SnapshotTerminalTempMaintenanceStartOutcome, SnapshotUnleasedTempMaintenanceFailureKind,
+    SnapshotUnleasedTempMaintenanceOutcome, SnapshotUnleasedTempMaintenanceResult,
+    SnapshotUnleasedTempMaintenanceStartOutcome, StartSubtreeScanError, StartTaskError,
+    TaskAccessError, TaskEvent, TaskEventBatch, TaskEventKind, TaskFailureKind, TaskId, TaskKind,
+    TaskPhase, TaskPriority, TaskSnapshot,
 };
 pub use volume_status::{
     CapacityHistoryDisposition, CapacityTrend, CapacityTrendChange, CapacityTrendPoint,

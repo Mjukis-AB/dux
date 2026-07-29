@@ -74,7 +74,13 @@ struct ExplorerView: View {
                 )
                 .navigationTitle("Explore Snapshot")
             case .recommendations:
-                ExplorerRecommendationsView(model: model)
+                ExplorerRecommendationsView(
+                    model: model,
+                    reviewScan: { scanID in
+                        snapshotBrowser.prepareExactScanReview(scanID: scanID)
+                        selection = .snapshot
+                    }
+                )
                     .navigationTitle("Recommendations")
             case .cleanupHistory:
                 ExplorerCleanupHistoryView(model: model)
@@ -151,9 +157,15 @@ struct ExplorerView: View {
 }
 
 private struct ExplorerRecommendationsView: View {
+    @Environment(\.openSettings) private var openSettings
+
     let model: AppModel
+    let reviewScan: (String) -> Void
 
     var body: some View {
+        let focused = TargetedReclaimScanPresentation.make(
+            model.targetedReclaimScanState
+        )
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 Label("Safe ways to reclaim space", systemImage: "checkmark.shield")
@@ -176,10 +188,142 @@ private struct ExplorerRecommendationsView: View {
                     .accessibilityElement(children: .combine)
                 }
                 .accessibilityIdentifier(ExplorerAccessibility.recommendations)
+
+                GroupBox {
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack(alignment: .firstTextBaseline, spacing: 10) {
+                            Image(systemName: focused.symbol)
+                                .foregroundStyle(color(focused.tone))
+                                .accessibilityHidden(true)
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(focused.title)
+                                    .font(.headline)
+                                Text(focused.detail)
+                                    .font(.callout)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .accessibilityElement(children: .combine)
+                        .accessibilityIdentifier(
+                            ExplorerAccessibility.targetedReclaimScanStatus
+                        )
+
+                        if let progress = focused.progressValue,
+                           let label = focused.progressLabel
+                        {
+                            ProgressView(value: progress) {
+                                Text(label)
+                                    .font(.caption)
+                            }
+                            .accessibilityValue(label)
+                            .accessibilityIdentifier(
+                                ExplorerAccessibility.targetedReclaimScanProgress
+                            )
+                        }
+
+                        if !focused.rows.isEmpty {
+                            Divider()
+                            VStack(alignment: .leading, spacing: 10) {
+                                ForEach(focused.rows) { row in
+                                    HStack(alignment: .top, spacing: 10) {
+                                        Image(
+                                            systemName: row.tone == .success
+                                                ? "checkmark.circle.fill"
+                                                : "exclamationmark.circle.fill"
+                                        )
+                                        .foregroundStyle(color(row.tone))
+                                        .accessibilityHidden(true)
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(row.path)
+                                                .font(.callout.monospaced())
+                                                .lineLimit(2)
+                                                .textSelection(.enabled)
+                                            Text(row.title)
+                                                .font(.caption.weight(.semibold))
+                                            Text(row.detail)
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                            if let scanID = row.scanID {
+                                                Button("Review findings") {
+                                                    reviewScan(scanID)
+                                                }
+                                                .buttonStyle(.link)
+                                                .help(
+                                                    "Open this exact read-only scan in Explorer"
+                                                )
+                                                .accessibilityIdentifier(
+                                                    ExplorerAccessibility
+                                                        .targetedReclaimScanReview(
+                                                            ordinal: row.ordinal
+                                                        )
+                                                )
+                                            }
+                                        }
+                                    }
+                                    .accessibilityElement(children: .contain)
+                                    .accessibilityIdentifier(
+                                        ExplorerAccessibility.targetedReclaimScanRoot(
+                                            ordinal: row.ordinal
+                                        )
+                                    )
+                                }
+                            }
+                        }
+
+                        if focused.canCancel || focused.canRetry
+                            || focused.showsConfigureRoots
+                        {
+                            HStack(spacing: 10) {
+                                if focused.canCancel {
+                                    Button("Stop focused scan", role: .cancel) {
+                                        Task {
+                                            await model.cancelTargetedReclaimScan()
+                                        }
+                                    }
+                                    .accessibilityIdentifier(
+                                        ExplorerAccessibility.targetedReclaimScanCancel
+                                    )
+                                }
+                                if focused.canRetry,
+                                   let snapshot = model.volumeState.snapshot
+                                {
+                                    Button("Retry focused scan") {
+                                        Task {
+                                            await model.reconcileTargetedReclaimScan(
+                                                for: snapshot
+                                            )
+                                        }
+                                    }
+                                    .accessibilityIdentifier(
+                                        ExplorerAccessibility.targetedReclaimScanRetry
+                                    )
+                                }
+                                if focused.showsConfigureRoots {
+                                    Button("Configure folders…") {
+                                        AppActivation.openSettings(using: openSettings)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } label: {
+                    Label("Low-space focused discovery", systemImage: "scope")
+                }
+                .accessibilityIdentifier(ExplorerAccessibility.targetedReclaimScan)
             }
             .padding(28)
             .frame(maxWidth: 860, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func color(_ tone: TargetedReclaimScanTone) -> Color {
+        switch tone {
+        case .neutral: .secondary
+        case .active: .blue
+        case .success: .green
+        case .warning: .orange
+        case .failure: .red
         }
     }
 }

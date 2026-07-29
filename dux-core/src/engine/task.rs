@@ -22,6 +22,28 @@ impl TaskId {
     }
 }
 
+/// Stable engine queue priority. Workers always choose the highest class
+/// first and preserve admission order within one class.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(u8)]
+pub enum TaskPriority {
+    Maintenance = 0,
+    Targeted = 1,
+    UserFull = 2,
+    UserSubtree = 3,
+    UserInteractive = 4,
+    Cleanup = 5,
+}
+
+/// Origin of a scan task. Targeted recommendations remain ordinary,
+/// cancellable observation-only scans and carry no cleanup authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScanTaskOrigin {
+    UserFull,
+    UserSubtree,
+    TargetedRecommendation,
+}
+
 /// Closed set of engine-owned task kinds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -242,6 +264,8 @@ pub enum SnapshotUnleasedTempMaintenanceFailureKind {
 pub struct TaskSnapshot {
     pub id: TaskId,
     pub kind: TaskKind,
+    pub priority: TaskPriority,
+    pub scan_origin: Option<ScanTaskOrigin>,
     pub phase: TaskPhase,
     pub cancellation_requested: bool,
     pub revision: u64,
@@ -1606,6 +1630,8 @@ pub enum ScanRootErrorKind {
     Symlink,
     ChangedDuringValidation,
     IdentityUnavailable,
+    VolumeMismatch,
+    VolumeUnproven,
     UnsupportedPlatform,
     Unavailable,
 }

@@ -13,6 +13,82 @@ private func canonicalTestPath(_ url: URL) -> String {
     return String(decoding: buffer[..<end].map(UInt8.init(bitPattern:)), as: UTF8.self)
 }
 
+private let targetedTestVolumeID =
+    "volume:macos:01234567-89ab-cdef-0123-456789abcdef"
+
+private func generatedTargetedPressure(
+    anchorUnixMS: Int64 = 4_000
+) -> TargetedProjectScanPressureContext {
+    TargetedProjectScanPressureContext(
+        recordVersion: 1,
+        stableVolumeId: targetedTestVolumeID,
+        capacityAnchorUnixMs: anchorUnixMS,
+        pressure: .warning,
+        currentEpisodeStartedAtUnixMs: 2_000,
+        pressureStartedAtUnixMs: 1_000,
+        policyRevision: 9
+    )
+}
+
+private func generatedTargetedAdmission(
+    pressure: TargetedProjectScanPressureContext,
+    disposition: TargetedProjectScanDisposition,
+    task: ScanTask? = nil,
+    existingPhase: TaskPhase? = nil,
+    rootUnavailableReason: TargetedProjectScanRootUnavailableReason? = nil,
+    currentResult: ScanTaskResult? = nil,
+    maxNodes: UInt32 = 50_000
+) -> TargetedProjectScanAdmission {
+    TargetedProjectScanAdmission(
+        recordVersion: 1,
+        configuredRootsRevision: 7,
+        rootCount: 4,
+        selection: TargetedProjectScanSelection(
+            recordVersion: 1,
+            ordinal: 0,
+            root: ConfiguredProjectRootPath(
+                encoding: .unixBytes,
+                encodedBytes: Data("/Users/example/project".utf8)
+            ),
+            maxNodes: maxNodes
+        ),
+        pressure: pressure,
+        disposition: disposition,
+        rootUnavailableReason: rootUnavailableReason,
+        currentResult: currentResult,
+        task: task,
+        existingTaskObservedPhase: existingPhase
+    )
+}
+
+private func generatedTargetedCurrentResult() -> ScanTaskResult {
+    ScanTaskResult(
+        recordVersion: 1,
+        scanId: "scan:targeted:fixture",
+        startedAtUnixMs: 2_500,
+        completedAtUnixMs: 3_000,
+        status: .succeeded,
+        directoryCount: 4,
+        fileCount: 8,
+        logicalBytes: 4_096,
+        allocatedBytes: 3_072,
+        snapshotAvailable: true,
+        coverage: ScanCoverageSummary(
+            recordVersion: 1,
+            status: .complete,
+            measuredPermille: 1_000,
+            issueRecordCount: 0,
+            issueOccurrenceCount: 0
+        ),
+        candidateEvaluation: ScanCandidateEvaluationSummary(
+            recordVersion: 1,
+            status: .succeeded,
+            candidateCount: 2,
+            failure: nil
+        )
+    )
+}
+
 final class EngineServiceTests: XCTestCase {
     func testRustTargetPlanReviewBridgeUsesBoundParentAndMapsExactRecord() async throws {
         let parent = RecordingGeneratedSnapshotReview()
@@ -399,7 +475,7 @@ final class EngineServiceTests: XCTestCase {
         // DUX-DESTRUCTIVE: allow=test-swift-retry-obstruction-remove -- remove only this test fixture's deliberate file obstruction
         try FileManager.default.removeItem(at: dataRoot)
         let status = try await service.loadStatus()
-        XCTAssertEqual(status.ffiContractVersion, 37)
+        XCTAssertEqual(status.ffiContractVersion, 38)
         let closed = await service.close()
         XCTAssertTrue(closed)
     }
@@ -409,7 +485,7 @@ final class EngineServiceTests: XCTestCase {
         let result = try await EngineService(engine: fixture.engine).loadStatus()
 
         XCTAssertEqual(result.libraryVersion, "0.5.0")
-        XCTAssertEqual(result.ffiContractVersion, 37)
+        XCTAssertEqual(result.ffiContractVersion, 38)
         XCTAssertTrue(result.executedOffMainThread)
     }
 
@@ -1159,6 +1235,223 @@ final class EngineServiceTests: XCTestCase {
 
         guard case .failed(.blockedUntilRestart) = admission else {
             return XCTFail("Expected malformed start record to fail closed")
+        }
+    }
+
+    func testTargetedScanBridgeUsesPathFreeAdmissionAndExactFinalCheckpoint() async throws {
+        let pressure = generatedTargetedPressure()
+        let task = RecordingGeneratedScanTask(
+            polls: [generatedActivePoll(revision: 1)]
+        )
+        let engine = RecordingTargetedScanEngine(
+            admissions: [
+                generatedTargetedAdmission(
+                    pressure: pressure,
+                    disposition: .started,
+                    task: task
+                ),
+            ],
+            checkpoint: TargetedProjectScanCheckpoint(
+                recordVersion: 1,
+                configuredRootsRevision: 7,
+                rootCount: 4,
+                pressure: pressure
+            )
+        )
+        let service = EngineService(engine: engine)
+
+        let admission = try await service.startTargetedReclaimScan(
+            stableVolumeID: targetedTestVolumeID,
+            anchorAt: Date(timeIntervalSince1970: 4),
+            ordinal: 0,
+            expectedRootsRevision: 7
+        )
+
+        guard
+            case .started = admission.disposition,
+            let context = admission.context
+        else {
+            return XCTFail("Expected one owned targeted scan task")
+        }
+        XCTAssertEqual(admission.ordinal, 0)
+        XCTAssertEqual(admission.root?.encodedBytes, Data("/Users/example/project".utf8))
+        XCTAssertEqual(context.stableVolumeID, targetedTestVolumeID)
+        XCTAssertEqual(context.capacityAnchorAt, Date(timeIntervalSince1970: 4))
+        XCTAssertEqual(context.pressure, .warning)
+        XCTAssertEqual(context.pressureEpisodeStartedAt, Date(timeIntervalSince1970: 2))
+        XCTAssertEqual(context.lowPressureSequenceStartedAt, Date(timeIntervalSince1970: 1))
+        XCTAssertEqual(context.policyRevision, 9)
+        XCTAssertEqual(context.rootsRevision, 7)
+        XCTAssertEqual(context.rootCount, 4)
+        XCTAssertEqual(
+            engine.startRequest,
+            TargetedProjectScanRequest(
+                recordVersion: 1,
+                stableVolumeId: targetedTestVolumeID,
+                capacityAnchorUnixMs: 4_000,
+                selectedRootOrdinal: 0,
+                expectedConfiguredRootsRevision: 7
+            )
+        )
+        XCTAssertEqual(engine.startCalledOnMain, false)
+
+        let validated = try await service.validateTargetedReclaimScan(context)
+
+        XCTAssertEqual(validated, context)
+        XCTAssertEqual(
+            engine.checkpointRequest,
+            TargetedProjectScanCheckpointRequest(
+                recordVersion: 1,
+                expectedPressure: pressure,
+                expectedConfiguredRootsRevision: 7,
+                expectedRootCount: 4
+            )
+        )
+        XCTAssertEqual(engine.checkpointCalledOnMain, false)
+        do {
+            _ = try await service.validateTargetedReclaimScan(context)
+            XCTFail("Expected the exact checkpoint proof to be consume-on-success")
+        } catch {
+            XCTAssertEqual(
+                error as? TargetedReclaimScanServiceError,
+                .invalidResponse
+            )
+        }
+    }
+
+    func testTargetedScanBridgeDistinguishesObservedTasksAndRootFailures() async throws {
+        let pressure = generatedTargetedPressure(anchorUnixMS: 4_000)
+        let task = RecordingGeneratedScanTask(
+            polls: [generatedActivePoll(revision: 1)]
+        )
+        let engine = RecordingTargetedScanEngine(
+            admissions: [
+                generatedTargetedAdmission(
+                    pressure: pressure,
+                    disposition: .existingTask,
+                    task: task,
+                    existingPhase: .running
+                ),
+                generatedTargetedAdmission(
+                    pressure: pressure,
+                    disposition: .rootUnavailable,
+                    rootUnavailableReason: .volumeMismatch
+                ),
+            ]
+        )
+        let service = EngineService(engine: engine)
+
+        let observed = try await service.startTargetedReclaimScan(
+            stableVolumeID: targetedTestVolumeID,
+            anchorAt: Date(timeIntervalSince1970: 4),
+            ordinal: 0,
+            expectedRootsRevision: 7
+        )
+        guard case .observing = observed.disposition else {
+            return XCTFail("Expected an existing targeted task to be non-owning")
+        }
+        XCTAssertNil(observed.disposition.ownedTask)
+        XCTAssertNotNil(observed.disposition.task)
+
+        let unavailable = try await service.startTargetedReclaimScan(
+            stableVolumeID: targetedTestVolumeID,
+            anchorAt: Date(timeIntervalSince1970: 4),
+            ordinal: 0,
+            expectedRootsRevision: 7
+        )
+        guard case let .unavailable(failure) = unavailable.disposition else {
+            return XCTFail("Expected a root-local failure")
+        }
+        XCTAssertEqual(failure, .differentVolume)
+    }
+
+    func testTargetedScanBridgeMapsOnlyCurrentTargetedResultsAndExactBudgets() async throws {
+        let pressure = generatedTargetedPressure()
+        let valid = RecordingTargetedScanEngine(
+            admissions: [
+                generatedTargetedAdmission(
+                    pressure: pressure,
+                    disposition: .current,
+                    currentResult: generatedTargetedCurrentResult()
+                ),
+            ]
+        )
+        let admission = try await EngineService(engine: valid).startTargetedReclaimScan(
+            stableVolumeID: targetedTestVolumeID,
+            anchorAt: Date(timeIntervalSince1970: 4),
+            ordinal: 0,
+            expectedRootsRevision: 7
+        )
+        guard case let .current(result) = admission.disposition else {
+            return XCTFail("Expected validated durable targeted evidence")
+        }
+        XCTAssertTrue(result.succeeded)
+        XCTAssertEqual(result.scanID, "scan:targeted:fixture")
+        XCTAssertEqual(result.candidateEvaluation, .succeeded(candidateCount: 2))
+
+        let malformed = generatedTargetedAdmission(
+            pressure: pressure,
+            disposition: .current,
+            currentResult: generatedTargetedCurrentResult(),
+            maxNodes: 49_999
+        )
+        do {
+            _ = try await EngineService(
+                engine: RecordingTargetedScanEngine(admissions: [malformed])
+            ).startTargetedReclaimScan(
+                stableVolumeID: targetedTestVolumeID,
+                anchorAt: Date(timeIntervalSince1970: 4),
+                ordinal: 0,
+                expectedRootsRevision: 7
+            )
+            XCTFail("Expected a contradictory Rust node budget to fail closed")
+        } catch {
+            XCTAssertEqual(
+                error as? TargetedReclaimScanServiceError,
+                .invalidResponse
+            )
+        }
+    }
+
+    func testTargetedScanBridgeMapsEveryTypedAdmissionError() async {
+        let cases: [(TargetedProjectScanError, TargetedReclaimScanServiceError)] = [
+            (.Closed, .closed),
+            (.InvalidRecordVersion, .invalidRecordVersion),
+            (.InvalidVolumeIdentity, .invalidVolumeIdentity),
+            (.InvalidAnchor, .invalidAnchor),
+            (.InvalidOrdinal, .invalidOrdinal),
+            (.RegistryChanged, .configuredRootsChanged),
+            (.PressureChanged, .pressureChanged),
+            (.ReadOnlyStore, .readOnlyStore),
+            (.IncompatibleSchema, .incompatibleSchema),
+            (.Busy, .busy),
+            (.UnsafeStorage, .unsafeStorage),
+            (.BudgetExceeded, .budgetExceeded),
+            (.CorruptData, .corruptData),
+            (.Unavailable, .storageUnavailable),
+            (.OutcomeUnknown, .outcomeUnknown),
+            (.QueueFull, .queueFull),
+            (.TaskIdExhausted, .internalState),
+            (.InternalState, .internalState),
+        ]
+
+        for (ffiError, expected) in cases {
+            do {
+                _ = try await EngineService(
+                    engine: RecordingTargetedScanEngine(
+                        admissions: [],
+                        startError: ffiError
+                    )
+                ).startTargetedReclaimScan(
+                    stableVolumeID: targetedTestVolumeID,
+                    anchorAt: Date(timeIntervalSince1970: 4),
+                    ordinal: 0,
+                    expectedRootsRevision: nil
+                )
+                XCTFail("Expected \(ffiError) to be mapped")
+            } catch {
+                XCTAssertEqual(error as? TargetedReclaimScanServiceError, expected)
+            }
         }
     }
 
@@ -1952,7 +2245,7 @@ final class EngineServiceTests: XCTestCase {
             weakEngine = engine
 
             XCTAssertEqual(liveEngineInstanceCount(), baseline + 1)
-            XCTAssertEqual(try engine.libraryVersion().ffiContractVersion, 37)
+            XCTAssertEqual(try engine.libraryVersion().ffiContractVersion, 38)
             XCTAssertTrue(engine.close())
             XCTAssertTrue(engine.close())
             XCTAssertThrowsError(try engine.formatSize(bytes: 1_536)) { error in
@@ -2848,6 +3141,56 @@ private final class RecordingGeneratedMaintenanceTask:
 
     override func cancel() throws -> MaintenanceCancelOutcome {
         .requested
+    }
+}
+
+private final class RecordingTargetedScanEngine: DuxEngine, @unchecked Sendable {
+    private var admissions: [TargetedProjectScanAdmission]
+    private let checkpoint: TargetedProjectScanCheckpoint?
+    private let startError: TargetedProjectScanError?
+    private(set) var startRequest: TargetedProjectScanRequest?
+    private(set) var checkpointRequest: TargetedProjectScanCheckpointRequest?
+    private(set) var startCalledOnMain: Bool?
+    private(set) var checkpointCalledOnMain: Bool?
+
+    required init(unsafeFromHandle handle: UInt64) {
+        fatalError("RecordingTargetedScanEngine cannot be lifted from handle: \(handle)")
+    }
+
+    init(
+        admissions: [TargetedProjectScanAdmission],
+        checkpoint: TargetedProjectScanCheckpoint? = nil,
+        startError: TargetedProjectScanError? = nil
+    ) {
+        self.admissions = admissions
+        self.checkpoint = checkpoint
+        self.startError = startError
+        super.init(noHandle: NoHandle())
+    }
+
+    override func startTargetedProjectScan(
+        request: TargetedProjectScanRequest
+    ) throws -> TargetedProjectScanAdmission {
+        startRequest = request
+        startCalledOnMain = Thread.isMainThread
+        if let startError {
+            throw startError
+        }
+        guard !admissions.isEmpty else {
+            throw TargetedProjectScanError.InternalState
+        }
+        return admissions.removeFirst()
+    }
+
+    override func validateTargetedProjectScanContext(
+        request: TargetedProjectScanCheckpointRequest
+    ) throws -> TargetedProjectScanCheckpoint {
+        checkpointRequest = request
+        checkpointCalledOnMain = Thread.isMainThread
+        guard let checkpoint else {
+            throw TargetedProjectScanError.InternalState
+        }
+        return checkpoint
     }
 }
 

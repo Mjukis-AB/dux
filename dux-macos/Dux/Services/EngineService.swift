@@ -154,7 +154,7 @@ extension DuxPermanentCleanupPolicyServing {
 protocol EngineServing: DuxVolumeStatusServing, DuxCapacityTrendServing,
     DuxPressureEpisodeServing, DuxPressurePolicyServing, DuxPermanentCleanupPolicyServing,
     DuxCleanupExclusionsServing, DuxProjectDiscoveryRootsServing,
-    DuxDirectCargoEnrollmentServing, DuxCleanupHistoryServing,
+    DuxDirectCargoEnrollmentServing, DuxTargetedReclaimScanServing, DuxCleanupHistoryServing,
     DuxCleanupHistoryClearing, Sendable
 {
     func loadStatus() async throws -> EngineStatus
@@ -350,8 +350,10 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
     DuxSnapshotHistoryServing, DuxCleanupHistoryServing, DuxScanCoverageServing, HomeScanServing,
     Sendable
 {
-    fileprivate static let expectedFFIContractVersion: UInt32 = 37
+    fileprivate static let expectedFFIContractVersion: UInt32 = 38
     fileprivate static let expectedRecordVersion: UInt32 = 1
+    private static let maximumTargetedProjectScanNodes: UInt32 = 50_000
+    private static let maximumTargetedProjectScanPassNodes: UInt32 = 200_000
 
     private let state: EngineServiceState
 
@@ -893,6 +895,97 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
             } catch let error as ScanError {
                 throw Self.homeScanServiceError(error)
             }
+        }
+    }
+
+    func startTargetedReclaimScan(
+        stableVolumeID: String,
+        anchorAt: Date,
+        ordinal: UInt16,
+        expectedRootsRevision: UInt64?
+    ) async throws -> TargetedReclaimScanAdmission {
+        try await state.perform { state in
+            precondition(!Thread.isMainThread, "Blocking FFI work reached the main thread")
+            let canonicalVolumeID = try Self.targetedVolumeID(stableVolumeID)
+            let anchorAtUnixMS = try Self.targetedTimestamp(anchorAt)
+            let engine: DuxEngine
+            do {
+                engine = try state.resolveEngine()
+            } catch let error as EngineServiceError {
+                throw Self.targetedReclaimScanError(error)
+            }
+
+            let response: TargetedProjectScanAdmission
+            do {
+                response = try engine.startTargetedProjectScan(
+                    request: TargetedProjectScanRequest(
+                        recordVersion: Self.expectedRecordVersion,
+                        stableVolumeId: canonicalVolumeID,
+                        capacityAnchorUnixMs: anchorAtUnixMS,
+                        selectedRootOrdinal: ordinal,
+                        expectedConfiguredRootsRevision: expectedRootsRevision
+                    )
+                )
+            } catch let error as TargetedProjectScanError {
+                throw Self.targetedReclaimScanError(error)
+            }
+
+            let admission = try Self.targetedReclaimScanAdmission(
+                response,
+                expectedStableVolumeID: canonicalVolumeID,
+                expectedAnchorAtUnixMS: anchorAtUnixMS,
+                expectedOrdinal: ordinal,
+                expectedRootsRevision: expectedRootsRevision,
+                state: state
+            )
+            if let context = admission.context,
+               context.rootCount > 0,
+               let pressure = response.pressure
+            {
+                try state.rememberTargetedProjectScanProof(
+                    context: context,
+                    pressure: pressure
+                )
+            }
+            return admission
+        }
+    }
+
+    func validateTargetedReclaimScan(
+        _ context: TargetedReclaimScanContext
+    ) async throws -> TargetedReclaimScanContext {
+        try await state.perform { state in
+            precondition(!Thread.isMainThread, "Blocking FFI work reached the main thread")
+            guard context.rootCount > 0 else {
+                throw TargetedReclaimScanServiceError.invalidResponse
+            }
+            let proof = try state.targetedProjectScanProof(for: context)
+            let engine: DuxEngine
+            do {
+                engine = try state.resolveEngine()
+            } catch let error as EngineServiceError {
+                throw Self.targetedReclaimScanError(error)
+            }
+
+            let response: TargetedProjectScanCheckpoint
+            do {
+                response = try engine.validateTargetedProjectScanContext(
+                    request: TargetedProjectScanCheckpointRequest(
+                        recordVersion: Self.expectedRecordVersion,
+                        expectedPressure: proof.pressure,
+                        expectedConfiguredRootsRevision: context.rootsRevision,
+                        expectedRootCount: context.rootCount
+                    )
+                )
+            } catch let error as TargetedProjectScanError {
+                throw Self.targetedReclaimScanError(error)
+            }
+            let validated = try Self.targetedReclaimScanCheckpoint(
+                response,
+                expected: proof
+            )
+            state.consumeTargetedProjectScanProof(proof)
+            return validated
         }
     }
 
@@ -1742,6 +1835,363 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         }
     }
 
+    private static func targetedVolumeID(
+        _ stableVolumeID: String
+    ) throws -> String {
+        let prefix = "volume:macos:"
+        guard
+            stableVolumeID.hasPrefix(prefix),
+            let uuid = macOSVolumeUUID(stableVolumeID)
+        else {
+            throw TargetedReclaimScanServiceError.invalidVolumeIdentity
+        }
+        let canonical = "\(prefix)\(uuid.uuidString.lowercased())"
+        guard stableVolumeID == canonical else {
+            throw TargetedReclaimScanServiceError.invalidVolumeIdentity
+        }
+        return canonical
+    }
+
+    private static func targetedTimestamp(_ date: Date) throws -> Int64 {
+        let milliseconds = date.timeIntervalSince1970 * 1_000
+        guard
+            milliseconds.isFinite,
+            milliseconds >= 0,
+            milliseconds <= Double(Int64.max)
+        else {
+            throw TargetedReclaimScanServiceError.invalidAnchor
+        }
+        return Int64(milliseconds.rounded(.towardZero))
+    }
+
+    private static func targetedReclaimScanAdmission(
+        _ response: TargetedProjectScanAdmission,
+        expectedStableVolumeID: String,
+        expectedAnchorAtUnixMS: Int64,
+        expectedOrdinal: UInt16,
+        expectedRootsRevision: UInt64?,
+        state: EngineServiceState
+    ) throws -> TargetedReclaimScanAdmission {
+        guard
+            response.recordVersion == expectedRecordVersion,
+            response.rootCount <= UInt16(ProjectDiscoveryRoot.maximumCount),
+            expectedRootsRevision.map({ $0 == response.configuredRootsRevision }) ?? true
+        else {
+            throw TargetedReclaimScanServiceError.invalidResponse
+        }
+
+        let selection = try response.selection.map {
+            try targetedReclaimSelection(
+                $0,
+                expectedOrdinal: expectedOrdinal,
+                rootCount: response.rootCount
+            )
+        }
+        let context = try response.pressure.map {
+            try targetedReclaimContext(
+                $0,
+                expectedStableVolumeID: expectedStableVolumeID,
+                expectedAnchorAtUnixMS: expectedAnchorAtUnixMS,
+                rootsRevision: response.configuredRootsRevision,
+                rootCount: response.rootCount
+            )
+        }
+        let hasNoTaggedPayload =
+            response.rootUnavailableReason == nil
+                && response.currentResult == nil
+                && response.task == nil
+                && response.existingTaskObservedPhase == nil
+
+        switch response.disposition {
+        case .emptyRegistry:
+            guard
+                response.rootCount == 0,
+                selection == nil,
+                hasNoTaggedPayload
+            else {
+                throw TargetedReclaimScanServiceError.invalidResponse
+            }
+            return TargetedReclaimScanAdmission(
+                context: context,
+                ordinal: nil,
+                root: nil,
+                disposition: .noConfiguredRoots
+            )
+        case .noPressure:
+            guard
+                response.rootCount > 0,
+                response.configuredRootsRevision > 0,
+                selection != nil,
+                context == nil,
+                hasNoTaggedPayload
+            else {
+                throw TargetedReclaimScanServiceError.invalidResponse
+            }
+            return TargetedReclaimScanAdmission(
+                context: nil,
+                ordinal: nil,
+                root: nil,
+                disposition: .pressureNotActive
+            )
+        case .rootUnavailable:
+            guard
+                response.rootCount > 0,
+                response.configuredRootsRevision > 0,
+                let selection,
+                let context,
+                let reason = response.rootUnavailableReason,
+                response.currentResult == nil,
+                response.task == nil,
+                response.existingTaskObservedPhase == nil
+            else {
+                throw TargetedReclaimScanServiceError.invalidResponse
+            }
+            return TargetedReclaimScanAdmission(
+                context: context,
+                ordinal: selection.ordinal,
+                root: selection.root,
+                disposition: .unavailable(targetedRootFailure(reason))
+            )
+        case .current:
+            guard
+                response.rootCount > 0,
+                response.configuredRootsRevision > 0,
+                let selection,
+                let context,
+                let rawResult = response.currentResult,
+                response.rootUnavailableReason == nil,
+                response.task == nil,
+                response.existingTaskObservedPhase == nil
+            else {
+                throw TargetedReclaimScanServiceError.invalidResponse
+            }
+            let result: HomeScanTaskResult
+            do {
+                result = try FFIHomeScanTask.mapTargetedCurrentResult(
+                    rawResult,
+                    pressureEpisodeStartedAt: context.pressureEpisodeStartedAt
+                )
+            } catch {
+                throw TargetedReclaimScanServiceError.invalidResponse
+            }
+            return TargetedReclaimScanAdmission(
+                context: context,
+                ordinal: selection.ordinal,
+                root: selection.root,
+                disposition: .current(result)
+            )
+        case .existingTask:
+            guard
+                response.rootCount > 0,
+                response.configuredRootsRevision > 0,
+                let selection,
+                let context,
+                let task = response.task,
+                let observedPhase = response.existingTaskObservedPhase,
+                observedPhase == .queued || observedPhase == .running,
+                response.rootUnavailableReason == nil,
+                response.currentResult == nil
+            else {
+                throw TargetedReclaimScanServiceError.invalidResponse
+            }
+            return TargetedReclaimScanAdmission(
+                context: context,
+                ordinal: selection.ordinal,
+                root: selection.root,
+                disposition: .observing(
+                    FFIHomeScanTask(
+                        task: task,
+                        state: state,
+                        targetedPressureEpisodeStartedAt: context.pressureEpisodeStartedAt
+                    )
+                )
+            )
+        case .started:
+            guard
+                response.rootCount > 0,
+                response.configuredRootsRevision > 0,
+                let selection,
+                let context,
+                let task = response.task,
+                response.rootUnavailableReason == nil,
+                response.currentResult == nil,
+                response.existingTaskObservedPhase == nil
+            else {
+                throw TargetedReclaimScanServiceError.invalidResponse
+            }
+            return TargetedReclaimScanAdmission(
+                context: context,
+                ordinal: selection.ordinal,
+                root: selection.root,
+                disposition: .started(
+                    FFIHomeScanTask(
+                        task: task,
+                        state: state,
+                        targetedPressureEpisodeStartedAt: context.pressureEpisodeStartedAt
+                    )
+                )
+            )
+        }
+    }
+
+    private static func targetedReclaimSelection(
+        _ selection: TargetedProjectScanSelection,
+        expectedOrdinal: UInt16,
+        rootCount: UInt16
+    ) throws -> (ordinal: UInt16, root: ProjectDiscoveryRoot) {
+        guard rootCount > 0 else {
+            throw TargetedReclaimScanServiceError.invalidResponse
+        }
+        let divisor = UInt32(rootCount)
+        let expectedMaxNodes = min(
+            maximumTargetedProjectScanNodes,
+            max(1, maximumTargetedProjectScanPassNodes / divisor)
+        )
+        let root: ProjectDiscoveryRoot
+        do {
+            root = try projectDiscoveryRoot(selection.root)
+        } catch {
+            throw TargetedReclaimScanServiceError.invalidResponse
+        }
+        guard
+            selection.recordVersion == expectedRecordVersion,
+            selection.ordinal == expectedOrdinal,
+            selection.ordinal < rootCount,
+            selection.maxNodes == expectedMaxNodes,
+            UInt64(selection.maxNodes) * UInt64(rootCount)
+                <= UInt64(maximumTargetedProjectScanPassNodes)
+        else {
+            throw TargetedReclaimScanServiceError.invalidResponse
+        }
+        return (selection.ordinal, root)
+    }
+
+    private static func targetedReclaimContext(
+        _ pressure: TargetedProjectScanPressureContext,
+        expectedStableVolumeID: String,
+        expectedAnchorAtUnixMS: Int64,
+        rootsRevision: UInt64,
+        rootCount: UInt16
+    ) throws -> TargetedReclaimScanContext {
+        guard
+            pressure.recordVersion == expectedRecordVersion,
+            pressure.stableVolumeId == expectedStableVolumeID,
+            pressure.capacityAnchorUnixMs == expectedAnchorAtUnixMS,
+            pressure.pressureStartedAtUnixMs >= 0,
+            pressure.currentEpisodeStartedAtUnixMs >= pressure.pressureStartedAtUnixMs,
+            pressure.capacityAnchorUnixMs >= pressure.currentEpisodeStartedAtUnixMs,
+            rootCount <= UInt16(ProjectDiscoveryRoot.maximumCount)
+        else {
+            throw TargetedReclaimScanServiceError.invalidResponse
+        }
+        let mappedPressure: TargetedReclaimPressure = switch pressure.pressure {
+        case .warning: .warning
+        case .critical: .critical
+        }
+        return TargetedReclaimScanContext(
+            stableVolumeID: pressure.stableVolumeId,
+            capacityAnchorAt: Date(
+                timeIntervalSince1970: Double(pressure.capacityAnchorUnixMs) / 1_000
+            ),
+            pressure: mappedPressure,
+            pressureEpisodeStartedAt: Date(
+                timeIntervalSince1970:
+                Double(pressure.currentEpisodeStartedAtUnixMs) / 1_000
+            ),
+            lowPressureSequenceStartedAt: Date(
+                timeIntervalSince1970: Double(pressure.pressureStartedAtUnixMs) / 1_000
+            ),
+            policyRevision: pressure.policyRevision,
+            rootsRevision: rootsRevision,
+            rootCount: rootCount
+        )
+    }
+
+    private static func targetedRootFailure(
+        _ reason: TargetedProjectScanRootUnavailableReason
+    ) -> TargetedReclaimRootFailure {
+        switch reason {
+        case .invalidPath, .notDirectory, .symlink:
+            .invalidRoot
+        case .missing:
+            .rootMissing
+        case .accessDenied:
+            .accessDenied
+        case .changedDuringValidation, .identityUnavailable:
+            .rootChanged
+        case .volumeMismatch:
+            .differentVolume
+        case .volumeUnproven:
+            .volumeUnproven
+        case .unsupportedPlatform, .unavailable:
+            .storageUnavailable
+        }
+    }
+
+    private static func targetedReclaimScanCheckpoint(
+        _ response: TargetedProjectScanCheckpoint,
+        expected proof: TargetedProjectScanCheckpointProof
+    ) throws -> TargetedReclaimScanContext {
+        guard
+            response.recordVersion == expectedRecordVersion,
+            response.configuredRootsRevision == proof.context.rootsRevision,
+            response.rootCount == proof.context.rootCount,
+            response.rootCount > 0,
+            response.rootCount <= UInt16(ProjectDiscoveryRoot.maximumCount),
+            response.pressure == proof.pressure
+        else {
+            throw TargetedReclaimScanServiceError.invalidResponse
+        }
+        let context = try targetedReclaimContext(
+            response.pressure,
+            expectedStableVolumeID: proof.context.stableVolumeID,
+            expectedAnchorAtUnixMS: proof.pressure.capacityAnchorUnixMs,
+            rootsRevision: response.configuredRootsRevision,
+            rootCount: response.rootCount
+        )
+        guard context == proof.context else {
+            throw TargetedReclaimScanServiceError.invalidResponse
+        }
+        return context
+    }
+
+    private static func targetedReclaimScanError(
+        _ error: TargetedProjectScanError
+    ) -> TargetedReclaimScanServiceError {
+        switch error {
+        case .Closed: .closed
+        case .InvalidRecordVersion: .invalidRecordVersion
+        case .InvalidVolumeIdentity: .invalidVolumeIdentity
+        case .InvalidAnchor: .invalidAnchor
+        case .InvalidOrdinal: .invalidOrdinal
+        case .RegistryChanged: .configuredRootsChanged
+        case .PressureChanged: .pressureChanged
+        case .ReadOnlyStore: .readOnlyStore
+        case .IncompatibleSchema: .incompatibleSchema
+        case .Busy: .busy
+        case .UnsafeStorage: .unsafeStorage
+        case .BudgetExceeded: .budgetExceeded
+        case .CorruptData: .corruptData
+        case .Unavailable: .storageUnavailable
+        case .OutcomeUnknown: .outcomeUnknown
+        case .QueueFull: .queueFull
+        case .TaskIdExhausted, .InternalState: .internalState
+        }
+    }
+
+    private static func targetedReclaimScanError(
+        _ error: EngineServiceError
+    ) -> TargetedReclaimScanServiceError {
+        switch error {
+        case .closed: .closed
+        case .retryable: .busy
+        case .unavailable: .storageUnavailable
+        case .invalidCapacityObservation, .conflictingCapacityObservation,
+             .supersededCapacityObservation, .unexpected:
+            .internalState
+        }
+    }
+
     private static func directCargoEnrollmentPreview(
         _ info: DirectCargoEnrollmentPreviewInfo
     ) throws -> DirectCargoEnrollmentPreviewModel {
@@ -2339,7 +2789,14 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
     }
 }
 
+private struct TargetedProjectScanCheckpointProof {
+    let context: TargetedReclaimScanContext
+    let pressure: TargetedProjectScanPressureContext
+}
+
 private final class EngineServiceState: @unchecked Sendable {
+    private static let maximumTargetedProjectScanProofs = 8
+
     fileprivate let queue = DispatchQueue(label: "se.mjukis.dux.engine", qos: .utility)
     private let planReviewQueue = DispatchQueue(
         label: "se.mjukis.dux.plan-review",
@@ -2350,6 +2807,7 @@ private final class EngineServiceState: @unchecked Sendable {
     private let storageRoots: EngineStorageRoots?
     fileprivate let homeScanRoot: URL?
     private var closeResult: Bool?
+    private var targetedProjectScanProofs: [TargetedProjectScanCheckpointProof] = []
 
     init(engine: DuxEngine?, storageRoots: EngineStorageRoots?, homeScanRoot: URL?) {
         self.engine = engine
@@ -2380,6 +2838,45 @@ private final class EngineServiceState: @unchecked Sendable {
             throw error
         } catch {
             throw EngineServiceError.unexpected("engine initialization failed")
+        }
+    }
+
+    fileprivate func rememberTargetedProjectScanProof(
+        context: TargetedReclaimScanContext,
+        pressure: TargetedProjectScanPressureContext
+    ) throws {
+        dispatchPrecondition(condition: .onQueue(queue))
+        // AppModel serializes pressure runners. Replacing an unconsumed proof
+        // lets a later accepted capacity anchor recover after cancellation;
+        // the final checkpoint still replays only the latest exact raw proof.
+        targetedProjectScanProofs.removeAll { $0.context == context }
+        targetedProjectScanProofs.append(
+            TargetedProjectScanCheckpointProof(context: context, pressure: pressure)
+        )
+        if targetedProjectScanProofs.count > Self.maximumTargetedProjectScanProofs {
+            targetedProjectScanProofs.removeFirst(
+                targetedProjectScanProofs.count - Self.maximumTargetedProjectScanProofs
+            )
+        }
+    }
+
+    fileprivate func targetedProjectScanProof(
+        for context: TargetedReclaimScanContext
+    ) throws -> TargetedProjectScanCheckpointProof {
+        dispatchPrecondition(condition: .onQueue(queue))
+        let matches = targetedProjectScanProofs.filter { $0.context == context }
+        guard matches.count == 1, let proof = matches.first else {
+            throw TargetedReclaimScanServiceError.invalidResponse
+        }
+        return proof
+    }
+
+    fileprivate func consumeTargetedProjectScanProof(
+        _ proof: TargetedProjectScanCheckpointProof
+    ) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        targetedProjectScanProofs.removeAll {
+            $0.context == proof.context && $0.pressure == proof.pressure
         }
     }
 
@@ -2540,17 +3037,32 @@ private final class FFIHomeScanTask: HomeScanTask, @unchecked Sendable {
     )
     private let task: ScanTask
     private let state: EngineServiceState
+    private let targetedPressureEpisodeStartedAt: Date?
     private var lastPoll: HomeScanTaskPoll?
 
-    init(task: ScanTask, state: EngineServiceState) {
+    init(
+        task: ScanTask,
+        state: EngineServiceState,
+        targetedPressureEpisodeStartedAt: Date? = nil
+    ) {
         self.task = task
         self.state = state
+        self.targetedPressureEpisodeStartedAt = targetedPressureEpisodeStartedAt
     }
 
     func poll() async throws -> HomeScanTaskPoll {
         try await state.perform { _ in
             do {
                 let poll = try Self.map(self.task.poll(), after: self.lastPoll)
+                if let pressureEpisodeStartedAt = self.targetedPressureEpisodeStartedAt,
+                   let result = poll.result,
+                   !Self.validTargetedResult(
+                       result,
+                       pressureEpisodeStartedAt: pressureEpisodeStartedAt
+                   )
+                {
+                    throw HomeScanResponseViolation.resultRecord
+                }
                 self.lastPoll = poll
                 return poll
             } catch let violation as HomeScanResponseViolation {
@@ -2565,6 +3077,23 @@ private final class FFIHomeScanTask: HomeScanTask, @unchecked Sendable {
                 throw EngineService.homeScanServiceError(error)
             }
         }
+    }
+
+    fileprivate static func mapTargetedCurrentResult(
+        _ raw: ScanTaskResult,
+        pressureEpisodeStartedAt: Date
+    ) throws -> HomeScanTaskResult {
+        let result = try mapResult(raw)
+        guard
+            result.succeeded,
+            validTargetedResult(
+                result,
+                pressureEpisodeStartedAt: pressureEpisodeStartedAt
+            )
+        else {
+            throw HomeScanResponseViolation.resultRecord
+        }
+        return result
     }
 
     func requestCancellation() async throws -> HomeScanCancelOutcome {
@@ -2908,6 +3437,14 @@ private final class FFIHomeScanTask: HomeScanTask, @unchecked Sendable {
                     && (CharacterSet.alphanumerics.contains(scalar)
                         || "._-:".unicodeScalars.contains(scalar))
             }
+    }
+
+    private static func validTargetedResult(
+        _ result: HomeScanTaskResult,
+        pressureEpisodeStartedAt: Date
+    ) -> Bool {
+        result.scanID.hasPrefix("scan:targeted:")
+            && result.startedAt >= pressureEpisodeStartedAt
     }
 
     private static func validCoverage(_ coverage: ScanCoverageSummary) -> Bool {

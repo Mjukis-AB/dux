@@ -961,6 +961,28 @@ pub(super) fn load_pressure_episode_page_at_anchor(
     load_pressure_episode_page_at(connection, volume_id, Some(anchor_at_unix_ms), limit)
 }
 
+pub(super) fn load_volume_mount_path_at_anchor(
+    connection: &Connection,
+    volume_id: &VolumeId,
+    anchor_at: SystemTime,
+) -> Result<PathBuf, HistoryError> {
+    let anchor_at_unix_ms = system_time_to_unix_ms(anchor_at, HistoryErrorKind::InvalidInput)?;
+    run_bounded_query(connection, || {
+        let volume = load_volume_observation_with_caller_budget(connection, volume_id)?
+            .ok_or_else(corrupt)?;
+        if anchor_at_unix_ms != volume.last_seen_unix_ms {
+            return Err(invalid());
+        }
+        validate_observation_anchor_within_budget(
+            connection,
+            volume_id,
+            &volume,
+            anchor_at_unix_ms,
+        )?;
+        decode_host_path(&volume.mount_path).map_err(|_| corrupt())
+    })
+}
+
 fn load_pressure_episode_page_at(
     connection: &Connection,
     volume_id: &VolumeId,
@@ -975,38 +997,7 @@ fn load_pressure_episode_page_at(
         let volume = load_volume_observation_with_caller_budget(connection, volume_id)?
             .ok_or_else(corrupt)?;
         if let Some(anchor) = anchor_at_unix_ms {
-            if !volume.contains_sampled_ms(anchor) {
-                return Err(invalid());
-            }
-            // Every raw observation is a durable accepted anchor. Routine
-            // observations suppressed by the hourly cadence are represented
-            // only by the current volume row's exact last_seen timestamp.
-            // An arbitrary instant inside the volume lifetime is not evidence
-            // that the app accepted a capacity snapshot and must fail closed.
-            match load_exact_raw_capacity_sample_with_caller_budget(connection, volume_id, anchor)?
-            {
-                Some(sample) => {
-                    if sample.volume_id != *volume_id || !volume.contains_sample(&sample)? {
-                        return Err(corrupt());
-                    }
-                }
-                None if anchor != volume.last_seen_unix_ms => {
-                    return Err(invalid());
-                }
-                None => {
-                    // A suppressed current observation has no exact raw row,
-                    // but it must still extend an existing valid raw history.
-                    let Some(sample) = load_raw_sample_at_or_before_with_caller_budget(
-                        connection, volume_id, anchor,
-                    )?
-                    else {
-                        return Err(corrupt());
-                    };
-                    if sample.volume_id != *volume_id || !volume.contains_sample(&sample)? {
-                        return Err(corrupt());
-                    }
-                }
-            }
+            validate_observation_anchor_within_budget(connection, volume_id, &volume, anchor)?;
         }
         let mut statement = connection
             .prepare(
@@ -1095,6 +1086,39 @@ fn load_pressure_episode_page_at(
         episodes.truncate(limit);
         Ok(episodes)
     })
+}
+
+fn validate_observation_anchor_within_budget(
+    connection: &Connection,
+    volume_id: &VolumeId,
+    volume: &StoredVolumeObservation,
+    anchor: i64,
+) -> Result<(), HistoryError> {
+    if !volume.contains_sampled_ms(anchor) {
+        return Err(invalid());
+    }
+    // Every raw observation is a durable accepted anchor. Routine
+    // observations suppressed by the hourly cadence are represented only by
+    // the current volume row's exact last_seen timestamp.
+    match load_exact_raw_capacity_sample_with_caller_budget(connection, volume_id, anchor)? {
+        Some(sample) => {
+            if sample.volume_id != *volume_id || !volume.contains_sample(&sample)? {
+                return Err(corrupt());
+            }
+        }
+        None if anchor != volume.last_seen_unix_ms => return Err(invalid()),
+        None => {
+            let Some(sample) =
+                load_raw_sample_at_or_before_with_caller_budget(connection, volume_id, anchor)?
+            else {
+                return Err(corrupt());
+            };
+            if sample.volume_id != *volume_id || !volume.contains_sample(&sample)? {
+                return Err(corrupt());
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Reconcile a post-commit failure for outcomes that created or adopted an

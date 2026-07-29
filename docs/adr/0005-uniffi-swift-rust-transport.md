@@ -56,7 +56,7 @@ Those capabilities retain their own gates below and in ADR 0004.
 
 ## Current realization
 
-FFI contract v37 now carries the real shared engine session first introduced in
+FFI contract v38 now carries the real shared engine session first introduced in
 v4. The app supplies input-only private data/cache roots; storage paths never
 return across the boundary. Eight maintenance kinds use opaque task objects
 with nonblocking versioned path-free poll/cancel records, and exact Explorer
@@ -104,6 +104,24 @@ paths, duplicates, nested or overlapping roots, noncanonical order, oversized
 input, and contradictory Default/Stored state. The methods only load, replace,
 or reset durable discovery scope. They cannot start a scan, open a path,
 produce a candidate or plan, approve cleanup, invoke AI, or reach an executor.
+
+Contract v38 adds a separate path-free configured-root pressure-scan surface.
+One admission request contains only the canonical startup-volume identity,
+exact accepted capacity anchor, stored root ordinal, and optional expected
+registry revision. Rust alone rereads and selects the lossless stored root,
+proves the latest open Warning/Critical episode, enforces the per-root and
+aggregate node limits, checks startup-volume membership including the fixed
+macOS APFS System/Data pair, and returns either a typed root-local result,
+qualifying durable result, exact targeted task, or newly owned targeted task.
+User or ancestor scan handles are never projected as targeted ownership.
+Targeted durable IDs are excluded from generic Home latest/history selection.
+A second path-free call repeats only the exact pressure proof, registry
+revision, and count for end-of-pass validation. Swift independently checks the
+entire tagged shape, lossless root, exact echoed values, node arithmetic,
+timestamp order, targeted scan-ID/result invariants, and the final checkpoint.
+Neither call accepts a caller path, candidate, recommendation group, plan,
+approval, AI request, cleanup mode, callback, platform driver, or effect
+command.
 
 Contract v9 adds one path-free newest-available review acquisition. The core
 selects the deterministic newest succeeded, non-tombstoned snapshot and then

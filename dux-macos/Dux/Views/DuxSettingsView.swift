@@ -716,10 +716,10 @@ struct DuxSettingsView: View {
     private func projectDiscoveryRootSettings(model: AppModel) -> some View {
         Section("Project discovery roots") {
             Text(
-                "Save project folders for future focused, read-only recommendation scans. "
-                    + "The targeted runner is not active yet. These roots are discovery scope "
-                    + "only: adding one does not start a scan and never approves or performs "
-                    + "cleanup."
+                "Save project folders for bounded, read-only recommendation scans while the "
+                    + "startup disk is in Warning or Critical pressure. These roots are "
+                    + "discovery scope only: adding one does not start a scan and never "
+                    + "approves or performs cleanup."
             )
             .foregroundStyle(.secondary)
 
@@ -774,7 +774,7 @@ struct DuxSettingsView: View {
                                 )
                                 .accessibilityLabel("Remove project discovery root")
                                 .accessibilityHint(
-                                    "Stops future targeted discovery from scanning \(root.displayText)"
+                                    "Stops later low-space discovery from scanning \(root.displayText)"
                                 )
                             }
                         }
@@ -801,7 +801,7 @@ struct DuxSettingsView: View {
                     )
                     .accessibilityIdentifier(ProjectDiscoveryRootsAccessibility.add)
                     .accessibilityHint(
-                        "Selects one local folder for future read-only targeted scans"
+                        "Selects one local folder for bounded read-only low-space scans"
                     )
 
                     Button(

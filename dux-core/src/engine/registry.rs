@@ -73,6 +73,12 @@ use super::snapshot_review::{
     SnapshotReviewCategoryRoot, SnapshotReviewError, SnapshotReviewOwner, SnapshotReviewSession,
     category_path_bytes, map_repository_error as map_snapshot_review_error,
 };
+use super::targeted_project_scan::{
+    MAX_TARGETED_PRESSURE_CHAIN_EPISODES, TargetedProjectScanAdmission,
+    TargetedProjectScanCheckpoint, TargetedProjectScanCurrent, TargetedProjectScanDisposition,
+    TargetedProjectScanError, TargetedProjectScanPressureContext, TargetedProjectScanSelection,
+    derive_low_pressure_chain, targeted_scan_node_limit,
+};
 use super::task::{
     CancelOutcome, CandidateEvaluationRecoveryError,
     CandidateEvaluationRecoveryMaintenanceFailureKind,
@@ -86,18 +92,19 @@ use super::task::{
     HistoryMaintenanceStartOutcome, RecentScanHistory, ScanHistoryError,
     ScanRecoveryMaintenanceFailureKind, ScanRecoveryMaintenanceOutcome,
     ScanRecoveryMaintenanceResult, ScanRecoveryMaintenanceStartOutcome, ScanRootErrorKind,
-    ScanTaskCounts, ScanTaskResult, ScanTaskStatus, SnapshotOrphanMaintenanceFailureKind,
-    SnapshotOrphanMaintenanceOutcome, SnapshotOrphanMaintenanceResult,
-    SnapshotOrphanMaintenanceStartOutcome, SnapshotProvisioningStageMaintenanceFailureKind,
-    SnapshotProvisioningStageMaintenanceOutcome, SnapshotProvisioningStageMaintenanceResult,
-    SnapshotProvisioningStageMaintenanceStartOutcome, SnapshotRetentionFailureKind,
-    SnapshotRetentionOutcome, SnapshotRetentionResult, SnapshotRetentionStartOutcome,
-    SnapshotTerminalTempMaintenanceFailureKind, SnapshotTerminalTempMaintenanceOutcome,
-    SnapshotTerminalTempMaintenanceResult, SnapshotTerminalTempMaintenanceStartOutcome,
-    SnapshotUnleasedTempMaintenanceFailureKind, SnapshotUnleasedTempMaintenanceOutcome,
-    SnapshotUnleasedTempMaintenanceResult, SnapshotUnleasedTempMaintenanceStartOutcome,
-    StartSubtreeScanError, StartTaskError, TaskAccessError, TaskEvent, TaskEventBatch,
-    TaskEventKind, TaskFailureKind, TaskId, TaskKind, TaskPhase, TaskSnapshot,
+    ScanTaskCounts, ScanTaskOrigin, ScanTaskResult, ScanTaskStatus,
+    SnapshotOrphanMaintenanceFailureKind, SnapshotOrphanMaintenanceOutcome,
+    SnapshotOrphanMaintenanceResult, SnapshotOrphanMaintenanceStartOutcome,
+    SnapshotProvisioningStageMaintenanceFailureKind, SnapshotProvisioningStageMaintenanceOutcome,
+    SnapshotProvisioningStageMaintenanceResult, SnapshotProvisioningStageMaintenanceStartOutcome,
+    SnapshotRetentionFailureKind, SnapshotRetentionOutcome, SnapshotRetentionResult,
+    SnapshotRetentionStartOutcome, SnapshotTerminalTempMaintenanceFailureKind,
+    SnapshotTerminalTempMaintenanceOutcome, SnapshotTerminalTempMaintenanceResult,
+    SnapshotTerminalTempMaintenanceStartOutcome, SnapshotUnleasedTempMaintenanceFailureKind,
+    SnapshotUnleasedTempMaintenanceOutcome, SnapshotUnleasedTempMaintenanceResult,
+    SnapshotUnleasedTempMaintenanceStartOutcome, StartSubtreeScanError, StartTaskError,
+    TaskAccessError, TaskEvent, TaskEventBatch, TaskEventKind, TaskFailureKind, TaskId, TaskKind,
+    TaskPhase, TaskPriority, TaskSnapshot,
 };
 #[cfg(any(test, target_os = "macos"))]
 use crate::cleanup::capacity::CleanupCapacitySampler;
@@ -123,7 +130,9 @@ use crate::domain::{
     candidate_evaluation_context_digest_sha256, evaluate_completed_scan_candidates,
     replay_snapshot_candidate_evaluation, validate_bundled_candidate_catalog,
 };
-use crate::path_validation::{FilesystemIdentity, capture_scan_root, validate_scan_root};
+use crate::path_validation::{
+    CanonicalPathError, FilesystemIdentity, capture_scan_root, validate_scan_root,
+};
 #[cfg(any(test, target_os = "macos"))]
 use crate::persistence::CleanupTrigger;
 use crate::persistence::snapshot::from_scan::prepare_completed_scan;
@@ -140,7 +149,7 @@ use crate::persistence::{
     CandidateHistoryStatus, CandidateReviewAction, CleanupHistoryClearStoreError, CleanupSessionId,
     CompleteCandidateRecord, DryRunJournalFailure, HistoryErrorKind, HostPathObservationEncoding,
     MAX_RECENT_SCAN_HISTORY_LIMIT, NewCandidateRecord, NewScanRecord, ScanCompletionRecord,
-    ScanCounts, ScanStatus, SnapshotReviewPurpose, StoredCleanupErrorCategory,
+    ScanCounts, ScanRecord, ScanStatus, SnapshotReviewPurpose, StoredCleanupErrorCategory,
     StoredCleanupHistoryCursor, StoredCleanupHistoryObservation, StoredCleanupItemStatus,
     StoredCleanupItemSummary, StoredCleanupMode, StoredCleanupRecordFormat,
     StoredCleanupSessionStatus, StoredCleanupSessionSummary, StoredCleanupStatusCounts,
@@ -640,12 +649,20 @@ type Work = Box<dyn FnOnce(TaskContext) -> WorkOutcome + Send + 'static>;
 
 struct Job {
     id: TaskId,
+    priority: TaskPriority,
     work: Work,
+}
+
+enum TargetedScanSubmission {
+    Started(TaskId),
+    Existing { task_id: TaskId, phase: TaskPhase },
 }
 
 struct TaskRecord {
     id: TaskId,
     kind: TaskKind,
+    priority: TaskPriority,
+    scan_origin: Option<ScanTaskOrigin>,
     phase: TaskPhase,
     cancellation_requested: bool,
     cancellation_closed: bool,
@@ -661,9 +678,57 @@ struct TaskRecord {
 
 impl TaskRecord {
     fn new(id: TaskId, kind: TaskKind, scan_scope: Option<PathBuf>, event_limit: usize) -> Self {
+        let priority = match kind {
+            TaskKind::FormatSizeBatch => TaskPriority::UserInteractive,
+            TaskKind::Scan => TaskPriority::UserFull,
+            TaskKind::RustTargetDryRun | TaskKind::PermanentSafeCleanup => TaskPriority::Cleanup,
+            TaskKind::ScanRecoveryMaintenance
+            | TaskKind::CandidateEvaluationRecoveryMaintenance
+            | TaskKind::HistoryMaintenance
+            | TaskKind::SnapshotRetention
+            | TaskKind::SnapshotOrphanMaintenance
+            | TaskKind::SnapshotProvisioningStageMaintenance
+            | TaskKind::SnapshotTerminalTempMaintenance
+            | TaskKind::SnapshotUnleasedTempMaintenance => TaskPriority::Maintenance,
+        };
+        let scan_origin = (kind == TaskKind::Scan).then_some(ScanTaskOrigin::UserFull);
+        Self::new_with_priority(id, kind, priority, scan_origin, scan_scope, event_limit)
+    }
+
+    fn new_scan(
+        id: TaskId,
+        origin: ScanTaskOrigin,
+        scan_scope: PathBuf,
+        event_limit: usize,
+    ) -> Self {
+        let priority = match origin {
+            ScanTaskOrigin::UserFull => TaskPriority::UserFull,
+            ScanTaskOrigin::UserSubtree => TaskPriority::UserSubtree,
+            ScanTaskOrigin::TargetedRecommendation => TaskPriority::Targeted,
+        };
+        Self::new_with_priority(
+            id,
+            TaskKind::Scan,
+            priority,
+            Some(origin),
+            Some(scan_scope),
+            event_limit,
+        )
+    }
+
+    fn new_with_priority(
+        id: TaskId,
+        kind: TaskKind,
+        priority: TaskPriority,
+        scan_origin: Option<ScanTaskOrigin>,
+        scan_scope: Option<PathBuf>,
+        event_limit: usize,
+    ) -> Self {
         let mut record = Self {
             id,
             kind,
+            priority,
+            scan_origin,
             phase: TaskPhase::Queued,
             cancellation_requested: false,
             cancellation_closed: false,
@@ -684,6 +749,8 @@ impl TaskRecord {
         TaskSnapshot {
             id: self.id,
             kind: self.kind,
+            priority: self.priority,
+            scan_origin: self.scan_origin,
             phase: self.phase,
             cancellation_requested: self.cancellation_requested,
             revision: self.revision,
@@ -835,6 +902,54 @@ impl Registry {
                 self.records.remove(&expired);
             }
         }
+    }
+
+    fn enqueue(&mut self, job: Job) {
+        let position = self
+            .queue
+            .iter()
+            .position(|queued| queued.priority < job.priority);
+        if let Some(position) = position {
+            self.queue.insert(position, job);
+        } else {
+            self.queue.push_back(job);
+        }
+    }
+
+    fn cancel_queued_task(
+        &mut self,
+        id: TaskId,
+        event_limit: usize,
+        terminal_limit: usize,
+    ) -> bool {
+        let Some(position) = self.queue.iter().position(|job| job.id == id) else {
+            return false;
+        };
+        self.queue.remove(position);
+        let identity = self
+            .records
+            .get(&id)
+            .map(|record| (record.kind, record.scan_scope.clone()));
+        if let Some(record) = self.records.get_mut(&id) {
+            if record.phase != TaskPhase::Queued {
+                return false;
+            }
+            record.request_cancellation(event_limit);
+            record.phase = TaskPhase::Cancelled;
+            record.push_event(
+                TaskEventKind::Terminal {
+                    phase: TaskPhase::Cancelled,
+                },
+                event_limit,
+            );
+        } else {
+            return false;
+        }
+        if let Some((kind, scope)) = identity {
+            self.release_task_exclusivity(id, kind, scope.as_deref());
+        }
+        self.retain_terminal(id, terminal_limit);
+        true
     }
 
     fn release_task_exclusivity(&mut self, id: TaskId, kind: TaskKind, scan_scope: Option<&Path>) {
@@ -2274,7 +2389,11 @@ impl EngineHandle {
             );
             registry.active_cleanup_operation = Some(ActiveCleanupOperation::RustTargetDryRun(id));
             registry.records.insert(id, record);
-            registry.queue.push_back(Job { id, work });
+            registry.enqueue(Job {
+                id,
+                priority: TaskPriority::Cleanup,
+                work,
+            });
             self.inner.shared.workers_ready.notify_one();
             Ok(id)
         }
@@ -2399,7 +2518,11 @@ impl EngineHandle {
             );
             registry.active_cleanup_operation = Some(ActiveCleanupOperation::PermanentSafe(id));
             registry.records.insert(id, record);
-            registry.queue.push_back(Job { id, work });
+            registry.enqueue(Job {
+                id,
+                priority: TaskPriority::Cleanup,
+                work,
+            });
             self.inner.shared.workers_ready.notify_one();
             Ok(id)
         }
@@ -2563,48 +2686,7 @@ impl EngineHandle {
             .store
             .load_recent_scans(limit)
             .map_err(|error| map_scan_history_error(error.kind))?;
-        let scans = page
-            .records()
-            .iter()
-            .map(|record| {
-                let status = match record.status() {
-                    ScanStatus::Queued => DurableScanStatus::Queued,
-                    ScanStatus::Running => DurableScanStatus::Running,
-                    ScanStatus::Succeeded => DurableScanStatus::Succeeded,
-                    ScanStatus::Failed => DurableScanStatus::Failed,
-                    ScanStatus::Cancelled => DurableScanStatus::Cancelled,
-                    ScanStatus::Interrupted => DurableScanStatus::Interrupted,
-                };
-                let counts = (record.status() == ScanStatus::Succeeded).then(|| {
-                    let counts = record.counts();
-                    DurableScanCounts {
-                        directory_count: counts.directory_count,
-                        file_count: counts.file_count,
-                        logical_bytes: counts.logical_bytes,
-                        allocated_bytes: counts.allocated_bytes,
-                    }
-                });
-                let coverage = record.coverage();
-                DurableScanSummary {
-                    scan_id: record.id().clone(),
-                    started_at: record.started_at(),
-                    completed_at: record.completed_at(),
-                    status,
-                    counts,
-                    coverage: DurableScanCoverage {
-                        status: coverage.status(),
-                        measured_permille: coverage.measured_permille(),
-                        issue_record_count: coverage.issues().len(),
-                        issue_occurrence_count: coverage
-                            .issues()
-                            .iter()
-                            .map(|issue| u64::from(issue.occurrence_count()))
-                            .sum(),
-                    },
-                    snapshot_recorded: record.snapshot().is_some(),
-                }
-            })
-            .collect();
+        let scans = page.records().iter().map(public_scan_summary).collect();
         Ok(RecentScanHistory {
             scans,
             has_more: page.has_more(),
@@ -4093,6 +4175,357 @@ impl EngineHandle {
         self.start_scan_with_hooks(root, |_| {}, || {}, || {})
     }
 
+    /// Admit at most one observation-only scan for a configured project root
+    /// during the exact contiguous low-pressure interval proven at
+    /// `capacity_anchor`. The caller selects only a stored ordinal; no caller
+    /// path, cleanup plan, or effect authority crosses this boundary.
+    pub fn start_targeted_project_scan(
+        &self,
+        volume_id: &crate::domain::VolumeId,
+        capacity_anchor: SystemTime,
+        selected_root_ordinal: u16,
+        expected_configured_roots_revision: Option<u64>,
+    ) -> Result<TargetedProjectScanAdmission, TargetedProjectScanError> {
+        self.start_targeted_project_scan_with_hooks(
+            volume_id,
+            capacity_anchor,
+            selected_root_ordinal,
+            expected_configured_roots_revision,
+            |_| {},
+            || {},
+            || {},
+        )
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    fn start_targeted_project_scan_with_test_hooks(
+        &self,
+        volume_id: &crate::domain::VolumeId,
+        capacity_anchor: SystemTime,
+        selected_root_ordinal: u16,
+        expected_configured_roots_revision: Option<u64>,
+        before_traversal: impl FnOnce(&ScanId) + Send + 'static,
+        before_candidate_evaluation: impl FnOnce() + Send + 'static,
+        before_candidate_persistence: impl FnOnce() + Send + 'static,
+    ) -> Result<TargetedProjectScanAdmission, TargetedProjectScanError> {
+        self.start_targeted_project_scan_with_hooks(
+            volume_id,
+            capacity_anchor,
+            selected_root_ordinal,
+            expected_configured_roots_revision,
+            before_traversal,
+            before_candidate_evaluation,
+            before_candidate_persistence,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn start_targeted_project_scan_with_hooks(
+        &self,
+        volume_id: &crate::domain::VolumeId,
+        capacity_anchor: SystemTime,
+        selected_root_ordinal: u16,
+        expected_configured_roots_revision: Option<u64>,
+        before_traversal: impl FnOnce(&ScanId) + Send + 'static,
+        before_candidate_evaluation: impl FnOnce() + Send + 'static,
+        before_candidate_persistence: impl FnOnce() + Send + 'static,
+    ) -> Result<TargetedProjectScanAdmission, TargetedProjectScanError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(TargetedProjectScanError::Closed);
+        }
+        let status = self
+            .inner
+            .store
+            .status()
+            .map_err(|_| TargetedProjectScanError::Unavailable)?;
+        if !matches!(
+            status.access,
+            crate::persistence::DatabaseAccess::ReadWriteCurrent
+        ) {
+            return Err(TargetedProjectScanError::ReadOnlyStore);
+        }
+
+        let configured = self
+            .inner
+            .store
+            .load_configured_project_roots()
+            .map_err(|error| map_targeted_project_scan_history_error(error.kind))?;
+        if let Some(expected) = expected_configured_roots_revision
+            && expected != configured.revision
+        {
+            return Err(TargetedProjectScanError::RegistryChanged {
+                expected_revision: expected,
+                actual_revision: configured.revision,
+            });
+        }
+        let root_count = u16::try_from(configured.roots.len())
+            .map_err(|_| TargetedProjectScanError::CorruptData)?;
+
+        let episodes = self
+            .inner
+            .store
+            .load_pressure_episode_page_at_anchor(
+                volume_id,
+                capacity_anchor,
+                MAX_TARGETED_PRESSURE_CHAIN_EPISODES + 1,
+            )
+            .map_err(|error| map_targeted_project_scan_history_error(error.kind))?;
+        // Targeted admission is only meaningful for the latest accepted
+        // startup-volume observation. Historical anchors remain valid for
+        // charts, but cannot trigger new background filesystem work.
+        let volume_mount_path = self
+            .inner
+            .store
+            .load_volume_mount_path_at_anchor(volume_id, capacity_anchor)
+            .map_err(|error| map_targeted_project_scan_history_error(error.kind))?;
+        let chain = derive_low_pressure_chain(&episodes, capacity_anchor)
+            .map_err(map_targeted_project_scan_history_error)?;
+        let pressure = chain.map(|chain| TargetedProjectScanPressureContext {
+            volume_id: volume_id.clone(),
+            capacity_anchor,
+            pressure: chain.pressure,
+            current_episode_started_at: chain.current_episode_started_at,
+            pressure_started_at: chain.started_at,
+            policy_revision: chain.policy_revision,
+        });
+
+        if configured.roots.is_empty() {
+            return Ok(TargetedProjectScanAdmission {
+                configured_roots_revision: configured.revision,
+                root_count,
+                selection: None,
+                pressure,
+                disposition: TargetedProjectScanDisposition::EmptyRegistry,
+            });
+        }
+        let Some(selected_root) = configured
+            .roots
+            .get(usize::from(selected_root_ordinal))
+            .cloned()
+        else {
+            return Err(TargetedProjectScanError::InvalidOrdinal {
+                ordinal: selected_root_ordinal,
+                root_count,
+            });
+        };
+        let selection = TargetedProjectScanSelection {
+            ordinal: selected_root_ordinal,
+            root: selected_root.clone(),
+            max_nodes: u32::try_from(targeted_scan_node_limit(root_count))
+                .map_err(|_| TargetedProjectScanError::InternalState)?,
+        };
+        let targeted_max_nodes = usize::try_from(selection.max_nodes)
+            .map_err(|_| TargetedProjectScanError::InternalState)?;
+        let Some(pressure) = pressure else {
+            return Ok(TargetedProjectScanAdmission {
+                configured_roots_revision: configured.revision,
+                root_count,
+                selection: Some(selection),
+                pressure: None,
+                disposition: TargetedProjectScanDisposition::NoPressure,
+            });
+        };
+        let (canonical_root, expected_identity) = match prepare_targeted_scan_root(&selected_root) {
+            Ok(root) => root,
+            Err(reason) => {
+                self.ensure_configured_roots_unchanged(&configured)?;
+                return Ok(TargetedProjectScanAdmission {
+                    configured_roots_revision: configured.revision,
+                    root_count,
+                    selection: Some(selection),
+                    pressure: Some(pressure),
+                    disposition: TargetedProjectScanDisposition::RootUnavailable { reason },
+                });
+            }
+        };
+        if let Err(reason) = prove_root_on_affected_volume(&canonical_root, &volume_mount_path) {
+            self.ensure_configured_roots_unchanged(&configured)?;
+            return Ok(TargetedProjectScanAdmission {
+                configured_roots_revision: configured.revision,
+                root_count,
+                selection: Some(selection),
+                pressure: Some(pressure),
+                disposition: TargetedProjectScanDisposition::RootUnavailable { reason },
+            });
+        }
+
+        // Close the settings/read-to-filesystem gap before using the selected
+        // root. A concurrent registry edit never silently retargets admission.
+        self.ensure_configured_roots_unchanged(&configured)?;
+
+        if let Some(record) = self
+            .inner
+            .store
+            .load_latest_scan_for_exact_root_since(
+                &canonical_root,
+                pressure.current_episode_started_at,
+            )
+            .map_err(|error| map_targeted_project_scan_history_error(error.kind))?
+        {
+            let scan = public_scan_summary(&record);
+            let candidate_evaluation = self
+                .inner
+                .store
+                .load_candidate_evaluation_for_scan(record.id())
+                .map_err(|error| map_targeted_project_scan_history_error(error.kind))
+                .and_then(|observation| {
+                    public_candidate_history(record.id(), observation)
+                        .map_err(map_targeted_candidate_history_error)
+                })?;
+            if !matches!(
+                candidate_evaluation.status(),
+                DurableCandidateEvaluationStatus::Succeeded { .. }
+                    | DurableCandidateEvaluationStatus::Failed { .. }
+            ) {
+                return Err(TargetedProjectScanError::CorruptData);
+            }
+            return Ok(TargetedProjectScanAdmission {
+                configured_roots_revision: configured.revision,
+                root_count,
+                selection: Some(selection),
+                pressure: Some(pressure),
+                disposition: TargetedProjectScanDisposition::Current(Box::new(
+                    TargetedProjectScanCurrent {
+                        scan,
+                        candidate_evaluation,
+                    },
+                )),
+            });
+        }
+
+        self.ensure_configured_roots_unchanged(&configured)?;
+        let store = Arc::clone(&self.inner.store);
+        let snapshots = Arc::clone(&self.inner.snapshots);
+        let work_root = canonical_root.clone();
+        let work = Box::new(move |context| {
+            run_scan_task(
+                context,
+                AdmittedScanRoot {
+                    path: work_root,
+                    expected_identity: Some(expected_identity),
+                    origin: ScanTaskOrigin::TargetedRecommendation,
+                    max_nodes: targeted_max_nodes,
+                },
+                store,
+                snapshots,
+                before_traversal,
+                before_candidate_evaluation,
+                before_candidate_persistence,
+            )
+        });
+        let disposition = match self.submit_targeted_scan(canonical_root, work)? {
+            TargetedScanSubmission::Started(task_id) => {
+                TargetedProjectScanDisposition::Started { task_id }
+            }
+            TargetedScanSubmission::Existing { task_id, phase } => {
+                TargetedProjectScanDisposition::ExistingTask { task_id, phase }
+            }
+        };
+        Ok(TargetedProjectScanAdmission {
+            configured_roots_revision: configured.revision,
+            root_count,
+            selection: Some(selection),
+            pressure: Some(pressure),
+            disposition,
+        })
+    }
+
+    /// Revalidate the path-free registry and pressure facts after a bounded
+    /// selected-root pass. This starts no task and grants no cleanup authority.
+    pub fn validate_targeted_project_scan_context(
+        &self,
+        expected_pressure: &TargetedProjectScanPressureContext,
+        expected_configured_roots_revision: u64,
+        expected_root_count: u16,
+    ) -> Result<TargetedProjectScanCheckpoint, TargetedProjectScanError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(TargetedProjectScanError::Closed);
+        }
+        let status = self
+            .inner
+            .store
+            .status()
+            .map_err(|_| TargetedProjectScanError::Unavailable)?;
+        if !matches!(
+            status.access,
+            crate::persistence::DatabaseAccess::ReadWriteCurrent
+        ) {
+            return Err(TargetedProjectScanError::ReadOnlyStore);
+        }
+        let configured = self
+            .inner
+            .store
+            .load_configured_project_roots()
+            .map_err(|error| map_targeted_project_scan_history_error(error.kind))?;
+        let root_count = u16::try_from(configured.roots.len())
+            .map_err(|_| TargetedProjectScanError::CorruptData)?;
+        if configured.revision != expected_configured_roots_revision {
+            return Err(TargetedProjectScanError::RegistryChanged {
+                expected_revision: expected_configured_roots_revision,
+                actual_revision: configured.revision,
+            });
+        }
+        if root_count != expected_root_count {
+            return Err(TargetedProjectScanError::CorruptData);
+        }
+        let episodes = self
+            .inner
+            .store
+            .load_pressure_episode_page_at_anchor(
+                &expected_pressure.volume_id,
+                expected_pressure.capacity_anchor,
+                MAX_TARGETED_PRESSURE_CHAIN_EPISODES + 1,
+            )
+            .map_err(|error| map_targeted_project_scan_history_error(error.kind))?;
+        let _ = self
+            .inner
+            .store
+            .load_volume_mount_path_at_anchor(
+                &expected_pressure.volume_id,
+                expected_pressure.capacity_anchor,
+            )
+            .map_err(|error| map_targeted_project_scan_history_error(error.kind))?;
+        let chain = derive_low_pressure_chain(&episodes, expected_pressure.capacity_anchor)
+            .map_err(map_targeted_project_scan_history_error)?
+            .ok_or(TargetedProjectScanError::PressureChanged)?;
+        let current = TargetedProjectScanPressureContext {
+            volume_id: expected_pressure.volume_id.clone(),
+            capacity_anchor: expected_pressure.capacity_anchor,
+            pressure: chain.pressure,
+            current_episode_started_at: chain.current_episode_started_at,
+            pressure_started_at: chain.started_at,
+            policy_revision: chain.policy_revision,
+        };
+        if &current != expected_pressure {
+            return Err(TargetedProjectScanError::PressureChanged);
+        }
+        Ok(TargetedProjectScanCheckpoint {
+            configured_roots_revision: configured.revision,
+            root_count,
+            pressure: current,
+        })
+    }
+
+    fn ensure_configured_roots_unchanged(
+        &self,
+        expected: &ConfiguredProjectRootSetting,
+    ) -> Result<(), TargetedProjectScanError> {
+        let current = self
+            .inner
+            .store
+            .load_configured_project_roots()
+            .map_err(|error| map_targeted_project_scan_history_error(error.kind))?;
+        if current == *expected {
+            Ok(())
+        } else {
+            Err(TargetedProjectScanError::RegistryChanged {
+                expected_revision: expected.revision,
+                actual_revision: current.revision,
+            })
+        }
+    }
+
     /// Start one standalone immutable scan rooted at a directory selected from
     /// this engine's exact Explorer review. The resolved path remains sealed
     /// inside Rust and is fenced by its current filesystem identity.
@@ -4160,15 +4593,17 @@ impl EngineHandle {
         let snapshots = Arc::clone(&self.inner.snapshots);
         let root = target.path;
         let expected_identity = target.identity;
-        self.submit(
-            TaskKind::Scan,
-            Some(root.clone()),
+        self.submit_scan(
+            ScanTaskOrigin::UserSubtree,
+            root.clone(),
             Box::new(move |context| {
                 run_scan_task(
                     context,
                     AdmittedScanRoot {
                         path: root,
                         expected_identity: Some(expected_identity),
+                        origin: ScanTaskOrigin::UserSubtree,
+                        max_nodes: MAX_HOME_SCAN_NODES,
                     },
                     store,
                     snapshots,
@@ -4211,15 +4646,17 @@ impl EngineHandle {
         }
         let store = Arc::clone(&self.inner.store);
         let snapshots = Arc::clone(&self.inner.snapshots);
-        self.submit(
-            TaskKind::Scan,
-            Some(canonical_root.clone()),
+        self.submit_scan(
+            ScanTaskOrigin::UserFull,
+            canonical_root.clone(),
             Box::new(move |context| {
                 run_scan_task(
                     context,
                     AdmittedScanRoot {
                         path: canonical_root,
                         expected_identity: None,
+                        origin: ScanTaskOrigin::UserFull,
+                        max_nodes: MAX_HOME_SCAN_NODES,
                     },
                     store,
                     snapshots,
@@ -4808,6 +5245,8 @@ impl EngineHandle {
         scan_scope: Option<PathBuf>,
         work: Work,
     ) -> Result<TaskId, StartTaskError> {
+        debug_assert!(kind != TaskKind::Scan);
+        debug_assert!(scan_scope.is_none());
         let mut registry = self
             .inner
             .shared
@@ -4820,20 +5259,6 @@ impl EngineHandle {
         if registry.queue.len() >= self.inner.shared.limits.queued_tasks {
             return Err(StartTaskError::QueueFull);
         }
-        if let Some(scope) = &scan_scope
-            && let Some((active, existing)) = registry
-                .active_scan_roots
-                .iter()
-                .find(|(active, _)| super::config::paths_overlap(active, scope))
-        {
-            return if active.as_path() == scope.as_path() {
-                Err(StartTaskError::ScanAlreadyActive {
-                    existing: *existing,
-                })
-            } else {
-                Err(StartTaskError::ScanScopeBusy)
-            };
-        }
         let id = TASK_IDS.allocate()?;
         let record = TaskRecord::new(
             id,
@@ -4841,13 +5266,143 @@ impl EngineHandle {
             scan_scope.clone(),
             self.inner.shared.limits.events_per_task,
         );
+        let priority = record.priority;
         if let Some(scope) = scan_scope {
             registry.active_scan_roots.insert(scope, id);
         }
         registry.records.insert(id, record);
-        registry.queue.push_back(Job { id, work });
+        registry.enqueue(Job { id, priority, work });
         self.inner.shared.workers_ready.notify_one();
         Ok(id)
+    }
+
+    fn submit_scan(
+        &self,
+        origin: ScanTaskOrigin,
+        scan_scope: PathBuf,
+        work: Work,
+    ) -> Result<TaskId, StartTaskError> {
+        debug_assert!(matches!(
+            origin,
+            ScanTaskOrigin::UserFull | ScanTaskOrigin::UserSubtree
+        ));
+        let mut registry = self
+            .inner
+            .shared
+            .registry
+            .lock()
+            .map_err(|_| StartTaskError::InternalState)?;
+        if registry.lifecycle != EngineLifecycle::Open {
+            return Err(StartTaskError::Closed);
+        }
+        let overlapping = registry
+            .active_scan_roots
+            .iter()
+            .filter(|(active, _)| super::config::paths_overlap(active, &scan_scope))
+            .map(|(active, id)| (active.clone(), *id))
+            .collect::<Vec<_>>();
+        let mut preempt = Vec::new();
+        for (active, id) in &overlapping {
+            let Some(record) = registry.records.get(id) else {
+                return Err(StartTaskError::InternalState);
+            };
+            if record.phase == TaskPhase::Queued
+                && record.scan_origin == Some(ScanTaskOrigin::TargetedRecommendation)
+                && registry.queue.iter().any(|job| job.id == *id)
+            {
+                preempt.push(*id);
+                continue;
+            }
+            return if active == &scan_scope {
+                Err(StartTaskError::ScanAlreadyActive { existing: *id })
+            } else {
+                Err(StartTaskError::ScanScopeBusy)
+            };
+        }
+        for id in preempt {
+            if !registry.cancel_queued_task(
+                id,
+                self.inner.shared.limits.events_per_task,
+                self.inner.shared.limits.retained_terminal_tasks,
+            ) {
+                return Err(StartTaskError::InternalState);
+            }
+        }
+        if registry.queue.len() >= self.inner.shared.limits.queued_tasks {
+            return Err(StartTaskError::QueueFull);
+        }
+        let id = TASK_IDS.allocate()?;
+        let record = TaskRecord::new_scan(
+            id,
+            origin,
+            scan_scope.clone(),
+            self.inner.shared.limits.events_per_task,
+        );
+        let priority = record.priority;
+        registry.active_scan_roots.insert(scan_scope, id);
+        registry.records.insert(id, record);
+        registry.enqueue(Job { id, priority, work });
+        self.inner.shared.workers_ready.notify_one();
+        Ok(id)
+    }
+
+    fn submit_targeted_scan(
+        &self,
+        scan_scope: PathBuf,
+        work: Work,
+    ) -> Result<TargetedScanSubmission, TargetedProjectScanError> {
+        let mut registry = self
+            .inner
+            .shared
+            .registry
+            .lock()
+            .map_err(|_| TargetedProjectScanError::InternalState)?;
+        if registry.lifecycle != EngineLifecycle::Open {
+            return Err(TargetedProjectScanError::Closed);
+        }
+        let existing = registry
+            .active_scan_roots
+            .iter()
+            .filter(|(active, _)| super::config::paths_overlap(active, &scan_scope))
+            .map(|(active, id)| (active.clone(), *id))
+            .min_by_key(|(_, id)| *id);
+        if let Some((active_scope, task_id)) = existing {
+            let record = registry
+                .records
+                .get(&task_id)
+                .ok_or(TargetedProjectScanError::InternalState)?;
+            if active_scope != scan_scope
+                || record.scan_origin != Some(ScanTaskOrigin::TargetedRecommendation)
+            {
+                return Err(TargetedProjectScanError::Busy);
+            }
+            return Ok(TargetedScanSubmission::Existing {
+                task_id,
+                phase: record.phase,
+            });
+        }
+        if registry.queue.len() >= self.inner.shared.limits.queued_tasks {
+            return Err(TargetedProjectScanError::QueueFull);
+        }
+        let id = TASK_IDS.allocate().map_err(|error| match error {
+            StartTaskError::TaskIdExhausted => TargetedProjectScanError::TaskIdExhausted,
+            _ => TargetedProjectScanError::InternalState,
+        })?;
+        let record = TaskRecord::new_scan(
+            id,
+            ScanTaskOrigin::TargetedRecommendation,
+            scan_scope.clone(),
+            self.inner.shared.limits.events_per_task,
+        );
+        registry.active_scan_roots.insert(scan_scope, id);
+        registry.records.insert(id, record);
+        registry.enqueue(Job {
+            id,
+            priority: TaskPriority::Targeted,
+            work,
+        });
+        self.inner.shared.workers_ready.notify_one();
+        Ok(TargetedScanSubmission::Started(id))
     }
 
     fn submit_scan_recovery_maintenance(
@@ -4881,7 +5436,11 @@ impl EngineHandle {
         );
         registry.active_scan_recovery_maintenance = Some(id);
         registry.records.insert(id, record);
-        registry.queue.push_back(Job { id, work });
+        registry.enqueue(Job {
+            id,
+            priority: TaskPriority::Maintenance,
+            work,
+        });
         self.inner.shared.workers_ready.notify_one();
         Ok(ScanRecoveryMaintenanceStartOutcome::Started(id))
     }
@@ -4917,7 +5476,11 @@ impl EngineHandle {
         );
         registry.active_candidate_evaluation_recovery_maintenance = Some(id);
         registry.records.insert(id, record);
-        registry.queue.push_back(Job { id, work });
+        registry.enqueue(Job {
+            id,
+            priority: TaskPriority::Maintenance,
+            work,
+        });
         self.inner.shared.workers_ready.notify_one();
         Ok(CandidateEvaluationRecoveryMaintenanceStartOutcome::Started(
             id,
@@ -4955,7 +5518,11 @@ impl EngineHandle {
         );
         registry.active_history_maintenance = Some(id);
         registry.records.insert(id, record);
-        registry.queue.push_back(Job { id, work });
+        registry.enqueue(Job {
+            id,
+            priority: TaskPriority::Maintenance,
+            work,
+        });
         self.inner.shared.workers_ready.notify_one();
         Ok(HistoryMaintenanceStartOutcome::Started(id))
     }
@@ -4991,7 +5558,11 @@ impl EngineHandle {
         );
         registry.active_snapshot_retention = Some(id);
         registry.records.insert(id, record);
-        registry.queue.push_back(Job { id, work });
+        registry.enqueue(Job {
+            id,
+            priority: TaskPriority::Maintenance,
+            work,
+        });
         self.inner.shared.workers_ready.notify_one();
         Ok(SnapshotRetentionStartOutcome::Started(id))
     }
@@ -5029,7 +5600,11 @@ impl EngineHandle {
         );
         registry.active_snapshot_orphan_maintenance = Some(id);
         registry.records.insert(id, record);
-        registry.queue.push_back(Job { id, work });
+        registry.enqueue(Job {
+            id,
+            priority: TaskPriority::Maintenance,
+            work,
+        });
         self.inner.shared.workers_ready.notify_one();
         Ok(SnapshotOrphanMaintenanceStartOutcome::Started(id))
     }
@@ -5065,7 +5640,11 @@ impl EngineHandle {
         );
         registry.active_snapshot_provisioning_stage_maintenance = Some(id);
         registry.records.insert(id, record);
-        registry.queue.push_back(Job { id, work });
+        registry.enqueue(Job {
+            id,
+            priority: TaskPriority::Maintenance,
+            work,
+        });
         self.inner.shared.workers_ready.notify_one();
         Ok(SnapshotProvisioningStageMaintenanceStartOutcome::Started(
             id,
@@ -5105,7 +5684,11 @@ impl EngineHandle {
         );
         registry.active_snapshot_terminal_temp_maintenance = Some(id);
         registry.records.insert(id, record);
-        registry.queue.push_back(Job { id, work });
+        registry.enqueue(Job {
+            id,
+            priority: TaskPriority::Maintenance,
+            work,
+        });
         self.inner.shared.workers_ready.notify_one();
         Ok(SnapshotTerminalTempMaintenanceStartOutcome::Started(id))
     }
@@ -5143,7 +5726,11 @@ impl EngineHandle {
         );
         registry.active_snapshot_unleased_temp_maintenance = Some(id);
         registry.records.insert(id, record);
-        registry.queue.push_back(Job { id, work });
+        registry.enqueue(Job {
+            id,
+            priority: TaskPriority::Maintenance,
+            work,
+        });
         self.inner.shared.workers_ready.notify_one();
         Ok(SnapshotUnleasedTempMaintenanceStartOutcome::Started(id))
     }
@@ -5207,11 +5794,121 @@ fn prepare_scan_root(root: &Path) -> Result<PathBuf, StartTaskError> {
     Ok(canonical)
 }
 
-fn generate_scan_id() -> Result<ScanId, TaskFailureKind> {
+fn prepare_targeted_scan_root(
+    root: &Path,
+) -> Result<(PathBuf, FilesystemIdentity), ScanRootErrorKind> {
+    let normalized_root = normalize_macos_system_path_alias(root);
+    let metadata =
+        std::fs::symlink_metadata(&normalized_root).map_err(|error| match error.kind() {
+            std::io::ErrorKind::NotFound => ScanRootErrorKind::Missing,
+            std::io::ErrorKind::PermissionDenied => ScanRootErrorKind::AccessDenied,
+            _ => ScanRootErrorKind::Unavailable,
+        })?;
+    if metadata.file_type().is_symlink() {
+        return Err(ScanRootErrorKind::Symlink);
+    }
+    if !metadata.is_dir() {
+        return Err(ScanRootErrorKind::NotDirectory);
+    }
+    let lexical =
+        validate_scan_root(&normalized_root).map_err(|_| ScanRootErrorKind::InvalidPath)?;
+    let canonical = capture_scan_root(lexical).map_err(map_targeted_root_capture_error)?;
+    Ok((
+        canonical.canonical_path().to_path_buf(),
+        canonical.identity(),
+    ))
+}
+
+fn normalize_macos_system_path_alias(root: &Path) -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        for (alias, canonical) in [
+            (Path::new("/var"), Path::new("/private/var")),
+            (Path::new("/tmp"), Path::new("/private/tmp")),
+            (Path::new("/etc"), Path::new("/private/etc")),
+        ] {
+            if let Ok(relative) = root.strip_prefix(alias) {
+                return canonical.join(relative);
+            }
+        }
+    }
+    root.to_path_buf()
+}
+
+fn map_targeted_root_capture_error(error: CanonicalPathError) -> ScanRootErrorKind {
+    match error {
+        CanonicalPathError::UnsupportedPlatform => ScanRootErrorKind::UnsupportedPlatform,
+        CanonicalPathError::Missing { .. } => ScanRootErrorKind::Missing,
+        CanonicalPathError::AccessDenied { .. } => ScanRootErrorKind::AccessDenied,
+        CanonicalPathError::Io { kind, .. } => match kind {
+            std::io::ErrorKind::NotFound => ScanRootErrorKind::Missing,
+            std::io::ErrorKind::PermissionDenied => ScanRootErrorKind::AccessDenied,
+            _ => ScanRootErrorKind::Unavailable,
+        },
+        CanonicalPathError::ScanRootNotDirectory
+        | CanonicalPathError::NonDirectoryAncestor { .. } => ScanRootErrorKind::NotDirectory,
+        CanonicalPathError::SymlinkOrReparsePoint { .. }
+        | CanonicalPathError::CanonicalPathMismatch { .. }
+        | CanonicalPathError::CanonicalEscapesScanRoot => ScanRootErrorKind::Symlink,
+        CanonicalPathError::IdentityUnavailable { .. } => ScanRootErrorKind::IdentityUnavailable,
+        CanonicalPathError::ChangedDuringValidation { .. } => {
+            ScanRootErrorKind::ChangedDuringValidation
+        }
+        CanonicalPathError::CrossVolume { .. } => ScanRootErrorKind::VolumeMismatch,
+        CanonicalPathError::CanonicalizationFailed { source, .. } => match source.kind() {
+            std::io::ErrorKind::NotFound => ScanRootErrorKind::Missing,
+            std::io::ErrorKind::PermissionDenied => ScanRootErrorKind::AccessDenied,
+            _ => ScanRootErrorKind::Unavailable,
+        },
+        CanonicalPathError::UnsupportedTargetKind
+        | CanonicalPathError::MismatchedScanRoot
+        | CanonicalPathError::BoundaryTooDeep { .. } => ScanRootErrorKind::Unavailable,
+    }
+}
+
+fn prove_root_on_affected_volume(
+    root: &Path,
+    volume_mount_path: &Path,
+) -> Result<(), ScanRootErrorKind> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        let canonical_mount = std::fs::canonicalize(volume_mount_path)
+            .map_err(|_| ScanRootErrorKind::VolumeUnproven)?;
+        let root_metadata =
+            std::fs::metadata(root).map_err(|_| ScanRootErrorKind::VolumeUnproven)?;
+        let mount_metadata =
+            std::fs::metadata(&canonical_mount).map_err(|_| ScanRootErrorKind::VolumeUnproven)?;
+        if root_metadata.dev() == mount_metadata.dev() {
+            return Ok(());
+        }
+        #[cfg(target_os = "macos")]
+        if canonical_mount == Path::new("/") {
+            let data_metadata = std::fs::metadata("/System/Volumes/Data")
+                .map_err(|_| ScanRootErrorKind::VolumeUnproven)?;
+            if root_metadata.dev() == data_metadata.dev() {
+                return Ok(());
+            }
+        }
+        Err(ScanRootErrorKind::VolumeMismatch)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (root, volume_mount_path);
+        Err(ScanRootErrorKind::VolumeUnproven)
+    }
+}
+
+fn generate_scan_id(origin: ScanTaskOrigin) -> Result<ScanId, TaskFailureKind> {
     let mut random = [0_u8; 16];
     getrandom::fill(&mut random).map_err(|_| TaskFailureKind::InternalFailure)?;
-    let mut value = String::with_capacity("scan:".len() + random.len() * 2);
-    value.push_str("scan:");
+    let prefix = match origin {
+        ScanTaskOrigin::TargetedRecommendation => "scan:targeted:",
+        ScanTaskOrigin::UserFull | ScanTaskOrigin::UserSubtree => "scan:",
+    };
+    let mut value = String::with_capacity(prefix.len() + random.len() * 2);
+    value.push_str(prefix);
     const HEX: &[u8; 16] = b"0123456789abcdef";
     for byte in random {
         value.push(char::from(HEX[usize::from(byte >> 4)]));
@@ -5722,10 +6419,11 @@ fn map_snapshot_review_plan_review_error(error: SnapshotReviewError) -> RustTarg
 fn start_durable_scan(
     store: &StoreCoordinator,
     root: &Path,
+    origin: ScanTaskOrigin,
 ) -> Result<NewScanRecord, TaskFailureKind> {
     const COLLISION_RETRIES: usize = 4;
     for _ in 0..COLLISION_RETRIES {
-        let id = generate_scan_id()?;
+        let id = generate_scan_id(origin)?;
         let start = NewScanRecord::try_new(id, root.to_path_buf(), SystemTime::now())
             .map_err(|_| TaskFailureKind::PersistenceUnavailable)?;
         match store.record_scan_started_reconciled(&start) {
@@ -6576,6 +7274,74 @@ const fn public_durable_scan_status(status: ScanStatus) -> DurableScanStatus {
         ScanStatus::Failed => DurableScanStatus::Failed,
         ScanStatus::Cancelled => DurableScanStatus::Cancelled,
         ScanStatus::Interrupted => DurableScanStatus::Interrupted,
+    }
+}
+
+fn public_scan_summary(record: &ScanRecord) -> DurableScanSummary {
+    let counts = (record.status() == ScanStatus::Succeeded).then(|| {
+        let counts = record.counts();
+        DurableScanCounts {
+            directory_count: counts.directory_count,
+            file_count: counts.file_count,
+            logical_bytes: counts.logical_bytes,
+            allocated_bytes: counts.allocated_bytes,
+        }
+    });
+    let coverage = record.coverage();
+    DurableScanSummary {
+        scan_id: record.id().clone(),
+        started_at: record.started_at(),
+        completed_at: record.completed_at(),
+        status: public_durable_scan_status(record.status()),
+        counts,
+        coverage: DurableScanCoverage {
+            status: coverage.status(),
+            measured_permille: coverage.measured_permille(),
+            issue_record_count: coverage.issues().len(),
+            issue_occurrence_count: coverage
+                .issues()
+                .iter()
+                .map(|issue| u64::from(issue.occurrence_count()))
+                .sum(),
+        },
+        snapshot_recorded: record.snapshot().is_some(),
+    }
+}
+
+const fn map_targeted_project_scan_history_error(
+    kind: HistoryErrorKind,
+) -> TargetedProjectScanError {
+    match kind {
+        HistoryErrorKind::InvalidInput => TargetedProjectScanError::InvalidAnchor,
+        HistoryErrorKind::IncompatibleSchema => TargetedProjectScanError::IncompatibleSchema,
+        HistoryErrorKind::QueryLimitExceeded => TargetedProjectScanError::BudgetExceeded,
+        HistoryErrorKind::Busy => TargetedProjectScanError::Busy,
+        HistoryErrorKind::UnsafeStorage => TargetedProjectScanError::UnsafeStorage,
+        HistoryErrorKind::CorruptData | HistoryErrorKind::NotFound => {
+            TargetedProjectScanError::CorruptData
+        }
+        HistoryErrorKind::DatabaseUnavailable => TargetedProjectScanError::Unavailable,
+        HistoryErrorKind::OutcomeUnknown => TargetedProjectScanError::OutcomeUnknown,
+        HistoryErrorKind::AlreadyExists
+        | HistoryErrorKind::InvalidTransition
+        | HistoryErrorKind::InternalState => TargetedProjectScanError::InternalState,
+    }
+}
+
+const fn map_targeted_candidate_history_error(
+    error: CandidateHistoryError,
+) -> TargetedProjectScanError {
+    match error {
+        CandidateHistoryError::Closed => TargetedProjectScanError::Closed,
+        CandidateHistoryError::ScanNotFound | CandidateHistoryError::CorruptData => {
+            TargetedProjectScanError::CorruptData
+        }
+        CandidateHistoryError::IncompatibleSchema => TargetedProjectScanError::IncompatibleSchema,
+        CandidateHistoryError::Busy => TargetedProjectScanError::Busy,
+        CandidateHistoryError::UnsafeStorage => TargetedProjectScanError::UnsafeStorage,
+        CandidateHistoryError::QueryLimitExceeded => TargetedProjectScanError::BudgetExceeded,
+        CandidateHistoryError::Unavailable => TargetedProjectScanError::Unavailable,
+        CandidateHistoryError::InternalState => TargetedProjectScanError::InternalState,
     }
 }
 
@@ -7677,6 +8443,8 @@ const fn public_candidate_evaluation_failure(
 struct AdmittedScanRoot {
     path: PathBuf,
     expected_identity: Option<FilesystemIdentity>,
+    origin: ScanTaskOrigin,
+    max_nodes: usize,
 }
 
 // Home scans feed a retained DiskTree and path index. Keep the interactive
@@ -7696,13 +8464,15 @@ fn run_scan_task(
     let AdmittedScanRoot {
         path: admitted_root,
         expected_identity: expected_root_identity,
+        origin,
+        max_nodes,
     } = admitted;
     if prepare_scan_root(&admitted_root).ok().as_deref() != Some(admitted_root.as_path())
         || !current_root_matches(&admitted_root, expected_root_identity)
     {
         return WorkOutcome::Failed(TaskFailureKind::ScanRootChanged, None);
     }
-    let start = match start_durable_scan(&store, &admitted_root) {
+    let start = match start_durable_scan(&store, &admitted_root, origin) {
         Ok(start) => start,
         Err(failure) => return WorkOutcome::Failed(failure, None),
     };
@@ -7718,7 +8488,7 @@ fn run_scan_task(
     let scanner = Scanner::new(ScanConfig {
         follow_symlinks: false,
         max_depth: None,
-        max_nodes: Some(MAX_HOME_SCAN_NODES),
+        max_nodes: Some(max_nodes),
         same_filesystem: true,
         // A single traversal worker avoids an additional unbounded jwalk
         // prefetch queue while the main thread retains each node/path.

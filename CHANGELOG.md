@@ -1,5 +1,27 @@
 # Changelog
 
+- Added the configured-project-root portion of the Warning/Critical focused
+  reclaim scanner through UniFFI contract v38. At each exact latest durable
+  capacity anchor, Rust rereads the revisioned root registry and current open
+  pressure episode, admits one stored ordinal at a time, and scans roots
+  sequentially with a 50,000-node per-root and 200,000-node aggregate bound.
+  The request carries no path, candidate, plan, approval, AI input, cleanup
+  mode, or executor field. Roots are no-follow identity fenced, must be on the
+  pressured startup volume, and handle macOS's sealed System/Data APFS pair
+  without allowing unrelated mounted devices. Warning and Critical use their
+  own current episode identities; successful exact-root evidence is reused
+  durably only when its snapshot and terminal candidate evaluation remain
+  valid. Targeted tasks have lower priority than interactive scans, only exact
+  targeted work may be observed, and owned cancellation is polled to a terminal
+  state before foreground scope is considered released. Targeted snapshots no
+  longer replace generic Home history. Swift independently validates every
+  record, echoed volume/anchor/revision/ordinal, lossless root, node budget,
+  disposition shape, task result, and final path-free checkpoint. Explorer and
+  the menu bar show bounded read-only progress, honest scan time/allocated and
+  logical size/coverage/issues/candidate counts, partial failures, retry and
+  cancellation states; **Review findings** opens the exact immutable targeted
+  snapshot. No focused result can approve or perform cleanup. Known user-cache
+  roots and emergency recovery ordering remain later Milestone 6 slices.
 - Added the durable configured-project-root registry needed by the future
   targeted low-disk scan. Core now stores at most 16 lossless absolute,
   normalized, non-root host paths in canonical byte order, rejects duplicates,

@@ -4940,6 +4940,353 @@ fn configured_project_roots_are_shared_discovery_only_settings_with_typed_errors
     assert!(second.wait_until_closed(TEST_TIMEOUT));
 }
 
+#[cfg(unix)]
+fn targeted_capacity_anchor(
+    engine: &EngineHandle,
+    temp: &TempDir,
+    volume_id: &VolumeId,
+    sampled_at: SystemTime,
+    available_bytes: u64,
+) {
+    let mount = std::fs::canonicalize(temp.path()).unwrap();
+    let observation = crate::engine::VolumeCapacityObservation::try_new(
+        Some(volume_id.clone()),
+        mount,
+        Some("Targeted fixture".to_owned()),
+        Some("fixturefs".to_owned()),
+        Some(true),
+        Some(false),
+        sampled_at,
+        VolumeCapacity::new(1_000, Some(available_bytes), None).unwrap(),
+    )
+    .unwrap();
+    engine.observe_volume_capacity(observation).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn targeted_project_scan_validates_current_anchor_registry_and_root_locally() {
+    let temp = TempDir::new().unwrap();
+    let engine = EngineHandle::open(config(&temp)).unwrap();
+    let volume_id = VolumeId::new("volume:targeted-validation").unwrap();
+    let anchor = SystemTime::now();
+    targeted_capacity_anchor(&engine, &temp, &volume_id, anchor, 1);
+
+    let empty = engine
+        .start_targeted_project_scan(&volume_id, anchor, 0, Some(0))
+        .unwrap();
+    assert_eq!(empty.root_count, 0);
+    assert_eq!(
+        empty.disposition,
+        TargetedProjectScanDisposition::EmptyRegistry
+    );
+
+    let missing = temp.path().join("missing-project");
+    let stored = engine
+        .set_configured_project_roots(vec![missing.clone()])
+        .unwrap()
+        .settings;
+    assert_eq!(
+        engine.start_targeted_project_scan(&volume_id, anchor, 0, Some(0)),
+        Err(TargetedProjectScanError::RegistryChanged {
+            expected_revision: 0,
+            actual_revision: stored.revision,
+        })
+    );
+    assert_eq!(
+        engine.start_targeted_project_scan(&volume_id, anchor, 1, Some(stored.revision)),
+        Err(TargetedProjectScanError::InvalidOrdinal {
+            ordinal: 1,
+            root_count: 1,
+        })
+    );
+    let unavailable = engine
+        .start_targeted_project_scan(&volume_id, anchor, 0, Some(stored.revision))
+        .unwrap();
+    assert_eq!(
+        unavailable.selection.unwrap().root,
+        missing,
+        "root-local failures retain the lossless configured selection"
+    );
+    assert_eq!(
+        unavailable.disposition,
+        TargetedProjectScanDisposition::RootUnavailable {
+            reason: ScanRootErrorKind::Missing,
+        }
+    );
+    assert_eq!(
+        engine.start_targeted_project_scan(
+            &volume_id,
+            anchor - Duration::from_millis(1),
+            0,
+            Some(stored.revision),
+        ),
+        Err(TargetedProjectScanError::InvalidAnchor)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn targeted_project_scan_rejects_symlinked_roots_and_other_volumes() {
+    use std::os::unix::fs::MetadataExt;
+
+    let temp = TempDir::new().unwrap();
+    let engine = EngineHandle::open(config(&temp)).unwrap();
+    let canonical_temp = std::fs::canonicalize(temp.path()).unwrap();
+    let real = canonical_temp.join("real-project");
+    let link = canonical_temp.join("linked-project");
+    std::fs::create_dir(&real).unwrap();
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let revision = engine
+        .set_configured_project_roots(vec![link])
+        .unwrap()
+        .settings
+        .revision;
+    let volume_id = VolumeId::new("volume:targeted-symlink").unwrap();
+    let anchor = SystemTime::now();
+    targeted_capacity_anchor(&engine, &temp, &volume_id, anchor, 1);
+    assert_eq!(
+        engine
+            .start_targeted_project_scan(&volume_id, anchor, 0, Some(revision))
+            .unwrap()
+            .disposition,
+        TargetedProjectScanDisposition::RootUnavailable {
+            reason: ScanRootErrorKind::Symlink,
+        }
+    );
+
+    let root_device = std::fs::metadata(&canonical_temp).unwrap().dev();
+    let other_device = std::fs::metadata("/dev").unwrap().dev();
+    assert_ne!(
+        root_device, other_device,
+        "fixture requires /dev to be a distinct mounted filesystem"
+    );
+    assert_eq!(
+        prove_root_on_affected_volume(&canonical_temp, Path::new("/dev")),
+        Err(ScanRootErrorKind::VolumeMismatch)
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn targeted_project_scan_accepts_startup_data_volume_and_rejects_external_device() {
+    let temp = TempDir::new().unwrap();
+    let engine = EngineHandle::open(config(&temp)).unwrap();
+    let root = temp.path().join("data-volume-project");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("payload"), b"fixture").unwrap();
+    let revision = engine
+        .set_configured_project_roots(vec![root.clone()])
+        .unwrap()
+        .settings
+        .revision;
+    let volume_id = VolumeId::new("volume:startup-system-data-pair").unwrap();
+    let anchor = SystemTime::now();
+    let observation = crate::engine::VolumeCapacityObservation::try_new(
+        Some(volume_id.clone()),
+        PathBuf::from("/"),
+        Some("Macintosh HD".to_owned()),
+        Some("apfs".to_owned()),
+        Some(true),
+        Some(false),
+        anchor,
+        VolumeCapacity::new(1_000, Some(1), None).unwrap(),
+    )
+    .unwrap();
+    engine.observe_volume_capacity(observation).unwrap();
+
+    let admission = engine
+        .start_targeted_project_scan(&volume_id, anchor, 0, Some(revision))
+        .unwrap();
+    let TargetedProjectScanDisposition::Started { task_id } = admission.disposition else {
+        panic!("a normal writable startup-Data root must be admitted");
+    };
+    assert_eq!(wait_terminal(&engine, task_id).phase, TaskPhase::Succeeded);
+    assert_eq!(
+        prove_root_on_affected_volume(Path::new("/dev"), Path::new("/")),
+        Err(ScanRootErrorKind::VolumeMismatch),
+        "a different mounted device must not inherit startup-volume pressure"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn targeted_project_scan_starts_joins_and_reuses_only_terminal_targeted_evidence() {
+    let temp = TempDir::new().unwrap();
+    let engine = EngineHandle::open(config(&temp)).unwrap();
+    let root = std::fs::canonicalize(temp.path()).unwrap().join("project");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("file"), b"payload").unwrap();
+    let revision = engine
+        .set_configured_project_roots(vec![root.clone()])
+        .unwrap()
+        .settings
+        .revision;
+    let volume_id = VolumeId::new("volume:targeted-lifecycle").unwrap();
+    let anchor = SystemTime::now();
+    targeted_capacity_anchor(&engine, &temp, &volume_id, anchor, 1);
+
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let started = engine
+        .start_targeted_project_scan_with_test_hooks(
+            &volume_id,
+            anchor,
+            0,
+            Some(revision),
+            move |_| {
+                entered_tx.send(()).unwrap();
+                release_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+            },
+            || {},
+            || {},
+        )
+        .unwrap();
+    let pressure_context = started.pressure.clone().unwrap();
+    let TargetedProjectScanDisposition::Started { task_id } = started.disposition else {
+        panic!("expected a new targeted task");
+    };
+    entered_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    let task = engine.task_snapshot(task_id).unwrap();
+    assert_eq!(task.priority, TaskPriority::Targeted);
+    assert_eq!(
+        task.scan_origin,
+        Some(ScanTaskOrigin::TargetedRecommendation)
+    );
+    let joined = engine
+        .start_targeted_project_scan(&volume_id, anchor, 0, Some(revision))
+        .unwrap();
+    assert!(matches!(
+        joined.disposition,
+        TargetedProjectScanDisposition::ExistingTask {
+            task_id: existing,
+            phase: TaskPhase::Running,
+        } if existing == task_id
+    ));
+    release_tx.send(()).unwrap();
+    assert_eq!(wait_terminal(&engine, task_id).phase, TaskPhase::Succeeded);
+
+    let current = engine
+        .start_targeted_project_scan(&volume_id, anchor, 0, Some(revision))
+        .unwrap();
+    let TargetedProjectScanDisposition::Current(current) = current.disposition else {
+        panic!("expected durable current evidence");
+    };
+    assert!(current.scan.snapshot_recorded);
+    assert_eq!(current.scan.status, DurableScanStatus::Succeeded);
+    assert_eq!(
+        current.candidate_evaluation.scan_id(),
+        &current.scan.scan_id
+    );
+    assert!(matches!(
+        current.candidate_evaluation.status(),
+        DurableCandidateEvaluationStatus::Succeeded { .. }
+            | DurableCandidateEvaluationStatus::Failed { .. }
+    ));
+    let checkpoint = engine
+        .validate_targeted_project_scan_context(&pressure_context, revision, 1)
+        .unwrap();
+    assert_eq!(checkpoint.pressure, pressure_context);
+    assert_eq!(checkpoint.root_count, 1);
+    let changed = engine.reset_configured_project_roots().unwrap();
+    assert!(changed.changed);
+    assert_eq!(
+        engine.validate_targeted_project_scan_context(&checkpoint.pressure, revision, 1),
+        Err(TargetedProjectScanError::RegistryChanged {
+            expected_revision: revision,
+            actual_revision: 0,
+        })
+    );
+}
+
+#[test]
+fn registry_queue_is_priority_ordered_and_fifo_within_each_class() {
+    let mut registry = Registry::new();
+    let priorities = [
+        TaskPriority::Maintenance,
+        TaskPriority::Targeted,
+        TaskPriority::UserFull,
+        TaskPriority::UserSubtree,
+        TaskPriority::UserInteractive,
+        TaskPriority::Cleanup,
+        TaskPriority::Targeted,
+    ];
+    let mut admitted = Vec::new();
+    for priority in priorities {
+        let id = TASK_IDS.allocate().unwrap();
+        admitted.push((id, priority));
+        registry.enqueue(Job {
+            id,
+            priority,
+            work: Box::new(|_| WorkOutcome::Succeeded(TaskResult::TestOnly)),
+        });
+    }
+    let observed = registry
+        .queue
+        .iter()
+        .map(|job| (job.id, job.priority))
+        .collect::<Vec<_>>();
+    let mut expected = admitted;
+    expected.sort_by_key(|entry| std::cmp::Reverse(entry.1));
+    assert_eq!(observed, expected);
+}
+
+#[cfg(unix)]
+#[test]
+fn user_scan_preempts_an_overlapping_queued_targeted_scan() {
+    let temp = TempDir::new().unwrap();
+    let engine =
+        EngineHandle::open_with_limits(config(&temp), RegistryLimits::testing(1, 8, 16, 16))
+            .unwrap();
+    let root = std::fs::canonicalize(temp.path()).unwrap().join("project");
+    std::fs::create_dir(&root).unwrap();
+    let revision = engine
+        .set_configured_project_roots(vec![root.clone()])
+        .unwrap()
+        .settings
+        .revision;
+    let volume_id = VolumeId::new("volume:targeted-preemption").unwrap();
+    let anchor = SystemTime::now();
+    targeted_capacity_anchor(&engine, &temp, &volume_id, anchor, 1);
+
+    let (blocker_started_tx, blocker_started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let blocker = engine
+        .submit_test(Box::new(move |_| {
+            blocker_started_tx.send(()).unwrap();
+            release_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+            WorkOutcome::Succeeded(TaskResult::TestOnly)
+        }))
+        .unwrap();
+    blocker_started_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    let targeted = engine
+        .start_targeted_project_scan(&volume_id, anchor, 0, Some(revision))
+        .unwrap();
+    let TargetedProjectScanDisposition::Started {
+        task_id: targeted_id,
+    } = targeted.disposition
+    else {
+        panic!("targeted scan should queue behind blocker");
+    };
+    assert_eq!(
+        engine.task_snapshot(targeted_id).unwrap().phase,
+        TaskPhase::Queued
+    );
+
+    let user = engine.start_scan(root).unwrap();
+    assert_eq!(
+        engine.task_snapshot(targeted_id).unwrap().phase,
+        TaskPhase::Cancelled
+    );
+    assert_eq!(
+        engine.task_snapshot(user).unwrap().scan_origin,
+        Some(ScanTaskOrigin::UserFull)
+    );
+    release_tx.send(()).unwrap();
+    assert_eq!(wait_terminal(&engine, blocker).phase, TaskPhase::Succeeded);
+    assert_eq!(wait_terminal(&engine, user).phase, TaskPhase::Succeeded);
+}
+
 #[test]
 fn ambiguous_terminal_persistence_disarms_changed_fact_fallback() {
     let (_temp, engine) = engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));

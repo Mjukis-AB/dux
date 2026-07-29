@@ -26,6 +26,17 @@ struct MenuBarContentView: View {
                 scanSummary(scan, actions: presentation.actions)
             }
 
+            if model.volumeState.snapshot.map({
+                $0.pressure == .warning || $0.pressure == .critical
+            }) == true || model.targetedReclaimScanState.isActive
+            {
+                targetedReclaimSummary(
+                    TargetedReclaimScanPresentation.make(
+                        model.targetedReclaimScanState
+                    )
+                )
+            }
+
             Divider()
 
             Button {
@@ -285,6 +296,46 @@ struct MenuBarContentView: View {
         .controlSize(.small)
         .accessibilityIdentifier(MenuBarPopoverAccessibility.capacityRetry)
         .accessibilityHint("Checks startup-disk capacity again without starting a scan")
+    }
+
+    private func targetedReclaimSummary(
+        _ focused: TargetedReclaimScanPresentation
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: focused.symbol)
+                    .foregroundStyle(focused.tone == .failure ? Color.red : Color.accentColor)
+                    .accessibilityHidden(true)
+                Text(focused.title)
+                    .font(.subheadline.weight(.semibold))
+                    .lineLimit(1)
+                Spacer(minLength: 6)
+                if focused.canCancel {
+                    Button("Stop") {
+                        Task { await model.cancelTargetedReclaimScan() }
+                    }
+                    .controlSize(.small)
+                }
+            }
+            Text(focused.detail)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+            if let progress = focused.progressValue,
+               let label = focused.progressLabel
+            {
+                ProgressView(value: progress)
+                    .accessibilityLabel("Focused recovery scan")
+                    .accessibilityValue(label)
+                    .accessibilityIdentifier(
+                        MenuBarPopoverAccessibility.targetedReclaimProgress
+                    )
+            }
+        }
+        .padding(10)
+        .background(.quaternary, in: RoundedRectangle(cornerRadius: 9))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier(MenuBarPopoverAccessibility.targetedReclaim)
     }
 
     private func scanSummary(

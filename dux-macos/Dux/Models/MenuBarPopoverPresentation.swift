@@ -17,6 +17,8 @@ enum MenuBarPopoverAccessibility {
     static let scanStatus = "menu-popover-scan-status"
     static let scanProgress = "menu-popover-scan-progress"
     static let scanCancel = "menu-popover-scan-cancel"
+    static let targetedReclaim = "menu-popover-targeted-reclaim"
+    static let targetedReclaimProgress = "menu-popover-targeted-reclaim-progress"
     static let scanNow = "menu-popover-scan-now"
     static let openExplorer = "menu-popover-open-explorer"
     static let settings = "menu-popover-settings"
@@ -39,6 +41,8 @@ enum MenuBarPopoverAccessibility {
         scanStatus,
         scanProgress,
         scanCancel,
+        targetedReclaim,
+        targetedReclaimProgress,
         scanNow,
         openExplorer,
         settings,

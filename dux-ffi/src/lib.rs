@@ -81,8 +81,9 @@ use dux_core::engine::{
     ScanCoverageDetailsError as CoreScanCoverageDetailsError,
     ScanHistoryError as CoreScanHistoryError,
     ScanRecoveryMaintenanceOutcome as CoreScanRecoveryOutcome, ScanRecoveryMaintenanceStartOutcome,
-    ScanRootErrorKind, ScanTaskResult as CoreScanTaskResult, ScanTaskStatus as CoreScanTaskStatus,
-    SnapshotOrphanMaintenanceOutcome as CoreOrphanOutcome, SnapshotOrphanMaintenanceStartOutcome,
+    ScanRootErrorKind, ScanTaskOrigin as CoreScanTaskOrigin, ScanTaskResult as CoreScanTaskResult,
+    ScanTaskStatus as CoreScanTaskStatus, SnapshotOrphanMaintenanceOutcome as CoreOrphanOutcome,
+    SnapshotOrphanMaintenanceStartOutcome,
     SnapshotProvisioningStageMaintenanceOutcome as CoreStageOutcome,
     SnapshotProvisioningStageMaintenanceStartOutcome,
     SnapshotRetentionOutcome as CoreRetentionOutcome, SnapshotRetentionStartOutcome,
@@ -102,8 +103,15 @@ use dux_core::engine::{
     SnapshotTerminalTempMaintenanceStartOutcome,
     SnapshotUnleasedTempMaintenanceOutcome as CoreUnleasedTempOutcome,
     SnapshotUnleasedTempMaintenanceStartOutcome, StartSubtreeScanError, StartTaskError,
-    TaskAccessError, TaskEventBatch as CoreTaskEventBatch, TaskEventKind as CoreTaskEventKind,
-    TaskFailureKind, TaskId, TaskKind as CoreTaskKind, TaskPhase as CoreTaskPhase,
+    TargetedProjectScanAdmission as CoreTargetedProjectScanAdmission,
+    TargetedProjectScanCheckpoint as CoreTargetedProjectScanCheckpoint,
+    TargetedProjectScanCurrent as CoreTargetedProjectScanCurrent,
+    TargetedProjectScanDisposition as CoreTargetedProjectScanDisposition,
+    TargetedProjectScanError as CoreTargetedProjectScanError,
+    TargetedProjectScanPressure as CoreTargetedProjectScanPressure,
+    TargetedProjectScanPressureContext as CoreTargetedProjectScanPressureContext, TaskAccessError,
+    TaskEventBatch as CoreTaskEventBatch, TaskEventKind as CoreTaskEventKind, TaskFailureKind,
+    TaskId, TaskKind as CoreTaskKind, TaskPhase as CoreTaskPhase, TaskPriority as CoreTaskPriority,
     VolumeCapacityObservation as CoreVolumeObservation,
     VolumeCapacityStatusError as CoreVolumeStatusError,
 };
@@ -120,7 +128,7 @@ use dux_core::{
     VolumeCapacity, VolumeId,
 };
 
-const FFI_CONTRACT_VERSION: u32 = 37;
+const FFI_CONTRACT_VERSION: u32 = 38;
 const FFI_RECORD_VERSION: u32 = 1;
 const RUST_TARGET_MINIMUM_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const SNAPSHOT_NODE_RECORD_VERSION: u32 = 2;
@@ -541,6 +549,148 @@ pub enum ConfiguredProjectRootsError {
     #[error("the settings write outcome could not be proven")]
     OutcomeUnknown,
     #[error("engine settings state is unavailable")]
+    InternalState,
+}
+
+/// Versioned path-free request for one configured-root pressure scan.
+///
+/// The opaque stable volume identity selects the accepted macOS capacity
+/// observation. The root remains sealed in Rust and is addressed only by its
+/// stored ordinal.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct TargetedProjectScanRequest {
+    pub record_version: u32,
+    pub stable_volume_id: String,
+    pub capacity_anchor_unix_ms: i64,
+    pub selected_root_ordinal: u16,
+    pub expected_configured_roots_revision: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum TargetedProjectScanPressure {
+    Warning,
+    Critical,
+}
+
+/// Exact durable pressure proof used for every admission in one bounded pass.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct TargetedProjectScanPressureContext {
+    pub record_version: u32,
+    pub stable_volume_id: String,
+    pub capacity_anchor_unix_ms: i64,
+    pub pressure: TargetedProjectScanPressure,
+    pub current_episode_started_at_unix_ms: i64,
+    pub pressure_started_at_unix_ms: i64,
+    pub policy_revision: u64,
+}
+
+/// Lossless stored discovery root plus the per-root node budget enforced by
+/// Rust. The returned bytes are display/observation data, not cleanup input.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct TargetedProjectScanSelection {
+    pub record_version: u32,
+    pub ordinal: u16,
+    pub root: ConfiguredProjectRootPath,
+    pub max_nodes: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum TargetedProjectScanRootUnavailableReason {
+    InvalidPath,
+    Missing,
+    AccessDenied,
+    NotDirectory,
+    Symlink,
+    ChangedDuringValidation,
+    IdentityUnavailable,
+    VolumeMismatch,
+    VolumeUnproven,
+    UnsupportedPlatform,
+    Unavailable,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum TargetedProjectScanDisposition {
+    EmptyRegistry,
+    NoPressure,
+    RootUnavailable,
+    ExistingTask,
+    Current,
+    Started,
+}
+
+/// Strict tagged admission. Optional payloads are populated only for the
+/// corresponding disposition; Swift must independently reject contradictory
+/// shapes before presenting or retaining a task.
+#[derive(Clone, uniffi::Record)]
+pub struct TargetedProjectScanAdmission {
+    pub record_version: u32,
+    pub configured_roots_revision: u64,
+    pub root_count: u16,
+    pub selection: Option<TargetedProjectScanSelection>,
+    pub pressure: Option<TargetedProjectScanPressureContext>,
+    pub disposition: TargetedProjectScanDisposition,
+    pub root_unavailable_reason: Option<TargetedProjectScanRootUnavailableReason>,
+    pub current_result: Option<ScanTaskResult>,
+    pub task: Option<Arc<ScanTask>>,
+    pub existing_task_observed_phase: Option<TaskPhase>,
+}
+
+/// Path-free end-of-pass request. It repeats only the exact pressure and
+/// registry facts returned by admission; it cannot select a filesystem root.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct TargetedProjectScanCheckpointRequest {
+    pub record_version: u32,
+    pub expected_pressure: TargetedProjectScanPressureContext,
+    pub expected_configured_roots_revision: u64,
+    pub expected_root_count: u16,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct TargetedProjectScanCheckpoint {
+    pub record_version: u32,
+    pub configured_roots_revision: u64,
+    pub root_count: u16,
+    pub pressure: TargetedProjectScanPressureContext,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error, uniffi::Error)]
+pub enum TargetedProjectScanError {
+    #[error("engine session is closed")]
+    Closed,
+    #[error("targeted-project-scan record version is unsupported")]
+    InvalidRecordVersion,
+    #[error("the stable macOS volume identity is invalid")]
+    InvalidVolumeIdentity,
+    #[error("the capacity anchor is invalid or is not the latest accepted observation")]
+    InvalidAnchor,
+    #[error("configured project root ordinal is outside the current registry")]
+    InvalidOrdinal,
+    #[error("configured project roots changed during the targeted scan pass")]
+    RegistryChanged,
+    #[error("disk pressure changed during the targeted scan pass")]
+    PressureChanged,
+    #[error("the durable engine store is read-only")]
+    ReadOnlyStore,
+    #[error("the durable schema is incompatible")]
+    IncompatibleSchema,
+    #[error("operation is temporarily busy")]
+    Busy,
+    #[error("storage failed its safety checks")]
+    UnsafeStorage,
+    #[error("bounded operation exceeded its resource budget")]
+    BudgetExceeded,
+    #[error("durable targeted-scan state is corrupt")]
+    CorruptData,
+    #[error("durable targeted-scan state is unavailable")]
+    Unavailable,
+    #[error("operation outcome is unknown")]
+    OutcomeUnknown,
+    #[error("engine task queue is full")]
+    QueueFull,
+    #[error("engine task identifiers are exhausted")]
+    TaskIdExhausted,
+    #[error("internal targeted-scan state is invalid")]
     InternalState,
 }
 
@@ -3945,6 +4095,65 @@ impl DuxEngine {
         })
     }
 
+    /// Admit one bounded read-only scan selected exclusively from Rust's
+    /// configured-root registry at an exact accepted low-space observation.
+    pub fn start_targeted_project_scan(
+        &self,
+        request: TargetedProjectScanRequest,
+    ) -> Result<TargetedProjectScanAdmission, TargetedProjectScanError> {
+        if request.record_version != FFI_RECORD_VERSION {
+            return Err(TargetedProjectScanError::InvalidRecordVersion);
+        }
+        let volume_id = parse_targeted_project_scan_volume_id(&request.stable_volume_id)?;
+        let capacity_anchor = targeted_project_scan_time(request.capacity_anchor_unix_ms, false)?;
+        self.with_targeted_project_scan_engine(|engine| {
+            let admission = engine
+                .start_targeted_project_scan(
+                    &volume_id,
+                    capacity_anchor,
+                    request.selected_root_ordinal,
+                    request.expected_configured_roots_revision,
+                )
+                .map_err(map_targeted_project_scan_error)?;
+            targeted_project_scan_admission(
+                engine,
+                admission,
+                &volume_id,
+                capacity_anchor,
+                request.selected_root_ordinal,
+                request.expected_configured_roots_revision,
+            )
+        })
+    }
+
+    /// Revalidate the path-free pressure and registry context after a bounded
+    /// configured-root pass. This starts no work and exposes no path.
+    pub fn validate_targeted_project_scan_context(
+        &self,
+        request: TargetedProjectScanCheckpointRequest,
+    ) -> Result<TargetedProjectScanCheckpoint, TargetedProjectScanError> {
+        if request.record_version != FFI_RECORD_VERSION {
+            return Err(TargetedProjectScanError::InvalidRecordVersion);
+        }
+        let expected_pressure =
+            core_targeted_project_scan_pressure_context(request.expected_pressure)?;
+        self.with_targeted_project_scan_engine(|engine| {
+            let checkpoint = engine
+                .validate_targeted_project_scan_context(
+                    &expected_pressure,
+                    request.expected_configured_roots_revision,
+                    request.expected_root_count,
+                )
+                .map_err(map_targeted_project_scan_error)?;
+            targeted_project_scan_checkpoint(
+                checkpoint,
+                &expected_pressure,
+                request.expected_configured_roots_revision,
+                request.expected_root_count,
+            )
+        })
+    }
+
     /// Statically inspect one exact Cargo file and return an engine-bound,
     /// consume-once preview. Inspection does not run the selected bytes or
     /// change durable enrollment.
@@ -4999,6 +5208,22 @@ impl DuxEngine {
             EngineState::Open(engine) if !self.closed.load(Ordering::Acquire) => operation(engine),
             EngineState::Open(_) | EngineState::Closing | EngineState::Closed { .. } => {
                 Err(ConfiguredProjectRootsError::Closed)
+            }
+        }
+    }
+
+    fn with_targeted_project_scan_engine<T>(
+        &self,
+        operation: impl FnOnce(&EngineHandle) -> Result<T, TargetedProjectScanError>,
+    ) -> Result<T, TargetedProjectScanError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| TargetedProjectScanError::InternalState)?;
+        match &*state {
+            EngineState::Open(engine) if !self.closed.load(Ordering::Acquire) => operation(engine),
+            EngineState::Open(_) | EngineState::Closing | EngineState::Closed { .. } => {
+                Err(TargetedProjectScanError::Closed)
             }
         }
     }
@@ -8791,6 +9016,418 @@ fn configured_project_root_path(
     Err(ConfiguredProjectRootsError::InternalState)
 }
 
+fn parse_targeted_project_scan_volume_id(
+    value: &str,
+) -> Result<VolumeId, TargetedProjectScanError> {
+    const PREFIX: &str = "volume:macos:";
+    let raw = value.strip_prefix(PREFIX).unwrap_or(value);
+    let parsed = parse_macos_volume_id(Some(raw.to_owned()))
+        .map_err(|_| TargetedProjectScanError::InvalidVolumeIdentity)?
+        .ok_or(TargetedProjectScanError::InvalidVolumeIdentity)?;
+    if value.starts_with(PREFIX) && value != parsed.to_string() {
+        return Err(TargetedProjectScanError::InvalidVolumeIdentity);
+    }
+    Ok(parsed)
+}
+
+fn targeted_project_scan_time(
+    value: i64,
+    internal: bool,
+) -> Result<SystemTime, TargetedProjectScanError> {
+    let millis = u64::try_from(value).map_err(|_| {
+        if internal {
+            TargetedProjectScanError::InternalState
+        } else {
+            TargetedProjectScanError::InvalidAnchor
+        }
+    })?;
+    UNIX_EPOCH
+        .checked_add(Duration::from_millis(millis))
+        .ok_or({
+            if internal {
+                TargetedProjectScanError::InternalState
+            } else {
+                TargetedProjectScanError::InvalidAnchor
+            }
+        })
+}
+
+fn targeted_project_scan_time_ms(value: SystemTime) -> Result<i64, TargetedProjectScanError> {
+    i64::try_from(
+        value
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| TargetedProjectScanError::InternalState)?
+            .as_millis(),
+    )
+    .map_err(|_| TargetedProjectScanError::InternalState)
+}
+
+fn core_targeted_project_scan_pressure_context(
+    context: TargetedProjectScanPressureContext,
+) -> Result<CoreTargetedProjectScanPressureContext, TargetedProjectScanError> {
+    if context.record_version != FFI_RECORD_VERSION {
+        return Err(TargetedProjectScanError::InvalidRecordVersion);
+    }
+    let capacity_anchor = targeted_project_scan_time(context.capacity_anchor_unix_ms, false)?;
+    let current_episode_started_at =
+        targeted_project_scan_time(context.current_episode_started_at_unix_ms, false)?;
+    let pressure_started_at =
+        targeted_project_scan_time(context.pressure_started_at_unix_ms, false)?;
+    if pressure_started_at > current_episode_started_at
+        || current_episode_started_at > capacity_anchor
+    {
+        return Err(TargetedProjectScanError::InvalidAnchor);
+    }
+    Ok(CoreTargetedProjectScanPressureContext {
+        volume_id: parse_targeted_project_scan_volume_id(&context.stable_volume_id)?,
+        capacity_anchor,
+        pressure: match context.pressure {
+            TargetedProjectScanPressure::Warning => CoreTargetedProjectScanPressure::Warning,
+            TargetedProjectScanPressure::Critical => CoreTargetedProjectScanPressure::Critical,
+        },
+        current_episode_started_at,
+        pressure_started_at,
+        policy_revision: context.policy_revision,
+    })
+}
+
+fn targeted_project_scan_pressure_context(
+    context: &CoreTargetedProjectScanPressureContext,
+) -> Result<TargetedProjectScanPressureContext, TargetedProjectScanError> {
+    if context.pressure_started_at > context.current_episode_started_at
+        || context.current_episode_started_at > context.capacity_anchor
+    {
+        return Err(TargetedProjectScanError::InternalState);
+    }
+    Ok(TargetedProjectScanPressureContext {
+        record_version: FFI_RECORD_VERSION,
+        stable_volume_id: context.volume_id.to_string(),
+        capacity_anchor_unix_ms: targeted_project_scan_time_ms(context.capacity_anchor)?,
+        pressure: match context.pressure {
+            CoreTargetedProjectScanPressure::Warning => TargetedProjectScanPressure::Warning,
+            CoreTargetedProjectScanPressure::Critical => TargetedProjectScanPressure::Critical,
+        },
+        current_episode_started_at_unix_ms: targeted_project_scan_time_ms(
+            context.current_episode_started_at,
+        )?,
+        pressure_started_at_unix_ms: targeted_project_scan_time_ms(context.pressure_started_at)?,
+        policy_revision: context.policy_revision,
+    })
+}
+
+fn targeted_project_scan_selection(
+    selection: &dux_core::engine::TargetedProjectScanSelection,
+    root_count: u16,
+    expected_ordinal: u16,
+) -> Result<TargetedProjectScanSelection, TargetedProjectScanError> {
+    let expected_max_nodes = if root_count == 0 {
+        0
+    } else {
+        (dux_core::MAX_TARGETED_PROJECT_SCAN_PASS_NODES / usize::from(root_count))
+            .clamp(1, dux_core::MAX_TARGETED_PROJECT_SCAN_NODES)
+    };
+    if selection.ordinal != expected_ordinal
+        || selection.ordinal >= root_count
+        || usize::try_from(selection.max_nodes).ok() != Some(expected_max_nodes)
+    {
+        return Err(TargetedProjectScanError::InternalState);
+    }
+    let root = configured_project_root_path(&selection.root)
+        .map_err(|_| TargetedProjectScanError::InternalState)?;
+    Ok(TargetedProjectScanSelection {
+        record_version: FFI_RECORD_VERSION,
+        ordinal: selection.ordinal,
+        root,
+        max_nodes: selection.max_nodes,
+    })
+}
+
+fn targeted_project_scan_admission(
+    engine: &EngineHandle,
+    admission: CoreTargetedProjectScanAdmission,
+    expected_volume_id: &VolumeId,
+    expected_capacity_anchor: SystemTime,
+    expected_ordinal: u16,
+    expected_revision: Option<u64>,
+) -> Result<TargetedProjectScanAdmission, TargetedProjectScanError> {
+    if usize::from(admission.root_count) > MAX_CONFIGURED_PROJECT_ROOT_COUNT
+        || expected_revision.is_some_and(|value| value != admission.configured_roots_revision)
+    {
+        return Err(TargetedProjectScanError::InternalState);
+    }
+    let selection = admission
+        .selection
+        .as_ref()
+        .map(|selection| {
+            targeted_project_scan_selection(selection, admission.root_count, expected_ordinal)
+        })
+        .transpose()?;
+    let pressure = admission
+        .pressure
+        .as_ref()
+        .map(targeted_project_scan_pressure_context)
+        .transpose()?;
+    if admission.pressure.as_ref().is_some_and(|context| {
+        context.volume_id != *expected_volume_id
+            || context.capacity_anchor != expected_capacity_anchor
+    }) {
+        return Err(TargetedProjectScanError::InternalState);
+    }
+
+    let mut response = TargetedProjectScanAdmission {
+        record_version: FFI_RECORD_VERSION,
+        configured_roots_revision: admission.configured_roots_revision,
+        root_count: admission.root_count,
+        selection,
+        pressure,
+        disposition: TargetedProjectScanDisposition::EmptyRegistry,
+        root_unavailable_reason: None,
+        current_result: None,
+        task: None,
+        existing_task_observed_phase: None,
+    };
+    match admission.disposition {
+        CoreTargetedProjectScanDisposition::EmptyRegistry => {
+            if response.root_count != 0 || response.selection.is_some() {
+                return Err(TargetedProjectScanError::InternalState);
+            }
+        }
+        CoreTargetedProjectScanDisposition::NoPressure => {
+            if response.root_count == 0
+                || response.selection.is_none()
+                || response.pressure.is_some()
+            {
+                return Err(TargetedProjectScanError::InternalState);
+            }
+            response.disposition = TargetedProjectScanDisposition::NoPressure;
+        }
+        CoreTargetedProjectScanDisposition::RootUnavailable { reason } => {
+            require_targeted_project_scan_selection_and_pressure(&response)?;
+            response.disposition = TargetedProjectScanDisposition::RootUnavailable;
+            response.root_unavailable_reason = Some(map_targeted_project_scan_root_reason(reason)?);
+        }
+        CoreTargetedProjectScanDisposition::ExistingTask { task_id, phase } => {
+            require_targeted_project_scan_selection_and_pressure(&response)?;
+            response.disposition = TargetedProjectScanDisposition::ExistingTask;
+            response.task = Some(targeted_project_scan_task(engine, task_id)?);
+            response.existing_task_observed_phase = Some(map_phase(phase));
+        }
+        CoreTargetedProjectScanDisposition::Current(current) => {
+            require_targeted_project_scan_selection_and_pressure(&response)?;
+            response.disposition = TargetedProjectScanDisposition::Current;
+            response.current_result = Some(targeted_project_scan_current_result(&current)?);
+        }
+        CoreTargetedProjectScanDisposition::Started { task_id } => {
+            require_targeted_project_scan_selection_and_pressure(&response)?;
+            response.disposition = TargetedProjectScanDisposition::Started;
+            response.task = Some(targeted_project_scan_task(engine, task_id)?);
+        }
+        _ => return Err(TargetedProjectScanError::InternalState),
+    }
+    Ok(response)
+}
+
+fn require_targeted_project_scan_selection_and_pressure(
+    response: &TargetedProjectScanAdmission,
+) -> Result<(), TargetedProjectScanError> {
+    if response.root_count == 0 || response.selection.is_none() || response.pressure.is_none() {
+        Err(TargetedProjectScanError::InternalState)
+    } else {
+        Ok(())
+    }
+}
+
+fn map_targeted_project_scan_root_reason(
+    reason: ScanRootErrorKind,
+) -> Result<TargetedProjectScanRootUnavailableReason, TargetedProjectScanError> {
+    Ok(match reason {
+        ScanRootErrorKind::InvalidPath => TargetedProjectScanRootUnavailableReason::InvalidPath,
+        ScanRootErrorKind::Missing => TargetedProjectScanRootUnavailableReason::Missing,
+        ScanRootErrorKind::AccessDenied => TargetedProjectScanRootUnavailableReason::AccessDenied,
+        ScanRootErrorKind::NotDirectory => TargetedProjectScanRootUnavailableReason::NotDirectory,
+        ScanRootErrorKind::Symlink => TargetedProjectScanRootUnavailableReason::Symlink,
+        ScanRootErrorKind::ChangedDuringValidation => {
+            TargetedProjectScanRootUnavailableReason::ChangedDuringValidation
+        }
+        ScanRootErrorKind::IdentityUnavailable => {
+            TargetedProjectScanRootUnavailableReason::IdentityUnavailable
+        }
+        ScanRootErrorKind::VolumeMismatch => {
+            TargetedProjectScanRootUnavailableReason::VolumeMismatch
+        }
+        ScanRootErrorKind::VolumeUnproven => {
+            TargetedProjectScanRootUnavailableReason::VolumeUnproven
+        }
+        ScanRootErrorKind::UnsupportedPlatform => {
+            TargetedProjectScanRootUnavailableReason::UnsupportedPlatform
+        }
+        ScanRootErrorKind::Unavailable => TargetedProjectScanRootUnavailableReason::Unavailable,
+        _ => return Err(TargetedProjectScanError::InternalState),
+    })
+}
+
+fn targeted_project_scan_task(
+    engine: &EngineHandle,
+    task_id: TaskId,
+) -> Result<Arc<ScanTask>, TargetedProjectScanError> {
+    let snapshot = engine
+        .task_snapshot(task_id)
+        .map_err(map_targeted_project_scan_task_access_error)?;
+    if snapshot.kind != CoreTaskKind::Scan
+        || snapshot.priority != CoreTaskPriority::Targeted
+        || snapshot.scan_origin != Some(CoreScanTaskOrigin::TargetedRecommendation)
+    {
+        return Err(TargetedProjectScanError::InternalState);
+    }
+    Ok(Arc::new(ScanTask {
+        engine: engine.clone(),
+        id: task_id,
+        progress: Mutex::new(ScanProgressState::default()),
+    }))
+}
+
+fn map_targeted_project_scan_task_access_error(error: TaskAccessError) -> TargetedProjectScanError {
+    match error {
+        TaskAccessError::Closed => TargetedProjectScanError::Closed,
+        TaskAccessError::UnknownTask => TargetedProjectScanError::Unavailable,
+        TaskAccessError::InvalidEventLimit { .. }
+        | TaskAccessError::InvalidEventCursor
+        | TaskAccessError::WrongTaskKind
+        | TaskAccessError::InternalState => TargetedProjectScanError::InternalState,
+    }
+}
+
+fn targeted_project_scan_current_result(
+    current: &CoreTargetedProjectScanCurrent,
+) -> Result<ScanTaskResult, TargetedProjectScanError> {
+    let scan = &current.scan;
+    let evaluation = &current.candidate_evaluation;
+    let completed_at = scan
+        .completed_at
+        .ok_or(TargetedProjectScanError::InternalState)?;
+    let counts = scan.counts.ok_or(TargetedProjectScanError::InternalState)?;
+    if scan.status != CoreDurableScanStatus::Succeeded
+        || !scan.snapshot_recorded
+        || !scan.scan_id.as_str().starts_with("scan:targeted:")
+        || completed_at < scan.started_at
+        || evaluation.scan_id() != &scan.scan_id
+        || evaluation.source_scan_status() != CoreDurableScanStatus::Succeeded
+    {
+        return Err(TargetedProjectScanError::InternalState);
+    }
+    let scheduled_at = evaluation
+        .scheduled_at()
+        .ok_or(TargetedProjectScanError::InternalState)?;
+    let evaluation_completed_at = evaluation
+        .completed_at()
+        .ok_or(TargetedProjectScanError::InternalState)?;
+    if scheduled_at < scan.started_at || evaluation_completed_at < scheduled_at {
+        return Err(TargetedProjectScanError::InternalState);
+    }
+    let candidate_evaluation = match evaluation.status() {
+        CoreDurableCandidateEvaluationStatus::Succeeded { candidate_count } => {
+            if usize::try_from(candidate_count).ok() != Some(evaluation.candidates().len()) {
+                return Err(TargetedProjectScanError::InternalState);
+            }
+            ScanCandidateEvaluationSummary {
+                record_version: FFI_RECORD_VERSION,
+                status: ScanCandidateEvaluationStatus::Succeeded,
+                candidate_count,
+                failure: None,
+            }
+        }
+        CoreDurableCandidateEvaluationStatus::Failed { kind } => {
+            if !evaluation.candidates().is_empty() {
+                return Err(TargetedProjectScanError::InternalState);
+            }
+            ScanCandidateEvaluationSummary {
+                record_version: FFI_RECORD_VERSION,
+                status: ScanCandidateEvaluationStatus::Failed,
+                candidate_count: 0,
+                failure: Some(map_scan_candidate_evaluation_failure(kind)),
+            }
+        }
+        CoreDurableCandidateEvaluationStatus::NotRun
+        | CoreDurableCandidateEvaluationStatus::Pending => {
+            return Err(TargetedProjectScanError::InternalState);
+        }
+        _ => return Err(TargetedProjectScanError::InternalState),
+    };
+    let issue_record_count = u64::try_from(scan.coverage.issue_record_count)
+        .map_err(|_| TargetedProjectScanError::InternalState)?;
+    Ok(ScanTaskResult {
+        record_version: FFI_RECORD_VERSION,
+        scan_id: scan.scan_id.as_str().to_owned(),
+        started_at_unix_ms: targeted_project_scan_time_ms(scan.started_at)?,
+        completed_at_unix_ms: targeted_project_scan_time_ms(completed_at)?,
+        status: ScanTerminalStatus::Succeeded,
+        directory_count: counts.directory_count,
+        file_count: counts.file_count,
+        logical_bytes: counts.logical_bytes,
+        allocated_bytes: counts.allocated_bytes,
+        snapshot_available: true,
+        coverage: ScanCoverageSummary {
+            record_version: FFI_RECORD_VERSION,
+            status: map_scan_coverage_status(scan.coverage.status),
+            measured_permille: scan.coverage.measured_permille.map(|value| value.get()),
+            issue_record_count,
+            issue_occurrence_count: scan.coverage.issue_occurrence_count,
+        },
+        candidate_evaluation,
+    })
+}
+
+fn targeted_project_scan_checkpoint(
+    checkpoint: CoreTargetedProjectScanCheckpoint,
+    expected_pressure: &CoreTargetedProjectScanPressureContext,
+    expected_revision: u64,
+    expected_root_count: u16,
+) -> Result<TargetedProjectScanCheckpoint, TargetedProjectScanError> {
+    if checkpoint.configured_roots_revision != expected_revision
+        || checkpoint.root_count != expected_root_count
+        || usize::from(checkpoint.root_count) > MAX_CONFIGURED_PROJECT_ROOT_COUNT
+        || checkpoint.pressure != *expected_pressure
+    {
+        return Err(TargetedProjectScanError::InternalState);
+    }
+    Ok(TargetedProjectScanCheckpoint {
+        record_version: FFI_RECORD_VERSION,
+        configured_roots_revision: checkpoint.configured_roots_revision,
+        root_count: checkpoint.root_count,
+        pressure: targeted_project_scan_pressure_context(&checkpoint.pressure)?,
+    })
+}
+
+fn map_targeted_project_scan_error(
+    error: CoreTargetedProjectScanError,
+) -> TargetedProjectScanError {
+    match error {
+        CoreTargetedProjectScanError::Closed => TargetedProjectScanError::Closed,
+        CoreTargetedProjectScanError::ReadOnlyStore => TargetedProjectScanError::ReadOnlyStore,
+        CoreTargetedProjectScanError::RegistryChanged { .. } => {
+            TargetedProjectScanError::RegistryChanged
+        }
+        CoreTargetedProjectScanError::InvalidOrdinal { .. } => {
+            TargetedProjectScanError::InvalidOrdinal
+        }
+        CoreTargetedProjectScanError::InvalidAnchor => TargetedProjectScanError::InvalidAnchor,
+        CoreTargetedProjectScanError::PressureChanged => TargetedProjectScanError::PressureChanged,
+        CoreTargetedProjectScanError::IncompatibleSchema => {
+            TargetedProjectScanError::IncompatibleSchema
+        }
+        CoreTargetedProjectScanError::Busy => TargetedProjectScanError::Busy,
+        CoreTargetedProjectScanError::UnsafeStorage => TargetedProjectScanError::UnsafeStorage,
+        CoreTargetedProjectScanError::BudgetExceeded => TargetedProjectScanError::BudgetExceeded,
+        CoreTargetedProjectScanError::CorruptData => TargetedProjectScanError::CorruptData,
+        CoreTargetedProjectScanError::Unavailable => TargetedProjectScanError::Unavailable,
+        CoreTargetedProjectScanError::OutcomeUnknown => TargetedProjectScanError::OutcomeUnknown,
+        CoreTargetedProjectScanError::QueueFull => TargetedProjectScanError::QueueFull,
+        CoreTargetedProjectScanError::TaskIdExhausted => TargetedProjectScanError::TaskIdExhausted,
+        CoreTargetedProjectScanError::InternalState => TargetedProjectScanError::InternalState,
+        _ => TargetedProjectScanError::InternalState,
+    }
+}
+
 fn decode_direct_cargo_executable_path(
     request: DirectCargoEnrollmentInspectionRequest,
 ) -> Result<PathBuf, DirectCargoEnrollmentError> {
@@ -9381,10 +10018,10 @@ mod tests {
     }
 
     #[test]
-    fn reports_contract_thirty_six_and_preserves_legacy_formatting() {
+    fn reports_contract_thirty_eight_and_preserves_legacy_formatting() {
         let _guard = ENGINE_TEST_LOCK.lock().unwrap();
         let (_temp, engine) = engine();
-        assert_eq!(library_version().ffi_contract_version, 37);
+        assert_eq!(library_version().ffi_contract_version, 38);
         assert_eq!(engine.library_version().unwrap(), library_version());
         assert_eq!(engine.format_size(1536).unwrap().display, "1.5 KB");
         assert!(engine.close());
@@ -12984,6 +13621,318 @@ mod tests {
             ordinary_available_bytes,
             important_available_bytes,
         }
+    }
+
+    fn targeted_project_scan_request(
+        anchor_unix_ms: i64,
+        ordinal: u16,
+        revision: Option<u64>,
+    ) -> TargetedProjectScanRequest {
+        TargetedProjectScanRequest {
+            record_version: FFI_RECORD_VERSION,
+            stable_volume_id: "01234567-89AB-CDEF-0123-456789ABCDEF".into(),
+            capacity_anchor_unix_ms: anchor_unix_ms,
+            selected_root_ordinal: ordinal,
+            expected_configured_roots_revision: revision,
+        }
+    }
+
+    fn observe_critical_capacity(engine: &DuxEngine) -> i64 {
+        let gib = 1_024 * 1_024 * 1_024;
+        let anchor = system_time_ms(SystemTime::now()).unwrap();
+        let status = engine
+            .observe_startup_volume(startup_observation(anchor, Some(5 * gib), Some(5 * gib)))
+            .unwrap();
+        assert_eq!(status.pressure, VolumePressure::Critical);
+        anchor
+    }
+
+    #[test]
+    fn targeted_project_scan_is_path_free_bounded_and_reuses_current_evidence() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (temp, engine) = engine();
+        let root = temp.path().join("project");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("source.txt"), b"read-only discovery").unwrap();
+        let encoded_root = configured_project_root_path(&root).unwrap();
+        let configured = engine
+            .set_configured_project_roots(ConfiguredProjectRootsInput {
+                record_version: FFI_RECORD_VERSION,
+                roots: vec![encoded_root.clone()],
+            })
+            .unwrap()
+            .roots;
+        let anchor = observe_critical_capacity(&engine);
+
+        let started = engine
+            .start_targeted_project_scan(targeted_project_scan_request(
+                anchor,
+                0,
+                Some(configured.revision),
+            ))
+            .unwrap();
+        assert_eq!(started.record_version, FFI_RECORD_VERSION);
+        assert_eq!(started.configured_roots_revision, configured.revision);
+        assert_eq!(started.root_count, 1);
+        assert_eq!(started.disposition, TargetedProjectScanDisposition::Started);
+        assert_eq!(
+            started.selection,
+            Some(TargetedProjectScanSelection {
+                record_version: FFI_RECORD_VERSION,
+                ordinal: 0,
+                root: encoded_root.clone(),
+                max_nodes: u32::try_from(dux_core::MAX_TARGETED_PROJECT_SCAN_NODES).unwrap(),
+            })
+        );
+        let pressure = started.pressure.clone().unwrap();
+        assert_eq!(
+            pressure.stable_volume_id,
+            "volume:macos:01234567-89ab-cdef-0123-456789abcdef"
+        );
+        assert_eq!(pressure.capacity_anchor_unix_ms, anchor);
+        assert_eq!(pressure.pressure, TargetedProjectScanPressure::Critical);
+        assert!(
+            pressure.pressure_started_at_unix_ms <= pressure.current_episode_started_at_unix_ms
+        );
+        assert!(pressure.current_episode_started_at_unix_ms <= anchor);
+        assert!(started.root_unavailable_reason.is_none());
+        assert!(started.current_result.is_none());
+        assert!(started.existing_task_observed_phase.is_none());
+        let task = started.task.as_ref().unwrap();
+        let terminal = wait_for_scan(task);
+        assert_eq!(terminal.phase, TaskPhase::Succeeded);
+        let terminal_result = terminal.result.unwrap();
+
+        let current = engine
+            .start_targeted_project_scan(targeted_project_scan_request(
+                anchor,
+                0,
+                Some(configured.revision),
+            ))
+            .unwrap();
+        assert_eq!(current.disposition, TargetedProjectScanDisposition::Current);
+        assert_eq!(current.selection.unwrap().root, encoded_root);
+        assert_eq!(current.pressure.as_ref(), Some(&pressure));
+        assert!(current.task.is_none());
+        assert!(current.root_unavailable_reason.is_none());
+        assert!(current.existing_task_observed_phase.is_none());
+        let current_result = current.current_result.unwrap();
+        assert_eq!(current_result.scan_id, terminal_result.scan_id);
+        assert!(current_result.scan_id.starts_with("scan:targeted:"));
+        assert_eq!(current_result.status, ScanTerminalStatus::Succeeded);
+        assert!(current_result.snapshot_available);
+        assert!(matches!(
+            current_result.candidate_evaluation.status,
+            ScanCandidateEvaluationStatus::Succeeded | ScanCandidateEvaluationStatus::Failed
+        ));
+
+        let checkpoint = engine
+            .validate_targeted_project_scan_context(TargetedProjectScanCheckpointRequest {
+                record_version: FFI_RECORD_VERSION,
+                expected_pressure: pressure.clone(),
+                expected_configured_roots_revision: configured.revision,
+                expected_root_count: 1,
+            })
+            .unwrap();
+        assert_eq!(checkpoint.record_version, FFI_RECORD_VERSION);
+        assert_eq!(checkpoint.configured_roots_revision, configured.revision);
+        assert_eq!(checkpoint.root_count, 1);
+        assert_eq!(checkpoint.pressure, pressure);
+    }
+
+    #[test]
+    fn targeted_project_scan_preserves_empty_no_pressure_and_root_failure_shapes() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+
+        let (_empty_temp, empty_engine) = engine();
+        let empty_anchor = observe_critical_capacity(&empty_engine);
+        let empty = empty_engine
+            .start_targeted_project_scan(targeted_project_scan_request(empty_anchor, 0, None))
+            .unwrap();
+        assert_eq!(
+            empty.disposition,
+            TargetedProjectScanDisposition::EmptyRegistry
+        );
+        assert_eq!(empty.root_count, 0);
+        assert!(empty.selection.is_none());
+        assert!(empty.pressure.is_some());
+        assert!(empty.root_unavailable_reason.is_none());
+        assert!(empty.current_result.is_none());
+        assert!(empty.task.is_none());
+        assert!(empty.existing_task_observed_phase.is_none());
+
+        let (healthy_temp, healthy_engine) = engine();
+        let healthy_root = healthy_temp.path().join("healthy-project");
+        std::fs::create_dir_all(&healthy_root).unwrap();
+        let healthy_settings = healthy_engine
+            .set_configured_project_roots(ConfiguredProjectRootsInput {
+                record_version: FFI_RECORD_VERSION,
+                roots: vec![configured_project_root_path(&healthy_root).unwrap()],
+            })
+            .unwrap()
+            .roots;
+        let healthy_anchor = system_time_ms(SystemTime::now()).unwrap();
+        let gib = 1_024 * 1_024 * 1_024;
+        let healthy_status = healthy_engine
+            .observe_startup_volume(startup_observation(
+                healthy_anchor,
+                Some(200 * gib),
+                Some(200 * gib),
+            ))
+            .unwrap();
+        assert_eq!(healthy_status.pressure, VolumePressure::Healthy);
+        let no_pressure = healthy_engine
+            .start_targeted_project_scan(targeted_project_scan_request(
+                healthy_anchor,
+                0,
+                Some(healthy_settings.revision),
+            ))
+            .unwrap();
+        assert_eq!(
+            no_pressure.disposition,
+            TargetedProjectScanDisposition::NoPressure
+        );
+        assert!(no_pressure.selection.is_some());
+        assert!(no_pressure.pressure.is_none());
+        assert!(no_pressure.root_unavailable_reason.is_none());
+        assert!(no_pressure.current_result.is_none());
+        assert!(no_pressure.task.is_none());
+        assert!(no_pressure.existing_task_observed_phase.is_none());
+
+        let (missing_temp, missing_engine) = engine();
+        let missing_root = missing_temp.path().join("missing-project");
+        let missing_settings = missing_engine
+            .set_configured_project_roots(ConfiguredProjectRootsInput {
+                record_version: FFI_RECORD_VERSION,
+                roots: vec![configured_project_root_path(&missing_root).unwrap()],
+            })
+            .unwrap()
+            .roots;
+        let missing_anchor = observe_critical_capacity(&missing_engine);
+        let unavailable = missing_engine
+            .start_targeted_project_scan(targeted_project_scan_request(
+                missing_anchor,
+                0,
+                Some(missing_settings.revision),
+            ))
+            .unwrap();
+        assert_eq!(
+            unavailable.disposition,
+            TargetedProjectScanDisposition::RootUnavailable
+        );
+        assert_eq!(
+            unavailable.root_unavailable_reason,
+            Some(TargetedProjectScanRootUnavailableReason::Missing)
+        );
+        assert!(unavailable.selection.is_some());
+        assert!(unavailable.pressure.is_some());
+        assert!(unavailable.current_result.is_none());
+        assert!(unavailable.task.is_none());
+        assert!(unavailable.existing_task_observed_phase.is_none());
+    }
+
+    #[test]
+    fn targeted_project_scan_rejects_malformed_requests_and_changed_registry() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (temp, engine) = engine();
+        let root = temp.path().join("project");
+        std::fs::create_dir_all(&root).unwrap();
+        let configured = engine
+            .set_configured_project_roots(ConfiguredProjectRootsInput {
+                record_version: FFI_RECORD_VERSION,
+                roots: vec![configured_project_root_path(&root).unwrap()],
+            })
+            .unwrap()
+            .roots;
+        let anchor = observe_critical_capacity(&engine);
+
+        let mut request = targeted_project_scan_request(anchor, 0, Some(configured.revision));
+        request.record_version += 1;
+        assert!(matches!(
+            engine.start_targeted_project_scan(request),
+            Err(TargetedProjectScanError::InvalidRecordVersion)
+        ));
+        let mut request = targeted_project_scan_request(anchor, 0, Some(configured.revision));
+        request.stable_volume_id = "not-a-volume".into();
+        assert!(matches!(
+            engine.start_targeted_project_scan(request),
+            Err(TargetedProjectScanError::InvalidVolumeIdentity)
+        ));
+        let mut request = targeted_project_scan_request(anchor, 0, Some(configured.revision));
+        request.capacity_anchor_unix_ms = -1;
+        assert!(matches!(
+            engine.start_targeted_project_scan(request),
+            Err(TargetedProjectScanError::InvalidAnchor)
+        ));
+        assert!(matches!(
+            engine.start_targeted_project_scan(targeted_project_scan_request(
+                anchor,
+                1,
+                Some(configured.revision),
+            )),
+            Err(TargetedProjectScanError::InvalidOrdinal)
+        ));
+        assert!(matches!(
+            engine.start_targeted_project_scan(targeted_project_scan_request(
+                anchor,
+                0,
+                Some(configured.revision + 1),
+            )),
+            Err(TargetedProjectScanError::RegistryChanged)
+        ));
+
+        let pressure = engine
+            .start_targeted_project_scan(targeted_project_scan_request(
+                anchor,
+                0,
+                Some(configured.revision),
+            ))
+            .unwrap()
+            .pressure
+            .unwrap();
+        let mut malformed_pressure = pressure.clone();
+        malformed_pressure.record_version += 1;
+        assert!(matches!(
+            engine.validate_targeted_project_scan_context(TargetedProjectScanCheckpointRequest {
+                record_version: FFI_RECORD_VERSION,
+                expected_pressure: malformed_pressure,
+                expected_configured_roots_revision: configured.revision,
+                expected_root_count: 1,
+            }),
+            Err(TargetedProjectScanError::InvalidRecordVersion)
+        ));
+        let mut malformed_pressure = pressure;
+        malformed_pressure.pressure_started_at_unix_ms =
+            malformed_pressure.capacity_anchor_unix_ms + 1;
+        assert!(matches!(
+            engine.validate_targeted_project_scan_context(TargetedProjectScanCheckpointRequest {
+                record_version: FFI_RECORD_VERSION,
+                expected_pressure: malformed_pressure,
+                expected_configured_roots_revision: configured.revision,
+                expected_root_count: 1,
+            }),
+            Err(TargetedProjectScanError::InvalidAnchor)
+        ));
+    }
+
+    #[test]
+    fn targeted_task_bridge_refuses_user_scan_ownership() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (temp, engine) = engine();
+        let root = temp.path().join("user-scan");
+        std::fs::create_dir_all(&root).unwrap();
+        let core = {
+            let state = engine.state.lock().unwrap();
+            let EngineState::Open(core) = &*state else {
+                panic!("test engine must be open");
+            };
+            core.clone()
+        };
+        let user_task = core.start_scan(root).unwrap();
+        assert!(matches!(
+            targeted_project_scan_task(&core, user_task),
+            Err(TargetedProjectScanError::InternalState)
+        ));
     }
 
     fn default_pressure_policy_input() -> PressurePolicyInput {

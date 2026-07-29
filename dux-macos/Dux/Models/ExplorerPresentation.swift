@@ -7,6 +7,11 @@ enum ExplorerAccessibility {
     static let snapshotDestination = "explorer-destination-snapshot"
     static let recommendationsDestination = "explorer-destination-recommendations"
     static let recommendations = "explorer-recommendations"
+    static let targetedReclaimScan = "explorer-targeted-reclaim-scan"
+    static let targetedReclaimScanStatus = "explorer-targeted-reclaim-scan-status"
+    static let targetedReclaimScanProgress = "explorer-targeted-reclaim-scan-progress"
+    static let targetedReclaimScanCancel = "explorer-targeted-reclaim-scan-cancel"
+    static let targetedReclaimScanRetry = "explorer-targeted-reclaim-scan-retry"
     static let cleanupHistoryDestination = "explorer-destination-cleanup-history"
     static let cleanupHistory = "explorer-cleanup-history"
     static let cleanupHistoryStatus = "explorer-cleanup-history-status"
@@ -129,6 +134,11 @@ enum ExplorerAccessibility {
         snapshotDestination,
         recommendationsDestination,
         recommendations,
+        targetedReclaimScan,
+        targetedReclaimScanStatus,
+        targetedReclaimScanProgress,
+        targetedReclaimScanCancel,
+        targetedReclaimScanRetry,
         cleanupHistoryDestination,
         cleanupHistory,
         cleanupHistoryStatus,
@@ -246,6 +256,14 @@ enum ExplorerAccessibility {
 
     static func cleanupHistoryItem(ordinal: UInt16) -> String {
         "explorer-cleanup-history-item-\(ordinal)"
+    }
+
+    static func targetedReclaimScanRoot(ordinal: UInt16) -> String {
+        "explorer-targeted-reclaim-scan-root-\(ordinal)"
+    }
+
+    static func targetedReclaimScanReview(ordinal: UInt16) -> String {
+        "explorer-targeted-reclaim-scan-review-\(ordinal)"
     }
 }
 

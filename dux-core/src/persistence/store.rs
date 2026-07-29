@@ -27,8 +27,8 @@ use super::capacity_history::{
     RawCapacityObservation, RawCapacitySample, StoredCapacitySample, StoredPressureEpisode,
     exact_raw_and_volume_match, exact_volume_observation_match, load_capacity_trend,
     load_latest_raw_capacity_sample, load_pressure_episode_page,
-    load_pressure_episode_page_at_anchor, load_raw_capacity_page, validate_capacity_volume,
-    validate_ephemeral_capacity_observation, write_raw_capacity_sample,
+    load_pressure_episode_page_at_anchor, load_raw_capacity_page, load_volume_mount_path_at_anchor,
+    validate_capacity_volume, validate_ephemeral_capacity_observation, write_raw_capacity_sample,
 };
 use super::cleanup_history::{
     CleanupSessionId, NewCleanupSessionRecord, PreparedCleanupSession, StoredCleanupSessionRecord,
@@ -47,8 +47,8 @@ use super::cleanup_history_query::{
 use super::history::{
     HistoryError, HistoryErrorKind, NewScanRecord, PreparedNewScan, PreparedScanCompletion,
     RecentScanRecords, ScanCompletionRecord, ScanRecord, ScanStatus, insert_scan_started,
-    load_latest_available_snapshot_scan_record, load_recent_scan_records, load_scan_record,
-    map_write_sql_error, update_scan_finished,
+    load_latest_available_snapshot_scan_record, load_latest_scan_record_for_exact_root_since,
+    load_recent_scan_records, load_scan_record, map_write_sql_error, update_scan_finished,
 };
 use super::migrations::{
     SchemaState, apply_pending_migrations, inspect_schema, inspect_schema_for_status,
@@ -844,6 +844,15 @@ impl StoreCoordinator {
     ) -> Result<Vec<StoredPressureEpisode>, HistoryError> {
         let guard = self.lock_current_history_connection()?;
         load_pressure_episode_page_at_anchor(&guard.connection, volume_id, anchor_at, limit)
+    }
+
+    pub(crate) fn load_volume_mount_path_at_anchor(
+        &self,
+        volume_id: &crate::domain::VolumeId,
+        anchor_at: SystemTime,
+    ) -> Result<PathBuf, HistoryError> {
+        let guard = self.lock_current_history_connection()?;
+        load_volume_mount_path_at_anchor(&guard.connection, volume_id, anchor_at)
     }
 
     /// Build a bounded path-free trend view from durable capacity samples.
@@ -1642,6 +1651,15 @@ impl StoreCoordinator {
     ) -> Result<RecentScanRecords, HistoryError> {
         let guard = self.lock_current_history_connection()?;
         load_recent_scan_records(&guard.connection, limit)
+    }
+
+    pub(crate) fn load_latest_scan_for_exact_root_since(
+        &self,
+        root: &Path,
+        started_at_or_after: SystemTime,
+    ) -> Result<Option<ScanRecord>, HistoryError> {
+        let guard = self.lock_current_history_connection()?;
+        load_latest_scan_record_for_exact_root_since(&guard.connection, root, started_at_or_after)
     }
 
     pub(crate) fn load_latest_available_snapshot_scan(
