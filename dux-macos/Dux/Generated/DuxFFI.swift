@@ -928,8 +928,8 @@ public protocol DuxEngineProtocol: AnyObject, Sendable {
     func getDiskPressurePolicy() throws  -> PressurePolicyStatus
 
     /**
-     * Load the path-free global permanent-cleanup kill switch. This setting
-     * can only deny effects; it cannot create a plan or authorize a target.
+     * Load the path-free global permanent-cleanup opt-in. The disabled default
+     * can only deny effects; this cannot create a plan or authorize a target.
      */
     func getPermanentCleanupPolicy() throws  -> PermanentCleanupPolicyStatus
 
@@ -1230,8 +1230,8 @@ open func getDiskPressurePolicy()throws  -> PressurePolicyStatus  {
 }
 
     /**
-     * Load the path-free global permanent-cleanup kill switch. This setting
-     * can only deny effects; it cannot create a plan or authorize a target.
+     * Load the path-free global permanent-cleanup opt-in. The disabled default
+     * can only deny effects; this cannot create a plan or authorize a target.
      */
 open func getPermanentCleanupPolicy()throws  -> PermanentCleanupPolicyStatus  {
     return try  FfiConverterTypePermanentCleanupPolicyStatus_lift(try rustCallWithError(FfiConverterTypePermanentCleanupPolicyError_lift) {
@@ -5474,8 +5474,8 @@ public func FfiConverterTypeMaintenanceStart_lower(_ value: MaintenanceStart) ->
 
 
 /**
- * Versioned, path-free global permanent-cleanup kill switch. It never
- * selects a target or grants execution authority.
+ * Versioned, path-free global permanent-cleanup opt-in gate. It never selects
+ * a target or grants execution authority.
  */
 public struct PermanentCleanupPolicyStatus: Equatable, Hashable {
     public let recordVersion: UInt32
@@ -16592,7 +16592,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_dux_ffi_checksum_method_duxengine_get_disk_pressure_policy() != 6278) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_dux_ffi_checksum_method_duxengine_get_permanent_cleanup_policy() != 39054) {
+    if (uniffi_dux_ffi_checksum_method_duxengine_get_permanent_cleanup_policy() != 28759) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_inspect_direct_cargo_enrollment() != 42063) {

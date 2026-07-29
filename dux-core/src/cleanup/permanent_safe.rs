@@ -548,6 +548,24 @@ fn execute_rust_target_contents_inner(
             PermanentSafePlatformError::Cancelled,
         ));
     }
+    match claim.permanent_cleanup_effects_enabled() {
+        Ok(true) => {}
+        Ok(false) => {
+            claim
+                .finish_validation(
+                    item_ordinal,
+                    path_ordinal,
+                    crate::persistence::ValidationOutcome::Rejected,
+                    Some("permanent_cleanup_disabled"),
+                    now,
+                )
+                .map_err(|error| PermanentSafeExecutionError::Admission(error.kind))?;
+            return Err(PermanentSafeExecutionError::Admission(
+                HistoryErrorKind::InvalidTransition,
+            ));
+        }
+        Err(error) => return Err(PermanentSafeExecutionError::Admission(error.kind)),
+    }
     let receipt = claim
         .mark_effect_started(item_ordinal, path_ordinal, now)
         .map_err(|error| PermanentSafeExecutionError::Admission(error.kind))?;

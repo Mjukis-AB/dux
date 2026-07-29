@@ -56,7 +56,7 @@ Those capabilities retain their own gates below and in ADR 0004.
 
 ## Current realization
 
-FFI contract v32 now carries the real shared engine session first introduced in
+FFI contract v34 now carries the real shared engine session first introduced in
 v4. The app supplies input-only private data/cache roots; storage paths never
 return across the boundary. Eight maintenance kinds use opaque task objects
 with nonblocking versioned path-free poll/cancel records, and exact Explorer
@@ -64,6 +64,17 @@ reviews use opaque scan-bound lease objects. No maintenance task accepts a path,
 cap, inventory, victim, candidate, or cleanup instruction. Review sessions
 expose scan ID, expiry, renewal, idempotent release, and bounded read-only
 snapshot navigation.
+
+Contract v34 changes the existing v22 global permanent-cleanup setting to an
+explicit opt-in without adding a path or authority-bearing field. Rust projects
+rowless and reset state as disabled, rejects impossible enabled-Default shapes,
+and version-decodes legacy settings before the final journal gate. Swift accepts
+only those shapes, requires a loaded disabled observation plus the exact typed
+sentence before its sole product enable call, and treats disable/reset as
+immediate protection strengthening. A repository regression pins that trusted
+Settings → AppModel → EngineService → UniFFI call graph. The internal
+permanent-safe action remains Debug-only; this contract change does not satisfy
+or bypass the Release gates below.
 
 Contract v9 adds one path-free newest-available review acquisition. The core
 selects the deterministic newest succeeded, non-tombstoned snapshot and then

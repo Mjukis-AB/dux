@@ -1287,6 +1287,16 @@ fn rust_target_facts_fixture_with_limits(limits: RegistryLimits) -> RustTargetFa
     );
 
     let engine = EngineHandle::open_with_limits(config(&temp), limits).unwrap();
+    // Most fixtures in this lane exercise an already-confirmed permanent-safe
+    // execution. Individual deny-by-default tests reset this explicit consent
+    // before starting the reviewed task.
+    assert!(
+        engine
+            .set_permanent_cleanup_enabled(true)
+            .unwrap()
+            .policy
+            .enabled
+    );
     let enrollment = engine
         .inspect_direct_cargo_enrollment(&direct_toolchain_cargo())
         .unwrap();
@@ -1707,6 +1717,43 @@ fn rust_target_plan_review_rechecks_leaf_recency_at_final_materialization() {
     assert!(fixture.payload.exists());
     assert!(fixture.target.join("CACHEDIR.TAG").exists());
     parent.release().unwrap();
+    fixture.engine.close();
+    assert!(fixture.engine.wait_until_closed(TEST_TIMEOUT));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn default_disabled_policy_stops_reviewed_task_before_any_unlink() {
+    let fixture = rust_target_facts_fixture();
+    let reset = fixture.engine.reset_permanent_cleanup().unwrap();
+    assert!(reset.changed);
+    assert!(!reset.policy.enabled);
+    assert_eq!(
+        reset.policy.source,
+        crate::engine::PermanentCleanupPolicySource::Default
+    );
+    let (mut parent, review) = prepared_rust_target_plan_review(&fixture);
+
+    let task = fixture.engine.start_permanent_safe_cleanup(review).unwrap();
+    parent.release().unwrap();
+    let terminal = wait_terminal_with_timeout(&fixture.engine, task, RUST_TARGET_TASK_TIMEOUT);
+    assert_eq!(terminal.kind, TaskKind::PermanentSafeCleanup);
+    assert_eq!(terminal.phase, TaskPhase::Succeeded);
+    assert_eq!(terminal.failure, None);
+    let result = fixture
+        .engine
+        .permanent_safe_cleanup_result(task)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        result.status(),
+        crate::engine::DurableCleanupSessionStatus::Rejected
+    );
+    assert_eq!(result.removed_entries(), 0);
+    assert_eq!(result.removed_logical_bytes(), 0);
+    assert!(fixture.payload.exists());
+    assert!(fixture.target.join("CACHEDIR.TAG").exists());
+
     fixture.engine.close();
     assert!(fixture.engine.wait_until_closed(TEST_TIMEOUT));
 }

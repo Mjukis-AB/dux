@@ -770,7 +770,7 @@ Native executable use requires the remaining product gates to continue proving:
 - overlap resolution that consumes the still-exact replayed full batch,
   exclusions, current reviewed plan, expiry, and approval;
 - handle-relative executor-time revalidation and durable journal fencing; and
-- exact-path UI disclosure, global permanent-cleanup disablement, capacity
+- exact-path UI disclosure, global permanent-cleanup explicit opt-in, capacity
   verification, history, and recovery.
 
 Absence of a textual denial or presence of revision 2 metadata proves none of

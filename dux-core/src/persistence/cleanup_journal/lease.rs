@@ -852,6 +852,18 @@ impl CleanupJournalClaim {
     /// owns the store-wide cleanup exclusion. The settings writer takes the
     /// same exclusion, so disabling cannot race this final pre-effect gate.
     fn ensure_permanent_cleanup_enabled(&self) -> Result<(), HistoryError> {
+        if self.permanent_cleanup_effects_enabled()? {
+            Ok(())
+        } else {
+            Err(HistoryError::new(HistoryErrorKind::InvalidTransition))
+        }
+    }
+
+    /// Observe the deny-by-default global gate while this claim owns the same
+    /// cleanup exclusion used by setting writes. The executor can therefore
+    /// durably reject a disabled path before asking for an effect receipt,
+    /// without a policy write racing between observation and rejection.
+    pub(crate) fn permanent_cleanup_effects_enabled(&self) -> Result<bool, HistoryError> {
         self.lease
             .store
             .validate_cleanup_lock_for_journal(&self.lease.guard)?;
@@ -859,11 +871,7 @@ impl CleanupJournalClaim {
         self.lease
             .store
             .validate_cleanup_lock_for_journal(&self.lease.guard)?;
-        if crate::persistence::load_permanent_cleanup_setting(&connection.connection)?.enabled {
-            Ok(())
-        } else {
-            Err(HistoryError::new(HistoryErrorKind::InvalidTransition))
-        }
+        Ok(crate::persistence::load_permanent_cleanup_setting(&connection.connection)?.enabled)
     }
 
     /// Re-read deny-only user exclusions while the claim owns the cleanup

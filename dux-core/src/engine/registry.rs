@@ -1574,8 +1574,8 @@ impl EngineHandle {
             .map_err(|error| map_disk_pressure_policy_error(error.kind))
     }
 
-    /// Load the effective global permanent-cleanup switch. This is a kill
-    /// switch only and carries no plan, target, or effect authority.
+    /// Load the effective global permanent-cleanup opt-in. This deny-by-default
+    /// gate carries no plan, target, or effect authority.
     pub fn permanent_cleanup_policy(
         &self,
     ) -> Result<PermanentCleanupPolicy, PermanentCleanupPolicyError> {
@@ -1589,7 +1589,7 @@ impl EngineHandle {
             .map_err(|error| map_permanent_cleanup_policy_error(error.kind))
     }
 
-    /// Persist the global permanent-cleanup switch. Disabling takes the same
+    /// Persist the global permanent-cleanup opt-in. Disabling takes the same
     /// cleanup exclusion as the final journal gate and therefore cannot race
     /// an already-admitted permanent effect.
     pub fn set_permanent_cleanup_enabled(
@@ -1606,7 +1606,7 @@ impl EngineHandle {
             .map_err(|error| map_permanent_cleanup_policy_error(error.kind))
     }
 
-    /// Restore the versioned default (enabled) while retaining a new durable
+    /// Restore the versioned default (disabled) while retaining a new durable
     /// revision when an explicit switch value was active.
     pub fn reset_permanent_cleanup(
         &self,

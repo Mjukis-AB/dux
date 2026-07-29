@@ -19,7 +19,8 @@ use super::history::{
 use super::store::{HistoryConnectionGuard, StoreCoordinator};
 
 pub(crate) const PERMANENT_CLEANUP_KEY: &str = "permanent_cleanup";
-const VALUE_SCHEMA_VERSION: i64 = 1;
+const LEGACY_VALUE_SCHEMA_VERSION: i64 = 1;
+const VALUE_SCHEMA_VERSION: i64 = 2;
 const MAX_CANONICAL_VALUE_BYTES: usize = 128;
 const MAX_POLICY_REVISION: u64 = i64::MAX as u64;
 const CLEANUP_POLICY_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
@@ -39,11 +40,10 @@ pub(crate) struct PermanentCleanupSetting {
 }
 
 impl PermanentCleanupSetting {
-    /// Permanent cleanup remains enabled by default; the explicit switch is
-    /// an emergency/user kill switch and a stored `false` value is required to
-    /// block the effect boundary.
+    /// Permanent cleanup is an explicit opt-in. A missing row and every reset
+    /// deny effects; only a durable stored `true` value can open this gate.
     pub(crate) const DEFAULT: Self = Self {
-        enabled: true,
+        enabled: false,
         source: PermanentCleanupSettingSource::Default,
         revision: 0,
         updated_at: None,
@@ -71,7 +71,7 @@ enum StoredPolicySource {
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct PermanentCleanupValueV1 {
+struct PermanentCleanupValue {
     enabled: bool,
     revision: u64,
     source: StoredPolicySource,
@@ -80,6 +80,7 @@ struct PermanentCleanupValueV1 {
 struct StoredPermanentCleanupSetting {
     setting: PermanentCleanupSetting,
     canonical_json: String,
+    value_schema_version: i64,
     updated_at_unix_ms: i64,
 }
 
@@ -143,7 +144,12 @@ impl StoreCoordinator {
                 (enabled, PermanentCleanupSettingSource::Stored)
             }
             PolicyMutation::Reset => {
-                if current.source == PermanentCleanupSettingSource::Default {
+                let current_encoding_is_current = original
+                    .as_ref()
+                    .is_none_or(|stored| stored.value_schema_version == VALUE_SCHEMA_VERSION);
+                if current.source == PermanentCleanupSettingSource::Default
+                    && current_encoding_is_current
+                {
                     return Ok(PermanentCleanupSettingUpdate {
                         settings: current,
                         changed: false,
@@ -251,14 +257,15 @@ fn write_setting_row(
                      updated_at_unix_ms = ?3
                  WHERE setting_key = ?4
                    AND value_json = ?5
-                   AND value_schema_version = ?2
-                   AND updated_at_unix_ms = ?6",
+                   AND value_schema_version = ?6
+                   AND updated_at_unix_ms = ?7",
                 params![
                     canonical_json,
                     VALUE_SCHEMA_VERSION,
                     updated_at_unix_ms,
                     PERMANENT_CLEANUP_KEY,
                     stored.canonical_json,
+                    stored.value_schema_version,
                     stored.updated_at_unix_ms,
                 ],
             )
@@ -320,45 +327,58 @@ fn load_stored_permanent_cleanup_setting(
         let Some(raw) = raw else {
             return Ok(None);
         };
-        if raw.value_schema_version != VALUE_SCHEMA_VERSION {
-            return Err(if raw.value_schema_version > VALUE_SCHEMA_VERSION {
-                HistoryError::new(HistoryErrorKind::IncompatibleSchema)
-            } else {
-                corrupt()
-            });
+        if raw.value_schema_version > VALUE_SCHEMA_VERSION {
+            return Err(HistoryError::new(HistoryErrorKind::IncompatibleSchema));
         }
-        let value: PermanentCleanupValueV1 =
-            serde_json::from_str(&raw.canonical_json).map_err(|_| corrupt())?;
-        let setting = setting_from_value(&value, raw.updated_at_unix_ms)?;
-        if canonical_json(setting, HistoryErrorKind::CorruptData)? != raw.canonical_json {
+        if raw.value_schema_version != LEGACY_VALUE_SCHEMA_VERSION
+            && raw.value_schema_version != VALUE_SCHEMA_VERSION
+        {
             return Err(corrupt());
         }
+        let value: PermanentCleanupValue =
+            serde_json::from_str(&raw.canonical_json).map_err(|_| corrupt())?;
+        if canonical_value_json(&value, HistoryErrorKind::CorruptData)? != raw.canonical_json {
+            return Err(corrupt());
+        }
+        let setting = setting_from_value(&value, raw.value_schema_version, raw.updated_at_unix_ms)?;
         Ok(Some(StoredPermanentCleanupSetting {
             setting,
             canonical_json: raw.canonical_json,
+            value_schema_version: raw.value_schema_version,
             updated_at_unix_ms: raw.updated_at_unix_ms,
         }))
     })
 }
 
 fn setting_from_value(
-    value: &PermanentCleanupValueV1,
+    value: &PermanentCleanupValue,
+    value_schema_version: i64,
     updated_at_unix_ms: i64,
 ) -> Result<PermanentCleanupSetting, HistoryError> {
     if value.revision == 0 || value.revision > MAX_POLICY_REVISION {
         return Err(corrupt());
     }
-    if value.source == StoredPolicySource::Default
-        && value.enabled != PermanentCleanupSetting::DEFAULT.enabled
-    {
-        return Err(corrupt());
-    }
+    let (enabled, source) = match (value_schema_version, value.source, value.enabled) {
+        (LEGACY_VALUE_SCHEMA_VERSION, StoredPolicySource::Stored, enabled) => {
+            (enabled, PermanentCleanupSettingSource::Stored)
+        }
+        // Schema v1's default was enabled. That state did not prove the
+        // product's first-enable confirmation, so the v2 decoder strengthens
+        // it to the disabled default. Reset rewrites it canonically as v2.
+        (LEGACY_VALUE_SCHEMA_VERSION, StoredPolicySource::Default, true) => {
+            (false, PermanentCleanupSettingSource::Default)
+        }
+        (VALUE_SCHEMA_VERSION, StoredPolicySource::Stored, enabled) => {
+            (enabled, PermanentCleanupSettingSource::Stored)
+        }
+        (VALUE_SCHEMA_VERSION, StoredPolicySource::Default, false) => {
+            (false, PermanentCleanupSettingSource::Default)
+        }
+        _ => return Err(corrupt()),
+    };
     Ok(PermanentCleanupSetting {
-        enabled: value.enabled,
-        source: match value.source {
-            StoredPolicySource::Default => PermanentCleanupSettingSource::Default,
-            StoredPolicySource::Stored => PermanentCleanupSettingSource::Stored,
-        },
+        enabled,
+        source,
         revision: value.revision,
         updated_at: Some(unix_ms_to_system_time(updated_at_unix_ms)?),
     })
@@ -399,7 +419,7 @@ fn canonical_json(
     setting: PermanentCleanupSetting,
     kind: HistoryErrorKind,
 ) -> Result<String, HistoryError> {
-    let value = PermanentCleanupValueV1 {
+    let value = PermanentCleanupValue {
         enabled: setting.enabled,
         revision: setting.revision,
         source: match setting.source {
@@ -407,7 +427,14 @@ fn canonical_json(
             PermanentCleanupSettingSource::Stored => StoredPolicySource::Stored,
         },
     };
-    let json = serde_json::to_string(&value).map_err(|_| HistoryError::new(kind))?;
+    canonical_value_json(&value, kind)
+}
+
+fn canonical_value_json(
+    value: &PermanentCleanupValue,
+    kind: HistoryErrorKind,
+) -> Result<String, HistoryError> {
+    let json = serde_json::to_string(value).map_err(|_| HistoryError::new(kind))?;
     if json.len() > MAX_CANONICAL_VALUE_BYTES {
         return Err(HistoryError::new(kind));
     }
@@ -431,6 +458,7 @@ fn stored_exact(
 ) -> bool {
     left.setting == right.setting
         && left.canonical_json == right.canonical_json
+        && left.value_schema_version == right.value_schema_version
         && left.updated_at_unix_ms == right.updated_at_unix_ms
 }
 
@@ -452,13 +480,15 @@ mod tests {
     }
 
     #[test]
-    fn missing_setting_is_enabled_default_without_writing() {
+    fn missing_setting_is_disabled_default_without_writing() {
         let temp = TempDir::new().unwrap();
         let store = open(&temp);
-        assert_eq!(
-            store.load_permanent_cleanup_setting().unwrap(),
-            PermanentCleanupSetting::DEFAULT
-        );
+        let setting = store.load_permanent_cleanup_setting().unwrap();
+        assert_eq!(setting, PermanentCleanupSetting::DEFAULT);
+        assert!(!setting.enabled);
+        let reset = store.reset_permanent_cleanup().unwrap();
+        assert!(!reset.changed);
+        assert_eq!(reset.settings, setting);
         store.with_connection(|connection| {
             assert_eq!(
                 connection
@@ -474,44 +504,148 @@ mod tests {
     }
 
     #[test]
-    fn disable_enable_reset_and_retry_preserve_revision_and_provenance() {
+    fn enable_disable_reset_and_retry_preserve_revision_and_provenance() {
         let temp = TempDir::new().unwrap();
         let observed = UNIX_EPOCH + Duration::from_millis(1_750_000_000_000);
         let store = open(&temp);
-        let disabled = store
-            .set_permanent_cleanup_enabled_at_for_test(false, observed)
-            .unwrap();
-        assert!(disabled.changed);
-        assert!(!disabled.settings.enabled);
-        assert_eq!(disabled.settings.revision, 1);
-        assert_eq!(
-            disabled.settings.source,
-            PermanentCleanupSettingSource::Stored
-        );
-        let retry = store
-            .set_permanent_cleanup_enabled_at_for_test(false, observed + Duration::from_secs(1))
-            .unwrap();
-        assert!(!retry.changed);
-        assert_eq!(retry.settings, disabled.settings);
         let enabled = store
-            .set_permanent_cleanup_after_commit_failure_for_test(
-                true,
-                observed + Duration::from_secs(2),
-            )
+            .set_permanent_cleanup_enabled_at_for_test(true, observed)
             .unwrap();
         assert!(enabled.changed);
         assert!(enabled.settings.enabled);
-        assert_eq!(enabled.settings.revision, 2);
+        assert_eq!(enabled.settings.revision, 1);
+        assert_eq!(
+            enabled.settings.source,
+            PermanentCleanupSettingSource::Stored
+        );
+        let retry = store
+            .set_permanent_cleanup_enabled_at_for_test(true, observed + Duration::from_secs(1))
+            .unwrap();
+        assert!(!retry.changed);
+        assert_eq!(retry.settings, enabled.settings);
+        let disabled = store
+            .set_permanent_cleanup_after_commit_failure_for_test(
+                false,
+                observed + Duration::from_secs(2),
+            )
+            .unwrap();
+        assert!(disabled.changed);
+        assert!(!disabled.settings.enabled);
+        assert_eq!(disabled.settings.revision, 2);
         let reset = store
             .reset_permanent_cleanup_at_for_test(observed + Duration::from_secs(3))
             .unwrap();
         assert!(reset.changed);
-        assert!(reset.settings.enabled);
+        assert!(!reset.settings.enabled);
         assert_eq!(
             reset.settings.source,
             PermanentCleanupSettingSource::Default
         );
         assert_eq!(reset.settings.revision, 3);
+        let exact_reset = store
+            .reset_permanent_cleanup_at_for_test(observed + Duration::from_secs(4))
+            .unwrap();
+        assert!(!exact_reset.changed);
+        assert_eq!(exact_reset.settings, reset.settings);
+    }
+
+    #[test]
+    fn explicit_enabled_consent_survives_reopen() {
+        let temp = TempDir::new().unwrap();
+        let observed = UNIX_EPOCH + Duration::from_millis(1_750_000_000_000);
+        let store = open(&temp);
+        let enabled = store
+            .set_permanent_cleanup_enabled_at_for_test(true, observed)
+            .unwrap()
+            .settings;
+        drop(store);
+
+        let reopened = open(&temp);
+        assert_eq!(reopened.load_permanent_cleanup_setting().unwrap(), enabled);
+    }
+
+    #[test]
+    fn legacy_stored_enabled_consent_survives_reopen() {
+        let temp = TempDir::new().unwrap();
+        let store = open(&temp);
+        store.with_connection(|connection| {
+            connection
+                .execute(
+                    "INSERT INTO settings (
+                         setting_key, value_json, value_schema_version,
+                         updated_at_unix_ms
+                     ) VALUES (?1, ?2, 1, 1)",
+                    params![
+                        PERMANENT_CLEANUP_KEY,
+                        "{\"enabled\":true,\"revision\":7,\"source\":\"stored\"}",
+                    ],
+                )
+                .unwrap();
+        });
+
+        let consent = store.load_permanent_cleanup_setting().unwrap();
+        assert!(consent.enabled);
+        assert_eq!(consent.source, PermanentCleanupSettingSource::Stored);
+        assert_eq!(consent.revision, 7);
+        drop(store);
+
+        let reopened = open(&temp);
+        assert_eq!(reopened.load_permanent_cleanup_setting().unwrap(), consent);
+    }
+
+    #[test]
+    fn legacy_default_enabled_epoch_migrates_to_disabled_default_on_reset() {
+        let temp = TempDir::new().unwrap();
+        let store = open(&temp);
+        store.with_connection(|connection| {
+            connection
+                .execute(
+                    "INSERT INTO settings (
+                         setting_key, value_json, value_schema_version,
+                         updated_at_unix_ms
+                     ) VALUES (?1, ?2, 1, 1)",
+                    params![
+                        PERMANENT_CLEANUP_KEY,
+                        "{\"enabled\":true,\"revision\":7,\"source\":\"default\"}",
+                    ],
+                )
+                .unwrap();
+        });
+
+        let migrated = store.load_permanent_cleanup_setting().unwrap();
+        assert!(!migrated.enabled);
+        assert_eq!(migrated.source, PermanentCleanupSettingSource::Default);
+        assert_eq!(migrated.revision, 7);
+        assert_eq!(
+            migrated.updated_at,
+            Some(UNIX_EPOCH + Duration::from_millis(1))
+        );
+
+        let reset = store
+            .reset_permanent_cleanup_at_for_test(UNIX_EPOCH + Duration::from_millis(2))
+            .unwrap();
+        assert!(reset.changed);
+        assert!(!reset.settings.enabled);
+        assert_eq!(
+            reset.settings.source,
+            PermanentCleanupSettingSource::Default
+        );
+        assert_eq!(reset.settings.revision, 8);
+        store.with_connection(|connection| {
+            let (json, schema_version): (String, i64) = connection
+                .query_row(
+                    "SELECT value_json, value_schema_version
+                     FROM settings WHERE setting_key = ?1",
+                    [PERMANENT_CLEANUP_KEY],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(
+                json,
+                "{\"enabled\":false,\"revision\":8,\"source\":\"default\"}"
+            );
+            assert_eq!(schema_version, VALUE_SCHEMA_VERSION);
+        });
     }
 
     #[test]
@@ -519,7 +653,7 @@ mod tests {
         for value in [
             "{}",
             "{\"enabled\":false,\"revision\":0,\"source\":\"stored\"}",
-            "{\"enabled\":false,\"revision\":1,\"source\":\"default\"}",
+            "{\"enabled\":true,\"revision\":0,\"source\":\"default\"}",
             "{\"enabled\":false,\"revision\":1,\"source\":\"stored\",\"extra\":1}",
         ] {
             let temp = TempDir::new().unwrap();
@@ -528,8 +662,8 @@ mod tests {
                 connection
                     .execute(
                         "INSERT INTO settings (setting_key, value_json, value_schema_version, updated_at_unix_ms)
-                         VALUES (?1, ?2, 1, 1)",
-                        params![PERMANENT_CLEANUP_KEY, value],
+                         VALUES (?1, ?2, ?3, 1)",
+                        params![PERMANENT_CLEANUP_KEY, value, VALUE_SCHEMA_VERSION],
                     )
                     .unwrap();
             });
@@ -543,8 +677,29 @@ mod tests {
         store.with_connection(|connection| {
             connection
                 .execute(
+                    "INSERT INTO settings (
+                         setting_key, value_json, value_schema_version,
+                         updated_at_unix_ms
+                     ) VALUES (?1, ?2, 1, 1)",
+                    params![
+                        PERMANENT_CLEANUP_KEY,
+                        "{\"enabled\":false,\"revision\":1,\"source\":\"default\"}",
+                    ],
+                )
+                .unwrap();
+        });
+        assert_eq!(
+            store.load_permanent_cleanup_setting().unwrap_err().kind,
+            HistoryErrorKind::CorruptData
+        );
+
+        let temp = TempDir::new().unwrap();
+        let store = open(&temp);
+        store.with_connection(|connection| {
+            connection
+                .execute(
                     "INSERT INTO settings (setting_key, value_json, value_schema_version, updated_at_unix_ms)
-                     VALUES (?1, '{\"enabled\":false,\"revision\":1,\"source\":\"stored\"}', 2, 1)",
+                     VALUES (?1, '{\"enabled\":false,\"revision\":1,\"source\":\"stored\"}', 3, 1)",
                     [PERMANENT_CLEANUP_KEY],
                 )
                 .unwrap();
@@ -557,5 +712,52 @@ mod tests {
             store.set_permanent_cleanup_enabled(false).unwrap_err().kind,
             HistoryErrorKind::IncompatibleSchema
         );
+    }
+
+    #[test]
+    fn legacy_stored_disabled_choice_survives_and_reset_migrates_to_v2() {
+        let temp = TempDir::new().unwrap();
+        let store = open(&temp);
+        store.with_connection(|connection| {
+            connection
+                .execute(
+                    "INSERT INTO settings (
+                         setting_key, value_json, value_schema_version,
+                         updated_at_unix_ms
+                     ) VALUES (?1, ?2, 1, 1)",
+                    params![
+                        PERMANENT_CLEANUP_KEY,
+                        "{\"enabled\":false,\"revision\":7,\"source\":\"stored\"}",
+                    ],
+                )
+                .unwrap();
+        });
+
+        let disabled = store.load_permanent_cleanup_setting().unwrap();
+        assert!(!disabled.enabled);
+        assert_eq!(disabled.source, PermanentCleanupSettingSource::Stored);
+        assert_eq!(disabled.revision, 7);
+        let reset = store
+            .reset_permanent_cleanup_at_for_test(UNIX_EPOCH + Duration::from_millis(2))
+            .unwrap();
+        assert!(reset.changed);
+        assert!(!reset.settings.enabled);
+        assert_eq!(
+            reset.settings.source,
+            PermanentCleanupSettingSource::Default
+        );
+        store.with_connection(|connection| {
+            assert_eq!(
+                connection
+                    .query_row(
+                        "SELECT value_schema_version
+                         FROM settings WHERE setting_key = ?1",
+                        [PERMANENT_CLEANUP_KEY],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .unwrap(),
+                VALUE_SCHEMA_VERSION
+            );
+        });
     }
 }

@@ -420,7 +420,7 @@ final class AppModel: DuxCapacitySampling {
         diskPressurePolicyState = diskPressurePolicy == nil ? .idle : .ready
     }
 
-    static let permanentCleanupReenableConfirmation = "ENABLE PERMANENT CLEANUP"
+    static let permanentCleanupEnableConfirmation = "ENABLE PERMANENT CLEANUP"
 
     func loadPermanentCleanupPolicy() async {
         guard !permanentCleanupPolicyIsInvalidated else {
@@ -451,8 +451,8 @@ final class AppModel: DuxCapacitySampling {
         await task.value
     }
 
-    /// Changes the global kill switch. Re-enabling requires the exact phrase so
-    /// the UI cannot accidentally turn permanent cleanup back on.
+    /// Changes the global opt-in. Enabling requires the exact phrase so the UI
+    /// cannot accidentally permit permanent cleanup.
     func setPermanentCleanupEnabled(
         _ enabled: Bool,
         confirmation: String? = nil
@@ -462,28 +462,26 @@ final class AppModel: DuxCapacitySampling {
               !permanentCleanupPolicyState.isBusy else {
             return
         }
-        guard !enabled || confirmation == Self.permanentCleanupReenableConfirmation else {
-            permanentCleanupPolicyState = .failed(.confirmationRequired)
-            return
+        if enabled {
+            guard let permanentCleanupPolicy, !permanentCleanupPolicy.enabled,
+                  confirmation == Self.permanentCleanupEnableConfirmation else {
+                permanentCleanupPolicyState = .failed(.confirmationRequired)
+                return
+            }
         }
         await mutatePermanentCleanupPolicy(state: enabled ? .enabling : .disabling) { service in
             try await service.setPermanentCleanupEnabled(enabled)
         }
     }
 
-    func resetPermanentCleanup(confirmation: String? = nil) async {
+    func resetPermanentCleanup() async {
         guard !permanentCleanupPolicyIsInvalidated,
               permanentCleanupPolicyTask == nil,
               !permanentCleanupPolicyState.isBusy else {
             return
         }
-        // The core default is enabled. Treat reset as a re-enable whenever the
-        // current authoritative state is disabled.
-        if permanentCleanupPolicy?.enabled == false,
-           confirmation != Self.permanentCleanupReenableConfirmation {
-            permanentCleanupPolicyState = .failed(.confirmationRequired)
-            return
-        }
+        // Reset is always protection-strengthening: the core default denies
+        // permanent-cleanup effects, so it never needs enable confirmation.
         await mutatePermanentCleanupPolicy(state: .resetting) { service in
             try await service.resetPermanentCleanup()
         }

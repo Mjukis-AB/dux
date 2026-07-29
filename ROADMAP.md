@@ -5150,8 +5150,34 @@ Tasks:
     pass, as do all 376 native tests and fresh universal arm64/x86_64 Debug and
     Release builds targeting macOS 14.
 - [ ] Implement exclusions and global permanent-cleanup disable setting.
-  - [x] 2026-07-19 slice: add the revisioned global permanent-cleanup kill
-    switch to the typed settings store. Missing state defaults to enabled;
+  - [x] 2026-07-29 slice: make the global permanent-cleanup gate an explicit
+    opt-in before any Release exposure. Rowless state and reset are now
+    core-owned `Default(false)`; only durable `Stored(true)` consent can admit
+    a permanent-safe effect. Value schema v2 decodes schema-v1 `Stored(true)`
+    and `Stored(false)` as prior explicit choices, but strengthens the legacy
+    `Default(true)` epoch to disabled and rewrites it canonically on reset.
+    Malformed and newer values still fail closed. The claimed executor observes
+    the gate under the settings cleanup exclusion, records a disabled path as
+    durably Rejected before any effect receipt, and the final journal transition
+    rechecks the gate; an end-to-end reviewed Rust-target regression proves zero
+    unlinks and zero removed bytes. UniFFI contract v34 rejects impossible
+    `Default(true)` projections. EngineService accepts only disabled Default
+    shapes, AppModel requires a loaded authoritative disabled policy plus the
+    exact `ENABLE PERMANENT CLEANUP` phrase before the sole product enable
+    call, and reset immediately restores the safe disabled default without
+    confirmation. Settings copy, neutral safe status, VoiceOver identifiers,
+    and an exhaustive Swift/Rust production setter-call-graph regression
+    reflect those semantics. The Debug-only permanent-safe action and Release
+    gate remain unchanged. Verification includes workspace format/check/clippy,
+    the focused migration and journal suites, isolated real reviewed-task deny
+    and explicitly enabled success paths, all 64 ordinary UniFFI tests plus both
+    dedicated macOS cleanup harness cases, 31 repository policy tests, the
+    243-file destructive-call scan, all 403 native tests, and universal
+    arm64/x86_64 Debug bindings and Release app builds targeting macOS 14. The
+    independent adversarial review found no remaining blocker.
+  - [x] Original 2026-07-19 slice (default semantics superseded above): add the
+    revisioned global permanent-cleanup kill switch to the typed settings store.
+    Missing state initially defaulted to enabled;
     explicit disable/enable/reset operations preserve provenance and monotonic
     revisions, while malformed or newer values fail closed. Setting writes
     take the store-wide cleanup exclusion, and the journal checks the effective
@@ -5163,9 +5189,10 @@ Tasks:
     `effect_started`, so it can only deny an effect. The Swift settings surface
     now loads and presents this path-free state through EngineService/AppModel,
     applies disable immediately, and requires the exact phrase
-    `ENABLE PERMANENT CLEANUP` before re-enable or reset can restore the enabled
-    default. Path-bearing exclusion presentation remains separate and open.
-  - [x] 2026-07-19 slice: expose the path-free global permanent-cleanup kill
+    `ENABLE PERMANENT CLEANUP` before re-enable or reset could restore the
+    then-enabled default. Path-bearing exclusion presentation remained separate.
+  - [x] Original 2026-07-19 slice (UI semantics superseded above): expose the
+    path-free global permanent-cleanup kill
     switch through UniFFI contract v22. Versioned get/set/reset records carry
     only enabled state, Default/Stored provenance, monotonic revision, and
     optional update time; Rust remains the semantic validator and the switch
@@ -5175,7 +5202,8 @@ Tasks:
     maps every typed error and rejects malformed status shapes; AppModel
     generation-fences load/mutation/reset work and invalidates it during ordered
     shutdown. Settings exposes the deny-only gate with VoiceOver identifiers and
-    an exact typed confirmation for re-enable/reset. Exclusions remain a
+    an exact typed confirmation for the then-current re-enable/reset flow.
+    Exclusions remain a
     separate path-bearing presentation boundary.
   - [x] 2026-07-19 slice: expose the bounded lexical exclusion set through
     UniFFI contract v23. Get/set/reset carry exact path bytes with Unix or

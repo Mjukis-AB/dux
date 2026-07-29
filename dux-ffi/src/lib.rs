@@ -110,7 +110,7 @@ use dux_core::{
     VolumeCapacity, VolumeId,
 };
 
-const FFI_CONTRACT_VERSION: u32 = 33;
+const FFI_CONTRACT_VERSION: u32 = 34;
 const FFI_RECORD_VERSION: u32 = 1;
 const RUST_TARGET_MINIMUM_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const SNAPSHOT_NODE_RECORD_VERSION: u32 = 2;
@@ -310,8 +310,8 @@ pub enum PermanentCleanupPolicySource {
     Stored,
 }
 
-/// Versioned, path-free global permanent-cleanup kill switch. It never
-/// selects a target or grants execution authority.
+/// Versioned, path-free global permanent-cleanup opt-in gate. It never selects
+/// a target or grants execution authority.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct PermanentCleanupPolicyStatus {
     pub record_version: u32,
@@ -3507,8 +3507,8 @@ impl DuxEngine {
         })
     }
 
-    /// Load the path-free global permanent-cleanup kill switch. This setting
-    /// can only deny effects; it cannot create a plan or authorize a target.
+    /// Load the path-free global permanent-cleanup opt-in. The disabled default
+    /// can only deny effects; this cannot create a plan or authorize a target.
     pub fn get_permanent_cleanup_policy(
         &self,
     ) -> Result<PermanentCleanupPolicyStatus, PermanentCleanupPolicyError> {
@@ -8179,6 +8179,7 @@ fn permanent_cleanup_policy_status(
         .transpose()?;
     if (policy.revision == 0) != updated_at_unix_ms.is_none()
         || (policy.revision == 0 && policy.source != CorePermanentCleanupPolicySource::Default)
+        || (policy.source == CorePermanentCleanupPolicySource::Default && policy.enabled)
     {
         return Err(PermanentCleanupPolicyError::InternalState);
     }
@@ -8419,10 +8420,10 @@ mod tests {
     }
 
     #[test]
-    fn reports_contract_thirty_three_and_preserves_legacy_formatting() {
+    fn reports_contract_thirty_four_and_preserves_legacy_formatting() {
         let _guard = ENGINE_TEST_LOCK.lock().unwrap();
         let (_temp, engine) = engine();
-        assert_eq!(library_version().ffi_contract_version, 33);
+        assert_eq!(library_version().ffi_contract_version, 34);
         assert_eq!(engine.library_version().unwrap(), library_version());
         assert_eq!(engine.format_size(1536).unwrap().display, "1.5 KB");
         assert!(engine.close());
@@ -9096,6 +9097,7 @@ mod tests {
             })
             .unwrap(),
         );
+        engine.set_permanent_cleanup_enabled(true).unwrap();
         let cargo = direct_toolchain_cargo();
         let enrollment = engine
             .inspect_direct_cargo_enrollment(direct_cargo_request(&cargo))
@@ -11685,29 +11687,38 @@ mod tests {
         let (_temp, engine) = engine();
         let initial = engine.get_permanent_cleanup_policy().unwrap();
         assert_eq!(initial.record_version, 1);
-        assert!(initial.enabled);
+        assert!(!initial.enabled);
         assert_eq!(initial.source, PermanentCleanupPolicySource::Default);
         assert_eq!(initial.revision, 0);
         assert_eq!(initial.updated_at_unix_ms, None);
-
-        let disabled = engine.set_permanent_cleanup_enabled(false).unwrap();
-        assert!(disabled.changed);
-        assert!(!disabled.policy.enabled);
-        assert_eq!(disabled.policy.source, PermanentCleanupPolicySource::Stored);
-        assert_eq!(disabled.policy.revision, 1);
-        assert!(disabled.policy.updated_at_unix_ms.is_some());
         assert_eq!(
-            engine.get_permanent_cleanup_policy().unwrap(),
-            disabled.policy
+            permanent_cleanup_policy_status(CorePermanentCleanupPolicy {
+                enabled: true,
+                source: CorePermanentCleanupPolicySource::Default,
+                revision: 0,
+                updated_at: None,
+            }),
+            Err(PermanentCleanupPolicyError::InternalState)
         );
 
-        let exact = engine.set_permanent_cleanup_enabled(false).unwrap();
+        let enabled = engine.set_permanent_cleanup_enabled(true).unwrap();
+        assert!(enabled.changed);
+        assert!(enabled.policy.enabled);
+        assert_eq!(enabled.policy.source, PermanentCleanupPolicySource::Stored);
+        assert_eq!(enabled.policy.revision, 1);
+        assert!(enabled.policy.updated_at_unix_ms.is_some());
+        assert_eq!(
+            engine.get_permanent_cleanup_policy().unwrap(),
+            enabled.policy
+        );
+
+        let exact = engine.set_permanent_cleanup_enabled(true).unwrap();
         assert!(!exact.changed);
-        assert_eq!(exact.policy, disabled.policy);
+        assert_eq!(exact.policy, enabled.policy);
 
         let reset = engine.reset_permanent_cleanup().unwrap();
         assert!(reset.changed);
-        assert!(reset.policy.enabled);
+        assert!(!reset.policy.enabled);
         assert_eq!(reset.policy.source, PermanentCleanupPolicySource::Default);
         assert_eq!(reset.policy.revision, 2);
         assert!(reset.policy.updated_at_unix_ms.is_some());

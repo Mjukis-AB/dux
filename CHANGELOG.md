@@ -1,5 +1,19 @@
 # Changelog
 
+- Made permanent-safe cleanup explicitly opt-in before its Release gate can be
+  considered. Fresh and reset state is now core-owned disabled Default state;
+  only durable Stored consent can admit an effect. Typed setting value schema
+  v2 preserves schema-v1 explicit Stored choices, strengthens legacy
+  Default-enabled epochs to disabled, and keeps corrupt/newer state fail-closed.
+  The claimed executor records disabled work as Rejected before any effect
+  receipt and the final journal gate still rechecks under the shared cleanup
+  exclusion, so the platform driver receives no call and removes zero bytes.
+  UniFFI contract v34 rejects impossible Default-enabled projections. Native
+  Settings requires an authoritative loaded policy and the exact
+  `ENABLE PERMANENT CLEANUP` phrase before its sole enable path; disabling and
+  reset-to-safe-default are immediate. Copy and accessibility now present the
+  disabled state as normal protection. Public Release execution remains
+  compiled out and all §17.3 gates remain open.
 - Raised `developer.rust.target` to revision 3 and made inclusive seven-day
   inactivity a deterministic authority requirement. Fresh evaluation and
   retained-snapshot replay now bind the exact scheduled instant, require

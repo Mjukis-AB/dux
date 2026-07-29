@@ -33,7 +33,7 @@ struct ExplorerRustTargetPlanReviewPath: Equatable, Sendable {
     let display: String
 }
 
-/// Transport-neutral contract-v33 record. Generated-FFI values are projected into this
+/// Transport-neutral contract-v34 record. Generated-FFI values are projected into this
 /// app-owned shape at the EngineService boundary before strict validation.
 struct ExplorerRustTargetPlanReviewRecord: Equatable, Sendable {
     let recordVersion: UInt32

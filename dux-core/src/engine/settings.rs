@@ -176,14 +176,15 @@ pub struct DiskPressurePolicyUpdate {
 /// Origin of the effective global permanent-cleanup switch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PermanentCleanupPolicySource {
-    /// Permanent cleanup is enabled by the versioned core default.
+    /// Permanent cleanup is disabled by the versioned core default.
     Default,
     /// The user explicitly stored the switch value.
     Stored,
 }
 
-/// Path-free global permanent-cleanup policy. This is a kill switch only; it
-/// never selects a target or turns a plan into an executable capability.
+/// Path-free global permanent-cleanup opt-in. It is a deny-by-default gate
+/// only; it never selects a target or turns a plan into an executable
+/// capability.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PermanentCleanupPolicy {
     pub enabled: bool,

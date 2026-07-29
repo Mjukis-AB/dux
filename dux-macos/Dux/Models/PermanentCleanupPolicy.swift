@@ -1,13 +1,14 @@
 import Foundation
 
-/// The origin of the path-free global permanent-cleanup kill switch.
+/// The origin of the path-free global permanent-cleanup opt-in gate.
 enum PermanentCleanupPolicyOrigin: Equatable, Sendable {
     case `default`
     case stored
 }
 
-/// A validated, path-free snapshot of the global permanent-cleanup switch.
-/// This setting never selects a target or grants execution authority.
+/// A validated, path-free snapshot of the global permanent-cleanup opt-in.
+/// The default denies effects; this setting never selects a target or grants
+/// execution authority.
 struct PermanentCleanupPolicy: Equatable, Sendable {
     let enabled: Bool
     let source: PermanentCleanupPolicyOrigin

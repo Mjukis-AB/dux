@@ -1257,13 +1257,12 @@ fn effect_receipt_revalidates_and_only_the_compatible_outcome_completes() {
 }
 
 #[test]
-fn global_permanent_cleanup_disable_rejects_before_effect_started() {
+fn rowless_permanent_cleanup_policy_rejects_before_effect_started() {
     let fixture = Fixture::new(
         CleanupMode::PermanentSafe,
         CandidateAction::RemoveKnownRegenerableContents,
         1,
     );
-    fixture.store.set_permanent_cleanup_enabled(false).unwrap();
     let claim = fixture.claim();
     claim.begin_validation(0, 0).unwrap();
     assert_eq!(
@@ -1284,6 +1283,7 @@ fn global_permanent_cleanup_disable_rejects_before_effect_started() {
         CandidateAction::RemoveKnownRegenerableContents,
         1,
     );
+    fixture.store.set_permanent_cleanup_enabled(true).unwrap();
     let claim = fixture.claim();
     claim.begin_validation(0, 0).unwrap();
     let receipt = claim

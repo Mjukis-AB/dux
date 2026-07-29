@@ -173,6 +173,14 @@ malformed response, DUX never retries it: Settings performs one read-only status
 reload, visibly blocks further mutations until authoritative state is available,
 and offers an explicit **Reload Cargo status** action if that read fails.
 
+Cleanup safety is deny-by-default. A fresh store and **Restore DUX default**
+both block permanent-cleanup effects. Settings can enable the path-free global
+gate only after loading its authoritative state and receiving the exact typed
+sentence `ENABLE PERMANENT CLEANUP`; disable and reset act immediately. This
+choice cannot select a target or approve a plan, and AI, CLI, schedules, low
+disk pressure, and display records cannot override it. Existing explicit stored
+consent migrates forward; an enabled legacy default does not.
+
 Explorer exposes FFI v33's **Permanent-safe plan preview** for one exact
 revision-3 Rust-target candidate. Preparing it passes only the candidate ID
 through the already-retained snapshot review. Rust derives and revalidates the

@@ -302,7 +302,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
     DuxSnapshotHistoryServing, DuxCleanupHistoryServing, DuxScanCoverageServing, HomeScanServing,
     Sendable
 {
-    fileprivate static let expectedFFIContractVersion: UInt32 = 33
+    fileprivate static let expectedFFIContractVersion: UInt32 = 34
     fileprivate static let expectedRecordVersion: UInt32 = 1
 
     private let state: EngineServiceState
@@ -538,7 +538,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
                 let update = try Self.permanentCleanupPolicyUpdate(
                     engine.resetPermanentCleanup()
                 )
-                guard update.policy.source == .default, update.policy.enabled else {
+                guard update.policy.source == .default, !update.policy.enabled else {
                     throw PermanentCleanupPolicyServiceError.invalidResponse
                 }
                 return update
@@ -1307,12 +1307,12 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         guard
             status.recordVersion == expectedRecordVersion,
             (status.revision == 0
-                && status.enabled
+                && !status.enabled
                 && source == .default
                 && status.updatedAtUnixMs == nil)
                 || (status.revision > 0
                     && status.updatedAtUnixMs.map { $0 >= 0 } == true
-                    && (source == .stored || (source == .default && status.enabled)))
+                    && (source == .stored || (source == .default && !status.enabled)))
         else {
             throw PermanentCleanupPolicyServiceError.invalidResponse
         }

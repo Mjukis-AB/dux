@@ -34,6 +34,7 @@ enum PermanentCleanupPolicyAccessibility {
     static let reset = "permanent-cleanup-reset"
     static let confirmation = "permanent-cleanup-confirmation"
     static let confirm = "permanent-cleanup-confirm"
+    static let cancel = "permanent-cleanup-cancel"
     static let error = "permanent-cleanup-error"
     static let progress = "permanent-cleanup-progress"
     static let status = "permanent-cleanup-status"
@@ -43,6 +44,7 @@ enum PermanentCleanupPolicyAccessibility {
         reset,
         confirmation,
         confirm,
+        cancel,
         error,
         progress,
         status,
@@ -128,11 +130,6 @@ enum CleanupHistoryClearAccessibility {
     ]
 }
 
-private enum PermanentCleanupConfirmationAction {
-    case enable
-    case reset
-}
-
 private enum CleanupExclusionConfirmationAction {
     case remove(CleanupExclusionPathObservation)
     case reset
@@ -153,8 +150,6 @@ struct DuxSettingsView: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var permanentCleanupConfirmation = ""
     @State private var showingPermanentCleanupConfirmation = false
-    @State private var permanentCleanupConfirmationAction:
-        PermanentCleanupConfirmationAction = .enable
     @State private var cleanupExclusionConfirmationAction:
         CleanupExclusionConfirmationAction?
     @State private var directCargoConfirmationAction:
@@ -359,8 +354,8 @@ struct DuxSettingsView: View {
 
             Section("Cleanup safety") {
                 Text(
-                    "The DUX default permits reviewed permanent-cleanup effects to run. "
-                        + "This switch is only a global safety gate; it never selects or "
+                    "DUX blocks permanent-cleanup effects until you explicitly enable them. "
+                        + "This opt-in is only a global safety gate; it never selects or "
                         + "approves a target, and DUX never lets AI approve or execute cleanup."
                 )
                 .foregroundStyle(.secondary)
@@ -388,7 +383,6 @@ struct DuxSettingsView: View {
                         get: { model.permanentCleanupPolicy?.enabled ?? false },
                         set: { requested in
                             if requested {
-                                permanentCleanupConfirmationAction = .enable
                                 permanentCleanupConfirmation = ""
                                 showingPermanentCleanupConfirmation = true
                             } else {
@@ -403,60 +397,57 @@ struct DuxSettingsView: View {
                 )
                 .accessibilityIdentifier(PermanentCleanupPolicyAccessibility.toggle)
                 .accessibilityHint(
-                    "Disabling is immediate; re-enabling requires typing the confirmation phrase"
+                    "Disabling is immediate; enabling requires typing the confirmation phrase"
                 )
 
                 if model.permanentCleanupPolicy?.enabled == false {
                     Label(
-                        "Permanent-cleanup effects are currently blocked",
-                        systemImage: "hand.raised.fill"
+                        "Permanent cleanup is off (safe default)",
+                        systemImage: "lock.shield.fill"
                     )
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(.secondary)
                     .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier(PermanentCleanupPolicyAccessibility.status)
                 }
 
                 if showingPermanentCleanupConfirmation {
                     VStack(alignment: .leading, spacing: 8) {
                         Text(
                             "To continue, type “"
-                                + AppModel.permanentCleanupReenableConfirmation
+                                + AppModel.permanentCleanupEnableConfirmation
                                 + "” exactly."
                         )
                         .font(.callout)
                         TextField(
-                            AppModel.permanentCleanupReenableConfirmation,
+                            AppModel.permanentCleanupEnableConfirmation,
                             text: $permanentCleanupConfirmation
                         )
                         .textFieldStyle(.roundedBorder)
                         .accessibilityIdentifier(PermanentCleanupPolicyAccessibility.confirmation)
+                        .accessibilityLabel("Permanent cleanup confirmation")
+                        .accessibilityHint(
+                            "Enter the exact phrase ENABLE PERMANENT CLEANUP"
+                        )
                         HStack {
                             Button("Cancel") {
                                 showingPermanentCleanupConfirmation = false
                                 permanentCleanupConfirmation = ""
                             }
-                            Button(
-                                permanentCleanupConfirmationAction == .reset
-                                    ? "Restore default"
-                                    : "Confirm re-enable"
-                            ) {
+                            .accessibilityIdentifier(PermanentCleanupPolicyAccessibility.cancel)
+                            Button("Confirm enable") {
                                 let phrase = permanentCleanupConfirmation
                                 showingPermanentCleanupConfirmation = false
                                 permanentCleanupConfirmation = ""
                                 Task {
-                                    switch permanentCleanupConfirmationAction {
-                                    case .enable:
-                                        await model.setPermanentCleanupEnabled(
-                                            true,
-                                            confirmation: phrase
-                                        )
-                                    case .reset:
-                                        await model.resetPermanentCleanup(confirmation: phrase)
-                                    }
+                                    await model.setPermanentCleanupEnabled(
+                                        true,
+                                        confirmation: phrase
+                                    )
                                 }
                             }
                             .disabled(
                                 permanentCleanupConfirmation
-                                    != AppModel.permanentCleanupReenableConfirmation
+                                    != AppModel.permanentCleanupEnableConfirmation
                             )
                             .keyboardShortcut(.defaultAction)
                             .accessibilityIdentifier(PermanentCleanupPolicyAccessibility.confirm)
@@ -467,13 +458,7 @@ struct DuxSettingsView: View {
 
                 HStack {
                     Button("Restore DUX default") {
-                        if model.permanentCleanupPolicy?.enabled == false {
-                            permanentCleanupConfirmationAction = .reset
-                            permanentCleanupConfirmation = ""
-                            showingPermanentCleanupConfirmation = true
-                        } else {
-                            Task { await model.resetPermanentCleanup() }
-                        }
+                        Task { await model.resetPermanentCleanup() }
                     }
                     .disabled(
                         model.permanentCleanupPolicy == nil
@@ -481,7 +466,7 @@ struct DuxSettingsView: View {
                     )
                     .accessibilityIdentifier(PermanentCleanupPolicyAccessibility.reset)
                     .accessibilityHint(
-                        "Restores the enabled DUX default and may require typed confirmation"
+                        "Restores the disabled DUX default"
                     )
 
                     if model.permanentCleanupPolicyState.isBusy {
@@ -1522,7 +1507,7 @@ struct DuxSettingsView: View {
     static func message(for failure: PermanentCleanupPolicyFailure) -> String {
         switch failure {
         case .confirmationRequired:
-            String(localized: "Type ENABLE PERMANENT CLEANUP exactly to re-enable this setting.")
+            String(localized: "Type ENABLE PERMANENT CLEANUP exactly to enable this setting.")
         case let .service(error):
             switch error {
             case .closed:

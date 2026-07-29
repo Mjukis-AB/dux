@@ -18,17 +18,12 @@ final class PermanentCleanupPolicyAppModelTests: XCTestCase {
         )
     }
 
-    func testReenableRequiresExactConfirmationAndSuccessfulChangesPublish() async {
+    func testEnableRequiresExactConfirmationAndSuccessfulChangesPublish() async {
         let engine = PermanentCleanupEngineSpy()
         let model = AppModel(engineService: engine)
 
         await model.loadPermanentCleanupPolicy()
-        XCTAssertEqual(model.permanentCleanupPolicy?.enabled, true)
-
-        await model.setPermanentCleanupEnabled(false)
         XCTAssertEqual(model.permanentCleanupPolicy?.enabled, false)
-        var setCount = await engine.setRequestCount()
-        XCTAssertEqual(setCount, 1)
 
         await model.setPermanentCleanupEnabled(true, confirmation: "enable permanent cleanup")
         XCTAssertEqual(model.permanentCleanupPolicy?.enabled, false)
@@ -36,35 +31,67 @@ final class PermanentCleanupPolicyAppModelTests: XCTestCase {
             model.permanentCleanupPolicyState,
             .failed(.confirmationRequired)
         )
-        setCount = await engine.setRequestCount()
-        XCTAssertEqual(setCount, 1)
+        var setCount = await engine.setRequestCount()
+        XCTAssertEqual(setCount, 0)
 
         await model.setPermanentCleanupEnabled(
             true,
-            confirmation: AppModel.permanentCleanupReenableConfirmation
+            confirmation: AppModel.permanentCleanupEnableConfirmation
         )
         XCTAssertEqual(model.permanentCleanupPolicy?.enabled, true)
+        setCount = await engine.setRequestCount()
+        XCTAssertEqual(setCount, 1)
+
+        await model.setPermanentCleanupEnabled(false)
+        XCTAssertEqual(model.permanentCleanupPolicy?.enabled, false)
         setCount = await engine.setRequestCount()
         XCTAssertEqual(setCount, 2)
     }
 
-    func testResetFromDisabledAlsoRequiresConfirmation() async {
+    func testEnableRequiresAnAuthoritativeLoadedDisabledPolicy() async {
+        let engine = PermanentCleanupEngineSpy()
+        let model = AppModel(engineService: engine)
+
+        await model.setPermanentCleanupEnabled(
+            true,
+            confirmation: AppModel.permanentCleanupEnableConfirmation
+        )
+
+        XCTAssertNil(model.permanentCleanupPolicy)
+        XCTAssertEqual(model.permanentCleanupPolicyState, .failed(.confirmationRequired))
+        let setCount = await engine.setRequestCount()
+        XCTAssertEqual(setCount, 0)
+    }
+
+    func testStoredEnabledConsentLoadsWithoutAnotherWrite() async {
+        let engine = PermanentCleanupEngineSpy()
+        await engine.seedStoredEnabledConsent()
+        let model = AppModel(engineService: engine)
+
+        await model.loadPermanentCleanupPolicy()
+
+        XCTAssertEqual(model.permanentCleanupPolicy?.enabled, true)
+        XCTAssertEqual(model.permanentCleanupPolicy?.source, .stored)
+        XCTAssertEqual(model.permanentCleanupPolicyState, .ready)
+        let setCount = await engine.setRequestCount()
+        XCTAssertEqual(setCount, 0)
+    }
+
+    func testResetFromEnabledImmediatelyRestoresDisabledDefault() async {
         let engine = PermanentCleanupEngineSpy()
         let model = AppModel(engineService: engine)
         await model.loadPermanentCleanupPolicy()
-        await model.setPermanentCleanupEnabled(false)
+        await model.setPermanentCleanupEnabled(
+            true,
+            confirmation: AppModel.permanentCleanupEnableConfirmation
+        )
+        XCTAssertEqual(model.permanentCleanupPolicy?.enabled, true)
 
         await model.resetPermanentCleanup()
         XCTAssertEqual(model.permanentCleanupPolicy?.enabled, false)
-        XCTAssertEqual(model.permanentCleanupPolicyState, .failed(.confirmationRequired))
-        var resetCount = await engine.resetRequestCount()
-        XCTAssertEqual(resetCount, 0)
-
-        await model.resetPermanentCleanup(
-            confirmation: AppModel.permanentCleanupReenableConfirmation
-        )
-        XCTAssertEqual(model.permanentCleanupPolicy?.enabled, true)
-        resetCount = await engine.resetRequestCount()
+        XCTAssertEqual(model.permanentCleanupPolicy?.source, .default)
+        XCTAssertEqual(model.permanentCleanupPolicyState, .ready)
+        let resetCount = await engine.resetRequestCount()
         XCTAssertEqual(resetCount, 1)
     }
 
@@ -89,7 +116,7 @@ final class PermanentCleanupPolicyAppModelTests: XCTestCase {
 
 private actor PermanentCleanupEngineSpy: EngineServing {
     private var policy = PermanentCleanupPolicy(
-        enabled: true,
+        enabled: false,
         source: .default,
         revision: 0,
         updatedAtUnixMilliseconds: nil
@@ -175,7 +202,7 @@ private actor PermanentCleanupEngineSpy: EngineServing {
     func resetPermanentCleanup() async throws -> PermanentCleanupPolicyUpdateResult {
         resetCount += 1
         policy = PermanentCleanupPolicy(
-            enabled: true,
+            enabled: false,
             source: .default,
             revision: policy.revision + 1,
             updatedAtUnixMilliseconds: Int64(policy.revision + 1)
@@ -185,6 +212,15 @@ private actor PermanentCleanupEngineSpy: EngineServing {
 
     func setRequestCount() -> Int { setCount }
     func resetRequestCount() -> Int { resetCount }
+
+    func seedStoredEnabledConsent() {
+        policy = PermanentCleanupPolicy(
+            enabled: true,
+            source: .stored,
+            revision: 1,
+            updatedAtUnixMilliseconds: 1
+        )
+    }
 
     func suspendNextLoad() {
         shouldSuspendNextLoad = true

@@ -2033,15 +2033,20 @@ native Windows handles deny delete sharing to prevent path replacement. No
 history, FFI, CLI, Swift, AI, plan, or effect API can obtain this guard; only
 the sealed mutable-journal lease couples it to an owner-generation claim.
 
-The global permanent-cleanup switch is a separate revisioned typed setting. A
-missing row means enabled by the versioned default; malformed or newer rows are
-errors, never an implicit enable or disable. Every write takes the same
-store-wide cleanup exclusion used by the journal. Immediately before a
-permanent effect records `effect_started`, the claim reloads the setting while
-holding that exclusion. Therefore a disable write cannot race an already
-admitted effect, and a disabled switch rejects the effect before any platform
-driver call. The setting is a kill switch only: it contains no target, path,
-plan, approval, or executor authority.
+The global permanent-cleanup opt-in is a separate revisioned typed setting. A
+missing row means disabled by the versioned default; malformed or newer rows
+are errors, never an implicit enable. Value schema v2 stores that default
+explicitly. Its version-aware decoder preserves a schema-v1 `Stored(true)` as
+the user's prior explicit consent, preserves `Stored(false)`, and strengthens a
+legacy `Default(true)` epoch to disabled because the old default did not prove
+first-enable confirmation. Reset rewrites legacy state as canonical v2
+`Default(false)`. Every write takes the same store-wide cleanup exclusion used
+by the journal. A permanent-safe claim observes the setting while holding that
+exclusion and durably rejects a disabled path before an effect receipt; the
+final `effect_started` transition rechecks it under the same exclusion.
+Therefore a setting write cannot race admission, and disabled state reaches no
+platform driver call. The setting contains no target, path, plan, approval, or
+executor authority.
 
 User cleanup exclusions are a separate bounded, lossless settings value. Each
 entry is an absolute lexical host path with no `.` or `..` components; entries
@@ -2670,17 +2675,19 @@ plan, approval, execution fence, or cleanup capability. The app requests scan
 cancellation and quiesces its generation-fenced publication driver before the
 maintenance/review/engine shutdown chain.
 
-Contract v22 adds path-free global permanent-cleanup kill-switch get/set/reset
-operations. Rust owns semantic setting validation and maps missing/default
-versus explicit stored state through a monotonic revision and optional update
-time. Swift receives only bounded enabled/provenance observations and typed
-storage errors; it cannot supply a target, plan, approval, callback, or
-executor input. EngineService rejects malformed status shapes, while the
-generation-fenced AppModel invalidates pending setting work during shutdown.
-The settings UI can disable immediately, but re-enable and reset use the exact
-typed confirmation sentence `ENABLE PERMANENT CLEANUP` before calling the
-setting. The path-bearing exclusion setting remains a separate boundary and is
-not included in this contract.
+Contract v22 introduced path-free global permanent-cleanup get/set/reset
+operations. Contract v34 changes their semantic default without adding fields:
+Rust maps missing/default state to disabled, preserves only versioned explicit
+stored consent, and rejects impossible `Default(true)` projections. Swift
+receives only bounded enabled/provenance observations and typed storage errors;
+it cannot supply a target, plan, approval, callback, or executor input.
+EngineService rejects malformed status shapes, while the generation-fenced
+AppModel requires an authoritative loaded disabled policy and the exact
+sentence `ENABLE PERMANENT CLEANUP` before the sole product enable call.
+Disabling and reset-to-disabled are immediate protection-strengthening
+operations and require no enable confirmation. Shutdown invalidates pending
+setting work. The path-bearing exclusion setting remains a separate boundary
+and is not included in this contract.
 
 Notification authorization is a separate Swift-owned observation boundary.
 Settings reads `UNUserNotificationCenter` status and may request Alert and Sound
@@ -2975,7 +2982,7 @@ coverage is labelled as Home-scoped and unknown coverage stays unknown.
 | CLI cleanup authority | Retired. The CLI remains a read-only scan/navigation/history/reveal client; its former raw permanent-delete adapter, shortcuts, workers, and lint exceptions are absent | Any future CLI cleanup must consume the same current reviewed-plan executor without accepting caller paths or restoring client-owned effects |
 | Centralized executor | A private production-core Rust-target driver and typed admission/journal/revalidation chain exist behind an engine-owned `PermanentSafeCleanup` task. The task consumes only the exact opaque review, mints all approval/session inputs inside Rust, serializes with Trash, returns path-free results, and quarantines unresolved claim/effect capabilities. A shared bounded descriptor-relative validator enforces the revision-3 seven-day cutoff before preview, before effect admission, and again inside the driver before any unlink; the driver retains exact per-entry identity/type/link/size/mtime checks. Its capacity sampler derives only from the approved plan's unanimous trusted kernel mount scope, rechecks macOS `statfs` identity/location/type, and brackets real effect time; missing telemetry remains unknown. UniFFI v33 can start this task only by irreversibly consuming the exact engine-bound opaque review; the separately confirmed Explorer Trash route cannot nominate its driver inputs. Native confirmation and observation are integrated behind the Debug-only feature condition; the shipped Release UI has no permanent-safe start action | Remaining §17.3 release gates |
 | Engine/FFI task and plan API | Core handle, pre-worker catalog/SQLite/snapshot compatibility handshake, bounded per-session registry, read-only formatting, durable full-scan plus deterministic candidate-evaluation tasks, and an engine-owned consume-once permanent-safe Rust-target cleanup task are implemented alongside the bounded history/detail/maintenance/settings APIs. Permanent-safe admission returns an unconsumed review on core foreign-engine, closed, full, busy, or quarantined refusal; FFI rejects a foreign object without touching it but makes every owning-engine attempt one-shot before core revalidation. Acceptance consumes/approves the child synchronously after final parent/expiry checks, accepted queued cancellation creates no journal, the worker owns session/journal/effect metadata, one cleanup reservation also fences synchronous Trash, and only path-free terminal results/failures enter task state. Ambiguous owner claim, post-claim admission, and post-effect settlement capabilities are retained in process-lifetime physical-store quarantine and can never repeat a platform effect. Scan admission and maintenance retain their existing overlap, schema, idle, and cancellation fences. UniFFI v33 retains the opaque review-to-task transition and input-free pending candidate-evaluation recovery task, adds strict Rust-target recency observations, and preserves explicit cancellation plus path-free polling; Swift independently validates all eight kind/result shapes and transitions, and the controller/browser consume permanent-safe execution only in internal Debug UI | Priority, cross-process scan leasing, and release-gated product cleanup remain later |
-| Global permanent-cleanup FFI switch | UniFFI contract v22 exposes only the revisioned enabled/default-or-stored observation and typed get/set/reset failures; the switch remains deny-only and cannot carry a path, plan, approval, callback, or executor input. Generated bindings are refreshed from the universal Debug XCFramework; Swift EngineService/AppModel/settings control maps every typed error, rejects malformed shapes, generation-fences work, and requires exact confirmation before re-enable/reset | The separate path-bearing exclusion boundary |
+| Global permanent-cleanup FFI opt-in | UniFFI contract v22 introduced only the revisioned enabled/default-or-stored observation and typed get/set/reset failures; contract v34 makes rowless/reset state disabled and rejects `Default(true)`. Value-schema-v2 migration preserves schema-v1 explicit Stored consent but strengthens legacy enabled Default epochs. The gate remains deny-only and cannot carry a path, plan, approval, callback, or executor input. Swift EngineService/AppModel/Settings maps every typed error, rejects malformed shapes, generation-fences work, requires an authoritative loaded policy plus exact confirmation before enable, and lets disable/reset strengthen protection immediately. The Release execution action remains absent | The separate path-bearing exclusion boundary and remaining §17.3 Release gates |
 | User cleanup exclusions | UniFFI contract v23 exposes a bounded lossless path-byte observation and replacement/reset operations with explicit source, revision, timestamp, and changed state. Rust validates absolute lexical prefixes, encoding, count, size, canonical order, storage races, and the shared cleanup exclusion lock; Swift treats returned bytes as display-only observations, allows adding a local prefix, and requires explicit confirmation before weakening protection by removing one or resetting all. No path is accepted as a plan, approval, callback, or executor input | Future planner/executor lifecycle and richer review presentation |
 | Candidate review intent and detail | UniFFI contract v26, Swift EngineService, and the native Explorer Candidates view expose four fixed scan-bound commands (`Select`, `ClearSelection`, `Dismiss`, `Restore`) plus bounded summary, historical path, and deterministic evidence pages. Rust revalidates the complete candidate/source binding and persists semantic review transitions transactionally; FFI and Swift independently enforce per-path and 24 MiB aggregate-page budgets, while Swift validates record version, exact scan/candidate IDs, immutable body, cursor/count/total shape, and generation before presentation. Contract v33 carries one current revision-3 Rust-target plan observation through an opaque child; the adapter independently checks the complete one-item permanent-safe shape, byte-exact current-target projection, the ordered evidence-kind sequence, lossless newest mtime, exact seven-day requirement, warnings, and short expiry, while exact marker paths remain bound and revalidated inside core. Controller/browser ownership refreshes the immutable child, releases it before its parent, and generation-fences candidate, snapshot, mode, cancellation, expiry, and shutdown. Internal Debug UI adds exact-plan confirmation and changed-since-plan/task-state presentation, but Release retains a locked unavailable execution label | Close §17.3 before enabling any permanent-safe cleanup effect in Release |
 | Cleanup-history observation and clearing | UniFFI contracts v25/v29 expose bounded path-free newest-first summary pages and exact-session detail with lifecycle, policy, estimates, optional verified capacity delta, ordered item outcomes, and warnings. Rust and Swift independently validate the complete graph and presentation shape; history selectors remain observations and cannot enter a planner or executor. Contract v30 adds one Settings-only, engine-bound, consume-once preview over the exact terminal five-table graph. The two-minute authority is monotonic, accepts no selector/path/plan/AI/effect input, preserves active/recovering/uncertain evidence, recomputes its SHA-256 witness under cleanup exclusion and an immediate transaction, authorizes deletes only from the five history tables, and reconciles every unproven commit to outcome-unknown without retry. Swift requires exact count/range confirmation, fences concurrent history publication, and performs one read-only terminal refresh; the UI promises no file cleanup or freed space | Live partial-progress controls and planner/executor wiring remain separate |

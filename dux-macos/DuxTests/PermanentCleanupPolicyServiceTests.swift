@@ -20,22 +20,22 @@ final class PermanentCleanupPolicyServiceTests: XCTestCase {
         let service = EngineService(engine: engine)
 
         let initial = try await service.loadPermanentCleanupPolicy()
-        XCTAssertTrue(initial.enabled)
+        XCTAssertFalse(initial.enabled)
         XCTAssertEqual(initial.source, .default)
         XCTAssertEqual(initial.revision, 0)
         XCTAssertNil(initial.updatedAtUnixMilliseconds)
 
-        let disabled = try await service.setPermanentCleanupEnabled(false)
-        XCTAssertFalse(disabled.policy.enabled)
-        XCTAssertEqual(disabled.policy.source, .stored)
-        XCTAssertTrue(disabled.changed)
+        let enabled = try await service.setPermanentCleanupEnabled(true)
+        XCTAssertTrue(enabled.policy.enabled)
+        XCTAssertEqual(enabled.policy.source, .stored)
+        XCTAssertTrue(enabled.changed)
 
-        let unchanged = try await service.setPermanentCleanupEnabled(false)
+        let unchanged = try await service.setPermanentCleanupEnabled(true)
         XCTAssertFalse(unchanged.changed)
-        XCTAssertEqual(unchanged.policy, disabled.policy)
+        XCTAssertEqual(unchanged.policy, enabled.policy)
 
         let reset = try await service.resetPermanentCleanup()
-        XCTAssertTrue(reset.policy.enabled)
+        XCTAssertFalse(reset.policy.enabled)
         XCTAssertEqual(reset.policy.source, .default)
         XCTAssertTrue(reset.changed)
 
@@ -50,35 +50,43 @@ final class PermanentCleanupPolicyServiceTests: XCTestCase {
     }
 
     func testMalformedDefaultStateIsRejectedFailClosed() async {
-        let service = EngineService(engine: InvalidPermanentCleanupPolicyEngine())
+        for revision: UInt64 in [0, 7] {
+            let service = EngineService(
+                engine: InvalidPermanentCleanupPolicyEngine(revision: revision)
+            )
 
-        do {
-            _ = try await service.loadPermanentCleanupPolicy()
-            XCTFail("Expected malformed permanent-cleanup response rejection")
-        } catch let error as PermanentCleanupPolicyServiceError {
-            XCTAssertEqual(error, .invalidResponse)
-        } catch {
-            XCTFail("Unexpected error: \(error)")
+            do {
+                _ = try await service.loadPermanentCleanupPolicy()
+                XCTFail("Expected malformed permanent-cleanup response rejection")
+            } catch let error as PermanentCleanupPolicyServiceError {
+                XCTAssertEqual(error, .invalidResponse)
+            } catch {
+                XCTFail("Unexpected error: \(error)")
+            }
         }
     }
 }
 
 private final class InvalidPermanentCleanupPolicyEngine: DuxEngine, @unchecked Sendable {
+    private let revision: UInt64
+
     required init(unsafeFromHandle handle: UInt64) {
+        revision = 0
         super.init(unsafeFromHandle: handle)
     }
 
-    init() {
+    init(revision: UInt64) {
+        self.revision = revision
         super.init(noHandle: NoHandle())
     }
 
     override func getPermanentCleanupPolicy() throws -> PermanentCleanupPolicyStatus {
         PermanentCleanupPolicyStatus(
             recordVersion: 1,
-            enabled: false,
+            enabled: true,
             source: .default,
-            revision: 0,
-            updatedAtUnixMs: nil
+            revision: revision,
+            updatedAtUnixMs: revision == 0 ? nil : 1
         )
     }
 }
