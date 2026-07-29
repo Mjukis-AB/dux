@@ -42,7 +42,7 @@ enum ExplorerCandidateCategory: Equatable, Hashable, Sendable {
     }
 }
 
-enum ExplorerCandidateSafety: Equatable, Sendable {
+enum ExplorerCandidateSafety: Equatable, Hashable, Sendable {
     case safeRegenerable
     case safeEvictable
     case reviewRequired
@@ -60,7 +60,7 @@ enum ExplorerCandidateSafety: Equatable, Sendable {
     }
 }
 
-enum ExplorerCandidateAction: Equatable, Sendable {
+enum ExplorerCandidateAction: Equatable, Hashable, Sendable {
     case removeKnownRegenerableContents
     case evictLocalCopy
     case moveToTrash
@@ -200,6 +200,23 @@ struct ExplorerCandidateSummary: Equatable, Identifiable, Sendable {
     let blockers: [ExplorerCandidateBlockReason]
     let createdAt: ExplorerSnapshotTimestamp
     let status: ExplorerCandidateStatus
+
+    /// Revision-bound display copy only. Unknown catalog entries deliberately
+    /// retain their raw rule ID instead of guessing what they represent.
+    var ruleDisplayName: String {
+        switch (ruleID, ruleRevision) {
+        case ("developer.homebrew.cache", 1):
+            "Homebrew downloads"
+        case ("developer.python.pip_cache", 1):
+            "pip package cache"
+        case ("developer.rust.target", 3):
+            "Rust build output"
+        case ("developer.python.pycache", 2):
+            "Python bytecode cache"
+        default:
+            ruleID
+        }
+    }
 }
 
 struct ExplorerCandidateSummaryPage: Equatable, Sendable {
@@ -208,6 +225,52 @@ struct ExplorerCandidateSummaryPage: Equatable, Sendable {
     let nextCursor: UInt16?
     let totalCandidates: UInt16
     let candidates: [ExplorerCandidateSummary]
+
+    var findingGroups: [ExplorerCandidateFindingGroup] {
+        var groups: [ExplorerCandidateFindingGroup.ID: ExplorerCandidateFindingGroup] = [:]
+        var order: [ExplorerCandidateFindingGroup.ID] = []
+        for candidate in candidates {
+            let id = ExplorerCandidateFindingGroup.ID(
+                category: candidate.category,
+                safety: candidate.safety,
+                action: candidate.action
+            )
+            if var group = groups[id] {
+                group.count += 1
+                if !candidate.blockers.isEmpty {
+                    group.blockedCount += 1
+                }
+                groups[id] = group
+            } else {
+                order.append(id)
+                groups[id] = ExplorerCandidateFindingGroup(
+                    id: id,
+                    count: 1,
+                    blockedCount: candidate.blockers.isEmpty ? 0 : 1
+                )
+            }
+        }
+        return order.compactMap { groups[$0] }
+    }
+}
+
+/// A page-local visual grouping. It intentionally carries neither candidate
+/// IDs nor byte totals: candidates can overlap, and presentation must not turn
+/// a convenient grouping into cleanup authority or an inflated reclaim claim.
+struct ExplorerCandidateFindingGroup: Equatable, Identifiable, Sendable {
+    struct ID: Equatable, Hashable, Sendable {
+        let category: ExplorerCandidateCategory
+        let safety: ExplorerCandidateSafety
+        let action: ExplorerCandidateAction
+    }
+
+    let id: ID
+    var count: Int
+    var blockedCount: Int
+
+    var category: ExplorerCandidateCategory { id.category }
+    var safety: ExplorerCandidateSafety { id.safety }
+    var action: ExplorerCandidateAction { id.action }
 }
 
 struct ExplorerCandidatePathPage: Equatable, Sendable {

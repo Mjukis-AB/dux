@@ -1,5 +1,29 @@
 # Changelog
 
+- Completed the Warning/Critical targeted-reclaim scan with deterministic,
+  read-only Homebrew and pip findings. Candidate evaluator revision 4 and the
+  reviewed 13-rule catalog add exact direct-child
+  `developer.homebrew.cache` and `developer.python.pip_cache` revision-1
+  matches only inside the Rust-derived current-account `Library/Caches`
+  scope. Both require candidate-local coverage and complete inclusive
+  seven-day newest-mtime evidence, retain descendant-symlink observations,
+  and remain unschedulable and non-executable behind
+  `MissingOrIncompleteEvidence` plus `ProtectedPath`; recency is never treated
+  as provider inactivity. Immutable-snapshot replay reproduces the same
+  result, scope/scan-ID mismatches fail closed, pending known-cache evaluation
+  is not recovered without live OS-account root proof, and targeted durable
+  reuse rejects stale evaluator/catalog observations. Recommendations'
+  **Review findings** now opens the exact scan directly in Candidates. The
+  native view adds revision-bound provider names, raw rule/revision detail,
+  page-local category/safety/action cards that do not sum overlapping
+  estimates, honest “Observed estimate” labels, and bounded 64-item
+  previous/next paging. Independent provider reviews document the discovery
+  and future-promotion boundaries; no plan, approval, AI, scheduler, command,
+  or filesystem-effect authority was added. The final checkpoint passes the
+  serialized Rust/FFI suites (including both isolated effect regressions), all
+  444 native tests, policy and destructive-call gates, byte-identical
+  Debug/Release bindings, and universal arm64/x86_64 Debug and Release builds
+  targeting macOS 14.
 - Added the Rust-owned known-user-cache foundation to the Warning/Critical
   focused scanner through UniFFI contract v39. The engine derives the single
   current account `Library/Caches` root from OS account evidence, never from

@@ -698,6 +698,29 @@ final class ExplorerSnapshotBrowserTests: XCTestCase {
         XCTAssertFalse(calls.contains(.acquireLatest))
     }
 
+    func testPreparedTargetedFindingReviewOpensExactCandidatesWithoutLoadingLatestHome() async {
+        let reviews = BrowserReviewStub(mode: .candidatesAvailable)
+        let browser = ExplorerSnapshotBrowserModel(reviews: reviews)
+        let targetedScanID = "scan:targeted:caches"
+
+        browser.prepareExactCandidateReview(scanID: targetedScanID)
+        await browser.present(id: UUID())
+
+        XCTAssertEqual(browser.phase, .ready)
+        XCTAssertEqual(browser.scanID, targetedScanID)
+        XCTAssertEqual(browser.contentMode, .candidates)
+        XCTAssertEqual(browser.candidatePage?.scanID, targetedScanID)
+        XCTAssertEqual(browser.candidatePage?.candidates.count, 2)
+        let calls = await reviews.recordedCalls()
+        XCTAssertTrue(calls.contains(.acquire(scanID: targetedScanID)))
+        XCTAssertTrue(calls.contains(.candidateSummaries(
+            scanID: targetedScanID,
+            cursor: 0,
+            limit: ExplorerCandidateDetailAdapter.maximumPageLimit
+        )))
+        XCTAssertFalse(calls.contains(.acquireLatest))
+    }
+
     func testHistoryFailureLeavesConfirmedSnapshotReady() async {
         let reviews = BrowserReviewStub()
         let history = BrowserHistoryStub(fails: true)
@@ -1050,6 +1073,42 @@ final class ExplorerSnapshotBrowserTests: XCTestCase {
         XCTAssertTrue(calls.contains(.candidateEvidence(
             scanID: "scan:latest",
             candidateID: candidate.candidateID,
+            cursor: 64,
+            limit: ExplorerCandidateDetailAdapter.maximumPageLimit
+        )))
+    }
+
+    func testCandidateSummaryPagesMoveThroughBoundedFindingsAndClearSelection() async throws {
+        let reviews = BrowserReviewStub(mode: .candidateSummaryPages)
+        let browser = ExplorerSnapshotBrowserModel(reviews: reviews)
+        await browser.reloadLatest()
+        await browser.selectContentMode(.candidates)
+
+        XCTAssertEqual(browser.candidatePage?.cursor, 0)
+        XCTAssertEqual(browser.candidatePage?.candidates.count, 64)
+        XCTAssertEqual(browser.candidatePage?.nextCursor, 64)
+        XCTAssertFalse(browser.hasPreviousCandidatePage)
+        XCTAssertTrue(browser.hasNextCandidatePage)
+        let selected = try XCTUnwrap(browser.candidatePage?.candidates.first)
+        await browser.selectCandidate(selected.candidateID)
+        XCTAssertEqual(browser.selectedCandidateID, selected.candidateID)
+
+        await browser.showNextCandidatePage()
+
+        XCTAssertEqual(browser.candidatePage?.cursor, 64)
+        XCTAssertEqual(browser.candidatePage?.candidates.count, 1)
+        XCTAssertNil(browser.candidatePage?.nextCursor)
+        XCTAssertTrue(browser.hasPreviousCandidatePage)
+        XCTAssertFalse(browser.hasNextCandidatePage)
+        XCTAssertNil(browser.selectedCandidateID)
+
+        await browser.showPreviousCandidatePage()
+
+        XCTAssertEqual(browser.candidatePage?.cursor, 0)
+        XCTAssertEqual(browser.candidatePage?.candidates.count, 64)
+        let calls = await reviews.recordedCalls()
+        XCTAssertTrue(calls.contains(.candidateSummaries(
+            scanID: "scan:latest",
             cursor: 64,
             limit: ExplorerCandidateDetailAdapter.maximumPageLimit
         )))
@@ -1704,6 +1763,7 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
         case offPageCategoryMismatch
         case refreshedTreemapMismatch
         case candidatesAvailable
+        case candidateSummaryPages
         case suspendedCandidateDetail
         case candidateDetailExpired
         case candidateDetailMalformed
@@ -1851,6 +1911,7 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
         calls.append(.candidateSummaries(scanID: scanID, cursor: cursor, limit: limit))
         guard
             mode == .candidatesAvailable
+                || mode == .candidateSummaryPages
                 || mode == .suspendedCandidateDetail
                 || mode == .candidateDetailExpired
                 || mode == .candidateDetailMalformed
@@ -1863,12 +1924,18 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
             throw ExplorerCandidateDetailError.reviewNotAcquired
         }
         let candidates = candidateSummaries()
+        let start = Int(cursor)
+        guard start <= candidates.count else {
+            throw ExplorerCandidateDetailError.invalidRequest
+        }
+        let end = min(start + Int(limit), candidates.count)
+        let page = Array(candidates[start ..< end])
         return ExplorerCandidateSummaryPage(
             scanID: scanID,
             cursor: cursor,
-            nextCursor: nil,
+            nextCursor: end < candidates.count ? UInt16(end) : nil,
             totalCandidates: UInt16(candidates.count),
-            candidates: candidates
+            candidates: page
         )
     }
 
@@ -1889,6 +1956,7 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
         }
         guard
             mode == .candidatesAvailable
+                || mode == .candidateSummaryPages
                 || mode == .suspendedCandidateDetail
                 || mode == .candidateDetailMalformed
                 || mode == .rustTargetPlanReviewAvailable
@@ -1942,6 +2010,7 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
         }
         guard
             mode == .candidatesAvailable
+                || mode == .candidateSummaryPages
                 || mode == .suspendedCandidateDetail
                 || mode == .candidateDetailMalformed
                 || mode == .rustTargetPlanReviewAvailable
@@ -2449,7 +2518,12 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
     }
 
     private func candidateSummaries() -> [ExplorerCandidateSummary] {
-        [
+        if mode == .candidateSummaryPages {
+            return (0 ... 64).map {
+                browserCandidateSummary(id: "candidate:page-\($0)")
+            }
+        }
+        return [
             candidateSummary(id: "candidate:browser-0"),
             candidateSummary(id: "candidate:browser-1"),
         ]

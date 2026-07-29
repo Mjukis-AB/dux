@@ -1,21 +1,21 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use thiserror::Error;
 
 use super::{
     CandidateBatch, CandidateEvaluationError, CandidateEvaluationScope, MAX_EVALUATED_CANDIDATES,
-    ObservedArtifact, candidate_evaluation_scope, empty_candidate_batch,
-    evaluate_observed_artifacts,
+    ObservedArtifact, USER_CACHE_BINDINGS, candidate_evaluation_scope,
+    candidate_has_partial_coverage, evaluate_observed_artifacts, project_rule_id,
 };
-use crate::domain::{Candidate, ScanCoverage, ScanCoverageStatus};
+use crate::domain::{BlockReason, Candidate, ScanCoverage};
 use crate::persistence::snapshot::{
     HostValue, SnapshotNodeKind, SnapshotReviewDocument, SnapshotTimestamp,
 };
 use crate::persistence::{CandidateBatchMaterializationBudget, CompleteCandidateRecord};
 use crate::projection::{
-    ARTIFACT_PATTERNS, ArtifactKind, ArtifactMarkerLocation, ArtifactMarkerMatch, ArtifactPattern,
+    ARTIFACT_PATTERNS, ArtifactMarkerLocation, ArtifactMarkerMatch, ArtifactPattern,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
@@ -51,8 +51,7 @@ impl DirectoryMarkers {
 }
 
 struct PendingArtifact {
-    component: &'static str,
-    kind: ArtifactKind,
+    rule_id: &'static str,
     evidence_nodes: Vec<u64>,
 }
 
@@ -64,7 +63,16 @@ struct DirectoryFrame {
     newest_mtime: Option<SystemTime>,
     mtime_coverage_complete: bool,
     known_allocated_bytes: u64,
+    saw_symlink_boundary: bool,
     pending: Option<PendingArtifact>,
+}
+
+struct SnapshotReplayContext<'a> {
+    document: &'a SnapshotReviewDocument,
+    root: &'a Path,
+    coverage: &'a ScanCoverage,
+    scope: CandidateEvaluationScope,
+    evaluated_at: SystemTime,
 }
 
 pub(crate) fn verify_snapshot_candidate_evaluation(
@@ -73,7 +81,12 @@ pub(crate) fn verify_snapshot_candidate_evaluation(
     expected: &[CompleteCandidateRecord],
     evaluated_at: SystemTime,
 ) -> Result<(), CandidateSnapshotReplayError> {
-    let replayed = replay_snapshot_candidate_evaluation(document, coverage, evaluated_at)?;
+    let replayed = replay_snapshot_candidate_evaluation(
+        document,
+        coverage,
+        evaluated_at,
+        CandidateEvaluationScope::SelectedScanRoot,
+    )?;
     exact_batch_matches(&replayed, expected)
         .then_some(())
         .ok_or(CandidateSnapshotReplayError::BatchMismatch)
@@ -83,22 +96,23 @@ pub(crate) fn replay_snapshot_candidate_evaluation(
     document: &SnapshotReviewDocument,
     coverage: &ScanCoverage,
     evaluated_at: SystemTime,
+    scope: CandidateEvaluationScope,
 ) -> Result<CandidateBatch, CandidateSnapshotReplayError> {
     let root = document
         .metadata
         .root
         .to_path_buf()
         .map_err(|_| CandidateSnapshotReplayError::InvalidSnapshot)?;
-    if candidate_evaluation_scope(&document.metadata.scan_id)
-        == CandidateEvaluationScope::UserCacheDirectory
-    {
-        return Ok(empty_candidate_batch(
-            &document.metadata.scan_id,
-            &root,
-            coverage,
-            evaluated_at,
-        ));
+    if candidate_evaluation_scope(&document.metadata.scan_id) != scope {
+        return Err(CandidateSnapshotReplayError::InvalidSnapshot);
     }
+    let replay_context = SnapshotReplayContext {
+        document,
+        root: &root,
+        coverage,
+        scope,
+        evaluated_at,
+    };
     let mut frames = Vec::new();
     frames
         .try_reserve_exact(
@@ -110,21 +124,16 @@ pub(crate) fn replay_snapshot_candidate_evaluation(
     let mut artifacts = Vec::new();
     let mut observed_matches = 0_usize;
     let mut materialization_budget = CandidateBatchMaterializationBudget::default();
-    let base_blocker_count = 1 + usize::from(coverage.status() != ScanCoverageStatus::Complete);
-
     for (index, node) in document.nodes.iter().enumerate() {
         while frames
             .last()
             .is_some_and(|frame: &DirectoryFrame| frame.depth >= node.depth)
         {
             close_directory(
-                document,
-                &root,
+                &replay_context,
                 &mut frames,
                 &mut artifacts,
                 &mut materialization_budget,
-                base_blocker_count,
-                evaluated_at,
             )?;
         }
 
@@ -133,11 +142,31 @@ pub(crate) fn replay_snapshot_candidate_evaluation(
             let ancestor_classified = frames
                 .last()
                 .is_some_and(|frame| frame.suppresses_descendants);
-            let classification = classify_directory(
-                node.name.as_ref(),
-                frames.last().map(|frame| &frame.markers),
-                &markers,
-            );
+            let classification = match scope {
+                CandidateEvaluationScope::SelectedScanRoot => classify_directory(
+                    node.name.as_ref(),
+                    frames.last().map(|frame| &frame.markers),
+                    &markers,
+                )
+                .map(|(pattern, evidence_nodes)| {
+                    project_rule_id(pattern.kind, pattern.component).map(|rule_id| {
+                        PendingArtifact {
+                            rule_id,
+                            evidence_nodes,
+                        }
+                    })
+                })
+                .transpose()
+                .map_err(map_evaluation)?,
+                CandidateEvaluationScope::UserCacheDirectory => {
+                    classify_user_cache_directory(node.name.as_ref(), node.parent, node.depth).map(
+                        |binding| PendingArtifact {
+                            rule_id: binding.rule_id,
+                            evidence_nodes: Vec::new(),
+                        },
+                    )
+                }
+            };
             let classified = classification.is_some();
             let pending = if classification.is_some() && !ancestor_classified {
                 observed_matches = observed_matches.saturating_add(1);
@@ -149,11 +178,7 @@ pub(crate) fn replay_snapshot_candidate_evaluation(
                         },
                     ));
                 }
-                classification.map(|(pattern, evidence_nodes)| PendingArtifact {
-                    component: pattern.component,
-                    kind: pattern.kind,
-                    evidence_nodes,
-                })
+                classification
             } else {
                 None
             };
@@ -169,6 +194,7 @@ pub(crate) fn replay_snapshot_candidate_evaluation(
                     .map_err(|_| CandidateSnapshotReplayError::InvalidSnapshot)?,
                 mtime_coverage_complete: node.modified_at.is_some(),
                 known_allocated_bytes: 0,
+                saw_symlink_boundary: false,
                 pending,
             });
         } else {
@@ -188,17 +214,15 @@ pub(crate) fn replay_snapshot_candidate_evaluation(
             } else if node.kind == SnapshotNodeKind::File {
                 parent.mtime_coverage_complete = false;
             }
+            parent.saw_symlink_boundary |= node.kind == SnapshotNodeKind::Symlink;
         }
     }
     while !frames.is_empty() {
         close_directory(
-            document,
-            &root,
+            &replay_context,
             &mut frames,
             &mut artifacts,
             &mut materialization_budget,
-            base_blocker_count,
-            evaluated_at,
         )?;
     }
 
@@ -213,33 +237,47 @@ pub(crate) fn replay_snapshot_candidate_evaluation(
 }
 
 fn close_directory(
-    document: &SnapshotReviewDocument,
-    root: &std::path::Path,
+    context: &SnapshotReplayContext<'_>,
     frames: &mut Vec<DirectoryFrame>,
     artifacts: &mut Vec<ObservedArtifact>,
     materialization_budget: &mut CandidateBatchMaterializationBudget,
-    base_blocker_count: usize,
-    evaluated_at: SystemTime,
 ) -> Result<(), CandidateSnapshotReplayError> {
     let frame = frames
         .pop()
         .ok_or(CandidateSnapshotReplayError::InvalidSnapshot)?;
     if let Some(pending) = frame.pending {
-        let path = historical_path(document, root, frame.node)?;
+        let path = historical_path(context.document, context.root, frame.node)?;
+        let partial_coverage =
+            candidate_has_partial_coverage(context.scope, context.coverage, context.root, &path);
         let evidence_paths = pending
             .evidence_nodes
             .into_iter()
-            .map(|node| historical_path(document, root, node))
+            .map(|node| historical_path(context.document, context.root, node))
             .collect::<Result<Vec<_>, _>>()?;
-        let is_rust_target = pending.component == "target" && pending.kind == ArtifactKind::Rust;
-        let recency_satisfied = is_rust_target
+        let minimum_age = match pending.rule_id {
+            "developer.rust.target" => Some(super::SAFE_RUST_RULE_MINIMUM_AGE),
+            "developer.homebrew.cache" | "developer.python.pip_cache" => {
+                Some(super::SAFE_USER_CACHE_MINIMUM_AGE)
+            }
+            _ => None,
+        };
+        let recency_satisfied = minimum_age.is_some()
+            && !partial_coverage
             && frame.mtime_coverage_complete
             && frame.newest_mtime.is_some_and(|newest_mtime| {
-                evaluated_at
+                context
+                    .evaluated_at
                     .duration_since(newest_mtime)
-                    .is_ok_and(|age| age >= super::SAFE_RUST_RULE_MINIMUM_AGE)
+                    .is_ok_and(|age| age >= minimum_age.expect("checked above"))
             });
-        let blocker_count = base_blocker_count + usize::from(is_rust_target && !recency_satisfied);
+        let is_user_cache = USER_CACHE_BINDINGS
+            .iter()
+            .any(|binding| binding.rule_id == pending.rule_id);
+        let blocker_count = 1
+            + usize::from(partial_coverage)
+            + usize::from(minimum_age.is_some() && !partial_coverage && !recency_satisfied)
+            + usize::from(is_user_cache)
+            + usize::from(frame.saw_symlink_boundary);
         let scalar_evidence_count = usize::from(recency_satisfied);
         if !materialization_budget
             .charge_observed_candidate(&path, &evidence_paths, scalar_evidence_count, blocker_count)
@@ -252,12 +290,21 @@ fn close_directory(
             .map_err(|_| CandidateSnapshotReplayError::InvalidSnapshot)?;
         artifacts.push(ObservedArtifact {
             path,
-            component: pending.component,
-            kind: pending.kind,
+            rule_id: pending.rule_id,
             size: frame.known_allocated_bytes,
             newest_mtime: frame.newest_mtime,
             mtime_coverage_complete: frame.mtime_coverage_complete,
             evidence_paths,
+            additional_blockers: {
+                let mut blockers = Vec::with_capacity(3);
+                if is_user_cache {
+                    blockers.push(BlockReason::MissingOrIncompleteEvidence);
+                }
+                if frame.saw_symlink_boundary {
+                    blockers.push(BlockReason::SymlinkBoundary);
+                }
+                blockers
+            },
         });
     }
     if let Some(parent) = frames.last_mut() {
@@ -269,6 +316,7 @@ fn close_directory(
             update_newest(&mut parent.newest_mtime, newest);
         }
         parent.mtime_coverage_complete &= frame.mtime_coverage_complete;
+        parent.saw_symlink_boundary |= frame.saw_symlink_boundary;
     }
     Ok(())
 }
@@ -355,6 +403,20 @@ fn classify_directory(
         evidence.push(node);
     }
     Some((pattern, evidence))
+}
+
+fn classify_user_cache_directory(
+    name: Option<&HostValue>,
+    parent: Option<u64>,
+    depth: u32,
+) -> Option<&'static super::UserCacheBinding> {
+    if parent != Some(0) || depth != 1 {
+        return None;
+    }
+    let name = name?;
+    USER_CACHE_BINDINGS
+        .iter()
+        .find(|binding| name.matches_ascii_component(binding.component))
 }
 
 fn historical_path(
@@ -447,7 +509,9 @@ fn map_evaluation(error: CandidateEvaluationError) -> CandidateSnapshotReplayErr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{ScanCoverage, ScanId};
+    use crate::domain::{
+        BlockReason, Evidence, ScanCoverage, ScanCoverageStatus, ScanId, ScanIssue, ScanIssueKind,
+    };
     use crate::persistence::snapshot::{
         HostValue, SnapshotDocument, SnapshotMetadata, SnapshotNode, SnapshotScanFlags,
         SnapshotTotals,
@@ -460,8 +524,13 @@ mod tests {
         let maximum =
             SnapshotReviewDocument::from_document_for_test(rust_targets(MAX_EVALUATED_CANDIDATES))
                 .unwrap();
-        let batch =
-            replay_snapshot_candidate_evaluation(&maximum, &coverage, evaluated_at).unwrap();
+        let batch = replay_snapshot_candidate_evaluation(
+            &maximum,
+            &coverage,
+            evaluated_at,
+            CandidateEvaluationScope::SelectedScanRoot,
+        )
+        .unwrap();
         assert_eq!(batch.candidates.len(), MAX_EVALUATED_CANDIDATES);
 
         let overflow = SnapshotReviewDocument::from_document_for_test(rust_targets(
@@ -469,7 +538,12 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(
-            replay_snapshot_candidate_evaluation(&overflow, &coverage, evaluated_at),
+            replay_snapshot_candidate_evaluation(
+                &overflow,
+                &coverage,
+                evaluated_at,
+                CandidateEvaluationScope::SelectedScanRoot,
+            ),
             Err(CandidateSnapshotReplayError::Evaluation(
                 CandidateEvaluationError::CandidateLimitExceeded {
                     observed_at_least: MAX_EVALUATED_CANDIDATES + 1,
@@ -487,7 +561,12 @@ mod tests {
             SnapshotReviewDocument::from_document_for_test(deep_rust_targets(200, 30, 900))
                 .unwrap();
         assert_eq!(
-            replay_snapshot_candidate_evaluation(&document, &coverage, evaluated_at),
+            replay_snapshot_candidate_evaluation(
+                &document,
+                &coverage,
+                evaluated_at,
+                CandidateEvaluationScope::SelectedScanRoot,
+            ),
             Err(CandidateSnapshotReplayError::ResourceLimit)
         );
     }
@@ -514,10 +593,20 @@ mod tests {
         let evaluated_at =
             UNIX_EPOCH + Duration::from_secs(10) + super::super::SAFE_RUST_RULE_MINIMUM_AGE;
 
-        let first =
-            replay_snapshot_candidate_evaluation(&document, &coverage, evaluated_at).unwrap();
-        let repeated =
-            replay_snapshot_candidate_evaluation(&document, &coverage, evaluated_at).unwrap();
+        let first = replay_snapshot_candidate_evaluation(
+            &document,
+            &coverage,
+            evaluated_at,
+            CandidateEvaluationScope::SelectedScanRoot,
+        )
+        .unwrap();
+        let repeated = replay_snapshot_candidate_evaluation(
+            &document,
+            &coverage,
+            evaluated_at,
+            CandidateEvaluationScope::SelectedScanRoot,
+        )
+        .unwrap();
         assert_eq!(first.candidates(), repeated.candidates());
         assert_eq!(
             first.context_digest_sha256(),
@@ -538,6 +627,7 @@ mod tests {
             &document,
             &coverage,
             evaluated_at + Duration::from_nanos(1),
+            CandidateEvaluationScope::SelectedScanRoot,
         )
         .unwrap();
         assert_ne!(
@@ -548,6 +638,7 @@ mod tests {
             &document,
             &coverage,
             evaluated_at - Duration::from_nanos(1),
+            CandidateEvaluationScope::SelectedScanRoot,
         )
         .unwrap();
         assert_eq!(
@@ -568,15 +659,140 @@ mod tests {
         missing_file_time.nodes[3].modified_at = Some(old);
         let missing_file_time =
             SnapshotReviewDocument::from_document_for_test(missing_file_time).unwrap();
-        let missing =
-            replay_snapshot_candidate_evaluation(&missing_file_time, &coverage, evaluated_at)
-                .unwrap();
+        let missing = replay_snapshot_candidate_evaluation(
+            &missing_file_time,
+            &coverage,
+            evaluated_at,
+            CandidateEvaluationScope::SelectedScanRoot,
+        )
+        .unwrap();
         assert_eq!(
             missing.candidates()[0].blockers(),
             [
                 crate::domain::BlockReason::MissingModificationTime,
                 crate::domain::BlockReason::ProtectedPath,
             ]
+        );
+    }
+
+    #[test]
+    fn user_cache_replay_is_scope_bound_direct_and_candidate_local() {
+        let old = SnapshotTimestamp::new(86_400, 0).unwrap();
+        let mut document = user_caches();
+        for node in &mut document.nodes {
+            if matches!(
+                node.kind,
+                SnapshotNodeKind::Directory | SnapshotNodeKind::File
+            ) {
+                node.modified_at = Some(old);
+            }
+        }
+        let root = snapshot_test_root();
+        let sibling_exclusion =
+            ScanIssue::try_new(ScanIssueKind::PolicyExcluded, Some(root.join("Dux")), 1).unwrap();
+        let coverage =
+            ScanCoverage::try_new(ScanCoverageStatus::Partial, None, vec![sibling_exclusion])
+                .unwrap();
+        let document = SnapshotReviewDocument::from_document_for_test(document).unwrap();
+        let evaluated_at = UNIX_EPOCH + Duration::from_secs(30 * 86_400);
+
+        let batch = replay_snapshot_candidate_evaluation(
+            &document,
+            &coverage,
+            evaluated_at,
+            CandidateEvaluationScope::UserCacheDirectory,
+        )
+        .unwrap();
+        assert_eq!(batch.candidates().len(), 2);
+        assert_eq!(
+            batch
+                .candidates()
+                .iter()
+                .map(|candidate| candidate.rule().id().as_str())
+                .collect::<Vec<_>>(),
+            vec!["developer.homebrew.cache", "developer.python.pip_cache"]
+        );
+        for candidate in batch.candidates() {
+            assert_eq!(
+                candidate.blockers(),
+                &[
+                    BlockReason::MissingOrIncompleteEvidence,
+                    BlockReason::ProtectedPath,
+                ]
+            );
+            assert!(
+                candidate
+                    .evidence()
+                    .iter()
+                    .any(|evidence| matches!(evidence, Evidence::MinimumAge { .. }))
+            );
+        }
+        assert_eq!(
+            replay_snapshot_candidate_evaluation(
+                &document,
+                &coverage,
+                evaluated_at,
+                CandidateEvaluationScope::SelectedScanRoot,
+            ),
+            Err(CandidateSnapshotReplayError::InvalidSnapshot)
+        );
+    }
+
+    #[test]
+    fn user_cache_replay_taints_only_the_affected_candidate() {
+        let old = SnapshotTimestamp::new(86_400, 0).unwrap();
+        let mut source = user_caches();
+        for node in &mut source.nodes {
+            if matches!(
+                node.kind,
+                SnapshotNodeKind::Directory | SnapshotNodeKind::File
+            ) {
+                node.modified_at = Some(old);
+            }
+        }
+        let root = snapshot_test_root();
+        let coverage = ScanCoverage::try_new(
+            ScanCoverageStatus::Partial,
+            None,
+            vec![
+                ScanIssue::try_new(ScanIssueKind::PolicyExcluded, Some(root.join("Dux")), 1)
+                    .unwrap(),
+                ScanIssue::try_new(
+                    ScanIssueKind::PermissionDenied,
+                    Some(root.join("pip/http-v2")),
+                    1,
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+        let document = SnapshotReviewDocument::from_document_for_test(source).unwrap();
+        let batch = replay_snapshot_candidate_evaluation(
+            &document,
+            &coverage,
+            UNIX_EPOCH + Duration::from_secs(30 * 86_400),
+            CandidateEvaluationScope::UserCacheDirectory,
+        )
+        .unwrap();
+
+        let homebrew = &batch.candidates()[0];
+        assert!(
+            !homebrew
+                .blockers()
+                .contains(&BlockReason::PartialScanCoverage)
+        );
+        assert!(
+            homebrew
+                .evidence()
+                .iter()
+                .any(|evidence| matches!(evidence, Evidence::MinimumAge { .. }))
+        );
+        let pip = &batch.candidates()[1];
+        assert!(pip.blockers().contains(&BlockReason::PartialScanCoverage));
+        assert!(
+            !pip.evidence()
+                .iter()
+                .any(|evidence| matches!(evidence, Evidence::MinimumAge { .. }))
         );
     }
 
@@ -652,6 +868,91 @@ mod tests {
                     file_count: u64::try_from(count).unwrap().checked_mul(2).unwrap(),
                     logical_bytes: total_bytes,
                     allocated_bytes: Some(total_bytes),
+                },
+            },
+            nodes,
+        }
+    }
+
+    fn user_caches() -> SnapshotDocument {
+        let mut nodes = vec![
+            node(0, None, 0, SnapshotNodeKind::Directory, None, 30, 2, 3),
+            node(
+                1,
+                Some(0),
+                1,
+                SnapshotNodeKind::Directory,
+                Some("Homebrew"),
+                10,
+                1,
+                1,
+            ),
+            node(
+                2,
+                Some(1),
+                2,
+                SnapshotNodeKind::File,
+                Some("download"),
+                10,
+                1,
+                0,
+            ),
+            node(
+                3,
+                Some(0),
+                1,
+                SnapshotNodeKind::Directory,
+                Some("pip"),
+                20,
+                1,
+                1,
+            ),
+            node(
+                4,
+                Some(3),
+                2,
+                SnapshotNodeKind::File,
+                Some("wheel"),
+                20,
+                1,
+                0,
+            ),
+            node(
+                5,
+                Some(0),
+                1,
+                SnapshotNodeKind::Directory,
+                Some("wrapper"),
+                0,
+                0,
+                1,
+            ),
+            node(
+                6,
+                Some(5),
+                2,
+                SnapshotNodeKind::Directory,
+                Some("pip"),
+                0,
+                0,
+                0,
+            ),
+        ];
+        nodes.shrink_to_fit();
+        SnapshotDocument {
+            metadata: SnapshotMetadata {
+                scan_id: ScanId::new(format!(
+                    "{}snapshot-replay",
+                    super::super::KNOWN_USER_CACHE_SCAN_ID_PREFIX
+                ))
+                .unwrap(),
+                root: HostValue::from_root(snapshot_test_root().as_path()).unwrap(),
+                captured_at: SnapshotTimestamp::new(1_750_000_000, 0).unwrap(),
+                totals: SnapshotTotals {
+                    directory_count: 5,
+                    file_count: 2,
+                    logical_bytes: 30,
+                    allocated_bytes: Some(30),
                 },
             },
             nodes,

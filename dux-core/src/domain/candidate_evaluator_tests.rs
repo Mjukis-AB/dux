@@ -74,6 +74,26 @@ fn add_python_pycache_project(tree: &mut DiskTree, project_name: &str, bytes: u6
     cache_path
 }
 
+fn add_user_cache(
+    tree: &mut DiskTree,
+    component: &str,
+    bytes: u64,
+    modified_at: SystemTime,
+) -> (NodeId, PathBuf) {
+    let path = tree.root_path().join(component);
+    let directory = tree.add_node(
+        component.to_owned(),
+        NodeKind::Directory,
+        path.clone(),
+        NodeId::ROOT,
+    );
+    let file = add_file(tree, directory, "entry.cache", path.join("entry.cache"));
+    tree.get_mut(directory).unwrap().mtime = Some(modified_at);
+    tree.get_mut(file).unwrap().mtime = Some(modified_at);
+    tree.set_size(directory, bytes);
+    (directory, path)
+}
+
 fn evaluate(tree: &DiskTree) -> CandidateBatch {
     evaluate_artifact_candidates(
         &ScanId::new("scan:fixture").unwrap(),
@@ -478,19 +498,21 @@ fn exact_catalog_digest_is_stable() {
     push_lower_hex(&mut actual, &bundled_candidate_catalog_digest_sha256());
     assert_eq!(
         actual,
-        "c0c4544d6c2c3d96ebc356425ee99b7698d631411282125421267e766759f09e"
+        "8ebb1d34c9362e13411b29bba2bcfae6f1225d1e2afec2e2223491c9cb28a7ef"
     );
     let catalog = load_and_validate_catalog().unwrap();
-    assert!(
+    assert_eq!(
         catalog
             .iter()
-            .all(|rule| rule.scope() == RuleScope::SelectedScanRoot)
+            .filter(|rule| rule.scope() == RuleScope::UserCacheDirectory)
+            .count(),
+        2
     );
     let safe_rules = catalog
         .iter()
         .filter(|rule| rule.safety() == SafetyTier::SafeRegenerable)
         .collect::<Vec<_>>();
-    assert_eq!(safe_rules.len(), 2);
+    assert_eq!(safe_rules.len(), 4);
     assert!(safe_rules.iter().any(|rule| {
         rule.reference().id().as_str() == SAFE_RUST_RULE_ID
             && rule.reference().revision().get() == SAFE_RUST_RULE_REVISION
@@ -501,6 +523,14 @@ fn exact_catalog_digest_is_stable() {
             && rule.reference().revision().get() == 2
             && rule.guards().minimum_age().is_none()
     }));
+    for rule_id in ["developer.homebrew.cache", "developer.python.pip_cache"] {
+        assert!(safe_rules.iter().any(|rule| {
+            rule.reference().id().as_str() == rule_id
+                && rule.reference().revision().get() == 1
+                && rule.scope() == RuleScope::UserCacheDirectory
+                && rule.guards().minimum_age() == Some(SAFE_USER_CACHE_MINIMUM_AGE)
+        }));
+    }
     assert!(safe_rules.iter().all(|rule| !rule.schedule_eligible()));
     assert!(
         safe_rules
@@ -808,6 +838,9 @@ fn output_limit_fails_as_a_typed_error_instead_of_silently_truncating() {
 fn automatic_user_cache_scope_cannot_borrow_selected_root_rules() {
     let mut tree = DiskTree::new(PathBuf::from("/Users/example/Library/Caches"));
     add_rust_project(&mut tree, "plausible-project", 10);
+    let old = SystemTime::UNIX_EPOCH + Duration::from_secs(86_400);
+    let (_, homebrew_path) = add_user_cache(&mut tree, "Homebrew", 4_096, old);
+    let (_, pip_path) = add_user_cache(&mut tree, "pip", 8_192, old);
     let coverage = complete_coverage();
     let selected_id = ScanId::new("scan:targeted:selected-fixture").unwrap();
     let known_cache_id = ScanId::new(format!("{KNOWN_USER_CACHE_SCAN_ID_PREFIX}fixture")).unwrap();
@@ -818,7 +851,44 @@ fn automatic_user_cache_scope_cannot_borrow_selected_root_rules() {
         evaluate_artifact_candidates(&known_cache_id, &tree, &coverage, evaluated_at()).unwrap();
 
     assert_eq!(selected.observed_match_count(), 1);
-    assert_eq!(automatic.observed_match_count(), 0);
+    assert_eq!(automatic.observed_match_count(), 2);
+    assert_eq!(
+        automatic
+            .candidates()
+            .iter()
+            .map(|candidate| (
+                candidate.rule().id().as_str(),
+                candidate.paths()[0].clone(),
+                candidate.estimated_bytes(),
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            ("developer.homebrew.cache", homebrew_path, 4_096),
+            ("developer.python.pip_cache", pip_path, 8_192),
+        ]
+    );
+    for candidate in automatic.candidates() {
+        assert_eq!(candidate.safety(), SafetyTier::SafeRegenerable);
+        assert_eq!(
+            candidate.action(),
+            CandidateAction::RemoveKnownRegenerableContents
+        );
+        assert!(!candidate.rule_marks_schedule_eligible());
+        assert!(candidate.evidence().iter().any(|evidence| matches!(
+            evidence,
+            Evidence::MinimumAge {
+                minimum_age: SAFE_USER_CACHE_MINIMUM_AGE,
+                ..
+            }
+        )));
+        assert_eq!(
+            candidate.blockers(),
+            &[
+                BlockReason::MissingOrIncompleteEvidence,
+                BlockReason::ProtectedPath,
+            ]
+        );
+    }
     assert_ne!(
         selected.context_digest_sha256(),
         automatic.context_digest_sha256()
@@ -826,6 +896,159 @@ fn automatic_user_cache_scope_cannot_borrow_selected_root_rules() {
     assert_eq!(
         candidate_evaluation_scope(&known_cache_id),
         CandidateEvaluationScope::UserCacheDirectory
+    );
+}
+
+#[test]
+fn user_cache_matching_is_direct_exact_and_never_borrowed_by_selected_scope() {
+    let root = PathBuf::from("/Users/example/Library/Caches");
+    let old = SystemTime::UNIX_EPOCH + Duration::from_secs(86_400);
+    let mut tree = DiskTree::new(root.clone());
+    add_user_cache(&mut tree, "Pip", 1, old);
+    let file = tree.add_node(
+        "pip".to_owned(),
+        NodeKind::File,
+        root.join("pip"),
+        NodeId::ROOT,
+    );
+    tree.get_mut(file).unwrap().mtime = Some(old);
+    let wrapper = tree.add_node(
+        "wrapper".to_owned(),
+        NodeKind::Directory,
+        root.join("wrapper"),
+        NodeId::ROOT,
+    );
+    let nested = tree.add_node(
+        "Homebrew".to_owned(),
+        NodeKind::Directory,
+        root.join("wrapper/Homebrew"),
+        wrapper,
+    );
+    tree.get_mut(nested).unwrap().mtime = Some(old);
+
+    let automatic = evaluate_artifact_candidates(
+        &ScanId::new(format!("{KNOWN_USER_CACHE_SCAN_ID_PREFIX}exact")).unwrap(),
+        &tree,
+        &complete_coverage(),
+        evaluated_at(),
+    )
+    .unwrap();
+    assert!(automatic.candidates().is_empty());
+
+    let mut selected = DiskTree::new(root);
+    add_user_cache(&mut selected, "pip", 10, old);
+    assert!(
+        evaluate_artifact_candidates(
+            &ScanId::new("scan:selected-cache-name").unwrap(),
+            &selected,
+            &complete_coverage(),
+            evaluated_at(),
+        )
+        .unwrap()
+        .candidates()
+        .is_empty()
+    );
+}
+
+#[test]
+fn user_cache_recency_symlink_and_local_coverage_are_fail_closed() {
+    let root = PathBuf::from("/Users/example/Library/Caches");
+    let old = SystemTime::UNIX_EPOCH + Duration::from_secs(86_400);
+    let recent = evaluated_at() - Duration::from_secs(86_400);
+    let mut tree = DiskTree::new(root.clone());
+    let (homebrew, _) = add_user_cache(&mut tree, "Homebrew", 10, old);
+    let (pip, pip_path) = add_user_cache(&mut tree, "pip", 20, recent);
+    let symlink = tree.add_node(
+        "outside".to_owned(),
+        NodeKind::Symlink,
+        root.join("Homebrew/outside"),
+        homebrew,
+    );
+    tree.get_mut(symlink).unwrap().mtime = Some(old);
+    tree.get_mut(pip).unwrap().mtime = None;
+    let issues = vec![
+        ScanIssue::try_new(ScanIssueKind::PolicyExcluded, Some(root.join("Dux")), 1).unwrap(),
+        ScanIssue::try_new(
+            ScanIssueKind::PermissionDenied,
+            Some(pip_path.join("http-v2")),
+            1,
+        )
+        .unwrap(),
+    ];
+    let coverage = ScanCoverage::try_new(ScanCoverageStatus::Partial, None, issues).unwrap();
+    let batch = evaluate_artifact_candidates(
+        &ScanId::new(format!("{KNOWN_USER_CACHE_SCAN_ID_PREFIX}guards")).unwrap(),
+        &tree,
+        &coverage,
+        evaluated_at(),
+    )
+    .unwrap();
+
+    let homebrew = batch
+        .candidates()
+        .iter()
+        .find(|candidate| candidate.rule().id().as_str() == "developer.homebrew.cache")
+        .unwrap();
+    assert_eq!(
+        homebrew.blockers(),
+        &[
+            BlockReason::MissingOrIncompleteEvidence,
+            BlockReason::SymlinkBoundary,
+            BlockReason::ProtectedPath,
+        ]
+    );
+    assert!(
+        homebrew
+            .evidence()
+            .iter()
+            .any(|evidence| matches!(evidence, Evidence::MinimumAge { .. }))
+    );
+
+    let pip = batch
+        .candidates()
+        .iter()
+        .find(|candidate| candidate.rule().id().as_str() == "developer.python.pip_cache")
+        .unwrap();
+    assert_eq!(
+        pip.blockers(),
+        &[
+            BlockReason::PartialScanCoverage,
+            BlockReason::MissingOrIncompleteEvidence,
+            BlockReason::ProtectedPath,
+        ]
+    );
+    assert!(
+        !pip.evidence()
+            .iter()
+            .any(|evidence| matches!(evidence, Evidence::MinimumAge { .. }))
+    );
+}
+
+#[test]
+fn completed_user_cache_evaluation_requires_explicit_trusted_scope() {
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::write(fixture.path().join("payload"), b"fixture").unwrap();
+    let (progress, worker) = crate::scanner::Scanner::new(crate::scanner::ScanConfig {
+        num_threads: 1,
+        ..crate::scanner::ScanConfig::default()
+    })
+    .scan(fixture.path().to_path_buf());
+    for _ in progress {}
+    let artifact = worker
+        .join()
+        .unwrap()
+        .into_completed_artifact()
+        .expect("fixture scan completes");
+    let scan_id = ScanId::new(format!("{KNOWN_USER_CACHE_SCAN_ID_PREFIX}forged")).unwrap();
+
+    assert_eq!(
+        evaluate_completed_scan_candidates(
+            &scan_id,
+            &artifact,
+            evaluated_at(),
+            CandidateEvaluationScope::SelectedScanRoot,
+        ),
+        Err(CandidateEvaluationError::InvalidArtifactProjection)
     );
 }
 

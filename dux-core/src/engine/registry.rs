@@ -127,7 +127,7 @@ use crate::cleanup::permanent_safe::{
 use crate::cleanup::{TrashEffectRequest, TrashPlatformResult, TrashSelectionError};
 use crate::domain::{
     CANDIDATE_CATALOG_SCHEMA_VERSION, CANDIDATE_CATALOG_SHA256, CANDIDATE_CONTEXT_FORMAT_VERSION,
-    CANDIDATE_EVALUATOR_REVISION, CandidateEvaluationError, CandidateId,
+    CANDIDATE_EVALUATOR_REVISION, CandidateEvaluationError, CandidateEvaluationScope, CandidateId,
     CandidateSnapshotReplayError, CleanupPlanId, Evidence, ScanCoverage, ScanId,
     candidate_evaluation_context_digest_sha256, evaluate_completed_scan_candidates,
     replay_snapshot_candidate_evaluation, validate_bundled_candidate_catalog,
@@ -1328,6 +1328,17 @@ impl EngineHandle {
             settle_failure(CandidateEvaluationFailureKind::ContextInvalid)?;
             return Ok(CandidateEvaluationRecoveryOutcome::Incompatible { has_more });
         }
+        if record
+            .scan_id()
+            .as_str()
+            .starts_with(crate::domain::KNOWN_USER_CACHE_SCAN_ID_PREFIX)
+        {
+            // Recovery has only an untrusted durable ID/root pair, not the
+            // live OS-account cache-root witness required to re-enter this
+            // scope. A later pressure pass may safely rescan it.
+            settle_failure(CandidateEvaluationFailureKind::ContextInvalid)?;
+            return Ok(CandidateEvaluationRecoveryOutcome::Incompatible { has_more });
+        }
 
         let document = snapshots
             .load_for_candidate_recovery(reference)
@@ -1344,6 +1355,7 @@ impl EngineHandle {
             &document,
             scan.coverage(),
             record.scheduled_at(),
+            CandidateEvaluationScope::SelectedScanRoot,
         ) {
             Ok(batch) => batch,
             Err(error) => {
@@ -4470,36 +4482,45 @@ impl EngineHandle {
                 )
             });
         if let Some(record) = reusable_record {
-            let scan = public_scan_summary(&record);
-            let candidate_evaluation = self
+            let observation = self
                 .inner
                 .store
                 .load_candidate_evaluation_for_scan(record.id())
-                .map_err(|error| map_targeted_project_scan_history_error(error.kind))
-                .and_then(|observation| {
-                    public_candidate_history(record.id(), observation)
-                        .map_err(map_targeted_candidate_history_error)
-                })?;
-            if !matches!(
-                candidate_evaluation.status(),
-                DurableCandidateEvaluationStatus::Succeeded { .. }
-                    | DurableCandidateEvaluationStatus::Failed { .. }
-            ) {
-                return Err(TargetedProjectScanError::CorruptData);
+                .map_err(|error| map_targeted_project_scan_history_error(error.kind))?;
+            let is_current = match &observation {
+                CandidateEvaluationObservation::Succeeded(evaluation)
+                | CandidateEvaluationObservation::Failed(evaluation) => {
+                    evaluation.matches_current_scan_observation(&record)
+                }
+                CandidateEvaluationObservation::MissingScan
+                | CandidateEvaluationObservation::NotRun { .. }
+                | CandidateEvaluationObservation::Pending(_) => false,
+            };
+            if is_current {
+                let scan = public_scan_summary(&record);
+                let candidate_evaluation = public_candidate_history(record.id(), observation)
+                    .map_err(map_targeted_candidate_history_error)?;
+                if !matches!(
+                    candidate_evaluation.status(),
+                    DurableCandidateEvaluationStatus::Succeeded { .. }
+                        | DurableCandidateEvaluationStatus::Failed { .. }
+                ) {
+                    return Err(TargetedProjectScanError::CorruptData);
+                }
+                return Ok(TargetedProjectScanAdmission {
+                    configured_roots_revision: configured.revision,
+                    root_count,
+                    root_catalog,
+                    selection: Some(selection),
+                    pressure: Some(pressure),
+                    disposition: TargetedProjectScanDisposition::Current(Box::new(
+                        TargetedProjectScanCurrent {
+                            scan,
+                            candidate_evaluation,
+                        },
+                    )),
+                });
             }
-            return Ok(TargetedProjectScanAdmission {
-                configured_roots_revision: configured.revision,
-                root_count,
-                root_catalog,
-                selection: Some(selection),
-                pressure: Some(pressure),
-                disposition: TargetedProjectScanDisposition::Current(Box::new(
-                    TargetedProjectScanCurrent {
-                        scan,
-                        candidate_evaluation,
-                    },
-                )),
-            });
         }
 
         self.ensure_targeted_reclaim_catalog_unchanged(&configured, &root_catalog)?;
@@ -6990,6 +7011,7 @@ fn prepare_candidate_evaluation(
     scan_id: &ScanId,
     artifact: &crate::scanner::CompletedScanArtifact,
     scheduled_at: SystemTime,
+    scope: CandidateEvaluationScope,
 ) -> Result<
     (
         CandidateEvaluationIdentity,
@@ -7015,7 +7037,7 @@ fn prepare_candidate_evaluation(
         );
     }
 
-    let batch = match evaluate_completed_scan_candidates(scan_id, artifact, scheduled_at) {
+    let batch = match evaluate_completed_scan_candidates(scan_id, artifact, scheduled_at, scope) {
         Ok(batch) => batch,
         Err(error) => {
             let kind = map_candidate_evaluation_error(error);
@@ -9023,7 +9045,20 @@ fn run_scan_task(
             };
             before_candidate_evaluation();
             let (evaluation_identity, evaluation, evaluation_status) =
-                match prepare_candidate_evaluation(&context, start.id(), &artifact, completed_at) {
+                match prepare_candidate_evaluation(
+                    &context,
+                    start.id(),
+                    &artifact,
+                    completed_at,
+                    match targeted_root_kind {
+                        Some(TargetedReclaimRootKind::KnownUserLibraryCaches) => {
+                            CandidateEvaluationScope::UserCacheDirectory
+                        }
+                        Some(TargetedReclaimRootKind::ConfiguredProject) | None => {
+                            CandidateEvaluationScope::SelectedScanRoot
+                        }
+                    },
+                ) {
                     Ok(evaluation) => evaluation,
                     Err(failure) => {
                         let result = durable.settle(

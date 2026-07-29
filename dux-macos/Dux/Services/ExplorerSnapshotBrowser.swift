@@ -430,6 +430,8 @@ final class ExplorerSnapshotBrowserModel {
     @ObservationIgnored
     private var pendingExactScanID: String?
     @ObservationIgnored
+    private var pendingExactContentMode: ExplorerSnapshotContentMode?
+    @ObservationIgnored
     private var historyGeneration: UInt64 = 0
     @ObservationIgnored
     private var largeFilesGeneration: UInt64 = 0
@@ -588,6 +590,14 @@ final class ExplorerSnapshotBrowserModel {
             && rustTargetDryRunState == .idle
     }
 
+    var hasPreviousCandidatePage: Bool {
+        (candidatePage?.cursor ?? 0) > 0
+    }
+
+    var hasNextCandidatePage: Bool {
+        candidatePage?.nextCursor != nil
+    }
+
     var hasPreviousCandidatePathPage: Bool {
         (candidatePathPage?.cursor ?? 0) > 0
     }
@@ -648,7 +658,12 @@ final class ExplorerSnapshotBrowserModel {
         }
         activePresentationID = id
         let requestedScanID = pendingExactScanID
+        let requestedContentMode = pendingExactContentMode
         pendingExactScanID = nil
+        pendingExactContentMode = nil
+        if let requestedContentMode {
+            contentMode = requestedContentMode
+        }
         async let history: Void = reloadHistory()
         if let requestedScanID {
             await openExactScan(requestedScanID)
@@ -664,6 +679,15 @@ final class ExplorerSnapshotBrowserModel {
     /// history, so their trusted scan IDs must be opened explicitly.
     func prepareExactScanReview(scanID: String) {
         pendingExactScanID = scanID
+        pendingExactContentMode = .browse
+    }
+
+    /// Queue one exact targeted result directly in its deterministic findings
+    /// view. This changes presentation intent only; it creates no candidate,
+    /// plan, approval, or cleanup authority.
+    func prepareExactCandidateReview(scanID: String) {
+        pendingExactScanID = scanID
+        pendingExactContentMode = .candidates
     }
 
     func dismiss(id: UUID) async {
@@ -1005,11 +1029,31 @@ final class ExplorerSnapshotBrowserModel {
     }
 
     func reloadCandidates() async {
+        await loadCandidatePage(cursor: 0)
+    }
+
+    func showNextCandidatePage() async {
+        guard let cursor = candidatePage?.nextCursor else {
+            return
+        }
+        await loadCandidatePage(cursor: cursor)
+    }
+
+    func showPreviousCandidatePage() async {
+        guard let page = candidatePage, page.cursor > 0 else {
+            return
+        }
+        let limit = ExplorerCandidateDetailAdapter.maximumPageLimit
+        await loadCandidatePage(cursor: page.cursor >= limit ? page.cursor - limit : 0)
+    }
+
+    private func loadCandidatePage(cursor: UInt16) async {
         guard
             phase == .ready,
             contentMode == .candidates,
             let scanID,
-            !isSwitchingSnapshot
+            !isSwitchingSnapshot,
+            !isCandidateLoading
         else { return }
         await releaseRustTargetPlanReview()
         candidateGeneration &+= 1
@@ -1022,7 +1066,7 @@ final class ExplorerSnapshotBrowserModel {
         do {
             let page = try await reviews.candidateSummaries(
                 scanID: scanID,
-                cursor: 0,
+                cursor: cursor,
                 limit: ExplorerCandidateDetailAdapter.maximumPageLimit
             )
             guard
@@ -1031,7 +1075,7 @@ final class ExplorerSnapshotBrowserModel {
                 self.scanID == scanID,
                 contentMode == .candidates,
                 page.scanID == scanID,
-                page.cursor == 0,
+                page.cursor == cursor,
                 !Task.isCancelled
             else { return }
             candidatePage = page

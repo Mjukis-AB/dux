@@ -125,7 +125,13 @@ impl PersistedFixture {
             .unwrap()
             .into_completed_artifact()
             .expect("fixture scan completes");
-        let batch = evaluate_completed_scan_candidates(&scan_id, &artifact, observed_at).unwrap();
+        let batch = evaluate_completed_scan_candidates(
+            &scan_id,
+            &artifact,
+            observed_at,
+            crate::domain::CandidateEvaluationScope::SelectedScanRoot,
+        )
+        .unwrap();
         let discovered_candidate_id = batch
             .candidates()
             .iter()

@@ -5244,6 +5244,66 @@ fn targeted_project_scan_starts_joins_and_reuses_only_terminal_targeted_evidence
 
 #[cfg(unix)]
 #[test]
+fn targeted_scan_never_reuses_a_stale_evaluator_revision() {
+    let temp = TempDir::new().unwrap();
+    let engine = EngineHandle::open(config(&temp)).unwrap();
+    let root = std::fs::canonicalize(temp.path()).unwrap().join("project");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("file"), b"payload").unwrap();
+    let revision = engine
+        .set_configured_project_roots(vec![root])
+        .unwrap()
+        .settings
+        .revision;
+    let volume_id = VolumeId::new("volume:targeted-stale-evaluator").unwrap();
+    let anchor = SystemTime::now();
+    targeted_capacity_anchor(&engine, &temp, &volume_id, anchor, 1);
+
+    let admission = engine
+        .start_targeted_project_scan(&volume_id, anchor, 0, Some(revision))
+        .unwrap();
+    let TargetedProjectScanDisposition::Started { task_id } = admission.disposition else {
+        panic!("expected first targeted scan");
+    };
+    assert_eq!(wait_terminal(&engine, task_id).phase, TaskPhase::Succeeded);
+    let scan_id = engine
+        .scan_result(task_id)
+        .unwrap()
+        .unwrap()
+        .scan_id()
+        .clone();
+    engine.inner.store.with_connection(|connection| {
+        connection
+            .execute(
+                "UPDATE candidate_evaluations
+                 SET evaluator_revision = ?1
+                 WHERE scan_id = ?2",
+                rusqlite::params![
+                    i64::from(crate::domain::CANDIDATE_EVALUATOR_REVISION - 1),
+                    scan_id.as_str()
+                ],
+            )
+            .unwrap();
+    });
+
+    let replacement = engine
+        .start_targeted_project_scan(&volume_id, anchor, 0, Some(revision))
+        .unwrap();
+    let TargetedProjectScanDisposition::Started {
+        task_id: replacement_id,
+    } = replacement.disposition
+    else {
+        panic!("stale evaluator evidence must start a replacement scan");
+    };
+    assert_ne!(replacement_id, task_id);
+    assert_eq!(
+        wait_terminal(&engine, replacement_id).phase,
+        TaskPhase::Succeeded
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn targeted_scan_join_requires_the_exact_pressure_episode() {
     let temp = TempDir::new().unwrap();
     let engine = EngineHandle::open(config(&temp)).unwrap();

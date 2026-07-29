@@ -23,7 +23,7 @@ use crate::projection::{
     ArtifactKind, BuildArtifactEntry, StaleThreshold, project_build_artifacts_bounded_at,
 };
 use crate::scanner::CompletedScanArtifact;
-use crate::tree::DiskTree;
+use crate::tree::{DiskTree, NodeId, NodeKind};
 
 #[path = "candidate_evaluator_snapshot_replay.rs"]
 mod candidate_evaluator_snapshot_replay;
@@ -47,17 +47,18 @@ const UNRESOLVED_PROTECTION: &[u8] = b"protected_path_authority:unresolved";
 /// happen to appear below that root.
 pub(crate) const KNOWN_USER_CACHE_SCAN_ID_PREFIX: &str = "scan:targeted:known-user-cache:";
 
-pub(crate) const CANDIDATE_EVALUATOR_REVISION: u32 = 3;
+pub(crate) const CANDIDATE_EVALUATOR_REVISION: u32 = 4;
 pub(crate) const CANDIDATE_CATALOG_SCHEMA_VERSION: u32 = 1;
 pub(crate) const CANDIDATE_CONTEXT_FORMAT_VERSION: u32 = 2;
 pub(crate) const CANDIDATE_CATALOG_SHA256: [u8; 32] = [
-    0xc0, 0xc4, 0x54, 0x4d, 0x6c, 0x2c, 0x3d, 0x96, 0xeb, 0xc3, 0x56, 0x42, 0x5e, 0xe9, 0x9b, 0x76,
-    0x98, 0xd6, 0x31, 0x41, 0x12, 0x82, 0x12, 0x54, 0x21, 0x26, 0x7e, 0x76, 0x67, 0x59, 0xf0, 0x9e,
+    0x8e, 0xbb, 0x1d, 0x34, 0xc9, 0x36, 0x2e, 0x13, 0x41, 0x1b, 0x29, 0xbb, 0xa2, 0xbc, 0xfa, 0xe6,
+    0xf1, 0x22, 0x5d, 0x1e, 0x2a, 0xfe, 0xc2, 0xe2, 0x22, 0x34, 0x91, 0xc9, 0xcb, 0x28, 0xa7, 0xef,
 ];
 const SAFE_RUST_RULE_ID: &str = "developer.rust.target";
 pub(crate) const SAFE_RUST_RULE_REVISION: u32 = 3;
 pub(crate) const SAFE_RUST_RULE_MINIMUM_AGE: Duration = Duration::from_secs(7 * 86_400);
 const SAFE_PYTHON_PYCACHE_RULE_ID: &str = "developer.python.pycache";
+pub(crate) const SAFE_USER_CACHE_MINIMUM_AGE: Duration = Duration::from_secs(7 * 86_400);
 
 /// Maximum findings returned by one evaluator invocation.
 pub(crate) const MAX_EVALUATED_CANDIDATES: usize = 4_096;
@@ -71,12 +72,18 @@ struct CatalogBinding {
 
 pub(super) struct ObservedArtifact {
     path: PathBuf,
-    component: &'static str,
-    kind: ArtifactKind,
+    rule_id: &'static str,
     size: u64,
     newest_mtime: Option<SystemTime>,
     mtime_coverage_complete: bool,
     evidence_paths: Vec<PathBuf>,
+    additional_blockers: Vec<BlockReason>,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct UserCacheBinding {
+    pub(super) component: &'static str,
+    pub(super) rule_id: &'static str,
 }
 
 const CATALOG_BINDINGS: &[CatalogBinding] = &[
@@ -134,6 +141,17 @@ const CATALOG_BINDINGS: &[CatalogBinding] = &[
         kind: ArtifactKind::Rust,
         component: "target",
         rule_id: "developer.rust.target",
+    },
+];
+
+pub(super) const USER_CACHE_BINDINGS: &[UserCacheBinding] = &[
+    UserCacheBinding {
+        component: "Homebrew",
+        rule_id: "developer.homebrew.cache",
+    },
+    UserCacheBinding {
+        component: "pip",
+        rule_id: "developer.python.pip_cache",
     },
 ];
 
@@ -210,15 +228,14 @@ pub(crate) fn evaluate_completed_scan_candidates(
     source_scan_id: &ScanId,
     artifact: &CompletedScanArtifact,
     evaluated_at: SystemTime,
+    scope: CandidateEvaluationScope,
 ) -> Result<CandidateBatch, CandidateEvaluationError> {
+    if candidate_evaluation_scope(source_scan_id) != scope {
+        return Err(CandidateEvaluationError::InvalidArtifactProjection);
+    }
     let (tree, _, coverage) = artifact.parts();
-    if candidate_evaluation_scope(source_scan_id) == CandidateEvaluationScope::UserCacheDirectory {
-        return Ok(empty_candidate_batch(
-            source_scan_id,
-            tree.root_path(),
-            coverage,
-            evaluated_at,
-        ));
+    if scope == CandidateEvaluationScope::UserCacheDirectory {
+        return evaluate_user_cache_candidates(source_scan_id, tree, coverage, evaluated_at);
     }
     evaluate_artifact_candidates(source_scan_id, tree, coverage, evaluated_at)
 }
@@ -231,12 +248,7 @@ fn evaluate_artifact_candidates(
     evaluated_at: SystemTime,
 ) -> Result<CandidateBatch, CandidateEvaluationError> {
     if candidate_evaluation_scope(source_scan_id) == CandidateEvaluationScope::UserCacheDirectory {
-        return Ok(empty_candidate_batch(
-            source_scan_id,
-            tree.root_path(),
-            coverage,
-            evaluated_at,
-        ));
+        return evaluate_user_cache_candidates(source_scan_id, tree, coverage, evaluated_at);
     }
     let entries = project_build_artifacts_bounded_at(
         tree,
@@ -258,12 +270,12 @@ fn evaluate_artifact_candidates(
         let binding = binding_for(tree, &entry)?;
         Ok(ObservedArtifact {
             path: node.path.clone(),
-            component: binding.component,
-            kind: entry.kind,
+            rule_id: binding.rule_id,
             size: entry.size,
             newest_mtime: entry.newest_mtime,
             mtime_coverage_complete: entry.mtime_coverage_complete,
             evidence_paths: entry.evidence_paths,
+            additional_blockers: Vec::new(),
         })
     })
     .collect::<Result<Vec<_>, CandidateEvaluationError>>()?;
@@ -276,6 +288,114 @@ fn evaluate_artifact_candidates(
     )
 }
 
+/// Match only reviewed, exact direct children of the code-owned current-user
+/// cache root. A same-named nested directory or selected-root scan cannot enter
+/// this scope.
+fn evaluate_user_cache_candidates(
+    source_scan_id: &ScanId,
+    tree: &DiskTree,
+    coverage: &ScanCoverage,
+    evaluated_at: SystemTime,
+) -> Result<CandidateBatch, CandidateEvaluationError> {
+    if candidate_evaluation_scope(source_scan_id) != CandidateEvaluationScope::UserCacheDirectory {
+        return Err(CandidateEvaluationError::InvalidArtifactProjection);
+    }
+    let root = tree.root();
+    let mut entries = Vec::new();
+    for child_id in &root.children {
+        let child = tree
+            .get(*child_id)
+            .ok_or(CandidateEvaluationError::InvalidArtifactProjection)?;
+        let Some(binding) = USER_CACHE_BINDINGS
+            .iter()
+            .find(|binding| binding.component == child.name)
+        else {
+            continue;
+        };
+        if child.parent != Some(NodeId::ROOT)
+            || child.depth != 1
+            || child.kind != NodeKind::Directory
+            || child.path_is_symlink
+            || child.path != tree.root_path().join(binding.component)
+        {
+            continue;
+        }
+        if entries.len() == MAX_EVALUATED_CANDIDATES {
+            return Err(CandidateEvaluationError::CandidateLimitExceeded {
+                observed_at_least: MAX_EVALUATED_CANDIDATES + 1,
+                maximum: MAX_EVALUATED_CANDIDATES,
+            });
+        }
+        entries.push(user_cache_observation(tree, *child_id, binding)?);
+    }
+    evaluate_observed_artifacts(
+        source_scan_id,
+        tree.root_path(),
+        coverage,
+        entries,
+        evaluated_at,
+    )
+}
+
+fn user_cache_observation(
+    tree: &DiskTree,
+    root_id: NodeId,
+    binding: &UserCacheBinding,
+) -> Result<ObservedArtifact, CandidateEvaluationError> {
+    let root = tree
+        .get(root_id)
+        .ok_or(CandidateEvaluationError::InvalidArtifactProjection)?;
+    let mut newest_mtime = None;
+    let mut mtime_coverage_complete = true;
+    let mut saw_symlink_boundary = false;
+    let mut stack = vec![root_id];
+    let mut visited = 0_usize;
+
+    while let Some(node_id) = stack.pop() {
+        visited = visited.saturating_add(1);
+        if visited > tree.len() {
+            return Err(CandidateEvaluationError::InvalidArtifactProjection);
+        }
+        let node = tree
+            .get(node_id)
+            .ok_or(CandidateEvaluationError::InvalidArtifactProjection)?;
+        match node.kind {
+            NodeKind::Directory | NodeKind::File => {
+                if node.path_is_symlink {
+                    saw_symlink_boundary = true;
+                }
+                match node.mtime {
+                    Some(mtime) => {
+                        if newest_mtime.is_none_or(|current| mtime > current) {
+                            newest_mtime = Some(mtime);
+                        }
+                    }
+                    None => mtime_coverage_complete = false,
+                }
+            }
+            NodeKind::Symlink => saw_symlink_boundary = true,
+            NodeKind::Other | NodeKind::Error => {}
+        }
+        stack.extend(node.children.iter().copied());
+    }
+
+    // Recency is useful prioritization evidence, not a proof that the owning
+    // tool is idle. No provider-specific process/activity witness exists yet.
+    let mut additional_blockers = vec![BlockReason::MissingOrIncompleteEvidence];
+    if saw_symlink_boundary {
+        additional_blockers.push(BlockReason::SymlinkBoundary);
+    }
+    Ok(ObservedArtifact {
+        path: root.path.clone(),
+        rule_id: binding.rule_id,
+        size: root.size,
+        newest_mtime,
+        mtime_coverage_complete,
+        evidence_paths: Vec::new(),
+        additional_blockers,
+    })
+}
+
 pub(super) fn evaluate_observed_artifacts(
     source_scan_id: &ScanId,
     root: &Path,
@@ -283,14 +403,6 @@ pub(super) fn evaluate_observed_artifacts(
     entries: Vec<ObservedArtifact>,
     evaluated_at: SystemTime,
 ) -> Result<CandidateBatch, CandidateEvaluationError> {
-    if candidate_evaluation_scope(source_scan_id) == CandidateEvaluationScope::UserCacheDirectory {
-        return Ok(empty_candidate_batch(
-            source_scan_id,
-            root,
-            coverage,
-            evaluated_at,
-        ));
-    }
     let catalog = load_and_validate_catalog()?;
     let catalog_digest_sha256 = bundled_candidate_catalog_digest_sha256();
     let context_digest_sha256 = candidate_evaluation_context_digest_for_observation(
@@ -302,22 +414,25 @@ pub(super) fn evaluate_observed_artifacts(
     let mut entries = entries
         .into_iter()
         .map(|entry| {
-            let binding = binding_for_observation(entry.kind, entry.component)?;
-            Ok((native_path_bytes(&entry.path), binding, entry))
+            let rule = rule_for_id(catalog, entry.rule_id)?;
+            Ok((native_path_bytes(&entry.path), rule, entry))
         })
         .collect::<Result<Vec<_>, CandidateEvaluationError>>()?;
     entries.sort_by(|left, right| {
-        left.0
-            .cmp(&right.0)
-            .then_with(|| left.1.rule_id.cmp(right.1.rule_id))
+        left.0.cmp(&right.0).then_with(|| {
+            left.1
+                .reference()
+                .id()
+                .as_str()
+                .cmp(right.1.reference().id().as_str())
+        })
     });
     if entries.windows(2).any(|pair| pair[0].0 == pair[1].0) {
         return Err(CandidateEvaluationError::InvalidArtifactProjection);
     }
 
     let mut candidates = Vec::with_capacity(entries.len());
-    for (path_bytes, binding, mut entry) in entries {
-        let rule = rule_for(catalog, binding)?;
+    for (path_bytes, rule, mut entry) in entries {
         entry
             .evidence_paths
             .sort_by_key(|evidence_path| native_path_bytes(evidence_path));
@@ -332,12 +447,21 @@ pub(super) fn evaluate_observed_artifacts(
                 .map(|path| Evidence::RequiredMarker { path }),
         );
 
-        let mut blockers = Vec::with_capacity(3);
-        if coverage.status() != ScanCoverageStatus::Complete {
+        let partial_coverage = candidate_has_partial_coverage(
+            candidate_evaluation_scope(source_scan_id),
+            coverage,
+            root,
+            &entry.path,
+        );
+        let mut blockers = Vec::with_capacity(5);
+        if partial_coverage {
             blockers.push(BlockReason::PartialScanCoverage);
         }
         if let Some(minimum_age) = rule.guards().minimum_age() {
-            match (entry.mtime_coverage_complete, entry.newest_mtime) {
+            match (
+                !partial_coverage && entry.mtime_coverage_complete,
+                entry.newest_mtime,
+            ) {
                 (true, Some(newest_mtime))
                     if evaluated_at
                         .duration_since(newest_mtime)
@@ -349,7 +473,15 @@ pub(super) fn evaluate_observed_artifacts(
                     });
                 }
                 (true, Some(_)) => blockers.push(BlockReason::RecentActivity),
-                _ => blockers.push(BlockReason::MissingModificationTime),
+                (true, None) | (false, _) if !partial_coverage => {
+                    blockers.push(BlockReason::MissingModificationTime);
+                }
+                _ => {}
+            }
+        }
+        for blocker in entry.additional_blockers {
+            if !blockers.contains(&blocker) {
+                blockers.push(blocker);
             }
         }
         // The evaluator has no trusted home, volume, canonical ancestry, or
@@ -381,8 +513,30 @@ pub(super) fn evaluate_observed_artifacts(
     })
 }
 
+pub(super) fn candidate_has_partial_coverage(
+    scope: CandidateEvaluationScope,
+    coverage: &ScanCoverage,
+    root: &Path,
+    candidate: &Path,
+) -> bool {
+    if scope == CandidateEvaluationScope::SelectedScanRoot {
+        return coverage.status() != ScanCoverageStatus::Complete;
+    }
+    if coverage.status() == ScanCoverageStatus::Unknown {
+        return true;
+    }
+    if coverage.status() == ScanCoverageStatus::Complete {
+        return false;
+    }
+    coverage.issues().iter().any(|issue| {
+        issue.path().is_none_or(|path| {
+            path == root || path.starts_with(candidate) || candidate.starts_with(path)
+        })
+    })
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum CandidateEvaluationScope {
+pub(crate) enum CandidateEvaluationScope {
     SelectedScanRoot,
     UserCacheDirectory,
 }
@@ -395,27 +549,6 @@ pub(super) fn candidate_evaluation_scope(source_scan_id: &ScanId) -> CandidateEv
         CandidateEvaluationScope::UserCacheDirectory
     } else {
         CandidateEvaluationScope::SelectedScanRoot
-    }
-}
-
-pub(super) fn empty_candidate_batch(
-    source_scan_id: &ScanId,
-    root: &Path,
-    coverage: &ScanCoverage,
-    evaluated_at: SystemTime,
-) -> CandidateBatch {
-    CandidateBatch {
-        evaluator_revision: CANDIDATE_EVALUATOR_REVISION,
-        catalog_schema_version: CANDIDATE_CATALOG_SCHEMA_VERSION,
-        catalog_digest_sha256: CANDIDATE_CATALOG_SHA256,
-        context_format_version: CANDIDATE_CONTEXT_FORMAT_VERSION,
-        context_digest_sha256: candidate_evaluation_context_digest_for_observation(
-            source_scan_id,
-            root,
-            coverage,
-            evaluated_at,
-        ),
-        candidates: Vec::new(),
     }
 }
 
@@ -438,45 +571,65 @@ fn validate_catalog_bytes() -> Result<RuleRegistry, CandidateEvaluationError> {
     }
     let catalog = load_rule_registry_json(BUNDLED_CATALOG)
         .map_err(|_| CandidateEvaluationError::InvalidBundledCatalog)?;
-    if catalog.len() != CATALOG_BINDINGS.len() || catalog.is_empty() {
+    if catalog.len() != CATALOG_BINDINGS.len() + USER_CACHE_BINDINGS.len() || catalog.is_empty() {
         return Err(CandidateEvaluationError::InvalidBundledCatalog);
     }
     for binding in CATALOG_BINDINGS {
-        let id = RuleId::new(binding.rule_id)
-            .map_err(|_| CandidateEvaluationError::InvalidBundledCatalog)?;
-        let Some(rule) = catalog.get(&id) else {
-            return Err(CandidateEvaluationError::InvalidBundledCatalog);
-        };
-        let (required_ancestor_markers_any, required_markers_all) =
-            expected_catalog_markers(binding.rule_id)?;
-        let (expected_revision, expected_safety, expected_action) =
-            expected_catalog_policy(binding.rule_id)?;
-        if rule.category() != CandidateCategory::DeveloperArtifact
-            || rule.reference().revision().get() != expected_revision
-            || rule.scope() != RuleScope::SelectedScanRoot
-            || rule.matcher().path_component() != Some(binding.component)
-            || !matches_exact_strings(
-                rule.matcher().required_ancestor_markers_any(),
-                required_ancestor_markers_any,
-            )
-            || !matches_exact_strings(rule.matcher().required_markers_all(), required_markers_all)
-            || !rule.matcher().exact_bundle_identifiers().is_empty()
-            || !rule.matcher().forbidden_markers_any().is_empty()
-            || !rule.matcher().excluded_descendants().is_empty()
-            || !rule.matcher().protected_descendants().is_empty()
-            || rule.guards().minimum_age() != expected_minimum_age(binding.rule_id)
-            || rule.guards().minimum_bytes() != 0
-            || !rule.guards().inactive_processes().is_empty()
-            || rule.guards().requires_cloud_upload_complete()
-            || rule.safety() != expected_safety
-            || rule.action() != expected_action
-            || rule.schedule_eligible()
-            || !has_expected_provenance(rule, binding.rule_id)
-        {
-            return Err(CandidateEvaluationError::InvalidBundledCatalog);
-        }
+        validate_catalog_rule(
+            &catalog,
+            binding.rule_id,
+            binding.component,
+            RuleScope::SelectedScanRoot,
+        )?;
+    }
+    for binding in USER_CACHE_BINDINGS {
+        validate_catalog_rule(
+            &catalog,
+            binding.rule_id,
+            binding.component,
+            RuleScope::UserCacheDirectory,
+        )?;
     }
     Ok(catalog)
+}
+
+fn validate_catalog_rule(
+    catalog: &RuleRegistry,
+    rule_id: &str,
+    component: &str,
+    expected_scope: RuleScope,
+) -> Result<(), CandidateEvaluationError> {
+    let id = RuleId::new(rule_id).map_err(|_| CandidateEvaluationError::InvalidBundledCatalog)?;
+    let Some(rule) = catalog.get(&id) else {
+        return Err(CandidateEvaluationError::InvalidBundledCatalog);
+    };
+    let (required_ancestor_markers_any, required_markers_all) = expected_catalog_markers(rule_id)?;
+    let (expected_revision, expected_safety, expected_action) = expected_catalog_policy(rule_id)?;
+    if rule.category() != CandidateCategory::DeveloperArtifact
+        || rule.reference().revision().get() != expected_revision
+        || rule.scope() != expected_scope
+        || rule.matcher().path_component() != Some(component)
+        || !matches_exact_strings(
+            rule.matcher().required_ancestor_markers_any(),
+            required_ancestor_markers_any,
+        )
+        || !matches_exact_strings(rule.matcher().required_markers_all(), required_markers_all)
+        || !rule.matcher().exact_bundle_identifiers().is_empty()
+        || !rule.matcher().forbidden_markers_any().is_empty()
+        || !rule.matcher().excluded_descendants().is_empty()
+        || !rule.matcher().protected_descendants().is_empty()
+        || rule.guards().minimum_age() != expected_minimum_age(rule_id)
+        || rule.guards().minimum_bytes() != 0
+        || !rule.guards().inactive_processes().is_empty()
+        || rule.guards().requires_cloud_upload_complete()
+        || rule.safety() != expected_safety
+        || rule.action() != expected_action
+        || rule.schedule_eligible()
+        || !has_expected_provenance(rule, rule_id)
+    {
+        return Err(CandidateEvaluationError::InvalidBundledCatalog);
+    }
+    Ok(())
 }
 
 fn has_expected_provenance(rule: &Rule, rule_id: &str) -> bool {
@@ -490,6 +643,8 @@ fn has_expected_provenance(rule: &Rule, rule_id: &str) -> bool {
             "https://docs.python.org/3/faq/programming.html#how-do-i-create-a-pyc-file",
             "https://peps.python.org/pep-3147/",
         ],
+        "developer.homebrew.cache" => &["https://docs.brew.sh/Manpage#cache-options"],
+        "developer.python.pip_cache" => &["https://pip.pypa.io/en/stable/topics/caching/"],
         _ => return true,
     };
     rule.provenance().len() == expected.len()
@@ -514,12 +669,26 @@ fn expected_catalog_policy(
             SafetyTier::SafeRegenerable,
             CandidateAction::RemoveKnownRegenerableContents,
         )),
+        "developer.homebrew.cache" | "developer.python.pip_cache" => Ok((
+            1,
+            SafetyTier::SafeRegenerable,
+            CandidateAction::RemoveKnownRegenerableContents,
+        )),
         _ => Ok((1, SafetyTier::Informational, CandidateAction::RevealOnly)),
     }
 }
 
 fn expected_minimum_age(rule_id: &str) -> Option<Duration> {
-    (rule_id == SAFE_RUST_RULE_ID).then_some(SAFE_RUST_RULE_MINIMUM_AGE)
+    if rule_id == SAFE_RUST_RULE_ID {
+        Some(SAFE_RUST_RULE_MINIMUM_AGE)
+    } else if USER_CACHE_BINDINGS
+        .iter()
+        .any(|binding| binding.rule_id == rule_id)
+    {
+        Some(SAFE_USER_CACHE_MINIMUM_AGE)
+    } else {
+        None
+    }
 }
 
 fn expected_catalog_markers(
@@ -541,6 +710,7 @@ fn expected_catalog_markers(
         "developer.python.tox" => Ok((&["tox.ini"], &[])),
         "developer.python.venv" | "developer.python.venv_hidden" => Ok((&[], &["pyvenv.cfg"])),
         "developer.rust.target" => Ok((&["Cargo.toml"], &["CACHEDIR.TAG"])),
+        "developer.homebrew.cache" | "developer.python.pip_cache" => Ok((&[], &[])),
         _ => Err(CandidateEvaluationError::InvalidBundledCatalog),
     }
 }
@@ -713,13 +883,14 @@ fn binding_for(
         .ok_or(CandidateEvaluationError::InvalidArtifactProjection)
 }
 
-fn binding_for_observation(
+pub(super) fn project_rule_id(
     kind: ArtifactKind,
     component: &str,
-) -> Result<&'static CatalogBinding, CandidateEvaluationError> {
+) -> Result<&'static str, CandidateEvaluationError> {
     CATALOG_BINDINGS
         .iter()
         .find(|binding| binding.kind == kind && binding.component == component)
+        .map(|binding| binding.rule_id)
         .ok_or(CandidateEvaluationError::InvalidArtifactProjection)
 }
 
@@ -727,8 +898,14 @@ fn rule_for<'a>(
     catalog: &'a RuleRegistry,
     binding: &CatalogBinding,
 ) -> Result<&'a Rule, CandidateEvaluationError> {
-    let id = RuleId::new(binding.rule_id)
-        .map_err(|_| CandidateEvaluationError::InvalidBundledCatalog)?;
+    rule_for_id(catalog, binding.rule_id)
+}
+
+fn rule_for_id<'a>(
+    catalog: &'a RuleRegistry,
+    rule_id: &str,
+) -> Result<&'a Rule, CandidateEvaluationError> {
+    let id = RuleId::new(rule_id).map_err(|_| CandidateEvaluationError::InvalidBundledCatalog)?;
     catalog
         .get(&id)
         .ok_or(CandidateEvaluationError::InvalidBundledCatalog)

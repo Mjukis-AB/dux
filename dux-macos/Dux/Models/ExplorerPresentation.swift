@@ -68,7 +68,12 @@ enum ExplorerAccessibility {
     static let snapshotError = "explorer-snapshot-error"
     static let snapshotContentMode = "explorer-snapshot-content-mode"
     static let snapshotCandidates = "explorer-snapshot-candidates"
+    static let snapshotCandidateGroups = "explorer-snapshot-candidate-groups"
     static let snapshotCandidateTable = "explorer-snapshot-candidate-table"
+    static let snapshotCandidatePageStatus = "explorer-snapshot-candidate-page-status"
+    static let snapshotCandidatePreviousPage =
+        "explorer-snapshot-candidate-previous-page"
+    static let snapshotCandidateNextPage = "explorer-snapshot-candidate-next-page"
     static let snapshotCandidateStatus = "explorer-snapshot-candidate-status"
     static let snapshotCandidateInspector = "explorer-snapshot-candidate-inspector"
     static let snapshotCandidateDetailStatus = "explorer-snapshot-candidate-detail-status"
@@ -195,7 +200,11 @@ enum ExplorerAccessibility {
         snapshotError,
         snapshotContentMode,
         snapshotCandidates,
+        snapshotCandidateGroups,
         snapshotCandidateTable,
+        snapshotCandidatePageStatus,
+        snapshotCandidatePreviousPage,
+        snapshotCandidateNextPage,
         snapshotCandidateStatus,
         snapshotCandidateInspector,
         snapshotCandidateDetailStatus,

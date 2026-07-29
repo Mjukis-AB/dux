@@ -77,7 +77,7 @@ struct ExplorerView: View {
                 ExplorerRecommendationsView(
                     model: model,
                     reviewScan: { scanID in
-                        snapshotBrowser.prepareExactScanReview(scanID: scanID)
+                        snapshotBrowser.prepareExactCandidateReview(scanID: scanID)
                         selection = .snapshot
                     }
                 )

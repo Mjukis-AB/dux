@@ -2,6 +2,45 @@
 import XCTest
 
 final class ExplorerCandidateDetailTests: XCTestCase {
+    func testCandidatePresentationUsesRevisionBoundNamesAndHonestGroups() throws {
+        let homebrew = presentationCandidate(
+            id: "candidate:homebrew",
+            ruleID: "developer.homebrew.cache",
+            ruleRevision: 1,
+            blockers: [.missingOrIncompleteEvidence, .protectedPath]
+        )
+        let pip = presentationCandidate(
+            id: "candidate:pip",
+            ruleID: "developer.python.pip_cache",
+            ruleRevision: 1,
+            blockers: []
+        )
+        let unknownRevision = presentationCandidate(
+            id: "candidate:future",
+            ruleID: "developer.homebrew.cache",
+            ruleRevision: 2,
+            blockers: [.protectedPath]
+        )
+        let page = ExplorerCandidateSummaryPage(
+            scanID: "scan:example",
+            cursor: 0,
+            nextCursor: nil,
+            totalCandidates: 3,
+            candidates: [homebrew, pip, unknownRevision]
+        )
+
+        XCTAssertEqual(homebrew.ruleDisplayName, "Homebrew downloads")
+        XCTAssertEqual(pip.ruleDisplayName, "pip package cache")
+        XCTAssertEqual(unknownRevision.ruleDisplayName, "developer.homebrew.cache")
+        let group = try XCTUnwrap(page.findingGroups.first)
+        XCTAssertEqual(page.findingGroups.count, 1)
+        XCTAssertEqual(group.category, .developerArtifact)
+        XCTAssertEqual(group.safety, .safeRegenerable)
+        XCTAssertEqual(group.action, .removeKnownRegenerableContents)
+        XCTAssertEqual(group.count, 3)
+        XCTAssertEqual(group.blockedCount, 2)
+    }
+
     func testRustTargetPlanReviewMapsExactCurrentPermanentSafeObservation() throws {
         let record = rustTargetPlanReviewRecord()
 
@@ -599,6 +638,36 @@ final class ExplorerCandidateDetailTests: XCTestCase {
             effectiveExpiresAt: effectiveExpiresAt,
             scheduleEligible: false,
             target: target
+        )
+    }
+
+    private func presentationCandidate(
+        id: String,
+        ruleID: String,
+        ruleRevision: UInt32,
+        blockers: [ExplorerCandidateBlockReason]
+    ) -> ExplorerCandidateSummary {
+        ExplorerCandidateSummary(
+            candidateID: id,
+            ruleID: ruleID,
+            ruleRevision: ruleRevision,
+            category: .developerArtifact,
+            estimatedBytes: 42,
+            newestMtime: ExplorerSnapshotTimestamp(
+                secondsSinceUnixEpoch: 1_700_000_000,
+                nanoseconds: 0
+            ),
+            safety: .safeRegenerable,
+            action: .removeKnownRegenerableContents,
+            ruleScheduleEligible: false,
+            pathCount: 1,
+            evidenceKinds: [.matchedPath, .minimumAge],
+            blockers: blockers,
+            createdAt: ExplorerSnapshotTimestamp(
+                secondsSinceUnixEpoch: 1_700_000_001,
+                nanoseconds: 0
+            ),
+            status: .discovered
         )
     }
 }

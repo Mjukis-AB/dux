@@ -452,11 +452,67 @@ struct ExplorerSnapshotBrowserView: View {
                     )
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
+                    candidateFindingGroups(page)
                     candidatesTable(page.candidates)
+                    candidatePageControls(page)
                 }
             }
         }
         .accessibilityIdentifier(ExplorerAccessibility.snapshotCandidates)
+    }
+
+    private func candidateFindingGroups(
+        _ page: ExplorerCandidateSummaryPage
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("Finding groups")
+                    .font(.headline)
+                Spacer()
+                Text("Current page · estimates are not summed")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            ScrollView(.horizontal) {
+                HStack(spacing: 10) {
+                    ForEach(page.findingGroups) { group in
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text(verbatim: group.category.displayName)
+                                .font(.headline)
+                            Text(verbatim: group.safety.displayName)
+                                .font(.subheadline)
+                            Text(verbatim: group.action.displayName)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                            HStack {
+                                Label(
+                                    "\(group.count) \(group.count == 1 ? "finding" : "findings")",
+                                    systemImage: "doc.text.magnifyingglass"
+                                )
+                                if group.blockedCount > 0 {
+                                    Label(
+                                        "\(group.blockedCount) blocked",
+                                        systemImage: "lock.fill"
+                                    )
+                                    .foregroundStyle(.orange)
+                                }
+                            }
+                            .font(.caption)
+                        }
+                        .frame(minWidth: 220, alignment: .leading)
+                        .padding(12)
+                        .background(
+                            .quaternary.opacity(0.45),
+                            in: RoundedRectangle(cornerRadius: 10)
+                        )
+                        .accessibilityElement(children: .combine)
+                    }
+                }
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier(ExplorerAccessibility.snapshotCandidateGroups)
     }
 
     private func candidatesTable(_ candidates: [ExplorerCandidateSummary]) -> some View {
@@ -471,11 +527,11 @@ struct ExplorerSnapshotBrowserView: View {
         ) {
             TableColumn("Rule") { candidate in
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(verbatim: candidate.ruleID)
+                    Text(verbatim: candidate.ruleDisplayName)
                         .font(.headline)
                     Text(
                         verbatim:
-                        "Revision \(candidate.ruleRevision) · \(candidate.category.displayName)"
+                        "\(candidate.ruleID) · revision \(candidate.ruleRevision) · \(candidate.category.displayName)"
                     )
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -485,7 +541,7 @@ struct ExplorerSnapshotBrowserView: View {
                     Task { await browser.selectCandidate(candidate.candidateID) }
                 }
             }
-            TableColumn("Observed size") { candidate in
+            TableColumn("Observed estimate") { candidate in
                 Text(ByteCountFormatter.string(fromByteCount: Int64(min(candidate.estimatedBytes, UInt64(Int64.max))), countStyle: .file))
                     .monospacedDigit()
             }
@@ -519,6 +575,48 @@ struct ExplorerSnapshotBrowserView: View {
             }
         }
         .accessibilityIdentifier(ExplorerAccessibility.snapshotCandidateTable)
+    }
+
+    private func candidatePageControls(
+        _ page: ExplorerCandidateSummaryPage
+    ) -> some View {
+        HStack {
+            Text(verbatim: candidatePageStatus(page))
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+                .accessibilityIdentifier(
+                    ExplorerAccessibility.snapshotCandidatePageStatus
+                )
+            Spacer()
+            Button {
+                Task { await browser.showPreviousCandidatePage() }
+            } label: {
+                Label("Previous findings", systemImage: "chevron.left")
+            }
+            .disabled(!browser.hasPreviousCandidatePage || browser.isCandidateLoading)
+            .accessibilityIdentifier(
+                ExplorerAccessibility.snapshotCandidatePreviousPage
+            )
+            Button {
+                Task { await browser.showNextCandidatePage() }
+            } label: {
+                Label("Next findings", systemImage: "chevron.right")
+            }
+            .disabled(!browser.hasNextCandidatePage || browser.isCandidateLoading)
+            .accessibilityIdentifier(
+                ExplorerAccessibility.snapshotCandidateNextPage
+            )
+        }
+    }
+
+    private func candidatePageStatus(_ page: ExplorerCandidateSummaryPage) -> String {
+        guard !page.candidates.isEmpty else {
+            return "No findings"
+        }
+        let first = Int(page.cursor) + 1
+        let last = Int(page.cursor) + page.candidates.count
+        return "Showing \(first)–\(last) of \(page.totalCandidates) findings"
     }
 
     private var browseContent: some View {
@@ -1619,12 +1717,12 @@ private struct ExplorerCandidateInspectorView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(verbatim: candidate.ruleID)
+                    Text(verbatim: candidate.ruleDisplayName)
                         .font(.title3.bold())
                         .textSelection(.enabled)
                     Text(
                         verbatim:
-                        "Revision \(candidate.ruleRevision) · \(candidate.category.displayName)"
+                        "\(candidate.ruleID) · revision \(candidate.ruleRevision) · \(candidate.category.displayName)"
                     )
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -1647,7 +1745,7 @@ private struct ExplorerCandidateInspectorView: View {
                 GroupBox("Candidate") {
                     VStack(alignment: .leading, spacing: 8) {
                         detailRow(
-                            "Observed size",
+                            "Observed estimate",
                             StorageByteFormatter.string(from: candidate.estimatedBytes)
                         )
                         detailRow("Safety label", candidate.safety.displayName)

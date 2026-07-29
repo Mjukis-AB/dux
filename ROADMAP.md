@@ -5733,7 +5733,7 @@ Tasks:
     groups require a completed read-only scan and carries no deletion or AI
     execution authority. The affected-volume identity is retained in the
     validated payload but is never used as a filesystem path.
-- [ ] Add targeted reclaim scan on Warning/Critical.
+- [x] Add targeted reclaim scan on Warning/Critical.
   - [x] 2026-07-29 prerequisite slice: add the durable configured-project-root
     registry required to scope focused project discovery before pressure
     orchestration exists. Core stores at most 16 absolute, normalized,
@@ -5807,6 +5807,40 @@ Tasks:
     the evaluator authority boundary. The parent remains open until
     deterministic cache-specific rules can turn this evidence into reviewable
     safe findings; emergency ordering remains the next separate slice.
+  - [x] 2026-07-29 deterministic cache-findings slice: add independently
+    reviewed `developer.homebrew.cache` and
+    `developer.python.pip_cache` revision-1 rules for exact direct children of
+    the Rust-owned current-account `Library/Caches` scan. Evaluator revision 4
+    and the updated catalog digest bind the separate user-cache scope, exact
+    component, seven-day inclusive newest-mtime fact, candidate-local coverage,
+    aggregate observation, and symlink boundary. Neither age nor a cache name
+    proves provider inactivity or ownership, so every positive finding remains
+    unschedulable and blocked by `MissingOrIncompleteEvidence` plus
+    `ProtectedPath`; a subtree symlink, recent timestamp, incomplete timestamp,
+    or local coverage issue adds or withholds evidence fail-closed. Snapshot
+    replay reproduces the exact result, rejects scope/scan-ID mismatches, and
+    pending known-cache evaluations are not recovered without a fresh
+    OS-account root witness. Durable targeted reuse now rejects an older
+    evaluator or catalog revision during the same pressure episode.
+    Recommendations' **Review findings** action queues the exact targeted scan
+    directly into Explorer's Candidates view. The native view uses
+    revision-bound friendly names, page-local category/safety/action cards
+    without summing potentially overlapping estimates, exact raw rule IDs in
+    detail, and bounded previous/next candidate paging. The rule reviews in
+    `docs/rules/developer-homebrew-cache.md` and
+    `docs/rules/developer-python-pip-cache.md` record official provider
+    evidence and the missing authority needed for any future promotion.
+    Focused core and native regression gates cover exact matching, age,
+    symlink, candidate-local coverage, replay, stale reuse, deep-link intent,
+    grouping, and pagination. Final checkpoint verification passes formatting,
+    workspace Clippy with warnings denied, the serialized Rust suites (34 CLI
+    unit, 3 CLI integration, 1,119 core with 2 performance tests ignored, 13
+    projection, and 77 FFI with the 2 effect regressions run separately and
+    passing), all 31 policy-checker tests, the 250-source destructive-call
+    boundary, all 444 native tests, byte-identical generated Debug/Release
+    Swift bindings, and unsigned universal arm64/x86_64 Debug and Release apps
+    targeting macOS 14. Critical recommendation ordering remains the next
+    separate slice.
 - [ ] Add emergency recovery ordering.
 - [ ] Add rule outcome/regrowth measurement.
 - [ ] Add recurring “storage thief” ranking.

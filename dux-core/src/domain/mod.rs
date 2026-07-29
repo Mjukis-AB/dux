@@ -38,9 +38,10 @@ pub(crate) use candidate::CandidateInput;
 pub use candidate::{BlockReason, Candidate, CandidateValidationError, Evidence, EvidenceKind};
 pub(crate) use candidate_evaluator::{
     CANDIDATE_CATALOG_SCHEMA_VERSION, CANDIDATE_CATALOG_SHA256, CANDIDATE_CONTEXT_FORMAT_VERSION,
-    CANDIDATE_EVALUATOR_REVISION, CandidateEvaluationError, CandidateSnapshotReplayError,
-    KNOWN_USER_CACHE_SCAN_ID_PREFIX, MAX_EVALUATED_CANDIDATES, SAFE_RUST_RULE_MINIMUM_AGE,
-    SAFE_RUST_RULE_REVISION, candidate_evaluation_context_digest_for_observation,
+    CANDIDATE_EVALUATOR_REVISION, CandidateEvaluationError, CandidateEvaluationScope,
+    CandidateSnapshotReplayError, KNOWN_USER_CACHE_SCAN_ID_PREFIX, MAX_EVALUATED_CANDIDATES,
+    SAFE_RUST_RULE_MINIMUM_AGE, SAFE_RUST_RULE_REVISION,
+    candidate_evaluation_context_digest_for_observation,
     candidate_evaluation_context_digest_sha256, candidate_from_complete_record,
     current_rust_target_candidate_id, evaluate_completed_scan_candidates,
     replay_snapshot_candidate_evaluation, validate_bundled_candidate_catalog,

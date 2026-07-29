@@ -5,9 +5,11 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 const CATALOG_PATH: &str = "catalogs/candidate-rules-v1.json";
-const EXPECTED_SHA256: &str = "c0c4544d6c2c3d96ebc356425ee99b7698d631411282125421267e766759f09e";
+const EXPECTED_SHA256: &str = "8ebb1d34c9362e13411b29bba2bcfae6f1225d1e2afec2e2223491c9cb28a7ef";
 const SAFE_RUST_RULE_ID: &str = "developer.rust.target";
 const SAFE_PYTHON_PYCACHE_RULE_ID: &str = "developer.python.pycache";
+const SAFE_HOMEBREW_CACHE_RULE_ID: &str = "developer.homebrew.cache";
+const SAFE_PIP_CACHE_RULE_ID: &str = "developer.python.pip_cache";
 
 fn main() {
     println!("cargo:rerun-if-changed={CATALOG_PATH}");
@@ -33,7 +35,7 @@ fn main() {
         .get("rules")
         .and_then(Value::as_array)
         .expect("candidate catalog must contain a rules array");
-    assert_eq!(rules.len(), 11, "candidate catalog rule count changed");
+    assert_eq!(rules.len(), 13, "candidate catalog rule count changed");
     let mut ids = BTreeSet::new();
     for rule in rules {
         let rule = rule
@@ -44,15 +46,22 @@ fn main() {
             .and_then(Value::as_str)
             .expect("every candidate catalog rule must have a string ID");
         assert!(ids.insert(id), "candidate catalog rule IDs must be unique");
+        let expected_scope = match id {
+            SAFE_HOMEBREW_CACHE_RULE_ID | SAFE_PIP_CACHE_RULE_ID => "user_cache_directory",
+            _ => "selected_scan_root",
+        };
         assert_eq!(
             rule.get("scope").and_then(Value::as_str),
-            Some("selected_scan_root"),
-            "discovery catalog rules must bind the selected scan root"
+            Some(expected_scope),
+            "candidate rules must bind their exact reviewed discovery scope"
         );
         let (expected_revision, expected_safety, expected_action) = match id {
             SAFE_RUST_RULE_ID => (3, "safe_regenerable", "remove_known_regenerable_contents"),
             SAFE_PYTHON_PYCACHE_RULE_ID => {
                 (2, "safe_regenerable", "remove_known_regenerable_contents")
+            }
+            SAFE_HOMEBREW_CACHE_RULE_ID | SAFE_PIP_CACHE_RULE_ID => {
+                (1, "safe_regenerable", "remove_known_regenerable_contents")
             }
             _ => (1, "informational", "reveal_only"),
         };
@@ -131,6 +140,42 @@ fn main() {
                     Value::String("https://peps.python.org/pep-3147/".to_owned()),
                 ])),
                 "the Python rule must retain all reviewed sources"
+            );
+        } else if id == SAFE_HOMEBREW_CACHE_RULE_ID {
+            assert_eq!(
+                rule.get("minimum_age_days").and_then(Value::as_u64),
+                Some(7),
+                "the Homebrew cache rule must retain its reviewed seven-day observation threshold"
+            );
+            assert_eq!(
+                rule.get("path_component").and_then(Value::as_str),
+                Some("Homebrew"),
+                "the Homebrew cache rule must retain the exact conventional macOS component"
+            );
+            assert_eq!(
+                rule.get("provenance"),
+                Some(&Value::Array(vec![Value::String(
+                    "https://docs.brew.sh/Manpage#cache-options".to_owned()
+                )])),
+                "the Homebrew cache rule must retain its reviewed source"
+            );
+        } else if id == SAFE_PIP_CACHE_RULE_ID {
+            assert_eq!(
+                rule.get("minimum_age_days").and_then(Value::as_u64),
+                Some(7),
+                "the pip cache rule must retain its reviewed seven-day observation threshold"
+            );
+            assert_eq!(
+                rule.get("path_component").and_then(Value::as_str),
+                Some("pip"),
+                "the pip cache rule must retain the exact conventional macOS component"
+            );
+            assert_eq!(
+                rule.get("provenance"),
+                Some(&Value::Array(vec![Value::String(
+                    "https://pip.pypa.io/en/stable/topics/caching/".to_owned()
+                )])),
+                "the pip cache rule must retain its reviewed source"
             );
         }
     }
