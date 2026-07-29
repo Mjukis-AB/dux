@@ -5164,7 +5164,7 @@ Tasks:
     Explorer dismissal does not imply cancellation, while app shutdown
     explicitly cancels and waits. The action remains Debug-only until §17.3 is
     complete, so broader release UI keeps this parent open.
-- [ ] Add bounded pending-evaluation discovery and snapshot-backed restart
+- [x] Add bounded pending-evaluation discovery and snapshot-backed restart
   recovery; malformed or incompatible state fails closed.
   - [x] 2026-07-19 slice: add a bounded oldest-first pending-evaluation
     discovery sentinel and a core recovery seam that replays only the exact
@@ -5176,6 +5176,34 @@ Tasks:
     cleanup authority. The result is path-free and reports only recovered count
     plus a bounded `has_more` hint; startup scheduling and FFI/Swift wiring
     remain the next orchestration slice.
+  - [x] 2026-07-29 slice: schedule that seam as the eighth idle-only native
+    maintenance task through UniFFI contract v32. Production admission accepts
+    no caller path, scan/snapshot/candidate identity, clock, evaluator/catalog
+    input, AI output, plan, approval, or command; Rust samples time inside the
+    worker and processes at most one oldest row from the exact retained
+    immutable snapshot. The former direct caller-clock recovery method and its
+    public replay result/error types are removed, leaving the admitted task as
+    the only production entry point. Applying linearizes cancellation, late
+    cancellation or close preserves the exact result, invalid clocks are typed,
+    malformed or missing state fails closed, and `has_more` remains only a
+    bounded hint because core never self-enqueues. FFI exposes only `None`,
+    `Recovered`, or `Incompatible`, recovered candidate count, timestamp, and
+    `has_more`, and validates task kind plus phase/failure/result shape. Swift
+    independently validates all eight maintenance result families and requests
+    candidate recovery immediately after abandoned-scan recovery while
+    preserving the 60-second startup grace, energy gates, fair cadence,
+    backoffs, and ordered
+    shutdown cancellation. Evidence includes 10 focused core recovery tests,
+    all 65 FFI tests (63 passed, two intentionally isolated), all 398 linked
+    native tests, all 29 destructive-policy tests, and a clean 242-file
+    destructive-call scan. Workspace format, check, and warning-denied Clippy
+    gates pass. The broad parallel Rust lane passed the CLI suites but reported
+    three existing load-sensitive core timing/availability failures; each exact
+    failed regression passed independently (one 220-second registry case and
+    two subsecond planner cases). Universal arm64/x86_64 Debug and Release app
+    builds and the generated Release FFI archive pass with macOS 14.0 minimum;
+    Release contains neither the internal permanent-cleanup compilation
+    condition nor its action string.
 - [ ] Wire deterministic evaluator → reviewed plan → journal → executor through
   the core engine and FFI/Swift while preserving generation, cancellation,
   recovery, and outcome-unknown fencing.

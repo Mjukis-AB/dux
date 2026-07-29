@@ -3351,6 +3351,17 @@ fn started_scan_recovery_maintenance(outcome: ScanRecoveryMaintenanceStartOutcom
     }
 }
 
+fn started_candidate_evaluation_recovery_maintenance(
+    outcome: CandidateEvaluationRecoveryMaintenanceStartOutcome,
+) -> TaskId {
+    match outcome {
+        CandidateEvaluationRecoveryMaintenanceStartOutcome::Started(id) => id,
+        other => {
+            panic!("expected started candidate-evaluation recovery maintenance, got {other:?}")
+        }
+    }
+}
+
 fn started_snapshot_retention(outcome: SnapshotRetentionStartOutcome) -> TaskId {
     match outcome {
         SnapshotRetentionStartOutcome::Started(id) => id,
@@ -3640,6 +3651,26 @@ fn completed_marker_candidate() -> (
     (temp, config, engine, scan_id, candidate_id, expected_target)
 }
 
+fn reset_candidate_evaluation_to_pending(engine: &EngineHandle, scan_id: &ScanId) {
+    engine.inner.store.with_connection(|connection| {
+        connection
+            .execute(
+                "DELETE FROM candidates WHERE scan_id = ?1",
+                [scan_id.as_str()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE candidate_evaluations
+                 SET status = 'pending', completed_at_unix_ms = NULL,
+                     candidate_count = NULL, failure_kind = NULL
+                 WHERE scan_id = ?1",
+                [scan_id.as_str()],
+            )
+            .unwrap();
+    });
+}
+
 #[test]
 fn pending_candidate_evaluation_replays_exact_snapshot_after_restart_boundary() {
     let (_temp, _config, engine, scan_id, _candidate_id, _target) = completed_marker_candidate();
@@ -3662,9 +3693,12 @@ fn pending_candidate_evaluation_replays_exact_snapshot_after_restart_boundary() 
     });
 
     assert_eq!(
-        engine
-            .recover_pending_candidate_evaluation(SystemTime::UNIX_EPOCH + Duration::from_secs(20))
-            .unwrap(),
+        EngineHandle::recover_pending_candidate_evaluation_after_admission(
+            &engine.inner.store,
+            &engine.inner.snapshots,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(20),
+        )
+        .unwrap(),
         super::super::task::CandidateEvaluationRecoveryOutcome::Recovered {
             candidate_count: 1,
             has_more: false,
@@ -3705,9 +3739,12 @@ fn incompatible_pending_candidate_evaluation_fails_closed_without_replay() {
     });
 
     assert_eq!(
-        engine
-            .recover_pending_candidate_evaluation(SystemTime::UNIX_EPOCH + Duration::from_secs(20))
-            .unwrap(),
+        EngineHandle::recover_pending_candidate_evaluation_after_admission(
+            &engine.inner.store,
+            &engine.inner.snapshots,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(20),
+        )
+        .unwrap(),
         super::super::task::CandidateEvaluationRecoveryOutcome::Incompatible { has_more: false }
     );
     assert_eq!(
@@ -3753,9 +3790,12 @@ fn malformed_pending_candidate_evaluation_is_rejected_before_replay() {
     });
 
     assert_eq!(
-        engine
-            .recover_pending_candidate_evaluation(SystemTime::UNIX_EPOCH + Duration::from_secs(20))
-            .unwrap_err(),
+        EngineHandle::recover_pending_candidate_evaluation_after_admission(
+            &engine.inner.store,
+            &engine.inner.snapshots,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(20),
+        )
+        .unwrap_err(),
         super::super::task::CandidateEvaluationRecoveryError::CorruptData
     );
     assert_eq!(
@@ -3767,6 +3807,603 @@ fn malformed_pending_candidate_evaluation_is_rejected_before_replay() {
             .kind,
         HistoryErrorKind::CorruptData
     );
+}
+
+#[test]
+fn candidate_evaluation_recovery_maintenance_reports_path_free_none_and_events() {
+    let (temp, engine) = engine_with_limits(RegistryLimits::testing(1, 2, 8, 8));
+    let observed = SystemTime::UNIX_EPOCH + Duration::from_secs(20);
+    let id = started_candidate_evaluation_recovery_maintenance(
+        engine
+            .start_candidate_evaluation_recovery_maintenance_at(observed)
+            .unwrap(),
+    );
+
+    let terminal = wait_terminal(&engine, id);
+    assert_eq!(
+        terminal.kind,
+        TaskKind::CandidateEvaluationRecoveryMaintenance
+    );
+    assert_eq!(terminal.phase, TaskPhase::Succeeded);
+    assert!(terminal.result_available);
+    let result = engine
+        .candidate_evaluation_recovery_maintenance_result(id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.observed_at(), observed);
+    assert_eq!(
+        result.outcome(),
+        CandidateEvaluationRecoveryMaintenanceOutcome::None
+    );
+    assert!(!result.has_more());
+    assert_eq!(
+        engine.scan_recovery_maintenance_result(id).unwrap_err(),
+        TaskAccessError::WrongTaskKind
+    );
+
+    let events = engine.task_events(id, 0, 8).unwrap().events;
+    let applying = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event.kind,
+                TaskEventKind::CandidateEvaluationRecoveryMaintenanceApplying
+            )
+        })
+        .unwrap();
+    let finished = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event.kind,
+                TaskEventKind::CandidateEvaluationRecoveryMaintenanceFinished {
+                    outcome: CandidateEvaluationRecoveryMaintenanceOutcome::None,
+                    has_more: false,
+                }
+            )
+        })
+        .unwrap();
+    let terminal_event = events
+        .iter()
+        .position(|event| matches!(event.kind, TaskEventKind::Terminal { .. }))
+        .unwrap();
+    assert!(applying < finished && finished < terminal_event);
+    let debug = format!("{result:?}{events:?}");
+    assert!(!debug.contains(temp.path().to_string_lossy().as_ref()));
+    assert!(!debug.contains("scan:"));
+}
+
+#[test]
+fn candidate_evaluation_recovery_maintenance_replays_one_exact_snapshot() {
+    let (_temp, _config, engine, scan_id, _candidate_id, _target) = completed_marker_candidate();
+    reset_candidate_evaluation_to_pending(&engine, &scan_id);
+    let observed = SystemTime::UNIX_EPOCH + Duration::from_secs(20);
+    let id = started_candidate_evaluation_recovery_maintenance(
+        engine
+            .start_candidate_evaluation_recovery_maintenance_at(observed)
+            .unwrap(),
+    );
+
+    assert_eq!(wait_terminal(&engine, id).phase, TaskPhase::Succeeded);
+    let result = engine
+        .candidate_evaluation_recovery_maintenance_result(id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.observed_at(), observed);
+    assert_eq!(
+        result.outcome(),
+        CandidateEvaluationRecoveryMaintenanceOutcome::Recovered { candidate_count: 1 }
+    );
+    assert!(!result.has_more());
+    assert!(matches!(
+        engine
+            .inner
+            .store
+            .load_candidate_evaluation(&scan_id)
+            .unwrap()
+            .unwrap()
+            .status(),
+        crate::persistence::CandidateEvaluationStatus::Succeeded { candidate_count: 1 }
+    ));
+}
+
+#[test]
+fn candidate_evaluation_recovery_maintenance_recovers_only_oldest_and_exposes_has_more() {
+    let (_temp, _config, engine, first_scan, _candidate_id, target) = completed_marker_candidate();
+    let root = target
+        .parent()
+        .and_then(Path::parent)
+        .unwrap()
+        .to_path_buf();
+    std::thread::sleep(Duration::from_millis(2));
+    std::fs::write(target.join("second-object"), b"second snapshot").unwrap();
+    let second_task = engine.start_scan(root).unwrap();
+    assert_eq!(
+        wait_terminal(&engine, second_task).phase,
+        TaskPhase::Succeeded
+    );
+    let second_scan = engine
+        .scan_result(second_task)
+        .unwrap()
+        .unwrap()
+        .scan_id()
+        .clone();
+    reset_candidate_evaluation_to_pending(&engine, &first_scan);
+    reset_candidate_evaluation_to_pending(&engine, &second_scan);
+
+    let first = started_candidate_evaluation_recovery_maintenance(
+        engine
+            .start_candidate_evaluation_recovery_maintenance_at(
+                SystemTime::UNIX_EPOCH + Duration::from_secs(20),
+            )
+            .unwrap(),
+    );
+    assert_eq!(wait_terminal(&engine, first).phase, TaskPhase::Succeeded);
+    let first_result = engine
+        .candidate_evaluation_recovery_maintenance_result(first)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        first_result.outcome(),
+        CandidateEvaluationRecoveryMaintenanceOutcome::Recovered { candidate_count: 1 }
+    );
+    assert!(first_result.has_more());
+    assert!(matches!(
+        engine
+            .inner
+            .store
+            .load_candidate_evaluation(&first_scan)
+            .unwrap()
+            .unwrap()
+            .status(),
+        crate::persistence::CandidateEvaluationStatus::Succeeded { .. }
+    ));
+    assert_eq!(
+        engine
+            .inner
+            .store
+            .load_candidate_evaluation(&second_scan)
+            .unwrap()
+            .unwrap()
+            .status(),
+        crate::persistence::CandidateEvaluationStatus::Pending
+    );
+
+    let second = started_candidate_evaluation_recovery_maintenance(
+        engine
+            .start_candidate_evaluation_recovery_maintenance_at(
+                SystemTime::UNIX_EPOCH + Duration::from_secs(21),
+            )
+            .unwrap(),
+    );
+    assert_eq!(wait_terminal(&engine, second).phase, TaskPhase::Succeeded);
+    assert!(
+        !engine
+            .candidate_evaluation_recovery_maintenance_result(second)
+            .unwrap()
+            .unwrap()
+            .has_more()
+    );
+}
+
+#[test]
+fn candidate_evaluation_recovery_maintenance_settles_incompatible_pending_state() {
+    let (_temp, _config, engine, scan_id, _candidate_id, _target) = completed_marker_candidate();
+    reset_candidate_evaluation_to_pending(&engine, &scan_id);
+    engine.inner.store.with_connection(|connection| {
+        connection
+            .execute(
+                "UPDATE candidate_evaluations
+                 SET context_sha256 = zeroblob(32)
+                 WHERE scan_id = ?1",
+                [scan_id.as_str()],
+            )
+            .unwrap();
+    });
+
+    let id = started_candidate_evaluation_recovery_maintenance(
+        engine
+            .start_candidate_evaluation_recovery_maintenance_at(
+                SystemTime::UNIX_EPOCH + Duration::from_secs(20),
+            )
+            .unwrap(),
+    );
+    assert_eq!(wait_terminal(&engine, id).phase, TaskPhase::Succeeded);
+    let result = engine
+        .candidate_evaluation_recovery_maintenance_result(id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        result.outcome(),
+        CandidateEvaluationRecoveryMaintenanceOutcome::Incompatible
+    );
+    assert!(!result.has_more());
+    assert_eq!(
+        engine
+            .inner
+            .store
+            .load_candidate_evaluation(&scan_id)
+            .unwrap()
+            .unwrap()
+            .status(),
+        crate::persistence::CandidateEvaluationStatus::Failed {
+            kind: crate::persistence::CandidateEvaluationFailureKind::ContextInvalid,
+        }
+    );
+}
+
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test moves only a TempDir-owned snapshot to exercise missing-file recovery"
+)]
+fn candidate_evaluation_recovery_maintenance_maps_malformed_and_missing_snapshot_failures() {
+    let (_temp, _config, malformed_engine, malformed_scan, _candidate_id, _target) =
+        completed_marker_candidate();
+    reset_candidate_evaluation_to_pending(&malformed_engine, &malformed_scan);
+    malformed_engine.inner.store.with_connection(|connection| {
+        connection
+            .pragma_update(None, "ignore_check_constraints", true)
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE candidate_evaluations
+                     SET context_sha256 = X'00'
+                     WHERE scan_id = ?1",
+                [malformed_scan.as_str()],
+            )
+            .unwrap();
+        connection
+            .pragma_update(None, "ignore_check_constraints", false)
+            .unwrap();
+    });
+    let malformed = started_candidate_evaluation_recovery_maintenance(
+        malformed_engine
+            .start_candidate_evaluation_recovery_maintenance_at(
+                SystemTime::UNIX_EPOCH + Duration::from_secs(20),
+            )
+            .unwrap(),
+    );
+    let terminal = wait_terminal(&malformed_engine, malformed);
+    assert_eq!(terminal.phase, TaskPhase::Failed);
+    assert_eq!(
+        terminal.failure,
+        Some(TaskFailureKind::CandidateEvaluationRecoveryMaintenance(
+            CandidateEvaluationRecoveryMaintenanceFailureKind::CorruptData,
+        ))
+    );
+    assert!(!terminal.result_available);
+
+    let (_temp, config, missing_engine, missing_scan, _candidate_id, _target) =
+        completed_marker_candidate();
+    reset_candidate_evaluation_to_pending(&missing_engine, &missing_scan);
+    let reference = missing_engine
+        .inner
+        .store
+        .load_scan(&missing_scan)
+        .unwrap()
+        .unwrap()
+        .snapshot()
+        .unwrap()
+        .clone();
+    // DUX-DESTRUCTIVE: allow=test-candidate-recovery-missing-snapshot-rename -- move only this TempDir-owned immutable snapshot to prove recovery fails closed when its exact retained file is missing
+    std::fs::rename(
+        config
+            .snapshots_directory()
+            .join(reference.file_name().as_str()),
+        config
+            .snapshots_directory()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("missing-snapshot-for-test"),
+    )
+    .unwrap();
+    let missing = started_candidate_evaluation_recovery_maintenance(
+        missing_engine
+            .start_candidate_evaluation_recovery_maintenance_at(
+                SystemTime::UNIX_EPOCH + Duration::from_secs(20),
+            )
+            .unwrap(),
+    );
+    let terminal = wait_terminal(&missing_engine, missing);
+    assert_eq!(terminal.phase, TaskPhase::Failed);
+    assert_eq!(
+        terminal.failure,
+        Some(TaskFailureKind::CandidateEvaluationRecoveryMaintenance(
+            CandidateEvaluationRecoveryMaintenanceFailureKind::Unavailable,
+        ))
+    );
+    assert!(!terminal.result_available);
+}
+
+#[test]
+fn candidate_evaluation_recovery_maintenance_reports_invalid_clock_without_settling_pending() {
+    let (_temp, _config, engine, scan_id, _candidate_id, _target) = completed_marker_candidate();
+    reset_candidate_evaluation_to_pending(&engine, &scan_id);
+    let id = started_candidate_evaluation_recovery_maintenance(
+        engine
+            .start_candidate_evaluation_recovery_maintenance_at(
+                SystemTime::UNIX_EPOCH
+                    .checked_add(Duration::from_millis(i64::MAX as u64 + 1))
+                    .unwrap(),
+            )
+            .unwrap(),
+    );
+
+    let terminal = wait_terminal(&engine, id);
+    assert_eq!(terminal.phase, TaskPhase::Failed);
+    assert_eq!(
+        terminal.failure,
+        Some(TaskFailureKind::CandidateEvaluationRecoveryMaintenance(
+            CandidateEvaluationRecoveryMaintenanceFailureKind::InvalidClock,
+        ))
+    );
+    assert!(!terminal.result_available);
+    assert_eq!(
+        engine
+            .inner
+            .store
+            .load_candidate_evaluation(&scan_id)
+            .unwrap()
+            .unwrap()
+            .status(),
+        crate::persistence::CandidateEvaluationStatus::Pending
+    );
+}
+
+#[test]
+fn candidate_evaluation_recovery_maintenance_is_idle_deduplicated_and_cross_exclusive() {
+    let (_temp, engine) = engine_with_limits(RegistryLimits::testing(1, 2, 8, 8));
+    let (foreground_started_tx, foreground_started_rx) = mpsc::channel();
+    let (foreground_release_tx, foreground_release_rx) = mpsc::channel();
+    let foreground = engine
+        .submit_test(Box::new(move |_| {
+            foreground_started_tx.send(()).unwrap();
+            foreground_release_rx.recv().unwrap();
+            WorkOutcome::Succeeded(TaskResult::TestOnly)
+        }))
+        .unwrap();
+    foreground_started_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    assert_eq!(
+        engine
+            .start_candidate_evaluation_recovery_maintenance()
+            .unwrap(),
+        CandidateEvaluationRecoveryMaintenanceStartOutcome::DeferredBusy
+    );
+    foreground_release_tx.send(()).unwrap();
+    wait_terminal(&engine, foreground);
+
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let first = started_candidate_evaluation_recovery_maintenance(
+        engine
+            .start_candidate_evaluation_recovery_maintenance_with_test_hooks(
+                SystemTime::UNIX_EPOCH + Duration::from_secs(20),
+                move || {
+                    started_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                },
+                || {},
+            )
+            .unwrap(),
+    );
+    started_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    assert_eq!(
+        engine
+            .start_candidate_evaluation_recovery_maintenance()
+            .unwrap(),
+        CandidateEvaluationRecoveryMaintenanceStartOutcome::AlreadyActive(first)
+    );
+    assert_eq!(
+        engine.start_scan_recovery_maintenance().unwrap(),
+        ScanRecoveryMaintenanceStartOutcome::DeferredBusy
+    );
+    assert_eq!(
+        engine.start_history_maintenance().unwrap(),
+        HistoryMaintenanceStartOutcome::DeferredBusy
+    );
+    release_tx.send(()).unwrap();
+    assert_eq!(wait_terminal(&engine, first).phase, TaskPhase::Succeeded);
+    assert!(
+        engine
+            .inner
+            .shared
+            .lock_registry_recover()
+            .active_candidate_evaluation_recovery_maintenance
+            .is_none()
+    );
+}
+
+#[test]
+fn candidate_evaluation_recovery_cancellation_is_linearized_at_applying() {
+    let (_temp, _config, engine, scan_id, _candidate_id, _target) = completed_marker_candidate();
+    reset_candidate_evaluation_to_pending(&engine, &scan_id);
+    let observed = SystemTime::UNIX_EPOCH + Duration::from_secs(20);
+
+    let (before_tx, before_rx) = mpsc::channel();
+    let (before_release_tx, before_release_rx) = mpsc::channel();
+    let cancelled = started_candidate_evaluation_recovery_maintenance(
+        engine
+            .start_candidate_evaluation_recovery_maintenance_with_test_hooks(
+                observed,
+                move || {
+                    before_tx.send(()).unwrap();
+                    before_release_rx.recv().unwrap();
+                },
+                || {},
+            )
+            .unwrap(),
+    );
+    before_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    assert_eq!(
+        engine.cancel_task(cancelled).unwrap(),
+        CancelOutcome::Requested
+    );
+    before_release_tx.send(()).unwrap();
+    assert_eq!(
+        wait_terminal(&engine, cancelled).phase,
+        TaskPhase::Cancelled
+    );
+    assert!(
+        engine
+            .task_events(cancelled, 0, 8)
+            .unwrap()
+            .events
+            .iter()
+            .all(|event| !matches!(
+                event.kind,
+                TaskEventKind::CandidateEvaluationRecoveryMaintenanceApplying
+            ))
+    );
+    assert_eq!(
+        engine
+            .inner
+            .store
+            .load_candidate_evaluation(&scan_id)
+            .unwrap()
+            .unwrap()
+            .status(),
+        crate::persistence::CandidateEvaluationStatus::Pending
+    );
+
+    let (applying_tx, applying_rx) = mpsc::channel();
+    let (applying_release_tx, applying_release_rx) = mpsc::channel();
+    let applied = started_candidate_evaluation_recovery_maintenance(
+        engine
+            .start_candidate_evaluation_recovery_maintenance_with_test_hooks(
+                observed + Duration::from_secs(1),
+                || {},
+                move || {
+                    applying_tx.send(()).unwrap();
+                    applying_release_rx.recv().unwrap();
+                },
+            )
+            .unwrap(),
+    );
+    applying_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    assert_eq!(
+        engine.cancel_task(applied).unwrap(),
+        CancelOutcome::Requested
+    );
+    applying_release_tx.send(()).unwrap();
+    let terminal = wait_terminal(&engine, applied);
+    assert_eq!(terminal.phase, TaskPhase::Succeeded);
+    assert!(terminal.cancellation_requested);
+    assert_eq!(
+        engine
+            .candidate_evaluation_recovery_maintenance_result(applied)
+            .unwrap()
+            .unwrap()
+            .outcome(),
+        CandidateEvaluationRecoveryMaintenanceOutcome::Recovered { candidate_count: 1 }
+    );
+}
+
+#[test]
+fn candidate_evaluation_recovery_close_preserves_post_applying_result() {
+    let (_temp, engine) = engine_with_limits(RegistryLimits::testing(1, 2, 8, 8));
+    let (applying_tx, applying_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let id = started_candidate_evaluation_recovery_maintenance(
+        engine
+            .start_candidate_evaluation_recovery_maintenance_with_test_hooks(
+                SystemTime::UNIX_EPOCH + Duration::from_secs(20),
+                || {},
+                move || {
+                    applying_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                },
+            )
+            .unwrap(),
+    );
+    applying_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    assert_eq!(engine.close(), CloseOutcome::Initiated);
+    release_tx.send(()).unwrap();
+    assert!(engine.wait_until_closed(TEST_TIMEOUT));
+
+    let registry = engine.inner.shared.lock_registry_recover();
+    let record = registry.records.get(&id).unwrap();
+    assert_eq!(record.phase, TaskPhase::Succeeded);
+    assert!(record.cancellation_requested);
+    assert!(matches!(
+        record.result,
+        Some(TaskResult::CandidateEvaluationRecoveryMaintenance(_))
+    ));
+}
+
+#[test]
+fn candidate_evaluation_recovery_maintenance_mappings_are_exhaustive() {
+    for (input, expected, has_more) in [
+        (
+            CandidateEvaluationRecoveryOutcome::NoPending,
+            CandidateEvaluationRecoveryMaintenanceOutcome::None,
+            false,
+        ),
+        (
+            CandidateEvaluationRecoveryOutcome::Recovered {
+                candidate_count: 7,
+                has_more: true,
+            },
+            CandidateEvaluationRecoveryMaintenanceOutcome::Recovered { candidate_count: 7 },
+            true,
+        ),
+        (
+            CandidateEvaluationRecoveryOutcome::Incompatible { has_more: true },
+            CandidateEvaluationRecoveryMaintenanceOutcome::Incompatible,
+            true,
+        ),
+    ] {
+        assert_eq!(
+            public_candidate_evaluation_recovery_maintenance_outcome(input),
+            (expected, has_more)
+        );
+    }
+
+    for (input, expected) in [
+        (
+            CandidateEvaluationRecoveryError::InvalidClock,
+            CandidateEvaluationRecoveryMaintenanceFailureKind::InvalidClock,
+        ),
+        (
+            CandidateEvaluationRecoveryError::IncompatibleSchema,
+            CandidateEvaluationRecoveryMaintenanceFailureKind::IncompatibleSchema,
+        ),
+        (
+            CandidateEvaluationRecoveryError::Busy,
+            CandidateEvaluationRecoveryMaintenanceFailureKind::Busy,
+        ),
+        (
+            CandidateEvaluationRecoveryError::UnsafeStorage,
+            CandidateEvaluationRecoveryMaintenanceFailureKind::UnsafeStorage,
+        ),
+        (
+            CandidateEvaluationRecoveryError::BudgetExceeded,
+            CandidateEvaluationRecoveryMaintenanceFailureKind::BudgetExceeded,
+        ),
+        (
+            CandidateEvaluationRecoveryError::CorruptData,
+            CandidateEvaluationRecoveryMaintenanceFailureKind::CorruptData,
+        ),
+        (
+            CandidateEvaluationRecoveryError::Unavailable,
+            CandidateEvaluationRecoveryMaintenanceFailureKind::Unavailable,
+        ),
+        (
+            CandidateEvaluationRecoveryError::OutcomeUnknown,
+            CandidateEvaluationRecoveryMaintenanceFailureKind::OutcomeUnknown,
+        ),
+        (
+            CandidateEvaluationRecoveryError::InternalState,
+            CandidateEvaluationRecoveryMaintenanceFailureKind::InternalState,
+        ),
+    ] {
+        assert_eq!(
+            map_candidate_evaluation_recovery_maintenance_failure(input),
+            TaskFailureKind::CandidateEvaluationRecoveryMaintenance(expected)
+        );
+    }
 }
 
 fn make_marker_candidate_cleanup_reviewable(engine: &EngineHandle, scan_id: &ScanId) {

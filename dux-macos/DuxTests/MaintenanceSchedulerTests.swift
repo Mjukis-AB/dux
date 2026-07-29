@@ -22,7 +22,7 @@ final class MaintenanceSchedulerTests: XCTestCase {
         let firstStarts = await service.startedKinds()
         XCTAssertEqual(firstStarts, [.scanRecovery])
 
-        for expectedCount in 2 ... 7 {
+        for expectedCount in 2 ... 8 {
             await clock.advance(by: 2)
             try await eventually {
                 let count = await service.startedKinds().count
@@ -33,7 +33,7 @@ final class MaintenanceSchedulerTests: XCTestCase {
         let allStarts = await service.startedKinds()
         XCTAssertEqual(allStarts, DuxMaintenanceKind.allCases)
         let afterCycle = await scheduler.snapshot()
-        XCTAssertEqual(afterCycle.nextDeadline?.milliseconds, 122)
+        XCTAssertEqual(afterCycle.nextDeadline?.milliseconds, 124)
         await scheduler.stop()
     }
 
@@ -86,7 +86,7 @@ final class MaintenanceSchedulerTests: XCTestCase {
             return count == 2 && inFlight == nil
         }
         let starts = await service.startedKinds()
-        XCTAssertEqual(starts, [.scanRecovery, .snapshotTerminalTemp])
+        XCTAssertEqual(starts, [.scanRecovery, .candidateEvaluationRecovery])
         await scheduler.stop()
     }
 
@@ -179,7 +179,7 @@ final class MaintenanceSchedulerTests: XCTestCase {
         await clock.advance(by: 2)
         try await waitForCompletedAttempt(scheduler, service: service, count: 2)
         let starts = await service.startedKinds()
-        XCTAssertEqual(starts, [.scanRecovery, .snapshotTerminalTemp])
+        XCTAssertEqual(starts, [.scanRecovery, .candidateEvaluationRecovery])
         await scheduler.stop()
     }
 
@@ -212,8 +212,8 @@ final class MaintenanceSchedulerTests: XCTestCase {
             [
                 .scanRecovery,
                 .scanRecovery,
-                .snapshotTerminalTemp,
-                .snapshotTerminalTemp,
+                .candidateEvaluationRecovery,
+                .candidateEvaluationRecovery,
             ]
         )
         await scheduler.stop()
@@ -251,7 +251,7 @@ final class MaintenanceSchedulerTests: XCTestCase {
         try await eventually { await service.startedKinds().count == 2 }
         let starts = await service.startedKinds()
         let cancellationsAfterFinish = await task.cancellationCount()
-        XCTAssertEqual(starts, [.scanRecovery, .snapshotTerminalTemp])
+        XCTAssertEqual(starts, [.scanRecovery, .candidateEvaluationRecovery])
         XCTAssertEqual(cancellationsAfterFinish, 0)
         await scheduler.stop()
     }
@@ -291,7 +291,7 @@ final class MaintenanceSchedulerTests: XCTestCase {
         await scheduler.start()
         await clock.advance(by: 10)
         try await eventually {
-            await scheduler.snapshot().nextKind == .snapshotTerminalTemp
+            await scheduler.snapshot().nextKind == .candidateEvaluationRecovery
         }
         let starts = await service.startedKinds()
         XCTAssertEqual(starts, [.scanRecovery])
@@ -319,6 +319,36 @@ final class MaintenanceSchedulerTests: XCTestCase {
         let starts = await service.startedKinds()
         let isStarted = await scheduler.snapshot().isStarted
         XCTAssertEqual(starts, [.scanRecovery])
+        XCTAssertFalse(isStarted)
+    }
+
+    func testStopCancelsInFlightCandidateEvaluationRecovery() async throws {
+        let clock = ManualDuxMaintenanceClock()
+        let service = StubDuxMaintenanceService()
+        await service.enqueue(
+            .started(StubDuxMaintenanceTask(polls: [
+                .finished(DuxMaintenanceBatchSignal(hasMore: false)),
+            ]))
+        )
+        let recoveryTask = StubDuxMaintenanceTask(polls: [.running])
+        await service.enqueue(.started(recoveryTask))
+        let scheduler = makeScheduler(service: service, clock: clock)
+
+        await scheduler.start()
+        await clock.advance(by: 10)
+        try await waitForCompletedAttempt(scheduler, service: service, count: 1)
+        await clock.advance(by: 2)
+        try await eventually {
+            await scheduler.snapshot().inFlightKind == .candidateEvaluationRecovery
+        }
+
+        await scheduler.stop()
+
+        let cancellationCount = await recoveryTask.cancellationCount()
+        let startedKinds = await service.startedKinds()
+        let isStarted = await scheduler.snapshot().isStarted
+        XCTAssertEqual(cancellationCount, 1)
+        XCTAssertEqual(startedKinds, [.scanRecovery, .candidateEvaluationRecovery])
         XCTAssertFalse(isStarted)
     }
 

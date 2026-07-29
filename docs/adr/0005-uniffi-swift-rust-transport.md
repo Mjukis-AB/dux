@@ -56,9 +56,9 @@ Those capabilities retain their own gates below and in ADR 0004.
 
 ## Current realization
 
-FFI contract v16 now carries the real shared engine session first introduced in
+FFI contract v32 now carries the real shared engine session first introduced in
 v4. The app supplies input-only private data/cache roots; storage paths never
-return across the boundary. Seven maintenance kinds use opaque task objects
+return across the boundary. Eight maintenance kinds use opaque task objects
 with nonblocking versioned path-free poll/cancel records, and exact Explorer
 reviews use opaque scan-bound lease objects. No maintenance task accepts a path,
 cap, inventory, victim, candidate, or cleanup instruction. Review sessions
@@ -166,10 +166,20 @@ exact result review, root, first page, and treemap validate, then performs a
 generation-fenced lease handoff. No path, merge authority, candidate detail,
 plan, AI input, or cleanup capability is added.
 
-The seventh task is scan recovery. It exposes only bounded page counts and
+The seventh original task is scan recovery. It exposes only bounded page counts and
 typed outcomes; process-instance identities and recovery-scope keys remain
 private to Rust. As with every maintenance task, the transport cannot select a
 scan, owner, or victim and cannot acquire cleanup authority.
+
+Contract v32 adds the eighth task: pending candidate-evaluation recovery. It
+accepts no path, scan/snapshot/candidate identity, timestamp, evaluator or
+catalog input, AI output, plan, approval, or command. Rust samples the clock and
+processes at most one oldest pending row by replaying only its exact retained
+immutable snapshot. The path-free result carries only `None`, `Recovered`, or
+`Incompatible`, recovered candidate count, observation time, and `has_more`.
+The native scheduler requests it immediately after scan recovery, and both FFI
+and Swift reject mismatched kinds, phases, outcome families, counts, or nonzero
+unused fields before using the result.
 
 Contract v5 added one synchronous, versioned, path-free
 startup-volume observation/status pair. Swift supplies optional canonical

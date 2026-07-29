@@ -1,5 +1,20 @@
 # Changelog
 
+- Added bounded startup recovery for durable pending candidate evaluations.
+  Core now exposes an eighth idle-only maintenance task that selects at most
+  one oldest pending row, replays only its exact retained immutable snapshot,
+  and returns only `None`, recovered candidate count, or `Incompatible` plus a
+  bounded `has_more` hint. The task accepts no path, scan ID, timestamp,
+  evaluator input, catalog, AI output, plan, approval, or cleanup command;
+  Rust owns the clock and all replay inputs. Applying linearizes cancellation,
+  late cancellation preserves the exact terminal result, invalid clocks and
+  malformed/missing state fail closed, and core never self-enqueues. UniFFI
+  contract v32 carries the task as a path-free opaque observer with strict
+  kind, phase, failure, outcome, count, and unused-field validation. The native
+  eight-kind scheduler requests candidate recovery immediately after abandoned
+  scan recovery, retains its startup grace, energy gates, fair cadence,
+  bounded backoffs, and ordered cancellation on quit. Swift independently
+  validates every maintenance result family before scheduling from it.
 - Retired the legacy CLI arbitrary-descendant permanent-delete path. The CLI
   remains a supported read-only companion for scanning, navigation, selection,
   computed views, history, and reveal; its former `d` action is inert.

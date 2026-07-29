@@ -5296,6 +5296,8 @@ public func FfiConverterTypeMaintenancePoll_lower(_ value: MaintenancePoll) -> R
  * Scan recovery uses primary before/after for the inspected claimed-running
  * page, then secondary/tertiary/quaternary before for alive, unknown, and
  * definitely gone owners; process identities never cross this boundary.
+ * Candidate-evaluation recovery uses primary after only for the recovered
+ * candidate count. Scan and candidate identities never cross this boundary.
  * Snapshot residual kinds use count pairs for their documented inventories;
  * byte fields always contain bytes and never row counts.
  */
@@ -11395,6 +11397,7 @@ public func FfiConverterTypeMaintenanceFailure_lower(_ value: MaintenanceFailure
 public enum MaintenanceKind: Equatable, Hashable {
 
     case scanRecovery
+    case candidateEvaluationRecovery
     case history
     case snapshotRetention
     case snapshotOrphan
@@ -11424,17 +11427,19 @@ public struct FfiConverterTypeMaintenanceKind: FfiConverterRustBuffer {
 
         case 1: return .scanRecovery
 
-        case 2: return .history
+        case 2: return .candidateEvaluationRecovery
 
-        case 3: return .snapshotRetention
+        case 3: return .history
 
-        case 4: return .snapshotOrphan
+        case 4: return .snapshotRetention
 
-        case 5: return .snapshotProvisioningStage
+        case 5: return .snapshotOrphan
 
-        case 6: return .snapshotTerminalTemp
+        case 6: return .snapshotProvisioningStage
 
-        case 7: return .snapshotUnleasedTemp
+        case 7: return .snapshotTerminalTemp
+
+        case 8: return .snapshotUnleasedTemp
 
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -11448,28 +11453,32 @@ public struct FfiConverterTypeMaintenanceKind: FfiConverterRustBuffer {
             writeInt(&buf, Int32(1))
 
 
-        case .history:
+        case .candidateEvaluationRecovery:
             writeInt(&buf, Int32(2))
 
 
-        case .snapshotRetention:
+        case .history:
             writeInt(&buf, Int32(3))
 
 
-        case .snapshotOrphan:
+        case .snapshotRetention:
             writeInt(&buf, Int32(4))
 
 
-        case .snapshotProvisioningStage:
+        case .snapshotOrphan:
             writeInt(&buf, Int32(5))
 
 
-        case .snapshotTerminalTemp:
+        case .snapshotProvisioningStage:
             writeInt(&buf, Int32(6))
 
 
-        case .snapshotUnleasedTemp:
+        case .snapshotTerminalTemp:
             writeInt(&buf, Int32(7))
+
+
+        case .snapshotUnleasedTemp:
+            writeInt(&buf, Int32(8))
 
         }
     }
@@ -11500,6 +11509,9 @@ public enum MaintenanceOutcome: Equatable, Hashable {
     case scanRecoveryDeferredUnproven
     case scanRecoveryInterrupted
     case scanRecoveryChangedConcurrently
+    case candidateEvaluationRecoveryNone
+    case candidateEvaluationRecoveryRecovered
+    case candidateEvaluationRecoveryIncompatible
     case historyApplied
     case retentionUnderCap
     case retentionDeferredUnstable
@@ -11548,43 +11560,49 @@ public struct FfiConverterTypeMaintenanceOutcome: FfiConverterRustBuffer {
 
         case 4: return .scanRecoveryChangedConcurrently
 
-        case 5: return .historyApplied
+        case 5: return .candidateEvaluationRecoveryNone
 
-        case 6: return .retentionUnderCap
+        case 6: return .candidateEvaluationRecoveryRecovered
 
-        case 7: return .retentionDeferredUnstable
+        case 7: return .candidateEvaluationRecoveryIncompatible
 
-        case 8: return .retentionDeferredNoEligibleSnapshot
+        case 8: return .historyApplied
 
-        case 9: return .retentionRemovedTombstonedResidual
+        case 9: return .retentionUnderCap
 
-        case 10: return .retentionTombstonedAndRemoved
+        case 10: return .retentionDeferredUnstable
 
-        case 11: return .orphanNone
+        case 11: return .retentionDeferredNoEligibleSnapshot
 
-        case 12: return .orphanRemoved
+        case 12: return .retentionRemovedTombstonedResidual
 
-        case 13: return .stageNone
+        case 13: return .retentionTombstonedAndRemoved
 
-        case 14: return .stageDeferredUnproven
+        case 14: return .orphanNone
 
-        case 15: return .stageRemovedMarkerOnly
+        case 15: return .orphanRemoved
 
-        case 16: return .stageRemovedMarkerComplete
+        case 16: return .stageNone
 
-        case 17: return .terminalTempNone
+        case 17: return .stageDeferredUnproven
 
-        case 18: return .terminalTempDeferredActive
+        case 18: return .stageRemovedMarkerOnly
 
-        case 19: return .terminalTempReconciledRowOnly
+        case 19: return .stageRemovedMarkerComplete
 
-        case 20: return .terminalTempRemoved
+        case 20: return .terminalTempNone
 
-        case 21: return .unleasedTempNone
+        case 21: return .terminalTempDeferredActive
 
-        case 22: return .unleasedTempDeferredActive
+        case 22: return .terminalTempReconciledRowOnly
 
-        case 23: return .unleasedTempRemoved
+        case 23: return .terminalTempRemoved
+
+        case 24: return .unleasedTempNone
+
+        case 25: return .unleasedTempDeferredActive
+
+        case 26: return .unleasedTempRemoved
 
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -11610,80 +11628,92 @@ public struct FfiConverterTypeMaintenanceOutcome: FfiConverterRustBuffer {
             writeInt(&buf, Int32(4))
 
 
-        case .historyApplied:
+        case .candidateEvaluationRecoveryNone:
             writeInt(&buf, Int32(5))
 
 
-        case .retentionUnderCap:
+        case .candidateEvaluationRecoveryRecovered:
             writeInt(&buf, Int32(6))
 
 
-        case .retentionDeferredUnstable:
+        case .candidateEvaluationRecoveryIncompatible:
             writeInt(&buf, Int32(7))
 
 
-        case .retentionDeferredNoEligibleSnapshot:
+        case .historyApplied:
             writeInt(&buf, Int32(8))
 
 
-        case .retentionRemovedTombstonedResidual:
+        case .retentionUnderCap:
             writeInt(&buf, Int32(9))
 
 
-        case .retentionTombstonedAndRemoved:
+        case .retentionDeferredUnstable:
             writeInt(&buf, Int32(10))
 
 
-        case .orphanNone:
+        case .retentionDeferredNoEligibleSnapshot:
             writeInt(&buf, Int32(11))
 
 
-        case .orphanRemoved:
+        case .retentionRemovedTombstonedResidual:
             writeInt(&buf, Int32(12))
 
 
-        case .stageNone:
+        case .retentionTombstonedAndRemoved:
             writeInt(&buf, Int32(13))
 
 
-        case .stageDeferredUnproven:
+        case .orphanNone:
             writeInt(&buf, Int32(14))
 
 
-        case .stageRemovedMarkerOnly:
+        case .orphanRemoved:
             writeInt(&buf, Int32(15))
 
 
-        case .stageRemovedMarkerComplete:
+        case .stageNone:
             writeInt(&buf, Int32(16))
 
 
-        case .terminalTempNone:
+        case .stageDeferredUnproven:
             writeInt(&buf, Int32(17))
 
 
-        case .terminalTempDeferredActive:
+        case .stageRemovedMarkerOnly:
             writeInt(&buf, Int32(18))
 
 
-        case .terminalTempReconciledRowOnly:
+        case .stageRemovedMarkerComplete:
             writeInt(&buf, Int32(19))
 
 
-        case .terminalTempRemoved:
+        case .terminalTempNone:
             writeInt(&buf, Int32(20))
 
 
-        case .unleasedTempNone:
+        case .terminalTempDeferredActive:
             writeInt(&buf, Int32(21))
 
 
-        case .unleasedTempDeferredActive:
+        case .terminalTempReconciledRowOnly:
             writeInt(&buf, Int32(22))
 
 
-        case .unleasedTempRemoved:
+        case .terminalTempRemoved:
             writeInt(&buf, Int32(23))
+
+
+        case .unleasedTempNone:
+            writeInt(&buf, Int32(24))
+
+
+        case .unleasedTempDeferredActive:
+            writeInt(&buf, Int32(25))
+
+
+        case .unleasedTempRemoved:
+            writeInt(&buf, Int32(26))
 
         }
     }

@@ -64,7 +64,10 @@ use super::snapshot_review::{
     category_path_bytes, map_repository_error as map_snapshot_review_error,
 };
 use super::task::{
-    CancelOutcome, CandidateEvaluationRecoveryError, CandidateEvaluationRecoveryOutcome,
+    CancelOutcome, CandidateEvaluationRecoveryError,
+    CandidateEvaluationRecoveryMaintenanceFailureKind,
+    CandidateEvaluationRecoveryMaintenanceOutcome, CandidateEvaluationRecoveryMaintenanceResult,
+    CandidateEvaluationRecoveryMaintenanceStartOutcome, CandidateEvaluationRecoveryOutcome,
     CandidateEvaluationTaskFailureKind, CandidateEvaluationTaskStatus, CandidateHistoryError,
     CloseOutcome, DurableCandidateEvaluation, DurableCandidateEvaluationStatus,
     DurableCandidateStatus, DurableCandidateSummary, DurableScanCounts, DurableScanCoverage,
@@ -248,6 +251,7 @@ enum TaskResult {
     Scan(Arc<ScanTaskResult>),
     HistoryMaintenance(Arc<HistoryMaintenanceResult>),
     ScanRecoveryMaintenance(Arc<ScanRecoveryMaintenanceResult>),
+    CandidateEvaluationRecoveryMaintenance(Arc<CandidateEvaluationRecoveryMaintenanceResult>),
     SnapshotRetention(Arc<SnapshotRetentionResult>),
     SnapshotOrphanMaintenance(Arc<SnapshotOrphanMaintenanceResult>),
     SnapshotProvisioningStageMaintenance(Arc<SnapshotProvisioningStageMaintenanceResult>),
@@ -359,6 +363,38 @@ impl TaskContext {
         let event_limit = self.shared.limits.events_per_task;
         if let Some(record) = registry.records.get_mut(&self.id)
             && record.kind == TaskKind::ScanRecoveryMaintenance
+            && !record.phase.is_terminal()
+        {
+            record.push_event(kind, event_limit);
+        }
+    }
+
+    /// Atomically order cancellation against replaying one exact pending
+    /// candidate evaluation. Once this wins, later cancellation cannot hide
+    /// the exact replay result or failure.
+    fn try_begin_candidate_evaluation_recovery_maintenance(&self) -> bool {
+        let mut registry = self.shared.lock_registry_recover();
+        let event_limit = self.shared.limits.events_per_task;
+        if let Some(record) = registry.records.get_mut(&self.id)
+            && record.kind == TaskKind::CandidateEvaluationRecoveryMaintenance
+            && record.phase == TaskPhase::Running
+            && !record.cancellation_requested
+        {
+            record.push_event(
+                TaskEventKind::CandidateEvaluationRecoveryMaintenanceApplying,
+                event_limit,
+            );
+            true
+        } else {
+            false
+        }
+    }
+
+    fn report_candidate_evaluation_recovery_maintenance_finished(&self, kind: TaskEventKind) {
+        let mut registry = self.shared.lock_registry_recover();
+        let event_limit = self.shared.limits.events_per_task;
+        if let Some(record) = registry.records.get_mut(&self.id)
+            && record.kind == TaskKind::CandidateEvaluationRecoveryMaintenance
             && !record.phase.is_terminal()
         {
             record.push_event(kind, event_limit);
@@ -647,6 +683,7 @@ struct Registry {
     live_workers: usize,
     active_scan_roots: HashMap<PathBuf, TaskId>,
     active_scan_recovery_maintenance: Option<TaskId>,
+    active_candidate_evaluation_recovery_maintenance: Option<TaskId>,
     active_history_maintenance: Option<TaskId>,
     active_snapshot_retention: Option<TaskId>,
     active_snapshot_orphan_maintenance: Option<TaskId>,
@@ -736,6 +773,7 @@ impl Registry {
             live_workers: 0,
             active_scan_roots: HashMap::new(),
             active_scan_recovery_maintenance: None,
+            active_candidate_evaluation_recovery_maintenance: None,
             active_history_maintenance: None,
             active_snapshot_retention: None,
             active_snapshot_orphan_maintenance: None,
@@ -766,6 +804,11 @@ impl Registry {
             && self.active_scan_recovery_maintenance == Some(id)
         {
             self.active_scan_recovery_maintenance = None;
+        }
+        if kind == TaskKind::CandidateEvaluationRecoveryMaintenance
+            && self.active_candidate_evaluation_recovery_maintenance == Some(id)
+        {
+            self.active_candidate_evaluation_recovery_maintenance = None;
         }
         if kind == TaskKind::HistoryMaintenance && self.active_history_maintenance == Some(id) {
             self.active_history_maintenance = None;
@@ -1046,21 +1089,15 @@ impl EngineHandle {
         self.inner.store.status().map_err(|error| error.kind)
     }
 
-    /// Replay at most one durable pending candidate evaluation from its exact
-    /// immutable snapshot. This is a bounded restart seam: it never scans the
-    /// live filesystem, accepts no caller path, and creates no plan or cleanup
-    /// capability. A later startup coordinator may call it again when the
-    /// returned `has_more` hint is true.
-    pub fn recover_pending_candidate_evaluation(
-        &self,
+    /// Worker-only replay seam reached after maintenance admission and the
+    /// Applying cancellation boundary. It must not become a public engine API:
+    /// callers may neither supply the clock nor bypass idle task admission.
+    fn recover_pending_candidate_evaluation_after_admission(
+        store: &StoreCoordinator,
+        snapshots: &SnapshotRepository,
         observed_at: SystemTime,
     ) -> Result<CandidateEvaluationRecoveryOutcome, CandidateEvaluationRecoveryError> {
-        if self.lifecycle() != EngineLifecycle::Open {
-            return Err(CandidateEvaluationRecoveryError::Closed);
-        }
-        let Some((scan, pending)) = self
-            .inner
-            .store
+        let Some((scan, pending)) = store
             .load_pending_candidate_evaluation()
             .map_err(|error| map_candidate_recovery_error(error.kind))?
         else {
@@ -1082,8 +1119,7 @@ impl EngineHandle {
         let settle_failure = |kind: CandidateEvaluationFailureKind| {
             let completion = CandidateEvaluationCompletion::failed(completed_at, kind)
                 .map_err(|error| map_candidate_recovery_error(error.kind))?;
-            self.inner
-                .store
+            store
                 .record_candidate_evaluation_completed_reconciled(&request, &completion)
                 .map_err(|error| map_candidate_recovery_error(error.kind))
         };
@@ -1096,9 +1132,7 @@ impl EngineHandle {
             return Ok(CandidateEvaluationRecoveryOutcome::Incompatible { has_more });
         }
 
-        let document = self
-            .inner
-            .snapshots
+        let document = snapshots
             .load_for_candidate_recovery(reference)
             .map_err(|error| {
                 map_candidate_recovery_error(map_candidate_recovery_snapshot_error(error.kind))
@@ -1162,8 +1196,7 @@ impl EngineHandle {
         }
         let completion = CandidateEvaluationCompletion::succeeded(completed_at, candidates)
             .map_err(|error| map_candidate_recovery_error(error.kind))?;
-        self.inner
-            .store
+        store
             .record_candidate_evaluation_completed_reconciled(&request, &completion)
             .map_err(|error| map_candidate_recovery_error(error.kind))?;
         Ok(CandidateEvaluationRecoveryOutcome::Recovered {
@@ -2893,6 +2926,135 @@ impl EngineHandle {
         Ok(None)
     }
 
+    /// Recover at most one oldest durable pending candidate evaluation from
+    /// its exact immutable snapshot. This idle-only task accepts no path,
+    /// timestamp, scan identity, or evaluator input.
+    pub fn start_candidate_evaluation_recovery_maintenance(
+        &self,
+    ) -> Result<CandidateEvaluationRecoveryMaintenanceStartOutcome, StartTaskError> {
+        self.start_candidate_evaluation_recovery_maintenance_with_hooks(
+            SystemTime::now,
+            || {},
+            || {},
+        )
+    }
+
+    #[cfg(test)]
+    fn start_candidate_evaluation_recovery_maintenance_at(
+        &self,
+        observed_at: SystemTime,
+    ) -> Result<CandidateEvaluationRecoveryMaintenanceStartOutcome, StartTaskError> {
+        self.start_candidate_evaluation_recovery_maintenance_with_hooks(
+            move || observed_at,
+            || {},
+            || {},
+        )
+    }
+
+    #[cfg(test)]
+    fn start_candidate_evaluation_recovery_maintenance_with_test_hooks(
+        &self,
+        observed_at: SystemTime,
+        before_recovery: impl FnOnce() + Send + 'static,
+        after_applying: impl FnOnce() + Send + 'static,
+    ) -> Result<CandidateEvaluationRecoveryMaintenanceStartOutcome, StartTaskError> {
+        self.start_candidate_evaluation_recovery_maintenance_with_hooks(
+            move || observed_at,
+            before_recovery,
+            after_applying,
+        )
+    }
+
+    fn start_candidate_evaluation_recovery_maintenance_with_hooks(
+        &self,
+        clock: impl FnOnce() -> SystemTime + Send + 'static,
+        before_recovery: impl FnOnce() + Send + 'static,
+        after_applying: impl FnOnce() + Send + 'static,
+    ) -> Result<CandidateEvaluationRecoveryMaintenanceStartOutcome, StartTaskError> {
+        if let Some(outcome) = self.candidate_evaluation_recovery_maintenance_preflight()? {
+            return Ok(outcome);
+        }
+        let status = self
+            .inner
+            .store
+            .status()
+            .map_err(|_| StartTaskError::PersistenceUnavailable)?;
+        if !matches!(
+            status.access,
+            crate::persistence::DatabaseAccess::ReadWriteCurrent
+        ) {
+            return Err(StartTaskError::ReadOnlyStore);
+        }
+        let store = Arc::clone(&self.inner.store);
+        let snapshots = Arc::clone(&self.inner.snapshots);
+        self.submit_candidate_evaluation_recovery_maintenance(Box::new(move |context| {
+            if context.is_cancellation_requested() {
+                return WorkOutcome::Cancelled(None);
+            }
+            let observed_at = clock();
+            before_recovery();
+            if !context.try_begin_candidate_evaluation_recovery_maintenance() {
+                return WorkOutcome::Cancelled(None);
+            }
+            // Applying is the point of no return. A later cancellation remains
+            // visible intent but cannot suppress the exact recovery outcome.
+            after_applying();
+            match Self::recover_pending_candidate_evaluation_after_admission(
+                &store,
+                &snapshots,
+                observed_at,
+            ) {
+                Ok(outcome) => {
+                    let (outcome, has_more) =
+                        public_candidate_evaluation_recovery_maintenance_outcome(outcome);
+                    let result = Arc::new(CandidateEvaluationRecoveryMaintenanceResult::new(
+                        observed_at,
+                        outcome,
+                        has_more,
+                    ));
+                    context.report_candidate_evaluation_recovery_maintenance_finished(
+                        TaskEventKind::CandidateEvaluationRecoveryMaintenanceFinished {
+                            outcome: result.outcome(),
+                            has_more: result.has_more(),
+                        },
+                    );
+                    WorkOutcome::Succeeded(TaskResult::CandidateEvaluationRecoveryMaintenance(
+                        result,
+                    ))
+                }
+                Err(error) => WorkOutcome::Failed(
+                    map_candidate_evaluation_recovery_maintenance_failure(error),
+                    None,
+                ),
+            }
+        }))
+    }
+
+    fn candidate_evaluation_recovery_maintenance_preflight(
+        &self,
+    ) -> Result<Option<CandidateEvaluationRecoveryMaintenanceStartOutcome>, StartTaskError> {
+        let registry = self
+            .inner
+            .shared
+            .registry
+            .lock()
+            .map_err(|_| StartTaskError::InternalState)?;
+        if registry.lifecycle != EngineLifecycle::Open {
+            return Err(StartTaskError::Closed);
+        }
+        if let Some(existing) = registry.active_candidate_evaluation_recovery_maintenance {
+            return Ok(Some(
+                CandidateEvaluationRecoveryMaintenanceStartOutcome::AlreadyActive(existing),
+            ));
+        }
+        if registry.running_tasks != 0 || !registry.queue.is_empty() {
+            return Ok(Some(
+                CandidateEvaluationRecoveryMaintenanceStartOutcome::DeferredBusy,
+            ));
+        }
+        Ok(None)
+    }
+
     /// Start one bounded DUX-owned history-maintenance batch. This can roll up
     /// and prune capacity telemetry and remove expired AI cache rows; it never
     /// mutates cleanup history or user data. A successful result's `has_more`
@@ -3924,6 +4086,7 @@ impl EngineHandle {
             Some(
                 TaskResult::Scan(_)
                 | TaskResult::ScanRecoveryMaintenance(_)
+                | TaskResult::CandidateEvaluationRecoveryMaintenance(_)
                 | TaskResult::HistoryMaintenance(_)
                 | TaskResult::SnapshotRetention(_)
                 | TaskResult::SnapshotOrphanMaintenance(_)
@@ -3954,6 +4117,7 @@ impl EngineHandle {
             Some(
                 TaskResult::FormatSizeBatch(_)
                 | TaskResult::ScanRecoveryMaintenance(_)
+                | TaskResult::CandidateEvaluationRecoveryMaintenance(_)
                 | TaskResult::HistoryMaintenance(_)
                 | TaskResult::SnapshotRetention(_)
                 | TaskResult::SnapshotOrphanMaintenance(_)
@@ -3987,6 +4151,41 @@ impl EngineHandle {
             Some(
                 TaskResult::FormatSizeBatch(_)
                 | TaskResult::Scan(_)
+                | TaskResult::CandidateEvaluationRecoveryMaintenance(_)
+                | TaskResult::HistoryMaintenance(_)
+                | TaskResult::SnapshotRetention(_)
+                | TaskResult::SnapshotOrphanMaintenance(_)
+                | TaskResult::SnapshotProvisioningStageMaintenance(_)
+                | TaskResult::SnapshotTerminalTempMaintenance(_)
+                | TaskResult::SnapshotUnleasedTempMaintenance(_)
+                | TaskResult::PermanentSafeCleanup(_),
+            ) => return Err(TaskAccessError::WrongTaskKind),
+            #[cfg(test)]
+            Some(TaskResult::TestOnly) => return Err(TaskAccessError::WrongTaskKind),
+            None => None,
+        })
+    }
+
+    pub fn candidate_evaluation_recovery_maintenance_result(
+        &self,
+        id: TaskId,
+    ) -> Result<Option<Arc<CandidateEvaluationRecoveryMaintenanceResult>>, TaskAccessError> {
+        let registry = self.lock_open_registry()?;
+        let record = registry
+            .records
+            .get(&id)
+            .ok_or(TaskAccessError::UnknownTask)?;
+        if record.kind != TaskKind::CandidateEvaluationRecoveryMaintenance {
+            return Err(TaskAccessError::WrongTaskKind);
+        }
+        Ok(match &record.result {
+            Some(TaskResult::CandidateEvaluationRecoveryMaintenance(result)) => {
+                Some(Arc::clone(result))
+            }
+            Some(
+                TaskResult::FormatSizeBatch(_)
+                | TaskResult::Scan(_)
+                | TaskResult::ScanRecoveryMaintenance(_)
                 | TaskResult::HistoryMaintenance(_)
                 | TaskResult::SnapshotRetention(_)
                 | TaskResult::SnapshotOrphanMaintenance(_)
@@ -4019,6 +4218,7 @@ impl EngineHandle {
                 TaskResult::FormatSizeBatch(_)
                 | TaskResult::Scan(_)
                 | TaskResult::ScanRecoveryMaintenance(_)
+                | TaskResult::CandidateEvaluationRecoveryMaintenance(_)
                 | TaskResult::SnapshotRetention(_)
                 | TaskResult::SnapshotOrphanMaintenance(_)
                 | TaskResult::SnapshotProvisioningStageMaintenance(_)
@@ -4052,6 +4252,7 @@ impl EngineHandle {
                 TaskResult::FormatSizeBatch(_)
                 | TaskResult::Scan(_)
                 | TaskResult::ScanRecoveryMaintenance(_)
+                | TaskResult::CandidateEvaluationRecoveryMaintenance(_)
                 | TaskResult::HistoryMaintenance(_)
                 | TaskResult::SnapshotOrphanMaintenance(_)
                 | TaskResult::SnapshotProvisioningStageMaintenance(_)
@@ -4083,6 +4284,7 @@ impl EngineHandle {
                 TaskResult::FormatSizeBatch(_)
                 | TaskResult::Scan(_)
                 | TaskResult::ScanRecoveryMaintenance(_)
+                | TaskResult::CandidateEvaluationRecoveryMaintenance(_)
                 | TaskResult::HistoryMaintenance(_)
                 | TaskResult::SnapshotRetention(_)
                 | TaskResult::SnapshotProvisioningStageMaintenance(_)
@@ -4116,6 +4318,7 @@ impl EngineHandle {
                 TaskResult::FormatSizeBatch(_)
                 | TaskResult::Scan(_)
                 | TaskResult::ScanRecoveryMaintenance(_)
+                | TaskResult::CandidateEvaluationRecoveryMaintenance(_)
                 | TaskResult::HistoryMaintenance(_)
                 | TaskResult::SnapshotRetention(_)
                 | TaskResult::SnapshotOrphanMaintenance(_)
@@ -4147,6 +4350,7 @@ impl EngineHandle {
                 TaskResult::FormatSizeBatch(_)
                 | TaskResult::Scan(_)
                 | TaskResult::ScanRecoveryMaintenance(_)
+                | TaskResult::CandidateEvaluationRecoveryMaintenance(_)
                 | TaskResult::HistoryMaintenance(_)
                 | TaskResult::SnapshotRetention(_)
                 | TaskResult::SnapshotOrphanMaintenance(_)
@@ -4178,6 +4382,7 @@ impl EngineHandle {
                 TaskResult::FormatSizeBatch(_)
                 | TaskResult::Scan(_)
                 | TaskResult::ScanRecoveryMaintenance(_)
+                | TaskResult::CandidateEvaluationRecoveryMaintenance(_)
                 | TaskResult::HistoryMaintenance(_)
                 | TaskResult::SnapshotRetention(_)
                 | TaskResult::SnapshotOrphanMaintenance(_)
@@ -4209,6 +4414,7 @@ impl EngineHandle {
                 TaskResult::FormatSizeBatch(_)
                 | TaskResult::Scan(_)
                 | TaskResult::ScanRecoveryMaintenance(_)
+                | TaskResult::CandidateEvaluationRecoveryMaintenance(_)
                 | TaskResult::HistoryMaintenance(_)
                 | TaskResult::SnapshotRetention(_)
                 | TaskResult::SnapshotOrphanMaintenance(_)
@@ -4384,6 +4590,44 @@ impl EngineHandle {
         registry.queue.push_back(Job { id, work });
         self.inner.shared.workers_ready.notify_one();
         Ok(ScanRecoveryMaintenanceStartOutcome::Started(id))
+    }
+
+    fn submit_candidate_evaluation_recovery_maintenance(
+        &self,
+        work: Work,
+    ) -> Result<CandidateEvaluationRecoveryMaintenanceStartOutcome, StartTaskError> {
+        let mut registry = self
+            .inner
+            .shared
+            .registry
+            .lock()
+            .map_err(|_| StartTaskError::InternalState)?;
+        if registry.lifecycle != EngineLifecycle::Open {
+            return Err(StartTaskError::Closed);
+        }
+        if let Some(existing) = registry.active_candidate_evaluation_recovery_maintenance {
+            return Ok(CandidateEvaluationRecoveryMaintenanceStartOutcome::AlreadyActive(existing));
+        }
+        // Candidate recovery shares the lowest-priority idle boundary with
+        // every foreground and maintenance task. Recheck after the store probe
+        // to close admission races.
+        if registry.running_tasks != 0 || !registry.queue.is_empty() {
+            return Ok(CandidateEvaluationRecoveryMaintenanceStartOutcome::DeferredBusy);
+        }
+        let id = TASK_IDS.allocate()?;
+        let record = TaskRecord::new(
+            id,
+            TaskKind::CandidateEvaluationRecoveryMaintenance,
+            None,
+            self.inner.shared.limits.events_per_task,
+        );
+        registry.active_candidate_evaluation_recovery_maintenance = Some(id);
+        registry.records.insert(id, record);
+        registry.queue.push_back(Job { id, work });
+        self.inner.shared.workers_ready.notify_one();
+        Ok(CandidateEvaluationRecoveryMaintenanceStartOutcome::Started(
+            id,
+        ))
     }
 
     fn submit_history_maintenance(
@@ -5346,9 +5590,8 @@ fn canonical_recovery_evaluation_time(
 
 const fn map_candidate_recovery_error(kind: HistoryErrorKind) -> CandidateEvaluationRecoveryError {
     match kind {
-        HistoryErrorKind::InvalidInput | HistoryErrorKind::InvalidTransition => {
-            CandidateEvaluationRecoveryError::InternalState
-        }
+        HistoryErrorKind::InvalidInput => CandidateEvaluationRecoveryError::InvalidClock,
+        HistoryErrorKind::InvalidTransition => CandidateEvaluationRecoveryError::InternalState,
         HistoryErrorKind::NotFound => CandidateEvaluationRecoveryError::Unavailable,
         HistoryErrorKind::IncompatibleSchema => {
             CandidateEvaluationRecoveryError::IncompatibleSchema
@@ -6362,6 +6605,62 @@ const fn public_scan_recovery_maintenance_outcome(
             ScanRecoveryMaintenanceOutcome::ChangedConcurrently
         }
     }
+}
+
+const fn public_candidate_evaluation_recovery_maintenance_outcome(
+    outcome: CandidateEvaluationRecoveryOutcome,
+) -> (CandidateEvaluationRecoveryMaintenanceOutcome, bool) {
+    match outcome {
+        CandidateEvaluationRecoveryOutcome::NoPending => {
+            (CandidateEvaluationRecoveryMaintenanceOutcome::None, false)
+        }
+        CandidateEvaluationRecoveryOutcome::Recovered {
+            candidate_count,
+            has_more,
+        } => (
+            CandidateEvaluationRecoveryMaintenanceOutcome::Recovered { candidate_count },
+            has_more,
+        ),
+        CandidateEvaluationRecoveryOutcome::Incompatible { has_more } => (
+            CandidateEvaluationRecoveryMaintenanceOutcome::Incompatible,
+            has_more,
+        ),
+    }
+}
+
+const fn map_candidate_evaluation_recovery_maintenance_failure(
+    error: CandidateEvaluationRecoveryError,
+) -> TaskFailureKind {
+    let kind = match error {
+        CandidateEvaluationRecoveryError::InvalidClock => {
+            CandidateEvaluationRecoveryMaintenanceFailureKind::InvalidClock
+        }
+        CandidateEvaluationRecoveryError::IncompatibleSchema => {
+            CandidateEvaluationRecoveryMaintenanceFailureKind::IncompatibleSchema
+        }
+        CandidateEvaluationRecoveryError::Busy => {
+            CandidateEvaluationRecoveryMaintenanceFailureKind::Busy
+        }
+        CandidateEvaluationRecoveryError::UnsafeStorage => {
+            CandidateEvaluationRecoveryMaintenanceFailureKind::UnsafeStorage
+        }
+        CandidateEvaluationRecoveryError::BudgetExceeded => {
+            CandidateEvaluationRecoveryMaintenanceFailureKind::BudgetExceeded
+        }
+        CandidateEvaluationRecoveryError::CorruptData => {
+            CandidateEvaluationRecoveryMaintenanceFailureKind::CorruptData
+        }
+        CandidateEvaluationRecoveryError::Unavailable => {
+            CandidateEvaluationRecoveryMaintenanceFailureKind::Unavailable
+        }
+        CandidateEvaluationRecoveryError::OutcomeUnknown => {
+            CandidateEvaluationRecoveryMaintenanceFailureKind::OutcomeUnknown
+        }
+        CandidateEvaluationRecoveryError::InternalState => {
+            CandidateEvaluationRecoveryMaintenanceFailureKind::InternalState
+        }
+    };
+    TaskFailureKind::CandidateEvaluationRecoveryMaintenance(kind)
 }
 
 const fn public_snapshot_retention_outcome(

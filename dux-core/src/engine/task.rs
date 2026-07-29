@@ -29,6 +29,7 @@ pub enum TaskKind {
     FormatSizeBatch,
     Scan,
     ScanRecoveryMaintenance,
+    CandidateEvaluationRecoveryMaintenance,
     HistoryMaintenance,
     SnapshotRetention,
     SnapshotOrphanMaintenance,
@@ -65,6 +66,7 @@ pub enum TaskFailureKind {
     PersistenceUnavailable,
     PersistenceOutcomeUnknown,
     ScanRecoveryMaintenance(ScanRecoveryMaintenanceFailureKind),
+    CandidateEvaluationRecoveryMaintenance(CandidateEvaluationRecoveryMaintenanceFailureKind),
     HistoryMaintenance(HistoryMaintenanceFailureKind),
     SnapshotRetention(SnapshotRetentionFailureKind),
     SnapshotOrphanMaintenance(SnapshotOrphanMaintenanceFailureKind),
@@ -98,6 +100,22 @@ pub enum PermanentSafeCleanupFailureKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ScanRecoveryMaintenanceFailureKind {
+    InvalidClock,
+    IncompatibleSchema,
+    Busy,
+    UnsafeStorage,
+    BudgetExceeded,
+    CorruptData,
+    Unavailable,
+    OutcomeUnknown,
+    InternalState,
+}
+
+/// Path-free failure categories for durable pending candidate-evaluation
+/// recovery.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CandidateEvaluationRecoveryMaintenanceFailureKind {
     InvalidClock,
     IncompatibleSchema,
     Busy,
@@ -240,6 +258,11 @@ pub enum TaskEventKind {
         alive_count: u32,
         unknown_count: u32,
         recoverable_count: u32,
+        has_more: bool,
+    },
+    CandidateEvaluationRecoveryMaintenanceApplying,
+    CandidateEvaluationRecoveryMaintenanceFinished {
+        outcome: CandidateEvaluationRecoveryMaintenanceOutcome,
         has_more: bool,
     },
     HistoryMaintenanceBatchApplying,
@@ -471,6 +494,52 @@ impl ScanRecoveryMaintenanceResult {
 
     pub const fn recoverable_count(&self) -> u32 {
         self.recoverable_count
+    }
+
+    pub const fn has_more(&self) -> bool {
+        self.has_more
+    }
+}
+
+/// Path-free outcome of one bounded pending candidate-evaluation recovery
+/// decision. Exact scan and candidate identities stay private.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CandidateEvaluationRecoveryMaintenanceOutcome {
+    None,
+    Recovered { candidate_count: u32 },
+    Incompatible,
+}
+
+/// Immutable outcome from one idle-only pending candidate-evaluation recovery
+/// task. `has_more` asks the caller to submit a later task; core never
+/// self-enqueues.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CandidateEvaluationRecoveryMaintenanceResult {
+    observed_at: SystemTime,
+    outcome: CandidateEvaluationRecoveryMaintenanceOutcome,
+    has_more: bool,
+}
+
+impl CandidateEvaluationRecoveryMaintenanceResult {
+    pub(super) const fn new(
+        observed_at: SystemTime,
+        outcome: CandidateEvaluationRecoveryMaintenanceOutcome,
+        has_more: bool,
+    ) -> Self {
+        Self {
+            observed_at,
+            outcome,
+            has_more,
+        }
+    }
+
+    pub const fn observed_at(&self) -> SystemTime {
+        self.observed_at
+    }
+
+    pub const fn outcome(&self) -> CandidateEvaluationRecoveryMaintenanceOutcome {
+        self.outcome
     }
 
     pub const fn has_more(&self) -> bool {
@@ -1255,10 +1324,9 @@ pub enum CandidateEvaluationTaskStatus {
     },
 }
 
-/// Bounded result of one restart-time pending-evaluation recovery attempt.
-/// This is an internal orchestration observation, never cleanup authority.
+/// Worker-private result of one pending-evaluation replay attempt.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CandidateEvaluationRecoveryOutcome {
+pub(super) enum CandidateEvaluationRecoveryOutcome {
     NoPending,
     Recovered {
         candidate_count: u32,
@@ -1269,12 +1337,12 @@ pub enum CandidateEvaluationRecoveryOutcome {
     },
 }
 
-/// Path-free failures from one bounded restart-time evaluator recovery pass.
+/// Worker-private failures from one pending-evaluation replay attempt.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
-pub enum CandidateEvaluationRecoveryError {
-    #[error("engine session is closed")]
-    Closed,
+pub(super) enum CandidateEvaluationRecoveryError {
+    #[error("the recovery clock is invalid")]
+    InvalidClock,
     #[error("the durable engine schema is incompatible")]
     IncompatibleSchema,
     #[error("the durable evaluator state is busy")]
@@ -1405,6 +1473,13 @@ pub enum HistoryMaintenanceStartOutcome {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScanRecoveryMaintenanceStartOutcome {
+    Started(TaskId),
+    AlreadyActive(TaskId),
+    DeferredBusy,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CandidateEvaluationRecoveryMaintenanceStartOutcome {
     Started(TaskId),
     AlreadyActive(TaskId),
     DeferredBusy,

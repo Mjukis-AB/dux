@@ -460,6 +460,11 @@ EXCEPTIONS = {
         "rust-filesystem-effect",
         "test:explorer_review_live_target_rejects_a_replaced_symlink_ancestor",
     ),
+    "test-candidate-recovery-missing-snapshot-rename": ExceptionSpec(
+        "dux-core/src/engine/registry_tests.rs",
+        "rust-filesystem-effect",
+        "test:candidate_evaluation_recovery_maintenance_maps_malformed_and_missing_snapshot_failures",
+    ),
     "test-durable-rust-target-replace-rename": ExceptionSpec(
         "dux-core/src/planner/rust_target_source_tests.rs",
         "rust-filesystem-effect",
@@ -763,6 +768,7 @@ EXCEPTION_PRIMITIVES = {
     "test-live-target-replace-rename": "rename",
     "test-live-target-missing-remove": "remove_file",
     "test-live-target-symlink-ancestor-rename": "rename",
+    "test-candidate-recovery-missing-snapshot-rename": "rename",
     "test-durable-rust-target-replace-rename": "rename",
     "test-durable-rust-project-replace-rename": "rename",
     "test-durable-rust-target-move-back": "rename",
@@ -840,7 +846,7 @@ CLIPPY_SUPPRESSION_COUNTS = {
     "dux-core/src/planner/cargo_workspace_glob.rs": 2,
     "dux-core/src/planner/rust_target_cargo_tests.rs": 1,
     "dux-core/src/planner/rust_target_source_tests.rs": 2,
-    "dux-core/src/engine/registry_tests.rs": 6,
+    "dux-core/src/engine/registry_tests.rs": 7,
     "dux-core/src/engine/volume_status.rs": 1,
     "dux-core/src/persistence/persistence_tests.rs": 3,
     "dux-core/src/persistence/cleanup_journal/tests.rs": 1,

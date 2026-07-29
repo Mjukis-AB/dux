@@ -12,6 +12,8 @@ use std::os::windows::ffi::{OsStrExt, OsStringExt};
 
 use dux_core::engine::{
     CancelOutcome as CoreCancelOutcome, CandidateDetailError as CoreCandidateDetailError,
+    CandidateEvaluationRecoveryMaintenanceOutcome as CoreCandidateEvaluationRecoveryOutcome,
+    CandidateEvaluationRecoveryMaintenanceStartOutcome,
     CandidateEvaluationTaskFailureKind as CoreCandidateEvaluationFailure,
     CandidateEvaluationTaskStatus as CoreCandidateEvaluationStatus,
     CandidateHistoryError as CoreCandidateHistoryError,
@@ -108,7 +110,7 @@ use dux_core::{
     VolumeCapacity, VolumeId,
 };
 
-const FFI_CONTRACT_VERSION: u32 = 31;
+const FFI_CONTRACT_VERSION: u32 = 32;
 const FFI_RECORD_VERSION: u32 = 1;
 const SNAPSHOT_NODE_RECORD_VERSION: u32 = 2;
 const SCAN_EVENT_PAGE_LIMIT: u16 = 64;
@@ -1658,6 +1660,7 @@ pub enum ScanError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum MaintenanceKind {
     ScanRecovery,
+    CandidateEvaluationRecovery,
     History,
     SnapshotRetention,
     SnapshotOrphan,
@@ -1709,6 +1712,9 @@ pub enum MaintenanceOutcome {
     ScanRecoveryDeferredUnproven,
     ScanRecoveryInterrupted,
     ScanRecoveryChangedConcurrently,
+    CandidateEvaluationRecoveryNone,
+    CandidateEvaluationRecoveryRecovered,
+    CandidateEvaluationRecoveryIncompatible,
     HistoryApplied,
     RetentionUnderCap,
     RetentionDeferredUnstable,
@@ -1737,6 +1743,8 @@ pub enum MaintenanceOutcome {
 /// Scan recovery uses primary before/after for the inspected claimed-running
 /// page, then secondary/tertiary/quaternary before for alive, unknown, and
 /// definitely gone owners; process identities never cross this boundary.
+/// Candidate-evaluation recovery uses primary after only for the recovered
+/// candidate count. Scan and candidate identities never cross this boundary.
 /// Snapshot residual kinds use count pairs for their documented inventories;
 /// byte fields always contain bytes and never row counts.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
@@ -3055,6 +3063,8 @@ impl ScanProgressState {
                 | CoreTaskEventKind::CancellationRequested
                 | CoreTaskEventKind::ScanRecoveryMaintenanceBatchApplying
                 | CoreTaskEventKind::ScanRecoveryMaintenanceBatchFinished { .. }
+                | CoreTaskEventKind::CandidateEvaluationRecoveryMaintenanceApplying
+                | CoreTaskEventKind::CandidateEvaluationRecoveryMaintenanceFinished { .. }
                 | CoreTaskEventKind::HistoryMaintenanceBatchApplying
                 | CoreTaskEventKind::HistoryMaintenanceBatchFinished { .. }
                 | CoreTaskEventKind::SnapshotRetentionBatchApplying
@@ -3129,6 +3139,8 @@ fn map_scan_event_kind(kind: &CoreTaskEventKind) -> ScanEventKind {
         },
         CoreTaskEventKind::ScanRecoveryMaintenanceBatchApplying
         | CoreTaskEventKind::ScanRecoveryMaintenanceBatchFinished { .. }
+        | CoreTaskEventKind::CandidateEvaluationRecoveryMaintenanceApplying
+        | CoreTaskEventKind::CandidateEvaluationRecoveryMaintenanceFinished { .. }
         | CoreTaskEventKind::HistoryMaintenanceBatchApplying
         | CoreTaskEventKind::HistoryMaintenanceBatchFinished { .. }
         | CoreTaskEventKind::SnapshotRetentionBatchApplying
@@ -3292,18 +3304,24 @@ impl MaintenanceTask {
             .engine
             .task_snapshot(self.id)
             .map_err(map_task_access_error)?;
+        if !maintenance_core_kind_matches(self.kind, snapshot.kind) {
+            return Err(EngineError::InternalState);
+        }
         let result = if snapshot.result_available {
             maintenance_result(&self.engine, self.id, self.kind)?
         } else {
             None
         };
+        let phase = map_phase(snapshot.phase);
+        let failure = snapshot.failure.map(map_failure);
+        validate_maintenance_poll_shape(self.kind, phase, failure, result.as_ref())?;
         Ok(MaintenancePoll {
             record_version: FFI_RECORD_VERSION,
             kind: self.kind,
-            phase: map_phase(snapshot.phase),
+            phase,
             cancellation_requested: snapshot.cancellation_requested,
             revision: snapshot.revision,
-            failure: snapshot.failure.map(map_failure),
+            failure,
             result,
         })
     }
@@ -4957,6 +4975,7 @@ fn map_scan_task_failure(failure: TaskFailureKind) -> ScanTaskFailure {
         TaskFailureKind::PersistenceOutcomeUnknown => ScanTaskFailure::PersistenceOutcomeUnknown,
         TaskFailureKind::InternalFailure => ScanTaskFailure::InternalState,
         TaskFailureKind::ScanRecoveryMaintenance(_)
+        | TaskFailureKind::CandidateEvaluationRecoveryMaintenance(_)
         | TaskFailureKind::HistoryMaintenance(_)
         | TaskFailureKind::SnapshotRetention(_)
         | TaskFailureKind::SnapshotOrphanMaintenance(_)
@@ -5130,6 +5149,12 @@ fn start_maintenance(
             ScanRecoveryMaintenanceStartOutcome::AlreadyActive,
             ScanRecoveryMaintenanceStartOutcome::DeferredBusy
         ),
+        MaintenanceKind::CandidateEvaluationRecovery => map_start!(
+            engine.start_candidate_evaluation_recovery_maintenance(),
+            CandidateEvaluationRecoveryMaintenanceStartOutcome::Started,
+            CandidateEvaluationRecoveryMaintenanceStartOutcome::AlreadyActive,
+            CandidateEvaluationRecoveryMaintenanceStartOutcome::DeferredBusy
+        ),
         MaintenanceKind::History => map_start!(
             engine.start_history_maintenance(),
             HistoryMaintenanceStartOutcome::Started,
@@ -5244,6 +5269,29 @@ fn maintenance_result(
                 out.secondary_count_before = u64::from(r.alive_count());
                 out.tertiary_count_before = u64::from(r.unknown_count());
                 out.quaternary_count_before = u64::from(r.recoverable_count());
+                Ok(out)
+            })
+            .transpose()?,
+        MaintenanceKind::CandidateEvaluationRecovery => engine
+            .candidate_evaluation_recovery_maintenance_result(id)
+            .map_err(map_task_access_error)?
+            .map(|r| {
+                let (outcome, candidate_count) = match r.outcome() {
+                    CoreCandidateEvaluationRecoveryOutcome::None => {
+                        (MaintenanceOutcome::CandidateEvaluationRecoveryNone, 0)
+                    }
+                    CoreCandidateEvaluationRecoveryOutcome::Recovered { candidate_count } => (
+                        MaintenanceOutcome::CandidateEvaluationRecoveryRecovered,
+                        candidate_count,
+                    ),
+                    CoreCandidateEvaluationRecoveryOutcome::Incompatible => (
+                        MaintenanceOutcome::CandidateEvaluationRecoveryIncompatible,
+                        0,
+                    ),
+                    _ => return Err(EngineError::InternalState),
+                };
+                let mut out = empty_result(kind, r.observed_at(), outcome, r.has_more())?;
+                out.primary_count_after = u64::from(candidate_count);
                 Ok(out)
             })
             .transpose()?,
@@ -5414,10 +5462,147 @@ fn map_phase(phase: CoreTaskPhase) -> TaskPhase {
     }
 }
 
+fn maintenance_outcome_matches_kind(kind: MaintenanceKind, outcome: MaintenanceOutcome) -> bool {
+    matches!(
+        (kind, outcome),
+        (
+            MaintenanceKind::ScanRecovery,
+            MaintenanceOutcome::ScanRecoveryNone
+                | MaintenanceOutcome::ScanRecoveryDeferredUnproven
+                | MaintenanceOutcome::ScanRecoveryInterrupted
+                | MaintenanceOutcome::ScanRecoveryChangedConcurrently
+        ) | (
+            MaintenanceKind::CandidateEvaluationRecovery,
+            MaintenanceOutcome::CandidateEvaluationRecoveryNone
+                | MaintenanceOutcome::CandidateEvaluationRecoveryRecovered
+                | MaintenanceOutcome::CandidateEvaluationRecoveryIncompatible
+        ) | (MaintenanceKind::History, MaintenanceOutcome::HistoryApplied)
+            | (
+                MaintenanceKind::SnapshotRetention,
+                MaintenanceOutcome::RetentionUnderCap
+                    | MaintenanceOutcome::RetentionDeferredUnstable
+                    | MaintenanceOutcome::RetentionDeferredNoEligibleSnapshot
+                    | MaintenanceOutcome::RetentionRemovedTombstonedResidual
+                    | MaintenanceOutcome::RetentionTombstonedAndRemoved
+            )
+            | (
+                MaintenanceKind::SnapshotOrphan,
+                MaintenanceOutcome::OrphanNone | MaintenanceOutcome::OrphanRemoved
+            )
+            | (
+                MaintenanceKind::SnapshotProvisioningStage,
+                MaintenanceOutcome::StageNone
+                    | MaintenanceOutcome::StageDeferredUnproven
+                    | MaintenanceOutcome::StageRemovedMarkerOnly
+                    | MaintenanceOutcome::StageRemovedMarkerComplete
+            )
+            | (
+                MaintenanceKind::SnapshotTerminalTemp,
+                MaintenanceOutcome::TerminalTempNone
+                    | MaintenanceOutcome::TerminalTempDeferredActive
+                    | MaintenanceOutcome::TerminalTempReconciledRowOnly
+                    | MaintenanceOutcome::TerminalTempRemoved
+            )
+            | (
+                MaintenanceKind::SnapshotUnleasedTemp,
+                MaintenanceOutcome::UnleasedTempNone
+                    | MaintenanceOutcome::UnleasedTempDeferredActive
+                    | MaintenanceOutcome::UnleasedTempRemoved
+            )
+    )
+}
+
+fn maintenance_core_kind_matches(kind: MaintenanceKind, core_kind: CoreTaskKind) -> bool {
+    matches!(
+        (kind, core_kind),
+        (
+            MaintenanceKind::ScanRecovery,
+            CoreTaskKind::ScanRecoveryMaintenance
+        ) | (
+            MaintenanceKind::CandidateEvaluationRecovery,
+            CoreTaskKind::CandidateEvaluationRecoveryMaintenance
+        ) | (MaintenanceKind::History, CoreTaskKind::HistoryMaintenance)
+            | (
+                MaintenanceKind::SnapshotRetention,
+                CoreTaskKind::SnapshotRetention
+            )
+            | (
+                MaintenanceKind::SnapshotOrphan,
+                CoreTaskKind::SnapshotOrphanMaintenance
+            )
+            | (
+                MaintenanceKind::SnapshotProvisioningStage,
+                CoreTaskKind::SnapshotProvisioningStageMaintenance
+            )
+            | (
+                MaintenanceKind::SnapshotTerminalTemp,
+                CoreTaskKind::SnapshotTerminalTempMaintenance
+            )
+            | (
+                MaintenanceKind::SnapshotUnleasedTemp,
+                CoreTaskKind::SnapshotUnleasedTempMaintenance
+            )
+    )
+}
+
+fn validate_maintenance_poll_shape(
+    expected_kind: MaintenanceKind,
+    phase: TaskPhase,
+    failure: Option<MaintenanceFailure>,
+    result: Option<&MaintenanceResult>,
+) -> Result<(), EngineError> {
+    let terminal_shape_is_valid = match phase {
+        TaskPhase::Queued | TaskPhase::Running => failure.is_none() && result.is_none(),
+        TaskPhase::Succeeded => failure.is_none() && result.is_some(),
+        TaskPhase::Failed => failure.is_some() && result.is_none(),
+        TaskPhase::Cancelled => failure.is_none() && result.is_none(),
+    };
+    if !terminal_shape_is_valid {
+        return Err(EngineError::InternalState);
+    }
+    let Some(result) = result else {
+        return Ok(());
+    };
+    if result.record_version != FFI_RECORD_VERSION
+        || result.kind != expected_kind
+        || !maintenance_outcome_matches_kind(result.kind, result.outcome)
+    {
+        return Err(EngineError::InternalState);
+    }
+    if result.kind == MaintenanceKind::CandidateEvaluationRecovery {
+        let candidate_count_is_valid = match result.outcome {
+            MaintenanceOutcome::CandidateEvaluationRecoveryRecovered => true,
+            MaintenanceOutcome::CandidateEvaluationRecoveryNone
+            | MaintenanceOutcome::CandidateEvaluationRecoveryIncompatible => {
+                result.primary_count_after == 0
+            }
+            _ => false,
+        };
+        let unused_fields_are_zero = result.primary_count_before == 0
+            && result.secondary_count_before == 0
+            && result.secondary_count_after == 0
+            && result.tertiary_count_before == 0
+            && result.tertiary_count_after == 0
+            && result.quaternary_count_before == 0
+            && result.quaternary_count_after == 0
+            && result.charged_bytes_before == 0
+            && result.charged_bytes_after == 0
+            && result.removed_bytes == 0
+            && result.cap_bytes == 0;
+        let none_has_no_more = result.outcome
+            != MaintenanceOutcome::CandidateEvaluationRecoveryNone
+            || !result.has_more;
+        if !candidate_count_is_valid || !unused_fields_are_zero || !none_has_no_more {
+            return Err(EngineError::InternalState);
+        }
+    }
+    Ok(())
+}
+
 fn map_failure(failure: TaskFailureKind) -> MaintenanceFailure {
     use dux_core::engine::{
-        HistoryMaintenanceFailureKind as H, ScanRecoveryMaintenanceFailureKind as S,
-        SnapshotOrphanMaintenanceFailureKind as O,
+        CandidateEvaluationRecoveryMaintenanceFailureKind as C, HistoryMaintenanceFailureKind as H,
+        ScanRecoveryMaintenanceFailureKind as S, SnapshotOrphanMaintenanceFailureKind as O,
         SnapshotProvisioningStageMaintenanceFailureKind as P, SnapshotRetentionFailureKind as R,
         SnapshotTerminalTempMaintenanceFailureKind as T,
         SnapshotUnleasedTempMaintenanceFailureKind as U,
@@ -5440,6 +5625,7 @@ fn map_failure(failure: TaskFailureKind) -> MaintenanceFailure {
     }
     match failure {
         TaskFailureKind::ScanRecoveryMaintenance(value) => map_typed!(value, S),
+        TaskFailureKind::CandidateEvaluationRecoveryMaintenance(value) => map_typed!(value, C),
         TaskFailureKind::HistoryMaintenance(value) => map_typed!(value, H),
         TaskFailureKind::SnapshotProvisioningStageMaintenance(value) => map_typed!(value, P),
         TaskFailureKind::SnapshotTerminalTempMaintenance(value) => map_typed!(value, T),
@@ -8227,10 +8413,10 @@ mod tests {
     }
 
     #[test]
-    fn reports_contract_thirty_one_and_preserves_legacy_formatting() {
+    fn reports_contract_thirty_two_and_preserves_legacy_formatting() {
         let _guard = ENGINE_TEST_LOCK.lock().unwrap();
         let (_temp, engine) = engine();
-        assert_eq!(library_version().ffi_contract_version, 31);
+        assert_eq!(library_version().ffi_contract_version, 32);
         assert_eq!(engine.library_version().unwrap(), library_version());
         assert_eq!(engine.format_size(1536).unwrap().display, "1.5 KB");
         assert!(engine.close());
@@ -11808,6 +11994,7 @@ mod tests {
         let (_temp, engine) = engine();
         for kind in [
             MaintenanceKind::ScanRecovery,
+            MaintenanceKind::CandidateEvaluationRecovery,
             MaintenanceKind::History,
             MaintenanceKind::SnapshotRetention,
             MaintenanceKind::SnapshotOrphan,
@@ -11837,6 +12024,28 @@ mod tests {
                         assert_eq!(result.quaternary_count_before, 0);
                         assert_eq!(result.removed_bytes, 0);
                     }
+                    if kind == MaintenanceKind::CandidateEvaluationRecovery
+                        && poll.phase == TaskPhase::Succeeded
+                    {
+                        let result = poll.result.as_ref().unwrap();
+                        assert_eq!(
+                            result.outcome,
+                            MaintenanceOutcome::CandidateEvaluationRecoveryNone
+                        );
+                        assert_eq!(result.primary_count_before, 0);
+                        assert_eq!(result.primary_count_after, 0);
+                        assert_eq!(result.secondary_count_before, 0);
+                        assert_eq!(result.secondary_count_after, 0);
+                        assert_eq!(result.tertiary_count_before, 0);
+                        assert_eq!(result.tertiary_count_after, 0);
+                        assert_eq!(result.quaternary_count_before, 0);
+                        assert_eq!(result.quaternary_count_after, 0);
+                        assert_eq!(result.charged_bytes_before, 0);
+                        assert_eq!(result.charged_bytes_after, 0);
+                        assert_eq!(result.removed_bytes, 0);
+                        assert_eq!(result.cap_bytes, 0);
+                        assert!(!result.has_more);
+                    }
                     break;
                 }
                 assert!(Instant::now() < deadline);
@@ -11844,6 +12053,95 @@ mod tests {
             }
         }
         assert!(engine.close());
+    }
+
+    #[test]
+    fn candidate_evaluation_recovery_poll_shape_is_strict_and_path_free() {
+        let kind = MaintenanceKind::CandidateEvaluationRecovery;
+        let mut recovered = empty_result(
+            kind,
+            UNIX_EPOCH,
+            MaintenanceOutcome::CandidateEvaluationRecoveryRecovered,
+            true,
+        )
+        .unwrap();
+        recovered.primary_count_after = 7;
+        assert_eq!(
+            validate_maintenance_poll_shape(kind, TaskPhase::Succeeded, None, Some(&recovered)),
+            Ok(())
+        );
+
+        let incompatible = empty_result(
+            kind,
+            UNIX_EPOCH,
+            MaintenanceOutcome::CandidateEvaluationRecoveryIncompatible,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            validate_maintenance_poll_shape(kind, TaskPhase::Succeeded, None, Some(&incompatible)),
+            Ok(())
+        );
+
+        let none = empty_result(
+            kind,
+            UNIX_EPOCH,
+            MaintenanceOutcome::CandidateEvaluationRecoveryNone,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            validate_maintenance_poll_shape(kind, TaskPhase::Succeeded, None, Some(&none)),
+            Ok(())
+        );
+
+        let mut wrong_kind = recovered.clone();
+        wrong_kind.kind = MaintenanceKind::History;
+        assert_eq!(
+            validate_maintenance_poll_shape(kind, TaskPhase::Succeeded, None, Some(&wrong_kind)),
+            Err(EngineError::InternalState)
+        );
+
+        let mut wrong_outcome = recovered.clone();
+        wrong_outcome.outcome = MaintenanceOutcome::HistoryApplied;
+        assert_eq!(
+            validate_maintenance_poll_shape(kind, TaskPhase::Succeeded, None, Some(&wrong_outcome)),
+            Err(EngineError::InternalState)
+        );
+
+        let mut leaked_field = recovered.clone();
+        leaked_field.removed_bytes = 1;
+        assert_eq!(
+            validate_maintenance_poll_shape(kind, TaskPhase::Succeeded, None, Some(&leaked_field)),
+            Err(EngineError::InternalState)
+        );
+
+        let mut invalid_none = none.clone();
+        invalid_none.primary_count_after = 1;
+        assert_eq!(
+            validate_maintenance_poll_shape(kind, TaskPhase::Succeeded, None, Some(&invalid_none)),
+            Err(EngineError::InternalState)
+        );
+        invalid_none.primary_count_after = 0;
+        invalid_none.has_more = true;
+        assert_eq!(
+            validate_maintenance_poll_shape(kind, TaskPhase::Succeeded, None, Some(&invalid_none)),
+            Err(EngineError::InternalState)
+        );
+
+        assert_eq!(
+            validate_maintenance_poll_shape(kind, TaskPhase::Running, None, Some(&recovered)),
+            Err(EngineError::InternalState)
+        );
+        assert_eq!(
+            validate_maintenance_poll_shape(
+                kind,
+                TaskPhase::Failed,
+                Some(MaintenanceFailure::CorruptData),
+                None
+            ),
+            Ok(())
+        );
     }
 
     #[test]

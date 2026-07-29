@@ -266,7 +266,7 @@ final class EngineServiceTests: XCTestCase {
         // DUX-DESTRUCTIVE: allow=test-swift-retry-obstruction-remove -- remove only this test fixture's deliberate file obstruction
         try FileManager.default.removeItem(at: dataRoot)
         let status = try await service.loadStatus()
-        XCTAssertEqual(status.ffiContractVersion, 31)
+        XCTAssertEqual(status.ffiContractVersion, 32)
         let closed = await service.close()
         XCTAssertTrue(closed)
     }
@@ -276,7 +276,7 @@ final class EngineServiceTests: XCTestCase {
         let result = try await EngineService(engine: fixture.engine).loadStatus()
 
         XCTAssertEqual(result.libraryVersion, "0.5.0")
-        XCTAssertEqual(result.ffiContractVersion, 31)
+        XCTAssertEqual(result.ffiContractVersion, 32)
         XCTAssertTrue(result.executedOffMainThread)
     }
 
@@ -885,6 +885,150 @@ final class EngineServiceTests: XCTestCase {
         }
     }
 
+    func testMaintenanceAdapterMapsCandidateEvaluationRecoveryOutcomes() async throws {
+        let cases: [(MaintenanceOutcome, UInt64, Bool)] = [
+            (.candidateEvaluationRecoveryNone, 0, false),
+            (.candidateEvaluationRecoveryRecovered, 12, true),
+            (.candidateEvaluationRecoveryIncompatible, 0, true),
+        ]
+
+        for (outcome, candidateCount, hasMore) in cases {
+            let generatedTask = RecordingGeneratedMaintenanceTask(
+                polls: [
+                    generatedMaintenancePoll(
+                        result: generatedCandidateEvaluationRecoveryResult(
+                            outcome: outcome,
+                            candidateCount: candidateCount,
+                            hasMore: hasMore
+                        )
+                    ),
+                ]
+            )
+            let engine = RecordingMaintenanceEngine(task: generatedTask)
+            let admission = await EngineService(engine: engine)
+                .startMaintenance(.candidateEvaluationRecovery)
+            guard case let .started(task) = admission else {
+                return XCTFail("Expected candidate-evaluation recovery task")
+            }
+
+            let poll = await task.poll()
+            guard case let .finished(signal) = poll else {
+                return XCTFail("Expected a valid candidate-evaluation recovery result")
+            }
+
+            XCTAssertEqual(signal.hasMore, hasMore)
+            XCTAssertNil(signal.deferral)
+            XCTAssertEqual(engine.receivedKind, .candidateEvaluationRecovery)
+            XCTAssertEqual(engine.calledOnMain, false)
+            XCTAssertEqual(generatedTask.pollCalledOnMain, false)
+        }
+    }
+
+    func testMaintenanceAdapterRejectsMalformedCandidateRecoveryPolls() async {
+        let validResult = generatedCandidateEvaluationRecoveryResult(
+            outcome: .candidateEvaluationRecoveryRecovered,
+            candidateCount: 1,
+            hasMore: false
+        )
+        let malformedPolls = [
+            generatedMaintenancePoll(recordVersion: 2, result: validResult),
+            generatedMaintenancePoll(kind: .history, result: validResult),
+            generatedMaintenancePoll(
+                result: generatedCandidateEvaluationRecoveryResult(
+                    recordVersion: 2,
+                    outcome: .candidateEvaluationRecoveryRecovered,
+                    candidateCount: 1,
+                    hasMore: false
+                )
+            ),
+            generatedMaintenancePoll(
+                result: generatedCandidateEvaluationRecoveryResult(
+                    kind: .history,
+                    outcome: .candidateEvaluationRecoveryRecovered,
+                    candidateCount: 1,
+                    hasMore: false
+                )
+            ),
+            generatedMaintenancePoll(
+                result: generatedCandidateEvaluationRecoveryResult(
+                    outcome: .candidateEvaluationRecoveryRecovered,
+                    candidateCount: 1,
+                    hasMore: false,
+                    observedAtUnixMS: -1
+                )
+            ),
+            generatedMaintenancePoll(
+                result: generatedCandidateEvaluationRecoveryResult(
+                    outcome: .historyApplied,
+                    candidateCount: 0,
+                    hasMore: false
+                )
+            ),
+            generatedMaintenancePoll(
+                result: generatedCandidateEvaluationRecoveryResult(
+                    outcome: .candidateEvaluationRecoveryRecovered,
+                    candidateCount: 1,
+                    hasMore: false,
+                    secondaryCountBefore: 1
+                )
+            ),
+            generatedMaintenancePoll(
+                result: generatedCandidateEvaluationRecoveryResult(
+                    outcome: .candidateEvaluationRecoveryRecovered,
+                    candidateCount: 4_097,
+                    hasMore: false
+                )
+            ),
+            generatedMaintenancePoll(
+                result: generatedCandidateEvaluationRecoveryResult(
+                    outcome: .candidateEvaluationRecoveryNone,
+                    candidateCount: 0,
+                    hasMore: true
+                )
+            ),
+            generatedMaintenancePoll(phase: .running, result: validResult),
+            generatedMaintenancePoll(phase: .failed, result: nil),
+        ]
+
+        for poll in malformedPolls {
+            let generatedTask = RecordingGeneratedMaintenanceTask(polls: [poll])
+            let admission = await EngineService(
+                engine: RecordingMaintenanceEngine(task: generatedTask)
+            ).startMaintenance(.candidateEvaluationRecovery)
+            guard case let .started(task) = admission else {
+                return XCTFail("Expected generated maintenance task")
+            }
+            guard case .failed(.blockedUntilRestart) = await task.poll() else {
+                return XCTFail("Expected malformed maintenance response to fail closed")
+            }
+        }
+    }
+
+    func testMaintenanceAdapterRejectsMalformedStartRecord() async {
+        let generatedTask = RecordingGeneratedMaintenanceTask(
+            polls: [
+                generatedMaintenancePoll(
+                    result: generatedCandidateEvaluationRecoveryResult(
+                        outcome: .candidateEvaluationRecoveryNone,
+                        candidateCount: 0,
+                        hasMore: false
+                    )
+                ),
+            ]
+        )
+        let engine = RecordingMaintenanceEngine(
+            task: generatedTask,
+            startRecordVersion: 2
+        )
+
+        let admission = await EngineService(engine: engine)
+            .startMaintenance(.candidateEvaluationRecovery)
+
+        guard case .failed(.blockedUntilRestart) = admission else {
+            return XCTFail("Expected malformed start record to fail closed")
+        }
+    }
+
     func testHomeScanAdapterPassesOnlyResolvedHomeAndRunsAllFFIOffMain() async throws {
         let generatedTask = RecordingGeneratedScanTask(
             polls: [generatedActivePoll(revision: 1)]
@@ -1473,7 +1617,7 @@ final class EngineServiceTests: XCTestCase {
             weakEngine = engine
 
             XCTAssertEqual(liveEngineInstanceCount(), baseline + 1)
-            XCTAssertEqual(try engine.libraryVersion().ffiContractVersion, 31)
+            XCTAssertEqual(try engine.libraryVersion().ffiContractVersion, 32)
             XCTAssertTrue(engine.close())
             XCTAssertTrue(engine.close())
             XCTAssertThrowsError(try engine.formatSize(bytes: 1_536)) { error in
@@ -2193,6 +2337,65 @@ private final class TestEngineFixture {
     }
 }
 
+private final class RecordingMaintenanceEngine: DuxEngine, @unchecked Sendable {
+    private let task: MaintenanceTask
+    private let startRecordVersion: UInt32
+    private(set) var receivedKind: MaintenanceKind?
+    private(set) var calledOnMain: Bool?
+
+    required init(unsafeFromHandle handle: UInt64) {
+        fatalError("RecordingMaintenanceEngine cannot be lifted from an FFI handle: \(handle)")
+    }
+
+    init(task: MaintenanceTask, startRecordVersion: UInt32 = 1) {
+        self.task = task
+        self.startRecordVersion = startRecordVersion
+        super.init(noHandle: NoHandle())
+    }
+
+    override func startMaintenance(kind: MaintenanceKind) throws -> MaintenanceStart {
+        receivedKind = kind
+        calledOnMain = Thread.isMainThread
+        return MaintenanceStart(
+            recordVersion: startRecordVersion,
+            disposition: .started,
+            task: task
+        )
+    }
+}
+
+private final class RecordingGeneratedMaintenanceTask:
+    MaintenanceTask,
+    @unchecked Sendable
+{
+    private var polls: [MaintenancePoll]
+    private(set) var pollCalledOnMain: Bool?
+
+    required init(unsafeFromHandle handle: UInt64) {
+        fatalError(
+            "RecordingGeneratedMaintenanceTask cannot be lifted from an FFI handle: \(handle)"
+        )
+    }
+
+    init(polls: [MaintenancePoll]) {
+        precondition(!polls.isEmpty)
+        self.polls = polls
+        super.init(noHandle: NoHandle())
+    }
+
+    override func poll() throws -> MaintenancePoll {
+        pollCalledOnMain = Thread.isMainThread
+        if polls.count > 1 {
+            return polls.removeFirst()
+        }
+        return polls[0]
+    }
+
+    override func cancel() throws -> MaintenanceCancelOutcome {
+        .requested
+    }
+}
+
 private final class RecordingScanEngine: DuxEngine, @unchecked Sendable {
     private let task: ScanTask
     private let startRecordVersion: UInt32
@@ -2283,6 +2486,54 @@ private func generatedActivePoll(
         eventsTruncated: false,
         failure: nil,
         result: nil
+    )
+}
+
+private func generatedMaintenancePoll(
+    recordVersion: UInt32 = 1,
+    kind: MaintenanceKind = .candidateEvaluationRecovery,
+    phase: TaskPhase = .succeeded,
+    failure: MaintenanceFailure? = nil,
+    result: MaintenanceResult?
+) -> MaintenancePoll {
+    MaintenancePoll(
+        recordVersion: recordVersion,
+        kind: kind,
+        phase: phase,
+        cancellationRequested: false,
+        revision: 3,
+        failure: failure,
+        result: result
+    )
+}
+
+private func generatedCandidateEvaluationRecoveryResult(
+    recordVersion: UInt32 = 1,
+    kind: MaintenanceKind = .candidateEvaluationRecovery,
+    outcome: MaintenanceOutcome,
+    candidateCount: UInt64,
+    hasMore: Bool,
+    observedAtUnixMS: Int64 = 1,
+    secondaryCountBefore: UInt64 = 0
+) -> MaintenanceResult {
+    MaintenanceResult(
+        recordVersion: recordVersion,
+        kind: kind,
+        observedAtUnixMs: observedAtUnixMS,
+        outcome: outcome,
+        primaryCountBefore: 0,
+        primaryCountAfter: candidateCount,
+        secondaryCountBefore: secondaryCountBefore,
+        secondaryCountAfter: 0,
+        tertiaryCountBefore: 0,
+        tertiaryCountAfter: 0,
+        quaternaryCountBefore: 0,
+        quaternaryCountAfter: 0,
+        chargedBytesBefore: 0,
+        chargedBytesAfter: 0,
+        removedBytes: 0,
+        capBytes: 0,
+        hasMore: hasMore
     )
 }
 

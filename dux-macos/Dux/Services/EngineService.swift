@@ -302,7 +302,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
     DuxSnapshotHistoryServing, DuxCleanupHistoryServing, DuxScanCoverageServing, HomeScanServing,
     Sendable
 {
-    fileprivate static let expectedFFIContractVersion: UInt32 = 31
+    fileprivate static let expectedFFIContractVersion: UInt32 = 32
     fileprivate static let expectedRecordVersion: UInt32 = 1
 
     private let state: EngineServiceState
@@ -757,7 +757,8 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         await state.performNonthrowing { state in
             do {
                 let engine = try state.resolveEngine()
-                let start = try engine.startMaintenance(kind: Self.ffiKind(kind))
+                let expectedKind = Self.ffiKind(kind)
+                let start = try engine.startMaintenance(kind: expectedKind)
                 guard start.recordVersion == 1 else {
                     return .failed(.blockedUntilRestart)
                 }
@@ -766,13 +767,28 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
                     guard let task = start.task else {
                         return .failed(.blockedUntilRestart)
                     }
-                    return .started(FFIDuxMaintenanceTask(task: task, state: state))
+                    return .started(
+                        FFIDuxMaintenanceTask(
+                            task: task,
+                            state: state,
+                            expectedKind: expectedKind
+                        )
+                    )
                 case .alreadyActive:
                     guard let task = start.task else {
                         return .failed(.blockedUntilRestart)
                     }
-                    return .alreadyActive(FFIDuxMaintenanceTask(task: task, state: state))
+                    return .alreadyActive(
+                        FFIDuxMaintenanceTask(
+                            task: task,
+                            state: state,
+                            expectedKind: expectedKind
+                        )
+                    )
                 case .deferredBusy:
+                    guard start.task == nil else {
+                        return .failed(.blockedUntilRestart)
+                    }
                     return .deferredBusy
                 }
             } catch let error as EngineError {
@@ -1038,6 +1054,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
     private static func ffiKind(_ kind: DuxMaintenanceKind) -> MaintenanceKind {
         switch kind {
         case .scanRecovery: .scanRecovery
+        case .candidateEvaluationRecovery: .candidateEvaluationRecovery
         case .history: .history
         case .snapshotRetention: .snapshotRetention
         case .snapshotOrphan: .snapshotOrphan
@@ -2639,16 +2656,25 @@ private final class FFIHomeScanTask: HomeScanTask, @unchecked Sendable {
 private final class FFIDuxMaintenanceTask: DuxMaintenanceTask, @unchecked Sendable {
     private let task: MaintenanceTask
     private let state: EngineServiceState
+    private let expectedKind: MaintenanceKind
 
-    init(task: MaintenanceTask, state: EngineServiceState) {
+    init(
+        task: MaintenanceTask,
+        state: EngineServiceState,
+        expectedKind: MaintenanceKind
+    ) {
         self.task = task
         self.state = state
+        self.expectedKind = expectedKind
     }
 
     func poll() async -> DuxMaintenanceTaskPoll {
         await state.performNonthrowing { _ in
             do {
-                return Self.map(try self.task.poll())
+                return Self.map(
+                    try self.task.poll(),
+                    expectedKind: self.expectedKind
+                )
             } catch let error as EngineError {
                 return .failed(Self.failureDisposition(error))
             } catch {
@@ -2663,19 +2689,38 @@ private final class FFIDuxMaintenanceTask: DuxMaintenanceTask, @unchecked Sendab
         }
     }
 
-    private static func map(_ poll: MaintenancePoll) -> DuxMaintenanceTaskPoll {
-        guard poll.recordVersion == 1 else {
+    private static func map(
+        _ poll: MaintenancePoll,
+        expectedKind: MaintenanceKind
+    ) -> DuxMaintenanceTaskPoll {
+        guard
+            poll.recordVersion == EngineService.expectedRecordVersion,
+            poll.kind == expectedKind
+        else {
             return .failed(.blockedUntilRestart)
         }
         switch poll.phase {
         case .queued, .running:
+            guard poll.failure == nil, poll.result == nil else {
+                return .failed(.blockedUntilRestart)
+            }
             return .running
         case .cancelled:
+            guard poll.failure == nil, poll.result == nil else {
+                return .failed(.blockedUntilRestart)
+            }
             return .cancelled
         case .failed:
-            return .failed(poll.failure.map(failureDisposition) ?? .blockedUntilRestart)
+            guard let failure = poll.failure, poll.result == nil else {
+                return .failed(.blockedUntilRestart)
+            }
+            return .failed(failureDisposition(failure))
         case .succeeded:
-            guard let result = poll.result, result.recordVersion == 1 else {
+            guard
+                poll.failure == nil,
+                let result = poll.result,
+                valid(result, expectedKind: expectedKind)
+            else {
                 return .failed(.blockedUntilRestart)
             }
             return .finished(
@@ -2685,6 +2730,170 @@ private final class FFIDuxMaintenanceTask: DuxMaintenanceTask, @unchecked Sendab
                 )
             )
         }
+    }
+
+    private static func valid(
+        _ result: MaintenanceResult,
+        expectedKind: MaintenanceKind
+    ) -> Bool {
+        guard
+            result.recordVersion == EngineService.expectedRecordVersion,
+            result.kind == expectedKind,
+            result.observedAtUnixMs >= 0
+        else {
+            return false
+        }
+
+        switch expectedKind {
+        case .scanRecovery:
+            guard
+                result.secondaryCountAfter == 0,
+                result.tertiaryCountAfter == 0,
+                result.quaternaryCountAfter == 0,
+                zeroByteFields(result)
+            else {
+                return false
+            }
+            switch result.outcome {
+            case .scanRecoveryNone, .scanRecoveryDeferredUnproven,
+                 .scanRecoveryInterrupted, .scanRecoveryChangedConcurrently:
+                return true
+            default:
+                return false
+            }
+        case .candidateEvaluationRecovery:
+            guard
+                result.primaryCountBefore == 0,
+                result.secondaryCountBefore == 0,
+                result.secondaryCountAfter == 0,
+                result.tertiaryCountBefore == 0,
+                result.tertiaryCountAfter == 0,
+                result.quaternaryCountBefore == 0,
+                result.quaternaryCountAfter == 0,
+                zeroByteFields(result)
+            else {
+                return false
+            }
+            switch result.outcome {
+            case .candidateEvaluationRecoveryNone:
+                return result.primaryCountAfter == 0 && !result.hasMore
+            case .candidateEvaluationRecoveryRecovered:
+                return result.primaryCountAfter <= 4_096
+            case .candidateEvaluationRecoveryIncompatible:
+                return result.primaryCountAfter == 0
+            default:
+                return false
+            }
+        case .history:
+            guard
+                result.primaryCountBefore == 0,
+                result.secondaryCountBefore == 0,
+                result.tertiaryCountBefore == 0,
+                result.quaternaryCountBefore == 0,
+                zeroByteFields(result)
+            else {
+                return false
+            }
+            return result.outcome == .historyApplied
+        case .snapshotRetention:
+            guard zeroCountFields(result) else {
+                return false
+            }
+            switch result.outcome {
+            case .retentionUnderCap, .retentionDeferredUnstable,
+                 .retentionDeferredNoEligibleSnapshot,
+                 .retentionRemovedTombstonedResidual,
+                 .retentionTombstonedAndRemoved:
+                return true
+            default:
+                return false
+            }
+        case .snapshotOrphan:
+            guard
+                result.secondaryCountBefore == 0,
+                result.secondaryCountAfter == 0,
+                result.tertiaryCountBefore == 0,
+                result.tertiaryCountAfter == 0,
+                result.quaternaryCountBefore == 0,
+                result.quaternaryCountAfter == 0,
+                result.capBytes == 0
+            else {
+                return false
+            }
+            switch result.outcome {
+            case .orphanNone, .orphanRemoved:
+                return true
+            default:
+                return false
+            }
+        case .snapshotProvisioningStage:
+            guard
+                result.quaternaryCountBefore == 0,
+                result.quaternaryCountAfter == 0,
+                result.capBytes == 0
+            else {
+                return false
+            }
+            switch result.outcome {
+            case .stageNone, .stageDeferredUnproven,
+                 .stageRemovedMarkerOnly, .stageRemovedMarkerComplete:
+                return true
+            default:
+                return false
+            }
+        case .snapshotTerminalTemp:
+            guard
+                result.tertiaryCountBefore == 0,
+                result.tertiaryCountAfter == 0,
+                result.quaternaryCountBefore == 0,
+                result.quaternaryCountAfter == 0,
+                result.capBytes == 0
+            else {
+                return false
+            }
+            switch result.outcome {
+            case .terminalTempNone, .terminalTempDeferredActive,
+                 .terminalTempReconciledRowOnly, .terminalTempRemoved:
+                return true
+            default:
+                return false
+            }
+        case .snapshotUnleasedTemp:
+            guard
+                result.tertiaryCountBefore == 0,
+                result.tertiaryCountAfter == 0,
+                result.quaternaryCountBefore == 0,
+                result.quaternaryCountAfter == 0,
+                result.capBytes == 0
+            else {
+                return false
+            }
+            switch result.outcome {
+            case .unleasedTempNone, .unleasedTempDeferredActive,
+                 .unleasedTempRemoved:
+                return true
+            default:
+                return false
+            }
+        }
+    }
+
+    private static func zeroCountFields(_ result: MaintenanceResult) -> Bool {
+        result.primaryCountBefore == 0
+            && result.primaryCountAfter == 0
+            && result.secondaryCountBefore == 0
+            && result.secondaryCountAfter == 0
+            && result.tertiaryCountBefore == 0
+            && result.tertiaryCountAfter == 0
+            && result.quaternaryCountBefore == 0
+            && result.quaternaryCountAfter == 0
+    }
+
+    private static func zeroByteFields(_ result: MaintenanceResult) -> Bool {
+        result.chargedBytesBefore == 0
+            && result.chargedBytesAfter == 0
+            && result.removedBytes == 0
+            && result.capBytes == 0
     }
 
     private static func deferral(_ outcome: MaintenanceOutcome) -> DuxMaintenanceDeferral? {

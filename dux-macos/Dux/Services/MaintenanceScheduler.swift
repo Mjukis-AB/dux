@@ -2,6 +2,7 @@ import Foundation
 
 enum DuxMaintenanceKind: CaseIterable, Sendable {
     case scanRecovery
+    case candidateEvaluationRecovery
     case snapshotTerminalTemp
     case snapshotUnleasedTemp
     case snapshotProvisioningStage
@@ -184,6 +185,7 @@ struct DuxMaintenanceSchedulerSnapshot: Sendable {
 actor DuxMaintenanceScheduler {
     private static let rotation: [DuxMaintenanceKind] = [
         .scanRecovery,
+        .candidateEvaluationRecovery,
         .snapshotTerminalTemp,
         .snapshotUnleasedTemp,
         .snapshotProvisioningStage,
