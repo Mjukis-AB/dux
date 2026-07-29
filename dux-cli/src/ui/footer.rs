@@ -6,41 +6,32 @@ use ratatui::{
 };
 
 use crate::app::views::{StaleThreshold, stale_threshold_label};
-use crate::app::{AppMode, SessionStats, ViewMode};
+use crate::app::{AppMode, ViewMode};
 
 use super::text::{char_count, truncate_start};
 use super::theme::Theme;
 
-/// Footer widget showing keyboard hints and session stats
+/// Footer widget showing keyboard hints and selection totals.
 pub struct Footer<'a> {
     mode: AppMode,
     view_mode: ViewMode,
     theme: &'a Theme,
-    session_stats: &'a SessionStats,
     stale_threshold: Option<StaleThreshold>,
     selection_count: usize,
     selection_size: u64,
     selecting_mode: bool,
-    quit_requested: bool,
 }
 
 impl<'a> Footer<'a> {
-    pub fn new(
-        mode: AppMode,
-        view_mode: ViewMode,
-        theme: &'a Theme,
-        session_stats: &'a SessionStats,
-    ) -> Self {
+    pub fn new(mode: AppMode, view_mode: ViewMode, theme: &'a Theme) -> Self {
         Self {
             mode,
             view_mode,
             theme,
-            session_stats,
             stale_threshold: None,
             selection_count: 0,
             selection_size: 0,
             selecting_mode: false,
-            quit_requested: false,
         }
     }
 
@@ -53,11 +44,6 @@ impl<'a> Footer<'a> {
         self.selection_count = count;
         self.selection_size = size;
         self.selecting_mode = selecting;
-        self
-    }
-
-    pub fn with_quit_requested(mut self, quit_requested: bool) -> Self {
-        self.quit_requested = quit_requested;
         self
     }
 }
@@ -74,59 +60,43 @@ impl Widget for Footer<'_> {
             ("v", "Select".to_string())
         };
 
-        let hints: Vec<(&str, String)> = if self.quit_requested {
-            vec![(
-                "…",
-                "Waiting for permanent deletion before quitting".to_string(),
-            )]
-        } else {
-            match self.mode {
-                AppMode::Scanning | AppMode::Finalizing => vec![("q", "Quit".to_string())],
-                AppMode::Browsing => match self.view_mode {
-                    ViewMode::Tree => vec![
+        let hints: Vec<(&str, String)> = match self.mode {
+            AppMode::Scanning | AppMode::Finalizing => vec![("q", "Quit".to_string())],
+            AppMode::Browsing => match self.view_mode {
+                ViewMode::Tree => vec![
+                    ("Tab", "Views".to_string()),
+                    ("↑↓", "Navigate".to_string()),
+                    select_hint.clone(),
+                    ("←→", "Collapse/Expand".to_string()),
+                    ("r", "Rescan".to_string()),
+                    ("?", "Help".to_string()),
+                    ("q", "Quit".to_string()),
+                ],
+                ViewMode::LargeFiles => vec![
+                    ("Tab", "Views".to_string()),
+                    ("↑↓", "Navigate".to_string()),
+                    select_hint.clone(),
+                    ("r", "Rescan".to_string()),
+                    ("?", "Help".to_string()),
+                    ("q", "Quit".to_string()),
+                ],
+                ViewMode::BuildArtifacts => {
+                    let stale_label = self
+                        .stale_threshold
+                        .map(|threshold| format!("Stale:{}", stale_threshold_label(threshold)))
+                        .unwrap_or_else(|| "Stale".to_string());
+                    vec![
                         ("Tab", "Views".to_string()),
                         ("↑↓", "Navigate".to_string()),
                         select_hint.clone(),
-                        ("←→", "Collapse/Expand".to_string()),
-                        ("d", "Permanently delete".to_string()),
+                        ("s", stale_label),
                         ("r", "Rescan".to_string()),
                         ("?", "Help".to_string()),
                         ("q", "Quit".to_string()),
-                    ],
-                    ViewMode::LargeFiles => vec![
-                        ("Tab", "Views".to_string()),
-                        ("↑↓", "Navigate".to_string()),
-                        select_hint.clone(),
-                        ("d", "Permanently delete".to_string()),
-                        ("r", "Rescan".to_string()),
-                        ("?", "Help".to_string()),
-                        ("q", "Quit".to_string()),
-                    ],
-                    ViewMode::BuildArtifacts => {
-                        let stale_label = self
-                            .stale_threshold
-                            .map(|threshold| format!("Stale:{}", stale_threshold_label(threshold)))
-                            .unwrap_or_else(|| "Stale".to_string());
-                        vec![
-                            ("Tab", "Views".to_string()),
-                            ("↑↓", "Navigate".to_string()),
-                            select_hint.clone(),
-                            ("s", stale_label),
-                            ("d", "Permanently delete".to_string()),
-                            ("r", "Rescan".to_string()),
-                            ("?", "Help".to_string()),
-                            ("q", "Quit".to_string()),
-                        ]
-                    }
-                },
-                AppMode::Help => vec![("Esc", "Close help".to_string()), ("q", "Quit".to_string())],
-                AppMode::ConfirmDelete | AppMode::ConfirmMultiDelete => {
-                    vec![("y", "Yes".to_string()), ("n", "Cancel".to_string())]
+                    ]
                 }
-                AppMode::MultiDeleting => {
-                    vec![("q", "Quit after permanent deletions".to_string())]
-                }
-            }
+            },
+            AppMode::Help => vec![("Esc", "Close help".to_string()), ("q", "Quit".to_string())],
         };
 
         let key_style = Style::default()
@@ -156,7 +126,7 @@ impl Widget for Footer<'_> {
             }
         }
 
-        // Right side: selection info or freed space
+        // Right side: selection info.
         let right_text = if self.selection_count > 0 {
             Some((
                 format!(
@@ -166,22 +136,6 @@ impl Widget for Footer<'_> {
                 ),
                 Style::default()
                     .fg(self.theme.purple)
-                    .add_modifier(Modifier::BOLD),
-            ))
-        } else if self.session_stats.items_deleted > 0 {
-            Some((
-                format!(
-                    "Deleted (scan estimate): {} ({} item{})",
-                    dux_core::format_size(self.session_stats.bytes_freed),
-                    self.session_stats.items_deleted,
-                    if self.session_stats.items_deleted == 1 {
-                        ""
-                    } else {
-                        "s"
-                    }
-                ),
-                Style::default()
-                    .fg(self.theme.green)
                     .add_modifier(Modifier::BOLD),
             ))
         } else {
@@ -203,45 +157,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn deferred_quit_copy_does_not_claim_background_survival() {
-        let area = Rect::new(0, 0, 80, 1);
-        let mut buffer = Buffer::empty(area);
-        Footer::new(
-            AppMode::MultiDeleting,
-            ViewMode::Tree,
-            &Theme::default(),
-            &SessionStats::default(),
-        )
-        .with_quit_requested(true)
-        .render(area, &mut buffer);
-
-        let text = buffer
-            .content()
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect::<String>();
-        assert!(text.contains("Waiting for permanent deletion before quitting"));
-        assert!(!text.contains("continue"));
-    }
-
-    #[test]
-    fn browsing_and_session_copy_are_explicit_and_do_not_claim_measured_recovery() {
+    fn browsing_copy_has_navigation_without_a_delete_action() {
         let area = Rect::new(0, 0, 240, 1);
         let mut buffer = Buffer::empty(area);
-        let stats = SessionStats {
-            bytes_freed: 1024,
-            items_deleted: 1,
-        };
-        Footer::new(AppMode::Browsing, ViewMode::Tree, &Theme::default(), &stats)
-            .render(area, &mut buffer);
+        Footer::new(AppMode::Browsing, ViewMode::Tree, &Theme::default()).render(area, &mut buffer);
 
         let text = buffer
             .content()
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(text.contains("Permanently delete"));
-        assert!(text.contains("Deleted (scan estimate):"));
-        assert!(!text.contains("Freed:"));
+        assert!(text.contains("Navigate"));
+        assert!(text.contains("Rescan"));
+        assert!(!text.contains("delete"));
+        assert!(!text.contains("Delete"));
     }
 }

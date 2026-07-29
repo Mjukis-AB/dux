@@ -4939,6 +4939,31 @@ Tasks:
     regressing polls, forged display information, stale/repeated confirmation,
     close survival, and shutdown cancellation. Public §17.3 gates remain open,
     so the parent item intentionally stays unchecked.
+  - [x] 2026-07-29 slice: retire the legacy CLI arbitrary-descendant
+    permanent-delete authority instead of treating its temporary adapter as a
+    compliant migration. The CLI remains a supported companion for scanning,
+    navigation, selection, computed views, history, and reveal, while its
+    `d` action, confirmation/progress modes, background delete workers,
+    cache/tree post-delete mutation, and session delete accounting are absent.
+    `dux-core::cleanup::legacy_cli`, its raw recursive-delete effects, and the
+    three `legacy-adapter-delete-*` lint exceptions are removed. Repository
+    policy rejects reintroducing the retired module/symbol family, and a
+    fixture-backed input regression proves the former shortcut is inert and
+    cannot alter the filesystem. Any future CLI cleanup must consume the same
+    current, unexpired, reviewed-plan executor without accepting a caller path
+    or restoring client-owned effects. This removes one noncompliant authority
+    edge; it does not enable permanent-safe cleanup in Release or close the
+    remaining §17.3 gates, so the parent item stays unchecked.
+
+    Verification covers 34 CLI unit tests and 3 process-boundary CLI
+    integration tests, including the fixture-backed inert-key regression;
+    locked all-target workspace check and warnings-denied Clippy; all 29
+    repository policy tests; and an authority scan of 242 repository source
+    files. The full locked all-target workspace lane passed 1,074 tests with 2
+    intentional ignores before reporting two unrelated concurrency-sensitive
+    Rust-target safety failures; both exact regressions passed when rerun in
+    isolation (including the 292.60-second quiescence case). Formatting and
+    diff hygiene pass.
 - [ ] Implement execution-time revalidation.
   - [x] 2026-07-19 slice: make the approved-session handoff use one canonical
     millisecond start time for persistence and journal claiming, and recheck
@@ -5713,7 +5738,8 @@ If starting immediately, use this exact order:
 3. Move existing computed views from CLI to core without changing behavior.
 4. Add candidate/rule/plan types with no deletion.
 5. Add safety validator, protected roots, corpus, fuzz tests, and security document.
-6. Centralize existing CLI deletion behind the executor boundary.
+6. Retire the legacy CLI deletion path; reintroduce CLI cleanup only through
+   the same reviewed-plan executor used by the native product.
 7. Add SQLite aggregate history and volume status.
 8. Build the read-only menu bar and Overview.
 9. Build Explorer treemap/list on the shared snapshot API.

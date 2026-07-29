@@ -13,10 +13,12 @@ schemas. Reimplementing policy in Swift or treating the CLI's text output as an
 application API would create divergent safety decisions and make destructive
 behavior difficult to review.
 
-The current boundary is not yet the target boundary. `dux-cli` still owns
-computed views, scan/cache orchestration, and destructive filesystem operations.
-Migration must be incremental so the shipped CLI keeps working while reusable
-engine services are extracted.
+The current boundary is not yet the complete target boundary. `dux-cli` still
+owns some computed views and scan/cache orchestration, but its former
+CLI-specific destructive filesystem path was retired on 2026-07-29. The CLI
+continues as a read-only companion while reusable engine services are
+extracted. If cleanup returns to the CLI, this decision requires it to consume
+the shared reviewed-plan executor rather than restore client-owned effects.
 
 The FFI technology was intentionally not decided here. The roadmap defaulted to
 UniFFI, with a narrow C ABI fallback, while the Phase 0 spike tested Swift
@@ -78,9 +80,9 @@ path. Boundary-specific copies are DTOs, not independent domain models.
 - CLI-specific JSON serialization contracts layered over shared engine DTOs;
 - optional platform commands such as reveal-in-Finder through a narrow adapter.
 
-Existing CLI-owned policy moves into core in reviewable slices. Until deletion
-is centralized, the current CLI behavior remains explicitly legacy and must not
-be exposed to Swift as the new engine contract.
+Existing CLI-owned policy moves into core in reviewable slices. The retired
+legacy deletion adapter must not be restored or exposed to Swift as an engine
+contract.
 
 ### `dux-macos` owns
 
@@ -274,7 +276,7 @@ Before cleanup reaches the app:
 
 - classification and computed views used by both clients live in core;
 - candidate, rule, plan, validator, and executor APIs have no Swift-only policy;
-- CLI deletion uses the centralized executor;
+- any future CLI deletion uses the centralized executor;
 - no raw destructive UI/FFI call can bypass plan revalidation;
 - shared schema compatibility tests cover app and CLI.
 

@@ -1,5 +1,16 @@
 # Changelog
 
+- Retired the legacy CLI arbitrary-descendant permanent-delete path. The CLI
+  remains a supported read-only companion for scanning, navigation, selection,
+  computed views, history, and reveal; its former `d` action is inert.
+  Confirmation/progress UI, background delete workers, tree/cache mutation,
+  the temporary `dux-core::cleanup::legacy_cli` adapter, its raw recursive
+  filesystem effects, and all three `legacy-adapter-delete-*` policy
+  exceptions are removed. Repository policy and a fixture-backed input
+  regression prevent that authority route from returning. Any future CLI
+  cleanup must consume the same current, unexpired, reviewed-plan executor as
+  the native product. This removes a noncompliant authority edge without
+  enabling permanent-safe cleanup in Release.
 - Exposed the reviewed Rust-target permanent-safe task through UniFFI contract
   v31. The only start input is the exact engine-bound opaque plan review:
   paths, identifiers, timestamps, approval flags, callbacks, AI output,

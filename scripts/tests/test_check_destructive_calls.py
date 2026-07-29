@@ -86,49 +86,20 @@ class DestructiveCallLintTests(unittest.TestCase):
 
     def test_test_only_requires_a_test_context(self) -> None:
         call = (
-            "// DUX-DESTRUCTIVE: allow=test-delete-replaced-file -- temporary directory is exclusively owned by this test\n"
-            "std::fs::rename(a, b);\n"
+            "// DUX-DESTRUCTIVE: allow=test-cargo-config-transient-remove -- temporary directory is exclusively owned by this test\n"
+            "std::fs::remove_file(path);\n"
         )
         self.assert_rule("src/example.rs", call, "invalid-annotation-scope")
-        path = "dux-core/src/cleanup/legacy_cli.rs"
+        path = "dux-core/src/planner/cargo_config.rs"
         self.assert_rule(path, call, "invalid-annotation-scope")
         allowed_test = (
-            "#[cfg(test)]\nmod tests {\nfn replaced_file_is_not_deleted() {\n"
+            "#[cfg(test)]\nmod tests {\nfn create_then_remove_is_still_a_terminal_vnode_event() {\n"
             + call
             + "}\n}\n"
         )
         self.assertEqual(lint.scan_source(path, allowed_test), [])
         escaped = "#[cfg(test)]\nmod tests {}\nfn product() {\n" + call + "}\n"
         self.assert_rule(path, escaped, "invalid-annotation-scope")
-
-    def test_legacy_baseline_is_symbol_and_count_restricted(self) -> None:
-        marker = "// DUX-" + "DESTRUCTIVE: allow={} -- reviewed legacy adapter owns {} path\n"
-        source = (
-            "fn execute_plan() {\n"
-            f"    {marker.format('legacy-adapter-delete-file', 'the first planned')}"
-            "    std::fs::remove_file(first);\n"
-            f"    {marker.format('legacy-adapter-delete-directory', 'the second planned')}"
-            "    std::fs::remove_dir_all(second);\n"
-            f"    {marker.format('legacy-adapter-delete-windows-link', 'the third planned')}"
-            "    std::fs::remove_dir_all(third);\n"
-            "}\n"
-        )
-        path = "dux-core/src/cleanup/legacy_cli.rs"
-        self.assertEqual(lint.scan_source(path, source), [])
-        duplicated = source.replace(
-            "legacy-adapter-delete-directory", "legacy-adapter-delete-file"
-        ).replace(
-            "legacy-adapter-delete-windows-link", "legacy-adapter-delete-file"
-        )
-        duplicated = duplicated.replace("remove_dir_all", "remove_file")
-        self.assert_rule(path, duplicated, "duplicate-exception-id")
-        spoofed = (
-            "fn execute_plan() {\n"
-            "// DUX-DESTRUCTIVE: allow=legacy-adapter-delete-file -- reviewed legacy adapter owns this planned path\n"
-            "std::fs::rename(first, second); // remove_file\n"
-            "}\n"
-        )
-        self.assert_rule(path, spoofed, "invalid-annotation-scope")
 
     def test_shell_traps_moves_and_find_delete_are_rejected(self) -> None:
         self.assert_rule("script.sh", "trap 'rm -rf \"$tmp\"' EXIT\n", "shell-remove")
@@ -167,34 +138,6 @@ class DestructiveCallLintTests(unittest.TestCase):
         self.assert_rule("src/example.rs", source, "invalid-clippy-suppression")
         conditional = "#[cfg_attr(target_os = \"macos\", allow(clippy::disallowed_methods))]\nfn product() {}\n"
         self.assert_rule("src/example.rs", conditional, "invalid-clippy-suppression")
-
-    def test_legacy_adapter_cannot_be_referenced_by_ffi_or_other_clients(self) -> None:
-        source = "use dux_core::cleanup::legacy_cli::LegacyCliPermanentDeleteExecutor;\n"
-        self.assert_rule("dux-ffi/src/lib.rs", source, "legacy-adapter-boundary")
-        self.assert_rule("dux-macos/Dux/App.swift", "LegacyCliPermanentDeleteExecutor\n", "legacy-adapter-boundary")
-        self.assert_rule(
-            "dux-core/src/cleanup/mod.rs",
-            "pub mod legacy_cli;\npub use legacy_cli::*;\n",
-            "legacy-adapter-boundary",
-        )
-        for reexport in [
-            "pub use dux_core;\n",
-            "pub use dux_core as core;\n",
-            "pub use dux_core::*;\n",
-            "pub use dux_core::cleanup;\n",
-            "pub use dux_core::cleanup as cleanup_api;\n",
-            "pub use dux_core::{cleanup, DiskTree};\n",
-            "pub use dux_core::{self as core, DiskTree};\n",
-            "pub extern crate dux_core as core;\n",
-        ]:
-            with self.subTest(reexport=reexport):
-                self.assert_rule("dux-ffi/src/lib.rs", reexport, "legacy-adapter-boundary")
-
-        findings = lint.scan_source(
-            "dux-core/src/cleanup/mod.rs",
-            "//! Cleanup boundaries.\n#[doc(hidden)]\npub mod legacy_cli;\n",
-        )
-        self.assertNotIn("legacy-adapter-boundary", {finding.rule for finding in findings})
 
     def test_swift_and_python_effects_are_rejected(self) -> None:
         self.assert_rule(
@@ -284,6 +227,36 @@ class DestructiveCallLintTests(unittest.TestCase):
         source = "tree.remove_node(id); values.remove(&key); std::thread::spawn(worker);\n"
         self.assertEqual(lint.scan_source("src/example.rs", source), [])
         self.assertEqual(lint.scan_source("script.sh", "find build -type f -print -quit\n"), [])
+
+    def test_retired_legacy_cli_architecture_cannot_be_reintroduced(self) -> None:
+        module_name = "legacy" + "_cli"
+        symbol_name = "Legacy" + "Cli" + "PermanentDelete"
+        path = f"dux-core/src/cleanup/{module_name}.rs"
+
+        self.assert_rule(
+            "dux-core/src/cleanup/mod.rs",
+            f"pub mod {module_name};\n",
+            "retired-legacy-cli-architecture",
+        )
+        self.assert_rule(
+            "dux-cli/src/app/state.rs",
+            f"let adapter: {symbol_name}Worker;\n",
+            "retired-legacy-cli-architecture",
+        )
+        self.assert_rule(
+            "dux-ffi/src/lib.rs",
+            f"use dux_core::cleanup::{module_name}::{symbol_name}Executor;\n",
+            "retired-legacy-cli-architecture",
+        )
+        self.assert_rule(path, "pub struct SafePlaceholder;\n", "retired-legacy-cli-architecture")
+
+    def test_retired_legacy_cli_markers_outside_product_rust_are_ignored(self) -> None:
+        module_name = "legacy" + "_cli"
+        symbol_name = "Legacy" + "Cli" + "PermanentDelete"
+        self.assertEqual(
+            lint.scan_source("examples/migration.rs", f"mod {module_name}; struct {symbol_name};\n"),
+            [],
+        )
 
     def test_xcframework_builder_rejects_arbitrary_output_before_build(self) -> None:
         builder = SCRIPT.parents[1] / "dux-macos/scripts/build-rust-xcframework.sh"

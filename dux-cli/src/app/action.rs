@@ -29,12 +29,6 @@ pub enum Action {
     HideHelp,
     /// Open selected item in Finder
     OpenInFinder,
-    /// Request delete (show confirmation dialog)
-    Delete,
-    /// Confirm delete operation
-    ConfirmDelete,
-    /// Cancel delete operation
-    CancelDelete,
     /// Quit the application
     Quit,
     /// Switch to next view
@@ -61,10 +55,6 @@ pub enum Action {
     ToggleSelect,
     /// Clear multi-selection
     ClearSelection,
-    /// Confirm multi-delete operation
-    ConfirmMultiDelete,
-    /// Cancel multi-delete operation
-    CancelMultiDelete,
     /// No action (for tick events)
     Tick,
 }

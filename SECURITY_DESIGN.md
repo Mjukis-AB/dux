@@ -2,7 +2,7 @@
 
 Status: normative design and implementation gate
 
-Last reviewed: 2026-07-19
+Last reviewed: 2026-07-29
 
 Applies to: `dux-core`, `dux-cli`, `dux-ffi`, and the direct-download macOS app
 
@@ -16,8 +16,7 @@ This document defines the security boundary for those capabilities. It is the
 normative companion to the product roadmap and the architecture decisions in
 `docs/adr/`. When implementation and this document disagree, new/public macOS
 cleanup remains disabled until the code and document are reconciled in the same
-reviewed change. The active legacy CLI exception is documented in §5 and is
-migration debt, not compliance with the target authority graph.
+reviewed change.
 
 Accepted architecture decisions are binding implementation defaults. A
 material change to one of those decisions requires a superseding ADR rather
@@ -34,7 +33,7 @@ This document deliberately separates:
 - deterministic policy from AI interpretation;
 - review records from approval;
 - estimated reclaimable bytes from verified capacity change; and
-- the hardened legacy CLI deletion path from the future shared executor.
+- read-only client presentation from the private reviewed-plan executor.
 
 ## 2. Security objectives
 
@@ -168,10 +167,10 @@ helper, privileged daemon, or launch daemon. The primary app is not App
 Sandboxed, but TCC, SIP, ACLs, POSIX permissions, file flags, and filesystem
 rules still apply.
 
-For future shared cleanup, user approval of an unintended item does not bypass
-protected roots, sensitive categories, action compatibility, freshness, or
-explicit mode. The current legacy CLI does not enforce those policy layers. An
-advanced confirmation is never a universal policy bypass.
+User approval of an unintended item does not bypass protected roots, sensitive
+categories, action compatibility, freshness, or explicit mode. The CLI is now
+read-only rather than retaining a weaker exception. An advanced confirmation
+is never a universal policy bypass.
 
 The signed application bundle and embedded deterministic rules are trusted
 only after Developer ID verification, Hardened Runtime signing, notarization,
@@ -194,20 +193,19 @@ flows MUST NOT gain a generic “ignore safety” switch.
 
 ## 5. Current implementation status
 
-As of the review date, the macOS application is read-only with respect to
-filesystem effects. It samples startup volume capacity and now exposes a
-scan-bound, review-only candidate status transition through the Swift/Rust
-boundary; it has no plan, approval, cleanup, AI-provider, or scheduling API.
-The shared
-core engine opens its private SQLite compatibility store internally before
-workers start, but that store has no app-facing CRUD surface.
+As of the review date, the macOS application exposes separately confirmed
+Explorer Trash. One exact Rust-target permanent-safe reviewed-plan chain is
+integrated only behind a Debug compile condition; Release contains no start
+action and release automation rejects that condition. The CLI is a read-only
+scan/navigation/history/reveal companion. AI-provider, cloud-eviction, and
+scheduled-cleanup authority remain absent.
 
 `dux-core` has typed rule, candidate, cleanup-plan, lexical validation,
-filesystem evidence, protected-root policy, and dangerous-path test models.
-Their constructors and exports are intentionally restricted. They do not form a
-complete authority chain because trusted home/volume discovery, stable rule
-scope grants, plan-time source witnesses, full platform ancestry guarantees,
-and executor-time mutation revalidation do not yet exist.
+filesystem evidence, protected-root policy, dangerous-path tests, durable
+journaling, Trash admission, and one private Rust-target permanent-safe
+executor chain. Public Release cleanup is still gated because the complete
+trusted home/volume/rule/platform evidence, mode, history, and verification
+requirements in §17.3 are not yet satisfied.
 
 The shared engine now runs one deterministic discovery evaluator for every
 fresh successfully completed scan. Its exact bundled catalog is checked during
@@ -590,47 +588,25 @@ and all planner witnesses are observations, not cleanup authority. The durable
 binding exposes no replayed candidate, blocker-removal, planning, FFI,
 scheduling, or effect edge.
 
-The existing CLI still offers permanent deletion, but its filesystem effect is
-now centralized in the temporary core-owned
-`dux-core/src/cleanup/legacy_cli.rs` adapter. The CLI can only prepare an opaque,
-target-bound plan before confirmation and consume that exact plan through the
-adapter; it no longer owns or directly invokes recursive deletion. The adapter
-captures target, marker, and ancestor identity before confirmation and rechecks
-those facts immediately before calling `remove_file` or `remove_dir_all`. The
-CLI still waits for tracked deletion workers on graceful quit. This is useful
-containment, but it remains legacy behavior because:
+The CLI no longer offers filesystem deletion. The temporary
+`dux-core::cleanup::legacy_cli` adapter, its raw `remove_file` and
+`remove_dir_all` effects, confirmation/progress modes, worker orchestration,
+and destructive-call exceptions were removed on 2026-07-29. Pressing the
+former `d` shortcut while browsing is inert. The CLI remains a supported
+read-only companion for scanning, navigation, selection, computed views,
+history, and reveal.
 
-- the temporary adapter is not the production centralized executor or an
-  implementation of the reviewed authority graph;
-- it is not constructed from the new immutable cleanup-plan model;
-- it has no durable operation journal or pre/post capacity verification;
-- its byte accounting is derived from scan estimates rather than measured
-  post-operation capacity (the CLI now labels that distinction explicitly);
-- its final removal is path-based and retains a TOCTOU window;
-- unchanged directory identity does not freeze descendants; and
-- cache-rebuilt paths can be lossy and are not valid cleanup identity.
+This retirement closes the arbitrary-descendant authority path rather than
+claiming it was migrated. Cached tree names remain lossy, non-authoritative
+observations and cannot nominate a cleanup target. Any future CLI cleanup MUST
+consume the same current, unexpired, reviewed-plan executor used by the native
+product and MUST NOT restore a CLI-specific adapter, raw path request, or
+client-owned worker.
 
-The legacy identity snapshots do not record target size, mtime, content digest,
-or planned kind, and marker snapshots record identity rather than contents.
-In-place edits to a file or marker can therefore retain identity and still pass
-the legacy recheck.
-
-It also does not apply the new protected-root registry, hard-link policy, plan
-expiry, or authoritative mount-location grant. A broad scan of `/`, `/Users`,
-or a home directory can expose critical descendants to the permanent `d`, then
-`y` flow. A final symlink is removed as the link on Unix. These are unresolved
-legacy risks, not accepted exceptions.
-
-This checkpoint closes one immediate forged-cache escape in that legacy path:
-admission now requires an absolute strict descendant whose complete relative
-path contains only normal, valid-text, control-free components, and it rejects
-a target, ancestor, or marker on a different filesystem from the scan root.
-Previously a forged terminal `.` or `..` cache name could alias the scan root or
-its parent because only the target parent was checked. The cache format itself
-still lacks semantic tree validation and authenticity.
-
-The CLI MUST keep clearly labeling this action as permanent until migration.
-The macOS app MUST NOT call, wrap, or expose the legacy path.
+The private core permanent-safe driver and macOS Trash bridge remain the only
+product cleanup effect boundaries. Public Release exposure remains closed by
+§17.3; removing the CLI exception does not satisfy the remaining trusted
+home/volume/rule, mode, history, platform, or verification gates.
 
 Scanner workers now return bounded typed coverage and issue observations with
 their tree and an authoritative terminal state. Access failures, explicit
@@ -2827,14 +2803,10 @@ rule/primitive, and where needed an enclosing symbol or test context. It is
 adjacent to one matched statement and includes a specific reason. Unknown,
 duplicate, malformed, misplaced, copied, unused, and multi-call annotations
 fail, while registered IDs missing from source are stale and fail repository
-scanning. Current product mutation remains temporarily restricted to the three
-identity-checked calls in `legacy_cli::execute_plan`, registered as the
-`legacy-adapter-delete-*` exceptions. A repository architecture check rejects
-references or re-exports outside the adapter and CLI state orchestration, so
-FFI and the macOS app cannot adopt this legacy route. The public Rust surface is
-temporary and unsupported rather than a sealed authority boundary; this
-baseline is removed when the production centralized executor replaces the
-adapter. Internal cache exceptions own only `create_new`
+scanning. The former three `legacy-adapter-delete-*` exceptions and their
+architecture allowlist were removed with the CLI adapter. Repository policy
+now rejects any attempt to reintroduce that module, symbol family, or raw
+recursive-delete surface. Internal cache exceptions own only `create_new`
 temporary files and their atomic destination. Build exceptions own only
 `mktemp -d` staging paths or the exact repository-generated XCFramework path;
 the builder rejects its former caller-selected output path and any symlinked or
@@ -2974,8 +2946,8 @@ coverage is labelled as Home-scoped and unknown coverage stays unknown.
 | Rule schema/loader | Strict schema plus a build-time digest/policy-gated and strict load-time-validated discovery catalog; nine rules remain selected-root RevealOnly observations, while independently researched `developer.rust.target` and `developer.python.pycache` revision 2 require exact snapshot marker evidence and propose only SafeRegenerable/RemoveKnownRegenerableContents. Every rule is unschedulable and every result remains blocked by `ProtectedPath`. Sealed Unix-only live and Cargo-resolution witnesses verify the exact Rust tag, manifest digest, current default layout, and scrubbed-context Cargo workspace/target result; Python live-writer and relocation authority remains open. macOS additionally has explicit revisioned same-store direct-Cargo enrollment, a contract-v27 one-preview native enrollment surface, bounded policy-3 positive config/include byte closure and ordered Cargo trace intent, descriptor-retained metadata cwd, static-code evidence, suspended selected-running-code attestation, complete executable/config/manifest ancestry APFS fences, a guarded two-pass reported root/member-manifest closure, a policy-1 closed accepted path-dependency graph, stale-preview rejection, revocation tombstones, and post-publication retention/revalidation of every Cargo read-set fence and enrolled version, still without clearing that blocker | Developer ID signing must cover catalog bytes; before either safe rule can lose its blocker, complete its marker/read-set and namespace provenance, review the documented conservative path-dependency compatibility and path-intent/path-based/same-UID launch limits, prove authoritative volume/protected-root grants, add process/descendant/change guards, and complete adversarial review |
 | Candidate and cleanup-plan records | Completed fresh scans create deterministic, snapshot-bound durable candidate batches; exact-scan summaries plus bounded lossless path/evidence pages and semantic review commands remain non-authoritative history. A crate-private planner module seals an exact current-evaluator/current-catalog source to a retained snapshot and live Rust-target/Cargo witnesses. One private Rust-target authority chain constructs and approves an exact permanent-safe plan and atomically claims its durable candidate while preserving the sole `ProtectedPath` history fact; an insertion-only typed coupling, schema-v12 exact active-claim seal, complete immutable-body/blocker comparison, and rule-specific policy checks prevent generic blocked candidates from borrowing that path. Contract v28 retains the real reviewed plan behind an opaque child; contract v31 can consume only that exact engine-bound child into the serialized task. The native controller additionally stores and compares the entire displayed immutable record before consuming its child. Displayed fields still cannot mint approval, journal metadata, paths, callbacks, scheduling, CLI, AI, or Trash authority | Complete §17.3 before enabling the internal confirmation path in Release; keep the blocker exception rule-specific and non-forgeable |
 | macOS app cleanup | Confirmation-gated Explorer Trash is implemented. Permanent-safe confirmation, generation-fenced task observation, explicit cancellation, and shutdown quiescence exist only behind `DUX_INTERNAL_PERMANENT_SAFE_CLEANUP` in Debug; Release shows no action and the release pipeline rejects the condition | Entire permanent-safe cleanup release gate in §17.3 |
-| Legacy CLI deletion | Active arbitrary-descendant permanent path routed through a temporary core adapter; strict-target/volume/identity rechecks only; scanned-byte estimates labeled in CLI | Replace adapter with reviewed plan/approval/executor chain without weakening current checks |
-| Centralized executor | A private production-core Rust-target driver and typed admission/journal/revalidation chain exist behind an engine-owned `PermanentSafeCleanup` task. The task consumes only the exact opaque review, mints all approval/session inputs inside Rust, serializes with Trash, returns path-free results, and quarantines unresolved claim/effect capabilities. Its capacity sampler derives only from the approved plan's unanimous trusted kernel mount scope, rechecks macOS `statfs` identity/location/type, and brackets real effect time; missing telemetry remains unknown. UniFFI v31 can start this task only by irreversibly consuming the exact engine-bound opaque review; the separately confirmed Explorer Trash route and temporary legacy CLI adapter cannot nominate its driver inputs. Native confirmation and observation are integrated behind the Debug-only feature condition; the shipped Release UI has no permanent-safe start action | §17.3 release gates and removal of the legacy adapter boundary |
+| CLI cleanup authority | Retired. The CLI remains a read-only scan/navigation/history/reveal client; its former raw permanent-delete adapter, shortcuts, workers, and lint exceptions are absent | Any future CLI cleanup must consume the same current reviewed-plan executor without accepting caller paths or restoring client-owned effects |
+| Centralized executor | A private production-core Rust-target driver and typed admission/journal/revalidation chain exist behind an engine-owned `PermanentSafeCleanup` task. The task consumes only the exact opaque review, mints all approval/session inputs inside Rust, serializes with Trash, returns path-free results, and quarantines unresolved claim/effect capabilities. Its capacity sampler derives only from the approved plan's unanimous trusted kernel mount scope, rechecks macOS `statfs` identity/location/type, and brackets real effect time; missing telemetry remains unknown. UniFFI v31 can start this task only by irreversibly consuming the exact engine-bound opaque review; the separately confirmed Explorer Trash route cannot nominate its driver inputs. Native confirmation and observation are integrated behind the Debug-only feature condition; the shipped Release UI has no permanent-safe start action | Remaining §17.3 release gates |
 | Engine/FFI task and plan API | Core handle, pre-worker catalog/SQLite/snapshot compatibility handshake, bounded per-session registry, read-only formatting, durable full-scan plus deterministic candidate-evaluation tasks, and an engine-owned consume-once permanent-safe Rust-target cleanup task are implemented alongside the bounded history/detail/maintenance/settings APIs. Permanent-safe admission returns an unconsumed review on core foreign-engine, closed, full, busy, or quarantined refusal; FFI rejects a foreign object without touching it but makes every owning-engine attempt one-shot before core revalidation. Acceptance consumes/approves the child synchronously after final parent/expiry checks, accepted queued cancellation creates no journal, the worker owns session/journal/effect metadata, one cleanup reservation also fences synchronous Trash, and only path-free terminal results/failures enter task state. Ambiguous owner claim, post-claim admission, and post-effect settlement capabilities are retained in process-lifetime physical-store quarantine and can never repeat a platform effect. Scan admission and maintenance retain their existing overlap, schema, idle, and cancellation fences. UniFFI v31 exposes the opaque review-to-task transition, explicit cancellation, and strictly validated path-free polling; Swift independently validates shape and transitions, and the controller/browser consume it only in internal Debug UI | Priority, cross-process scan leasing, and release-gated product cleanup remain later |
 | Global permanent-cleanup FFI switch | UniFFI contract v22 exposes only the revisioned enabled/default-or-stored observation and typed get/set/reset failures; the switch remains deny-only and cannot carry a path, plan, approval, callback, or executor input. Generated bindings are refreshed from the universal Debug XCFramework; Swift EngineService/AppModel/settings control maps every typed error, rejects malformed shapes, generation-fences work, and requires exact confirmation before re-enable/reset | The separate path-bearing exclusion boundary |
 | User cleanup exclusions | UniFFI contract v23 exposes a bounded lossless path-byte observation and replacement/reset operations with explicit source, revision, timestamp, and changed state. Rust validates absolute lexical prefixes, encoding, count, size, canonical order, storage races, and the shared cleanup exclusion lock; Swift treats returned bytes as display-only observations, allows adding a local prefix, and requires explicit confirmation before weakening protection by removing one or resetting all. No path is accepted as a plan, approval, callback, or executor input | Future planner/executor lifecycle and richer review presentation |
@@ -2987,7 +2959,7 @@ coverage is labelled as Home-scoped and unknown coverage stays unknown.
 | Typed scan coverage/issues | Implemented as bounded semantic domain values, authoritative scanner terminal outcomes, engine task results/events, atomic SQLite-v2 summary children, truthful fresh/legacy-cache CLI labels, changed-hard-link observations, and a path-free aggregate FFI/Swift summary; observations grant no plan or cleanup authority | Paged Explorer issue details and permission onboarding |
 | Cache semantic/input validation | Atomic write plus CRC/version only; full-file read before bounds | Bounded reads, tree/path semantics, private permissions, retention, and migration |
 | Hard-link accounting and policy | Fresh completed scans deterministically count allocation once per stable identity and fail conflicts/unknown identity closed; no cleanup policy or authority derives from it | Native Windows sparse/compressed verification plus explicit planner/executor per-mode admission and live revalidation rules |
-| Forbidden destructive-call lint | Implemented with compiler-resolved Rust denial, cross-language repository scan, scoped annotations, self-tests, and CI | Keep exception set exact; remove legacy baseline during executor migration |
+| Forbidden destructive-call lint | Implemented with compiler-resolved Rust denial, cross-language repository scan, scoped annotations, self-tests, and CI; the legacy CLI exception set is removed and reintroduction is rejected | Keep the remaining exception set exact |
 | Durable operation journal/history | Schema, typed immutable `planned` insert/load, permanent cleanup OS lock, tri-state process evidence, a private cleanup-lock-coupled owner/generation state machine, bounded path-free recent-session plus exact-session/item observations, and explicit terminal-metadata clearing are implemented. Clearing preserves active/recovering authority and distinguishes proven applied/not-applied from outcome-unknown. The journal covers validation, durable effect intent, outcomes, cancellation, terminal derivation, same-scope death recovery, and explicit unknown reconciliation. Changed boot/foreign scope and Windows-unproven death remain non-executable. Generation-one claim ambiguity now retains the exact approved capability/lease and retries only the same claim; post-claim comparison ambiguity retains the live session. Panics inside permanent-safe or Trash one-shot callbacks record `outcome_unknown`, and ambiguous settlement retains its exact receipt/session so persistence-only retry cannot repeat the effect. Continued ambiguity holds the physical store's cleanup lock for the process lifetime; same-process reopen remains denied and process restart hands authority to durable recovery. The rule-specific schema-v12 active-claim seal still preserves the sole trusted `ProtectedPath` fact and ordinary blocked candidates fail closed. History cannot become a planner witness | A newer-schema stable-host witness and non-resumable prior-boot diagnostics/reconciliation, native Windows proof, native permanent-safe observation/confirmation, and app release gates |
 | Private 0700/0600 stores | SQLite and application snapshot roots/controls/data enforce ownership, no-follow identity, links, and exact Unix modes; macOS rejects final-object ACLs but accepts deny-only publication-parent ACLs; Windows uses exact protected DACLs, handle-bound publication, retained identity, and rename guards; the legacy binary cache remains non-private | Extend equivalent guarantees to the legacy cache, logs, provider temp data, and bounded abandoned-stage/temp maintenance |
 | Trash executor | Explorer explicit-selection executor is implemented through the core journal fence, UniFFI v21 callback, and macOS adapter; contract v24 preserves `ChangedSincePlan` as a distinct path-free rejection. Known platform outcomes are timestamped only after the callback returns and terminalized with explicitly unknown capacity delta, so Trash never claims immediate free space. Generation-one claim ambiguity retains and retries only the exact lease before the callback moves; known post-claim refusal terminalizes before releasing its owner, while ambiguous admission retains the exact claim/receipt. Callback panic becomes durable `outcome_unknown`; ambiguous cancellation/effect/terminal settlement retains the same capability in process-lifetime quarantine, and persistence-only retry cannot invoke Trash again. Permanent delete, AI, CLI, and scheduling remain excluded | Add trustworthy post-effect capacity reconciliation and Linux/Windows adapters before expanding authority |

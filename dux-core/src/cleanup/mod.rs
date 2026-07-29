@@ -116,6 +116,3 @@ pub(crate) mod executor;
     reason = "the permanent-safe driver is reachable only through the crate-private approved-session engine bridge"
 )]
 pub(crate) mod permanent_safe;
-
-#[doc(hidden)]
-pub mod legacy_cli;

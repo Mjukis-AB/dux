@@ -61,8 +61,8 @@ The rule carries `SafeRegenerable` and
 `RemoveKnownRegenerableContents` as proposed policy, but every production
 candidate still has `ProtectedPath`. It is not selectable, cannot construct a
 cleanup plan, is not schedule eligible, crosses no FFI cleanup boundary, and
-cannot reach a filesystem effect. The stricter marker also narrows the legacy
-CLI's existing artifact classification; it adds no new CLI deletion authority.
+cannot reach a filesystem effect. The stricter marker also narrows the
+read-only CLI's artifact classification; the CLI has no cleanup authority.
 
 ## Adversarial coverage
 
@@ -708,12 +708,15 @@ or retry token. The opaque task exports only explicit cancellation and
 strictly validated, path-free polling with durable history correlation.
 Dropping it neither cancels nor retries the effect.
 
-This is transport, not shipped product authorization. Generated Swift bindings
-contain v31, but the native service, model, and Explorer have no caller. The
-remaining native confirmation must bind the exact visible preview, disclose
-changed-since-plan failure, observe task state through generation fences, and
-satisfy every release gate below. AI, CLI, schedules, history, and reconstructed
-display values cannot enter the consuming call.
+This transport now reaches an internal native execution checkpoint, not shipped
+product authorization. `EngineService`, the app model, and Explorer bind the
+complete visible preview to a consume-once v31 start, independently validate
+generation-fenced path-free task state, disclose changed-since-plan and unknown
+outcomes, and preserve observation across window closure. The confirmation and
+start action compile only with `DUX_INTERNAL_PERMANENT_SAFE_CLEANUP` in Debug;
+Release exposes no execution action and the release pipeline rejects that
+condition. AI, CLI, schedules, history, and reconstructed display values cannot
+enter the consuming call, and every release gate below remains open.
 
 ## Required before native executable use
 

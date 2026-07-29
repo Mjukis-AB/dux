@@ -242,33 +242,6 @@ class ExceptionSpec:
 
 
 EXCEPTIONS = {
-    "legacy-adapter-delete-directory": ExceptionSpec(
-        "dux-core/src/cleanup/legacy_cli.rs", "rust-filesystem-effect", "execute_plan"
-    ),
-    "legacy-adapter-delete-windows-link": ExceptionSpec(
-        "dux-core/src/cleanup/legacy_cli.rs", "rust-filesystem-effect", "execute_plan"
-    ),
-    "legacy-adapter-delete-file": ExceptionSpec(
-        "dux-core/src/cleanup/legacy_cli.rs", "rust-filesystem-effect", "execute_plan"
-    ),
-    "test-delete-replaced-file": ExceptionSpec(
-        "dux-core/src/cleanup/legacy_cli.rs", "rust-filesystem-effect", "test:replaced_file_is_not_deleted"
-    ),
-    "test-delete-replaced-directory": ExceptionSpec(
-        "dux-core/src/cleanup/legacy_cli.rs", "rust-filesystem-effect", "test:replaced_directory_is_not_deleted"
-    ),
-    "test-delete-missing-entry": ExceptionSpec(
-        "dux-core/src/cleanup/legacy_cli.rs", "rust-filesystem-effect", "test:missing_entry_is_not_counted_as_deleted"
-    ),
-    "test-delete-replaced-symlink": ExceptionSpec(
-        "dux-core/src/cleanup/legacy_cli.rs", "rust-filesystem-effect", "test:replaced_symlink_is_not_deleted"
-    ),
-    "test-delete-changed-evidence": ExceptionSpec(
-        "dux-core/src/cleanup/legacy_cli.rs", "rust-filesystem-effect", "test:changed_artifact_evidence_blocks_delete"
-    ),
-    "test-delete-replaced-ancestor": ExceptionSpec(
-        "dux-core/src/cleanup/legacy_cli.rs", "rust-filesystem-effect", "test:replaced_ancestor_cannot_redirect_delete_outside_scan_root"
-    ),
     "finder-reveal": ExceptionSpec("dux-cli/src/app/state.rs", "rust-process-spawn", "open_in_finder"),
     "cargo-metadata-observer-spawn": ExceptionSpec(
         "dux-core/src/planner/rust_target_cargo.rs", "rust-process-spawn", "run_cargo_portable"
@@ -385,12 +358,6 @@ EXCEPTIONS = {
         "dux-core/src/persistence/persistence_tests.rs",
         "rust-truncation-effect",
         "test:marker_owned_database_truncated_after_its_valid_header_is_corrupt",
-    ),
-    "test-state-replaced-multi-item": ExceptionSpec(
-        "dux-cli/src/app/state.rs", "rust-filesystem-effect", "test:multi_delete_skips_replaced_item_and_deletes_unchanged_item"
-    ),
-    "test-state-changed-evidence": ExceptionSpec(
-        "dux-cli/src/app/state.rs", "rust-filesystem-effect", "test:changed_artifact_marker_blocks_state_driven_delete"
     ),
     "permanent-safe-rust-target-descriptor-contents": ExceptionSpec(
         "dux-core/src/cleanup/permanent_safe.rs",
@@ -748,15 +715,6 @@ EXCEPTIONS = {
 }
 
 EXCEPTION_PRIMITIVES = {
-    "legacy-adapter-delete-directory": "remove_dir_all",
-    "legacy-adapter-delete-windows-link": "remove_dir_all",
-    "legacy-adapter-delete-file": "remove_file",
-    "test-delete-replaced-file": "rename",
-    "test-delete-replaced-directory": "rename",
-    "test-delete-missing-entry": "remove_file",
-    "test-delete-replaced-symlink": "rename",
-    "test-delete-changed-evidence": "rename",
-    "test-delete-replaced-ancestor": "rename",
     "finder-reveal": "Command::new",
     "cargo-metadata-observer-spawn": "Command::new",
     "cargo-suspended-observer-spawn": "posix_spawn",
@@ -782,8 +740,6 @@ EXCEPTION_PRIMITIVES = {
     "test-capacity-cross-process-helper-spawn": "Command::new",
     "test-persistence-displace-shm": "rename",
     "test-persistence-truncate-owned-database": "set_len",
-    "test-state-replaced-multi-item": "rename",
-    "test-state-changed-evidence": "rename",
     "permanent-safe-rust-target-descriptor-contents": "unlinkat",
     "test-reviewed-trash-replaced-file-remove": "remove_file",
     "test-reviewed-trash-missing-file-remove": "remove_file",
@@ -868,8 +824,7 @@ EXCEPTION_PRIMITIVES = {
 }
 
 CLIPPY_SUPPRESSION_COUNTS = {
-    "dux-core/src/cleanup/legacy_cli.rs": 7,
-    "dux-cli/src/app/state.rs": 3,
+    "dux-cli/src/app/state.rs": 1,
     "dux-core/src/cache/mod.rs": 2,
     "dux-core/src/cleanup/executor.rs": 1,
     "dux-core/src/path_validation/protected.rs": 1,
@@ -897,33 +852,48 @@ CLIPPY_SUPPRESSION_COUNTS = {
 }
 
 CLIPPY_PRODUCT_SUPPRESSION_SYMBOLS = {
-    "dux-core/src/cleanup/legacy_cli.rs": {"execute_plan"},
     "dux-cli/src/app/state.rs": {"open_in_finder"},
     "dux-core/src/cache/mod.rs": {"save_cache"},
     "dux-core/src/planner/rust_target_cargo.rs": {"run_cargo_portable"},
 }
 
-LEGACY_ADAPTER_ALLOWED_PATHS = {
-    "dux-cli/src/app/state.rs",
-    "dux-core/src/cleanup/legacy_cli.rs",
-    "scripts/check_destructive_calls.py",
-    "scripts/tests/test_check_destructive_calls.py",
-}
+RETIRED_LEGACY_MODULE = "legacy" + "_cli"
+RETIRED_LEGACY_SYMBOL_PREFIX = "Legacy" + "Cli" + "PermanentDelete"
 
-LEGACY_ADAPTER_MARKERS = (
-    "LegacyCliPermanentDelete",
-    "legacy_cli",
-)
 
-LEGACY_ADAPTER_MODULE_DECLARATION = "pub mod legacy_cli;"
+def _retired_legacy_cli_findings(path: str, source: str) -> list[Finding]:
+    if pathlib.PurePosixPath(path).suffix.lower() != ".rs" or not path.startswith(
+        ("dux-cli/src/", "dux-core/src/", "dux-ffi/src/")
+    ):
+        return []
 
-LEGACY_ADAPTER_REEXPORT_PATTERNS = (
-    re.compile(
-        r"\bpub\s+use\s+(?:::)?dux_core\s*(?:;|as\b|::\s*(?:\*|cleanup\b)|::\s*\{[^}]*\b(?:self|cleanup)\b)",
-        re.DOTALL,
-    ),
-    re.compile(r"\bpub\s+extern\s+crate\s+dux_core\b"),
-)
+    sanitized = _strip_c_like_comments_and_literals(source)
+    markers = (
+        re.compile(rf"\b{re.escape(RETIRED_LEGACY_MODULE)}\b"),
+        re.compile(rf"\b{re.escape(RETIRED_LEGACY_SYMBOL_PREFIX)}[A-Za-z0-9_]*\b"),
+    )
+    findings = []
+    for marker in markers:
+        for match in marker.finditer(sanitized):
+            findings.append(
+                Finding(
+                    path,
+                    _line_number(sanitized, match.start()),
+                    "retired-legacy-cli-architecture",
+                    "the retired CLI permanent-delete adapter must not be reintroduced",
+                )
+            )
+
+    if pathlib.PurePosixPath(path).stem == RETIRED_LEGACY_MODULE and not findings:
+        findings.append(
+            Finding(
+                path,
+                1,
+                "retired-legacy-cli-architecture",
+                "the retired CLI permanent-delete module path must not be reintroduced",
+            )
+        )
+    return findings
 
 
 def _line_number(text: str, offset: int) -> int:
@@ -1587,33 +1557,7 @@ def scan_source(
     suffix = pathlib.PurePosixPath(path).suffix.lower()
     annotations, annotation_findings = _annotations(lines)
     findings = [dataclasses.replace(finding, path=path) for finding in annotation_findings]
-    legacy_adapter_source = source
-    if path == "dux-core/src/cleanup/mod.rs":
-        legacy_adapter_source = legacy_adapter_source.replace(
-            LEGACY_ADAPTER_MODULE_DECLARATION, ""
-        )
-    if path not in LEGACY_ADAPTER_ALLOWED_PATHS and any(
-        marker in legacy_adapter_source for marker in LEGACY_ADAPTER_MARKERS
-    ):
-        findings.append(
-            Finding(
-                path,
-                1,
-                "legacy-adapter-boundary",
-                "legacy CLI permanent-delete adapter may not be referenced from this source",
-            )
-        )
-    if suffix == ".rs" and path not in LEGACY_ADAPTER_ALLOWED_PATHS:
-        rust_code = _strip_c_like_comments_and_literals(source)
-        if any(pattern.search(rust_code) for pattern in LEGACY_ADAPTER_REEXPORT_PATTERNS):
-            findings.append(
-                Finding(
-                    path,
-                    1,
-                    "legacy-adapter-boundary",
-                    "dux-core cleanup modules may not be publicly re-exported",
-                )
-            )
+    findings.extend(_retired_legacy_cli_findings(path, source))
     if suffix == ".rs":
         findings.extend(
             _clippy_suppression_findings(

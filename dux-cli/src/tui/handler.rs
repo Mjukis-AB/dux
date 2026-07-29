@@ -8,9 +8,6 @@ pub fn handle_key(key: KeyEvent, mode: AppMode, has_selection: bool, selecting: 
         AppMode::Help => handle_key_help(key),
         AppMode::Scanning | AppMode::Finalizing => handle_key_scanning(key),
         AppMode::Browsing => handle_key_browsing(key, has_selection, selecting),
-        AppMode::ConfirmDelete => handle_key_confirm_delete(key),
-        AppMode::ConfirmMultiDelete => handle_key_confirm_multi_delete(key),
-        AppMode::MultiDeleting => handle_key_multi_deleting(key),
     }
 }
 
@@ -96,33 +93,6 @@ fn handle_key_browsing(key: KeyEvent, has_selection: bool, selecting: bool) -> A
         // Open in Finder
         KeyCode::Char('o') => Action::OpenInFinder,
 
-        // Delete
-        KeyCode::Char('d') => Action::Delete,
-
-        _ => Action::Tick,
-    }
-}
-
-fn handle_key_confirm_delete(key: KeyEvent) -> Action {
-    match key.code {
-        KeyCode::Char('y') => Action::ConfirmDelete,
-        KeyCode::Char('n') | KeyCode::Esc => Action::CancelDelete,
-        _ => Action::Tick,
-    }
-}
-
-fn handle_key_confirm_multi_delete(key: KeyEvent) -> Action {
-    match key.code {
-        KeyCode::Char('y') => Action::ConfirmMultiDelete,
-        KeyCode::Char('n') | KeyCode::Esc => Action::CancelMultiDelete,
-        _ => Action::Tick,
-    }
-}
-
-fn handle_key_multi_deleting(key: KeyEvent) -> Action {
-    match key.code {
-        KeyCode::Char('q') => Action::Quit,
-        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => Action::Quit,
         _ => Action::Tick,
     }
 }
@@ -136,54 +106,15 @@ mod tests {
     }
 
     #[test]
-    fn delete_confirmation_requires_explicit_y() {
+    fn former_delete_key_is_inert_while_browsing() {
         assert_eq!(
-            handle_key(
-                key(KeyCode::Char('y')),
-                AppMode::ConfirmDelete,
-                false,
-                false
-            ),
-            Action::ConfirmDelete
-        );
-        assert_eq!(
-            handle_key(key(KeyCode::Enter), AppMode::ConfirmDelete, false, false),
+            handle_key(key(KeyCode::Char('d')), AppMode::Browsing, false, false),
             Action::Tick
         );
-        for code in [KeyCode::Char('n'), KeyCode::Esc] {
-            assert_eq!(
-                handle_key(key(code), AppMode::ConfirmDelete, false, false),
-                Action::CancelDelete
-            );
-        }
-    }
-
-    #[test]
-    fn multi_delete_confirmation_requires_explicit_y() {
         assert_eq!(
-            handle_key(
-                key(KeyCode::Char('y')),
-                AppMode::ConfirmMultiDelete,
-                false,
-                false
-            ),
-            Action::ConfirmMultiDelete
-        );
-        assert_eq!(
-            handle_key(
-                key(KeyCode::Enter),
-                AppMode::ConfirmMultiDelete,
-                false,
-                false
-            ),
+            handle_key(key(KeyCode::Char('d')), AppMode::Browsing, true, true),
             Action::Tick
         );
-        for code in [KeyCode::Char('n'), KeyCode::Esc] {
-            assert_eq!(
-                handle_key(key(code), AppMode::ConfirmMultiDelete, false, false),
-                Action::CancelMultiDelete
-            );
-        }
     }
 
     #[test]
@@ -200,7 +131,7 @@ mod tests {
             handle_key(key(KeyCode::Char('r')), AppMode::Browsing, false, false),
             Action::Rescan
         );
-        for mode in [AppMode::Scanning, AppMode::MultiDeleting] {
+        for mode in [AppMode::Scanning, AppMode::Finalizing] {
             assert_eq!(
                 handle_key(key(KeyCode::Char('r')), mode, false, false),
                 Action::Tick
