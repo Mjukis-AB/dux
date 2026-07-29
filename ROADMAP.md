@@ -4912,6 +4912,33 @@ Tasks:
     consume them yet. Explicit native confirmation, changed-since-plan
     presentation, and release gates remain open, so the parent item stays
     unchecked.
+  - [x] 2026-07-29 slice: connect v31 to an internal native execution
+    checkpoint without opening the public cleanup gate. `EngineService`
+    independently validates record version, strict phase/failure/result shape,
+    monotonic revision, sticky cancellation, terminal stability, exact
+    `cleanup:rust-target:<32 lowercase hex>` correlation, and outcome-unknown
+    aggregates. Its review wrapper serializes info/release/start, marks every
+    owning-engine start consume-once before calling FFI, and retains no caller
+    path, reconstructed plan, approval Boolean, callback, AI output, command,
+    or retry token. The authority-owning review controller stores the complete
+    immutable `ExplorerRustTargetPlanReviewInfo`, requires exact equality at
+    start, verifies the exact parent generation, and removes the child before
+    suspension. A same-UUID/same-candidate handle with altered plan or target
+    display is rejected without consuming the real child.
+    Explorer binds confirmation to a separate generation, exact child UUID,
+    and complete displayed plan; clears the preview before transfer; and
+    presents queued, running, explicit cancellation, changed-since-plan,
+    partial, failed, outcome-unknown, cancelled, and terminal path-free states
+    in a global accessible banner. It never retries. Closing Explorer preserves
+    observation; ordered app shutdown requests cancellation and awaits the
+    driver. The confirmation/action compile only under
+    `DUX_INTERNAL_PERMANENT_SAFE_CLEANUP`, which XcodeGen assigns to Debug.
+    Release shows execution unavailable, and notarized-release automation
+    rejects resolved Release settings containing that condition. Focused
+    adapter/controller/browser tests cover consume-once mapping, malformed and
+    regressing polls, forged display information, stale/repeated confirmation,
+    close survival, and shutdown cancellation. Public §17.3 gates remain open,
+    so the parent item intentionally stays unchecked.
 - [ ] Implement execution-time revalidation.
   - [x] 2026-07-19 slice: make the approved-session handoff use one canonical
     millisecond start time for persistence and journal claiming, and recheck
@@ -5104,6 +5131,14 @@ Tasks:
     schedule, AI input, or executor capability crosses this endpoint; the
     candidate presentation controls and plan lifecycle remain the next UI
     slice.
+  - [x] 2026-07-29 slice: add internal permanent-safe changed-since-plan,
+    progress, partial/failed/unknown result, explicit cancellation, and
+    terminal presentation through the v31 path-free task. There is deliberately
+    no retry control; the consumed capability cannot be reconstructed, and an
+    unknown outcome directs the user to durable Cleanup History. Ordinary
+    Explorer dismissal does not imply cancellation, while app shutdown
+    explicitly cancels and waits. The action remains Debug-only until §17.3 is
+    complete, so broader release UI keeps this parent open.
 - [ ] Add bounded pending-evaluation discovery and snapshot-backed restart
   recovery; malformed or incompatible state fails closed.
   - [x] 2026-07-19 slice: add a bounded oldest-first pending-evaluation
@@ -5175,6 +5210,15 @@ Tasks:
     candidate transition, journal claim, schedule, callback, AI request, or
     filesystem effect; the broader evaluator → approval → journal → executor
     product orchestration remains open.
+  - [x] 2026-07-29 slice: complete the first internal Swift orchestration edge
+    from the exact immutable reviewed child to the core-owned v31 task. The
+    controller, not a display DTO, owns the child; full-record equality and
+    parent generation are rechecked before consume-once transfer. Browser
+    confirmation and observation are separately generation-fenced,
+    cancellation is explicit, unknown outcomes never retry, and app shutdown
+    quiesces the observer. This is compiled out of the public Release action
+    surface, so §17.3 and later production orchestration keep the parent
+    unchecked.
 - [ ] Expose review intent, plan lifecycle, and path-free cleanup history through
   FFI/Swift UI without turning history into planner authority.
   - [x] 2026-07-19 slice: add the first app-facing history boundary as a
@@ -5251,6 +5295,23 @@ Tasks:
     destructive-boundary tests plus the 241-file source scan, deterministic
     Debug/Release binding generation, and universal arm64/x86_64 Debug and
     Release app builds targeting macOS 14.
+  - [x] 2026-07-29 slice: add the internal native confirmation and path-free
+    observation layer for the exact v31 task. The accessible destructive
+    confirmation repeats the exact target, unverified estimate, preserved
+    marker/target directory, and irreversibility; a persistent global banner
+    survives candidate/window transitions and exposes cancellation plus honest
+    aggregate/capacity/history correlation. Release retains an unavailable
+    execution label because the explicit Debug-only compilation condition is
+    checked again by release automation. History and display values remain
+    observations and cannot mint or retry cleanup authority. Verification
+    covers 122 focused and 394 full native tests, Rust formatting/check/clippy,
+    all 62 active FFI unit tests plus the isolated exact-success and
+    refusal/close-drain regressions, 29 Python repository tests, and the
+    246-source destructive-call scan. Debug and Release binding generation is
+    deterministic; the Debug and Release app executables and FFI archive are
+    universal arm64/x86_64 and target macOS 14. Resolved Release settings omit
+    the internal condition, and the Release executable contains no destructive
+    action label.
 - [x] Expand production cleanup session/item history with exact-session detail,
   verified capacity outcomes, and separately confirmed history clearing.
   - [x] 2026-07-28 slice: expose the existing core exact-session observation

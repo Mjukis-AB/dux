@@ -202,6 +202,24 @@ compare_app_layouts() {
         || die "Debug and Release app bundle layouts differ"
 }
 
+verify_permanent_cleanup_feature_gate() {
+    local debug_settings
+    local release_settings
+    debug_settings="$(
+        xcodebuild -project "$PROJECT_PATH" -scheme Dux \
+            -configuration Debug -showBuildSettings
+    )"
+    release_settings="$(
+        xcodebuild -project "$PROJECT_PATH" -scheme Dux \
+            -configuration Release -showBuildSettings
+    )"
+    grep -Fq 'DUX_INTERNAL_PERMANENT_SAFE_CLEANUP' <<<"$debug_settings" \
+        || die "internal cleanup UI must remain explicit in Debug builds"
+    if grep -Fq 'DUX_INTERNAL_PERMANENT_SAFE_CLEANUP' <<<"$release_settings"; then
+        die "permanent cleanup UI must not be compiled into public Release builds"
+    fi
+}
+
 verify_signed_app() {
     local app="$1"
     local executable="$app/Contents/MacOS/$(
@@ -392,6 +410,7 @@ main() {
     git -C "$REPO_ROOT" diff --exit-code -- \
         dux-macos/Dux.xcodeproj/project.pbxproj \
         dux-macos/Dux/Generated/DuxFFI.swift
+    verify_permanent_cleanup_feature_gate
     xcodebuild test -project "$PROJECT_PATH" -scheme Dux \
         -destination 'platform=macOS,arch=arm64' \
         -derivedDataPath "$swift_test_data" CODE_SIGNING_ALLOWED=NO

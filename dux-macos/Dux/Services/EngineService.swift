@@ -235,7 +235,14 @@ protocol DuxRustTargetPlanReviewSession: AnyObject, Sendable {
     var scanID: String { get }
     var candidateID: String { get }
     func info() async throws -> ExplorerRustTargetPlanReviewRecord
+    func startCleanup() async throws -> any DuxRustTargetCleanupTask
     func release() async
+}
+
+extension DuxRustTargetPlanReviewSession {
+    func startCleanup() async throws -> any DuxRustTargetCleanupTask {
+        throw ExplorerRustTargetCleanupStartError.unavailable
+    }
 }
 
 extension DuxSnapshotReviewLease {
@@ -3279,6 +3286,220 @@ enum EngineRustTargetPlanReviewAdapter {
     }
 }
 
+private enum EngineRustTargetCleanupResponseViolation: Error {
+    case envelope
+    case phaseShape
+    case result
+    case transition
+}
+
+enum EngineRustTargetCleanupAdapter {
+    static func map(
+        _ raw: RustTargetCleanupPoll,
+        after previous: ExplorerRustTargetCleanupPoll?
+    ) throws -> ExplorerRustTargetCleanupPoll {
+        guard raw.recordVersion == EngineService.expectedRecordVersion, raw.revision > 0 else {
+            throw EngineRustTargetCleanupResponseViolation.envelope
+        }
+        let result = try raw.result.map(map)
+        let mapped = ExplorerRustTargetCleanupPoll(
+            phase: map(raw.phase),
+            cancellationRequested: raw.cancellationRequested,
+            revision: raw.revision,
+            failure: raw.failure.map(map),
+            result: result
+        )
+        guard validShape(mapped) else {
+            throw EngineRustTargetCleanupResponseViolation.phaseShape
+        }
+        if let previous {
+            guard validTransition(from: previous, to: mapped) else {
+                throw EngineRustTargetCleanupResponseViolation.transition
+            }
+        }
+        return mapped
+    }
+
+    static func map(
+        _ error: RustTargetCleanupStartError
+    ) -> ExplorerRustTargetCleanupStartError {
+        switch error {
+        case .Closed:
+            .closed
+        case .WrongEngine, .InternalState:
+            .invalidResponse
+        case .ReviewUnavailable:
+            .reviewUnavailable
+        case .ParentReviewUnavailable:
+            .parentReviewUnavailable
+        case .ReviewExpired:
+            .reviewExpired
+        case .ChangedDuringReview:
+            .changedSincePlan
+        case .CancelledBeforeStart:
+            .cancelledBeforeStart
+        case .BudgetExceeded:
+            .budgetExceeded
+        case .QueueFull:
+            .queueFull
+        case .Busy:
+            .busy
+        case .UnsafeStorage:
+            .unsafeStorage
+        case .IncompatibleSchema:
+            .incompatibleSchema
+        case .CorruptData:
+            .corruptData
+        case .OutcomeUnknown:
+            .outcomeUnknown
+        case .Unavailable:
+            .unavailable
+        }
+    }
+
+    static func map(
+        _ error: RustTargetCleanupTaskError
+    ) -> ExplorerRustTargetCleanupTaskError {
+        switch error {
+        case .Closed:
+            .closed
+        case .TaskUnavailable:
+            .taskUnavailable
+        case .WrongTaskKind, .InternalState:
+            .invalidResponse
+        }
+    }
+
+    private static func map(_ phase: TaskPhase) -> ExplorerRustTargetCleanupPhase {
+        switch phase {
+        case .queued: .queued
+        case .running: .running
+        case .succeeded: .succeeded
+        case .failed: .failed
+        case .cancelled: .cancelled
+        }
+    }
+
+    private static func map(
+        _ failure: RustTargetCleanupTaskFailure
+    ) -> ExplorerRustTargetCleanupFailure {
+        switch failure {
+        case .parentReviewUnavailable: .parentReviewUnavailable
+        case .reviewExpired: .reviewExpired
+        case .changedDuringReview: .changedSincePlan
+        case .budgetExceeded: .budgetExceeded
+        case .busy: .busy
+        case .unsafeStorage: .unsafeStorage
+        case .incompatibleSchema: .incompatibleSchema
+        case .corruptData: .corruptData
+        case .outcomeUnknown: .outcomeUnknown
+        case .unavailable: .unavailable
+        case .internalState: .internalState
+        }
+    }
+
+    private static func map(
+        _ raw: RustTargetCleanupResult
+    ) throws -> ExplorerRustTargetCleanupResult {
+        let status: CleanupHistorySessionStatus = switch raw.status {
+        case .planned: .planned
+        case .running: .running
+        case .recovering: .recovering
+        case .completed: .completed
+        case .partiallyCompleted: .partiallyCompleted
+        case .failed: .failed
+        case .cancelled: .cancelled
+        case .interrupted: .interrupted
+        case .rejected: .rejected
+        case .dryRun: .dryRun
+        }
+        guard
+            raw.recordVersion == EngineService.expectedRecordVersion,
+            validSessionID(raw.sessionId),
+            status != .recovering
+                || (raw.removedEntries == 0
+                    && raw.removedLogicalBytes == 0
+                    && raw.verifiedCapacityDeltaBytes == nil)
+        else {
+            throw EngineRustTargetCleanupResponseViolation.result
+        }
+        return ExplorerRustTargetCleanupResult(
+            sessionID: raw.sessionId,
+            status: status,
+            removedEntries: raw.removedEntries,
+            removedLogicalBytes: raw.removedLogicalBytes,
+            verifiedCapacityDeltaBytes: raw.verifiedCapacityDeltaBytes
+        )
+    }
+
+    private static func validShape(_ poll: ExplorerRustTargetCleanupPoll) -> Bool {
+        switch poll.phase {
+        case .queued, .running:
+            poll.failure == nil && poll.result == nil
+        case .succeeded:
+            poll.failure == nil
+                && poll.result.map {
+                    switch $0.status {
+                    case .completed, .partiallyCompleted, .failed, .interrupted, .rejected:
+                        true
+                    case .planned, .running, .recovering, .cancelled, .dryRun:
+                        false
+                    }
+                } == true
+        case .cancelled:
+            poll.failure == nil
+                && poll.result.map { $0.status == .cancelled } ?? true
+        case .failed:
+            switch poll.failure {
+            case .outcomeUnknown:
+                poll.result.map { $0.status == .recovering } ?? true
+            case .some:
+                poll.result == nil
+            case nil:
+                false
+            }
+        }
+    }
+
+    private static func validTransition(
+        from previous: ExplorerRustTargetCleanupPoll,
+        to current: ExplorerRustTargetCleanupPoll
+    ) -> Bool {
+        guard
+            current.revision >= previous.revision,
+            !previous.cancellationRequested || current.cancellationRequested
+        else {
+            return false
+        }
+        if current.revision == previous.revision {
+            return current == previous
+        }
+        switch previous.phase {
+        case .queued:
+            return true
+        case .running:
+            return current.phase != .queued
+        case .succeeded, .failed, .cancelled:
+            return current == previous
+        }
+    }
+
+    private static func validSessionID(_ value: String) -> Bool {
+        let prefix = "cleanup:rust-target:"
+        guard
+            value.utf8.count <= 128,
+            value.hasPrefix(prefix)
+        else {
+            return false
+        }
+        let suffix = value.dropFirst(prefix.count)
+        return suffix.utf8.count == 32
+            && suffix.utf8.allSatisfy {
+                (0x30 ... 0x39).contains($0) || (0x61 ... 0x66).contains($0)
+            }
+    }
+}
+
 private final class FFIDuxRustTargetPlanReviewSession:
     DuxRustTargetPlanReviewSession,
     @unchecked Sendable
@@ -3288,6 +3509,7 @@ private final class FFIDuxRustTargetPlanReviewSession:
 
     private let session: RustTargetPlanReviewSession
     private let state: EngineServiceState
+    private var isAvailable = true
 
     init(
         session: RustTargetPlanReviewSession,
@@ -3303,6 +3525,9 @@ private final class FFIDuxRustTargetPlanReviewSession:
 
     func info() async throws -> ExplorerRustTargetPlanReviewRecord {
         try await state.performPlanReview {
+            guard self.isAvailable else {
+                throw ExplorerRustTargetPlanReviewError.reviewNotAcquired
+            }
             do {
                 return try EngineRustTargetPlanReviewAdapter.map(
                     try self.session.info()
@@ -3313,8 +3538,30 @@ private final class FFIDuxRustTargetPlanReviewSession:
         }
     }
 
+    func startCleanup() async throws -> any DuxRustTargetCleanupTask {
+        let engine = try await state.perform { state in
+            try state.resolveEngine()
+        }
+        let task = try await state.performPlanReview {
+            guard self.isAvailable else {
+                throw ExplorerRustTargetCleanupStartError.reviewUnavailable
+            }
+            self.isAvailable = false
+            do {
+                return try engine.startPermanentSafeCleanup(review: self.session)
+            } catch let error as RustTargetCleanupStartError {
+                throw EngineRustTargetCleanupAdapter.map(error)
+            }
+        }
+        return FFIDuxRustTargetCleanupTask(task: task, state: state)
+    }
+
     func release() async {
-        await state.performNonthrowing { _ in
+        _ = try? await state.performPlanReview {
+            guard self.isAvailable else {
+                return
+            }
+            self.isAvailable = false
             do {
                 switch try self.session.release() {
                 case .released, .alreadyUnavailable:
@@ -3322,6 +3569,52 @@ private final class FFIDuxRustTargetPlanReviewSession:
                 }
             } catch {
                 // Release is consuming, idempotent best effort during teardown.
+            }
+        }
+    }
+}
+
+private final class FFIDuxRustTargetCleanupTask:
+    DuxRustTargetCleanupTask,
+    @unchecked Sendable
+{
+    private let task: RustTargetCleanupTask
+    private let state: EngineServiceState
+    private var lastPoll: ExplorerRustTargetCleanupPoll?
+
+    init(task: RustTargetCleanupTask, state: EngineServiceState) {
+        self.task = task
+        self.state = state
+    }
+
+    func poll() async throws -> ExplorerRustTargetCleanupPoll {
+        try await state.perform { _ in
+            do {
+                let poll = try EngineRustTargetCleanupAdapter.map(
+                    try self.task.poll(),
+                    after: self.lastPoll
+                )
+                self.lastPoll = poll
+                return poll
+            } catch is EngineRustTargetCleanupResponseViolation {
+                throw ExplorerRustTargetCleanupTaskError.invalidResponse
+            } catch let error as RustTargetCleanupTaskError {
+                throw EngineRustTargetCleanupAdapter.map(error)
+            }
+        }
+    }
+
+    func requestCancellation() async throws -> ExplorerRustTargetCleanupCancelOutcome {
+        try await state.perform { _ in
+            do {
+                return switch try self.task.cancel() {
+                case .cancelledBeforeStart: .cancelledBeforeStart
+                case .requested: .requested
+                case .alreadyRequested: .alreadyRequested
+                case .alreadyTerminal: .alreadyTerminal
+                }
+            } catch let error as RustTargetCleanupTaskError {
+                throw EngineRustTargetCleanupAdapter.map(error)
             }
         }
     }

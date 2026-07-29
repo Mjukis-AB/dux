@@ -1234,6 +1234,183 @@ final class ExplorerSnapshotBrowserTests: XCTestCase {
         XCTAssertEqual(releasedPlanReviewCount, 1)
     }
 
+    func testExactCleanupConfirmationIsConsumeOnceAndPublishesPathFreeResult() async throws {
+        let cleanup = BrowserCleanupTaskStub(
+            polls: [
+                ExplorerRustTargetCleanupPoll(
+                    phase: .succeeded,
+                    cancellationRequested: false,
+                    revision: 1,
+                    failure: nil,
+                    result: ExplorerRustTargetCleanupResult(
+                        sessionID:
+                        "cleanup:rust-target:0123456789abcdef0123456789abcdef",
+                        status: .completed,
+                        removedEntries: 4,
+                        removedLogicalBytes: 8_192,
+                        verifiedCapacityDeltaBytes: 7_000
+                    )
+                ),
+            ]
+        )
+        let reviews = BrowserReviewStub(
+            mode: .rustTargetPlanReviewAvailable,
+            cleanupTask: cleanup
+        )
+        let browser = ExplorerSnapshotBrowserModel(reviews: reviews)
+        await browser.reloadLatest()
+        await browser.selectContentMode(.candidates)
+        let candidate = try XCTUnwrap(browser.candidatePage?.candidates.first)
+        await browser.selectCandidate(candidate.candidateID)
+        await browser.prepareSelectedRustTargetPlanReview()
+        let confirmation = try XCTUnwrap(
+            browser.makeRustTargetCleanupConfirmation()
+        )
+        let stale = ExplorerRustTargetCleanupConfirmation(
+            generation: confirmation.generation &+ 1,
+            reviewHandleID: confirmation.reviewHandleID,
+            info: confirmation.info
+        )
+
+        await browser.startConfirmedRustTargetCleanup(stale)
+        let startsAfterStaleConfirmation = await reviews.cleanupStartCount()
+        XCTAssertEqual(startsAfterStaleConfirmation, 0)
+        await browser.startConfirmedRustTargetCleanup(confirmation)
+
+        guard case let .observing(_, poll) = browser.rustTargetCleanupState else {
+            return XCTFail("Expected a terminal path-free cleanup observation")
+        }
+        let cleanupStartCount = await reviews.cleanupStartCount()
+        let releaseCount = await reviews.releasedPlanReviewCount()
+        XCTAssertEqual(cleanupStartCount, 1)
+        XCTAssertEqual(releaseCount, 0)
+        XCTAssertEqual(poll.phase, .succeeded)
+        XCTAssertEqual(poll.result?.removedEntries, 4)
+        XCTAssertEqual(poll.result?.removedLogicalBytes, 8_192)
+        XCTAssertFalse(browser.canPrepareRustTargetPlanReview)
+
+        await browser.startConfirmedRustTargetCleanup(confirmation)
+        let startsAfterRepeatedConfirmation = await reviews.cleanupStartCount()
+        XCTAssertEqual(startsAfterRepeatedConfirmation, 1)
+    }
+
+    func testClosingExplorerDoesNotCancelConfirmedCleanup() async throws {
+        let cleanup = BrowserCleanupTaskStub(
+            polls: [
+                ExplorerRustTargetCleanupPoll(
+                    phase: .running,
+                    cancellationRequested: false,
+                    revision: 1,
+                    failure: nil,
+                    result: nil
+                ),
+                ExplorerRustTargetCleanupPoll(
+                    phase: .succeeded,
+                    cancellationRequested: false,
+                    revision: 2,
+                    failure: nil,
+                    result: ExplorerRustTargetCleanupResult(
+                        sessionID:
+                        "cleanup:rust-target:fedcba9876543210fedcba9876543210",
+                        status: .completed,
+                        removedEntries: 1,
+                        removedLogicalBytes: 10,
+                        verifiedCapacityDeltaBytes: nil
+                    )
+                ),
+            ]
+        )
+        let clock = SuspendedRustTargetCleanupPollingClock()
+        let reviews = BrowserReviewStub(
+            mode: .rustTargetPlanReviewAvailable,
+            cleanupTask: cleanup
+        )
+        let browser = ExplorerSnapshotBrowserModel(
+            reviews: reviews,
+            rustTargetCleanupPollingClock: clock
+        )
+        await browser.reloadLatest()
+        await browser.selectContentMode(.candidates)
+        let candidate = try XCTUnwrap(browser.candidatePage?.candidates.first)
+        await browser.selectCandidate(candidate.candidateID)
+        await browser.prepareSelectedRustTargetPlanReview()
+        let confirmation = try XCTUnwrap(
+            browser.makeRustTargetCleanupConfirmation()
+        )
+        let execution = Task {
+            await browser.startConfirmedRustTargetCleanup(confirmation)
+        }
+        try await eventually { await clock.hasSuspendedSleep() }
+
+        await browser.close()
+
+        let cancellationCount = await cleanup.cancellationCount()
+        XCTAssertEqual(cancellationCount, 0)
+        await clock.resumeSleep()
+        await execution.value
+        guard case let .observing(_, poll) = browser.rustTargetCleanupState else {
+            return XCTFail("Expected cleanup observation to survive Explorer close")
+        }
+        XCTAssertEqual(poll.phase, .succeeded)
+    }
+
+    func testAppShutdownCancelsAndWaitsForConfirmedCleanup() async throws {
+        let cleanup = BrowserCleanupTaskStub(
+            polls: [
+                ExplorerRustTargetCleanupPoll(
+                    phase: .running,
+                    cancellationRequested: false,
+                    revision: 1,
+                    failure: nil,
+                    result: nil
+                ),
+                ExplorerRustTargetCleanupPoll(
+                    phase: .cancelled,
+                    cancellationRequested: true,
+                    revision: 2,
+                    failure: nil,
+                    result: nil
+                ),
+            ]
+        )
+        let clock = SuspendedRustTargetCleanupPollingClock()
+        let reviews = BrowserReviewStub(
+            mode: .rustTargetPlanReviewAvailable,
+            cleanupTask: cleanup
+        )
+        let browser = ExplorerSnapshotBrowserModel(
+            reviews: reviews,
+            rustTargetCleanupPollingClock: clock
+        )
+        await browser.reloadLatest()
+        await browser.selectContentMode(.candidates)
+        let candidate = try XCTUnwrap(browser.candidatePage?.candidates.first)
+        await browser.selectCandidate(candidate.candidateID)
+        await browser.prepareSelectedRustTargetPlanReview()
+        let confirmation = try XCTUnwrap(
+            browser.makeRustTargetCleanupConfirmation()
+        )
+        let execution = Task {
+            await browser.startConfirmedRustTargetCleanup(confirmation)
+        }
+        try await eventually { await clock.hasSuspendedSleep() }
+
+        let shutdown = Task {
+            await browser.shutdownRustTargetCleanup()
+        }
+        try await eventually { await cleanup.cancellationCount() == 1 }
+        await clock.resumeSleep()
+        await shutdown.value
+        await execution.value
+
+        guard case let .observing(_, poll) = browser.rustTargetCleanupState else {
+            return XCTFail("Expected shutdown to retain the terminal observation")
+        }
+        XCTAssertEqual(poll.phase, .cancelled)
+        let cancellationCount = await cleanup.cancellationCount()
+        XCTAssertEqual(cancellationCount, 1)
+    }
+
     private func eventually(
         _ condition: @escaping @Sendable () async -> Bool,
         file: StaticString = #filePath,
@@ -1379,6 +1556,7 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
     }
 
     private let mode: Mode
+    private let cleanupTask: BrowserCleanupTaskStub
     private var calls: [Call] = []
     private var released: [String] = []
     private var acquisitionContinuation: CheckedContinuation<Void, Never>?
@@ -1394,9 +1572,14 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
     private var didSuspendQuery = false
     private var didSuspendCandidateDetail = false
     private var rootFirstPageRequestCount = 0
+    private var cleanupStarts = 0
 
-    init(mode: Mode = .available) {
+    init(
+        mode: Mode = .available,
+        cleanupTask: BrowserCleanupTaskStub = BrowserCleanupTaskStub()
+    ) {
         self.mode = mode
+        self.cleanupTask = cleanupTask
     }
 
     func acquire(scanID: String) async throws {
@@ -1923,6 +2106,16 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
         releasedPlanReviewIDs.append(handle.id)
     }
 
+    func startRustTargetCleanup(
+        _: ExplorerRustTargetPlanReviewHandle
+    ) throws -> any DuxRustTargetCleanupTask {
+        guard mode == .rustTargetPlanReviewAvailable else {
+            throw ExplorerRustTargetCleanupStartError.unavailable
+        }
+        cleanupStarts += 1
+        return cleanupTask
+    }
+
     func recordedCalls() -> [Call] {
         calls
     }
@@ -1998,6 +2191,10 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
         releasedPlanReviewIDs.count
     }
 
+    func cleanupStartCount() -> Int {
+        cleanupStarts
+    }
+
     func hasSuspendedRelease() -> Bool {
         releaseContinuation != nil
     }
@@ -2023,6 +2220,79 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
         default:
             browserCandidateSummary(id: id)
         }
+    }
+}
+
+private actor BrowserCleanupTaskStub: DuxRustTargetCleanupTask {
+    private let polls: [ExplorerRustTargetCleanupPoll]
+    private var pollIndex = 0
+    private var cancellations = 0
+
+    init(
+        polls: [ExplorerRustTargetCleanupPoll] = [
+            ExplorerRustTargetCleanupPoll(
+                phase: .cancelled,
+                cancellationRequested: true,
+                revision: 1,
+                failure: nil,
+                result: nil
+            ),
+        ]
+    ) {
+        precondition(!polls.isEmpty)
+        self.polls = polls
+    }
+
+    func poll() throws -> ExplorerRustTargetCleanupPoll {
+        let poll = polls[min(pollIndex, polls.count - 1)]
+        pollIndex += 1
+        return poll
+    }
+
+    func requestCancellation() -> ExplorerRustTargetCleanupCancelOutcome {
+        cancellations += 1
+        return .requested
+    }
+
+    func cancellationCount() -> Int {
+        cancellations
+    }
+}
+
+private struct SuspendedRustTargetCleanupPollingClock:
+    ExplorerRustTargetCleanupPollingClock
+{
+    private let sleeper = SuspendedRustTargetCleanupPollingSleeper()
+
+    func sleepUntilNextPoll() async throws {
+        await sleeper.sleep()
+    }
+
+    func hasSuspendedSleep() async -> Bool {
+        await sleeper.hasSuspendedSleep()
+    }
+
+    func resumeSleep() async {
+        await sleeper.resumeSleep()
+    }
+}
+
+private actor SuspendedRustTargetCleanupPollingSleeper {
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func sleep() async {
+        await withCheckedContinuation { continuation in
+            self.continuation = continuation
+        }
+    }
+
+    func hasSuspendedSleep() -> Bool {
+        continuation != nil
+    }
+
+    func resumeSleep() {
+        continuation?.resume()
+        continuation = nil
     }
 }
 

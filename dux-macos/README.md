@@ -179,12 +179,15 @@ candidate ID through the already-retained snapshot review. Rust derives and
 revalidates the current target, source scan, permanent-safe mode, plan
 identity, estimate, warnings, and short effective expiry; the returned opaque
 child supports information reads and release. FFI v31 can consume that exact
-engine-bound child directly into the core-owned permanent-safe task, but
-`EngineService`, AppModel, and Explorer intentionally do not call the new
-transport yet. Its start accepts no path, identifier, timestamp, approval
-Boolean, callback, AI result, command, or retry token; its task observation is
-path-free. The existing confirmation-gated Explorer Trash route is separate
-and cannot consume the preview child or its display DTO.
+engine-bound child directly into the core-owned permanent-safe task. The native
+service and review controller now implement that consuming edge without
+accepting a path or reconstructed plan: the controller stores the complete
+immutable information shown to the user, requires exact equality at execution,
+and removes the child before the asynchronous start. Its start accepts no path,
+identifier, timestamp, approval Boolean, callback, AI result, command, or retry
+token; its task observation is path-free. The existing confirmation-gated
+Explorer Trash route is separate and cannot consume the preview child or its
+display DTO.
 
 The controller owns the child separately from its renewable parent review,
 refreshes the immutable observation every 15 seconds, and releases the child
@@ -198,11 +201,19 @@ Current paths are lossless byte observations: unsafe/hidden Unicode and
 non-UTF-8 bytes use a deterministic escaped display that Swift validates
 byte-for-byte before presentation.
 
-The next product gate must add explicit confirmation bound to that immutable
-preview and generation-fenced task observation before the native app can start
-permanent cleanup. Dropping a v31 task observer does not cancel or retry the
-core task; cancellation is explicit, and every owning-engine start attempt
-consumes the opaque review once even if later core admission refuses it.
+Internal Debug builds add an explicit destructive confirmation bound to that
+immutable preview and a generation-fenced global status banner. The banner
+keeps observing after the Explorer window closes, never retries, and exposes
+explicit cancellation; ordered app shutdown requests cancellation and waits
+for the observer. Dropping a v31 task observer still has no cancellation or
+retry semantics, and every owning-engine start attempt consumes the opaque
+review once even if later core admission refuses it.
+
+This action is deliberately unavailable in public Release builds until every
+cleanup release condition in `SECURITY_DESIGN.md` §17.3 is evidenced. XcodeGen
+defines `DUX_INTERNAL_PERMANENT_SAFE_CLEANUP` only for Debug, Release shows a
+locked unavailable label instead of the destructive action, and the notarized
+release script fails if resolved Release build settings contain that condition.
 
 Cleanup History exposes FFI v29's exact-session, observation-only drill-down.
 The list supplies one bounded stable session ID; Rust reloads and validates the

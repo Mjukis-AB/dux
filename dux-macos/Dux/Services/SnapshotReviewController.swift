@@ -24,6 +24,7 @@ actor DuxSnapshotReviewController {
         let parentGeneration: UUID
         let scanID: String
         let candidateID: String
+        let info: ExplorerRustTargetPlanReviewInfo
         let session: any DuxRustTargetPlanReviewSession
     }
 
@@ -424,6 +425,7 @@ actor DuxSnapshotReviewController {
             parentGeneration: entry.generation,
             scanID: scanID,
             candidateID: candidateID,
+            info: info,
             session: session
         )
         return ExplorerRustTargetPlanReviewHandle(id: id, info: info)
@@ -438,6 +440,27 @@ actor DuxSnapshotReviewController {
         await entry.session.release()
     }
 
+    /// Irreversibly transfers one exact controller-owned plan review into the
+    /// core cleanup task. The handle is removed before suspension so no UI
+    /// race can refresh, release, or submit the same authority twice.
+    func startRustTargetCleanup(
+        _ handle: ExplorerRustTargetPlanReviewHandle
+    ) async throws -> any DuxRustTargetCleanupTask {
+        guard !isShuttingDown else {
+            throw ExplorerRustTargetCleanupStartError.closed
+        }
+        guard
+            let review = planReviews[handle.id],
+            review.info == handle.info,
+            let parent = leases[review.scanID],
+            parent.generation == review.parentGeneration
+        else {
+            throw ExplorerRustTargetCleanupStartError.reviewUnavailable
+        }
+        planReviews.removeValue(forKey: handle.id)
+        return try await review.session.startCleanup()
+    }
+
     func refreshRustTargetPlanReview(
         _ handle: ExplorerRustTargetPlanReviewHandle
     ) async throws -> ExplorerRustTargetPlanReviewHandle {
@@ -450,8 +473,7 @@ actor DuxSnapshotReviewController {
         guard
             let parent = leases[review.scanID],
             parent.generation == review.parentGeneration,
-            review.scanID == handle.info.sourceScanID,
-            review.candidateID == handle.info.candidateID
+            review.info == handle.info
         else {
             await releasePlanReviewIfCurrent(id: handle.id, entry: review)
             throw ExplorerRustTargetPlanReviewError.parentReviewUnavailable
@@ -592,7 +614,8 @@ actor DuxSnapshotReviewController {
             let current = planReviews[id],
             current.parentGeneration == entry.parentGeneration,
             current.scanID == entry.scanID,
-            current.candidateID == entry.candidateID
+            current.candidateID == entry.candidateID,
+            current.info == entry.info
         else {
             return
         }

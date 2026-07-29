@@ -77,6 +77,107 @@ final class EngineServiceTests: XCTestCase {
         }
     }
 
+    func testRustTargetCleanupBridgeConsumesExactReviewAndMapsTerminalResult() async throws {
+        let parent = RecordingGeneratedSnapshotReview()
+        let plan = RecordingGeneratedRustTargetPlanReview(
+            info: generatedRustTargetPlanReviewInfo()
+        )
+        let cleanup = RecordingGeneratedRustTargetCleanupTask(
+            polls: [
+                RustTargetCleanupPoll(
+                    recordVersion: 1,
+                    phase: .succeeded,
+                    cancellationRequested: false,
+                    revision: 3,
+                    failure: nil,
+                    result: RustTargetCleanupResult(
+                        recordVersion: 1,
+                        sessionId: "cleanup:rust-target:0123456789abcdef0123456789abcdef",
+                        status: .completed,
+                        removedEntries: 7,
+                        removedLogicalBytes: 4_096,
+                        verifiedCapacityDeltaBytes: 3_000
+                    )
+                ),
+            ]
+        )
+        let engine = RecordingRustTargetPlanReviewEngine(
+            parent: parent,
+            plan: plan,
+            cleanupTask: cleanup
+        )
+        let service = EngineService(engine: engine)
+        let lease = try await service.acquireExplorerReview(scanID: "scan:example")
+        let session = try await lease.prepareRustTargetPlanReview(
+            candidateID: "candidate:example"
+        )
+
+        let task = try await session.startCleanup()
+        let poll = try await task.poll()
+        await session.release()
+
+        XCTAssertTrue(engine.receivedCleanupReview === plan)
+        XCTAssertEqual(plan.releaseCount, 0)
+        XCTAssertEqual(poll.phase, .succeeded)
+        XCTAssertEqual(poll.result?.status, .completed)
+        XCTAssertEqual(poll.result?.removedEntries, 7)
+        XCTAssertEqual(poll.result?.removedLogicalBytes, 4_096)
+        XCTAssertEqual(poll.result?.verifiedCapacityDeltaBytes, 3_000)
+        XCTAssertEqual(
+            poll.result?.sessionID,
+            "cleanup:rust-target:0123456789abcdef0123456789abcdef"
+        )
+        let closed = await service.close()
+        XCTAssertTrue(closed)
+    }
+
+    func testRustTargetCleanupAdapterRejectsMalformedAndRegressingPolls() throws {
+        let running = try EngineRustTargetCleanupAdapter.map(
+            RustTargetCleanupPoll(
+                recordVersion: 1,
+                phase: .running,
+                cancellationRequested: true,
+                revision: 2,
+                failure: nil,
+                result: nil
+            ),
+            after: nil
+        )
+        XCTAssertThrowsError(
+            try EngineRustTargetCleanupAdapter.map(
+                RustTargetCleanupPoll(
+                    recordVersion: 1,
+                    phase: .queued,
+                    cancellationRequested: false,
+                    revision: 3,
+                    failure: nil,
+                    result: nil
+                ),
+                after: running
+            )
+        )
+        XCTAssertThrowsError(
+            try EngineRustTargetCleanupAdapter.map(
+                RustTargetCleanupPoll(
+                    recordVersion: 1,
+                    phase: .failed,
+                    cancellationRequested: false,
+                    revision: 1,
+                    failure: .outcomeUnknown,
+                    result: RustTargetCleanupResult(
+                        recordVersion: 1,
+                        sessionId: "cleanup:rust-target:0123456789abcdef0123456789abcdef",
+                        status: .recovering,
+                        removedEntries: 1,
+                        removedLogicalBytes: 0,
+                        verifiedCapacityDeltaBytes: nil
+                    )
+                ),
+                after: nil
+            )
+        )
+    }
+
     func testRustTargetPlanReviewBridgeRejectsNegativeGeneratedTimestamp() {
         XCTAssertThrowsError(
             try EngineRustTargetPlanReviewAdapter.map(
@@ -1833,17 +1934,24 @@ private func generatedRustTargetPlanReviewInfo(
 private final class RecordingRustTargetPlanReviewEngine: DuxEngine, @unchecked Sendable {
     private let parent: SnapshotReviewSession
     private let plan: RustTargetPlanReviewSession
+    private let cleanupTask: RustTargetCleanupTask?
     private(set) var receivedScanID: String?
     private(set) var receivedParent: SnapshotReviewSession?
     private(set) var receivedRequest: RustTargetPlanReviewRequest?
+    private(set) var receivedCleanupReview: RustTargetPlanReviewSession?
 
     required init(unsafeFromHandle handle: UInt64) {
         fatalError("RecordingRustTargetPlanReviewEngine cannot be lifted: \(handle)")
     }
 
-    init(parent: SnapshotReviewSession, plan: RustTargetPlanReviewSession) {
+    init(
+        parent: SnapshotReviewSession,
+        plan: RustTargetPlanReviewSession,
+        cleanupTask: RustTargetCleanupTask? = nil
+    ) {
         self.parent = parent
         self.plan = plan
+        self.cleanupTask = cleanupTask
         super.init(noHandle: NoHandle())
     }
 
@@ -1863,8 +1971,46 @@ private final class RecordingRustTargetPlanReviewEngine: DuxEngine, @unchecked S
         return plan
     }
 
+    override func startPermanentSafeCleanup(
+        review: RustTargetPlanReviewSession
+    ) throws -> RustTargetCleanupTask {
+        receivedCleanupReview = review
+        guard let cleanupTask else {
+            throw RustTargetCleanupStartError.Unavailable
+        }
+        return cleanupTask
+    }
+
     override func close() -> Bool {
         true
+    }
+}
+
+private final class RecordingGeneratedRustTargetCleanupTask:
+    RustTargetCleanupTask,
+    @unchecked Sendable
+{
+    private let polls: [RustTargetCleanupPoll]
+    private var index = 0
+
+    required init(unsafeFromHandle handle: UInt64) {
+        fatalError("RecordingGeneratedRustTargetCleanupTask cannot be lifted: \(handle)")
+    }
+
+    init(polls: [RustTargetCleanupPoll]) {
+        precondition(!polls.isEmpty)
+        self.polls = polls
+        super.init(noHandle: NoHandle())
+    }
+
+    override func poll() throws -> RustTargetCleanupPoll {
+        let poll = polls[min(index, polls.count - 1)]
+        index += 1
+        return poll
+    }
+
+    override func cancel() throws -> RustTargetCleanupCancelOutcome {
+        .requested
     }
 }
 

@@ -369,12 +369,22 @@ cancellation or retry semantics. Start uses the existing operation tracker so
 engine close either wins admission or waits for the admitted call without
 holding the FFI engine-state mutex across live revalidation.
 
-The generated Swift module contains this transport, but `EngineService`,
-AppModel, and Explorer intentionally do not invoke it in v31. The product still
-needs explicit native confirmation bound to the visible reviewed plan,
-generation-fenced task observation, changed-since-plan presentation, and the
-remaining permanent-cleanup release gates. AI, CLI, schedules, history rows,
-and display DTOs have no route to the consuming call.
+The native adapter now consumes this transport only through the exact
+controller-owned child. The controller stores and compares the complete
+immutable plan information shown to the user before removing that child, so a
+same-UUID handle with altered plan, target, estimate, warning, rule, or expiry
+facts cannot nominate the real opaque review. Explorer binds a separate
+generation token and handle UUID into explicit confirmation, then observes only
+the path-free task state. It does not retry, ordinary window dismissal does not
+cancel, and app shutdown explicitly requests cancellation and waits.
+
+The destructive action and confirmation are compiled only under
+`DUX_INTERNAL_PERMANENT_SAFE_CLEANUP`, which XcodeGen assigns to Debug. Public
+Release retains the observation-only preview and a locked unavailable label;
+the notarized-release script independently rejects resolved Release settings
+that contain the condition. The remaining permanent-cleanup release gates are
+therefore still mandatory before this action can ship. AI, CLI, schedules,
+history rows, and display DTOs still have no route to the consuming call.
 
 The Swift adapter lazily constructs and synchronizes the engine on its utility
 queue. FFI close invalidates renewal, attempts exact release for every

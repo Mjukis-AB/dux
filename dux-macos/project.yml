@@ -39,6 +39,8 @@ targets:
         ENABLE_HARDENED_RUNTIME: YES
         DEAD_CODE_STRIPPING: YES
       configs:
+        Debug:
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) DUX_INTERNAL_PERMANENT_SAFE_CLEANUP"
         Release:
           CODE_SIGN_ENTITLEMENTS: Config/Release.entitlements
 

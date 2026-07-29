@@ -413,3 +413,195 @@ enum ExplorerRustTargetPlanReviewAdapter {
         }
     }
 }
+
+/// App-owned confirmation evidence for one exact opaque plan-review handle.
+/// The displayed fields remain observations; only the controller-retained
+/// handle can cross the core's consume-once execution edge.
+struct ExplorerRustTargetCleanupConfirmation: Equatable, Sendable {
+    let generation: UInt64
+    let reviewHandleID: UUID
+    let info: ExplorerRustTargetPlanReviewInfo
+}
+
+enum ExplorerRustTargetCleanupPhase: Equatable, Sendable {
+    case queued
+    case running
+    case succeeded
+    case failed
+    case cancelled
+
+    var isTerminal: Bool {
+        switch self {
+        case .succeeded, .failed, .cancelled:
+            true
+        case .queued, .running:
+            false
+        }
+    }
+}
+
+enum ExplorerRustTargetCleanupFailure: Equatable, Sendable {
+    case parentReviewUnavailable
+    case reviewExpired
+    case changedSincePlan
+    case budgetExceeded
+    case busy
+    case unsafeStorage
+    case incompatibleSchema
+    case corruptData
+    case outcomeUnknown
+    case unavailable
+    case internalState
+
+    var title: String {
+        switch self {
+        case .changedSincePlan:
+            "Storage changed since review"
+        case .reviewExpired, .parentReviewUnavailable:
+            "Review expired"
+        case .budgetExceeded, .busy:
+            "Cleanup is busy"
+        case .outcomeUnknown:
+            "Cleanup outcome is unknown"
+        case .unsafeStorage, .incompatibleSchema, .corruptData:
+            "Cleanup is blocked"
+        case .unavailable, .internalState:
+            "Cleanup is unavailable"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .changedSincePlan:
+            "DUX refused the changed target. Run a new scan and review a fresh plan before trying again."
+        case .reviewExpired, .parentReviewUnavailable:
+            "The exact reviewed authority ended before cleanup could start. Prepare and confirm a fresh plan."
+        case .budgetExceeded:
+            "DUX refused to exceed its bounded cleanup budget. Nothing should be retried automatically."
+        case .busy:
+            "Another cleanup operation is active. Check Cleanup History before preparing a new plan."
+        case .outcomeUnknown:
+            "DUX cannot prove whether the filesystem effect completed. Do not retry; inspect Cleanup History after restarting DUX."
+        case .unsafeStorage:
+            "DUX cannot trust its cleanup store. No new cleanup should be attempted."
+        case .incompatibleSchema:
+            "Cleanup history uses an incompatible schema. Update DUX before attempting cleanup."
+        case .corruptData:
+            "DUX rejected inconsistent cleanup state. No retry was attempted."
+        case .unavailable:
+            "The cleanup engine is unavailable. No retry was attempted."
+        case .internalState:
+            "DUX rejected an inconsistent cleanup response. No retry was attempted."
+        }
+    }
+}
+
+enum ExplorerRustTargetCleanupStartError: Error, Equatable, Sendable {
+    case closed
+    case reviewUnavailable
+    case parentReviewUnavailable
+    case reviewExpired
+    case changedSincePlan
+    case cancelledBeforeStart
+    case budgetExceeded
+    case queueFull
+    case busy
+    case unsafeStorage
+    case incompatibleSchema
+    case corruptData
+    case outcomeUnknown
+    case unavailable
+    case invalidResponse
+
+    var failure: ExplorerRustTargetCleanupFailure {
+        switch self {
+        case .parentReviewUnavailable:
+            .parentReviewUnavailable
+        case .reviewExpired, .reviewUnavailable:
+            .reviewExpired
+        case .changedSincePlan:
+            .changedSincePlan
+        case .budgetExceeded:
+            .budgetExceeded
+        case .queueFull, .busy:
+            .busy
+        case .unsafeStorage:
+            .unsafeStorage
+        case .incompatibleSchema:
+            .incompatibleSchema
+        case .corruptData:
+            .corruptData
+        case .outcomeUnknown:
+            .outcomeUnknown
+        case .closed, .cancelledBeforeStart, .unavailable:
+            .unavailable
+        case .invalidResponse:
+            .internalState
+        }
+    }
+}
+
+enum ExplorerRustTargetCleanupTaskError: Error, Equatable, Sendable {
+    case closed
+    case taskUnavailable
+    case invalidResponse
+}
+
+enum ExplorerRustTargetCleanupCancelOutcome: Equatable, Sendable {
+    case cancelledBeforeStart
+    case requested
+    case alreadyRequested
+    case alreadyTerminal
+}
+
+struct ExplorerRustTargetCleanupResult: Equatable, Sendable {
+    let sessionID: String
+    let status: CleanupHistorySessionStatus
+    let removedEntries: UInt64
+    let removedLogicalBytes: UInt64
+    let verifiedCapacityDeltaBytes: Int64?
+}
+
+struct ExplorerRustTargetCleanupPoll: Equatable, Sendable {
+    let phase: ExplorerRustTargetCleanupPhase
+    let cancellationRequested: Bool
+    let revision: UInt64
+    let failure: ExplorerRustTargetCleanupFailure?
+    let result: ExplorerRustTargetCleanupResult?
+}
+
+enum ExplorerRustTargetCleanupState: Equatable, Sendable {
+    case idle
+    case starting(ExplorerRustTargetPlanReviewInfo)
+    case observing(ExplorerRustTargetPlanReviewInfo, ExplorerRustTargetCleanupPoll)
+    case startFailed(ExplorerRustTargetPlanReviewInfo, ExplorerRustTargetCleanupFailure)
+    case observationFailed(ExplorerRustTargetPlanReviewInfo)
+
+    var isActive: Bool {
+        switch self {
+        case .starting:
+            true
+        case let .observing(_, poll):
+            !poll.phase.isTerminal
+        case .idle, .startFailed, .observationFailed:
+            false
+        }
+    }
+}
+
+protocol DuxRustTargetCleanupTask: AnyObject, Sendable {
+    func poll() async throws -> ExplorerRustTargetCleanupPoll
+    func requestCancellation() async throws -> ExplorerRustTargetCleanupCancelOutcome
+}
+
+protocol ExplorerRustTargetCleanupPollingClock: Sendable {
+    func sleepUntilNextPoll() async throws
+}
+
+struct ContinuousExplorerRustTargetCleanupPollingClock:
+    ExplorerRustTargetCleanupPollingClock
+{
+    func sleepUntilNextPoll() async throws {
+        try await Task.sleep(for: .milliseconds(250))
+    }
+}

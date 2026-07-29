@@ -82,6 +82,18 @@ enum ExplorerAccessibility {
         "explorer-snapshot-candidate-plan-review-refresh"
     static let snapshotCandidatePlanReviewClose =
         "explorer-snapshot-candidate-plan-review-close"
+    static let snapshotCandidateCleanupPrepare =
+        "explorer-snapshot-candidate-cleanup-prepare"
+    static let snapshotCandidateCleanupConfirm =
+        "explorer-snapshot-candidate-cleanup-confirm"
+    static let snapshotCandidateCleanupConfirmation =
+        "explorer-snapshot-candidate-cleanup-confirmation"
+    static let snapshotCandidateCleanupStatus =
+        "explorer-snapshot-candidate-cleanup-status"
+    static let snapshotCandidateCleanupCancel =
+        "explorer-snapshot-candidate-cleanup-cancel"
+    static let snapshotCandidateCleanupDismiss =
+        "explorer-snapshot-candidate-cleanup-dismiss"
     static let snapshotLargeFileThreshold = "explorer-snapshot-large-file-threshold"
     static let snapshotLargeFileAge = "explorer-snapshot-large-file-age"
     static let snapshotLargeFileTable = "explorer-snapshot-large-file-table"
@@ -172,6 +184,12 @@ enum ExplorerAccessibility {
         snapshotCandidatePlanReviewWarnings,
         snapshotCandidatePlanReviewRefresh,
         snapshotCandidatePlanReviewClose,
+        snapshotCandidateCleanupPrepare,
+        snapshotCandidateCleanupConfirm,
+        snapshotCandidateCleanupConfirmation,
+        snapshotCandidateCleanupStatus,
+        snapshotCandidateCleanupCancel,
+        snapshotCandidateCleanupDismiss,
         snapshotLargeFileThreshold,
         snapshotLargeFileAge,
         snapshotLargeFileTable,

@@ -6,12 +6,15 @@ struct ExplorerSnapshotBrowserView: View {
     @State private var presentationID = UUID()
     @State private var inspectorPresented = true
     @State private var trashConfirmationNode: ExplorerSnapshotNode?
+    @State private var rustTargetCleanupConfirmation:
+        ExplorerRustTargetCleanupConfirmation?
     let model: AppModel
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             header
             subtreeScanStatus
+            rustTargetCleanupBanner
             content
         }
         .padding(20)
@@ -39,6 +42,36 @@ struct ExplorerSnapshotBrowserView: View {
         } message: { _ in
             Text("DUX will revalidate this reviewed item and record a one-shot operation. Empty Trash separately to reclaim disk space.")
         }
+#if DUX_INTERNAL_PERMANENT_SAFE_CLEANUP
+        .confirmationDialog(
+            "Permanently remove this build output?",
+            isPresented: Binding(
+                get: { rustTargetCleanupConfirmation != nil },
+                set: { if !$0 { rustTargetCleanupConfirmation = nil } }
+            ),
+            presenting: rustTargetCleanupConfirmation
+        ) { confirmation in
+            Button("Remove build output permanently", role: .destructive) {
+                rustTargetCleanupConfirmation = nil
+                Task {
+                    await browser.startConfirmedRustTargetCleanup(confirmation)
+                }
+            }
+            .accessibilityIdentifier(
+                ExplorerAccessibility.snapshotCandidateCleanupConfirm
+            )
+            Button("Cancel", role: .cancel) {
+                rustTargetCleanupConfirmation = nil
+            }
+        } message: { confirmation in
+            Text(
+                "DUX will consume this exact short-lived review and permanently remove only the validated regenerable contents inside \(confirmation.info.target.display). The target folder and CACHEDIR.TAG marker remain. Estimated reclaimable space is \(StorageByteFormatter.string(from: confirmation.info.estimatedBytes)); the estimate is not guaranteed. This cannot be undone."
+            )
+            .accessibilityIdentifier(
+                ExplorerAccessibility.snapshotCandidateCleanupConfirmation
+            )
+        }
+#endif
         .accessibilityIdentifier(ExplorerAccessibility.snapshotBrowser)
     }
 
@@ -331,7 +364,10 @@ struct ExplorerSnapshotBrowserView: View {
             }
         )) {
             if browser.contentMode == .candidates {
-                ExplorerCandidateInspectorView(browser: browser)
+                ExplorerCandidateInspectorView(
+                    browser: browser,
+                    confirmCleanup: { rustTargetCleanupConfirmation = $0 }
+                )
                     .inspectorColumnWidth(min: 300, ideal: 380, max: 480)
             } else {
                 ExplorerSnapshotInspectorView(browser: browser)
@@ -1105,6 +1141,175 @@ struct ExplorerSnapshotBrowserView: View {
         return "\(first)–\(last) of \(browser.totalChildren)"
     }
 
+    @ViewBuilder
+    private var rustTargetCleanupBanner: some View {
+        if browser.rustTargetCleanupState != .idle {
+            GroupBox("Permanent-safe cleanup") {
+                VStack(alignment: .leading, spacing: 8) {
+                    switch browser.rustTargetCleanupState {
+                    case .idle:
+                        EmptyView()
+                    case let .starting(info):
+                        ProgressView("Starting confirmed cleanup…")
+                        Text(
+                            "The exact review for \(info.target.display) has been consumed. DUX is repeating deterministic checks before any filesystem effect."
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        cleanupCancelButton
+                    case let .observing(_, poll):
+                        cleanupPollBanner(poll)
+                    case let .startFailed(_, failure):
+                        Label(
+                            failure.title,
+                            systemImage: "exclamationmark.triangle.fill"
+                        )
+                        .foregroundStyle(.orange)
+                        Text(verbatim: failure.detail)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Text(
+                            "The reviewed capability was consumed. No automatic retry is available."
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        cleanupDismissButton
+                    case .observationFailed:
+                        Label(
+                            "Cleanup status unavailable",
+                            systemImage: "exclamationmark.triangle.fill"
+                        )
+                        .foregroundStyle(.orange)
+                        Text(
+                            "DUX rejected an invalid path-free task response. Do not retry; restart DUX and inspect Cleanup History."
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        cleanupDismissButton
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .accessibilityIdentifier(
+                    ExplorerAccessibility.snapshotCandidateCleanupStatus
+                )
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func cleanupPollBanner(
+        _ poll: ExplorerRustTargetCleanupPoll
+    ) -> some View {
+        switch poll.phase {
+        case .queued, .running:
+            ProgressView(
+                poll.cancellationRequested
+                    ? "Stopping remaining work…"
+                    : "Removing validated build output…"
+            )
+            Text(
+                poll.cancellationRequested
+                    ? "Cancellation is recorded. A filesystem operation already in progress may still need to settle."
+                    : "Closing Explorer does not cancel or retry this core-owned operation."
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            if !poll.cancellationRequested {
+                cleanupCancelButton
+            }
+        case .succeeded:
+            if let result = poll.result {
+                Label(
+                    cleanupResultTitle(result.status),
+                    systemImage: result.status == .completed
+                        ? "checkmark.circle.fill"
+                        : "exclamationmark.triangle.fill"
+                )
+                .foregroundStyle(result.status == .completed ? .green : .orange)
+                Text(
+                    "Removed \(result.removedEntries) entries · \(StorageByteFormatter.string(from: result.removedLogicalBytes)) logical · available-space change \(cleanupCapacityDelta(result.verifiedCapacityDeltaBytes))."
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                Text(verbatim: "History session \(result.sessionID)")
+                    .font(.caption.monospaced())
+                    .textSelection(.enabled)
+            }
+            cleanupDismissButton
+        case .failed:
+            let failure = poll.failure ?? .internalState
+            Label(failure.title, systemImage: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+            Text(verbatim: failure.detail)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if let sessionID = poll.result?.sessionID {
+                Text(verbatim: "Recovery history session \(sessionID)")
+                    .font(.caption.monospaced())
+                    .textSelection(.enabled)
+            }
+            Text("No retry is available from this result.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            cleanupDismissButton
+        case .cancelled:
+            Label("Cleanup stopped", systemImage: "stop.circle.fill")
+                .foregroundStyle(.orange)
+            Text(
+                "Cleanup History is the authoritative record of any work that settled before cancellation."
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            cleanupDismissButton
+        }
+    }
+
+    private var cleanupCancelButton: some View {
+        Button("Stop remaining work", role: .destructive) {
+            Task { await browser.cancelRustTargetCleanup() }
+        }
+        .accessibilityIdentifier(
+            ExplorerAccessibility.snapshotCandidateCleanupCancel
+        )
+    }
+
+    private var cleanupDismissButton: some View {
+        Button("Dismiss result") {
+            Task { await browser.dismissRustTargetCleanupResult() }
+        }
+        .accessibilityIdentifier(
+            ExplorerAccessibility.snapshotCandidateCleanupDismiss
+        )
+    }
+
+    private func cleanupResultTitle(
+        _ status: CleanupHistorySessionStatus
+    ) -> String {
+        switch status {
+        case .completed: "Cleanup completed"
+        case .partiallyCompleted: "Cleanup partially completed"
+        case .failed: "Cleanup finished with failures"
+        case .interrupted: "Cleanup was interrupted"
+        case .rejected: "Cleanup was rejected"
+        case .planned, .running, .recovering, .cancelled, .dryRun:
+            "Cleanup result rejected"
+        }
+    }
+
+    private func cleanupCapacityDelta(_ delta: Int64?) -> String {
+        guard let delta else {
+            return "not verified"
+        }
+        let formatted = StorageByteFormatter.string(from: delta.magnitude)
+        if delta > 0 {
+            return "+\(formatted)"
+        }
+        if delta < 0 {
+            return "−\(formatted)"
+        }
+        return "no measured change"
+    }
+
     private func largeFilesStatus(_ page: ExplorerSnapshotLargeFilesPage) -> String {
         let totalSize = StorageByteFormatter.string(from: page.totalMatchingLogicalBytes)
         let summary = "\(page.totalMatchingFiles) matching files · \(totalSize) observed"
@@ -1204,6 +1409,7 @@ struct ExplorerSnapshotBrowserView: View {
 
 private struct ExplorerCandidateInspectorView: View {
     @Bindable var browser: ExplorerSnapshotBrowserModel
+    let confirmCleanup: (ExplorerRustTargetCleanupConfirmation) -> Void
 
     var body: some View {
         Group {
@@ -1329,21 +1535,29 @@ private struct ExplorerCandidateInspectorView: View {
             VStack(alignment: .leading, spacing: 10) {
                 switch browser.rustTargetPlanReviewState {
                 case .idle:
-                    Label(
-                        "DUX can revalidate this exact Rust target and prepare a short-lived in-memory preview. Preparing it changes no files and records no approval.",
-                        systemImage: "checkmark.shield"
-                    )
-                    .foregroundStyle(.secondary)
-                    Button("Prepare plan preview") {
-                        Task { await browser.prepareSelectedRustTargetPlanReview() }
+                    if browser.rustTargetCleanupState == .idle {
+                        Label(
+                            "DUX can revalidate this exact Rust target and prepare a short-lived in-memory preview. Preparing it changes no files and records no approval.",
+                            systemImage: "checkmark.shield"
+                        )
+                        .foregroundStyle(.secondary)
+                        Button("Prepare plan preview") {
+                            Task { await browser.prepareSelectedRustTargetPlanReview() }
+                        }
+                        .disabled(!browser.canPrepareRustTargetPlanReview)
+                        .accessibilityIdentifier(
+                            ExplorerAccessibility.snapshotCandidatePlanReviewPrepare
+                        )
+                        .accessibilityHint(
+                            "Performs deterministic live checks without approving or removing files"
+                        )
+                    } else {
+                        Label(
+                            "The confirmed cleanup and its path-free status are shown above the snapshot browser.",
+                            systemImage: "arrow.up.circle"
+                        )
+                        .foregroundStyle(.secondary)
                     }
-                    .disabled(!browser.canPrepareRustTargetPlanReview)
-                    .accessibilityIdentifier(
-                        ExplorerAccessibility.snapshotCandidatePlanReviewPrepare
-                    )
-                    .accessibilityHint(
-                        "Performs deterministic live checks without approving or removing files"
-                    )
                 case .preparing:
                     ProgressView("Performing deterministic live checks…")
                         .accessibilityIdentifier(
@@ -1396,6 +1610,27 @@ private struct ExplorerCandidateInspectorView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     HStack {
+#if DUX_INTERNAL_PERMANENT_SAFE_CLEANUP
+                        Button("Remove build output…", role: .destructive) {
+                            if let confirmation =
+                                browser.makeRustTargetCleanupConfirmation()
+                            {
+                                confirmCleanup(confirmation)
+                            }
+                        }
+                        .accessibilityIdentifier(
+                            ExplorerAccessibility.snapshotCandidateCleanupPrepare
+                        )
+                        .accessibilityHint(
+                            "Opens a destructive confirmation for this exact reviewed plan"
+                        )
+#else
+                        Label(
+                            "Cleanup execution is unavailable in this build",
+                            systemImage: "lock.shield"
+                        )
+                        .foregroundStyle(.secondary)
+#endif
                         Button("Check again") {
                             Task { await browser.prepareSelectedRustTargetPlanReview() }
                         }

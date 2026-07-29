@@ -71,6 +71,9 @@ protocol DuxSnapshotReviewBrowsing: Sendable {
     func releaseRustTargetPlanReview(
         _ handle: ExplorerRustTargetPlanReviewHandle
     ) async
+    func startRustTargetCleanup(
+        _ handle: ExplorerRustTargetPlanReviewHandle
+    ) async throws -> any DuxRustTargetCleanupTask
     func resolveLiveItem(
         scanID: String,
         nodeID: UInt64,
@@ -104,6 +107,12 @@ extension DuxSnapshotReviewBrowsing {
     func releaseRustTargetPlanReview(
         _: ExplorerRustTargetPlanReviewHandle
     ) async {}
+
+    func startRustTargetCleanup(
+        _: ExplorerRustTargetPlanReviewHandle
+    ) async throws -> any DuxRustTargetCleanupTask {
+        throw ExplorerRustTargetCleanupStartError.unavailable
+    }
 
     func resolveLiveItem(
         scanID _: String,
@@ -376,6 +385,7 @@ final class ExplorerSnapshotBrowserModel {
     private(set) var isCandidatePathPaging = false
     private(set) var isCandidateEvidencePaging = false
     private(set) var rustTargetPlanReviewState = ExplorerRustTargetPlanReviewState.idle
+    private(set) var rustTargetCleanupState = ExplorerRustTargetCleanupState.idle
     private(set) var largeFileThreshold = ExplorerSnapshotLargeFileThreshold.gibibyte1
     private(set) var largeFileAge = ExplorerSnapshotLargeFileAge.any
     private(set) var largeFilesPage: ExplorerSnapshotLargeFilesPage?
@@ -398,6 +408,7 @@ final class ExplorerSnapshotBrowserModel {
     private let subtreeScans: any DuxSnapshotSubtreeScanServing
     private let scanDriver: (any ExplorerSubtreeScanDriving)?
     private let rustTargetPlanReviewClock: any ExplorerRustTargetPlanReviewClock
+    private let rustTargetCleanupPollingClock: any ExplorerRustTargetCleanupPollingClock
 
     @ObservationIgnored
     private var generation: UInt64 = 0
@@ -422,6 +433,14 @@ final class ExplorerSnapshotBrowserModel {
     @ObservationIgnored
     private var rustTargetPlanReviewExpiryTask: Task<Void, Never>?
     @ObservationIgnored
+    private var rustTargetCleanupGeneration: UInt64 = 0
+    @ObservationIgnored
+    private var rustTargetCleanupTask: (any DuxRustTargetCleanupTask)?
+    @ObservationIgnored
+    private var rustTargetCleanupDriverTask: Task<Void, Never>?
+    @ObservationIgnored
+    private var rustTargetCleanupCancellationRequested = false
+    @ObservationIgnored
     private var coverageGeneration: UInt64 = 0
     @ObservationIgnored
     private var liveActionGeneration: UInt64 = 0
@@ -438,7 +457,9 @@ final class ExplorerSnapshotBrowserModel {
             UnavailableDuxSnapshotSubtreeScanService(),
         scanDriver: (any ExplorerSubtreeScanDriving)? = nil,
         rustTargetPlanReviewClock: any ExplorerRustTargetPlanReviewClock =
-            ContinuousExplorerRustTargetPlanReviewClock()
+            ContinuousExplorerRustTargetPlanReviewClock(),
+        rustTargetCleanupPollingClock: any ExplorerRustTargetCleanupPollingClock =
+            ContinuousExplorerRustTargetCleanupPollingClock()
     ) {
         self.reviews = reviews
         self.history = history
@@ -447,6 +468,7 @@ final class ExplorerSnapshotBrowserModel {
         self.subtreeScans = subtreeScans
         self.scanDriver = scanDriver
         self.rustTargetPlanReviewClock = rustTargetPlanReviewClock
+        self.rustTargetCleanupPollingClock = rustTargetCleanupPollingClock
     }
 
     var currentDirectory: ExplorerSnapshotNode? {
@@ -528,6 +550,8 @@ final class ExplorerSnapshotBrowserModel {
             && !isCandidateLoading
             && isSelectedRustTargetPlanReviewCandidate
             && rustTargetPlanReviewState != .preparing
+            && !rustTargetCleanupState.isActive
+            && rustTargetCleanupState == .idle
     }
 
     var hasPreviousCandidatePathPage: Bool {
@@ -1321,6 +1345,157 @@ final class ExplorerSnapshotBrowserModel {
 
     func closeRustTargetPlanReview() async {
         await releaseRustTargetPlanReview()
+    }
+
+    func makeRustTargetCleanupConfirmation()
+        -> ExplorerRustTargetCleanupConfirmation?
+    {
+        guard
+            rustTargetCleanupState == .idle,
+            case let .ready(info) = rustTargetPlanReviewState,
+            let handle = rustTargetPlanReviewHandle,
+            handle.info == info
+        else {
+            return nil
+        }
+        return ExplorerRustTargetCleanupConfirmation(
+            generation: rustTargetCleanupGeneration,
+            reviewHandleID: handle.id,
+            info: info
+        )
+    }
+
+    /// Starts cleanup only from the exact confirmation currently displayed by
+    /// SwiftUI. The controller, not these display facts, owns and consumes the
+    /// opaque core review used as execution authority.
+    func startConfirmedRustTargetCleanup(
+        _ confirmation: ExplorerRustTargetCleanupConfirmation
+    ) async {
+        guard
+            rustTargetCleanupState == .idle,
+            confirmation.generation == rustTargetCleanupGeneration,
+            case let .ready(info) = rustTargetPlanReviewState,
+            info == confirmation.info,
+            let handle = rustTargetPlanReviewHandle,
+            handle.id == confirmation.reviewHandleID,
+            handle.info == confirmation.info
+        else {
+            return
+        }
+
+        rustTargetPlanReviewGeneration &+= 1
+        rustTargetPlanReviewExpiryTask?.cancel()
+        rustTargetPlanReviewExpiryTask = nil
+        rustTargetPlanReviewHandle = nil
+        rustTargetPlanReviewState = .idle
+
+        rustTargetCleanupGeneration &+= 1
+        let operation = rustTargetCleanupGeneration
+        rustTargetCleanupCancellationRequested = false
+        rustTargetCleanupState = .starting(info)
+        let reviews = reviews
+        let clock = rustTargetCleanupPollingClock
+        let driver = Task { @MainActor [weak self] in
+            guard let self else {
+                return
+            }
+            do {
+                let task = try await reviews.startRustTargetCleanup(handle)
+                guard operation == self.rustTargetCleanupGeneration else {
+                    _ = try? await task.requestCancellation()
+                    return
+                }
+                self.rustTargetCleanupTask = task
+                if self.rustTargetCleanupCancellationRequested {
+                    _ = try? await task.requestCancellation()
+                }
+
+                while operation == self.rustTargetCleanupGeneration {
+                    let poll = try await task.poll()
+                    guard operation == self.rustTargetCleanupGeneration else {
+                        _ = try? await task.requestCancellation()
+                        return
+                    }
+                    self.rustTargetCleanupState = .observing(info, poll)
+                    if poll.phase.isTerminal {
+                        self.finishRustTargetCleanupDriver(operation: operation)
+                        return
+                    }
+                    do {
+                        try await clock.sleepUntilNextPoll()
+                    } catch {
+                        // A confirmed core task must not lose observation merely
+                        // because the initiating Swift task was cancelled.
+                        continue
+                    }
+                }
+                _ = try? await task.requestCancellation()
+            } catch {
+                guard operation == self.rustTargetCleanupGeneration else {
+                    return
+                }
+                if self.rustTargetCleanupTask == nil {
+                    let startError = (error as? ExplorerRustTargetCleanupStartError)
+                        ?? .invalidResponse
+                    self.rustTargetCleanupState = .startFailed(
+                        info,
+                        startError.failure
+                    )
+                } else {
+                    self.rustTargetCleanupState = .observationFailed(info)
+                }
+                self.finishRustTargetCleanupDriver(operation: operation)
+            }
+        }
+        rustTargetCleanupDriverTask = driver
+        await driver.value
+    }
+
+    func cancelRustTargetCleanup() async {
+        guard rustTargetCleanupState.isActive else {
+            return
+        }
+        rustTargetCleanupCancellationRequested = true
+        guard let task = rustTargetCleanupTask else {
+            return
+        }
+        _ = try? await task.requestCancellation()
+    }
+
+    func dismissRustTargetCleanupResult() async {
+        guard
+            !rustTargetCleanupState.isActive,
+            rustTargetCleanupDriverTask == nil
+        else {
+            return
+        }
+        rustTargetCleanupGeneration &+= 1
+        rustTargetCleanupState = .idle
+        rustTargetCleanupCancellationRequested = false
+        if phase == .ready, contentMode == .candidates {
+            await reloadCandidates()
+        }
+    }
+
+    /// App shutdown explicitly requests cancellation and waits for the
+    /// confirmed operation observer. Ordinary Explorer dismissal deliberately
+    /// does neither; dropping a window must not pretend to undo an effect.
+    func shutdownRustTargetCleanup() async {
+        rustTargetCleanupCancellationRequested = true
+        if let task = rustTargetCleanupTask {
+            _ = try? await task.requestCancellation()
+        }
+        if let driver = rustTargetCleanupDriverTask {
+            await driver.value
+        }
+    }
+
+    private func finishRustTargetCleanupDriver(operation: UInt64) {
+        guard operation == rustTargetCleanupGeneration else {
+            return
+        }
+        rustTargetCleanupTask = nil
+        rustTargetCleanupDriverTask = nil
     }
 
     private func loadCandidatePathPage(cursor: UInt16) async {

@@ -8,6 +8,7 @@ import unittest
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "dux-macos/scripts/release-notarized-dmg.sh"
 ENTITLEMENTS = REPO_ROOT / "dux-macos/Config/Release.entitlements"
+PROJECT_SPEC = REPO_ROOT / "dux-macos/project.yml"
 
 
 class MacOSReleaseScriptTests(unittest.TestCase):
@@ -97,6 +98,26 @@ class MacOSReleaseScriptTests(unittest.TestCase):
         self.assertEqual(source.count("submit_and_require_accepted \"$"), 2)
         self.assertIn("xcrun stapler staple \"$staged_app\"", source)
         self.assertIn("xcrun stapler staple \"$staged_dmg\"", source)
+
+    def test_permanent_cleanup_ui_is_internal_debug_only(self) -> None:
+        source = SCRIPT.read_text(encoding="utf-8")
+        project_spec = PROJECT_SPEC.read_text(encoding="utf-8")
+
+        self.assertIn(
+            'verify_permanent_cleanup_feature_gate',
+            source,
+        )
+        self.assertIn(
+            'permanent cleanup UI must not be compiled into public Release builds',
+            source,
+        )
+        self.assertIn(
+            'Debug:\n'
+            '          SWIFT_ACTIVE_COMPILATION_CONDITIONS: '
+            '"$(inherited) DUX_INTERNAL_PERMANENT_SAFE_CLEANUP"\n'
+            '        Release:',
+            project_spec,
+        )
 
 
 if __name__ == "__main__":

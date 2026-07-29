@@ -184,6 +184,7 @@ final class AppRuntime {
             await model.shutdownCleanupHistoryClear()
             model.invalidateCleanupHistoryOperations()
             await scans.shutdownHomeScan()
+            await explorerSnapshotBrowser.shutdownRustTargetCleanup()
             await explorerSnapshotBrowser.close()
             await capacityResampleRouter?.invalidate()
             await capacityScheduler.stop()

@@ -9,8 +9,21 @@
   opaque task supports explicit cancellation and path-free polling with strict
   phase/failure/result validation and durable history correlation. Dropping it
   neither cancels nor retries work. Generated Swift bindings include the new
-  transport, while the native service and UI intentionally expose no permanent
-  cleanup action yet. Process-quiescence proof revision 2 continues to read a
+  transport. The native service now maps the consuming edge into an app-owned,
+  consume-once task without accepting a caller path or reconstructed plan. The
+  review controller binds execution to the complete immutable
+  information shown in confirmation, removes the exact child before
+  suspension, and rejects a same-UUID handle if any displayed plan field
+  differs. Explorer generation-fences confirmation and task observation,
+  presents queued, running, cancellation, changed-since-plan, partial, failed,
+  unknown, and terminal path-free states in a persistent accessible banner,
+  never retries, keeps observation alive when the Explorer window closes, and
+  requests cancellation plus waits during app shutdown. This execution action
+  is compiled only with `DUX_INTERNAL_PERMANENT_SAFE_CLEANUP` in Debug builds;
+  Release shows the review preview as unavailable for execution, and the
+  notarized-release pipeline rejects resolved Release settings containing that
+  condition. The public §17.3 cleanup release gate therefore remains closed.
+  Process-quiescence proof revision 2 continues to read a
   bounded complete libproc PID/name table but obtains executable identity only
   for exact guarded `cargo`/`rustc` names; inaccessible guarded identities
   still fail closed, while unrelated applications no longer block planning

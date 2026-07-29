@@ -32,6 +32,116 @@ final class SnapshotReviewControllerTests: XCTestCase {
         await controller.shutdown()
     }
 
+    func testCleanupStartConsumesExactChildBeforeSuspending() async throws {
+        let cleanup = ControllerCleanupTaskSpy()
+        let plan = StubRustTargetPlanReviewSession(
+            scanID: "scan:one",
+            candidateID: "candidate:one",
+            cleanupTask: cleanup
+        )
+        let lease = StubSnapshotReviewLease(
+            scanID: "scan:one",
+            planReview: plan
+        )
+        let controller = DuxSnapshotReviewController(
+            service: StubSnapshotReviewService(leases: [lease]),
+            clock: SuspendedSnapshotReviewClock()
+        )
+        try await controller.acquire(scanID: "scan:one")
+        let handle = try await controller.prepareRustTargetPlanReview(
+            scanID: "scan:one",
+            candidateID: "candidate:one"
+        )
+
+        let task = try await controller.startRustTargetCleanup(handle)
+        do {
+            _ = try await controller.startRustTargetCleanup(handle)
+            XCTFail("Expected the exact child to be consume-once")
+        } catch {
+            XCTAssertEqual(
+                error as? ExplorerRustTargetCleanupStartError,
+                .reviewUnavailable
+            )
+        }
+        await controller.releaseRustTargetPlanReview(handle)
+
+        let cleanupStartCount = await plan.cleanupStartCount()
+        let releaseCount = await plan.releaseCount()
+        let activeLeaseCount = await controller.activeLeaseCount()
+        XCTAssertTrue((task as AnyObject) === cleanup)
+        XCTAssertEqual(cleanupStartCount, 1)
+        XCTAssertEqual(releaseCount, 0)
+        XCTAssertEqual(activeLeaseCount, 1)
+        await controller.shutdown()
+    }
+
+    func testCleanupStartRejectsAlteredInfoWithoutConsumingExactChild() async throws {
+        let cleanup = ControllerCleanupTaskSpy()
+        let plan = StubRustTargetPlanReviewSession(
+            scanID: "scan:one",
+            candidateID: "candidate:one",
+            cleanupTask: cleanup
+        )
+        let lease = StubSnapshotReviewLease(
+            scanID: "scan:one",
+            planReview: plan
+        )
+        let controller = DuxSnapshotReviewController(
+            service: StubSnapshotReviewService(leases: [lease]),
+            clock: SuspendedSnapshotReviewClock()
+        )
+        try await controller.acquire(scanID: "scan:one")
+        let handle = try await controller.prepareRustTargetPlanReview(
+            scanID: "scan:one",
+            candidateID: "candidate:one"
+        )
+        let alteredInfo = ExplorerRustTargetPlanReviewInfo(
+            planID: "plan:altered",
+            sourceScanID: handle.info.sourceScanID,
+            candidateID: handle.info.candidateID,
+            ruleID: handle.info.ruleID,
+            ruleRevision: handle.info.ruleRevision,
+            category: handle.info.category,
+            mode: handle.info.mode,
+            safety: handle.info.safety,
+            action: handle.info.action,
+            estimatedBytes: handle.info.estimatedBytes,
+            itemCount: handle.info.itemCount,
+            pathCount: handle.info.pathCount,
+            warnings: handle.info.warnings,
+            createdAt: handle.info.createdAt,
+            effectiveExpiresAt: handle.info.effectiveExpiresAt,
+            scheduleEligible: handle.info.scheduleEligible,
+            target: ExplorerRustTargetPlanReviewPath(
+                encoding: handle.info.target.encoding,
+                encodedBytes: handle.info.target.encodedBytes,
+                display: "/Users/example/forged/target"
+            )
+        )
+        let alteredHandle = ExplorerRustTargetPlanReviewHandle(
+            id: handle.id,
+            info: alteredInfo
+        )
+
+        do {
+            _ = try await controller.startRustTargetCleanup(alteredHandle)
+            XCTFail("Expected altered display information to be rejected")
+        } catch {
+            XCTAssertEqual(
+                error as? ExplorerRustTargetCleanupStartError,
+                .reviewUnavailable
+            )
+        }
+        let startsAfterRejection = await plan.cleanupStartCount()
+        XCTAssertEqual(startsAfterRejection, 0)
+
+        let task = try await controller.startRustTargetCleanup(handle)
+        let finalStartCount = await plan.cleanupStartCount()
+        XCTAssertTrue((task as AnyObject) === cleanup)
+        XCTAssertEqual(finalStartCount, 1)
+        await controller.shutdown()
+    }
+
     func testFinalParentReleaseDrainsOwnedPlanReviewBeforeParent() async throws {
         let events = ControllerReleaseEvents()
         let plan = StubRustTargetPlanReviewSession(
@@ -852,9 +962,11 @@ private actor StubRustTargetPlanReviewSession: DuxRustTargetPlanReviewSession {
     private let events: ControllerReleaseEvents?
     private let infoError: ExplorerRustTargetPlanReviewError?
     private let refreshInfoError: ExplorerRustTargetPlanReviewError?
+    private let cleanupTask: (any DuxRustTargetCleanupTask)?
     private let record: ExplorerRustTargetPlanReviewRecord
     private var infos = 0
     private var releases = 0
+    private var cleanupStarts = 0
 
     init(
         scanID: String,
@@ -862,12 +974,14 @@ private actor StubRustTargetPlanReviewSession: DuxRustTargetPlanReviewSession {
         recordCandidateID: String? = nil,
         infoError: ExplorerRustTargetPlanReviewError? = nil,
         refreshInfoError: ExplorerRustTargetPlanReviewError? = nil,
+        cleanupTask: (any DuxRustTargetCleanupTask)? = nil,
         events: ControllerReleaseEvents? = nil
     ) {
         self.scanID = scanID
         self.candidateID = candidateID
         self.infoError = infoError
         self.refreshInfoError = refreshInfoError
+        self.cleanupTask = cleanupTask
         self.events = events
         let now = Date()
         record = controllerPlanReviewRecord(
@@ -894,12 +1008,43 @@ private actor StubRustTargetPlanReviewSession: DuxRustTargetPlanReviewSession {
         await events?.append("plan")
     }
 
+    func startCleanup() throws -> any DuxRustTargetCleanupTask {
+        cleanupStarts += 1
+        guard let cleanupTask else {
+            throw ExplorerRustTargetCleanupStartError.unavailable
+        }
+        return cleanupTask
+    }
+
     func infoCount() -> Int {
         infos
     }
 
     func releaseCount() -> Int {
         releases
+    }
+
+    func cleanupStartCount() -> Int {
+        cleanupStarts
+    }
+}
+
+private final class ControllerCleanupTaskSpy:
+    DuxRustTargetCleanupTask,
+    @unchecked Sendable
+{
+    func poll() async throws -> ExplorerRustTargetCleanupPoll {
+        ExplorerRustTargetCleanupPoll(
+            phase: .cancelled,
+            cancellationRequested: true,
+            revision: 1,
+            failure: nil,
+            result: nil
+        )
+    }
+
+    func requestCancellation() async throws -> ExplorerRustTargetCleanupCancelOutcome {
+        .alreadyTerminal
     }
 }
 
