@@ -26,7 +26,7 @@ use super::{
     resume_recovery, settle_cancellation, terminalize,
 };
 use crate::domain::CleanupPlan;
-use crate::persistence::cleanup_history::CleanupSessionId;
+use crate::persistence::cleanup_history::{CleanupSessionId, CleanupTrigger};
 use crate::persistence::history::{
     HistoryError, HistoryErrorKind, system_time_to_unix_ms, unix_ms_to_system_time,
 };
@@ -60,6 +60,38 @@ pub(crate) struct CleanupJournalClaim {
     test_fault: Cell<TestJournalFault>,
 }
 
+/// A terminal outcome from validation-only dry-run orchestration.
+///
+/// Every refusal carries a stable, non-sensitive category. `Cancelled`
+/// differs from `Interrupted` only in the terminal parent classification; both
+/// persist an interrupted path without effect evidence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ValidatedDryRunOutcome {
+    DryRun,
+    ChangedSincePlan(&'static str),
+    Rejected(&'static str),
+    Unavailable(&'static str),
+    Interrupted(&'static str),
+    Cancelled(&'static str),
+    Failed(&'static str),
+}
+
+impl ValidatedDryRunOutcome {
+    fn journal_parts(self) -> (ValidationOutcome, Option<&'static str>, bool) {
+        match self {
+            Self::DryRun => (ValidationOutcome::DryRun, None, false),
+            Self::ChangedSincePlan(error) => {
+                (ValidationOutcome::ChangedSincePlan, Some(error), false)
+            }
+            Self::Rejected(error) => (ValidationOutcome::Rejected, Some(error), false),
+            Self::Unavailable(error) => (ValidationOutcome::Unavailable, Some(error), false),
+            Self::Interrupted(error) => (ValidationOutcome::Interrupted, Some(error), false),
+            Self::Cancelled(error) => (ValidationOutcome::Interrupted, Some(error), true),
+            Self::Failed(error) => (ValidationOutcome::Failed, Some(error), false),
+        }
+    }
+}
+
 pub(in crate::persistence) enum RecoveryClaimResult {
     Claimed(Box<CleanupJournalClaim>),
     OwnerAlive,
@@ -80,6 +112,41 @@ enum RecoveryDecision {
 pub(crate) struct JournalLeaseFailure {
     lease: CleanupJournalLease,
     error: HistoryError,
+}
+
+/// A failed validation-only journal write that retains the cleanup lease.
+///
+/// Retaining the lease lets a caller retry the exact same operation after an
+/// ambiguous storage result. A retry succeeds only when the complete durable
+/// graph exactly matches the requested observation.
+#[must_use = "retain the lease and retry the exact observation or deliberately release it"]
+pub(crate) struct DryRunJournalFailure {
+    lease: CleanupJournalLease,
+    error: HistoryError,
+    may_have_committed: bool,
+}
+
+impl DryRunJournalFailure {
+    pub(crate) fn kind(&self) -> HistoryErrorKind {
+        self.error.kind
+    }
+
+    pub(crate) fn into_lease(self) -> CleanupJournalLease {
+        self.lease
+    }
+
+    pub(crate) const fn may_have_committed(&self) -> bool {
+        self.may_have_committed
+    }
+}
+
+impl fmt::Debug for DryRunJournalFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DryRunJournalFailure")
+            .field("error", &self.error)
+            .finish_non_exhaustive()
+    }
 }
 
 impl JournalLeaseFailure {
@@ -186,6 +253,109 @@ impl StoreCoordinator {
 }
 
 impl CleanupJournalLease {
+    /// Durably record one already validated DryRun observation without ever
+    /// creating an execution owner or an effect-capable journal claim.
+    ///
+    /// The exact plan is inserted uncoupled and terminalized in one SQLite
+    /// transaction while this value retains the store-wide cleanup lock. A
+    /// deny-only user exclusion observed under the same lock converts only an
+    /// otherwise successful observation to a durable
+    /// `Rejected("user_excluded")` record.
+    pub(crate) fn record_validated_dry_run(
+        self,
+        session_id: CleanupSessionId,
+        plan: &CleanupPlan,
+        trigger: CleanupTrigger,
+        requested_outcome: ValidatedDryRunOutcome,
+        started_at: SystemTime,
+        completed_at: SystemTime,
+    ) -> Result<TerminalSessionStatus, DryRunJournalFailure> {
+        let attempt = (|| {
+            if plan.mode() != crate::domain::CleanupMode::DryRun {
+                return Err(definite_write_failure(HistoryError::new(
+                    HistoryErrorKind::InvalidInput,
+                )));
+            }
+            let started_at = crate::persistence::canonical_started_at(started_at)
+                .map_err(definite_write_failure)?;
+            let completed_at = crate::persistence::canonical_started_at(completed_at)
+                .map_err(definite_write_failure)?;
+            if completed_at < started_at {
+                return Err(definite_write_failure(HistoryError::new(
+                    HistoryErrorKind::InvalidInput,
+                )));
+            }
+            let outcome = if matches!(requested_outcome, ValidatedDryRunOutcome::DryRun)
+                && self
+                    .plan_contains_user_exclusion(plan)
+                    .map_err(definite_write_failure)?
+            {
+                ValidatedDryRunOutcome::Rejected("user_excluded")
+            } else {
+                requested_outcome
+            };
+            let (validation, error_category, cancellation_requested) = outcome.journal_parts();
+            let expected_status = terminal_status_for_observed_dry_run(outcome);
+            match self.write_classified(|transaction| {
+                super::record_validated_dry_run(
+                    transaction,
+                    session_id.clone(),
+                    plan,
+                    trigger,
+                    validation,
+                    error_category,
+                    cancellation_requested,
+                    started_at,
+                    completed_at,
+                )
+            }) {
+                Ok(status) => Ok(status),
+                Err(failure) => {
+                    let reconciled = self
+                        .load(&session_id)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|journal| {
+                            observed_dry_run_matches(
+                                &journal,
+                                plan,
+                                trigger,
+                                outcome,
+                                started_at,
+                                completed_at,
+                                expected_status,
+                            )
+                        });
+                    if reconciled {
+                        Ok(expected_status)
+                    } else {
+                        Err(failure)
+                    }
+                }
+            }
+        })();
+        match attempt {
+            Ok(status) => Ok(status),
+            Err(failure) => Err(DryRunJournalFailure {
+                lease: self,
+                error: failure.error,
+                may_have_committed: failure.may_have_committed,
+            }),
+        }
+    }
+
+    fn plan_contains_user_exclusion(&self, plan: &CleanupPlan) -> Result<bool, HistoryError> {
+        self.store.validate_cleanup_lock_for_journal(&self.guard)?;
+        let connection = self.store.lock_current_history_connection()?;
+        self.store.validate_cleanup_lock_for_journal(&self.guard)?;
+        let exclusions = crate::persistence::load_cleanup_exclusions(&connection.connection)?;
+        Ok(plan
+            .items()
+            .iter()
+            .flat_map(|item| item.paths())
+            .any(|path| exclusions.contains_path(path)))
+    }
+
     /// Compare a planned history observation before claiming it. The caller
     /// still must claim and compare again under the journal owner fence.
     pub(crate) fn validate_planned_plan(
@@ -488,6 +658,27 @@ fn validate_journal_plan(
     journal: &CleanupJournal,
     expected: &CleanupPlan,
 ) -> Result<(), HistoryError> {
+    validate_frozen_journal_plan(journal, expected)?;
+    if journal.items.iter().any(|item| {
+        item.status != PathStatus::Planned
+            || item.error_category.is_some()
+            || item.paths.iter().any(|path| {
+                path.status != PathStatus::Planned
+                    || path.attempt_generation.is_some()
+                    || path.error_category.is_some()
+                    || path.effect_started_at.is_some()
+                    || path.completed_at.is_some()
+            })
+    }) {
+        return Err(HistoryError::new(HistoryErrorKind::InvalidTransition));
+    }
+    Ok(())
+}
+
+fn validate_frozen_journal_plan(
+    journal: &CleanupJournal,
+    expected: &CleanupPlan,
+) -> Result<(), HistoryError> {
     if journal.plan_id != *expected.id()
         || journal.source_scan_id != *expected.source_scan_id()
         || journal.plan_created_at != expected.created_at()
@@ -519,12 +710,65 @@ fn validate_journal_plan(
             return Err(HistoryError::new(HistoryErrorKind::InvalidTransition));
         }
         for (path, expected_path) in journal_item.paths.iter().zip(expected_item.paths()) {
-            if path.target != *expected_path || path.status != PathStatus::Planned {
+            if path.target != *expected_path {
                 return Err(HistoryError::new(HistoryErrorKind::InvalidTransition));
             }
         }
     }
     Ok(())
+}
+
+fn terminal_status_for_observed_dry_run(outcome: ValidatedDryRunOutcome) -> TerminalSessionStatus {
+    match outcome {
+        ValidatedDryRunOutcome::DryRun => TerminalSessionStatus::DryRun,
+        ValidatedDryRunOutcome::ChangedSincePlan(_)
+        | ValidatedDryRunOutcome::Unavailable(_)
+        | ValidatedDryRunOutcome::Failed(_) => TerminalSessionStatus::Failed,
+        ValidatedDryRunOutcome::Rejected(_) => TerminalSessionStatus::Rejected,
+        ValidatedDryRunOutcome::Interrupted(_) => TerminalSessionStatus::Interrupted,
+        ValidatedDryRunOutcome::Cancelled(_) => TerminalSessionStatus::Cancelled,
+    }
+}
+
+fn observed_dry_run_matches(
+    journal: &CleanupJournal,
+    expected_plan: &CleanupPlan,
+    expected_trigger: CleanupTrigger,
+    outcome: ValidatedDryRunOutcome,
+    started_at: SystemTime,
+    completed_at: SystemTime,
+    expected_status: TerminalSessionStatus,
+) -> bool {
+    if validate_frozen_journal_plan(journal, expected_plan).is_err()
+        || journal.trigger != expected_trigger
+        || journal.started_at != started_at
+        || journal.candidate_status_coupling
+            != crate::persistence::cleanup_history::CandidateStatusCoupling::LegacyUncoupled
+    {
+        return false;
+    }
+    let (_, error_category, cancellation_requested) = outcome.journal_parts();
+    let expected_path_status = PathStatus::from(outcome.journal_parts().0);
+    matches!(
+        journal.lifecycle,
+        JournalLifecycle::ObservedTerminal {
+            status,
+            completed_at: loaded_completed_at,
+            cancellation_requested: loaded_cancellation,
+        } if status == expected_status
+            && loaded_completed_at == completed_at
+            && loaded_cancellation == cancellation_requested
+    ) && journal.items.iter().all(|item| {
+        item.status == expected_path_status
+            && item.error_category.as_deref() == error_category
+            && item.paths.iter().all(|path| {
+                path.status == expected_path_status
+                    && path.attempt_generation == Some(1)
+                    && path.error_category.as_deref() == error_category
+                    && path.effect_started_at.is_none()
+                    && path.completed_at == Some(completed_at)
+            })
+    })
 }
 
 impl CleanupJournalClaim {

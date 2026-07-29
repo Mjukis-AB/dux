@@ -81,6 +81,28 @@ impl Fixture {
         item_count: usize,
         selected: &[usize],
     ) -> Self {
+        Self::new_with_selected_in_temp_and_record(temp, mode, action, item_count, selected, true)
+    }
+
+    fn new_unrecorded(mode: CleanupMode, action: CandidateAction, item_count: usize) -> Self {
+        Self::new_with_selected_in_temp_and_record(
+            TempDir::new().unwrap(),
+            mode,
+            action,
+            item_count,
+            &[],
+            false,
+        )
+    }
+
+    fn new_with_selected_in_temp_and_record(
+        temp: TempDir,
+        mode: CleanupMode,
+        action: CandidateAction,
+        item_count: usize,
+        selected: &[usize],
+        record_plan: bool,
+    ) -> Self {
         let database = temp.path().join("store").join("dux.sqlite3");
         let root = temp.path().join("root");
         let store = StoreCoordinator::open(&database).unwrap();
@@ -128,17 +150,19 @@ impl Fixture {
         let expires_at = plan.expires_at();
         let started_at = UNIX_EPOCH + Duration::from_millis(SESSION_STARTED_MILLIS);
         let session_id = CleanupSessionId::new("session:cleanup-journal").unwrap();
-        store
-            .record_cleanup_session_planned(
-                &NewCleanupSessionRecord::try_from_plan(
-                    session_id.clone(),
-                    &plan,
-                    started_at,
-                    CleanupTrigger::Manual,
+        if record_plan {
+            store
+                .record_cleanup_session_planned(
+                    &NewCleanupSessionRecord::try_from_plan(
+                        session_id.clone(),
+                        &plan,
+                        started_at,
+                        CleanupTrigger::Manual,
+                    )
+                    .unwrap(),
                 )
-                .unwrap(),
-            )
-            .unwrap();
+                .unwrap();
+        }
         Self {
             _temp: temp,
             store,
@@ -412,6 +436,417 @@ fn scalar_state_validator_accepts_planned_active_and_terminal_journals() {
         .terminalize(fixture.started_at + Duration::from_secs(3), None)
         .unwrap();
     fixture.validate_scalar_state().unwrap();
+}
+
+#[test]
+fn validated_dry_run_is_atomic_uncoupled_terminal_history_without_effect_fields() {
+    let fixture = Fixture::new_unrecorded(
+        CleanupMode::DryRun,
+        CandidateAction::RemoveKnownRegenerableContents,
+        2,
+    );
+    let completed_at = fixture.started_at + Duration::from_secs(2);
+    assert_eq!(
+        fixture
+            .lease()
+            .record_validated_dry_run(
+                fixture.session_id.clone(),
+                &fixture.plan,
+                CleanupTrigger::Manual,
+                ValidatedDryRunOutcome::DryRun,
+                fixture.started_at,
+                completed_at,
+            )
+            .unwrap(),
+        TerminalSessionStatus::DryRun
+    );
+
+    let snapshot = fixture.lease().load(&fixture.session_id).unwrap().unwrap();
+    assert!(matches!(
+        snapshot.lifecycle,
+        JournalLifecycle::ObservedTerminal {
+            status: TerminalSessionStatus::DryRun,
+            cancellation_requested: false,
+            ..
+        }
+    ));
+    assert!(snapshot.items.iter().all(|item| {
+        item.status == PathStatus::DryRun
+            && item.error_category.is_none()
+            && item.paths.iter().all(|path| {
+                path.status == PathStatus::DryRun
+                    && path.attempt_generation == Some(1)
+                    && path.error_category.is_none()
+                    && path.effect_started_at.is_none()
+                    && path.completed_at.is_some()
+            })
+    }));
+    assert_eq!(
+        fixture.candidate_status(0),
+        CandidateHistoryStatus::Discovered
+    );
+    assert_eq!(
+        fixture.candidate_status(1),
+        CandidateHistoryStatus::Discovered
+    );
+    assert_eq!(fixture.claim_count(), 0);
+
+    let parent = fixture.store.with_connection(|connection| {
+        connection
+            .query_row(
+                "SELECT status, verified_capacity_delta_bytes,
+                        execution_owner_id, execution_generation,
+                        last_heartbeat_at_unix_ms, cancellation_requested,
+                        candidate_status_coupling_version
+                 FROM cleanup_sessions WHERE session_id = ?1",
+                [fixture.session_id.as_str()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<i64>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<i64>>(3)?,
+                        row.get::<_, Option<i64>>(4)?,
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, i64>(6)?,
+                    ))
+                },
+            )
+            .unwrap()
+    });
+    assert_eq!(parent, ("dry_run".to_owned(), None, None, None, None, 0, 1));
+    let history = fixture
+        .store
+        .cleanup_history_session(&fixture.session_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        history.summary.status,
+        crate::persistence::StoredCleanupSessionStatus::DryRun
+    );
+    assert_eq!(history.summary.verified_capacity_delta_bytes, None);
+    assert_eq!(history.summary.path_status_counts.dry_run, 2);
+    fixture.validate_scalar_state().unwrap();
+}
+
+#[test]
+fn validated_dry_run_refusals_are_ownerless_terminal_observations() {
+    let cases = [
+        (
+            ValidatedDryRunOutcome::ChangedSincePlan("target_changed"),
+            TerminalSessionStatus::Failed,
+            PathStatus::ChangedSincePlan,
+            false,
+        ),
+        (
+            ValidatedDryRunOutcome::Rejected("protected_path"),
+            TerminalSessionStatus::Rejected,
+            PathStatus::Rejected,
+            false,
+        ),
+        (
+            ValidatedDryRunOutcome::Unavailable("volume_unavailable"),
+            TerminalSessionStatus::Failed,
+            PathStatus::Unavailable,
+            false,
+        ),
+        (
+            ValidatedDryRunOutcome::Interrupted("validation_interrupted"),
+            TerminalSessionStatus::Interrupted,
+            PathStatus::Interrupted,
+            false,
+        ),
+        (
+            ValidatedDryRunOutcome::Cancelled("cancelled"),
+            TerminalSessionStatus::Cancelled,
+            PathStatus::Interrupted,
+            true,
+        ),
+    ];
+    for (outcome, expected_session, expected_path, expected_cancellation) in cases {
+        let fixture = Fixture::new_unrecorded(
+            CleanupMode::DryRun,
+            CandidateAction::RemoveKnownRegenerableContents,
+            1,
+        );
+        assert_eq!(
+            fixture
+                .lease()
+                .record_validated_dry_run(
+                    fixture.session_id.clone(),
+                    &fixture.plan,
+                    CleanupTrigger::Manual,
+                    outcome,
+                    fixture.started_at,
+                    fixture.started_at + Duration::from_secs(2),
+                )
+                .unwrap(),
+            expected_session
+        );
+        let snapshot = fixture.lease().load(&fixture.session_id).unwrap().unwrap();
+        assert!(matches!(
+            snapshot.lifecycle,
+            JournalLifecycle::ObservedTerminal {
+                status,
+                cancellation_requested,
+                ..
+            } if status == expected_session
+                && cancellation_requested == expected_cancellation
+        ));
+        let path = &snapshot.items[0].paths[0];
+        assert_eq!(path.status, expected_path);
+        assert_eq!(path.attempt_generation, Some(1));
+        assert!(path.effect_started_at.is_none());
+        assert_eq!(
+            fixture.candidate_status(0),
+            CandidateHistoryStatus::Discovered
+        );
+        assert_eq!(fixture.claim_count(), 0);
+    }
+}
+
+#[test]
+fn validated_dry_run_exclusion_is_a_durable_rejection_under_the_lease() {
+    let fixture = Fixture::new_unrecorded(
+        CleanupMode::DryRun,
+        CandidateAction::RemoveKnownRegenerableContents,
+        1,
+    );
+    fixture
+        .store
+        .set_cleanup_exclusions(vec![fixture._temp.path().join("root")])
+        .unwrap();
+    assert_eq!(
+        fixture
+            .lease()
+            .record_validated_dry_run(
+                fixture.session_id.clone(),
+                &fixture.plan,
+                CleanupTrigger::Manual,
+                ValidatedDryRunOutcome::DryRun,
+                fixture.started_at,
+                fixture.started_at + Duration::from_secs(2),
+            )
+            .unwrap(),
+        TerminalSessionStatus::Rejected
+    );
+    let snapshot = fixture.lease().load(&fixture.session_id).unwrap().unwrap();
+    let path = &snapshot.items[0].paths[0];
+    assert_eq!(path.status, PathStatus::Rejected);
+    assert_eq!(path.error_category.as_deref(), Some("user_excluded"));
+    assert_eq!(path.attempt_generation, Some(1));
+    assert!(path.effect_started_at.is_none());
+    assert_eq!(
+        fixture.candidate_status(0),
+        CandidateHistoryStatus::Discovered
+    );
+    assert_eq!(fixture.claim_count(), 0);
+}
+
+#[test]
+fn validated_dry_run_exclusion_does_not_hide_a_more_specific_refusal() {
+    let fixture = Fixture::new_unrecorded(
+        CleanupMode::DryRun,
+        CandidateAction::RemoveKnownRegenerableContents,
+        1,
+    );
+    fixture
+        .store
+        .set_cleanup_exclusions(vec![fixture._temp.path().join("root")])
+        .unwrap();
+    assert_eq!(
+        fixture
+            .lease()
+            .record_validated_dry_run(
+                fixture.session_id.clone(),
+                &fixture.plan,
+                CleanupTrigger::Manual,
+                ValidatedDryRunOutcome::ChangedSincePlan("target_changed"),
+                fixture.started_at,
+                fixture.started_at + Duration::from_secs(2),
+            )
+            .unwrap(),
+        TerminalSessionStatus::Failed
+    );
+    let snapshot = fixture.lease().load(&fixture.session_id).unwrap().unwrap();
+    let path = &snapshot.items[0].paths[0];
+    assert_eq!(path.status, PathStatus::ChangedSincePlan);
+    assert_eq!(path.error_category.as_deref(), Some("target_changed"));
+}
+
+#[test]
+fn validated_dry_run_records_post_expiry_refusal_from_pre_expiry_start() {
+    let fixture = Fixture::new_unrecorded(
+        CleanupMode::DryRun,
+        CandidateAction::RemoveKnownRegenerableContents,
+        1,
+    );
+    let completed_at = fixture.expires_at + Duration::from_secs(1);
+    assert!(fixture.started_at < fixture.expires_at);
+    assert_eq!(
+        fixture
+            .lease()
+            .record_validated_dry_run(
+                fixture.session_id.clone(),
+                &fixture.plan,
+                CleanupTrigger::Manual,
+                ValidatedDryRunOutcome::ChangedSincePlan("review_expired"),
+                fixture.started_at,
+                completed_at,
+            )
+            .unwrap(),
+        TerminalSessionStatus::Failed
+    );
+    let snapshot = fixture.lease().load(&fixture.session_id).unwrap().unwrap();
+    assert!(matches!(
+        snapshot.lifecycle,
+        JournalLifecycle::ObservedTerminal {
+            status: TerminalSessionStatus::Failed,
+            ..
+        }
+    ));
+    assert_eq!(
+        snapshot.items[0].paths[0].error_category.as_deref(),
+        Some("review_expired")
+    );
+}
+
+#[test]
+fn validated_dry_run_rejects_completion_before_start_as_definite_failure() {
+    let fixture = Fixture::new_unrecorded(
+        CleanupMode::DryRun,
+        CandidateAction::RemoveKnownRegenerableContents,
+        1,
+    );
+    let failure = fixture
+        .lease()
+        .record_validated_dry_run(
+            fixture.session_id.clone(),
+            &fixture.plan,
+            CleanupTrigger::Manual,
+            ValidatedDryRunOutcome::DryRun,
+            fixture.started_at,
+            fixture.started_at - Duration::from_millis(1),
+        )
+        .unwrap_err();
+    assert_eq!(failure.kind(), HistoryErrorKind::InvalidInput);
+    assert!(!failure.may_have_committed());
+    drop(failure.into_lease());
+    assert!(fixture.lease().load(&fixture.session_id).unwrap().is_none());
+}
+
+#[test]
+fn ambiguous_validated_dry_run_write_reconciles_only_the_exact_graph_on_retry() {
+    let fixture = Fixture::new_unrecorded(
+        CleanupMode::DryRun,
+        CandidateAction::RemoveKnownRegenerableContents,
+        1,
+    );
+    let completed_at = fixture.started_at + Duration::from_secs(2);
+    let lease = fixture.lease();
+    lease.fail_next_write_after_commit_and_reconcile_read_for_test();
+    let failure = lease
+        .record_validated_dry_run(
+            fixture.session_id.clone(),
+            &fixture.plan,
+            CleanupTrigger::Manual,
+            ValidatedDryRunOutcome::DryRun,
+            fixture.started_at,
+            completed_at,
+        )
+        .unwrap_err();
+    assert_eq!(failure.kind(), HistoryErrorKind::DatabaseUnavailable);
+    assert!(failure.may_have_committed());
+    let mismatch = failure
+        .into_lease()
+        .record_validated_dry_run(
+            fixture.session_id.clone(),
+            &fixture.plan,
+            CleanupTrigger::Manual,
+            ValidatedDryRunOutcome::Rejected("different_observation"),
+            fixture.started_at,
+            completed_at,
+        )
+        .unwrap_err();
+    assert_eq!(mismatch.kind(), HistoryErrorKind::AlreadyExists);
+    assert!(!mismatch.may_have_committed());
+    assert_eq!(
+        mismatch
+            .into_lease()
+            .record_validated_dry_run(
+                fixture.session_id.clone(),
+                &fixture.plan,
+                CleanupTrigger::Manual,
+                ValidatedDryRunOutcome::DryRun,
+                fixture.started_at,
+                completed_at,
+            )
+            .unwrap(),
+        TerminalSessionStatus::DryRun
+    );
+    let count = fixture.store.with_connection(|connection| {
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM cleanup_sessions WHERE session_id = ?1",
+                [fixture.session_id.as_str()],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap()
+    });
+    assert_eq!(count, 1);
+    assert_eq!(fixture.claim_count(), 0);
+}
+
+#[test]
+fn unresolved_dry_run_metadata_releases_lease_without_cleanup_authority() {
+    let fixture = Fixture::new_unrecorded(
+        CleanupMode::DryRun,
+        CandidateAction::RemoveKnownRegenerableContents,
+        1,
+    );
+    let completed_at = fixture.started_at + Duration::from_secs(2);
+    crate::persistence::fail_next_write_after_commit_and_two_reconcile_reads_for_test();
+    let first = fixture
+        .lease()
+        .record_validated_dry_run(
+            fixture.session_id.clone(),
+            &fixture.plan,
+            CleanupTrigger::Manual,
+            ValidatedDryRunOutcome::DryRun,
+            fixture.started_at,
+            completed_at,
+        )
+        .unwrap_err();
+    assert!(first.may_have_committed());
+    let second = first
+        .into_lease()
+        .record_validated_dry_run(
+            fixture.session_id.clone(),
+            &fixture.plan,
+            CleanupTrigger::Manual,
+            ValidatedDryRunOutcome::DryRun,
+            fixture.started_at,
+            completed_at,
+        )
+        .unwrap_err();
+    assert!(!second.may_have_committed());
+
+    drop(second.into_lease());
+    let lease = fixture.lease();
+    assert_eq!(
+        lease
+            .record_validated_dry_run(
+                fixture.session_id.clone(),
+                &fixture.plan,
+                CleanupTrigger::Manual,
+                ValidatedDryRunOutcome::DryRun,
+                fixture.started_at,
+                completed_at,
+            )
+            .unwrap(),
+        TerminalSessionStatus::DryRun
+    );
+    assert_eq!(fixture.claim_count(), 0);
 }
 
 #[test]

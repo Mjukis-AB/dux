@@ -271,6 +271,16 @@ pub(crate) enum RuleScopeGrantError {
     Lexical(#[from] crate::path_validation::LexicalPathError),
 }
 
+impl RuleScopeGrantError {
+    pub(crate) fn is_unavailable(&self) -> bool {
+        match self {
+            Self::Filesystem(error) => error.is_unavailable(),
+            Self::Location(TrustedHomeMountError::UnsupportedPlatform) => true,
+            _ => false,
+        }
+    }
+}
+
 /// Mint a grant for an exact target snapshot and a known production rule.
 #[cfg(test)]
 pub(crate) fn authorize_rule_target(

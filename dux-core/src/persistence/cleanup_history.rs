@@ -549,6 +549,23 @@ pub(super) fn insert_cleanup_session(
     Ok(())
 }
 
+/// Insert one explicitly uncoupled cleanup graph inside a caller-owned
+/// transaction.
+///
+/// This narrow entry point exists for non-effect observations such as a
+/// validated dry run. It cannot create candidate plan claims because the
+/// record must have been minted by `try_from_uncoupled_plan`.
+pub(super) fn insert_uncoupled_cleanup_session(
+    transaction: &Transaction<'_>,
+    session: &NewCleanupSessionRecord,
+) -> Result<(), HistoryError> {
+    if session.candidate_status_coupling != CandidateStatusCoupling::LegacyUncoupled {
+        return Err(invalid());
+    }
+    let prepared = PreparedCleanupSession::prepare(session)?;
+    insert_cleanup_session(transaction, &prepared)
+}
+
 fn ensure_dependencies_match(
     connection: &Connection,
     session: &PreparedCleanupSession,

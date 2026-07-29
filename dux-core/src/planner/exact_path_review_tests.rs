@@ -113,6 +113,65 @@ fn trusted_candidate(path: PathBuf) -> Candidate {
     .unwrap()
 }
 
+#[cfg(target_os = "macos")]
+fn exact_rust_target_candidate(path: PathBuf, newest_mtime: SystemTime) -> Candidate {
+    let rule = Rule::try_new(RuleDefinition {
+        reference: RuleRef::new(
+            RuleId::new("developer.rust.target").unwrap(),
+            RuleRevision::new(crate::domain::SAFE_RUST_RULE_REVISION).unwrap(),
+        ),
+        title_key: LocalizedTextKey::new("developer.rust.target.title").unwrap(),
+        category: CandidateCategory::DeveloperArtifact,
+        scope: RuleScope::SelectedScanRoot,
+        matcher: RuleMatcher::try_new(RuleMatcherDefinition {
+            path_component: Some("target".to_owned()),
+            required_ancestor_markers_any: vec!["Cargo.toml".to_owned()],
+            required_markers_all: vec!["CACHEDIR.TAG".to_owned()],
+            forbidden_markers_any: Vec::new(),
+            exact_bundle_identifiers: Vec::new(),
+            excluded_descendants: Vec::new(),
+            protected_descendants: Vec::new(),
+        })
+        .unwrap(),
+        guards: RuleGuards::try_new(
+            Some(crate::domain::SAFE_RUST_RULE_MINIMUM_AGE),
+            0,
+            Vec::new(),
+            false,
+        )
+        .unwrap(),
+        safety: SafetyTier::SafeRegenerable,
+        action: CandidateAction::RemoveKnownRegenerableContents,
+        schedule_eligible: false,
+        explanation_key: LocalizedTextKey::new("developer.rust.target.explanation").unwrap(),
+        provenance: vec![ProvenanceUrl::new("https://example.com/rust-target").unwrap()],
+    })
+    .unwrap();
+    let manifest = path.parent().unwrap().join("Cargo.toml");
+    let cache_tag = path.join("CACHEDIR.TAG");
+    Candidate::try_from_rule(
+        &rule,
+        CandidateInput::new(
+            CandidateId::new("candidate:exact-rust-target").unwrap(),
+            vec![path.clone()],
+            41,
+            Some(newest_mtime),
+            vec![
+                Evidence::MatchedPath { path },
+                Evidence::RequiredMarker { path: manifest },
+                Evidence::RequiredMarker { path: cache_tag },
+                Evidence::MinimumAge {
+                    newest_mtime,
+                    minimum_age: crate::domain::SAFE_RUST_RULE_MINIMUM_AGE,
+                },
+            ],
+            Vec::new(),
+            ScanId::new("scan:exact-review").unwrap(),
+        ),
+    )
+    .unwrap()
+}
+
 fn root() -> (tempfile::TempDir, PathBuf, CanonicalScanRoot) {
     let directory = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
     let root_path = fs::canonicalize(directory.path()).unwrap();
@@ -122,6 +181,65 @@ fn root() -> (tempfile::TempDir, PathBuf, CanonicalScanRoot) {
     let lexical = validate_scan_root(&root_path).unwrap();
     let canonical = crate::path_validation::capture_scan_root(lexical).unwrap();
     (directory, root_path, canonical)
+}
+
+#[cfg(target_os = "macos")]
+fn trusted_rust_target_plan(
+    coupled: bool,
+    newest_mtime: SystemTime,
+) -> (
+    tempfile::TempDir,
+    PathBuf,
+    PathBuf,
+    TrustedReviewedCleanupPlan,
+) {
+    let (directory, root_path, scan_root) = root();
+    let project = root_path.join("project");
+    let target = project.join("target");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(
+        project.join("Cargo.toml"),
+        b"[package]\nname = \"fixture\"\n",
+    )
+    .unwrap();
+    fs::write(
+        target.join("CACHEDIR.TAG"),
+        b"Signature: 8a477f597d28d172789f06886806bc55",
+    )
+    .unwrap();
+    fs::write(target.join("artifact.o"), b"unchanged artifact").unwrap();
+    for path in [
+        target.join("CACHEDIR.TAG"),
+        target.join("artifact.o"),
+        target.clone(),
+    ] {
+        fs::File::open(path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(newest_mtime))
+            .unwrap();
+    }
+    let candidate = exact_rust_target_candidate(target.clone(), newest_mtime);
+    let review = review_exact_paths(
+        &scan_root,
+        std::slice::from_ref(&candidate),
+        CleanupMode::PermanentSafe,
+    )
+    .unwrap();
+    let authorization = authorize_rule_target(
+        &scan_root,
+        review.items()[0].paths()[0].snapshot().clone(),
+        review.items()[0].rule(),
+    )
+    .unwrap();
+    let mut reviewed = review
+        .into_trusted_permanent_plan(
+            crate::domain::CleanupPlanId::new("plan:exact-rust-target").unwrap(),
+            SystemTime::now(),
+            vec![authorization],
+        )
+        .unwrap();
+    reviewed.trusted_rust_target_coupling = coupled;
+    (directory, root_path, target, reviewed)
 }
 
 #[test]
@@ -428,6 +546,123 @@ fn trusted_plan_cannot_be_approved_after_expiration() {
         plan.approve(UNIX_EPOCH + crate::domain::CLEANUP_PLAN_VALIDITY),
         Err(ExactPathApprovalError::Expired)
     ));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn exact_trusted_rust_target_plan_projects_to_a_fully_validated_dry_run() {
+    let validation_time = SystemTime::now();
+    let stale_mtime = validation_time
+        .checked_sub(crate::domain::SAFE_RUST_RULE_MINIMUM_AGE + Duration::from_secs(60))
+        .unwrap();
+    let (_directory, root_path, target, reviewed) = trusted_rust_target_plan(true, stale_mtime);
+    let expected_id = reviewed.plan().id().clone();
+    let expected_items = reviewed.plan().items().to_vec();
+    let expected_expiry = reviewed.effective_expires_at();
+    let manifest_before = fs::read(root_path.join("project/Cargo.toml")).unwrap();
+    let tag_before = fs::read(target.join("CACHEDIR.TAG")).unwrap();
+    let artifact_before = fs::read(target.join("artifact.o")).unwrap();
+
+    let dry_run = reviewed.into_rust_target_dry_run().unwrap();
+
+    assert_eq!(dry_run.plan().id(), &expected_id);
+    assert_eq!(dry_run.plan().items(), expected_items);
+    assert_eq!(dry_run.plan().mode(), CleanupMode::DryRun);
+    assert_eq!(dry_run.effective_expires_at(), expected_expiry);
+    assert_eq!(
+        dry_run.plan().warnings(),
+        [
+            PlanWarning::EstimatedBytesUnverified,
+            PlanWarning::DryRunDoesNotMutate,
+            PlanWarning::PermanentRemovalCannotBeUndone,
+        ]
+    );
+    dry_run.validate_at(validation_time).unwrap();
+    assert_eq!(
+        fs::read(root_path.join("project/Cargo.toml")).unwrap(),
+        manifest_before
+    );
+    assert_eq!(fs::read(target.join("CACHEDIR.TAG")).unwrap(), tag_before);
+    assert_eq!(
+        fs::read(target.join("artifact.o")).unwrap(),
+        artifact_before
+    );
+    dry_run.release();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn generic_review_cannot_mint_the_rust_target_dry_run_authority() {
+    let now = SystemTime::now();
+    let stale_mtime = now
+        .checked_sub(crate::domain::SAFE_RUST_RULE_MINIMUM_AGE + Duration::from_secs(60))
+        .unwrap();
+    let (_directory, _root_path, _target, reviewed) = trusted_rust_target_plan(false, stale_mtime);
+
+    assert!(matches!(
+        reviewed.into_rust_target_dry_run(),
+        Err(ExactPathPlanError::AuthorizationMismatch)
+    ));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn rust_target_dry_run_preserves_authority_expiry_and_rejects_live_marker_change() {
+    let now = SystemTime::now();
+    let stale_mtime = now
+        .checked_sub(crate::domain::SAFE_RUST_RULE_MINIMUM_AGE + Duration::from_secs(60))
+        .unwrap();
+    let (_directory, _root_path, target, reviewed) = trusted_rust_target_plan(true, stale_mtime);
+    let dry_run = reviewed.into_rust_target_dry_run().unwrap();
+    fs::write(target.join("CACHEDIR.TAG"), b"changed marker").unwrap();
+    let changed = dry_run.validate_at(now).unwrap_err();
+    assert!(
+        matches!(
+            changed,
+            RustTargetDryRunValidationError::Authorization(_)
+                | RustTargetDryRunValidationError::RuleEvidence(_)
+        ),
+        "{changed:?}"
+    );
+    dry_run.release();
+
+    let (_directory, _root_path, _target, mut reviewed) =
+        trusted_rust_target_plan(true, stale_mtime);
+    reviewed.authority_expires_at = now;
+    let expired = reviewed.into_rust_target_dry_run().unwrap();
+    assert_eq!(expired.effective_expires_at(), now);
+    assert!(matches!(
+        expired.validate_at(now),
+        Err(RustTargetDryRunValidationError::Expired)
+    ));
+    expired.release();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn rust_target_dry_run_and_permanent_validation_share_recency_rejection() {
+    let now = SystemTime::now();
+    let (_directory, _root_path, _target, reviewed) = trusted_rust_target_plan(true, now);
+    assert!(matches!(
+        validate_rust_target_effect_plan(
+            reviewed.plan(),
+            &reviewed.authorizations[0],
+            reviewed.effective_expires_at(),
+            now,
+        ),
+        Err(RustTargetPlanObservationError::RuleEvidence(
+            RustTargetLiveValidationError::RecentActivity
+        ))
+    ));
+    let dry_run = reviewed.into_rust_target_dry_run().unwrap();
+
+    assert!(matches!(
+        dry_run.validate_at(now),
+        Err(RustTargetDryRunValidationError::RuleEvidence(
+            RustTargetLiveValidationError::RecentActivity
+        ))
+    ));
+    dry_run.release();
 }
 
 #[test]

@@ -12,6 +12,7 @@ mod cleanup_history_clear;
 mod config;
 mod registry;
 mod rust_target_cleanup;
+mod rust_target_dry_run;
 mod rust_target_plan_review;
 mod scan_coverage_details;
 mod settings;
@@ -43,6 +44,9 @@ pub use config::{EngineConfig, EngineConfigError, EngineConfigField, EngineConfi
 pub use registry::EngineHandle;
 pub use rust_target_cleanup::{
     RustTargetCleanupError, RustTargetCleanupResult, RustTargetCleanupStartFailure,
+};
+pub use rust_target_dry_run::{
+    RustTargetDryRunError, RustTargetDryRunResult, RustTargetDryRunStartFailure,
 };
 pub use rust_target_plan_review::{
     PendingRustTargetPlanReview, RustTargetPlanReview, RustTargetPlanReviewAdmission,
@@ -81,21 +85,21 @@ pub use task::{
     DurableScanCounts, DurableScanCoverage, DurableScanStatus, DurableScanSummary, EngineLifecycle,
     EngineOpenError, FormatSizeBatchResult, FormattedSizeEntry, HistoryMaintenanceFailureKind,
     HistoryMaintenanceResult, HistoryMaintenanceStartOutcome, PermanentSafeCleanupFailureKind,
-    RecentScanHistory, ScanHistoryError, ScanRecoveryMaintenanceFailureKind,
-    ScanRecoveryMaintenanceOutcome, ScanRecoveryMaintenanceResult,
-    ScanRecoveryMaintenanceStartOutcome, ScanRootErrorKind, ScanTaskCounts, ScanTaskResult,
-    ScanTaskStatus, SnapshotOrphanMaintenanceFailureKind, SnapshotOrphanMaintenanceOutcome,
-    SnapshotOrphanMaintenanceResult, SnapshotOrphanMaintenanceStartOutcome,
-    SnapshotProvisioningStageMaintenanceFailureKind, SnapshotProvisioningStageMaintenanceOutcome,
-    SnapshotProvisioningStageMaintenanceResult, SnapshotProvisioningStageMaintenanceStartOutcome,
-    SnapshotRetentionFailureKind, SnapshotRetentionOutcome, SnapshotRetentionResult,
-    SnapshotRetentionStartOutcome, SnapshotTerminalTempMaintenanceFailureKind,
-    SnapshotTerminalTempMaintenanceOutcome, SnapshotTerminalTempMaintenanceResult,
-    SnapshotTerminalTempMaintenanceStartOutcome, SnapshotUnleasedTempMaintenanceFailureKind,
-    SnapshotUnleasedTempMaintenanceOutcome, SnapshotUnleasedTempMaintenanceResult,
-    SnapshotUnleasedTempMaintenanceStartOutcome, StartSubtreeScanError, StartTaskError,
-    TaskAccessError, TaskEvent, TaskEventBatch, TaskEventKind, TaskFailureKind, TaskId, TaskKind,
-    TaskPhase, TaskSnapshot,
+    RecentScanHistory, RustTargetDryRunFailureKind, ScanHistoryError,
+    ScanRecoveryMaintenanceFailureKind, ScanRecoveryMaintenanceOutcome,
+    ScanRecoveryMaintenanceResult, ScanRecoveryMaintenanceStartOutcome, ScanRootErrorKind,
+    ScanTaskCounts, ScanTaskResult, ScanTaskStatus, SnapshotOrphanMaintenanceFailureKind,
+    SnapshotOrphanMaintenanceOutcome, SnapshotOrphanMaintenanceResult,
+    SnapshotOrphanMaintenanceStartOutcome, SnapshotProvisioningStageMaintenanceFailureKind,
+    SnapshotProvisioningStageMaintenanceOutcome, SnapshotProvisioningStageMaintenanceResult,
+    SnapshotProvisioningStageMaintenanceStartOutcome, SnapshotRetentionFailureKind,
+    SnapshotRetentionOutcome, SnapshotRetentionResult, SnapshotRetentionStartOutcome,
+    SnapshotTerminalTempMaintenanceFailureKind, SnapshotTerminalTempMaintenanceOutcome,
+    SnapshotTerminalTempMaintenanceResult, SnapshotTerminalTempMaintenanceStartOutcome,
+    SnapshotUnleasedTempMaintenanceFailureKind, SnapshotUnleasedTempMaintenanceOutcome,
+    SnapshotUnleasedTempMaintenanceResult, SnapshotUnleasedTempMaintenanceStartOutcome,
+    StartSubtreeScanError, StartTaskError, TaskAccessError, TaskEvent, TaskEventBatch,
+    TaskEventKind, TaskFailureKind, TaskId, TaskKind, TaskPhase, TaskSnapshot,
 };
 pub use volume_status::{
     CapacityHistoryDisposition, CapacityTrend, CapacityTrendChange, CapacityTrendPoint,

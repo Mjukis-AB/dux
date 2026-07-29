@@ -634,6 +634,58 @@ fn warnings_are_mandatory_deduplicated_and_operation_specific() {
 }
 
 #[test]
+fn permanent_plan_projects_to_dry_run_without_changing_frozen_facts_or_expiry() {
+    let original = plan(
+        CleanupMode::PermanentSafe,
+        &[regenerable(
+            "candidate:projection",
+            "/fixture/projection",
+            41,
+        )],
+    );
+    let expected_id = original.id().clone();
+    let expected_created_at = original.created_at();
+    let expected_source_scan_id = original.source_scan_id().clone();
+    let expected_items = original.items().to_vec();
+    let expected_bytes = original.estimated_bytes();
+    let expected_expiry = original.expires_at();
+
+    let dry_run = original.into_dry_run().unwrap();
+
+    assert_eq!(dry_run.id(), &expected_id);
+    assert_eq!(dry_run.created_at(), expected_created_at);
+    assert_eq!(dry_run.source_scan_id(), &expected_source_scan_id);
+    assert_eq!(dry_run.items(), expected_items);
+    assert_eq!(dry_run.estimated_bytes(), expected_bytes);
+    assert_eq!(dry_run.expires_at(), expected_expiry);
+    assert_eq!(dry_run.mode(), CleanupMode::DryRun);
+    assert_eq!(
+        dry_run.warnings(),
+        [
+            PlanWarning::EstimatedBytesUnverified,
+            PlanWarning::DryRunDoesNotMutate,
+            PlanWarning::PermanentRemovalCannotBeUndone,
+        ]
+    );
+}
+
+#[test]
+fn only_permanent_safe_plan_can_use_the_trusted_dry_run_projection() {
+    let dry_run = plan(
+        CleanupMode::DryRun,
+        &[regenerable(
+            "candidate:already-dry",
+            "/fixture/already-dry",
+            1,
+        )],
+    );
+    assert_eq!(
+        dry_run.into_dry_run(),
+        Err(CleanupPlanValidationError::InvalidDryRunSourceMode)
+    );
+}
+
+#[test]
 fn manual_permanent_plan_preserves_but_does_not_require_schedule_eligibility() {
     let manual = regenerable("candidate:manual", "/fixture/manual", 1);
     let scheduled = candidate(

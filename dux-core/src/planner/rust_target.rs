@@ -5,8 +5,8 @@ use std::time::{Duration, SystemTime};
 use thiserror::Error;
 
 use crate::domain::{
-    BlockReason, Candidate, CandidateAction, CandidateCategory, CandidateId, Evidence, SafetyTier,
-    ScanId, current_rust_target_candidate_id,
+    BlockReason, Candidate, CandidateAction, CandidateCategory, CandidateId, CleanupMode,
+    CleanupPlan, Evidence, SafetyTier, ScanId, current_rust_target_candidate_id,
 };
 use crate::path_validation::{
     CanonicalFileDigestError, CanonicalFileDigestSnapshot, CanonicalFilePrefixError,
@@ -16,6 +16,7 @@ use crate::path_validation::{
 };
 use crate::persistence::{CleanupSessionId, CompleteCandidateRecord};
 
+use super::rule_scope_grant::{RuleScopeAuthorization, RuleScopeGrantError};
 use super::rust_target_source::{
     RustTargetDurableSource, RustTargetSnapshotBindings, RustTargetSourceError,
 };
@@ -70,6 +71,17 @@ struct ProtectedPathStillUnresolved;
 /// effect. This witness proves the default Cargo target layout, the regular
 /// manifest identity/content, and the exact cache-tag signature. It remains
 /// non-cloneable and has no mutation or path-export API.
+#[must_use = "validated Rust-target observations must be explicitly consumed"]
+pub(super) struct RustTargetValidationObservation {
+    target: CanonicalPathSnapshot,
+    manifest: CanonicalFileDigestSnapshot,
+    cache_tag: CanonicalFilePrefixSnapshot,
+    recency_cutoff: SystemTime,
+}
+
+/// Rule-specific authority retained immediately before a permanent-safe
+/// effect. Only this module can project the shared inert validation
+/// observation into the effect witness.
 #[must_use = "the Rust-target effect witness must be consumed by the executor"]
 pub(crate) struct RustTargetEffectWitness {
     target: CanonicalPathSnapshot,
@@ -114,6 +126,36 @@ pub(crate) enum RustTargetLiveValidationError {
     FileDigest(#[from] CanonicalFileDigestError),
 }
 
+impl RustTargetLiveValidationError {
+    pub(crate) fn is_unavailable(&self) -> bool {
+        match self {
+            Self::UnsupportedPlatform => true,
+            Self::Filesystem(error) => error.is_unavailable(),
+            Self::FilePrefix(error) => error.is_unavailable(),
+            Self::FileDigest(error) => error.is_unavailable(),
+            _ => false,
+        }
+    }
+}
+
+#[derive(Debug, Error)]
+pub(super) enum RustTargetPlanObservationError {
+    #[error("the trusted Rust-target plan expired")]
+    Expired,
+    #[error("the trusted Rust-target plan does not have the exact required shape")]
+    InvalidPlan,
+    #[error("the trusted Rust-target authorization changed: {0}")]
+    Authorization(#[source] RuleScopeGrantError),
+    #[error("live Rust-target evidence changed: {0}")]
+    RuleEvidence(#[source] RustTargetLiveValidationError),
+}
+
+#[derive(Clone, Copy)]
+enum RustTargetObservationMode {
+    DryRun,
+    PermanentEffect,
+}
+
 pub(crate) fn validate_live_rust_target(
     source: RustTargetDurableSource,
 ) -> Result<RustTargetLiveWitness, RustTargetLiveValidationError> {
@@ -143,6 +185,136 @@ pub(crate) fn validate_rust_target_effect(
     target: CanonicalPathSnapshot,
     recency_cutoff: SystemTime,
 ) -> Result<RustTargetEffectWitness, RustTargetLiveValidationError> {
+    validate_rust_target_observation(target, recency_cutoff)
+        .map(RustTargetValidationObservation::into_effect_witness)
+}
+
+/// Validate the exact observation-only projection without ever constructing an
+/// effect witness.
+pub(super) fn validate_rust_target_dry_run_plan(
+    plan: &CleanupPlan,
+    authorization: &RuleScopeAuthorization,
+    effective_expires_at: SystemTime,
+    now: SystemTime,
+) -> Result<SystemTime, RustTargetPlanObservationError> {
+    validate_rust_target_plan_observation(
+        plan,
+        authorization,
+        effective_expires_at,
+        RustTargetObservationMode::DryRun,
+        now,
+    )
+    .map(|(_observation, validated_at)| validated_at)
+}
+
+/// Validate the exact permanent-safe plan and project the shared inert
+/// observation into an effect witness inside this module.
+pub(super) fn validate_rust_target_effect_plan(
+    plan: &CleanupPlan,
+    authorization: &RuleScopeAuthorization,
+    effective_expires_at: SystemTime,
+    now: SystemTime,
+) -> Result<RustTargetEffectWitness, RustTargetPlanObservationError> {
+    validate_rust_target_plan_observation(
+        plan,
+        authorization,
+        effective_expires_at,
+        RustTargetObservationMode::PermanentEffect,
+        now,
+    )
+    .map(|(observation, _validated_at)| observation.into_effect_witness())
+}
+
+fn validate_rust_target_plan_observation(
+    plan: &CleanupPlan,
+    authorization: &RuleScopeAuthorization,
+    effective_expires_at: SystemTime,
+    expected_mode: RustTargetObservationMode,
+    now: SystemTime,
+) -> Result<(RustTargetValidationObservation, SystemTime), RustTargetPlanObservationError> {
+    if now >= effective_expires_at {
+        return Err(RustTargetPlanObservationError::Expired);
+    }
+    let expected_cleanup_mode = match expected_mode {
+        RustTargetObservationMode::DryRun => CleanupMode::DryRun,
+        RustTargetObservationMode::PermanentEffect => CleanupMode::PermanentSafe,
+    };
+    if plan.mode() != expected_cleanup_mode {
+        return Err(RustTargetPlanObservationError::InvalidPlan);
+    }
+    let [item] = plan.items() else {
+        return Err(RustTargetPlanObservationError::InvalidPlan);
+    };
+    if item.rule().id().as_str() != RUST_TARGET_RULE_ID
+        || item.rule().revision().get() != RUST_TARGET_RULE_REVISION
+        || item.safety() != SafetyTier::SafeRegenerable
+        || item.action() != CandidateAction::RemoveKnownRegenerableContents
+        || item.rule_marks_schedule_eligible()
+    {
+        return Err(RustTargetPlanObservationError::InvalidPlan);
+    }
+    let candidate_paths =
+        validate_candidate_layout(item.paths(), item.newest_mtime(), item.evidence())
+            .map_err(RustTargetPlanObservationError::RuleEvidence)?;
+    let [expected_path] = item.paths() else {
+        return Err(RustTargetPlanObservationError::InvalidPlan);
+    };
+    if candidate_paths.target != *expected_path {
+        return Err(RustTargetPlanObservationError::InvalidPlan);
+    }
+    let (newest_mtime, minimum_age) =
+        validate_rust_target_recency_evidence(item.newest_mtime(), item.evidence())
+            .map_err(RustTargetPlanObservationError::RuleEvidence)?;
+    if !now
+        .duration_since(newest_mtime)
+        .is_ok_and(|age| age >= minimum_age)
+    {
+        return Err(RustTargetPlanObservationError::RuleEvidence(
+            RustTargetLiveValidationError::RecentActivity,
+        ));
+    }
+    let recency_cutoff =
+        now.checked_sub(minimum_age)
+            .ok_or(RustTargetPlanObservationError::RuleEvidence(
+                RustTargetLiveValidationError::RecentActivity,
+            ))?;
+    let target = authorization
+        .revalidated_target_snapshot()
+        .map_err(RustTargetPlanObservationError::Authorization)?;
+    if target.requested_path() != expected_path || !authorization.matches(item.rule(), &target) {
+        return Err(RustTargetPlanObservationError::InvalidPlan);
+    }
+    crate::cleanup::permanent_safe::validate_rust_target_subtree_recency(
+        target.canonical_path(),
+        target.target_identity(),
+        recency_cutoff,
+    )
+    .map_err(|_| {
+        RustTargetPlanObservationError::RuleEvidence(
+            RustTargetLiveValidationError::ChangedDuringValidation,
+        )
+    })?;
+    let observation = validate_rust_target_observation(target, recency_cutoff)
+        .map_err(RustTargetPlanObservationError::RuleEvidence)?;
+    authorization
+        .revalidate()
+        .map_err(RustTargetPlanObservationError::Authorization)?;
+    let validated_at = SystemTime::now();
+    if validated_at >= effective_expires_at {
+        return Err(RustTargetPlanObservationError::Expired);
+    }
+    Ok((observation, validated_at))
+}
+
+/// Rebuild the exact live marker, ancestry, identity, and layout observation
+/// shared by permanent execution and dry-run validation.
+///
+/// This result is deliberately inert: it has no public fields, path accessors,
+/// cloning, serialization, or effect conversion outside this module.
+pub(super) fn validate_rust_target_observation(
+    target: CanonicalPathSnapshot,
+    recency_cutoff: SystemTime,
+) -> Result<RustTargetValidationObservation, RustTargetLiveValidationError> {
     #[cfg(not(unix))]
     {
         let _ = (target, recency_cutoff);
@@ -227,12 +399,23 @@ pub(crate) fn validate_rust_target_effect(
             return Err(RustTargetLiveValidationError::ChangedDuringValidation);
         }
 
-        Ok(RustTargetEffectWitness {
+        Ok(RustTargetValidationObservation {
             target,
             manifest,
             cache_tag,
             recency_cutoff,
         })
+    }
+}
+
+impl RustTargetValidationObservation {
+    fn into_effect_witness(self) -> RustTargetEffectWitness {
+        RustTargetEffectWitness {
+            target: self.target,
+            manifest: self.manifest,
+            cache_tag: self.cache_tag,
+            recency_cutoff: self.recency_cutoff,
+        }
     }
 }
 

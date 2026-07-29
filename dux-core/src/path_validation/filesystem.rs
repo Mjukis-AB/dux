@@ -248,6 +248,19 @@ pub enum CanonicalPathError {
     BoundaryTooDeep { maximum: usize },
 }
 
+impl CanonicalPathError {
+    pub(crate) fn is_unavailable(&self) -> bool {
+        matches!(
+            self,
+            Self::UnsupportedPlatform
+                | Self::AccessDenied { .. }
+                | Self::Io { .. }
+                | Self::IdentityUnavailable { .. }
+                | Self::CanonicalizationFailed { .. }
+        )
+    }
+}
+
 #[derive(Debug, Error)]
 pub(crate) enum CanonicalFilePrefixError {
     #[error("invalid bounded file-prefix length")]
@@ -260,6 +273,16 @@ pub(crate) enum CanonicalFilePrefixError {
         #[source]
         source: io::Error,
     },
+}
+
+impl CanonicalFilePrefixError {
+    pub(crate) fn is_unavailable(&self) -> bool {
+        match self {
+            Self::Path(error) => error.is_unavailable(),
+            Self::Read { .. } => true,
+            Self::InvalidLength => false,
+        }
+    }
 }
 
 /// A bounded prefix read from the exact regular-file object captured here.
@@ -286,6 +309,16 @@ pub(crate) enum CanonicalFileDigestError {
         #[source]
         source: io::Error,
     },
+}
+
+impl CanonicalFileDigestError {
+    pub(crate) fn is_unavailable(&self) -> bool {
+        match self {
+            Self::Path(error) => error.is_unavailable(),
+            Self::Read { .. } => true,
+            Self::InvalidLength | Self::TooLarge => false,
+        }
+    }
 }
 
 /// A bounded full-file digest tied to one exact regular-file observation.

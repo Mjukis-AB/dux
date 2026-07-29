@@ -602,6 +602,17 @@ fn validate_parent_shape(raw: &RawParent) -> Result<(), HistoryError> {
                 StoredCleanupSessionStatus::Running | StoredCleanupSessionStatus::Recovering => {
                     full_fence && raw.completed_at_unix_ms.is_none() && raw.capacity_delta.is_none()
                 }
+                StoredCleanupSessionStatus::DryRun
+                | StoredCleanupSessionStatus::Failed
+                | StoredCleanupSessionStatus::Cancelled
+                | StoredCleanupSessionStatus::Interrupted
+                | StoredCleanupSessionStatus::Rejected
+                    if raw.mode == StoredCleanupMode::DryRun
+                        && raw.coupling == 1
+                        && raw.capacity_delta.is_none() =>
+                {
+                    (full_fence || no_fence) && raw.completed_at_unix_ms.is_some()
+                }
                 _ => full_fence && raw.completed_at_unix_ms.is_some(),
             };
             if shape { Ok(()) } else { Err(corrupt()) }
@@ -1099,6 +1110,16 @@ fn project_journal(journal: CleanupJournal) -> StoredCleanupHistoryObservation {
             terminal_session_status(status),
             Some(completed_at),
             verified_capacity_delta_bytes,
+            Some(cancellation_requested),
+        ),
+        JournalLifecycle::ObservedTerminal {
+            status,
+            completed_at,
+            cancellation_requested,
+        } => (
+            terminal_session_status(status),
+            Some(completed_at),
+            None,
             Some(cancellation_requested),
         ),
     };

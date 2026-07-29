@@ -1,5 +1,25 @@
 # Changelog
 
+- Added the first production-core Rust-target dry run. It consumes the same
+  exact opaque reviewed-plan child as permanent cleanup, projects that frozen
+  plan internally to `DryRun`, and repeats the shared Cargo/read-set,
+  process-quiescence, home/mount, protected-root, identity, seven-day recency,
+  complete-subtree, manifest, and cache-tag validation. The dry-run authority
+  cannot approve, create an effect witness, select a capacity sampler, or
+  receive a platform driver. A separate serialized engine task records one
+  uncoupled, ownerless terminal history graph with no candidate claim, effect
+  receipt, verified capacity delta, or removed-byte result. User exclusions
+  convert only an otherwise successful observation to durable rejection under
+  the same cleanup lock; cancellation and more specific validation refusals
+  retain precedence. A terminalization boundary prevents late cancellation
+  from being reported as accepted, unavailable evidence remains distinct from
+  changed evidence, and unresolved metadata releases its lease without
+  quarantining filesystem cleanup. The permanent-cleanup opt-in is deliberately
+  irrelevant. A real stale Cargo fixture proves the complete project tree is
+  byte- and identity-stable, and focused parity, refusal, cancellation-state,
+  exclusion, and ambiguous-write tests cover the non-mutating path. This core
+  API is not yet exposed through UniFFI or the native app, and it does not open
+  the public cleanup Release gate.
 - Made permanent-safe cleanup explicitly opt-in before its Release gate can be
   considered. Fresh and reset state is now core-owned disabled Default state;
   only durable Stored consent can admit an effect. Typed setting value schema

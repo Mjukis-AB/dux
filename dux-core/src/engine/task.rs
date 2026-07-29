@@ -36,6 +36,7 @@ pub enum TaskKind {
     SnapshotProvisioningStageMaintenance,
     SnapshotTerminalTempMaintenance,
     SnapshotUnleasedTempMaintenance,
+    RustTargetDryRun,
     PermanentSafeCleanup,
 }
 
@@ -73,7 +74,25 @@ pub enum TaskFailureKind {
     SnapshotProvisioningStageMaintenance(SnapshotProvisioningStageMaintenanceFailureKind),
     SnapshotTerminalTempMaintenance(SnapshotTerminalTempMaintenanceFailureKind),
     SnapshotUnleasedTempMaintenance(SnapshotUnleasedTempMaintenanceFailureKind),
+    RustTargetDryRun(RustTargetDryRunFailureKind),
     PermanentSafeCleanup(PermanentSafeCleanupFailureKind),
+}
+
+/// Path-free failure categories for one effect-free Rust-target dry-run task.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RustTargetDryRunFailureKind {
+    ParentReviewUnavailable,
+    ReviewExpired,
+    ChangedDuringReview,
+    BudgetExceeded,
+    Busy,
+    UnsafeStorage,
+    IncompatibleSchema,
+    CorruptData,
+    HistoryUnresolved,
+    Unavailable,
+    InternalState,
 }
 
 /// Path-free terminal failure categories for one engine-owned permanent-safe

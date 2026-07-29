@@ -1385,6 +1385,69 @@ fn prepared_rust_target_plan_review(
 }
 
 #[cfg(target_os = "macos")]
+#[derive(Debug, PartialEq, Eq)]
+struct FixtureTreeEntry {
+    relative_path: PathBuf,
+    file_type: u8,
+    device: u64,
+    inode: u64,
+    mode: u32,
+    link_count: u64,
+    logical_bytes: u64,
+    modified_seconds: i64,
+    modified_nanoseconds: i64,
+    contents: Vec<u8>,
+}
+
+#[cfg(target_os = "macos")]
+fn snapshot_fixture_project_tree(root: &Path) -> Vec<FixtureTreeEntry> {
+    use std::os::unix::fs::MetadataExt;
+
+    let mut pending = vec![root.to_path_buf()];
+    let mut entries = Vec::new();
+    while let Some(path) = pending.pop() {
+        let metadata = std::fs::symlink_metadata(&path).unwrap();
+        let file_type = metadata.file_type();
+        let kind = if file_type.is_dir() {
+            1
+        } else if file_type.is_file() {
+            2
+        } else if file_type.is_symlink() {
+            3
+        } else {
+            4
+        };
+        let contents = if file_type.is_file() {
+            std::fs::read(&path).unwrap()
+        } else {
+            Vec::new()
+        };
+        entries.push(FixtureTreeEntry {
+            relative_path: path.strip_prefix(root).unwrap().to_path_buf(),
+            file_type: kind,
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            mode: metadata.mode(),
+            link_count: metadata.nlink(),
+            logical_bytes: metadata.len(),
+            modified_seconds: metadata.mtime(),
+            modified_nanoseconds: metadata.mtime_nsec(),
+            contents,
+        });
+        if file_type.is_dir() {
+            let mut children = std::fs::read_dir(&path)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .collect::<Vec<_>>();
+            children.sort();
+            pending.extend(children.into_iter().rev());
+        }
+    }
+    entries.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    entries
+}
+
+#[cfg(target_os = "macos")]
 #[test]
 fn rust_target_plan_review_rechecks_parent_release_and_expiry_at_consume_completion() {
     let fixture = rust_target_facts_fixture();
@@ -1753,6 +1816,104 @@ fn default_disabled_policy_stops_reviewed_task_before_any_unlink() {
     assert_eq!(result.removed_logical_bytes(), 0);
     assert!(fixture.payload.exists());
     assert!(fixture.target.join("CACHEDIR.TAG").exists());
+
+    fixture.engine.close();
+    assert!(fixture.engine.wait_until_closed(TEST_TIMEOUT));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn rust_target_dry_run_uses_full_validation_without_mutation_or_permanent_opt_in() {
+    let fixture = rust_target_facts_fixture();
+    let reset = fixture.engine.reset_permanent_cleanup().unwrap();
+    assert!(!reset.policy.enabled);
+    let project = fixture.manifest.parent().unwrap();
+    let before = snapshot_fixture_project_tree(project);
+    let candidate_before = fixture
+        .engine
+        .candidate_history_for_scan(&fixture.scan_id)
+        .unwrap()
+        .candidates()
+        .iter()
+        .find(|candidate| candidate.id() == &fixture.candidate_id)
+        .cloned()
+        .unwrap();
+    let (mut parent, review) = prepared_rust_target_plan_review(&fixture);
+
+    let task = fixture.engine.start_rust_target_dry_run(review).unwrap();
+    parent.release().unwrap();
+    let terminal = wait_terminal_with_timeout(&fixture.engine, task, RUST_TARGET_TASK_TIMEOUT);
+    assert_eq!(terminal.kind, TaskKind::RustTargetDryRun);
+    assert_eq!(terminal.phase, TaskPhase::Succeeded, "{terminal:?}");
+    assert_eq!(terminal.failure, None);
+    let result = fixture
+        .engine
+        .rust_target_dry_run_result(task)
+        .unwrap()
+        .unwrap();
+    assert!(
+        result
+            .session_id()
+            .as_str()
+            .starts_with("cleanup:rust-target-dry-run:")
+    );
+    assert_eq!(result.status(), DurableCleanupSessionStatus::DryRun);
+    assert_eq!(snapshot_fixture_project_tree(project), before);
+    assert!(fixture.payload.exists());
+    assert!(fixture.target.join("CACHEDIR.TAG").exists());
+
+    let history = fixture
+        .engine
+        .cleanup_session_history(result.session_id())
+        .unwrap();
+    assert_eq!(
+        history.summary().status(),
+        DurableCleanupSessionStatus::DryRun
+    );
+    assert_eq!(
+        history.summary().mode(),
+        crate::engine::DurableCleanupMode::DryRun
+    );
+    assert_eq!(history.summary().verified_capacity_delta_bytes(), None);
+    assert_eq!(history.items().len(), 1);
+    assert_eq!(
+        history.items()[0].status(),
+        DurableCleanupItemStatus::DryRun
+    );
+    let candidate_after = fixture
+        .engine
+        .candidate_history_for_scan(&fixture.scan_id)
+        .unwrap()
+        .candidates()
+        .iter()
+        .find(|candidate| candidate.id() == &fixture.candidate_id)
+        .cloned()
+        .unwrap();
+    assert_eq!(candidate_after, candidate_before);
+    fixture.engine.inner.store.with_connection(|connection| {
+        let (paths, effect_receipts, candidate_claims, trusted_claims): (i64, i64, i64, i64) =
+            connection
+                .query_row(
+                    "SELECT
+                         (SELECT COUNT(*) FROM cleanup_item_paths
+                          WHERE session_id = ?1 AND status = 'dry_run'
+                            AND effect_started_at_unix_ms IS NULL),
+                         (SELECT COUNT(*) FROM cleanup_item_paths
+                          WHERE session_id = ?1
+                            AND effect_started_at_unix_ms IS NOT NULL),
+                         (SELECT COUNT(*) FROM candidate_plan_claims
+                          WHERE session_id = ?1),
+                         (SELECT COUNT(*) FROM trusted_rust_target_plan_claims
+                          WHERE session_id = ?1)",
+                    [result.session_id().as_str()],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .unwrap();
+        assert_eq!(paths, 1);
+        assert_eq!(effect_receipts, 0);
+        assert_eq!(candidate_claims, 0);
+        assert_eq!(trusted_claims, 0);
+    });
 
     fixture.engine.close();
     assert!(fixture.engine.wait_until_closed(TEST_TIMEOUT));
@@ -13252,6 +13413,50 @@ fn running_cancellation_is_intent_until_worker_returns() {
         engine.cancel_task(id).unwrap(),
         CancelOutcome::AlreadyTerminal
     );
+}
+
+#[test]
+fn cancellation_after_terminalization_boundary_is_not_reported_as_accepted() {
+    let (_temp, engine) = engine_with_limits(RegistryLimits::testing(1, 2, 4, 8));
+    let (closed_tx, closed_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let id = engine
+        .submit_test(Box::new(move |context| {
+            let boundary = context.close_cancellation_boundary();
+            assert!(!boundary.cancellation_requested);
+            assert!(boundary.engine_open);
+            closed_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            WorkOutcome::Succeeded(TaskResult::TestOnly)
+        }))
+        .unwrap();
+    closed_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+
+    assert_eq!(
+        engine.cancel_task(id).unwrap(),
+        CancelOutcome::AlreadyTerminal
+    );
+    let pending = engine.task_snapshot(id).unwrap();
+    assert_eq!(pending.phase, TaskPhase::Running);
+    assert!(!pending.cancellation_requested);
+
+    release_tx.send(()).unwrap();
+    assert_eq!(wait_terminal(&engine, id).phase, TaskPhase::Succeeded);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn rust_target_dry_run_distinguishes_unavailable_validation() {
+    assert!(matches!(
+        rust_target_dry_run_validation_outcome(RustTargetDryRunValidationError::RuleEvidence(
+            crate::planner::RustTargetLiveValidationError::UnsupportedPlatform,
+        ),),
+        ValidatedDryRunOutcome::Unavailable("validation_unavailable")
+    ));
+    assert!(matches!(
+        rust_target_dry_run_validation_outcome(RustTargetDryRunValidationError::Expired),
+        ValidatedDryRunOutcome::ChangedSincePlan("review_expired")
+    ));
 }
 
 #[test]

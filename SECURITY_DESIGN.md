@@ -1355,6 +1355,40 @@ capability. Each item retains its proposed effect so UI can distinguish Trash,
 permanent removal, and eviction. A dry-run success means “would currently pass
 validation,” not “space was freed.”
 
+The first production implementation is the core-owned revision-3 Rust-target
+dry run. Only the exact engine-bound opaque reviewed-plan child can enter it.
+Core consumes that child, projects its frozen permanent-safe plan to
+`DryRun`, recomputes the mandatory warnings, and retains its exact items,
+proposed removal action, authorizations, and deadline. Permanent execution and
+dry run share an inert internal observation validator for the complete plan,
+Cargo/read-set and process evidence, home/mount/protected scope, target
+identity, seven-day subtree recency, manifest digest, and cache tag. Only the
+permanent branch, inside the planner module, can convert that observation to an
+effect witness; the dry-run capability has no approval, target export,
+capacity, driver, or effect method.
+
+The engine serializes the dry run with Trash and permanent cleanup, but the
+permanent-cleanup opt-in does not authorize or block observation. While holding
+the same cleanup lock used by exclusion writers, persistence converts only an
+otherwise successful observation to durable `user_excluded`; cancellation and
+more specific validation failures keep their own outcome. It then atomically
+inserts an uncoupled terminal `DryRun` graph. That ownerless graph never enters
+running or recovery state and has no execution owner, heartbeat, candidate
+claim, trusted-rule claim, effect-start timestamp, capacity delta, or
+removed-byte result. Schema v12 still requires terminal path attempt ordinal
+`1`; this is only row-shape metadata and is not an execution owner or effect
+receipt.
+
+The task closes cancellation under the engine registry mutex immediately
+before durable recording. Requests accepted before that boundary can convert
+an otherwise successful observation to `Cancelled`; requests after it report
+that terminalization has already begun and are not presented as accepted.
+Ambiguous database completion can retry only exact graph reconciliation while
+retaining the lease. If the one retry cannot prove the graph, the task reports
+`HistoryUnresolved` and releases the non-authoritative lease; it does not enter
+the process-lifetime filesystem-cleanup quarantine. The failure is never
+filesystem `OutcomeUnknown`, because no filesystem call is reachable.
+
 ### 9.2 Trash
 
 Arbitrary Explorer cleanup defaults to Trash. On macOS, the platform executor
@@ -2978,6 +3012,7 @@ coverage is labelled as Home-scoped and unknown coverage stays unknown.
 | Dangerous-path corpus and fuzzing | Implemented | Keep cross-platform and promote every crash regression |
 | Rule schema/loader | Strict schema plus a build-time digest/policy-gated and strict load-time-validated discovery catalog; nine rules remain selected-root RevealOnly observations. Independently researched `developer.rust.target` revision 3 requires exact snapshot markers plus complete inclusive seven-day mtime evidence; `developer.python.pycache` remains revision 2 with exact marker evidence. Both propose only SafeRegenerable/RemoveKnownRegenerableContents, remain unschedulable, and retain `ProtectedPath`. Sealed Unix-only live and Cargo-resolution witnesses verify the exact Rust tag, manifest digest, current default layout, and scrubbed-context Cargo workspace/target result; Python live-writer and relocation authority remains open. macOS additionally has explicit revisioned same-store direct-Cargo enrollment, a contract-v27 one-preview native enrollment surface, bounded policy-3 positive config/include byte closure and ordered Cargo trace intent, descriptor-retained metadata cwd, static-code evidence, suspended selected-running-code attestation, complete executable/config/manifest ancestry APFS fences, a guarded two-pass reported root/member-manifest closure, a policy-1 closed accepted path-dependency graph, stale-preview rejection, revocation tombstones, and post-publication retention/revalidation of every Cargo read-set fence and enrolled version | Developer ID signing must cover catalog bytes; before either safe rule can lose its blocker, complete its marker/read-set and namespace provenance, review the documented conservative path-dependency compatibility and path-intent/path-based/same-UID launch limits, and complete adversarial review |
 | Candidate and cleanup-plan records | Completed fresh scans create deterministic, snapshot-bound durable candidate batches; exact-scan summaries plus bounded lossless path/evidence pages and semantic review commands remain non-authoritative history. A crate-private planner module seals an exact current-evaluator/current-catalog source to a retained snapshot and live Rust-target/Cargo witnesses. One private Rust-target authority chain constructs and approves an exact permanent-safe plan and atomically claims its durable candidate while preserving the sole `ProtectedPath` history fact; an insertion-only typed coupling, schema-v12 exact active-claim seal, complete immutable-body/blocker comparison, current revision-3 marker/age facts, and rule-specific policy checks prevent generic or stale blocked candidates from borrowing that path. Contract v33 retains the real reviewed plan behind an opaque child and carries its newest observed mtime plus exact seven-day requirement; only that exact engine-bound child can be consumed into the serialized task. The native controller stores and compares the entire displayed immutable record before consuming its child. Displayed fields still cannot mint approval, journal metadata, paths, callbacks, scheduling, CLI, AI, or Trash authority | Complete §17.3 before enabling the internal confirmation path in Release; keep the blocker exception rule-specific and non-forgeable |
+| Rust-target dry run | Core consumes the exact opaque reviewed-plan child into a separate non-effect `RustTargetDryRun` task. A shared inert validator gives dry run parity with the permanent pre-effect plan/Cargo/process/home/mount/protection/identity/recency/subtree/marker checks, but only the permanent branch can mint an effect witness. Persistence writes an uncoupled ownerless terminal graph under the cleanup/exclusion lock, with no candidate or trusted-rule claim, effect receipt, capacity delta, removed bytes, or permanent-policy dependency. Exclusion overrides success only; cancellation is linearized before recording, unavailable evidence remains distinct from drift, and unresolved metadata never quarantines filesystem cleanup. The API is core-only and has no FFI, Swift, CLI, AI, scheduler, or driver edge | Expose a visibly distinct dry-run review/result surface through FFI and native UI without adding caller-shaped authority; keep unsupported modes unavailable |
 | macOS app cleanup | Confirmation-gated Explorer Trash is implemented. Permanent-safe confirmation, generation-fenced task observation, explicit cancellation, and shutdown quiescence exist only behind `DUX_INTERNAL_PERMANENT_SAFE_CLEANUP` in Debug; Release shows no action and the release pipeline rejects the condition | Entire permanent-safe cleanup release gate in §17.3 |
 | CLI cleanup authority | Retired. The CLI remains a read-only scan/navigation/history/reveal client; its former raw permanent-delete adapter, shortcuts, workers, and lint exceptions are absent | Any future CLI cleanup must consume the same current reviewed-plan executor without accepting caller paths or restoring client-owned effects |
 | Centralized executor | A private production-core Rust-target driver and typed admission/journal/revalidation chain exist behind an engine-owned `PermanentSafeCleanup` task. The task consumes only the exact opaque review, mints all approval/session inputs inside Rust, serializes with Trash, returns path-free results, and quarantines unresolved claim/effect capabilities. A shared bounded descriptor-relative validator enforces the revision-3 seven-day cutoff before preview, before effect admission, and again inside the driver before any unlink; the driver retains exact per-entry identity/type/link/size/mtime checks. Its capacity sampler derives only from the approved plan's unanimous trusted kernel mount scope, rechecks macOS `statfs` identity/location/type, and brackets real effect time; missing telemetry remains unknown. UniFFI v33 can start this task only by irreversibly consuming the exact engine-bound opaque review; the separately confirmed Explorer Trash route cannot nominate its driver inputs. Native confirmation and observation are integrated behind the Debug-only feature condition; the shipped Release UI has no permanent-safe start action | Remaining §17.3 release gates |

@@ -39,6 +39,15 @@ use super::rust_target_cleanup::{
     recovering_result as rust_target_cleanup_recovering_result,
     result as rust_target_cleanup_result,
 };
+use super::rust_target_dry_run::{
+    RustTargetDryRunError, RustTargetDryRunResult, RustTargetDryRunStartFailure,
+};
+#[cfg(target_os = "macos")]
+use super::rust_target_dry_run::{
+    failure_kind as rust_target_dry_run_failure_kind,
+    generate_session_id as generate_dry_run_session_id,
+    map_history_error as map_dry_run_history_error, result as rust_target_dry_run_result,
+};
 use super::rust_target_plan_review::{
     PendingRustTargetPlanReview, RustTargetPlanReview, RustTargetPlanReviewAdmission,
     RustTargetPlanReviewError, ValidatedPendingRustTargetPlanReview,
@@ -128,13 +137,13 @@ use crate::persistence::{
     CandidateEvaluationCompletion, CandidateEvaluationFailureKind, CandidateEvaluationIdentity,
     CandidateEvaluationObservation, CandidateEvaluationRecord, CandidateEvaluationStatus,
     CandidateHistoryStatus, CandidateReviewAction, CleanupHistoryClearStoreError, CleanupSessionId,
-    CompleteCandidateRecord, HistoryErrorKind, HostPathObservationEncoding,
+    CompleteCandidateRecord, DryRunJournalFailure, HistoryErrorKind, HostPathObservationEncoding,
     MAX_RECENT_SCAN_HISTORY_LIMIT, NewCandidateRecord, NewScanRecord, ScanCompletionRecord,
     ScanCounts, ScanStatus, SnapshotReviewPurpose, StoredCleanupErrorCategory,
     StoredCleanupHistoryCursor, StoredCleanupHistoryObservation, StoredCleanupItemStatus,
     StoredCleanupItemSummary, StoredCleanupMode, StoredCleanupRecordFormat,
     StoredCleanupSessionStatus, StoredCleanupSessionSummary, StoredCleanupStatusCounts,
-    StoredCleanupTrigger, TerminalScanStatus, observe_host_path,
+    StoredCleanupTrigger, TerminalScanStatus, ValidatedDryRunOutcome, observe_host_path,
 };
 use crate::persistence::{
     CargoCodeSignatureRecord, CargoEnrollmentSetting, CargoEnrollmentSettingUpdate,
@@ -155,13 +164,13 @@ use crate::planner::{
     CleanupSessionStartError, RustTargetLiveWitness, RustTargetPipelineError, RustTargetPlanFacts,
     RustTargetPlanReviewFailure, prepare_rust_target_live_input,
 };
-#[cfg(all(test, target_os = "macos"))]
-use crate::planner::{RustTargetJournalRequest, begin_rust_target_cleanup_session};
 #[cfg(target_os = "macos")]
 use crate::planner::{
-    RustTargetPromotion, prepare_rust_target_plan_facts, prepare_rust_target_promotion,
-    review_rust_target_plan_facts,
+    RustTargetDryRunValidationError, RustTargetPromotion, TrustedRustTargetDryRun,
+    prepare_rust_target_plan_facts, prepare_rust_target_promotion, review_rust_target_plan_facts,
 };
+#[cfg(all(test, target_os = "macos"))]
+use crate::planner::{RustTargetJournalRequest, begin_rust_target_cleanup_session};
 use crate::scanner::{
     CancellationToken, ScanConfig, ScanMessage, ScanObjectIdentity, ScanTermination, Scanner,
 };
@@ -257,6 +266,7 @@ enum TaskResult {
     SnapshotProvisioningStageMaintenance(Arc<SnapshotProvisioningStageMaintenanceResult>),
     SnapshotTerminalTempMaintenance(Arc<SnapshotTerminalTempMaintenanceResult>),
     SnapshotUnleasedTempMaintenance(Arc<SnapshotUnleasedTempMaintenanceResult>),
+    RustTargetDryRun(Arc<RustTargetDryRunResult>),
     PermanentSafeCleanup(Arc<RustTargetCleanupResult>),
     #[cfg(test)]
     TestOnly,
@@ -274,6 +284,12 @@ struct TaskContext {
     shared: Arc<Shared>,
 }
 
+#[derive(Clone, Copy)]
+struct CancellationBoundary {
+    cancellation_requested: bool,
+    engine_open: bool,
+}
+
 impl TaskContext {
     fn is_cancellation_requested(&self) -> bool {
         self.cancellation.is_requested()
@@ -281,6 +297,27 @@ impl TaskContext {
 
     fn engine_is_open(&self) -> bool {
         self.shared.lock_registry_recover().lifecycle == EngineLifecycle::Open
+    }
+
+    /// Atomically closes the point at which cancellation can change this
+    /// task's result. A cancellation accepted before this boundary is
+    /// returned to the worker; later requests report that terminalization has
+    /// already begun instead of claiming cancellation was accepted.
+    fn close_cancellation_boundary(&self) -> CancellationBoundary {
+        let mut registry = self.shared.lock_registry_recover();
+        let engine_open = registry.lifecycle == EngineLifecycle::Open;
+        let cancellation_requested = registry
+            .records
+            .get_mut(&self.id)
+            .map(|record| {
+                record.cancellation_closed = true;
+                record.cancellation_requested
+            })
+            .unwrap_or(true);
+        CancellationBoundary {
+            cancellation_requested,
+            engine_open,
+        }
     }
 
     fn report_progress(&self, completed: u64, total: u64) {
@@ -608,6 +645,7 @@ struct TaskRecord {
     kind: TaskKind,
     phase: TaskPhase,
     cancellation_requested: bool,
+    cancellation_closed: bool,
     cancellation: CancellationFlag,
     scan_cancellation: Option<CancellationToken>,
     scan_scope: Option<PathBuf>,
@@ -625,6 +663,7 @@ impl TaskRecord {
             kind,
             phase: TaskPhase::Queued,
             cancellation_requested: false,
+            cancellation_closed: false,
             cancellation: CancellationFlag::new(),
             scan_cancellation: None,
             scan_scope,
@@ -696,6 +735,7 @@ struct Registry {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ActiveCleanupOperation {
+    RustTargetDryRun(TaskId),
     PermanentSafe(TaskId),
     Trash(u64),
     Quarantined,
@@ -838,6 +878,11 @@ impl Registry {
         }
         if kind == TaskKind::PermanentSafeCleanup
             && self.active_cleanup_operation == Some(ActiveCleanupOperation::PermanentSafe(id))
+        {
+            self.active_cleanup_operation = None;
+        }
+        if kind == TaskKind::RustTargetDryRun
+            && self.active_cleanup_operation == Some(ActiveCleanupOperation::RustTargetDryRun(id))
         {
             self.active_cleanup_operation = None;
         }
@@ -2073,6 +2118,128 @@ impl EngineHandle {
             pending.parent_review_live,
             observed_at,
         )
+    }
+
+    /// Admit one exact Rust-target plan review to an effect-free, consume-once
+    /// dry-run task.
+    ///
+    /// Refused admission returns the unconsumed opaque review. Accepted
+    /// admission converts it inside core to a mode-bound dry-run capability
+    /// that has no effect witness, platform driver, capacity sampler, or
+    /// permanent-cleanup policy dependency.
+    pub fn start_rust_target_dry_run(
+        &self,
+        review: RustTargetPlanReview,
+    ) -> Result<TaskId, RustTargetDryRunStartFailure> {
+        self.start_rust_target_dry_run_with_hook(review, Box::new(|| {}))
+    }
+
+    fn start_rust_target_dry_run_with_hook(
+        &self,
+        review: RustTargetPlanReview,
+        before_validation: Box<dyn FnOnce() + Send>,
+    ) -> Result<TaskId, RustTargetDryRunStartFailure> {
+        if !review.belongs_to(&self.inner.snapshot_review_owner) {
+            return Err(RustTargetDryRunStartFailure::new(
+                RustTargetDryRunError::WrongEngine,
+                review,
+            ));
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = before_validation;
+            return Err(RustTargetDryRunStartFailure::new(
+                RustTargetDryRunError::Unavailable,
+                review,
+            ));
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let quarantine = process_cleanup_quarantine()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if store_is_quarantined(&quarantine, &self.inner.store) {
+                return Err(RustTargetDryRunStartFailure::new(
+                    RustTargetDryRunError::HistoryUnresolved,
+                    review,
+                ));
+            }
+            let mut registry = match self.inner.shared.registry.lock() {
+                Ok(registry) => registry,
+                Err(_) => {
+                    return Err(RustTargetDryRunStartFailure::new(
+                        RustTargetDryRunError::InternalState,
+                        review,
+                    ));
+                }
+            };
+            if registry.lifecycle != EngineLifecycle::Open {
+                return Err(RustTargetDryRunStartFailure::new(
+                    RustTargetDryRunError::Closed,
+                    review,
+                ));
+            }
+            if registry.queue.len() >= self.inner.shared.limits.queued_tasks {
+                return Err(RustTargetDryRunStartFailure::new(
+                    RustTargetDryRunError::QueueFull,
+                    review,
+                ));
+            }
+            match registry.active_cleanup_operation {
+                Some(ActiveCleanupOperation::Quarantined) => {
+                    return Err(RustTargetDryRunStartFailure::new(
+                        RustTargetDryRunError::HistoryUnresolved,
+                        review,
+                    ));
+                }
+                Some(_) => {
+                    return Err(RustTargetDryRunStartFailure::new(
+                        RustTargetDryRunError::Busy,
+                        review,
+                    ));
+                }
+                None => {}
+            }
+            let id = match TASK_IDS.allocate() {
+                Ok(id) => id,
+                Err(_) => {
+                    return Err(RustTargetDryRunStartFailure::new(
+                        RustTargetDryRunError::InternalState,
+                        review,
+                    ));
+                }
+            };
+            let admitted_at = SystemTime::now();
+            let admitted = review
+                .into_reviewed_at(&self.inner.snapshot_review_owner, admitted_at)
+                .map_err(map_rust_target_dry_run_review_error)
+                .and_then(|reviewed| {
+                    reviewed
+                        .into_rust_target_dry_run()
+                        .map_err(|_| RustTargetDryRunError::ChangedDuringReview)
+                });
+            let store = Arc::clone(&self.inner.store);
+            let work: Work = Box::new(move |context| {
+                run_rust_target_dry_run_task(
+                    store,
+                    admitted,
+                    admitted_at,
+                    before_validation,
+                    &context,
+                )
+            });
+            let record = TaskRecord::new(
+                id,
+                TaskKind::RustTargetDryRun,
+                None,
+                self.inner.shared.limits.events_per_task,
+            );
+            registry.active_cleanup_operation = Some(ActiveCleanupOperation::RustTargetDryRun(id));
+            registry.records.insert(id, record);
+            registry.queue.push_back(Job { id, work });
+            self.inner.shared.workers_ready.notify_one();
+            Ok(id)
+        }
     }
 
     /// Admit one exact Rust-target plan review to the engine-owned,
@@ -4098,6 +4265,7 @@ impl EngineHandle {
                 | TaskResult::SnapshotProvisioningStageMaintenance(_)
                 | TaskResult::SnapshotTerminalTempMaintenance(_)
                 | TaskResult::SnapshotUnleasedTempMaintenance(_)
+                | TaskResult::RustTargetDryRun(_)
                 | TaskResult::PermanentSafeCleanup(_),
             ) => {
                 return Err(TaskAccessError::WrongTaskKind);
@@ -4129,6 +4297,7 @@ impl EngineHandle {
                 | TaskResult::SnapshotProvisioningStageMaintenance(_)
                 | TaskResult::SnapshotTerminalTempMaintenance(_)
                 | TaskResult::SnapshotUnleasedTempMaintenance(_)
+                | TaskResult::RustTargetDryRun(_)
                 | TaskResult::PermanentSafeCleanup(_),
             ) => {
                 return Err(TaskAccessError::WrongTaskKind);
@@ -4163,6 +4332,7 @@ impl EngineHandle {
                 | TaskResult::SnapshotProvisioningStageMaintenance(_)
                 | TaskResult::SnapshotTerminalTempMaintenance(_)
                 | TaskResult::SnapshotUnleasedTempMaintenance(_)
+                | TaskResult::RustTargetDryRun(_)
                 | TaskResult::PermanentSafeCleanup(_),
             ) => return Err(TaskAccessError::WrongTaskKind),
             #[cfg(test)]
@@ -4197,6 +4367,7 @@ impl EngineHandle {
                 | TaskResult::SnapshotProvisioningStageMaintenance(_)
                 | TaskResult::SnapshotTerminalTempMaintenance(_)
                 | TaskResult::SnapshotUnleasedTempMaintenance(_)
+                | TaskResult::RustTargetDryRun(_)
                 | TaskResult::PermanentSafeCleanup(_),
             ) => return Err(TaskAccessError::WrongTaskKind),
             #[cfg(test)]
@@ -4229,6 +4400,7 @@ impl EngineHandle {
                 | TaskResult::SnapshotProvisioningStageMaintenance(_)
                 | TaskResult::SnapshotTerminalTempMaintenance(_)
                 | TaskResult::SnapshotUnleasedTempMaintenance(_)
+                | TaskResult::RustTargetDryRun(_)
                 | TaskResult::PermanentSafeCleanup(_),
             ) => {
                 return Err(TaskAccessError::WrongTaskKind);
@@ -4263,6 +4435,7 @@ impl EngineHandle {
                 | TaskResult::SnapshotProvisioningStageMaintenance(_)
                 | TaskResult::SnapshotTerminalTempMaintenance(_)
                 | TaskResult::SnapshotUnleasedTempMaintenance(_)
+                | TaskResult::RustTargetDryRun(_)
                 | TaskResult::PermanentSafeCleanup(_),
             ) => return Err(TaskAccessError::WrongTaskKind),
             #[cfg(test)]
@@ -4295,6 +4468,7 @@ impl EngineHandle {
                 | TaskResult::SnapshotProvisioningStageMaintenance(_)
                 | TaskResult::SnapshotTerminalTempMaintenance(_)
                 | TaskResult::SnapshotUnleasedTempMaintenance(_)
+                | TaskResult::RustTargetDryRun(_)
                 | TaskResult::PermanentSafeCleanup(_),
             ) => return Err(TaskAccessError::WrongTaskKind),
             #[cfg(test)]
@@ -4329,6 +4503,7 @@ impl EngineHandle {
                 | TaskResult::SnapshotOrphanMaintenance(_)
                 | TaskResult::SnapshotTerminalTempMaintenance(_)
                 | TaskResult::SnapshotUnleasedTempMaintenance(_)
+                | TaskResult::RustTargetDryRun(_)
                 | TaskResult::PermanentSafeCleanup(_),
             ) => return Err(TaskAccessError::WrongTaskKind),
             #[cfg(test)]
@@ -4361,6 +4536,7 @@ impl EngineHandle {
                 | TaskResult::SnapshotOrphanMaintenance(_)
                 | TaskResult::SnapshotProvisioningStageMaintenance(_)
                 | TaskResult::SnapshotUnleasedTempMaintenance(_)
+                | TaskResult::RustTargetDryRun(_)
                 | TaskResult::PermanentSafeCleanup(_),
             ) => return Err(TaskAccessError::WrongTaskKind),
             #[cfg(test)]
@@ -4393,6 +4569,7 @@ impl EngineHandle {
                 | TaskResult::SnapshotOrphanMaintenance(_)
                 | TaskResult::SnapshotProvisioningStageMaintenance(_)
                 | TaskResult::SnapshotTerminalTempMaintenance(_)
+                | TaskResult::RustTargetDryRun(_)
                 | TaskResult::PermanentSafeCleanup(_),
             ) => return Err(TaskAccessError::WrongTaskKind),
             #[cfg(test)]
@@ -4425,7 +4602,41 @@ impl EngineHandle {
                 | TaskResult::SnapshotOrphanMaintenance(_)
                 | TaskResult::SnapshotProvisioningStageMaintenance(_)
                 | TaskResult::SnapshotTerminalTempMaintenance(_)
-                | TaskResult::SnapshotUnleasedTempMaintenance(_),
+                | TaskResult::SnapshotUnleasedTempMaintenance(_)
+                | TaskResult::RustTargetDryRun(_),
+            ) => return Err(TaskAccessError::WrongTaskKind),
+            #[cfg(test)]
+            Some(TaskResult::TestOnly) => return Err(TaskAccessError::WrongTaskKind),
+            None => None,
+        })
+    }
+
+    pub fn rust_target_dry_run_result(
+        &self,
+        id: TaskId,
+    ) -> Result<Option<Arc<RustTargetDryRunResult>>, TaskAccessError> {
+        let registry = self.lock_open_registry()?;
+        let record = registry
+            .records
+            .get(&id)
+            .ok_or(TaskAccessError::UnknownTask)?;
+        if record.kind != TaskKind::RustTargetDryRun {
+            return Err(TaskAccessError::WrongTaskKind);
+        }
+        Ok(match &record.result {
+            Some(TaskResult::RustTargetDryRun(result)) => Some(Arc::clone(result)),
+            Some(
+                TaskResult::FormatSizeBatch(_)
+                | TaskResult::Scan(_)
+                | TaskResult::ScanRecoveryMaintenance(_)
+                | TaskResult::CandidateEvaluationRecoveryMaintenance(_)
+                | TaskResult::HistoryMaintenance(_)
+                | TaskResult::SnapshotRetention(_)
+                | TaskResult::SnapshotOrphanMaintenance(_)
+                | TaskResult::SnapshotProvisioningStageMaintenance(_)
+                | TaskResult::SnapshotTerminalTempMaintenance(_)
+                | TaskResult::SnapshotUnleasedTempMaintenance(_)
+                | TaskResult::PermanentSafeCleanup(_),
             ) => return Err(TaskAccessError::WrongTaskKind),
             #[cfg(test)]
             Some(TaskResult::TestOnly) => return Err(TaskAccessError::WrongTaskKind),
@@ -4449,6 +4660,13 @@ impl EngineHandle {
             .is_some_and(|record| record.cancellation_requested)
         {
             return Ok(CancelOutcome::AlreadyRequested);
+        }
+        if registry
+            .records
+            .get(&id)
+            .is_some_and(|record| record.cancellation_closed)
+        {
+            return Ok(CancelOutcome::AlreadyTerminal);
         }
 
         let event_limit = self.inner.shared.limits.events_per_task;
@@ -4974,6 +5192,150 @@ fn map_rust_target_plan_review_pipeline_error(
 }
 
 #[cfg(target_os = "macos")]
+fn run_rust_target_dry_run_task(
+    store: Arc<StoreCoordinator>,
+    admitted: Result<TrustedRustTargetDryRun, RustTargetDryRunError>,
+    started_at: SystemTime,
+    before_validation: Box<dyn FnOnce() + Send>,
+    context: &TaskContext,
+) -> WorkOutcome {
+    if context.is_cancellation_requested() || !context.engine_is_open() {
+        if let Ok(dry_run) = admitted {
+            dry_run.release();
+        }
+        return WorkOutcome::Cancelled(None);
+    }
+    let dry_run = match admitted {
+        Ok(dry_run) => dry_run,
+        Err(error) => return rust_target_dry_run_failed(error),
+    };
+    let quarantine = process_cleanup_quarantine()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if store_is_quarantined(&quarantine, &store) {
+        dry_run.release();
+        return rust_target_dry_run_failed(RustTargetDryRunError::HistoryUnresolved);
+    }
+    drop(quarantine);
+
+    let session_id = match generate_dry_run_session_id() {
+        Ok(session_id) => session_id,
+        Err(error) => {
+            dry_run.release();
+            return rust_target_dry_run_failed(error);
+        }
+    };
+    let lease = match store.acquire_cleanup_journal_lease(Duration::from_secs(5)) {
+        Ok(lease) => lease,
+        Err(error) => {
+            dry_run.release();
+            return rust_target_dry_run_failed(map_dry_run_history_error(error.kind));
+        }
+    };
+    before_validation();
+    let observed_at = SystemTime::now();
+    let (mut requested_outcome, mut completed_at) =
+        if context.is_cancellation_requested() || !context.engine_is_open() {
+            (
+                ValidatedDryRunOutcome::Cancelled("cancelled"),
+                SystemTime::now(),
+            )
+        } else {
+            match dry_run.validate_at(observed_at) {
+                Ok(validated_at) => {
+                    if context.is_cancellation_requested() || !context.engine_is_open() {
+                        (
+                            ValidatedDryRunOutcome::Cancelled("cancelled"),
+                            SystemTime::now(),
+                        )
+                    } else {
+                        (ValidatedDryRunOutcome::DryRun, validated_at)
+                    }
+                }
+                Err(error) => (
+                    rust_target_dry_run_validation_outcome(error),
+                    SystemTime::now(),
+                ),
+            }
+        };
+    let boundary = context.close_cancellation_boundary();
+    if matches!(requested_outcome, ValidatedDryRunOutcome::DryRun)
+        && (boundary.cancellation_requested || !boundary.engine_open)
+    {
+        requested_outcome = ValidatedDryRunOutcome::Cancelled("cancelled");
+        completed_at = SystemTime::now();
+    }
+    let first_record: Result<_, DryRunJournalFailure> = lease.record_validated_dry_run(
+        session_id.clone(),
+        dry_run.plan(),
+        CleanupTrigger::Manual,
+        requested_outcome,
+        started_at,
+        completed_at,
+    );
+    let recorded = match first_record {
+        Ok(status) => Ok(status),
+        Err(failure) if failure.may_have_committed() => {
+            failure.into_lease().record_validated_dry_run(
+                session_id.clone(),
+                dry_run.plan(),
+                CleanupTrigger::Manual,
+                requested_outcome,
+                started_at,
+                completed_at,
+            )
+        }
+        Err(failure) => {
+            let error = map_dry_run_history_error(failure.kind());
+            drop(failure.into_lease());
+            dry_run.release();
+            return rust_target_dry_run_failed(error);
+        }
+    };
+    let status = match recorded {
+        Ok(status) => status,
+        Err(failure) => {
+            drop(failure.into_lease());
+            dry_run.release();
+            return rust_target_dry_run_failed(RustTargetDryRunError::HistoryUnresolved);
+        }
+    };
+    dry_run.release();
+    let result = match rust_target_dry_run_result(&session_id, status) {
+        Ok(result) => Arc::new(result),
+        Err(error) => return rust_target_dry_run_failed(error),
+    };
+    if result.status() == DurableCleanupSessionStatus::Cancelled {
+        WorkOutcome::Cancelled(Some(TaskResult::RustTargetDryRun(result)))
+    } else {
+        WorkOutcome::Succeeded(TaskResult::RustTargetDryRun(result))
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn rust_target_dry_run_validation_outcome(
+    error: RustTargetDryRunValidationError,
+) -> ValidatedDryRunOutcome {
+    match error {
+        RustTargetDryRunValidationError::Expired => {
+            ValidatedDryRunOutcome::ChangedSincePlan("review_expired")
+        }
+        RustTargetDryRunValidationError::InvalidPlan => {
+            ValidatedDryRunOutcome::Failed("invalid_plan")
+        }
+        error if error.is_unavailable() => {
+            ValidatedDryRunOutcome::Unavailable("validation_unavailable")
+        }
+        RustTargetDryRunValidationError::Authorization(_) => {
+            ValidatedDryRunOutcome::ChangedSincePlan("authorization_changed")
+        }
+        RustTargetDryRunValidationError::RuleEvidence(_) => {
+            ValidatedDryRunOutcome::ChangedSincePlan("evidence_changed")
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
 fn run_permanent_safe_cleanup_task(
     store: Arc<StoreCoordinator>,
     admitted: Result<ApprovedTrustedReviewedCleanupPlan, RustTargetCleanupError>,
@@ -5162,6 +5524,40 @@ const fn map_rust_target_cleanup_review_error(
         RustTargetPlanReviewError::CorruptData => RustTargetCleanupError::CorruptData,
         RustTargetPlanReviewError::InternalState => RustTargetCleanupError::InternalState,
     }
+}
+
+#[cfg(target_os = "macos")]
+const fn map_rust_target_dry_run_review_error(
+    error: RustTargetPlanReviewError,
+) -> RustTargetDryRunError {
+    match error {
+        RustTargetPlanReviewError::Closed => RustTargetDryRunError::Closed,
+        RustTargetPlanReviewError::WrongEngine => RustTargetDryRunError::WrongEngine,
+        RustTargetPlanReviewError::ParentReviewUnavailable => {
+            RustTargetDryRunError::ParentReviewUnavailable
+        }
+        RustTargetPlanReviewError::ReviewExpired => RustTargetDryRunError::ReviewExpired,
+        RustTargetPlanReviewError::ChangedDuringReview
+        | RustTargetPlanReviewError::CandidateUnavailable
+        | RustTargetPlanReviewError::CargoNotEnrolled
+        | RustTargetPlanReviewError::ActiveProcesses => RustTargetDryRunError::ChangedDuringReview,
+        RustTargetPlanReviewError::UnsupportedPlatform | RustTargetPlanReviewError::Unavailable => {
+            RustTargetDryRunError::Unavailable
+        }
+        RustTargetPlanReviewError::BudgetExceeded => RustTargetDryRunError::BudgetExceeded,
+        RustTargetPlanReviewError::Busy => RustTargetDryRunError::Busy,
+        RustTargetPlanReviewError::UnsafeStorage => RustTargetDryRunError::UnsafeStorage,
+        RustTargetPlanReviewError::CorruptData => RustTargetDryRunError::CorruptData,
+        RustTargetPlanReviewError::InternalState => RustTargetDryRunError::InternalState,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn rust_target_dry_run_failed(error: RustTargetDryRunError) -> WorkOutcome {
+    WorkOutcome::Failed(
+        TaskFailureKind::RustTargetDryRun(rust_target_dry_run_failure_kind(error)),
+        None,
+    )
 }
 
 #[cfg(target_os = "macos")]

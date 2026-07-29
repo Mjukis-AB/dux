@@ -134,6 +134,8 @@ pub enum CleanupPlanValidationError {
     InvalidSelectionPath,
     #[error("cleanup plan expiration could not be represented")]
     ExpirationOverflow,
+    #[error("only a permanent-safe plan can be projected into this dry run")]
+    InvalidDryRunSourceMode,
 }
 
 impl CleanupPlan {
@@ -364,6 +366,22 @@ impl CleanupPlan {
         self.expires_at
     }
 
+    /// Consume a permanent-safe plan into its observation-only projection.
+    ///
+    /// The immutable identity, source, item facts, estimates, and original
+    /// expiry are retained. Only the mode and its mandatory warning set
+    /// change. This is crate-private because callers must not use a mode
+    /// conversion to bypass the planner authority that admitted the original
+    /// permanent-safe plan.
+    pub(crate) fn into_dry_run(mut self) -> Result<Self, CleanupPlanValidationError> {
+        if self.mode != CleanupMode::PermanentSafe {
+            return Err(CleanupPlanValidationError::InvalidDryRunSourceMode);
+        }
+        self.mode = CleanupMode::DryRun;
+        self.warnings = derive_item_warnings(self.mode, &self.items);
+        Ok(self)
+    }
+
     /// Expiration is necessary but never sufficient evidence for execution.
     pub fn has_expired_at(&self, now: SystemTime) -> bool {
         now >= self.expires_at
@@ -568,6 +586,31 @@ fn derive_fact_warnings(
 ) -> Vec<PlanWarning> {
     let dry_run = mode == CleanupMode::DryRun;
     let has_action = |action| facts.iter().any(|fact| fact.action == action);
+    let warn_trash =
+        mode == CleanupMode::Trash || (dry_run && has_action(CandidateAction::MoveToTrash));
+    let warn_permanent = mode == CleanupMode::PermanentSafe
+        || (dry_run && has_action(CandidateAction::RemoveKnownRegenerableContents));
+    let warn_eviction = mode == CleanupMode::EvictLocalCopy
+        || (dry_run && has_action(CandidateAction::EvictLocalCopy));
+    let mut warnings = vec![PlanWarning::EstimatedBytesUnverified];
+    if dry_run {
+        warnings.push(PlanWarning::DryRunDoesNotMutate);
+    }
+    if warn_trash {
+        warnings.push(PlanWarning::TrashDoesNotFreeSpaceImmediately);
+    }
+    if warn_permanent {
+        warnings.push(PlanWarning::PermanentRemovalCannotBeUndone);
+    }
+    if warn_eviction {
+        warnings.push(PlanWarning::CloudEvictionRequiresNetworkToRedownload);
+    }
+    warnings
+}
+
+fn derive_item_warnings(mode: CleanupMode, items: &[CleanupPlanItem]) -> Vec<PlanWarning> {
+    let dry_run = mode == CleanupMode::DryRun;
+    let has_action = |action| items.iter().any(|item| item.action == action);
     let warn_trash =
         mode == CleanupMode::Trash || (dry_run && has_action(CandidateAction::MoveToTrash));
     let warn_permanent = mode == CleanupMode::PermanentSafe

@@ -44,6 +44,8 @@ pub(crate) use exact_path_review::{
     ApprovedCleanupSession, ApprovedTrustedReviewedCleanupPlan, CleanupSessionStartError,
     ExactPathHandoffError, ExactPathPlanError, TrustedReviewedCleanupPlan,
 };
+#[cfg(unix)]
+pub(crate) use exact_path_review::{RustTargetDryRunValidationError, TrustedRustTargetDryRun};
 #[cfg(all(test, target_os = "macos"))]
 pub(crate) use exact_path_review::{RustTargetJournalRequest, begin_rust_target_cleanup_session};
 #[cfg(test)]

@@ -1511,7 +1511,12 @@ Before any public build with cleanup:
 - `SECURITY_DESIGN.md` exists and matches implementation.
 - Dangerous-path corpus and fuzz seeds exist.
 - No-raw-delete CI lint passes.
-- Dry-run integration test proves no filesystem mutation.
+- Dry-run integration test proves no filesystem mutation. The 2026-07-29
+  Rust-target core slice snapshots a real stale Cargo project before and after
+  the complete production validator and proves byte content, object identity,
+  kind, mode, link count, size, and mtime are unchanged. This closes the
+  mutation-detector requirement for that implemented mode; future Trash and
+  eviction dry runs require their own parity evidence before exposure.
 - Trash and permanent-safe modes are visually distinct.
 - Operation history includes rejected/failed actions.
 - Rules have provenance and negative tests.
@@ -5019,6 +5024,47 @@ Tasks:
     files pass. Universal Debug FFI/XCFramework generation produced arm64 and
     x86_64 slices, and the complete native Xcode scheme passed 401 tests with
     zero failures.
+  - [x] 2026-07-29 slice: add the first production-core dry run through the
+    exact Rust-target evaluator → reviewed-plan → validator → history chain.
+    The engine accepts only the same consume-once opaque child used by the
+    proposed permanent operation; no path, display DTO, candidate/plan ID,
+    timestamp, approval Boolean, callback, AI result, command, or retry token
+    can start it. Core consumes and projects the exact frozen plan to
+    `DryRun`, preserving its item/action/estimate/expiry while recomputing the
+    ordered dry-run warnings. The resulting non-cloneable capability has no
+    approval, target export, capacity, journal-claim, driver, or effect-witness
+    method.
+    Permanent and dry-run paths share one inert internal observation validator
+    for current plan shape, Cargo/read-set and process quiescence,
+    account-home/mount/protected scope, target identity, seven-day complete
+    subtree recency, manifest digest, and cache-tag evidence. Effect-witness
+    conversion remains private to the permanent branch. A distinct serialized
+    `RustTargetDryRun` task ignores the permanent-cleanup opt-in and closes a
+    precise cancellation boundary before durable recording, so late requests
+    are never reported as accepted. Under the cleanup lock, current user
+    exclusions convert only an otherwise successful observation to durable
+    rejection; cancellation, drift, and unavailable evidence remain distinct.
+    Persistence atomically inserts an uncoupled, ownerless terminal graph; it
+    never creates a candidate/trusted-rule claim, execution owner, heartbeat,
+    effect-start receipt, capacity sample, removed-byte result, or platform
+    call. Ambiguous writes retry only exact graph reconciliation, then release
+    the non-authoritative lease and report history uncertainty without
+    quarantining filesystem cleanup or inventing an unknown filesystem
+    outcome.
+    Focused domain/planner tests cover projection fidelity, warnings, exact
+    coupling, expiry, marker and recency parity, and validation non-mutation.
+    Focused journal regressions cover success/refusal terminal graphs,
+    exclusion precedence, timestamp ordering, candidate immutability, zero
+    effect/capacity fields, exact ambiguous-commit adoption, and unresolved
+    metadata lease release. A lightweight engine regression covers the
+    cancellation terminalization race. One serialized real stale-Cargo fixture
+    ran the successful,
+    exclusion-refused, cancellation-during-validation, and manifest-drift task
+    paths in 797.72 seconds with the target unchanged; the committed regression
+    retains the complete successful mutation detector while focused layers
+    keep the ordinary suite bounded. The core API is not yet exposed through
+    UniFFI or Swift, so this does not enable Release cleanup or close the parent
+    orchestration item.
 - [ ] Implement execution-time revalidation.
   - [x] 2026-07-19 slice: make the approved-session handoff use one canonical
     millisecond start time for persistence and journal claiming, and recheck

@@ -30,8 +30,9 @@ use crate::persistence::{
 
 use super::rule_scope_grant::{RuleScopeAuthorization, RuleScopeGrantError};
 use super::rust_target::{
-    RustTargetEffectWitness, RustTargetLiveValidationError, validate_candidate_layout,
-    validate_rust_target_effect, validate_rust_target_recency_evidence,
+    RustTargetEffectWitness, RustTargetLiveValidationError, RustTargetPlanObservationError,
+    validate_candidate_layout, validate_rust_target_dry_run_plan, validate_rust_target_effect_plan,
+    validate_rust_target_recency_evidence,
 };
 #[cfg(unix)]
 use super::rust_target_promotion::{RustTargetPlanFacts, RustTargetPromotionError};
@@ -171,6 +172,20 @@ pub(crate) struct TrustedReviewedCleanupPlan {
     authority_expires_at: std::time::SystemTime,
 }
 
+/// A consume-once projection of the exact trusted Rust-target review for an
+/// observation-only run.
+///
+/// Unlike [`ApprovedTrustedReviewedCleanupPlan`], this type has no approval,
+/// journal-claim, capacity, or effect-witness path. It retains the exact
+/// authorization only so dry-run validation can repeat every live rule and
+/// filesystem check used before the permanent effect.
+#[must_use = "Rust-target dry-run authority must be explicitly validated or released"]
+pub(crate) struct TrustedRustTargetDryRun {
+    plan: CleanupPlan,
+    authorization: RuleScopeAuthorization,
+    authority_expires_at: std::time::SystemTime,
+}
+
 /// An explicitly approved reviewed plan. This capability is still crate
 /// private and deliberately has no journal, FFI, scheduling, or effect method;
 /// it only proves that a caller opted in while the plan and its authorizations
@@ -293,6 +308,28 @@ pub(crate) enum ExactPathHandoffError {
 }
 
 #[derive(Debug, Error)]
+pub(crate) enum RustTargetDryRunValidationError {
+    #[error("the Rust-target dry-run authority expired")]
+    Expired,
+    #[error("the Rust-target dry-run plan no longer has its exact trusted shape")]
+    InvalidPlan,
+    #[error("the Rust-target dry-run authorization changed: {0}")]
+    Authorization(#[source] RuleScopeGrantError),
+    #[error("live Rust-target dry-run evidence changed: {0}")]
+    RuleEvidence(#[source] RustTargetLiveValidationError),
+}
+
+impl RustTargetDryRunValidationError {
+    pub(crate) fn is_unavailable(&self) -> bool {
+        match self {
+            Self::Authorization(error) => error.is_unavailable(),
+            Self::RuleEvidence(error) => error.is_unavailable(),
+            Self::Expired | Self::InvalidPlan => false,
+        }
+    }
+}
+
+#[derive(Debug, Error)]
 pub(crate) enum CleanupSessionStartError {
     #[error(transparent)]
     Handoff(#[from] ExactPathHandoffError),
@@ -395,6 +432,46 @@ impl TrustedReviewedCleanupPlan {
 
     pub(crate) fn release(self) {}
 
+    /// Consume only the engine-owned, trusted Rust-target plan shape into an
+    /// observation-only plan. Generic reviewed plans cannot set the trusted
+    /// coupling bit and therefore cannot reach this authority.
+    #[cfg(unix)]
+    pub(crate) fn into_rust_target_dry_run(
+        self,
+    ) -> Result<TrustedRustTargetDryRun, ExactPathPlanError> {
+        if !self.trusted_rust_target_coupling
+            || self.plan.mode() != CleanupMode::PermanentSafe
+            || self.plan.items().len() != 1
+            || self.authorizations.len() != 1
+        {
+            return Err(ExactPathPlanError::AuthorizationMismatch);
+        }
+        let [item] = self.plan.items() else {
+            return Err(ExactPathPlanError::AuthorizationMismatch);
+        };
+        validate_exact_rust_target_item(item).map_err(ExactPathPlanError::RuleEvidence)?;
+        let [authorization] = self
+            .authorizations
+            .try_into()
+            .map_err(|_| ExactPathPlanError::AuthorizationMismatch)?;
+        let target = authorization
+            .revalidated_target_snapshot()
+            .map_err(ExactPathPlanError::Authorization)?;
+        let [expected_path] = item.paths() else {
+            return Err(ExactPathPlanError::AuthorizationMismatch);
+        };
+        if target.requested_path() != expected_path || !authorization.matches(item.rule(), &target)
+        {
+            return Err(ExactPathPlanError::AuthorizationMismatch);
+        }
+        let plan = self.plan.into_dry_run().map_err(ExactPathPlanError::Plan)?;
+        Ok(TrustedRustTargetDryRun {
+            plan,
+            authorization,
+            authority_expires_at: self.authority_expires_at,
+        })
+    }
+
     pub(crate) fn approve(
         self,
         approved_at: std::time::SystemTime,
@@ -411,6 +488,7 @@ impl TrustedReviewedCleanupPlan {
                 ExactPathPlanError::UnsupportedMode
                 | ExactPathPlanError::AuthorizationCount { .. }
                 | ExactPathPlanError::AuthorizationMismatch
+                | ExactPathPlanError::RuleEvidence(_)
                 | ExactPathPlanError::Plan(_) => {
                     unreachable!("trusted plan already passed construction validation")
                 }
@@ -424,6 +502,72 @@ impl TrustedReviewedCleanupPlan {
             approved_at,
         })
     }
+}
+
+#[cfg(unix)]
+impl TrustedRustTargetDryRun {
+    pub(crate) fn plan(&self) -> &CleanupPlan {
+        &self.plan
+    }
+
+    pub(crate) fn effective_expires_at(&self) -> std::time::SystemTime {
+        self.plan.expires_at().min(self.authority_expires_at)
+    }
+
+    /// Repeat the same exact plan, Cargo/process/read-set, home/mount,
+    /// protected-root, target identity, recency, subtree, manifest, and cache
+    /// tag checks used immediately before permanent execution.
+    ///
+    /// The shared live observation is consumed inside this method. No
+    /// `RustTargetEffectWitness` is created or exposed.
+    pub(crate) fn validate_at(
+        &self,
+        now: std::time::SystemTime,
+    ) -> Result<std::time::SystemTime, RustTargetDryRunValidationError> {
+        validate_rust_target_dry_run_plan(
+            &self.plan,
+            &self.authorization,
+            self.effective_expires_at(),
+            now,
+        )
+        .map_err(RustTargetDryRunValidationError::from)
+    }
+
+    pub(crate) fn release(self) {
+        self.authorization.release();
+    }
+}
+
+impl From<RustTargetPlanObservationError> for RustTargetDryRunValidationError {
+    fn from(error: RustTargetPlanObservationError) -> Self {
+        match error {
+            RustTargetPlanObservationError::Expired => Self::Expired,
+            RustTargetPlanObservationError::InvalidPlan => Self::InvalidPlan,
+            RustTargetPlanObservationError::Authorization(source) => Self::Authorization(source),
+            RustTargetPlanObservationError::RuleEvidence(source) => Self::RuleEvidence(source),
+        }
+    }
+}
+
+fn validate_exact_rust_target_item(
+    item: &crate::domain::CleanupPlanItem,
+) -> Result<(), RustTargetLiveValidationError> {
+    if item.rule().id().as_str() != "developer.rust.target"
+        || item.rule().revision().get() != crate::domain::SAFE_RUST_RULE_REVISION
+        || item.safety() != SafetyTier::SafeRegenerable
+        || item.action() != CandidateAction::RemoveKnownRegenerableContents
+        || item.rule_marks_schedule_eligible()
+    {
+        return Err(RustTargetLiveValidationError::CandidatePolicyMismatch);
+    }
+    let paths = validate_candidate_layout(item.paths(), item.newest_mtime(), item.evidence())?;
+    let [expected_path] = item.paths() else {
+        return Err(RustTargetLiveValidationError::CandidatePolicyMismatch);
+    };
+    if paths.target != *expected_path {
+        return Err(RustTargetLiveValidationError::CandidatePolicyMismatch);
+    }
+    Ok(())
 }
 
 impl ApprovedTrustedReviewedCleanupPlan {
@@ -452,6 +596,7 @@ impl ApprovedTrustedReviewedCleanupPlan {
                 ExactPathPlanError::UnsupportedMode
                 | ExactPathPlanError::AuthorizationCount { .. }
                 | ExactPathPlanError::AuthorizationMismatch
+                | ExactPathPlanError::RuleEvidence(_)
                 | ExactPathPlanError::Plan(_) => {
                     unreachable!("trusted plan already passed construction validation")
                 }
@@ -717,77 +862,49 @@ impl ApprovedCleanupSession {
         self.claim
             .validate_validating_path(item_ordinal, path_ordinal)
             .map_err(ExactPathHandoffError::Journal)?;
-        let item = self
+        if item_ordinal != 0 || path_ordinal != 0 {
+            return Err(ExactPathHandoffError::Journal(HistoryError::new(
+                crate::persistence::HistoryErrorKind::InvalidInput,
+            )));
+        }
+        let authorization = self
             .approved
-            .plan()
-            .items()
-            .get(item_ordinal)
+            .reviewed
+            .authorization_for_path(item_ordinal, path_ordinal)
             .ok_or_else(|| {
                 ExactPathHandoffError::Journal(HistoryError::new(
                     crate::persistence::HistoryErrorKind::InvalidInput,
                 ))
             })?;
-        if item.rule().id().as_str() != "developer.rust.target"
-            || item.rule().revision().get() != crate::domain::SAFE_RUST_RULE_REVISION
-            || item.safety() != SafetyTier::SafeRegenerable
-            || item.action() != CandidateAction::RemoveKnownRegenerableContents
-            || item.rule_marks_schedule_eligible()
-        {
-            return Err(ExactPathHandoffError::Journal(HistoryError::new(
-                crate::persistence::HistoryErrorKind::InvalidTransition,
-            )));
-        }
-        let expected_path = item.paths().get(path_ordinal).ok_or_else(|| {
-            ExactPathHandoffError::Journal(HistoryError::new(
-                crate::persistence::HistoryErrorKind::InvalidInput,
-            ))
-        })?;
-        let candidate_paths =
-            validate_candidate_layout(item.paths(), item.newest_mtime(), item.evidence())
-                .map_err(ExactPathHandoffError::RuleEvidence)?;
-        if candidate_paths.target != *expected_path {
-            return Err(ExactPathHandoffError::Journal(HistoryError::new(
-                crate::persistence::HistoryErrorKind::InvalidTransition,
-            )));
-        }
-        let (newest_mtime, minimum_age) =
-            validate_rust_target_recency_evidence(item.newest_mtime(), item.evidence())
-                .map_err(ExactPathHandoffError::RuleEvidence)?;
-        if !now
-            .duration_since(newest_mtime)
-            .is_ok_and(|age| age >= minimum_age)
-        {
-            return Err(ExactPathHandoffError::RuleEvidence(
-                RustTargetLiveValidationError::RecentActivity,
-            ));
-        }
-        let recency_cutoff = now.checked_sub(minimum_age).ok_or({
-            ExactPathHandoffError::RuleEvidence(RustTargetLiveValidationError::RecentActivity)
-        })?;
-        let target = self
-            .approved
-            .revalidated_target_for_path(item_ordinal, path_ordinal, now)
-            .map_err(ExactPathHandoffError::Approval)?;
-        if target.requested_path() != expected_path {
-            return Err(ExactPathHandoffError::Journal(HistoryError::new(
-                crate::persistence::HistoryErrorKind::InvalidTransition,
-            )));
-        }
-        crate::cleanup::permanent_safe::validate_rust_target_subtree_recency(
-            target.canonical_path(),
-            target.target_identity(),
-            recency_cutoff,
+        validate_rust_target_effect_plan(
+            self.approved.plan(),
+            authorization,
+            self.approved.reviewed.effective_expires_at(),
+            now,
         )
-        .map_err(|_| {
-            ExactPathHandoffError::RuleEvidence(
-                RustTargetLiveValidationError::ChangedDuringValidation,
-            )
-        })?;
-        validate_rust_target_effect(target, recency_cutoff)
-            .map_err(ExactPathHandoffError::RuleEvidence)
+        .map_err(map_rust_target_plan_observation_handoff)
     }
 
     pub(crate) fn release(self) {}
+}
+
+fn map_rust_target_plan_observation_handoff(
+    error: RustTargetPlanObservationError,
+) -> ExactPathHandoffError {
+    match error {
+        RustTargetPlanObservationError::Expired => {
+            ExactPathHandoffError::Approval(ExactPathApprovalError::Expired)
+        }
+        RustTargetPlanObservationError::InvalidPlan => ExactPathHandoffError::Journal(
+            HistoryError::new(crate::persistence::HistoryErrorKind::InvalidTransition),
+        ),
+        RustTargetPlanObservationError::Authorization(source) => {
+            ExactPathHandoffError::Approval(ExactPathApprovalError::Authorization(source))
+        }
+        RustTargetPlanObservationError::RuleEvidence(source) => {
+            ExactPathHandoffError::RuleEvidence(source)
+        }
+    }
 }
 
 impl ExactPathReview {
@@ -1088,6 +1205,8 @@ pub(crate) enum ExactPathPlanError {
     AuthorizationMismatch,
     #[error("trusted rule-scope authorization failed: {0}")]
     Authorization(#[source] RuleScopeGrantError),
+    #[error("trusted Rust-target rule evidence failed: {0}")]
+    RuleEvidence(#[source] RustTargetLiveValidationError),
     #[cfg(unix)]
     #[error("Rust-target promotion failed: {0}")]
     RustTargetPromotion(#[source] RustTargetPromotionError),

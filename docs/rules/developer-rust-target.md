@@ -1,7 +1,8 @@
 # `developer.rust.target` rule review
 
-Status: bundled revision 3 with deterministic reviewed core/FFI execution,
-unschedulable and disabled in the shipped Release UI.
+Status: bundled revision 3 with deterministic reviewed core/FFI execution and
+a core-owned non-mutating dry run; unschedulable and disabled in the shipped
+Release UI.
 
 Reviewed: 2026-07-18 against Cargo 1.96.0 and the current Cargo Book. This is
 an independent DUX review. It does not derive policy, code, fixtures, or wording
@@ -754,6 +755,31 @@ start action compile only with `DUX_INTERNAL_PERMANENT_SAFE_CLEANUP` in Debug;
 Release exposes no execution action and the release pipeline rejects that
 condition. AI, CLI, schedules, history, and reconstructed display values cannot
 enter the consuming call, and every release gate below remains open.
+
+The same exact opaque child can now instead enter a distinct production-core
+dry-run task. Core consumes it once, preserves the frozen Rust-target item and
+proposed `RemoveKnownRegenerableContents` action, changes only the plan mode
+and required warnings, and repeats the shared live plan, Cargo/read-set,
+process, account-home/mount/protected-scope, target-identity, seven-day subtree,
+manifest, and cache-tag checks. The shared result is inert; only the permanent
+branch inside the planner can convert it to `RustTargetEffectWitness`.
+
+The dry-run task has no approval, capacity sampler, descriptor-relative
+removal driver, or platform callback. It serializes with other cleanup journal
+operations so current user exclusions can override success with a durable
+rejection, but it deliberately ignores the permanent-cleanup opt-in because
+that setting authorizes mutation, not observation. History is inserted as an
+uncoupled ownerless terminal graph with no candidate or trusted-rule claim,
+execution owner, effect-start timestamp, capacity delta, or removed-byte
+result. Cancellation is closed at a registry-serialized terminalization
+boundary before that graph is recorded. Evidence unavailability remains
+distinct from drift, and an unprovable metadata write releases the
+non-authoritative lease rather than quarantining later filesystem cleanup. The
+original candidate remains `Discovered` with its `ProtectedPath` blocker. A
+real stale Cargo fixture compares the complete project tree before and after
+successful validation, including byte content, Unix identity, kind, mode, link
+count, size, and mtime. This API remains core-only; FFI, Swift, CLI, AI,
+schedules, and the public Release UI cannot start it yet.
 
 ## Required before native executable use
 

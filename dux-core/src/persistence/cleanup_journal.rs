@@ -8,7 +8,8 @@
 mod lease;
 
 pub(crate) use lease::{
-    CleanupJournalClaim, CleanupJournalLease, EffectStartReceipt, JournalLeaseFailure,
+    CleanupJournalClaim, CleanupJournalLease, DryRunJournalFailure, EffectStartReceipt,
+    JournalLeaseFailure, ValidatedDryRunOutcome,
 };
 #[cfg(test)]
 pub(crate) use lease::{
@@ -26,8 +27,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 use crate::domain::{
-    CLEANUP_PLAN_VALIDITY, CandidateAction, CandidateId, CleanupMode, CleanupPlanId, Evidence,
-    PlanWarning, RuleId, RuleRef, RuleRevision, SafetyTier, ScanId,
+    CLEANUP_PLAN_VALIDITY, CandidateAction, CandidateId, CleanupMode, CleanupPlan, CleanupPlanId,
+    Evidence, PlanWarning, RuleId, RuleRef, RuleRevision, SafetyTier, ScanId,
 };
 
 use super::candidate_history::{
@@ -36,7 +37,8 @@ use super::candidate_history::{
     settle_planned_candidate, stored_bool, validate_complete_children, validate_policy,
 };
 use super::cleanup_history::{
-    CandidateStatusCoupling, CleanupSessionId, CleanupTrigger, PlannedCleanupItemRecord,
+    CandidateStatusCoupling, CleanupSessionId, CleanupTrigger, NewCleanupSessionRecord,
+    PlannedCleanupItemRecord, insert_uncoupled_cleanup_session,
     load_frozen_cleanup_session_within_budget,
 };
 use super::history::{
@@ -115,6 +117,15 @@ pub(super) enum JournalLifecycle {
         heartbeat_at: SystemTime,
         completed_at: SystemTime,
         verified_capacity_delta_bytes: Option<i64>,
+        cancellation_requested: bool,
+    },
+    /// A terminal validation observation that never claimed an execution
+    /// owner. This shape is valid only for an uncoupled DryRun plan and can
+    /// contain only the schema-required first validation attempt, never an
+    /// execution generation, effect receipt, or capacity delta.
+    ObservedTerminal {
+        status: TerminalSessionStatus,
+        completed_at: SystemTime,
         cancellation_requested: bool,
     },
 }
@@ -494,6 +505,109 @@ fn expire_planned(
         owner,
         generation: 1,
     })
+}
+
+/// Atomically insert and settle one non-effect DryRun observation.
+///
+/// The row never enters `running` or `recovering`: there is no execution owner,
+/// execution generation, heartbeat, effect receipt, or capacity measurement.
+/// The surrounding cleanup lease is the sole serialization boundary.
+#[allow(clippy::too_many_arguments)]
+fn record_validated_dry_run(
+    transaction: &Transaction<'_>,
+    session_id: CleanupSessionId,
+    plan: &CleanupPlan,
+    trigger: CleanupTrigger,
+    outcome: ValidationOutcome,
+    error_category: Option<&str>,
+    cancellation_requested: bool,
+    started_at: SystemTime,
+    completed_at: SystemTime,
+) -> Result<TerminalSessionStatus, HistoryError> {
+    if plan.mode() != CleanupMode::DryRun {
+        return Err(HistoryError::new(HistoryErrorKind::InvalidInput));
+    }
+    validate_error(error_category)?;
+    if matches!(outcome, ValidationOutcome::DryRun) != error_category.is_none()
+        || (cancellation_requested && !matches!(outcome, ValidationOutcome::Interrupted))
+    {
+        return Err(invalid_transition());
+    }
+    let record = NewCleanupSessionRecord::try_from_uncoupled_plan(
+        session_id.clone(),
+        plan,
+        started_at,
+        trigger,
+    )?;
+    insert_uncoupled_cleanup_session(transaction, &record)?;
+
+    let path_status = PathStatus::from(outcome);
+    let completed = system_time_to_unix_ms(completed_at, HistoryErrorKind::InvalidInput)?;
+    let expected_paths = plan
+        .items()
+        .iter()
+        .try_fold(0_usize, |total, item| total.checked_add(item.paths().len()))
+        .ok_or_else(|| HistoryError::new(HistoryErrorKind::InvalidInput))?;
+    let changed_paths = transaction
+        .execute(
+            "UPDATE cleanup_item_paths
+             SET status = ?2, attempt_generation = 1,
+                 error_category = ?3, completed_at_unix_ms = ?4
+             WHERE session_id = ?1 AND status = 'planned'
+               AND attempt_generation IS NULL
+               AND error_category IS NULL
+               AND effect_started_at_unix_ms IS NULL
+               AND completed_at_unix_ms IS NULL",
+            params![
+                session_id.as_str(),
+                path_status.stored(),
+                error_category,
+                completed,
+            ],
+        )
+        .map_err(map_write_sql_error)?;
+    if changed_paths != expected_paths {
+        return Err(invalid_transition());
+    }
+    let changed_items = transaction
+        .execute(
+            "UPDATE cleanup_items
+             SET final_status = ?2, error_category = ?3
+             WHERE session_id = ?1 AND record_format_version = 2
+               AND final_status = 'planned' AND error_category IS NULL",
+            params![session_id.as_str(), path_status.stored(), error_category],
+        )
+        .map_err(map_write_sql_error)?;
+    if changed_items != plan.items().len() {
+        return Err(invalid_transition());
+    }
+    let statuses = vec![path_status; expected_paths];
+    let terminal =
+        derive_terminal_session_status(&statuses, CleanupMode::DryRun, cancellation_requested)?;
+    let changed_session = transaction
+        .execute(
+            "UPDATE cleanup_sessions
+             SET status = ?2, completed_at_unix_ms = ?3,
+                 cancellation_requested = ?4
+             WHERE session_id = ?1 AND record_format_version = 2
+               AND mode = 'dry_run'
+               AND candidate_status_coupling_version = 1
+               AND status = 'planned' AND completed_at_unix_ms IS NULL
+               AND verified_capacity_delta_bytes IS NULL
+               AND execution_owner_id IS NULL
+               AND execution_generation IS NULL
+               AND last_heartbeat_at_unix_ms IS NULL
+               AND cancellation_requested = 0",
+            params![
+                session_id.as_str(),
+                terminal.stored(),
+                completed,
+                i64::from(cancellation_requested),
+            ],
+        )
+        .map_err(map_write_sql_error)?;
+    require_one(changed_session)?;
+    Ok(terminal)
 }
 
 fn canonical_expiry_settlement_time(value: SystemTime) -> Result<SystemTime, HistoryError> {
@@ -1662,6 +1776,9 @@ pub(super) fn load_cleanup_journal_within_budget(
         || (trigger == CleanupTrigger::Scheduled
             && (mode != CleanupMode::PermanentSafe
                 || items.iter().any(|item| !item.frozen.rule_schedule_eligible)))
+        || (matches!(lifecycle, JournalLifecycle::ObservedTerminal { .. })
+            && (mode != CleanupMode::DryRun
+                || frozen.candidate_status_coupling != CandidateStatusCoupling::LegacyUncoupled))
         || cleanup_paths_overlap(&items)
     {
         return Err(corrupt());
@@ -2072,19 +2189,27 @@ fn decode_lifecycle_fields(
         });
     }
     let status = terminal_session_status_from_stored(raw.status)?;
-    // All schema-v2 terminal rows are produced from a claimed generation and
-    // retain that provenance even though no further mutation is permitted.
-    let (owner, generation, heartbeat_at) = execution.ok_or_else(corrupt)?;
-    Ok(JournalLifecycle::Terminal {
+    let completed_at = unix_ms_to_system_time(raw.completed_ms.ok_or_else(corrupt)?)?;
+    if let Some((owner, generation, heartbeat_at)) = execution {
+        return Ok(JournalLifecycle::Terminal {
+            status,
+            fence: ExecutionFence {
+                session_id: session_id.clone(),
+                owner,
+                generation,
+            },
+            heartbeat_at,
+            completed_at,
+            verified_capacity_delta_bytes: raw.capacity_delta,
+            cancellation_requested,
+        });
+    }
+    if raw.capacity_delta.is_some() {
+        return Err(corrupt());
+    }
+    Ok(JournalLifecycle::ObservedTerminal {
         status,
-        fence: ExecutionFence {
-            session_id: session_id.clone(),
-            owner,
-            generation,
-        },
-        heartbeat_at,
-        completed_at: unix_ms_to_system_time(raw.completed_ms.ok_or_else(corrupt)?)?,
-        verified_capacity_delta_bytes: raw.capacity_delta,
+        completed_at,
         cancellation_requested,
     })
 }
@@ -2524,6 +2649,7 @@ fn validate_dynamic_state<I: DynamicItemState>(
 ) -> Result<(), HistoryError> {
     let (current_generation, heartbeat_at) = match lifecycle {
         JournalLifecycle::Planned => (None, None),
+        JournalLifecycle::ObservedTerminal { .. } => (Some(1), None),
         JournalLifecycle::Active {
             fence,
             heartbeat_at,
@@ -2547,7 +2673,12 @@ fn validate_dynamic_state<I: DynamicItemState>(
             return Err(corrupt());
         }
         for path in item.paths() {
-            validate_path_shape(path, current_generation, started_at)?;
+            validate_path_shape(
+                path,
+                current_generation,
+                matches!(lifecycle, JournalLifecycle::ObservedTerminal { .. }),
+                started_at,
+            )?;
             if path
                 .effect_started_at()
                 .zip(heartbeat_at)
@@ -2611,6 +2742,24 @@ fn validate_dynamic_state<I: DynamicItemState>(
                 return Err(corrupt());
             }
         }
+        JournalLifecycle::ObservedTerminal {
+            status,
+            completed_at,
+            cancellation_requested,
+        } => {
+            if mode != CleanupMode::DryRun
+                || derive_terminal_session_status(&statuses, mode, *cancellation_requested)
+                    .map_err(|_| corrupt())?
+                    != *status
+                || items.iter().flat_map(DynamicItemState::paths).any(|path| {
+                    path.attempt_generation() != Some(1)
+                        || path.effect_started_at().is_some()
+                        || path.completed_at() != Some(*completed_at)
+                })
+            {
+                return Err(corrupt());
+            }
+        }
     }
     Ok(())
 }
@@ -2618,13 +2767,17 @@ fn validate_dynamic_state<I: DynamicItemState>(
 fn validate_path_shape<P: DynamicPathState>(
     path: &P,
     current_generation: Option<u64>,
+    observed_terminal: bool,
     started_at: SystemTime,
 ) -> Result<(), HistoryError> {
     if path
         .attempt_generation()
         .is_some_and(|generation| current_generation.is_none_or(|current| generation > current))
         || (path.status() == PathStatus::Planned && path.attempt_generation().is_some())
-        || (path.status() != PathStatus::Planned && path.attempt_generation().is_none())
+        || (path.status() != PathStatus::Planned
+            && path.attempt_generation().is_none()
+            && !observed_terminal)
+        || (observed_terminal && path.attempt_generation() != Some(1))
         || (path.status() == PathStatus::Planned
             && (path.error_category().is_some()
                 || path.effect_started_at().is_some()
