@@ -6041,9 +6041,12 @@ public struct RustTargetPlanReviewInfo: Equatable, Hashable {
     public let safety: CandidateSafety
     public let action: CandidateAction
     public let estimatedBytes: UInt64
+    public let newestMtime: SnapshotNodeTimestamp
+    public let minimumAgeSeconds: UInt64
+    public let minimumAgeNanoseconds: UInt32
     public let warnings: [CleanupWarning]
-    public let createdAtUnixMs: Int64
-    public let effectiveExpiresAtUnixMs: Int64
+    public let createdAt: SnapshotNodeTimestamp
+    public let effectiveExpiresAt: SnapshotNodeTimestamp
     public let scheduleEligible: Bool
     public let itemCount: UInt16
     public let pathCount: UInt16
@@ -6051,7 +6054,7 @@ public struct RustTargetPlanReviewInfo: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(recordVersion: UInt32, planId: String, sourceScanId: String, candidateId: String, ruleId: String, ruleRevision: UInt32, category: CandidateCategory, mode: CleanupMode, safety: CandidateSafety, action: CandidateAction, estimatedBytes: UInt64, warnings: [CleanupWarning], createdAtUnixMs: Int64, effectiveExpiresAtUnixMs: Int64, scheduleEligible: Bool, itemCount: UInt16, pathCount: UInt16, path: RustTargetPlanReviewPath) {
+    public init(recordVersion: UInt32, planId: String, sourceScanId: String, candidateId: String, ruleId: String, ruleRevision: UInt32, category: CandidateCategory, mode: CleanupMode, safety: CandidateSafety, action: CandidateAction, estimatedBytes: UInt64, newestMtime: SnapshotNodeTimestamp, minimumAgeSeconds: UInt64, minimumAgeNanoseconds: UInt32, warnings: [CleanupWarning], createdAt: SnapshotNodeTimestamp, effectiveExpiresAt: SnapshotNodeTimestamp, scheduleEligible: Bool, itemCount: UInt16, pathCount: UInt16, path: RustTargetPlanReviewPath) {
         self.recordVersion = recordVersion
         self.planId = planId
         self.sourceScanId = sourceScanId
@@ -6063,9 +6066,12 @@ public struct RustTargetPlanReviewInfo: Equatable, Hashable {
         self.safety = safety
         self.action = action
         self.estimatedBytes = estimatedBytes
+        self.newestMtime = newestMtime
+        self.minimumAgeSeconds = minimumAgeSeconds
+        self.minimumAgeNanoseconds = minimumAgeNanoseconds
         self.warnings = warnings
-        self.createdAtUnixMs = createdAtUnixMs
-        self.effectiveExpiresAtUnixMs = effectiveExpiresAtUnixMs
+        self.createdAt = createdAt
+        self.effectiveExpiresAt = effectiveExpiresAt
         self.scheduleEligible = scheduleEligible
         self.itemCount = itemCount
         self.pathCount = pathCount
@@ -6099,9 +6105,12 @@ public struct FfiConverterTypeRustTargetPlanReviewInfo: FfiConverterRustBuffer {
                 safety: FfiConverterTypeCandidateSafety.read(from: &buf),
                 action: FfiConverterTypeCandidateAction.read(from: &buf),
                 estimatedBytes: FfiConverterUInt64.read(from: &buf),
+                newestMtime: FfiConverterTypeSnapshotNodeTimestamp.read(from: &buf),
+                minimumAgeSeconds: FfiConverterUInt64.read(from: &buf),
+                minimumAgeNanoseconds: FfiConverterUInt32.read(from: &buf),
                 warnings: FfiConverterSequenceTypeCleanupWarning.read(from: &buf),
-                createdAtUnixMs: FfiConverterInt64.read(from: &buf),
-                effectiveExpiresAtUnixMs: FfiConverterInt64.read(from: &buf),
+                createdAt: FfiConverterTypeSnapshotNodeTimestamp.read(from: &buf),
+                effectiveExpiresAt: FfiConverterTypeSnapshotNodeTimestamp.read(from: &buf),
                 scheduleEligible: FfiConverterBool.read(from: &buf),
                 itemCount: FfiConverterUInt16.read(from: &buf),
                 pathCount: FfiConverterUInt16.read(from: &buf),
@@ -6121,9 +6130,12 @@ public struct FfiConverterTypeRustTargetPlanReviewInfo: FfiConverterRustBuffer {
         FfiConverterTypeCandidateSafety.write(value.safety, into: &buf)
         FfiConverterTypeCandidateAction.write(value.action, into: &buf)
         FfiConverterUInt64.write(value.estimatedBytes, into: &buf)
+        FfiConverterTypeSnapshotNodeTimestamp.write(value.newestMtime, into: &buf)
+        FfiConverterUInt64.write(value.minimumAgeSeconds, into: &buf)
+        FfiConverterUInt32.write(value.minimumAgeNanoseconds, into: &buf)
         FfiConverterSequenceTypeCleanupWarning.write(value.warnings, into: &buf)
-        FfiConverterInt64.write(value.createdAtUnixMs, into: &buf)
-        FfiConverterInt64.write(value.effectiveExpiresAtUnixMs, into: &buf)
+        FfiConverterTypeSnapshotNodeTimestamp.write(value.createdAt, into: &buf)
+        FfiConverterTypeSnapshotNodeTimestamp.write(value.effectiveExpiresAt, into: &buf)
         FfiConverterBool.write(value.scheduleEligible, into: &buf)
         FfiConverterUInt16.write(value.itemCount, into: &buf)
         FfiConverterUInt16.write(value.pathCount, into: &buf)

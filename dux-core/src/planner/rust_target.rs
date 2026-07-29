@@ -1,5 +1,6 @@
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use thiserror::Error;
 
@@ -20,7 +21,7 @@ use super::rust_target_source::{
 };
 
 const RUST_TARGET_RULE_ID: &str = "developer.rust.target";
-const RUST_TARGET_RULE_REVISION: u32 = 2;
+const RUST_TARGET_RULE_REVISION: u32 = 3;
 pub(super) const RUST_TARGET_WITNESS_REVISION: u32 = 1;
 const CARGO_CACHE_TAG_SIGNATURE: &[u8; 43] = b"Signature: 8a477f597d28d172789f06886806bc55";
 const MAX_CARGO_MANIFEST_BYTES: usize = 4 * 1024 * 1024;
@@ -74,6 +75,7 @@ pub(crate) struct RustTargetEffectWitness {
     target: CanonicalPathSnapshot,
     manifest: CanonicalFileDigestSnapshot,
     cache_tag: CanonicalFilePrefixSnapshot,
+    recency_cutoff: SystemTime,
 }
 
 #[derive(Debug, Error)]
@@ -86,6 +88,8 @@ pub(crate) enum RustTargetLiveValidationError {
     ProtectedPathNotUnresolved,
     #[error("candidate does not contain the exact staged Rust target evidence")]
     CandidateEvidenceMismatch,
+    #[error("the Rust target has activity within its required minimum age")]
+    RecentActivity,
     #[error("candidate paths do not form the exact default Cargo target layout")]
     LayoutMismatch,
     #[error("live Rust target validation is unsupported on this platform")]
@@ -137,10 +141,11 @@ pub(crate) fn validate_live_rust_target(
 /// candidate blocker or creates a plan.
 pub(crate) fn validate_rust_target_effect(
     target: CanonicalPathSnapshot,
+    recency_cutoff: SystemTime,
 ) -> Result<RustTargetEffectWitness, RustTargetLiveValidationError> {
     #[cfg(not(unix))]
     {
-        let _ = target;
+        let _ = (target, recency_cutoff);
         return Err(RustTargetLiveValidationError::UnsupportedPlatform);
     }
 
@@ -226,6 +231,7 @@ pub(crate) fn validate_rust_target_effect(
             target,
             manifest,
             cache_tag,
+            recency_cutoff,
         })
     }
 }
@@ -236,7 +242,11 @@ pub(super) fn validate_live_rust_target_for_test(
     candidate: &Candidate,
 ) -> Result<RustTargetLiveWitness, RustTargetLiveValidationError> {
     validate_candidate_policy(source.source_scan_id, candidate)?;
-    let paths = validate_candidate_layout(candidate.paths(), candidate.evidence())?;
+    let paths = validate_candidate_layout(
+        candidate.paths(),
+        candidate.newest_mtime(),
+        candidate.evidence(),
+    )?;
     validate_live_rust_target_inner(
         candidate.source_scan_id().clone(),
         candidate.id().clone(),
@@ -518,10 +528,11 @@ impl RustTargetLiveWitness {
 
 impl RustTargetEffectWitness {
     pub(crate) fn revalidate_current(&self) -> Result<(), RustTargetLiveValidationError> {
-        let current = validate_rust_target_effect(self.target.clone())?;
+        let current = validate_rust_target_effect(self.target.clone(), self.recency_cutoff)?;
         if current.target != self.target
             || current.manifest != self.manifest
             || current.cache_tag != self.cache_tag
+            || current.recency_cutoff != self.recency_cutoff
         {
             return Err(RustTargetLiveValidationError::ChangedDuringValidation);
         }
@@ -534,6 +545,10 @@ impl RustTargetEffectWitness {
 
     pub(crate) fn target_identity(&self) -> crate::path_validation::FilesystemIdentity {
         self.target.target_identity()
+    }
+
+    pub(crate) fn recency_cutoff(&self) -> SystemTime {
+        self.recency_cutoff
     }
 }
 
@@ -584,7 +599,11 @@ pub(super) fn validate_durable_candidate_for_source(
     if candidate.blockers() != [BlockReason::ProtectedPath] {
         return Err(RustTargetLiveValidationError::ProtectedPathNotUnresolved);
     }
-    let paths = validate_candidate_layout(candidate.paths(), candidate.evidence())?;
+    let paths = validate_candidate_layout(
+        candidate.paths(),
+        candidate.newest_mtime(),
+        candidate.evidence(),
+    )?;
     let expected_id = current_rust_target_candidate_id(source_scan_id, &paths.target)
         .map_err(|_| RustTargetLiveValidationError::CandidatePolicyMismatch)?;
     if candidate.id() != &expected_id {
@@ -593,8 +612,9 @@ pub(super) fn validate_durable_candidate_for_source(
     Ok(paths)
 }
 
-fn validate_candidate_layout(
+pub(super) fn validate_candidate_layout(
     candidate_paths: &[PathBuf],
+    newest_mtime: Option<SystemTime>,
     candidate_evidence: &[Evidence],
 ) -> Result<RustTargetCandidatePaths, RustTargetLiveValidationError> {
     let [target_path] = candidate_paths else {
@@ -612,6 +632,9 @@ fn validate_candidate_layout(
     let mut matched_target = 0_u8;
     let mut matched_manifest = 0_u8;
     let mut matched_cache_tag = 0_u8;
+    let (newest_mtime, required_minimum_age) =
+        validate_rust_target_recency_evidence(newest_mtime, candidate_evidence)?;
+    let mut matched_minimum_age = 0_u8;
     for evidence in candidate_evidence {
         match evidence {
             Evidence::MatchedPath { path } if path == target_path => {
@@ -623,13 +646,20 @@ fn validate_candidate_layout(
             Evidence::RequiredMarker { path } if path == &cache_tag_path => {
                 matched_cache_tag = matched_cache_tag.saturating_add(1);
             }
+            Evidence::MinimumAge {
+                newest_mtime: observed,
+                minimum_age,
+            } if *observed == newest_mtime && *minimum_age == required_minimum_age => {
+                matched_minimum_age = matched_minimum_age.saturating_add(1);
+            }
             _ => return Err(RustTargetLiveValidationError::CandidateEvidenceMismatch),
         }
     }
-    if candidate_evidence.len() != 3
+    if candidate_evidence.len() != 4
         || matched_target != 1
         || matched_manifest != 1
         || matched_cache_tag != 1
+        || matched_minimum_age != 1
     {
         return Err(RustTargetLiveValidationError::CandidateEvidenceMismatch);
     }
@@ -639,6 +669,33 @@ fn validate_candidate_layout(
         manifest: manifest_path,
         cache_tag: cache_tag_path,
     })
+}
+
+pub(crate) fn validate_rust_target_recency_evidence(
+    newest_mtime: Option<SystemTime>,
+    evidence: &[Evidence],
+) -> Result<(SystemTime, Duration), RustTargetLiveValidationError> {
+    let Some(newest_mtime) = newest_mtime else {
+        return Err(RustTargetLiveValidationError::CandidateEvidenceMismatch);
+    };
+    let minimum_age = crate::domain::SAFE_RUST_RULE_MINIMUM_AGE;
+    let mut matches = 0_u8;
+    for item in evidence {
+        if let Evidence::MinimumAge {
+            newest_mtime: observed,
+            minimum_age: observed_minimum,
+        } = item
+        {
+            if *observed != newest_mtime || *observed_minimum != minimum_age {
+                return Err(RustTargetLiveValidationError::CandidateEvidenceMismatch);
+            }
+            matches = matches.saturating_add(1);
+        }
+    }
+    if matches != 1 {
+        return Err(RustTargetLiveValidationError::CandidateEvidenceMismatch);
+    }
+    Ok((newest_mtime, minimum_age))
 }
 
 #[cfg(unix)]

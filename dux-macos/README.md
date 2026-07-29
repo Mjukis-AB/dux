@@ -173,21 +173,24 @@ malformed response, DUX never retries it: Settings performs one read-only status
 reload, visibly blocks further mutations until authoritative state is available,
 and offers an explicit **Reload Cargo status** action if that read fails.
 
-Explorer exposes FFI v28's observation-only **Permanent-safe plan preview** for
-one exact revision-2 Rust-target candidate. Preparing it passes only the
-candidate ID through the already-retained snapshot review. Rust derives and
-revalidates the current target, source scan, permanent-safe mode, plan
-identity, estimate, warnings, and short effective expiry; the returned opaque
-child supports information reads and release. FFI v31 can consume that exact
-engine-bound child directly into the core-owned permanent-safe task. The native
-service and review controller now implement that consuming edge without
-accepting a path or reconstructed plan: the controller stores the complete
-immutable information shown to the user, requires exact equality at execution,
-and removes the child before the asynchronous start. Its start accepts no path,
-identifier, timestamp, approval Boolean, callback, AI result, command, or retry
-token; its task observation is path-free. The existing confirmation-gated
-Explorer Trash route is separate and cannot consume the preview child or its
-display DTO.
+Explorer exposes FFI v33's **Permanent-safe plan preview** for one exact
+revision-3 Rust-target candidate. Preparing it passes only the candidate ID
+through the already-retained snapshot review. Rust derives and revalidates the
+current target, source scan, permanent-safe mode, plan identity, estimate,
+warnings, newest observed modification time, exact seven-day minimum age, and
+short effective expiry. All three timestamps cross FFI losslessly as
+seconds/nanoseconds. It inventories the live target descriptor-relatively
+before publishing the preview and rejects recent, future, missing, linked,
+special, symlinked, or changed entries. The returned opaque child supports
+information reads, release, and the gated consume-once transition into the
+core-owned permanent-safe task. The native service and review controller
+implement that consuming edge without accepting a path or reconstructed plan:
+the controller stores the complete immutable information shown to the user,
+requires exact equality at execution, and removes the child before the
+asynchronous start. Its start accepts no path, identifier, timestamp, approval
+Boolean, callback, AI result, command, or retry token; its task observation is
+path-free. The existing confirmation-gated Explorer Trash route is separate
+and cannot consume the preview child or its display DTO.
 
 The controller owns the child separately from its renewable parent review,
 refreshes the immutable observation every 15 seconds, and releases the child

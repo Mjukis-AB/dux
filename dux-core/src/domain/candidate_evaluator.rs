@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -40,14 +40,16 @@ const EVALUATION_CONTEXT_DOMAIN: &[u8] = b"dux-candidate-evaluation-context-v1\0
 const SELECTED_SCAN_ROOT_SCOPE: &[u8] = b"scope:selected_scan_root";
 const UNRESOLVED_PROTECTION: &[u8] = b"protected_path_authority:unresolved";
 
-pub(crate) const CANDIDATE_EVALUATOR_REVISION: u32 = 2;
+pub(crate) const CANDIDATE_EVALUATOR_REVISION: u32 = 3;
 pub(crate) const CANDIDATE_CATALOG_SCHEMA_VERSION: u32 = 1;
-pub(crate) const CANDIDATE_CONTEXT_FORMAT_VERSION: u32 = 1;
+pub(crate) const CANDIDATE_CONTEXT_FORMAT_VERSION: u32 = 2;
 pub(crate) const CANDIDATE_CATALOG_SHA256: [u8; 32] = [
-    0xdd, 0x91, 0x55, 0xd3, 0x99, 0x98, 0x59, 0x22, 0x44, 0xc9, 0x4c, 0x55, 0xfb, 0xc8, 0x17, 0xb7,
-    0x16, 0xd0, 0xeb, 0xfd, 0x40, 0xc3, 0x82, 0x13, 0xe1, 0x44, 0x66, 0x24, 0x4a, 0x0a, 0x0c, 0x91,
+    0xc0, 0xc4, 0x54, 0x4d, 0x6c, 0x2c, 0x3d, 0x96, 0xeb, 0xc3, 0x56, 0x42, 0x5e, 0xe9, 0x9b, 0x76,
+    0x98, 0xd6, 0x31, 0x41, 0x12, 0x82, 0x12, 0x54, 0x21, 0x26, 0x7e, 0x76, 0x67, 0x59, 0xf0, 0x9e,
 ];
 const SAFE_RUST_RULE_ID: &str = "developer.rust.target";
+pub(crate) const SAFE_RUST_RULE_REVISION: u32 = 3;
+pub(crate) const SAFE_RUST_RULE_MINIMUM_AGE: Duration = Duration::from_secs(7 * 86_400);
 const SAFE_PYTHON_PYCACHE_RULE_ID: &str = "developer.python.pycache";
 
 /// Maximum findings returned by one evaluator invocation.
@@ -66,6 +68,7 @@ pub(super) struct ObservedArtifact {
     kind: ArtifactKind,
     size: u64,
     newest_mtime: Option<SystemTime>,
+    mtime_coverage_complete: bool,
     evidence_paths: Vec<PathBuf>,
 }
 
@@ -199,9 +202,10 @@ pub(crate) fn bundled_candidate_catalog_digest_sha256() -> [u8; 32] {
 pub(crate) fn evaluate_completed_scan_candidates(
     source_scan_id: &ScanId,
     artifact: &CompletedScanArtifact,
+    evaluated_at: SystemTime,
 ) -> Result<CandidateBatch, CandidateEvaluationError> {
     let (tree, _, coverage) = artifact.parts();
-    evaluate_artifact_candidates(source_scan_id, tree, coverage)
+    evaluate_artifact_candidates(source_scan_id, tree, coverage, evaluated_at)
 }
 
 /// Convert existing marker-verified artifact projections into discovery-only candidates.
@@ -209,6 +213,7 @@ fn evaluate_artifact_candidates(
     source_scan_id: &ScanId,
     tree: &DiskTree,
     coverage: &ScanCoverage,
+    evaluated_at: SystemTime,
 ) -> Result<CandidateBatch, CandidateEvaluationError> {
     let entries = project_build_artifacts_bounded_at(
         tree,
@@ -234,11 +239,18 @@ fn evaluate_artifact_candidates(
             kind: entry.kind,
             size: entry.size,
             newest_mtime: entry.newest_mtime,
+            mtime_coverage_complete: entry.mtime_coverage_complete,
             evidence_paths: entry.evidence_paths,
         })
     })
     .collect::<Result<Vec<_>, CandidateEvaluationError>>()?;
-    evaluate_observed_artifacts(source_scan_id, tree.root_path(), coverage, entries)
+    evaluate_observed_artifacts(
+        source_scan_id,
+        tree.root_path(),
+        coverage,
+        entries,
+        evaluated_at,
+    )
 }
 
 pub(super) fn evaluate_observed_artifacts(
@@ -246,11 +258,16 @@ pub(super) fn evaluate_observed_artifacts(
     root: &Path,
     coverage: &ScanCoverage,
     entries: Vec<ObservedArtifact>,
+    evaluated_at: SystemTime,
 ) -> Result<CandidateBatch, CandidateEvaluationError> {
     let catalog = load_and_validate_catalog()?;
     let catalog_digest_sha256 = bundled_candidate_catalog_digest_sha256();
-    let context_digest_sha256 =
-        candidate_evaluation_context_digest_for_observation(source_scan_id, root, coverage);
+    let context_digest_sha256 = candidate_evaluation_context_digest_for_observation(
+        source_scan_id,
+        root,
+        coverage,
+        evaluated_at,
+    );
     let mut entries = entries
         .into_iter()
         .map(|entry| {
@@ -284,9 +301,25 @@ pub(super) fn evaluate_observed_artifacts(
                 .map(|path| Evidence::RequiredMarker { path }),
         );
 
-        let mut blockers = Vec::with_capacity(2);
+        let mut blockers = Vec::with_capacity(3);
         if coverage.status() != ScanCoverageStatus::Complete {
             blockers.push(BlockReason::PartialScanCoverage);
+        }
+        if let Some(minimum_age) = rule.guards().minimum_age() {
+            match (entry.mtime_coverage_complete, entry.newest_mtime) {
+                (true, Some(newest_mtime))
+                    if evaluated_at
+                        .duration_since(newest_mtime)
+                        .is_ok_and(|age| age >= minimum_age) =>
+                {
+                    evidence.push(Evidence::MinimumAge {
+                        newest_mtime,
+                        minimum_age,
+                    });
+                }
+                (true, Some(_)) => blockers.push(BlockReason::RecentActivity),
+                _ => blockers.push(BlockReason::MissingModificationTime),
+            }
         }
         // The evaluator has no trusted home, volume, canonical ancestry, or
         // protected-root grant witness. Keep that unresolved authority explicit.
@@ -362,7 +395,7 @@ fn validate_catalog_bytes() -> Result<RuleRegistry, CandidateEvaluationError> {
             || !rule.matcher().forbidden_markers_any().is_empty()
             || !rule.matcher().excluded_descendants().is_empty()
             || !rule.matcher().protected_descendants().is_empty()
-            || rule.guards().minimum_age().is_some()
+            || rule.guards().minimum_age() != expected_minimum_age(binding.rule_id)
             || rule.guards().minimum_bytes() != 0
             || !rule.guards().inactive_processes().is_empty()
             || rule.guards().requires_cloud_upload_complete()
@@ -402,13 +435,22 @@ fn expected_catalog_policy(
     rule_id: &str,
 ) -> Result<(u32, SafetyTier, CandidateAction), CandidateEvaluationError> {
     match rule_id {
-        SAFE_RUST_RULE_ID | SAFE_PYTHON_PYCACHE_RULE_ID => Ok((
+        SAFE_RUST_RULE_ID => Ok((
+            SAFE_RUST_RULE_REVISION,
+            SafetyTier::SafeRegenerable,
+            CandidateAction::RemoveKnownRegenerableContents,
+        )),
+        SAFE_PYTHON_PYCACHE_RULE_ID => Ok((
             2,
             SafetyTier::SafeRegenerable,
             CandidateAction::RemoveKnownRegenerableContents,
         )),
         _ => Ok((1, SafetyTier::Informational, CandidateAction::RevealOnly)),
     }
+}
+
+fn expected_minimum_age(rule_id: &str) -> Option<Duration> {
+    (rule_id == SAFE_RUST_RULE_ID).then_some(SAFE_RUST_RULE_MINIMUM_AGE)
 }
 
 fn expected_catalog_markers(
@@ -447,9 +489,15 @@ fn matches_exact_strings(actual: &[String], expected: &[&str]) -> bool {
 pub(crate) fn candidate_evaluation_context_digest_sha256(
     source_scan_id: &ScanId,
     artifact: &CompletedScanArtifact,
+    evaluated_at: SystemTime,
 ) -> [u8; 32] {
     let (tree, _, coverage) = artifact.parts();
-    candidate_evaluation_context_digest_for_observation(source_scan_id, tree.root_path(), coverage)
+    candidate_evaluation_context_digest_for_observation(
+        source_scan_id,
+        tree.root_path(),
+        coverage,
+        evaluated_at,
+    )
 }
 
 /// Recompute the current evaluator context from one durable scan observation.
@@ -461,6 +509,7 @@ pub(crate) fn candidate_evaluation_context_digest_for_observation(
     source_scan_id: &ScanId,
     root: &Path,
     coverage: &ScanCoverage,
+    evaluated_at: SystemTime,
 ) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(EVALUATION_CONTEXT_DOMAIN);
@@ -472,6 +521,7 @@ pub(crate) fn candidate_evaluation_context_digest_for_observation(
     update_length_prefixed(&mut hasher, UNRESOLVED_PROTECTION);
     update_length_prefixed(&mut hasher, source_scan_id.as_str().as_bytes());
     update_length_prefixed(&mut hasher, &native_path_bytes(root));
+    update_system_time(&mut hasher, evaluated_at);
     hasher.update([coverage_status_rank(coverage.status())]);
     match coverage.measured_permille() {
         Some(value) => {
@@ -493,6 +543,22 @@ pub(crate) fn candidate_evaluation_context_digest_for_observation(
         hasher.update(issue.occurrence_count().to_le_bytes());
     }
     hasher.finalize().into()
+}
+
+fn update_system_time(hasher: &mut Sha256, value: SystemTime) {
+    match value.duration_since(SystemTime::UNIX_EPOCH) {
+        Ok(duration) => {
+            hasher.update([0]);
+            hasher.update(duration.as_secs().to_le_bytes());
+            hasher.update(duration.subsec_nanos().to_le_bytes());
+        }
+        Err(error) => {
+            let duration = error.duration();
+            hasher.update([1]);
+            hasher.update(duration.as_secs().to_le_bytes());
+            hasher.update(duration.subsec_nanos().to_le_bytes());
+        }
+    }
 }
 
 /// Deterministic ID expected for the current bundled Rust-target rule.

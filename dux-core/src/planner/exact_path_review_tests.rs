@@ -67,7 +67,7 @@ fn trusted_candidate(path: PathBuf) -> Candidate {
     let rule = Rule::try_new(RuleDefinition {
         reference: RuleRef::new(
             RuleId::new("developer.rust.target").unwrap(),
-            RuleRevision::new(2).unwrap(),
+            RuleRevision::new(crate::domain::SAFE_RUST_RULE_REVISION).unwrap(),
         ),
         title_key: LocalizedTextKey::new("developer.rust.target.title").unwrap(),
         category: CandidateCategory::DeveloperArtifact,
@@ -82,7 +82,13 @@ fn trusted_candidate(path: PathBuf) -> Candidate {
             protected_descendants: Vec::new(),
         })
         .unwrap(),
-        guards: RuleGuards::try_new(None, 0, Vec::new(), false).unwrap(),
+        guards: RuleGuards::try_new(
+            Some(crate::domain::SAFE_RUST_RULE_MINIMUM_AGE),
+            0,
+            Vec::new(),
+            false,
+        )
+        .unwrap(),
         safety: SafetyTier::SafeRegenerable,
         action: CandidateAction::RemoveKnownRegenerableContents,
         schedule_eligible: false,

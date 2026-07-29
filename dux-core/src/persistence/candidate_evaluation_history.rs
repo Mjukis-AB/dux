@@ -380,6 +380,7 @@ impl CandidateEvaluationRecord {
                     scan.id(),
                     scan.root(),
                     scan.coverage(),
+                    self.request.scheduled_at,
                 )
             && self.request.snapshot_version == snapshot.version()
             && self.request.snapshot_sha256 == snapshot.digest().bytes()
@@ -448,6 +449,10 @@ impl CandidateValidationSourceRecord {
 
     pub(crate) fn evaluation_candidates(&self) -> &[CompleteCandidateRecord] {
         self.evaluation.candidates()
+    }
+
+    pub(crate) const fn evaluation_scheduled_at(&self) -> SystemTime {
+        self.evaluation.scheduled_at()
     }
 
     pub(crate) fn exactly_matches_after_trusted_claim(&self, current: &Self) -> bool {

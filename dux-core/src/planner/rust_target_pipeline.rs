@@ -316,7 +316,7 @@ pub(crate) fn prepare_rust_target_plan_facts(
     let (promotion, scan_root, target) =
         prepare_rust_target_promotion_with_witness(store, snapshots, scan_id, candidate_id)?;
     promotion
-        .into_plan_facts(scan_root, target)
+        .into_plan_facts(scan_root, target, std::time::SystemTime::now())
         .map_err(RustTargetPipelineError::Promotion)
 }
 

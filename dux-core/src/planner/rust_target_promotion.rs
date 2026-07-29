@@ -24,9 +24,10 @@ use crate::domain::{
 use crate::path_validation::{CanonicalPathSnapshot, CanonicalScanRoot};
 
 use super::rule_scope_grant::{RuleScopeAuthorization, RuleScopeGrantError};
+use super::rust_target::validate_rust_target_recency_evidence;
 
 const RUST_TARGET_RULE: &str = "developer.rust.target";
-const RUST_TARGET_REVISION: u32 = 2;
+const RUST_TARGET_REVISION: u32 = crate::domain::SAFE_RUST_RULE_REVISION;
 
 #[must_use = "the private Rust-target promotion must be consumed by a later planner boundary"]
 pub(crate) struct RustTargetPromotion {
@@ -68,6 +69,8 @@ pub(crate) enum RustTargetPromotionError {
     Plan(#[source] CleanupPlanValidationError),
     #[error("Rust-target plan facts require permanent-safe mode")]
     UnsupportedPlanMode,
+    #[error("the live Rust-target subtree does not satisfy the required minimum age")]
+    LiveRecency,
 }
 
 /// Admit one exact durable candidate only after the code-owned authorization
@@ -126,9 +129,13 @@ fn validate_candidate_shape(
         .map(|parent| parent.join("Cargo.toml"))
         .ok_or(RustTargetPromotionError::CandidateEvidence)?;
     let expected_cache_tag = candidate_path.join("CACHEDIR.TAG");
+    let (newest_mtime, minimum_age) =
+        validate_rust_target_recency_evidence(candidate.newest_mtime(), candidate.evidence())
+            .map_err(|_| RustTargetPromotionError::CandidateEvidence)?;
     let mut matched_target = false;
     let mut matched_manifest = false;
     let mut matched_cache_tag = false;
+    let mut matched_minimum_age = false;
     for evidence in candidate.evidence() {
         match evidence {
             Evidence::MatchedPath { path } if path == candidate_path && !matched_target => {
@@ -144,10 +151,23 @@ fn validate_candidate_shape(
             {
                 matched_cache_tag = true;
             }
+            Evidence::MinimumAge {
+                newest_mtime: observed,
+                minimum_age: observed_minimum,
+            } if *observed == newest_mtime
+                && *observed_minimum == minimum_age
+                && !matched_minimum_age =>
+            {
+                matched_minimum_age = true;
+            }
             _ => return Err(RustTargetPromotionError::CandidateEvidence),
         }
     }
-    if candidate.evidence().len() != 3 || !matched_target || !matched_manifest || !matched_cache_tag
+    if candidate.evidence().len() != 4
+        || !matched_target
+        || !matched_manifest
+        || !matched_cache_tag
+        || !matched_minimum_age
     {
         return Err(RustTargetPromotionError::CandidateEvidence);
     }
@@ -167,7 +187,30 @@ impl RustTargetPromotion {
         self,
         scan_root: CanonicalScanRoot,
         target: CanonicalPathSnapshot,
+        observed_at: std::time::SystemTime,
     ) -> Result<RustTargetPlanFacts, RustTargetPromotionError> {
+        self.revalidate(&scan_root, &target)
+            .map_err(RustTargetPromotionError::Authorization)?;
+        let (newest_mtime, minimum_age) = validate_rust_target_recency_evidence(
+            self.candidate.newest_mtime(),
+            self.candidate.evidence(),
+        )
+        .map_err(|_| RustTargetPromotionError::CandidateEvidence)?;
+        if !observed_at
+            .duration_since(newest_mtime)
+            .is_ok_and(|age| age >= minimum_age)
+        {
+            return Err(RustTargetPromotionError::LiveRecency);
+        }
+        let cutoff = observed_at
+            .checked_sub(minimum_age)
+            .ok_or(RustTargetPromotionError::LiveRecency)?;
+        crate::cleanup::permanent_safe::validate_rust_target_subtree_recency(
+            target.canonical_path(),
+            target.target_identity(),
+            cutoff,
+        )
+        .map_err(|_| RustTargetPromotionError::LiveRecency)?;
         self.revalidate(&scan_root, &target)
             .map_err(RustTargetPromotionError::Authorization)?;
         Ok(RustTargetPlanFacts {
@@ -302,7 +345,13 @@ mod tests {
                 protected_descendants: Vec::new(),
             })
             .unwrap(),
-            guards: RuleGuards::try_new(None, 0, Vec::new(), false).unwrap(),
+            guards: RuleGuards::try_new(
+                Some(crate::domain::SAFE_RUST_RULE_MINIMUM_AGE),
+                0,
+                Vec::new(),
+                false,
+            )
+            .unwrap(),
             safety: SafetyTier::SafeRegenerable,
             action: CandidateAction::RemoveKnownRegenerableContents,
             schedule_eligible: false,
@@ -317,7 +366,7 @@ mod tests {
                 id,
                 vec![target_path.clone()],
                 42,
-                None,
+                Some(std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(86_400)),
                 vec![
                     Evidence::MatchedPath {
                         path: target_path.clone(),
@@ -327,6 +376,11 @@ mod tests {
                     },
                     Evidence::RequiredMarker {
                         path: target_path.join("CACHEDIR.TAG"),
+                    },
+                    Evidence::MinimumAge {
+                        newest_mtime: std::time::SystemTime::UNIX_EPOCH
+                            + std::time::Duration::from_secs(86_400),
+                        minimum_age: crate::domain::SAFE_RUST_RULE_MINIMUM_AGE,
                     },
                 ],
                 vec![BlockReason::ProtectedPath],
@@ -376,7 +430,7 @@ mod tests {
                 id,
                 vec![fixture.target.clone()],
                 4_096,
-                None,
+                Some(super::super::rust_target_tests::rust_candidate_newest_mtime()),
                 super::super::rust_target_tests::exact_evidence(&fixture.target),
                 vec![BlockReason::ProtectedPath],
                 fixture.scan_id.clone(),

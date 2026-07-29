@@ -5,7 +5,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 const CATALOG_PATH: &str = "catalogs/candidate-rules-v1.json";
-const EXPECTED_SHA256: &str = "dd9155d39998592244c94c55fbc817b716d0ebfd40c38213e14466244a0a0c91";
+const EXPECTED_SHA256: &str = "c0c4544d6c2c3d96ebc356425ee99b7698d631411282125421267e766759f09e";
 const SAFE_RUST_RULE_ID: &str = "developer.rust.target";
 const SAFE_PYTHON_PYCACHE_RULE_ID: &str = "developer.python.pycache";
 
@@ -49,12 +49,13 @@ fn main() {
             Some("selected_scan_root"),
             "discovery catalog rules must bind the selected scan root"
         );
-        let (expected_revision, expected_safety, expected_action) =
-            if matches!(id, SAFE_RUST_RULE_ID | SAFE_PYTHON_PYCACHE_RULE_ID) {
+        let (expected_revision, expected_safety, expected_action) = match id {
+            SAFE_RUST_RULE_ID => (3, "safe_regenerable", "remove_known_regenerable_contents"),
+            SAFE_PYTHON_PYCACHE_RULE_ID => {
                 (2, "safe_regenerable", "remove_known_regenerable_contents")
-            } else {
-                (1, "informational", "reveal_only")
-            };
+            }
+            _ => (1, "informational", "reveal_only"),
+        };
         assert_eq!(
             rule.get("revision").and_then(Value::as_u64),
             Some(expected_revision),
@@ -76,6 +77,11 @@ fn main() {
             "the discovery catalog must never be schedulable"
         );
         if id == SAFE_RUST_RULE_ID {
+            assert_eq!(
+                rule.get("minimum_age_days").and_then(Value::as_u64),
+                Some(7),
+                "the Rust rule must retain its reviewed seven-day minimum age"
+            );
             assert_eq!(
                 rule.get("required_ancestor_markers_any"),
                 Some(&Value::Array(vec![Value::String("Cargo.toml".to_owned())])),

@@ -1,7 +1,7 @@
 #![cfg(unix)]
 
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use tempfile::TempDir;
 
@@ -109,7 +109,7 @@ pub(super) fn rust_rule(schedule_eligible: bool) -> Rule {
     Rule::try_new(RuleDefinition {
         reference: RuleRef::new(
             RuleId::new("developer.rust.target").unwrap(),
-            RuleRevision::new(2).unwrap(),
+            RuleRevision::new(crate::domain::SAFE_RUST_RULE_REVISION).unwrap(),
         ),
         title_key: LocalizedTextKey::new("rule.developer.rust.target.title").unwrap(),
         category: CandidateCategory::DeveloperArtifact,
@@ -124,7 +124,13 @@ pub(super) fn rust_rule(schedule_eligible: bool) -> Rule {
             protected_descendants: Vec::new(),
         })
         .unwrap(),
-        guards: RuleGuards::try_new(None, 0, Vec::new(), false).unwrap(),
+        guards: RuleGuards::try_new(
+            Some(crate::domain::SAFE_RUST_RULE_MINIMUM_AGE),
+            0,
+            Vec::new(),
+            false,
+        )
+        .unwrap(),
         safety: SafetyTier::SafeRegenerable,
         action: CandidateAction::RemoveKnownRegenerableContents,
         schedule_eligible,
@@ -148,7 +154,27 @@ pub(super) fn exact_evidence(target: &Path) -> Vec<Evidence> {
         Evidence::RequiredMarker {
             path: target.join("CACHEDIR.TAG"),
         },
+        Evidence::MinimumAge {
+            newest_mtime: rust_candidate_newest_mtime(),
+            minimum_age: crate::domain::SAFE_RUST_RULE_MINIMUM_AGE,
+        },
     ]
+}
+
+pub(super) fn rust_candidate_newest_mtime() -> SystemTime {
+    SystemTime::UNIX_EPOCH + Duration::from_secs(86_400)
+}
+
+pub(crate) fn set_subtree_modified_at(path: &Path, modified_at: SystemTime) {
+    if path.is_dir() {
+        for entry in std::fs::read_dir(path).unwrap() {
+            set_subtree_modified_at(&entry.unwrap().path(), modified_at);
+        }
+    }
+    std::fs::File::open(path)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(modified_at))
+        .unwrap();
 }
 
 pub(super) fn candidate(
@@ -164,7 +190,7 @@ pub(super) fn candidate(
             CandidateId::new("candidate:rust-live-fixture").unwrap(),
             vec![target.to_path_buf()],
             4_096,
-            None,
+            Some(rust_candidate_newest_mtime()),
             evidence,
             blockers,
             scan_id.clone(),
@@ -303,7 +329,7 @@ fn permanent_effect_witness_revalidates_markers_without_mutating_target() {
     let lexical_target = validate_cleanup_path(&lexical_root, &fixture.target).unwrap();
     let target = capture_path_snapshot(&scan_root, lexical_target).unwrap();
 
-    let witness = validate_rust_target_effect(target).unwrap();
+    let witness = validate_rust_target_effect(target, SystemTime::now()).unwrap();
     witness.revalidate_current().unwrap();
     assert_eq!(witness.target_path(), fixture.target);
     assert!(fixture.target.exists());

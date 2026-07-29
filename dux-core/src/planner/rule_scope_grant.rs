@@ -25,7 +25,7 @@ use crate::persistence::CleanupSessionId;
 const TRUSTED_VOLUME_GRANT_REVISION: u32 = 1;
 const PROTECTED_RULE_GRANT_REVISION: u32 = 1;
 const RUST_TARGET_PROTECTED_GRANT_KEY: &str =
-    "dux:protected-rule:developer.rust.target:2:policy-2:volume-1";
+    "dux:protected-rule:developer.rust.target:3:policy-2:volume-1";
 const PYTHON_PYCACHE_PROTECTED_GRANT_KEY: &str =
     "dux:protected-rule:developer.python.pycache:2:policy-2:volume-1";
 
@@ -192,7 +192,9 @@ impl ProtectedRuleGrant {
 #[cfg(unix)]
 fn trusted_rule_boundary_key(rule: &RuleRef) -> Option<&'static str> {
     match (rule.id().as_str(), rule.revision().get()) {
-        ("developer.rust.target", 2) => Some(RUST_TARGET_PROTECTED_GRANT_KEY),
+        ("developer.rust.target", crate::domain::SAFE_RUST_RULE_REVISION) => {
+            Some(RUST_TARGET_PROTECTED_GRANT_KEY)
+        }
         ("developer.python.pycache", 2) => Some(PYTHON_PYCACHE_PROTECTED_GRANT_KEY),
         _ => None,
     }
@@ -201,7 +203,8 @@ fn trusted_rule_boundary_key(rule: &RuleRef) -> Option<&'static str> {
 pub(crate) const TRUSTED_RULE_SCOPE_GRANT_REVISION: u32 = 1;
 const RUST_TARGET_RULE: &str = "developer.rust.target";
 const PYTHON_PYCACHE_RULE: &str = "developer.python.pycache";
-const SAFE_RULE_REVISION: u32 = 2;
+const RUST_TARGET_RULE_REVISION: u32 = crate::domain::SAFE_RUST_RULE_REVISION;
+const PYTHON_PYCACHE_RULE_REVISION: u32 = 2;
 
 /// A code-owned authorization for one known deterministic rule and one exact
 /// target. It is intentionally non-Clone, non-serializable, and exposes only
@@ -317,7 +320,8 @@ pub(crate) fn authorize_rust_target(
     target: CanonicalPathSnapshot,
     rule: &RuleRef,
 ) -> Result<RuleScopeAuthorization, RuleScopeGrantError> {
-    if rule.id().as_str() != RUST_TARGET_RULE || rule.revision().get() != SAFE_RULE_REVISION {
+    if rule.id().as_str() != RUST_TARGET_RULE || rule.revision().get() != RUST_TARGET_RULE_REVISION
+    {
         return Err(RuleScopeGrantError::UnsupportedRule);
     }
     boundary
@@ -349,7 +353,8 @@ pub(crate) fn authorize_rust_target(
 fn validate_rule(rule: &RuleRef) -> Result<(), RuleScopeGrantError> {
     let allowed = matches!(
         (rule.id().as_str(), rule.revision().get()),
-        (RUST_TARGET_RULE, SAFE_RULE_REVISION) | (PYTHON_PYCACHE_RULE, SAFE_RULE_REVISION)
+        (RUST_TARGET_RULE, RUST_TARGET_RULE_REVISION)
+            | (PYTHON_PYCACHE_RULE, PYTHON_PYCACHE_RULE_REVISION)
     );
     if allowed {
         Ok(())
@@ -424,7 +429,7 @@ impl RuleScopeAuthorization {
         item_ordinal: usize,
     ) -> Result<(), RuleScopeGrantError> {
         if self.rule.id().as_str() != RUST_TARGET_RULE
-            || self.rule.revision().get() != SAFE_RULE_REVISION
+            || self.rule.revision().get() != RUST_TARGET_RULE_REVISION
             || self.source_scan_id.is_none()
             || self.candidate_id.is_none()
         {
@@ -565,7 +570,7 @@ mod tests {
     fn rust_rule() -> RuleRef {
         RuleRef::new(
             RuleId::new(RUST_TARGET_RULE).unwrap(),
-            RuleRevision::new(SAFE_RULE_REVISION).unwrap(),
+            RuleRevision::new(RUST_TARGET_RULE_REVISION).unwrap(),
         )
     }
 

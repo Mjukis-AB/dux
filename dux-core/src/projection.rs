@@ -198,6 +198,9 @@ pub struct BuildArtifactEntry {
     pub is_stale: bool,
     /// Most recent mtime of the artifact or any descendant node.
     pub newest_mtime: Option<SystemTime>,
+    /// True only when every file and directory in the artifact subtree had a
+    /// representable modification time.
+    pub mtime_coverage_complete: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -322,7 +325,7 @@ fn collect_build_artifacts_at(
             return Err(entries.len().saturating_add(1));
         }
 
-        let newest_mtime = newest_descendant_mtime(tree, node.id);
+        let (newest_mtime, mtime_coverage_complete) = newest_descendant_mtime(tree, node.id);
         entries.push(BuildArtifactEntry {
             node_id: node.id,
             relative_path: node
@@ -339,8 +342,9 @@ fn collect_build_artifacts_at(
                 .into_iter()
                 .filter_map(|id| tree.get(id).map(|evidence| evidence.path.clone()))
                 .collect(),
-            is_stale: threshold.is_stale_at(newest_mtime, now),
+            is_stale: mtime_coverage_complete && threshold.is_stale_at(newest_mtime, now),
             newest_mtime,
+            mtime_coverage_complete,
         });
     }
 
@@ -354,7 +358,8 @@ pub fn refresh_artifact_staleness_at(
     now: SystemTime,
 ) {
     for entry in entries {
-        entry.is_stale = threshold.is_stale_at(entry.newest_mtime, now);
+        entry.is_stale =
+            entry.mtime_coverage_complete && threshold.is_stale_at(entry.newest_mtime, now);
     }
 }
 
@@ -372,19 +377,23 @@ fn has_classified_ancestor(tree: &DiskTree, node_id: NodeId) -> bool {
     false
 }
 
-fn newest_descendant_mtime(tree: &DiskTree, root: NodeId) -> Option<SystemTime> {
+fn newest_descendant_mtime(tree: &DiskTree, root: NodeId) -> (Option<SystemTime>, bool) {
     let mut newest = None;
+    let mut complete = true;
     let mut stack = vec![root];
     while let Some(id) = stack.pop() {
         let Some(node) = tree.get(id) else {
+            complete = false;
             continue;
         };
         if let Some(mtime) = node.mtime {
             newest = Some(newest.map_or(mtime, |previous: SystemTime| previous.max(mtime)));
+        } else if node.kind.is_directory() || node.kind == crate::tree::NodeKind::File {
+            complete = false;
         }
         stack.extend(node.children.iter().copied());
     }
-    newest
+    (newest, complete)
 }
 
 fn has_symlink_component(tree: &DiskTree, mut node_id: NodeId) -> bool {

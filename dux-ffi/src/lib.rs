@@ -110,8 +110,9 @@ use dux_core::{
     VolumeCapacity, VolumeId,
 };
 
-const FFI_CONTRACT_VERSION: u32 = 32;
+const FFI_CONTRACT_VERSION: u32 = 33;
 const FFI_RECORD_VERSION: u32 = 1;
+const RUST_TARGET_MINIMUM_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const SNAPSHOT_NODE_RECORD_VERSION: u32 = 2;
 const SCAN_EVENT_PAGE_LIMIT: u16 = 64;
 const RECENT_SCAN_HISTORY_PAGE_LIMIT: u16 = 200;
@@ -1317,9 +1318,12 @@ pub struct RustTargetPlanReviewInfo {
     pub safety: CandidateSafety,
     pub action: CandidateAction,
     pub estimated_bytes: u64,
+    pub newest_mtime: SnapshotNodeTimestamp,
+    pub minimum_age_seconds: u64,
+    pub minimum_age_nanoseconds: u32,
     pub warnings: Vec<CleanupWarning>,
-    pub created_at_unix_ms: i64,
-    pub effective_expires_at_unix_ms: i64,
+    pub created_at: SnapshotNodeTimestamp,
+    pub effective_expires_at: SnapshotNodeTimestamp,
     pub schedule_eligible: bool,
     pub item_count: u16,
     pub path_count: u16,
@@ -6043,11 +6047,16 @@ fn project_rust_target_plan_review_info(
     if info.item_count != 1
         || info.path_count != 1
         || info.rule_id != "developer.rust.target"
-        || info.rule_revision != 2
+        || info.rule_revision != 3
         || info.category != CoreCandidateCategory::DeveloperArtifact
         || info.mode != CorePlanCleanupMode::PermanentSafe
         || info.safety != CoreSafetyTier::SafeRegenerable
         || info.action != CoreCandidateAction::RemoveKnownRegenerableContents
+        || info.minimum_age != RUST_TARGET_MINIMUM_AGE
+        || info
+            .created_at
+            .duration_since(info.newest_mtime)
+            .map_or(true, |age| age < info.minimum_age)
         || info.schedule_eligible
         || info.warnings
             != [
@@ -6061,11 +6070,15 @@ fn project_rust_target_plan_review_info(
     {
         return Err(RustTargetPlanReviewError::InternalState);
     }
-    let created_at_unix_ms = rust_target_plan_review_time_ms(info.created_at)?;
-    let effective_expires_at_unix_ms = rust_target_plan_review_time_ms(info.effective_expires_at)?;
-    if created_at_unix_ms >= effective_expires_at_unix_ms {
+    if info.created_at >= info.effective_expires_at {
         return Err(RustTargetPlanReviewError::InternalState);
     }
+    let created_at = project_system_time_timestamp(info.created_at)
+        .map_err(|_| RustTargetPlanReviewError::InternalState)?;
+    let effective_expires_at = project_system_time_timestamp(info.effective_expires_at)
+        .map_err(|_| RustTargetPlanReviewError::InternalState)?;
+    let newest_mtime = project_system_time_timestamp(info.newest_mtime)
+        .map_err(|_| RustTargetPlanReviewError::InternalState)?;
     let path = project_rust_target_plan_review_path(&info.path)?;
     Ok(RustTargetPlanReviewInfo {
         record_version: FFI_RECORD_VERSION,
@@ -6079,12 +6092,15 @@ fn project_rust_target_plan_review_info(
         safety: map_candidate_safety(info.safety),
         action: map_candidate_action(info.action),
         estimated_bytes: info.estimated_bytes,
+        newest_mtime,
+        minimum_age_seconds: info.minimum_age.as_secs(),
+        minimum_age_nanoseconds: info.minimum_age.subsec_nanos(),
         warnings: vec![
             CleanupWarning::EstimatedBytesUnverified,
             CleanupWarning::PermanentRemovalCannotBeUndone,
         ],
-        created_at_unix_ms,
-        effective_expires_at_unix_ms,
+        created_at,
+        effective_expires_at,
         schedule_eligible: info.schedule_eligible,
         item_count: info.item_count,
         path_count: info.path_count,
@@ -6096,16 +6112,6 @@ fn is_bounded_plan_review_identifier(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= MAX_CANDIDATE_IDENTIFIER_BYTES
         && !value.chars().any(char::is_control)
-}
-
-fn rust_target_plan_review_time_ms(value: SystemTime) -> Result<i64, RustTargetPlanReviewError> {
-    i64::try_from(
-        value
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| RustTargetPlanReviewError::InternalState)?
-            .as_millis(),
-    )
-    .map_err(|_| RustTargetPlanReviewError::InternalState)
 }
 
 fn project_rust_target_plan_review_path(
@@ -8333,7 +8339,7 @@ uniffi::setup_scaffolding!();
 mod tests {
     use super::*;
     use std::sync::{Mutex, TryLockError};
-    use std::time::{Duration, Instant};
+    use std::time::{Duration, Instant, SystemTime};
     use tempfile::TempDir;
 
     static ENGINE_TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -8413,14 +8419,78 @@ mod tests {
     }
 
     #[test]
-    fn reports_contract_thirty_two_and_preserves_legacy_formatting() {
+    fn reports_contract_thirty_three_and_preserves_legacy_formatting() {
         let _guard = ENGINE_TEST_LOCK.lock().unwrap();
         let (_temp, engine) = engine();
-        assert_eq!(library_version().ffi_contract_version, 32);
+        assert_eq!(library_version().ffi_contract_version, 33);
         assert_eq!(engine.library_version().unwrap(), library_version());
         assert_eq!(engine.format_size(1536).unwrap().display, "1.5 KB");
         assert!(engine.close());
         assert_eq!(engine.format_size(1), Err(EngineError::Closed));
+    }
+
+    fn core_rust_target_plan_review_info() -> CoreRustTargetPlanReviewInfo {
+        CoreRustTargetPlanReviewInfo {
+            plan_id: "plan:example".to_owned(),
+            source_scan_id: ScanId::new("scan:example").unwrap(),
+            candidate_id: CandidateId::new("candidate:example").unwrap(),
+            rule_id: "developer.rust.target".to_owned(),
+            rule_revision: 3,
+            category: CoreCandidateCategory::DeveloperArtifact,
+            mode: CorePlanCleanupMode::PermanentSafe,
+            safety: CoreSafetyTier::SafeRegenerable,
+            action: CoreCandidateAction::RemoveKnownRegenerableContents,
+            estimated_bytes: 42,
+            newest_mtime: UNIX_EPOCH + Duration::new(1_699_395_200, 123_456_789),
+            minimum_age: RUST_TARGET_MINIMUM_AGE,
+            warnings: vec![
+                CorePlanWarning::EstimatedBytesUnverified,
+                CorePlanWarning::PermanentRemovalCannotBeUndone,
+            ],
+            created_at: UNIX_EPOCH + Duration::new(1_700_000_000, 123_456_789),
+            effective_expires_at: UNIX_EPOCH + Duration::new(1_700_000_600, 123_456_789),
+            schedule_eligible: false,
+            item_count: 1,
+            path_count: 1,
+            path: PathBuf::from("/Users/example/project/target"),
+        }
+    }
+
+    #[test]
+    fn rust_target_plan_review_projects_exact_revision_three_recency() {
+        let projected =
+            project_rust_target_plan_review_info(core_rust_target_plan_review_info()).unwrap();
+        assert_eq!(projected.rule_revision, 3);
+        assert_eq!(
+            projected.newest_mtime,
+            SnapshotNodeTimestamp {
+                seconds_since_unix_epoch: 1_699_395_200,
+                nanoseconds: 123_456_789,
+            }
+        );
+        assert_eq!(projected.minimum_age_seconds, 604_800);
+        assert_eq!(projected.minimum_age_nanoseconds, 0);
+
+        let mut wrong_revision = core_rust_target_plan_review_info();
+        wrong_revision.rule_revision = 2;
+        assert_eq!(
+            project_rust_target_plan_review_info(wrong_revision),
+            Err(RustTargetPlanReviewError::InternalState)
+        );
+
+        let mut wrong_age = core_rust_target_plan_review_info();
+        wrong_age.minimum_age = Duration::from_secs(604_799);
+        assert_eq!(
+            project_rust_target_plan_review_info(wrong_age),
+            Err(RustTargetPlanReviewError::InternalState)
+        );
+
+        let mut recent = core_rust_target_plan_review_info();
+        recent.newest_mtime = recent.created_at - Duration::from_secs(604_799);
+        assert_eq!(
+            project_rust_target_plan_review_info(recent),
+            Err(RustTargetPlanReviewError::InternalState)
+        );
     }
 
     #[cfg(unix)]
@@ -8987,6 +9057,7 @@ mod tests {
         let manifest = project.join("Cargo.toml");
         let lockfile = project.join("Cargo.lock");
         let source = project.join("src/lib.rs");
+        let cache_tag = target.join("CACHEDIR.TAG");
         let payload = target.join("object");
         std::fs::create_dir_all(source.parent().unwrap()).unwrap();
         std::fs::create_dir_all(&target).unwrap();
@@ -9007,8 +9078,15 @@ mod tests {
         )
         .unwrap();
         std::fs::write(&source, b"pub fn fixture() {}\n").unwrap();
-        std::fs::write(target.join("CACHEDIR.TAG"), CARGO_CACHE_TAG).unwrap();
+        std::fs::write(&cache_tag, CARGO_CACHE_TAG).unwrap();
         std::fs::write(&payload, b"temporary build output").unwrap();
+        let stale_mtime = SystemTime::now() - Duration::from_secs(8 * 86_400);
+        for path in [&cache_tag, &payload, &target] {
+            std::fs::File::open(path)
+                .unwrap()
+                .set_times(std::fs::FileTimes::new().set_modified(stale_mtime))
+                .unwrap();
+        }
 
         let data_root = temp.path().join("data");
         let engine = Arc::new(

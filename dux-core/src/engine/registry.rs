@@ -1143,7 +1143,11 @@ impl EngineHandle {
             return Err(map_candidate_recovery_error(HistoryErrorKind::CorruptData));
         }
 
-        let batch = match replay_snapshot_candidate_evaluation(&document, scan.coverage()) {
+        let batch = match replay_snapshot_candidate_evaluation(
+            &document,
+            scan.coverage(),
+            record.scheduled_at(),
+        ) {
             Ok(batch) => batch,
             Err(error) => {
                 settle_failure(candidate_replay_failure_kind(error))?;
@@ -1162,6 +1166,7 @@ impl EngineHandle {
                     scan.id(),
                     scan.root(),
                     scan.coverage(),
+                    record.scheduled_at(),
                 )
         {
             settle_failure(CandidateEvaluationFailureKind::ContextInvalid)?;
@@ -5401,7 +5406,7 @@ fn prepare_candidate_evaluation(
         CANDIDATE_CATALOG_SCHEMA_VERSION,
         CANDIDATE_CATALOG_SHA256,
         CANDIDATE_CONTEXT_FORMAT_VERSION,
-        candidate_evaluation_context_digest_sha256(scan_id, artifact),
+        candidate_evaluation_context_digest_sha256(scan_id, artifact, scheduled_at),
     )
     .map_err(|_| TaskFailureKind::InternalFailure)?;
     context.report_candidate_evaluation_started();
@@ -5413,7 +5418,7 @@ fn prepare_candidate_evaluation(
         );
     }
 
-    let batch = match evaluate_completed_scan_candidates(scan_id, artifact) {
+    let batch = match evaluate_completed_scan_candidates(scan_id, artifact, scheduled_at) {
         Ok(batch) => batch,
         Err(error) => {
             let kind = map_candidate_evaluation_error(error);

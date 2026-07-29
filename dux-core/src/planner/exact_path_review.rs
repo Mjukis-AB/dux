@@ -30,7 +30,8 @@ use crate::persistence::{
 
 use super::rule_scope_grant::{RuleScopeAuthorization, RuleScopeGrantError};
 use super::rust_target::{
-    RustTargetEffectWitness, RustTargetLiveValidationError, validate_rust_target_effect,
+    RustTargetEffectWitness, RustTargetLiveValidationError, validate_candidate_layout,
+    validate_rust_target_effect, validate_rust_target_recency_evidence,
 };
 #[cfg(unix)]
 use super::rust_target_promotion::{RustTargetPlanFacts, RustTargetPromotionError};
@@ -344,6 +345,52 @@ impl TrustedReviewedCleanupPlan {
             })?
             .checked_add(path_ordinal)?;
         self.authorizations.get(offset)
+    }
+
+    /// Revalidate the sole current Rust-target plan's exact age evidence and
+    /// complete live subtree immediately before an opaque review is published.
+    /// The target snapshot remains internal; callers receive only the frozen
+    /// time facts after the descriptor-relative check succeeds.
+    pub(crate) fn revalidate_rust_target_recency_at(
+        &self,
+        observed_at: std::time::SystemTime,
+    ) -> Result<(std::time::SystemTime, Duration), RustTargetLiveValidationError> {
+        self.revalidate_at(observed_at)
+            .map_err(|_| RustTargetLiveValidationError::ChangedDuringValidation)?;
+        let [item] = self.plan.items() else {
+            return Err(RustTargetLiveValidationError::CandidatePolicyMismatch);
+        };
+        let paths = validate_candidate_layout(item.paths(), item.newest_mtime(), item.evidence())?;
+        let authorization = self
+            .authorization_for_path(0, 0)
+            .ok_or(RustTargetLiveValidationError::CandidatePolicyMismatch)?;
+        let target = authorization
+            .revalidated_target_snapshot()
+            .map_err(|_| RustTargetLiveValidationError::ChangedDuringValidation)?;
+        if target.requested_path() != paths.target || !authorization.matches(item.rule(), &target) {
+            return Err(RustTargetLiveValidationError::CandidatePolicyMismatch);
+        }
+        let (newest_mtime, minimum_age) =
+            validate_rust_target_recency_evidence(item.newest_mtime(), item.evidence())?;
+        if !observed_at
+            .duration_since(newest_mtime)
+            .is_ok_and(|age| age >= minimum_age)
+        {
+            return Err(RustTargetLiveValidationError::RecentActivity);
+        }
+        let recency_cutoff = observed_at
+            .checked_sub(minimum_age)
+            .ok_or(RustTargetLiveValidationError::RecentActivity)?;
+        crate::cleanup::permanent_safe::validate_rust_target_subtree_recency(
+            target.canonical_path(),
+            target.target_identity(),
+            recency_cutoff,
+        )
+        .map_err(|_| RustTargetLiveValidationError::ChangedDuringValidation)?;
+        authorization
+            .revalidate()
+            .map_err(|_| RustTargetLiveValidationError::ChangedDuringValidation)?;
+        Ok((newest_mtime, minimum_age))
     }
 
     pub(crate) fn release(self) {}
@@ -681,7 +728,7 @@ impl ApprovedCleanupSession {
                 ))
             })?;
         if item.rule().id().as_str() != "developer.rust.target"
-            || item.rule().revision().get() != 2
+            || item.rule().revision().get() != crate::domain::SAFE_RUST_RULE_REVISION
             || item.safety() != SafetyTier::SafeRegenerable
             || item.action() != CandidateAction::RemoveKnownRegenerableContents
             || item.rule_marks_schedule_eligible()
@@ -695,6 +742,28 @@ impl ApprovedCleanupSession {
                 crate::persistence::HistoryErrorKind::InvalidInput,
             ))
         })?;
+        let candidate_paths =
+            validate_candidate_layout(item.paths(), item.newest_mtime(), item.evidence())
+                .map_err(ExactPathHandoffError::RuleEvidence)?;
+        if candidate_paths.target != *expected_path {
+            return Err(ExactPathHandoffError::Journal(HistoryError::new(
+                crate::persistence::HistoryErrorKind::InvalidTransition,
+            )));
+        }
+        let (newest_mtime, minimum_age) =
+            validate_rust_target_recency_evidence(item.newest_mtime(), item.evidence())
+                .map_err(ExactPathHandoffError::RuleEvidence)?;
+        if !now
+            .duration_since(newest_mtime)
+            .is_ok_and(|age| age >= minimum_age)
+        {
+            return Err(ExactPathHandoffError::RuleEvidence(
+                RustTargetLiveValidationError::RecentActivity,
+            ));
+        }
+        let recency_cutoff = now.checked_sub(minimum_age).ok_or({
+            ExactPathHandoffError::RuleEvidence(RustTargetLiveValidationError::RecentActivity)
+        })?;
         let target = self
             .approved
             .revalidated_target_for_path(item_ordinal, path_ordinal, now)
@@ -704,7 +773,18 @@ impl ApprovedCleanupSession {
                 crate::persistence::HistoryErrorKind::InvalidTransition,
             )));
         }
-        validate_rust_target_effect(target).map_err(ExactPathHandoffError::RuleEvidence)
+        crate::cleanup::permanent_safe::validate_rust_target_subtree_recency(
+            target.canonical_path(),
+            target.target_identity(),
+            recency_cutoff,
+        )
+        .map_err(|_| {
+            ExactPathHandoffError::RuleEvidence(
+                RustTargetLiveValidationError::ChangedDuringValidation,
+            )
+        })?;
+        validate_rust_target_effect(target, recency_cutoff)
+            .map_err(ExactPathHandoffError::RuleEvidence)
     }
 
     pub(crate) fn release(self) {}

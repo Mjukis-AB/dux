@@ -128,7 +128,7 @@ impl NewCleanupSessionRecord {
         };
         if plan.mode() != CleanupMode::PermanentSafe
             || item.rule().id().as_str() != "developer.rust.target"
-            || item.rule().revision().get() != 2
+            || item.rule().revision().get() != crate::domain::SAFE_RUST_RULE_REVISION
             || item.safety() != SafetyTier::SafeRegenerable
             || item.action() != CandidateAction::RemoveKnownRegenerableContents
             || item.rule_marks_schedule_eligible()
@@ -585,9 +585,17 @@ fn ensure_dependencies_match(
     Ok(candidates)
 }
 
+// Schema-v12 rows minted under rule revision 2 must remain decodable so restart
+// recovery can terminalize them safely after an upgrade. New sessions are
+// minted only for SAFE_RUST_RULE_REVISION, and the planner/effect boundaries
+// reject every non-current revision before filesystem authority is restored.
+fn is_decodable_trusted_rust_target_revision(revision: u32) -> bool {
+    matches!(revision, 2 | 3)
+}
+
 fn is_trusted_rust_target_candidate(candidate: &CompleteCandidateRecord) -> bool {
     candidate.rule.id().as_str() == "developer.rust.target"
-        && candidate.rule.revision().get() == 2
+        && is_decodable_trusted_rust_target_revision(candidate.rule.revision().get())
         && candidate.category == CandidateCategory::DeveloperArtifact
         && candidate.safety == SafetyTier::SafeRegenerable
         && candidate.action == CandidateAction::RemoveKnownRegenerableContents
@@ -1487,7 +1495,7 @@ fn decode_candidate_status_coupling(
 
 fn is_trusted_rust_target_item(item: &PlannedCleanupItemRecord) -> bool {
     item.rule.id().as_str() == "developer.rust.target"
-        && item.rule.revision().get() == 2
+        && is_decodable_trusted_rust_target_revision(item.rule.revision().get())
         && item.category == CandidateCategory::DeveloperArtifact
         && item.paths.len() == 1
         && item.safety == SafetyTier::SafeRegenerable
@@ -1916,7 +1924,7 @@ mod tests {
         Rule::try_new(RuleDefinition {
             reference: RuleRef::new(
                 RuleId::new("developer.rust.target").unwrap(),
-                RuleRevision::new(2).unwrap(),
+                RuleRevision::new(crate::domain::SAFE_RUST_RULE_REVISION).unwrap(),
             ),
             title_key: LocalizedTextKey::new("fixture.cleanup.title").unwrap(),
             category: CandidateCategory::DeveloperArtifact,
@@ -1931,7 +1939,13 @@ mod tests {
                 protected_descendants: Vec::new(),
             })
             .unwrap(),
-            guards: RuleGuards::try_new(None, 0, Vec::new(), false).unwrap(),
+            guards: RuleGuards::try_new(
+                Some(crate::domain::SAFE_RUST_RULE_MINIMUM_AGE),
+                0,
+                Vec::new(),
+                false,
+            )
+            .unwrap(),
             safety: SafetyTier::SafeRegenerable,
             action: CandidateAction::RemoveKnownRegenerableContents,
             schedule_eligible: false,
@@ -2378,7 +2392,7 @@ mod tests {
     }
 
     #[test]
-    fn trusted_rust_target_seal_survives_reopen_and_fences_tampering() {
+    fn historical_revision_two_trusted_rust_target_seal_remains_decodable_and_fenced() {
         let temp = TempDir::new().unwrap();
         let database = temp.path().join("store/dux.sqlite3");
         let root = temp.path().join("root");
@@ -2432,6 +2446,24 @@ mod tests {
                     )
                     .unwrap();
                 assert_eq!(seal_count, 1);
+                // Simulate an exact schema-v12 session minted by the previous
+                // rule revision. Current constructors cannot create this row;
+                // the decoder must retain it only so restart recovery can
+                // terminalize the already-sealed session.
+                connection
+                    .execute(
+                        "UPDATE candidates SET rule_revision = 2
+                         WHERE candidate_id = ?1",
+                        [candidate.id().as_str()],
+                    )
+                    .unwrap();
+                connection
+                    .execute(
+                        "UPDATE cleanup_items SET rule_revision = 2
+                         WHERE session_id = ?1 AND item_ordinal = 0",
+                        [session_id.as_str()],
+                    )
+                    .unwrap();
             });
         }
 
@@ -2445,6 +2477,7 @@ mod tests {
             stored.candidate_status_coupling,
             CandidateStatusCoupling::TrustedRustTargetPlanClaimsV1
         );
+        assert_eq!(stored.items[0].rule.revision().get(), 2);
 
         store.with_connection(|connection| {
             assert!(

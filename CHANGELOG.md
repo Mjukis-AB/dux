@@ -1,5 +1,23 @@
 # Changelog
 
+- Raised `developer.rust.target` to revision 3 and made inclusive seven-day
+  inactivity a deterministic authority requirement. Fresh evaluation and
+  retained-snapshot replay now bind the exact scheduled instant, require
+  complete file/directory modification-time coverage, emit one exact
+  `MinimumAge` fact, and fail closed for recent, future, or missing required
+  timestamps. Planning requires the exact four marker/age facts. One shared,
+  bounded descriptor-relative no-follow validator inventories the complete
+  target tree before publishing a preview and again immediately before
+  `effect_started`; the concrete driver repeats that inventory and compares
+  per-file identity, type, link count, logical size, and mtime before unlink.
+  Pre-preview and pre-effect drift therefore remove nothing. Historical sealed
+  revision-2 sessions remain decodable only for safe recovery
+  terminalization—new minting and every effect-authority boundary require the
+  current revision. UniFFI contract v33 carries every plan timestamp losslessly
+  as seconds/nanoseconds; Swift independently validates the newest observation,
+  creation time, expiry, and exact seven-day requirement. Explorer
+  displays both in the plan card and destructive confirmation while the Release
+  cleanup action remains disabled.
 - Added bounded startup recovery for durable pending candidate evaluations.
   Core now exposes an eighth idle-only maintenance task that selects at most
   one oldest pending row, replays only its exact retained immutable snapshot,

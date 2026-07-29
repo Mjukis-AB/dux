@@ -1162,6 +1162,23 @@ final class ExplorerSnapshotBrowserTests: XCTestCase {
         XCTAssertTrue(releasedScanIDs.isEmpty)
     }
 
+    func testRustTargetPlanReviewRejectsAndReleasesMismatchedRecency() async throws {
+        let reviews = BrowserReviewStub(mode: .rustTargetPlanReviewMismatchedRecency)
+        let browser = ExplorerSnapshotBrowserModel(reviews: reviews)
+        await browser.reloadLatest()
+        await browser.selectContentMode(.candidates)
+        let candidate = try XCTUnwrap(browser.candidatePage?.candidates.first)
+        await browser.selectCandidate(candidate.candidateID)
+
+        await browser.prepareSelectedRustTargetPlanReview()
+
+        let released = await reviews.releasedPlanReviewCount()
+        let starts = await reviews.cleanupStartCount()
+        XCTAssertEqual(browser.rustTargetPlanReviewState, .failed(.invalidResponse))
+        XCTAssertEqual(released, 1)
+        XCTAssertEqual(starts, 0)
+    }
+
     func testReadyRustTargetPlanReviewRevalidatesAndFailsClosedOnDrift() async throws {
         let reviews = BrowserReviewStub(mode: .rustTargetPlanReviewChangesOnRefresh)
         let clock = SuspendedRustTargetPlanReviewClock(now: Date())
@@ -1512,6 +1529,7 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
         case candidateDetailMalformed
         case rustTargetPlanReviewAvailable
         case rustTargetPlanReviewChangesOnRefresh
+        case rustTargetPlanReviewMismatchedRecency
         case rustTargetPlanReviewExpired
         case suspendedRustTargetPlanReview
     }
@@ -1650,6 +1668,7 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
                 || mode == .candidateDetailMalformed
                 || mode == .rustTargetPlanReviewAvailable
                 || mode == .rustTargetPlanReviewChangesOnRefresh
+                || mode == .rustTargetPlanReviewMismatchedRecency
                 || mode == .rustTargetPlanReviewExpired
                 || mode == .suspendedRustTargetPlanReview
         else {
@@ -1686,6 +1705,7 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
                 || mode == .candidateDetailMalformed
                 || mode == .rustTargetPlanReviewAvailable
                 || mode == .rustTargetPlanReviewChangesOnRefresh
+                || mode == .rustTargetPlanReviewMismatchedRecency
                 || mode == .rustTargetPlanReviewExpired
                 || mode == .suspendedRustTargetPlanReview
         else {
@@ -1738,6 +1758,7 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
                 || mode == .candidateDetailMalformed
                 || mode == .rustTargetPlanReviewAvailable
                 || mode == .rustTargetPlanReviewChangesOnRefresh
+                || mode == .rustTargetPlanReviewMismatchedRecency
                 || mode == .rustTargetPlanReviewExpired
                 || mode == .suspendedRustTargetPlanReview
         else {
@@ -2047,6 +2068,7 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
         guard
             mode == .rustTargetPlanReviewAvailable
                 || mode == .rustTargetPlanReviewChangesOnRefresh
+                || mode == .rustTargetPlanReviewMismatchedRecency
                 || mode == .suspendedRustTargetPlanReview
         else {
             throw ExplorerRustTargetPlanReviewError.unavailable
@@ -2062,12 +2084,18 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
             sourceScanID: scanID,
             candidateID: candidateID,
             ruleID: "developer.rust.target",
-            ruleRevision: 2,
+            ruleRevision: 3,
             category: .developerArtifact,
             mode: .permanentSafe,
             safety: .safeRegenerable,
             action: .removeKnownRegenerableContents,
             estimatedBytes: 42_000,
+            newestMtime: ExplorerSnapshotTimestamp(
+                secondsSinceUnixEpoch: 1_700_000_000,
+                nanoseconds: mode == .rustTargetPlanReviewMismatchedRecency ? 1 : 0
+            ),
+            minimumAgeSeconds: 604_800,
+            minimumAgeNanoseconds: 0,
             itemCount: 1,
             pathCount: 1,
             warnings: [
@@ -2214,6 +2242,7 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
     private func candidateSummary(id: String) -> ExplorerCandidateSummary {
         switch mode {
         case .rustTargetPlanReviewAvailable, .rustTargetPlanReviewChangesOnRefresh,
+             .rustTargetPlanReviewMismatchedRecency,
              .rustTargetPlanReviewExpired,
              .suspendedRustTargetPlanReview:
             browserRustTargetCandidateSummary(id: id)
@@ -2475,7 +2504,7 @@ private func browserRustTargetCandidateSummary(id: String) -> ExplorerCandidateS
     ExplorerCandidateSummary(
         candidateID: id,
         ruleID: "developer.rust.target",
-        ruleRevision: 2,
+        ruleRevision: 3,
         category: .developerArtifact,
         estimatedBytes: 42_000,
         newestMtime: ExplorerSnapshotTimestamp(
@@ -2486,7 +2515,7 @@ private func browserRustTargetCandidateSummary(id: String) -> ExplorerCandidateS
         action: .removeKnownRegenerableContents,
         ruleScheduleEligible: false,
         pathCount: 1,
-        evidenceKinds: [.matchedPath],
+        evidenceKinds: [.matchedPath, .requiredMarker, .requiredMarker, .minimumAge],
         blockers: [.protectedPath],
         createdAt: ExplorerSnapshotTimestamp(
             secondsSinceUnixEpoch: 1_700_000_001,

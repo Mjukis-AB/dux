@@ -237,7 +237,7 @@
     },
     {
       "id": "developer.rust.target",
-      "revision": 2,
+      "revision": 3,
       "title_key": "rule.developer.rust.target.title",
       "category": "developer_artifact",
       "scope": "selected_scan_root",
@@ -248,7 +248,7 @@
       "exact_bundle_identifiers": [],
       "excluded_descendants": [],
       "protected_descendants": [],
-      "minimum_age_days": null,
+      "minimum_age_days": 7,
       "minimum_bytes": 0,
       "inactive_processes": [],
       "requires_cloud_upload_complete": false,

@@ -397,10 +397,11 @@ fn artifact_projection_uses_newest_subtree_mtime_and_refreshes_in_place() {
     let mut tree = DiskTree::new(PathBuf::from("/scan"));
     add_file(&mut tree, NodeId::ROOT, "Cargo.toml");
     let target = add_dir(&mut tree, NodeId::ROOT, "target");
-    add_file(&mut tree, target, "CACHEDIR.TAG");
+    let cache_tag = add_file(&mut tree, target, "CACHEDIR.TAG");
     let descendant = add_dir(&mut tree, target, "debug");
     let output = add_file(&mut tree, descendant, "output");
     tree.get_mut(target).unwrap().mtime = Some(now - Duration::from_secs(20 * 86_400));
+    tree.get_mut(cache_tag).unwrap().mtime = Some(now - Duration::from_secs(30 * 86_400));
     tree.get_mut(descendant).unwrap().mtime = Some(now - Duration::from_secs(10 * 86_400));
     let newest_mtime = now - Duration::from_secs(1);
     tree.get_mut(output).unwrap().mtime = Some(newest_mtime);

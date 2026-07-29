@@ -362,7 +362,7 @@ EXCEPTIONS = {
     "permanent-safe-rust-target-descriptor-contents": ExceptionSpec(
         "dux-core/src/cleanup/permanent_safe.rs",
         "rust-platform-delete",
-        "remove_contents",
+        "remove_contents_unix",
     ),
     "test-reviewed-trash-replaced-file-remove": ExceptionSpec(
         "dux-core/src/cleanup/executor.rs",

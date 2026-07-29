@@ -83,6 +83,10 @@ impl PersistedFixture {
         if add_every_catalog_pattern {
             add_catalog_pattern_fixtures(&root);
         }
+        super::rust_target_tests::set_subtree_modified_at(
+            &target,
+            SystemTime::now() - Duration::from_secs(8 * 86_400),
+        );
         let root = root.canonicalize().unwrap();
         let target = root.join("project/target");
         let manifest = root.join("project/Cargo.toml");
@@ -92,7 +96,13 @@ impl PersistedFixture {
         let snapshots =
             SnapshotRepository::open(Arc::clone(&store), SnapshotStoreAccess::ReadWrite).unwrap();
         let scan_id = ScanId::new("scan:rust-durable-source").unwrap();
-        let observed_at = SystemTime::now();
+        let observed_at = {
+            let milliseconds = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_millis();
+            SystemTime::UNIX_EPOCH + Duration::from_millis(u64::try_from(milliseconds).unwrap())
+        };
         store
             .record_scan_started(
                 &NewScanRecord::try_new(
@@ -115,7 +125,7 @@ impl PersistedFixture {
             .unwrap()
             .into_completed_artifact()
             .expect("fixture scan completes");
-        let batch = evaluate_completed_scan_candidates(&scan_id, &artifact).unwrap();
+        let batch = evaluate_completed_scan_candidates(&scan_id, &artifact, observed_at).unwrap();
         let discovered_candidate_id = batch
             .candidates()
             .iter()
@@ -356,7 +366,7 @@ fn snapshot_replay_rejects_forged_size_and_newest_time() {
             &forged_time.scan_id,
             &forged_time.candidate_id,
         ),
-        Err(RustTargetSourceError::EvaluatorReplayMismatch)
+        Err(RustTargetSourceError::CandidateMismatch)
     ));
 }
 

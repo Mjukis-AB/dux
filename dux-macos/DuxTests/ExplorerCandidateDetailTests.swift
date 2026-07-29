@@ -19,7 +19,67 @@ final class ExplorerCandidateDetailTests: XCTestCase {
         XCTAssertEqual(mapped.category, .developerArtifact)
         XCTAssertEqual(mapped.itemCount, 1)
         XCTAssertEqual(mapped.pathCount, 1)
+        XCTAssertEqual(mapped.ruleRevision, 3)
+        XCTAssertEqual(mapped.minimumAgeSeconds, 604_800)
+        XCTAssertEqual(mapped.minimumAgeNanoseconds, 0)
+        XCTAssertEqual(mapped.newestMtime.secondsSinceUnixEpoch, 1_699_395_200)
         XCTAssertEqual(mapped.target.display, "/Users/example/project/target")
+    }
+
+    func testRustTargetPlanReviewRejectsWrongOrUnsatisfiedMinimumAge() {
+        let recent = rustTargetPlanReviewRecord(
+            newestMtime: ExplorerSnapshotTimestamp(
+                secondsSinceUnixEpoch: 1_699_395_201,
+                nanoseconds: 0
+            )
+        )
+        let wrongMinimum = rustTargetPlanReviewRecord(minimumAgeSeconds: 604_799)
+        let wrongMinimumNanoseconds = rustTargetPlanReviewRecord(
+            minimumAgeNanoseconds: 1
+        )
+        let oldRevision = rustTargetPlanReviewRecord(ruleRevision: 2)
+
+        for record in [recent, wrongMinimum, wrongMinimumNanoseconds, oldRevision] {
+            XCTAssertThrowsError(
+                try ExplorerRustTargetPlanReviewAdapter.map(
+                    record,
+                    expectedScanID: "scan:example",
+                    expectedCandidateID: "candidate:example",
+                    now: ExplorerSnapshotTimestamp(
+                        secondsSinceUnixEpoch: 1_700_000_100,
+                        nanoseconds: 0
+                    )
+                )
+            ) { error in
+                XCTAssertEqual(
+                    error as? ExplorerRustTargetPlanReviewError,
+                    .invalidResponse
+                )
+            }
+        }
+    }
+
+    func testRustTargetPlanReviewAcceptsExactNanosecondAgeBoundary() throws {
+        let mapped = try ExplorerRustTargetPlanReviewAdapter.map(
+            rustTargetPlanReviewRecord(
+                newestMtime: ExplorerSnapshotTimestamp(
+                    secondsSinceUnixEpoch: 1_699_395_200,
+                    nanoseconds: 123_456_789
+                ),
+                createdAt: ExplorerSnapshotTimestamp(
+                    secondsSinceUnixEpoch: 1_700_000_000,
+                    nanoseconds: 123_456_789
+                )
+            ),
+            expectedScanID: "scan:example",
+            expectedCandidateID: "candidate:example",
+            now: ExplorerSnapshotTimestamp(
+                secondsSinceUnixEpoch: 1_700_000_100,
+                nanoseconds: 0
+            )
+        )
+
+        XCTAssertEqual(mapped.newestMtime.nanoseconds, 123_456_789)
     }
 
     func testRustTargetPlanReviewRejectsCrossCandidateAndOversizedLifetime() {
@@ -493,6 +553,13 @@ final class ExplorerCandidateDetailTests: XCTestCase {
     }
 
     private func rustTargetPlanReviewRecord(
+        ruleRevision: UInt32 = 3,
+        newestMtime: ExplorerSnapshotTimestamp = ExplorerSnapshotTimestamp(
+            secondsSinceUnixEpoch: 1_699_395_200,
+            nanoseconds: 0
+        ),
+        minimumAgeSeconds: UInt64 = 604_800,
+        minimumAgeNanoseconds: UInt32 = 0,
         createdAt: ExplorerSnapshotTimestamp = ExplorerSnapshotTimestamp(
             secondsSinceUnixEpoch: 1_700_000_000,
             nanoseconds: 0
@@ -513,12 +580,15 @@ final class ExplorerCandidateDetailTests: XCTestCase {
             sourceScanID: "scan:example",
             candidateID: "candidate:example",
             ruleID: "developer.rust.target",
-            ruleRevision: 2,
+            ruleRevision: ruleRevision,
             category: .developerArtifact,
             mode: .permanentSafe,
             safety: .safeRegenerable,
             action: .removeKnownRegenerableContents,
             estimatedBytes: 42,
+            newestMtime: newestMtime,
+            minimumAgeSeconds: minimumAgeSeconds,
+            minimumAgeNanoseconds: minimumAgeNanoseconds,
             itemCount: 1,
             pathCount: 1,
             warnings: [

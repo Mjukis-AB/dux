@@ -533,12 +533,15 @@ final class ExplorerSnapshotBrowserModel {
             return false
         }
         return candidate.ruleID == "developer.rust.target"
-            && candidate.ruleRevision == 2
+            && candidate.ruleRevision == 3
             && candidate.category == .developerArtifact
+            && candidate.newestMtime != nil
             && candidate.safety == .safeRegenerable
             && candidate.action == .removeKnownRegenerableContents
             && !candidate.ruleScheduleEligible
             && candidate.pathCount == 1
+            && candidate.evidenceKinds
+                == [.matchedPath, .requiredMarker, .requiredMarker, .minimumAge]
             && candidate.blockers == [.protectedPath]
             && candidate.status == .discovered
     }

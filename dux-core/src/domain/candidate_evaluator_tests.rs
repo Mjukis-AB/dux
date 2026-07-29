@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use super::*;
 use crate::domain::{
@@ -8,6 +9,10 @@ use crate::tree::{NodeId, NodeKind};
 
 fn complete_coverage() -> ScanCoverage {
     ScanCoverage::from_validated_terminal_issues(Vec::new())
+}
+
+fn evaluated_at() -> SystemTime {
+    SystemTime::UNIX_EPOCH + Duration::from_secs(30 * 86_400)
 }
 
 fn add_file(tree: &mut DiskTree, parent: NodeId, name: &str, path: PathBuf) -> NodeId {
@@ -30,12 +35,15 @@ fn add_rust_project(tree: &mut DiskTree, project_name: &str, bytes: u64) -> Path
         target_path.clone(),
         project,
     );
-    add_file(
+    let cache_tag = add_file(
         tree,
         target,
         "CACHEDIR.TAG",
         target_path.join("CACHEDIR.TAG"),
     );
+    let old = SystemTime::UNIX_EPOCH + Duration::from_secs(86_400);
+    tree.get_mut(target).unwrap().mtime = Some(old);
+    tree.get_mut(cache_tag).unwrap().mtime = Some(old);
     tree.set_size(target, bytes);
     target_path
 }
@@ -71,6 +79,7 @@ fn evaluate(tree: &DiskTree) -> CandidateBatch {
         &ScanId::new("scan:fixture").unwrap(),
         tree,
         &complete_coverage(),
+        evaluated_at(),
     )
     .unwrap()
 }
@@ -87,7 +96,7 @@ fn marker_verified_artifact_preserves_paths_size_evidence_and_scan_binding() {
     assert_eq!(candidate.estimated_bytes(), 4096);
     assert_eq!(candidate.source_scan_id().as_str(), "scan:fixture");
     assert_eq!(candidate.rule().id().as_str(), "developer.rust.target");
-    assert_eq!(candidate.rule().revision().get(), 2);
+    assert_eq!(candidate.rule().revision().get(), 3);
     assert_eq!(candidate.safety(), SafetyTier::SafeRegenerable);
     assert_eq!(
         candidate.action(),
@@ -105,6 +114,10 @@ fn marker_verified_artifact_preserves_paths_size_evidence_and_scan_binding() {
             },
             Evidence::RequiredMarker {
                 path: PathBuf::from("/fixture/project/target/CACHEDIR.TAG"),
+            },
+            Evidence::MinimumAge {
+                newest_mtime: SystemTime::UNIX_EPOCH + Duration::from_secs(86_400),
+                minimum_age: SAFE_RUST_RULE_MINIMUM_AGE,
             },
         ]
     );
@@ -250,6 +263,7 @@ fn ids_and_order_are_independent_of_arena_insertion_order_and_bound_to_scan() {
         &ScanId::new("scan:other").unwrap(),
         &forward,
         &complete_coverage(),
+        evaluated_at(),
     )
     .unwrap();
     assert_ne!(
@@ -464,7 +478,7 @@ fn exact_catalog_digest_is_stable() {
     push_lower_hex(&mut actual, &bundled_candidate_catalog_digest_sha256());
     assert_eq!(
         actual,
-        "dd9155d39998592244c94c55fbc817b716d0ebfd40c38213e14466244a0a0c91"
+        "c0c4544d6c2c3d96ebc356425ee99b7698d631411282125421267e766759f09e"
     );
     let catalog = load_and_validate_catalog().unwrap();
     assert!(
@@ -477,11 +491,16 @@ fn exact_catalog_digest_is_stable() {
         .filter(|rule| rule.safety() == SafetyTier::SafeRegenerable)
         .collect::<Vec<_>>();
     assert_eq!(safe_rules.len(), 2);
-    assert!(
-        safe_rules
-            .iter()
-            .all(|rule| rule.reference().revision().get() == 2)
-    );
+    assert!(safe_rules.iter().any(|rule| {
+        rule.reference().id().as_str() == SAFE_RUST_RULE_ID
+            && rule.reference().revision().get() == SAFE_RUST_RULE_REVISION
+            && rule.guards().minimum_age() == Some(SAFE_RUST_RULE_MINIMUM_AGE)
+    }));
+    assert!(safe_rules.iter().any(|rule| {
+        rule.reference().id().as_str() == SAFE_PYTHON_PYCACHE_RULE_ID
+            && rule.reference().revision().get() == 2
+            && rule.guards().minimum_age().is_none()
+    }));
     assert!(safe_rules.iter().all(|rule| !rule.schedule_eligible()));
     assert!(
         safe_rules
@@ -521,9 +540,13 @@ fn incomplete_coverage_adds_a_distinct_blocker() {
     .unwrap();
     let coverage = ScanCoverage::try_new(ScanCoverageStatus::Partial, None, vec![issue]).unwrap();
 
-    let batch =
-        evaluate_artifact_candidates(&ScanId::new("scan:partial").unwrap(), &tree, &coverage)
-            .unwrap();
+    let batch = evaluate_artifact_candidates(
+        &ScanId::new("scan:partial").unwrap(),
+        &tree,
+        &coverage,
+        evaluated_at(),
+    )
+    .unwrap();
     assert_eq!(
         batch.candidates()[0].blockers(),
         &[BlockReason::PartialScanCoverage, BlockReason::ProtectedPath,]
@@ -537,12 +560,14 @@ fn evaluation_context_is_stable_and_bound_to_scan_root_and_coverage() {
         &ScanId::new("scan:context").unwrap(),
         &empty,
         &complete_coverage(),
+        evaluated_at(),
     )
     .unwrap();
     let repeated = evaluate_artifact_candidates(
         &ScanId::new("scan:context").unwrap(),
         &empty,
         &complete_coverage(),
+        evaluated_at(),
     )
     .unwrap();
     assert_eq!(
@@ -554,12 +579,14 @@ fn evaluation_context_is_stable_and_bound_to_scan_root_and_coverage() {
         &ScanId::new("scan:context").unwrap(),
         &DiskTree::new(PathBuf::from("/other")),
         &complete_coverage(),
+        evaluated_at(),
     )
     .unwrap();
     let unknown_coverage = evaluate_artifact_candidates(
         &ScanId::new("scan:context").unwrap(),
         &empty,
         &ScanCoverage::unknown(),
+        evaluated_at(),
     )
     .unwrap();
     assert_ne!(
@@ -570,6 +597,123 @@ fn evaluation_context_is_stable_and_bound_to_scan_root_and_coverage() {
         first.context_digest_sha256(),
         unknown_coverage.context_digest_sha256()
     );
+    let different_evaluation_time = evaluate_artifact_candidates(
+        &ScanId::new("scan:context").unwrap(),
+        &empty,
+        &complete_coverage(),
+        evaluated_at() + Duration::from_nanos(1),
+    )
+    .unwrap();
+    assert_ne!(
+        first.context_digest_sha256(),
+        different_evaluation_time.context_digest_sha256()
+    );
+}
+
+#[test]
+fn rust_target_minimum_age_is_inclusive_and_fails_closed() {
+    let now = evaluated_at();
+    let cases = [
+        (
+            "older",
+            Some(now - SAFE_RUST_RULE_MINIMUM_AGE - Duration::from_nanos(1)),
+            None,
+            None,
+        ),
+        ("exact", Some(now - SAFE_RUST_RULE_MINIMUM_AGE), None, None),
+        (
+            "young",
+            Some(now - SAFE_RUST_RULE_MINIMUM_AGE + Duration::from_nanos(1)),
+            None,
+            Some(BlockReason::RecentActivity),
+        ),
+        (
+            "future",
+            Some(now + Duration::from_nanos(1)),
+            None,
+            Some(BlockReason::RecentActivity),
+        ),
+        (
+            "missing-directory",
+            Some(now - SAFE_RUST_RULE_MINIMUM_AGE),
+            Some("directory"),
+            Some(BlockReason::MissingModificationTime),
+        ),
+        (
+            "missing-file",
+            Some(now - SAFE_RUST_RULE_MINIMUM_AGE),
+            Some("file"),
+            Some(BlockReason::MissingModificationTime),
+        ),
+    ];
+
+    for (name, newest_mtime, missing_mtime, recency_blocker) in cases {
+        let mut tree = DiskTree::new(PathBuf::from("/fixture"));
+        let target_path = add_rust_project(&mut tree, name, 4096);
+        let target = tree
+            .iter()
+            .find(|node| node.path == target_path)
+            .map(|node| node.id)
+            .unwrap();
+        let payload = add_file(
+            &mut tree,
+            target,
+            "artifact.rlib",
+            target_path.join("artifact.rlib"),
+        );
+        tree.get_mut(target).unwrap().mtime = newest_mtime;
+        for child in tree.get(target).unwrap().children.clone() {
+            tree.get_mut(child).unwrap().mtime = newest_mtime;
+        }
+        tree.get_mut(payload).unwrap().mtime = newest_mtime;
+        match missing_mtime {
+            Some("directory") => tree.get_mut(target).unwrap().mtime = None,
+            Some("file") => tree.get_mut(payload).unwrap().mtime = None,
+            None => {}
+            Some(_) => unreachable!(),
+        }
+
+        let batch = evaluate_artifact_candidates(
+            &ScanId::new(format!("scan:{name}")).unwrap(),
+            &tree,
+            &complete_coverage(),
+            now,
+        )
+        .unwrap();
+        let candidate = &batch.candidates()[0];
+        let recency_satisfied = recency_blocker.is_none();
+        let expected_blockers = match recency_blocker {
+            Some(blocker) => vec![blocker, BlockReason::ProtectedPath],
+            None => vec![BlockReason::ProtectedPath],
+        };
+        assert_eq!(candidate.blockers(), expected_blockers, "{name}");
+        let minimum_age_evidence = candidate
+            .evidence()
+            .iter()
+            .filter(|evidence| matches!(evidence, Evidence::MinimumAge { .. }))
+            .count();
+        assert_eq!(
+            minimum_age_evidence,
+            usize::from(recency_satisfied),
+            "{name}"
+        );
+        if recency_satisfied {
+            assert_eq!(candidate.newest_mtime(), newest_mtime, "{name}");
+            assert!(
+                candidate.evidence().iter().any(|evidence| {
+                    matches!(
+                        evidence,
+                        Evidence::MinimumAge {
+                            newest_mtime: observed,
+                            minimum_age,
+                        } if Some(*observed) == newest_mtime
+                            && *minimum_age == SAFE_RUST_RULE_MINIMUM_AGE
+                    )
+                }),
+                "{name}"
+            );
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -651,6 +795,7 @@ fn output_limit_fails_as_a_typed_error_instead_of_silently_truncating() {
             &ScanId::new("scan:limit").unwrap(),
             &tree,
             &complete_coverage(),
+            evaluated_at(),
         ),
         Err(CandidateEvaluationError::CandidateLimitExceeded {
             observed_at_least: MAX_EVALUATED_CANDIDATES + 1,

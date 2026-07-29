@@ -65,7 +65,7 @@ struct ExplorerSnapshotBrowserView: View {
             }
         } message: { confirmation in
             Text(
-                "DUX will consume this exact short-lived review and permanently remove only the validated regenerable contents inside \(confirmation.info.target.display). The target folder and CACHEDIR.TAG marker remain. Estimated reclaimable space is \(StorageByteFormatter.string(from: confirmation.info.estimatedBytes)); the estimate is not guaranteed. This cannot be undone."
+                "DUX will consume this exact short-lived review and permanently remove only the validated regenerable contents inside \(confirmation.info.target.display). The newest observed change was \(confirmationTimestamp(confirmation.info.newestMtime)); the rule requires \(confirmationMinimumAge(seconds: confirmation.info.minimumAgeSeconds, nanoseconds: confirmation.info.minimumAgeNanoseconds)) of inactivity, which DUX revalidates before cleanup. The target folder and CACHEDIR.TAG marker remain. Estimated reclaimable space is \(StorageByteFormatter.string(from: confirmation.info.estimatedBytes)); the estimate is not guaranteed. This cannot be undone."
             )
             .accessibilityIdentifier(
                 ExplorerAccessibility.snapshotCandidateCleanupConfirmation
@@ -73,6 +73,31 @@ struct ExplorerSnapshotBrowserView: View {
         }
 #endif
         .accessibilityIdentifier(ExplorerAccessibility.snapshotBrowser)
+    }
+
+    private func confirmationTimestamp(_ value: ExplorerSnapshotTimestamp) -> String {
+        let interval = Double(value.secondsSinceUnixEpoch)
+            + Double(value.nanoseconds) / 1_000_000_000
+        return Date(timeIntervalSince1970: interval).formatted(
+            date: .abbreviated,
+            time: .shortened
+        )
+    }
+
+    private func confirmationMinimumAge(seconds: UInt64, nanoseconds: UInt32) -> String {
+        let secondsPerDay: UInt64 = 24 * 60 * 60
+        if nanoseconds == 0, seconds.isMultiple(of: secondsPerDay) {
+            let days = seconds / secondsPerDay
+            return "\(days) \(days == 1 ? "day" : "days")"
+        }
+        guard nanoseconds > 0 else {
+            return "\(seconds) seconds"
+        }
+        var fraction = String(format: "%09u", nanoseconds)
+        while fraction.last == "0" {
+            fraction.removeLast()
+        }
+        return "\(seconds).\(fraction) seconds"
     }
 
     private var header: some View {
@@ -1577,6 +1602,14 @@ private struct ExplorerCandidateInspectorView: View {
                         )
                         detailRow("Scope", "\(info.itemCount) candidate · \(info.pathCount) exact target")
                         detailRow("Rule", "\(info.ruleID) revision \(info.ruleRevision)")
+                        detailRow("Newest observed change", timestamp(info.newestMtime))
+                        detailRow(
+                            "Required inactivity",
+                            minimumAgeDescription(
+                                seconds: info.minimumAgeSeconds,
+                                nanoseconds: info.minimumAgeNanoseconds
+                            )
+                        )
                         detailRow("Created", timestamp(info.createdAt))
                         detailRow("Current until", timestamp(info.effectiveExpiresAt))
                         VStack(alignment: .leading, spacing: 3) {
@@ -1590,7 +1623,7 @@ private struct ExplorerCandidateInspectorView: View {
                     }
                     .accessibilityElement(children: .combine)
                     .accessibilityLabel(
-                        "Permanent-safe plan preview. Estimated \(StorageByteFormatter.string(from: info.estimatedBytes)). Current until \(timestamp(info.effectiveExpiresAt)). Exact current target \(accessibilityPlanTarget(info.target.display)). Not approved; no files changed."
+                        "Permanent-safe plan preview. Estimated \(StorageByteFormatter.string(from: info.estimatedBytes)). Newest observed change \(timestamp(info.newestMtime)); required inactivity \(minimumAgeDescription(seconds: info.minimumAgeSeconds, nanoseconds: info.minimumAgeNanoseconds)). Current until \(timestamp(info.effectiveExpiresAt)). Exact current target \(accessibilityPlanTarget(info.target.display)). Not approved; no files changed."
                     )
                     .accessibilityIdentifier(
                         ExplorerAccessibility.snapshotCandidatePlanReviewSummary
@@ -1916,6 +1949,15 @@ private struct ExplorerCandidateInspectorView: View {
             fraction.removeLast()
         }
         return "\(seconds).\(fraction) seconds"
+    }
+
+    private func minimumAgeDescription(seconds: UInt64, nanoseconds: UInt32) -> String {
+        let secondsPerDay: UInt64 = 24 * 60 * 60
+        if nanoseconds == 0, seconds.isMultiple(of: secondsPerDay) {
+            let days = seconds / secondsPerDay
+            return "\(days) \(days == 1 ? "day" : "days")"
+        }
+        return duration(seconds: seconds, nanoseconds: nanoseconds)
     }
 }
 

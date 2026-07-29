@@ -33,7 +33,7 @@ struct ExplorerRustTargetPlanReviewPath: Equatable, Sendable {
     let display: String
 }
 
-/// Transport-neutral v28 record. Generated-FFI values are projected into this
+/// Transport-neutral contract-v33 record. Generated-FFI values are projected into this
 /// app-owned shape at the EngineService boundary before strict validation.
 struct ExplorerRustTargetPlanReviewRecord: Equatable, Sendable {
     let recordVersion: UInt32
@@ -47,6 +47,9 @@ struct ExplorerRustTargetPlanReviewRecord: Equatable, Sendable {
     let safety: ExplorerCandidateSafety
     let action: ExplorerCandidateAction
     let estimatedBytes: UInt64
+    let newestMtime: ExplorerSnapshotTimestamp
+    let minimumAgeSeconds: UInt64
+    let minimumAgeNanoseconds: UInt32
     let itemCount: UInt16
     let pathCount: UInt16
     let warnings: [ExplorerRustTargetPlanReviewWarning]
@@ -69,6 +72,9 @@ struct ExplorerRustTargetPlanReviewInfo: Equatable, Sendable {
     let safety: ExplorerCandidateSafety
     let action: ExplorerCandidateAction
     let estimatedBytes: UInt64
+    let newestMtime: ExplorerSnapshotTimestamp
+    let minimumAgeSeconds: UInt64
+    let minimumAgeNanoseconds: UInt32
     let itemCount: UInt16
     let pathCount: UInt16
     let warnings: [ExplorerRustTargetPlanReviewWarning]
@@ -181,7 +187,9 @@ enum ExplorerRustTargetPlanReviewAdapter {
     private static let maximumIdentifierBytes = 128
     private static let maximumUnixSeconds: UInt64 = 253_402_300_799
     private static let expectedRuleID = "developer.rust.target"
-    private static let expectedRuleRevision: UInt32 = 2
+    private static let expectedRuleRevision: UInt32 = 3
+    private static let expectedMinimumAgeSeconds: UInt64 = 7 * 24 * 60 * 60
+    private static let expectedMinimumAgeNanoseconds: UInt32 = 0
     private static let expectedWarnings: [ExplorerRustTargetPlanReviewWarning] = [
         .estimatedBytesUnverified,
         .permanentRemovalCannotBeUndone,
@@ -206,6 +214,15 @@ enum ExplorerRustTargetPlanReviewAdapter {
             raw.mode == .permanentSafe,
             raw.safety == .safeRegenerable,
             raw.action == .removeKnownRegenerableContents,
+            validTimestamp(raw.newestMtime),
+            raw.minimumAgeSeconds == expectedMinimumAgeSeconds,
+            raw.minimumAgeNanoseconds == expectedMinimumAgeNanoseconds,
+            satisfiesMinimumAge(
+                newestMtime: raw.newestMtime,
+                observedAt: raw.createdAt,
+                minimumAgeSeconds: raw.minimumAgeSeconds,
+                minimumAgeNanoseconds: raw.minimumAgeNanoseconds
+            ),
             !raw.scheduleEligible,
             raw.itemCount == 1,
             raw.pathCount == 1,
@@ -234,6 +251,9 @@ enum ExplorerRustTargetPlanReviewAdapter {
             safety: raw.safety,
             action: raw.action,
             estimatedBytes: raw.estimatedBytes,
+            newestMtime: raw.newestMtime,
+            minimumAgeSeconds: raw.minimumAgeSeconds,
+            minimumAgeNanoseconds: raw.minimumAgeNanoseconds,
             itemCount: raw.itemCount,
             pathCount: raw.pathCount,
             warnings: raw.warnings,
@@ -255,11 +275,14 @@ enum ExplorerRustTargetPlanReviewAdapter {
             && info.safety == candidate.safety
             && info.action == candidate.action
             && info.estimatedBytes == candidate.estimatedBytes
+            && candidate.newestMtime == info.newestMtime
             && info.itemCount == 1
             && info.pathCount == candidate.pathCount
             && info.scheduleEligible == candidate.ruleScheduleEligible
             && candidate.category == .developerArtifact
             && candidate.pathCount == 1
+            && candidate.evidenceKinds
+                == [.matchedPath, .requiredMarker, .requiredMarker, .minimumAge]
             && candidate.blockers == [.protectedPath]
             && candidate.status == .discovered
     }
@@ -325,6 +348,33 @@ enum ExplorerRustTargetPlanReviewAdapter {
             nanoseconds: start.nanoseconds
         )
         return compare(end, maximumEnd) != .orderedDescending
+    }
+
+    private static func satisfiesMinimumAge(
+        newestMtime: ExplorerSnapshotTimestamp,
+        observedAt: ExplorerSnapshotTimestamp,
+        minimumAgeSeconds: UInt64,
+        minimumAgeNanoseconds: UInt32
+    ) -> Bool {
+        let secondsFromNanoseconds = UInt64(minimumAgeNanoseconds / 1_000_000_000)
+        let remainderNanoseconds = minimumAgeNanoseconds % 1_000_000_000
+        let (baseSeconds, firstOverflow) =
+            newestMtime.secondsSinceUnixEpoch.addingReportingOverflow(minimumAgeSeconds)
+        let (secondsWithCarry, secondOverflow) =
+            baseSeconds.addingReportingOverflow(secondsFromNanoseconds)
+        let nanosecondTotal = UInt64(newestMtime.nanoseconds)
+            + UInt64(remainderNanoseconds)
+        let carry = nanosecondTotal / 1_000_000_000
+        let (qualifiedSeconds, carryOverflow) =
+            secondsWithCarry.addingReportingOverflow(carry)
+        guard !firstOverflow, !secondOverflow, !carryOverflow else {
+            return false
+        }
+        let qualifiedAt = ExplorerSnapshotTimestamp(
+            secondsSinceUnixEpoch: qualifiedSeconds,
+            nanoseconds: UInt32(nanosecondTotal % 1_000_000_000)
+        )
+        return compare(qualifiedAt, observedAt) != .orderedDescending
     }
 
     private static func validPath(_ path: ExplorerRustTargetPlanReviewPath) -> Bool {

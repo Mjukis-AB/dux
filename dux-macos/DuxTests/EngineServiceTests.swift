@@ -38,7 +38,11 @@ final class EngineServiceTests: XCTestCase {
         XCTAssertEqual(session.scanID, "scan:example")
         XCTAssertEqual(session.candidateID, "candidate:example")
         XCTAssertEqual(info.createdAt.secondsSinceUnixEpoch, 1_700_000_000)
-        XCTAssertEqual(info.createdAt.nanoseconds, 123_000_000)
+        XCTAssertEqual(info.createdAt.nanoseconds, 123_456_789)
+        XCTAssertEqual(info.newestMtime.secondsSinceUnixEpoch, 1_699_395_200)
+        XCTAssertEqual(info.newestMtime.nanoseconds, 123_456_789)
+        XCTAssertEqual(info.minimumAgeSeconds, 604_800)
+        XCTAssertEqual(info.minimumAgeNanoseconds, 0)
         XCTAssertEqual(info.target.encoding, .unixBytes)
         XCTAssertEqual(info.target.encodedBytes, Data("/Users/example/project/target".utf8))
 
@@ -178,10 +182,30 @@ final class EngineServiceTests: XCTestCase {
         )
     }
 
-    func testRustTargetPlanReviewBridgeRejectsNegativeGeneratedTimestamp() {
+    func testRustTargetPlanReviewBridgeRejectsInvalidGeneratedTimestamp() {
         XCTAssertThrowsError(
             try EngineRustTargetPlanReviewAdapter.map(
-                generatedRustTargetPlanReviewInfo(createdAtUnixMS: -1)
+                generatedRustTargetPlanReviewInfo(
+                    createdAt: SnapshotNodeTimestamp(
+                        secondsSinceUnixEpoch: 1_700_000_000,
+                        nanoseconds: 1_000_000_000
+                    )
+                )
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? ExplorerRustTargetPlanReviewError,
+                .invalidResponse
+            )
+        }
+        XCTAssertThrowsError(
+            try EngineRustTargetPlanReviewAdapter.map(
+                generatedRustTargetPlanReviewInfo(
+                    newestMtime: SnapshotNodeTimestamp(
+                        secondsSinceUnixEpoch: 1_699_395_200,
+                        nanoseconds: 1_000_000_000
+                    )
+                )
             )
         ) { error in
             XCTAssertEqual(
@@ -266,7 +290,7 @@ final class EngineServiceTests: XCTestCase {
         // DUX-DESTRUCTIVE: allow=test-swift-retry-obstruction-remove -- remove only this test fixture's deliberate file obstruction
         try FileManager.default.removeItem(at: dataRoot)
         let status = try await service.loadStatus()
-        XCTAssertEqual(status.ffiContractVersion, 32)
+        XCTAssertEqual(status.ffiContractVersion, 33)
         let closed = await service.close()
         XCTAssertTrue(closed)
     }
@@ -276,7 +300,7 @@ final class EngineServiceTests: XCTestCase {
         let result = try await EngineService(engine: fixture.engine).loadStatus()
 
         XCTAssertEqual(result.libraryVersion, "0.5.0")
-        XCTAssertEqual(result.ffiContractVersion, 32)
+        XCTAssertEqual(result.ffiContractVersion, 33)
         XCTAssertTrue(result.executedOffMainThread)
     }
 
@@ -1617,7 +1641,7 @@ final class EngineServiceTests: XCTestCase {
             weakEngine = engine
 
             XCTAssertEqual(liveEngineInstanceCount(), baseline + 1)
-            XCTAssertEqual(try engine.libraryVersion().ffiContractVersion, 32)
+            XCTAssertEqual(try engine.libraryVersion().ffiContractVersion, 33)
             XCTAssertTrue(engine.close())
             XCTAssertTrue(engine.close())
             XCTAssertThrowsError(try engine.formatSize(bytes: 1_536)) { error in
@@ -2044,7 +2068,14 @@ private func generatedCleanupCounts(
 }
 
 private func generatedRustTargetPlanReviewInfo(
-    createdAtUnixMS: Int64 = 1_700_000_000_123
+    createdAt: SnapshotNodeTimestamp = SnapshotNodeTimestamp(
+        secondsSinceUnixEpoch: 1_700_000_000,
+        nanoseconds: 123_456_789
+    ),
+    newestMtime: SnapshotNodeTimestamp = SnapshotNodeTimestamp(
+        secondsSinceUnixEpoch: 1_699_395_200,
+        nanoseconds: 123_456_789
+    )
 ) -> RustTargetPlanReviewInfo {
     RustTargetPlanReviewInfo(
         recordVersion: 1,
@@ -2052,18 +2083,24 @@ private func generatedRustTargetPlanReviewInfo(
         sourceScanId: "scan:example",
         candidateId: "candidate:example",
         ruleId: "developer.rust.target",
-        ruleRevision: 2,
+        ruleRevision: 3,
         category: .developerArtifact,
         mode: .permanentSafe,
         safety: .safeRegenerable,
         action: .removeKnownRegenerableContents,
         estimatedBytes: 42,
+        newestMtime: newestMtime,
+        minimumAgeSeconds: 604_800,
+        minimumAgeNanoseconds: 0,
         warnings: [
             .estimatedBytesUnverified,
             .permanentRemovalCannotBeUndone,
         ],
-        createdAtUnixMs: createdAtUnixMS,
-        effectiveExpiresAtUnixMs: 1_700_000_600_123,
+        createdAt: createdAt,
+        effectiveExpiresAt: SnapshotNodeTimestamp(
+            secondsSinceUnixEpoch: 1_700_000_600,
+            nanoseconds: 123_456_789
+        ),
         scheduleEligible: false,
         itemCount: 1,
         pathCount: 1,

@@ -73,4 +73,4 @@ mod rust_target_cargo_tests;
 #[cfg(all(test, unix))]
 mod rust_target_source_tests;
 #[cfg(test)]
-mod rust_target_tests;
+pub(crate) mod rust_target_tests;

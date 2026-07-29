@@ -4127,10 +4127,17 @@ Tasks:
     `ProtectedPath` blocker. Python's import reference, FAQ, and PEP 3147 are
     recorded in `docs/rules/developer-python-pycache.md`; no plan, executor,
     AI, FFI cleanup authority, or live Python-writer witness was added.
-  - [ ] Promote the bounded Cargo observation into trusted planning authority,
+  - [x] Promote the bounded Cargo observation into trusted planning authority,
     then add authoritative volume and protected-root grants,
     change/process/descendant guards, and executor-time revalidation before
     removing `ProtectedPath` or enabling scheduling.
+    The sole admitted Rust-target path now crosses the complete typed
+    enrolled-Cargo, current-account volume, protected-root, process,
+    descendant, reviewed-plan, journal, and descriptor-relative revalidation
+    chain. This closes the prerequisite work without treating it as permission
+    to weaken policy: durable candidate history still records `ProtectedPath`,
+    generic planning still rejects blocked candidates, scheduling remains
+    disabled, and Release cannot start permanent-safe cleanup.
     - [x] 2026-07-18 slice: add explicit, revisioned enrollment for one exact
       direct Cargo executable. The macOS core exposes inspect-then-commit,
       status, and revoke operations; inspection accepts no `PATH` or rustup
@@ -4964,6 +4971,54 @@ Tasks:
     Rust-target safety failures; both exact regressions passed when rerun in
     isolation (including the 292.60-second quiescence case). Formatting and
     diff hygiene pass.
+  - [x] 2026-07-29 slice: raise `developer.rust.target` to revision 3 and make
+    inclusive seven-day inactivity part of deterministic cleanup authority.
+    Evaluator revision 3 and context format 2 bind the exact persisted scheduled
+    instant into the context digest, require complete file/directory
+    modification-time coverage, emit an exact fourth `MinimumAge` fact, and
+    reject recent, future, or missing required timestamps. Snapshot replay uses
+    the retained scheduled instant, preserving exact-boundary and restart
+    determinism. Planning, promotion, candidate
+    coupling, plan review, and effect handoff accept only the current
+    marker/age shape. Historical sealed revision-2 sessions remain decodable
+    solely so recovery can terminalize them; current-only planner and effect
+    gates prevent that compatibility from reviving authority.
+    Before preview publication and again before `effect_started`, a shared
+    descriptor-relative no-follow validator compares two complete bounded
+    inventories and requires the target root, cache tag, and every descendant
+    to remain at or before the fresh seven-day cutoff. The concrete driver
+    repeats the inventory after effect admission and retains per-file
+    identity/type/link-count/logical-size/mtime checks before unlink. Recent,
+    future, missing, linked, special, symlinked, added, removed, or changed
+    entries fail closed; pre-preview and pre-effect failures perform zero
+    unlinks.
+    UniFFI contract v33 transports every plan timestamp losslessly as
+    seconds/nanoseconds plus the exact duration; Swift independently validates
+    revision, duration, candidate evidence, and age before publishing the
+    opaque child. Final materialization reruns the live subtree check after
+    parent validation, and the concrete driver performs its final inventory
+    after the last Cargo/read-set revalidation. Explorer adds the newest-change
+    and required-inactivity facts
+    to the plan card, accessibility summary, and internal destructive
+    confirmation. Release execution remains disabled and the rule remains
+    unschedulable.
+
+    Verification: the focused Rust-target lane passed 89 tests, including the
+    exact nanosecond boundary, replay, final-materialization leaf drift,
+    pre-effect drift, historical revision-2 recovery fencing, and final driver
+    inventory. The serialized all-target workspace run passed 1,057 tests with
+    2 intentional ignores and exposed one discovery fixture that still created
+    a fresh target; after the fixture was made explicitly eight days old and
+    required to carry `MinimumAge`, its exact persistence/reopen regression
+    passed. No non-test implementation changed after that full run. All 13
+    projection integration tests and 64 ordinary FFI tests pass; the two
+    intentionally ignored quiescent FFI cleanup regressions were also run
+    through their exact process-boundary harness and passed independently.
+    Locked all-target workspace check, warnings-denied Clippy, formatting, all
+    29 repository policy tests, and the destructive-boundary scan of 242 source
+    files pass. Universal Debug FFI/XCFramework generation produced arm64 and
+    x86_64 slices, and the complete native Xcode scheme passed 401 tests with
+    zero failures.
 - [ ] Implement execution-time revalidation.
   - [x] 2026-07-19 slice: make the approved-session handoff use one canonical
     millisecond start time for persistence and journal claiming, and recheck

@@ -173,6 +173,7 @@ fn acquire_rust_target_durable_source_with_clock_and_hook(
         &document,
         before.scan().coverage(),
         before.evaluation_candidates(),
+        before.evaluation_scheduled_at(),
     )
     .map_err(|_| RustTargetSourceError::EvaluatorReplayMismatch)?;
     let bindings = snapshot_bindings(&document, before.scan().root(), &paths)?;

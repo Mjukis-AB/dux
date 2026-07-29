@@ -134,6 +134,13 @@ The tag workflow is strictly ordered: validation/security, four-target builds, c
 - Current rules: Cargo `target` + sibling `Cargo.toml`; Node `node_modules` + sibling `package.json`; Gradle `build`/`.gradle` + a sibling Gradle build/settings script; Python `__pycache__` + sibling `.py`, `.tox` + sibling `tox.ini`, and `.venv`/`venv` + child `pyvenv.cfg`; CocoaPods `Pods` + sibling `Podfile` + child `Manifest.lock`; Next/Nuxt output + sibling `package.json` + matching framework config.
 - `DerivedData`, `Build`, `dist`, `vendor`, and `.cache` are intentionally not classified yet.
 - “Marker-matched” means likely tooling ownership, not guaranteed reproducibility. It grants no cleanup authority.
+- `developer.rust.target` revision 3 additionally requires complete file/directory
+  mtime coverage and an inclusive seven-day age at the evaluator's exact
+  scheduled instant. Preserve the same cutoff semantics in snapshot replay,
+  plan preview, pre-effect admission, and the descriptor-relative driver.
+  Historical sealed revision-2 sessions may be decoded only for recovery
+  terminalization; never let that compatibility mint or restore effect
+  authority.
 
 ## Git Hooks
 

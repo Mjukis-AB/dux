@@ -90,6 +90,10 @@ fn engine_executes_only_an_approved_permanent_safe_session() {
     write_cargo_cache_tag(&target);
     let payload = target.join("object");
     std::fs::write(&payload, b"temporary build output").unwrap();
+    crate::planner::rust_target_tests::set_subtree_modified_at(
+        &target,
+        SystemTime::now() - Duration::from_secs(8 * 86_400),
+    );
 
     let engine = EngineHandle::open(config).unwrap();
     let task = engine.start_scan(root.clone()).unwrap();
@@ -134,7 +138,13 @@ fn engine_executes_only_an_approved_permanent_safe_session() {
             protected_descendants: Vec::new(),
         })
         .unwrap(),
-        guards: RuleGuards::try_new(None, 0, Vec::new(), false).unwrap(),
+        guards: RuleGuards::try_new(
+            Some(crate::domain::SAFE_RUST_RULE_MINIMUM_AGE),
+            0,
+            Vec::new(),
+            false,
+        )
+        .unwrap(),
         safety: stored.safety(),
         action: stored.action(),
         schedule_eligible: false,
@@ -274,6 +284,10 @@ fn approved_rust_target_fixture(project_count: usize) -> ApprovedRustTargetFixtu
             b"another temporary build output",
         )
         .unwrap();
+        crate::planner::rust_target_tests::set_subtree_modified_at(
+            &target,
+            SystemTime::now() - Duration::from_secs(8 * 86_400),
+        );
     }
 
     let engine = EngineHandle::open(config).unwrap();
@@ -327,7 +341,13 @@ fn approved_rust_target_fixture(project_count: usize) -> ApprovedRustTargetFixtu
                 protected_descendants: Vec::new(),
             })
             .unwrap(),
-            guards: RuleGuards::try_new(None, 0, Vec::new(), false).unwrap(),
+            guards: RuleGuards::try_new(
+                Some(crate::domain::SAFE_RUST_RULE_MINIMUM_AGE),
+                0,
+                Vec::new(),
+                false,
+            )
+            .unwrap(),
             safety: stored.safety(),
             action: stored.action(),
             schedule_eligible: false,
@@ -515,6 +535,105 @@ impl crate::cleanup::permanent_safe::PermanentSafeContentsDriver for PanickingPe
     > {
         panic!("simulated platform driver panic after effect_started")
     }
+}
+
+#[cfg(unix)]
+#[derive(Default)]
+struct CountingPermanentSafeDriver {
+    calls: usize,
+}
+
+#[cfg(unix)]
+impl crate::cleanup::permanent_safe::PermanentSafeContentsDriver for CountingPermanentSafeDriver {
+    fn remove_contents(
+        &mut self,
+        _witness: &crate::planner::RustTargetEffectWitness,
+        _cancelled: &dyn Fn() -> bool,
+    ) -> Result<
+        crate::cleanup::permanent_safe::PermanentSafeRemovalSummary,
+        crate::cleanup::permanent_safe::PermanentSafePlatformError,
+    > {
+        self.calls += 1;
+        Ok(crate::cleanup::permanent_safe::PermanentSafeRemovalSummary::default())
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn recent_descendant_is_rejected_before_effect_receipt_or_driver_call() {
+    let mut fixture = approved_rust_target_fixture(1);
+    let target = fixture.payloads[0].parent().unwrap();
+    std::fs::File::open(&fixture.payloads[0])
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(SystemTime::now()))
+        .unwrap();
+    let second = target.join("second-object");
+    let mut driver = CountingPermanentSafeDriver::default();
+    let mut authority_now = SystemTime::now;
+
+    let result =
+        crate::cleanup::permanent_safe::execute_rust_target_session_with_capacity_and_clock_for_test(
+            &mut fixture.session,
+            SystemTime::now() + Duration::from_secs(1),
+            &mut driver,
+            &|| false,
+            None,
+            &mut authority_now,
+        );
+
+    let summary = result.unwrap();
+    assert_eq!(
+        summary.terminal_status,
+        crate::persistence::TerminalSessionStatus::Failed
+    );
+    assert_eq!(summary.removed_entries, 0);
+    assert_eq!(driver.calls, 0);
+    assert!(fixture.payloads[0].exists());
+    assert!(second.exists());
+    let history_id = fixture
+        .engine
+        .recent_cleanup_history(None, 64)
+        .unwrap()
+        .records()
+        .iter()
+        .find(|record| record.id().as_str() == fixture.session_id.as_str())
+        .map(|record| record.id().clone())
+        .unwrap();
+    let history = fixture.engine.cleanup_session_history(&history_id).unwrap();
+    assert_eq!(
+        history.items()[0].status(),
+        crate::engine::DurableCleanupItemStatus::ChangedSincePlan
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn rollback_clock_is_rejected_before_driver_call() {
+    let mut fixture = approved_rust_target_fixture(1);
+    let target = fixture.payloads[0].parent().unwrap();
+    let second = target.join("second-object");
+    let mut driver = CountingPermanentSafeDriver::default();
+    let mut authority_now = || SystemTime::UNIX_EPOCH;
+
+    let result =
+        crate::cleanup::permanent_safe::execute_rust_target_session_with_capacity_and_clock_for_test(
+            &mut fixture.session,
+            SystemTime::now() + Duration::from_secs(1),
+            &mut driver,
+            &|| false,
+            None,
+            &mut authority_now,
+        );
+
+    let summary = result.unwrap();
+    assert_eq!(
+        summary.terminal_status,
+        crate::persistence::TerminalSessionStatus::Failed
+    );
+    assert_eq!(summary.removed_entries, 0);
+    assert_eq!(driver.calls, 0);
+    assert!(fixture.payloads[0].exists());
+    assert!(second.exists());
 }
 
 #[cfg(unix)]
@@ -1162,6 +1281,10 @@ fn rust_target_facts_fixture_with_limits(limits: RegistryLimits) -> RustTargetFa
     write_cargo_cache_tag(&target);
     let payload = target.join("object");
     std::fs::write(&payload, b"temporary build output").unwrap();
+    crate::planner::rust_target_tests::set_subtree_modified_at(
+        &target,
+        SystemTime::now() - Duration::from_secs(8 * 86_400),
+    );
 
     let engine = EngineHandle::open_with_limits(config(&temp), limits).unwrap();
     let enrollment = engine
@@ -1330,7 +1453,9 @@ fn rust_target_plan_review_is_exact_observation_only_and_expires_at_the_boundary
     assert_eq!(info.source_scan_id, fixture.scan_id);
     assert_eq!(info.candidate_id, fixture.candidate_id);
     assert_eq!(info.rule_id, "developer.rust.target");
-    assert_eq!(info.rule_revision, 2);
+    assert_eq!(info.rule_revision, crate::domain::SAFE_RUST_RULE_REVISION);
+    assert_eq!(info.minimum_age, crate::domain::SAFE_RUST_RULE_MINIMUM_AGE);
+    assert!(info.newest_mtime <= SystemTime::now() - info.minimum_age);
     assert_eq!(
         info.category,
         crate::domain::CandidateCategory::DeveloperArtifact
@@ -1517,6 +1642,70 @@ fn rust_target_plan_review_requires_current_direct_cargo_enrollment() {
     ));
     assert_rust_target_review_left_no_cleanup_authority(&fixture);
 
+    parent.release().unwrap();
+    fixture.engine.close();
+    assert!(fixture.engine.wait_until_closed(TEST_TIMEOUT));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn rust_target_plan_review_rejects_recent_live_descendant_without_authority() {
+    let fixture = rust_target_facts_fixture();
+    let recent = fixture.target.join("recent-after-scan");
+    std::fs::write(&recent, b"recent").unwrap();
+    let mut parent = fixture
+        .engine
+        .acquire_explorer_snapshot_review(&fixture.scan_id)
+        .unwrap();
+
+    assert!(matches!(
+        fixture
+            .engine
+            .prepare_rust_target_plan_review(&mut parent, &fixture.candidate_id),
+        Err(RustTargetPlanReviewError::ChangedDuringReview)
+    ));
+    assert_rust_target_review_left_no_cleanup_authority(&fixture);
+    assert!(fixture.payload.exists());
+    assert!(recent.exists());
+    parent.release().unwrap();
+    fixture.engine.close();
+    assert!(fixture.engine.wait_until_closed(TEST_TIMEOUT));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn rust_target_plan_review_rechecks_leaf_recency_at_final_materialization() {
+    let fixture = rust_target_facts_fixture();
+    let mut parent = fixture
+        .engine
+        .acquire_explorer_snapshot_review(&fixture.scan_id)
+        .unwrap();
+    let admission = fixture
+        .engine
+        .begin_rust_target_plan_review(&parent, &fixture.candidate_id)
+        .unwrap();
+    let pending = fixture
+        .engine
+        .prepare_admitted_rust_target_plan_review(admission)
+        .unwrap();
+    let validated = fixture
+        .engine
+        .validate_pending_rust_target_plan_review(&parent, pending)
+        .unwrap();
+    std::fs::File::open(&fixture.payload)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(SystemTime::now()))
+        .unwrap();
+
+    assert!(matches!(
+        fixture
+            .engine
+            .materialize_rust_target_plan_review(validated),
+        Err(RustTargetPlanReviewError::ChangedDuringReview)
+    ));
+    assert_rust_target_review_left_no_cleanup_authority(&fixture);
+    assert!(fixture.payload.exists());
+    assert!(fixture.target.join("CACHEDIR.TAG").exists());
     parent.release().unwrap();
     fixture.engine.close();
     assert!(fixture.engine.wait_until_closed(TEST_TIMEOUT));
@@ -3638,6 +3827,10 @@ fn completed_marker_candidate() -> (
     std::fs::write(project.join("Cargo.toml"), b"[package]\nname='fixture'\n").unwrap();
     write_cargo_cache_tag(&target);
     std::fs::write(target.join("object"), vec![7_u8; 8 * 1024]).unwrap();
+    crate::planner::rust_target_tests::set_subtree_modified_at(
+        &target,
+        SystemTime::now() - Duration::from_secs(8 * 86_400),
+    );
     let expected_target = target.canonicalize().unwrap();
     let engine =
         EngineHandle::open_with_limits(config.clone(), RegistryLimits::testing(1, 4, 8, 16))
@@ -10190,6 +10383,10 @@ fn completed_scan_persists_marker_verified_discovery_batch_across_reopen() {
     std::fs::write(project.join("Cargo.toml"), b"[package]\nname='fixture'\n").unwrap();
     write_cargo_cache_tag(&target);
     std::fs::write(target.join("object"), vec![7_u8; 8 * 1024]).unwrap();
+    crate::planner::rust_target_tests::set_subtree_modified_at(
+        &target,
+        SystemTime::now() - Duration::from_secs(8 * 86_400),
+    );
     let engine =
         EngineHandle::open_with_limits(config.clone(), RegistryLimits::testing(1, 4, 8, 16))
             .unwrap();
@@ -10217,7 +10414,10 @@ fn completed_scan_persists_marker_verified_discovery_batch_across_reopen() {
         public_candidate.rule().id().as_str(),
         "developer.rust.target"
     );
-    assert_eq!(public_candidate.rule().revision().get(), 2);
+    assert_eq!(
+        public_candidate.rule().revision().get(),
+        crate::domain::SAFE_RUST_RULE_REVISION
+    );
     assert_eq!(
         public_candidate.category(),
         crate::CandidateCategory::DeveloperArtifact
@@ -10242,6 +10442,11 @@ fn completed_scan_persists_marker_verified_discovery_batch_across_reopen() {
             .evidence_kinds()
             .contains(&crate::EvidenceKind::RequiredMarker)
     );
+    assert!(
+        public_candidate
+            .evidence_kinds()
+            .contains(&crate::EvidenceKind::MinimumAge)
+    );
     assert_eq!(
         public_candidate.status(),
         DurableCandidateStatus::Discovered
@@ -10259,7 +10464,10 @@ fn completed_scan_persists_marker_verified_discovery_batch_across_reopen() {
     let candidate = &evaluation.candidates()[0];
     assert_eq!(candidate.source_scan_id, scan_id);
     assert_eq!(candidate.rule.id().as_str(), "developer.rust.target");
-    assert_eq!(candidate.rule.revision().get(), 2);
+    assert_eq!(
+        candidate.rule.revision().get(),
+        crate::domain::SAFE_RUST_RULE_REVISION
+    );
     assert_eq!(candidate.paths, [target.canonicalize().unwrap()]);
     assert!(candidate.estimated_bytes > 0);
     assert_eq!(candidate.safety, crate::SafetyTier::SafeRegenerable);

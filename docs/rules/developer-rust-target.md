@@ -1,11 +1,13 @@
 # `developer.rust.target` rule review
 
-Status: bundled revision 2 with deterministic reviewed core/FFI execution,
-unschedulable and not yet executable from the shipped native UI.
+Status: bundled revision 3 with deterministic reviewed core/FFI execution,
+unschedulable and disabled in the shipped Release UI.
 
 Reviewed: 2026-07-18 against Cargo 1.96.0 and the current Cargo Book. This is
 an independent DUX review. It does not derive policy, code, fixtures, or wording
 from Mole or another cleanup product.
+
+Recency policy reviewed: 2026-07-29.
 
 ## Vendor evidence
 
@@ -41,28 +43,42 @@ access, and an output binary may be convenient or temporarily difficult to
 reproduce. DUX must disclose that cost; “regenerable” does not mean disposable
 without review.
 
-## Revision 2 discovery evidence
+## Revision 3 discovery evidence
 
 The immutable scan classifier requires all of the following:
 
 1. an exact directory component named `target`;
 2. a direct regular, non-symlink sibling named `Cargo.toml`;
 3. a direct regular, non-symlink child named `CACHEDIR.TAG`; and
-4. no followed or unfollowed symlink component in the target ancestry.
+4. no followed or unfollowed symlink component in the target ancestry; and
+5. complete modification-time coverage for the target directory and every
+   regular file or directory below it, with the newest observation at least
+   seven inclusive days old at the evaluator's exact scheduled instant.
 
 The cache-tag filename and kind are supporting snapshot evidence only. The
 scanner does not read its signature, resolve Cargo configuration, or prove that
 this is the workspace's current target directory. Custom, relocated, or shared
-target directories are intentionally not discovered by revision 2. A stale
+target directories are intentionally not discovered by revision 3. A stale
 member-local target may still be discovered when it carries Cargo's tag; that
 is useful historical evidence but not live authority.
 
+The evaluator binds its exact persisted evaluation instant into the version-2
+context digest. Exactly seven days is accepted. A newer or future timestamp
+produces a typed `RecentActivity` blocker; a required file or directory without
+a representable timestamp produces `MissingModificationTime`. Successful
+revision-3 candidates retain four ordered facts: the matched target path, the
+two required markers, and the exact seven-day `MinimumAge` requirement.
+Snapshot replay uses the retained scheduled instant, so restart timing cannot
+age a previously ineligible candidate into eligibility.
+
 The rule carries `SafeRegenerable` and
 `RemoveKnownRegenerableContents` as proposed policy, but every production
-candidate still has `ProtectedPath`. It is not selectable, cannot construct a
-cleanup plan, is not schedule eligible, crosses no FFI cleanup boundary, and
-cannot reach a filesystem effect. The stricter marker also narrows the
-read-only CLI's artifact classification; the CLI has no cleanup authority.
+candidate still records `ProtectedPath`. Only the rule-specific typed
+Rust-target authority chain can retain that blocker while constructing and
+executing an exact reviewed plan; generic candidate planning still rejects it.
+The rule is not schedule eligible, AI cannot approve it, the CLI has no cleanup
+authority, and the shipped Release UI cannot start its internal effect path.
+The stricter marker also narrows the read-only CLI's artifact classification.
 
 ## Adversarial coverage
 
@@ -73,6 +89,8 @@ Core projection and evaluator tests cover:
 - a symlinked marker, target, or ancestor;
 - verified nested targets with deterministic outer-root suppression;
 - marker removal followed by a fresh projection;
+- exact seven-day inclusion, recent and future timestamps, incomplete file or
+  directory modification times, and deterministic same-instant replay;
 - scan/coverage binding and stable catalog digest;
 - durable publication, reopen, and path-free summary policy; and
 - rejection by candidate selection and the sealed test-only plan constructor.
@@ -86,8 +104,8 @@ blocked by `ProtectedPath` and unschedulable.
 ## Private promotion checkpoint
 
 The planner now has a private, non-Clone `RustTargetPromotion` token as an
-intermediate authority join. Admission requires the exact revision-2 policy,
-one target path, the three immutable marker facts, the deterministic candidate
+intermediate authority join. Admission requires the exact revision-3 policy,
+one target path, the four immutable marker/age facts, the deterministic candidate
 ID, the source scan and live target, and a complete immutable-body comparison
 against the retained durable candidate record. A candidate-bound Cargo grant
 must also revalidate its Cargo/read-set, process-quiescence,
@@ -138,9 +156,9 @@ request, or effect.
 
 ## Live default-layout witness
 
-A later 2026-07-18 checkpoint adds a sealed, crate-private Unix planner witness
-without changing the rule or its blockers. It accepts only the exact revision-2
-candidate, source scan, policy, three evidence facts, unschedulable flag, and
+A later planner checkpoint adds a sealed, crate-private Unix witness without
+changing the rule's blocker. It accepts only the exact revision-3 candidate,
+source scan, policy, four marker/age evidence facts, unschedulable flag, and
 sole unresolved `ProtectedPath` blocker. It then validates the current scan
 root, direct target directory, direct `Cargo.toml` sibling, and direct
 `CACHEDIR.TAG` child without following symlinks; requires both marker files to
@@ -478,8 +496,8 @@ loader requires an exact succeeded scan with complete coverage and an available
 immutable snapshot; the exact evaluation must have succeeded with the current
 evaluator revision, catalog schema and SHA-256, context format and recomputed
 context digest, plus the scan's exact snapshot version and digest. The selected
-candidate must still be `Discovered`, retain the exact revision-2 policy and
-three evidence facts, and match the deterministic candidate ID recomputed from
+candidate must still be `Discovered`, retain the exact revision-3 policy and
+four evidence facts, and match the deterministic candidate ID recomputed from
 the current bundled rule and lossless target path.
 
 Acquisition holds an exact `CleanupReview` snapshot lease, decodes the
@@ -674,19 +692,21 @@ suspended selected-code checkpoint, and guarded two-pass root/member manifest
 closure cover the currently admitted direct-executable case, but launch and
 manifest reads remain path-based and the complete Cargo read/namespace set is
 not attested. Direct-read or generation evidence is still required before
-promotion. The FFI surface cannot create a candidate, plan, approval, journal
-claim, schedule, AI request, or cleanup effect, and `ProtectedPath` therefore
-remains untouched.
+promotion. This enrollment FFI surface cannot create a candidate, plan,
+approval, journal claim, schedule, AI request, or cleanup effect, and
+`ProtectedPath` therefore remains untouched.
 
-UniFFI contract v28 and the native Explorer can now prepare a short-lived,
-observation-only preview after this complete deterministic chain succeeds for
-one exact revision-2 candidate. The request supplies only the candidate ID
-through the candidate's retained Explorer review. Rust derives the current
-target, source scan, plan ID, permanent-safe mode, estimate, ordered warnings,
-rule facts, and effective expiry; the returned opaque child supports only
-`info` and release. It creates no approval, durable plan/session, claim,
-journal row, schedule, callback, AI request, or filesystem effect, and the
-candidate remains `Discovered` with its `ProtectedPath` blocker.
+UniFFI contract v33 and the native Explorer can now prepare a short-lived,
+authority-bearing opaque reviewed-plan child after this complete deterministic
+chain succeeds for one exact revision-3 candidate. The request supplies only
+the candidate ID through the candidate's retained Explorer review. Rust derives
+the current target, source scan, plan ID, permanent-safe mode, estimate, ordered
+warnings, rule facts, and effective expiry. The child's displayed `info` is an
+observation only; the child supports consuming release and a separately gated,
+consume-once transition into the engine-owned cleanup task. Preparation creates
+no approved plan, durable plan/session, claim, journal row, schedule, callback,
+AI request, or filesystem effect, and the candidate remains `Discovered` with
+its `ProtectedPath` blocker until the consuming task transition succeeds.
 
 The preview is bound to one exact parent-session identity, not merely its scan
 ID. Parent release, drop, or expiry invalidates it; parent renewal cannot
@@ -695,8 +715,25 @@ and cannot be supplied back to Rust. Controls, invalid UTF-8, backslashes, and
 the pinned Unicode-16 format/default-ignorable set use a deterministic escaped
 display that Swift rederives and compares byte-for-byte. Explorer shows that
 current path separately from historical discovery evidence, along with the
-estimate, warnings, and expiry, and offers only prepare/check-again/close. It
-states explicitly that no cleanup was approved or performed.
+estimate, warnings, and expiry. Shipped Release offers only
+prepare/check-again/close; internal Debug additionally exposes the separately
+confirmed consuming start. The preview states explicitly that no cleanup has
+yet been approved or performed.
+
+Before publishing that preview, Rust derives the seven-day cutoff from a fresh
+authority-clock read and inventories the current target tree descriptor-
+relatively without following links. It requires the target directory,
+`CACHEDIR.TAG`, and every descendant to remain at or before the cutoff and
+compares two bounded inventories before returning any review. The same shared
+validator reruns at final child materialization and immediately before
+`effect_started`; the concrete driver inventories both before and after its
+final Cargo/read-set revalidation, then compares file identity, type, link
+count, logical size, and modification time before each unlink. A recent, future,
+missing, changed, oversized, deep, linked, symlinked, or special entry fails
+closed. Pre-preview and pre-effect refusals perform zero unlinks. Directory
+mtimes are not compared after child removal begins because DUX's own unlink
+changes them; their recency and identity were fixed by the two complete
+pre-effect inventories before the first mutation.
 
 UniFFI contract v31 adds one consuming edge from this exact opaque review to
 the existing engine-owned permanent-safe task. A foreign FFI engine is rejected

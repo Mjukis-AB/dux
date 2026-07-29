@@ -302,7 +302,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
     DuxSnapshotHistoryServing, DuxCleanupHistoryServing, DuxScanCoverageServing, HomeScanServing,
     Sendable
 {
-    fileprivate static let expectedFFIContractVersion: UInt32 = 32
+    fileprivate static let expectedFFIContractVersion: UInt32 = 33
     fileprivate static let expectedRecordVersion: UInt32 = 1
 
     private let state: EngineServiceState
@@ -3340,10 +3340,9 @@ enum EngineRustTargetPlanReviewAdapter {
         _ raw: RustTargetPlanReviewInfo
     ) throws -> ExplorerRustTargetPlanReviewRecord {
         guard
-            let createdAt = timestamp(unixMilliseconds: raw.createdAtUnixMs),
-            let effectiveExpiresAt = timestamp(
-                unixMilliseconds: raw.effectiveExpiresAtUnixMs
-            )
+            let createdAt = timestamp(raw.createdAt),
+            let newestMtime = timestamp(raw.newestMtime),
+            let effectiveExpiresAt = timestamp(raw.effectiveExpiresAt)
         else {
             throw ExplorerRustTargetPlanReviewError.invalidResponse
         }
@@ -3359,6 +3358,9 @@ enum EngineRustTargetPlanReviewAdapter {
             safety: map(raw.safety),
             action: map(raw.action),
             estimatedBytes: raw.estimatedBytes,
+            newestMtime: newestMtime,
+            minimumAgeSeconds: raw.minimumAgeSeconds,
+            minimumAgeNanoseconds: raw.minimumAgeNanoseconds,
             itemCount: raw.itemCount,
             pathCount: raw.pathCount,
             warnings: try raw.warnings.map(map),
@@ -3409,16 +3411,14 @@ enum EngineRustTargetPlanReviewAdapter {
     }
 
     private static func timestamp(
-        unixMilliseconds: Int64
+        _ raw: SnapshotNodeTimestamp
     ) -> ExplorerSnapshotTimestamp? {
-        guard unixMilliseconds >= 0 else {
+        guard raw.nanoseconds < 1_000_000_000 else {
             return nil
         }
-        let seconds = UInt64(unixMilliseconds / 1_000)
-        let remainingMilliseconds = UInt32(unixMilliseconds % 1_000)
         return ExplorerSnapshotTimestamp(
-            secondsSinceUnixEpoch: seconds,
-            nanoseconds: remainingMilliseconds * 1_000_000
+            secondsSinceUnixEpoch: raw.secondsSinceUnixEpoch,
+            nanoseconds: raw.nanoseconds
         )
     }
 

@@ -9,7 +9,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use thiserror::Error;
 
@@ -21,7 +21,7 @@ use crate::planner::TrustedReviewedCleanupPlan;
 use super::snapshot_review::SnapshotReviewOwner;
 
 const RUST_TARGET_RULE_ID: &str = "developer.rust.target";
-const RUST_TARGET_RULE_REVISION: u32 = 2;
+const RUST_TARGET_RULE_REVISION: u32 = crate::domain::SAFE_RUST_RULE_REVISION;
 
 /// Exact immutable plan facts safe to present while the opaque review remains
 /// current. The path is an observation only and cannot be supplied back to a
@@ -38,6 +38,8 @@ pub struct RustTargetPlanReviewInfo {
     pub safety: SafetyTier,
     pub action: CandidateAction,
     pub estimated_bytes: u64,
+    pub newest_mtime: SystemTime,
+    pub minimum_age: Duration,
     pub warnings: Vec<PlanWarning>,
     pub created_at: SystemTime,
     pub effective_expires_at: SystemTime,
@@ -169,6 +171,10 @@ impl RustTargetPlanReview {
         {
             return Err(RustTargetPlanReviewError::InternalState);
         }
+        let (newest_mtime, minimum_age) =
+            reviewed
+                .revalidate_rust_target_recency_at(observed_at)
+                .map_err(|_| RustTargetPlanReviewError::ChangedDuringReview)?;
         if observed_at >= parent_review_expires_at {
             return Err(RustTargetPlanReviewError::ParentReviewUnavailable);
         }
@@ -188,6 +194,8 @@ impl RustTargetPlanReview {
             safety: item.safety(),
             action: item.action(),
             estimated_bytes: plan.estimated_bytes(),
+            newest_mtime,
+            minimum_age,
             warnings: plan.warnings().to_vec(),
             created_at: plan.created_at(),
             effective_expires_at,
@@ -201,6 +209,16 @@ impl RustTargetPlanReview {
             return Err(RustTargetPlanReviewError::ParentReviewUnavailable);
         }
         if completed_at >= effective_expires_at {
+            return Err(RustTargetPlanReviewError::ReviewExpired);
+        }
+        reviewed
+            .revalidate_rust_target_recency_at(completed_at)
+            .map_err(|_| RustTargetPlanReviewError::ChangedDuringReview)?;
+        let published_at = SystemTime::now();
+        if !parent_review_live.load(Ordering::Acquire) || published_at >= parent_review_expires_at {
+            return Err(RustTargetPlanReviewError::ParentReviewUnavailable);
+        }
+        if published_at >= effective_expires_at {
             return Err(RustTargetPlanReviewError::ReviewExpired);
         }
         Ok(Self {

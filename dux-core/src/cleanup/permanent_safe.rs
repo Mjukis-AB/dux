@@ -10,7 +10,7 @@ use std::ffi::OsStr;
 use std::fs::File;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use thiserror::Error;
 
@@ -652,75 +652,158 @@ impl PermanentSafeContentsDriver for DescriptorRelativePermanentSafeDriver {
         }
         #[cfg(unix)]
         {
-            witness
-                .revalidate_current()
-                .map_err(|_| PermanentSafePlatformError::Changed)?;
-            let target = open_directory(witness.target_path())?;
-            if !same_directory_identity(&target, witness.target_identity())? {
-                return Err(PermanentSafePlatformError::Changed);
-            }
-            let mut entries = Vec::new();
-            let mut names = 0_usize;
-            inventory(
-                &target,
-                &[],
-                &[DirectoryObservation {
-                    relative: Vec::new(),
-                    identity: stat_identity(&target)?,
-                }],
-                &mut entries,
-                &mut names,
-                cancelled,
-            )?;
-            if cancelled() {
-                return Err(PermanentSafePlatformError::Cancelled);
-            }
-            witness
-                .revalidate_current()
-                .map_err(|_| PermanentSafePlatformError::Changed)?;
-            if !same_directory_identity(&target, witness.target_identity())? {
-                return Err(PermanentSafePlatformError::Changed);
-            }
-            entries.sort_by_key(|entry| std::cmp::Reverse(entry.relative.len()));
-            let mut summary = PermanentSafeRemovalSummary::default();
-            for entry in entries {
-                if cancelled() {
-                    return if summary.removed_entries == 0 {
-                        Err(PermanentSafePlatformError::Cancelled)
-                    } else {
-                        Err(PermanentSafePlatformError::OutcomeUnknown)
-                    };
-                }
-                let parent = open_parent(&target, &entry.parent, &entry.ancestors)?;
-                let live = stat_entry(&parent, &entry.name)?;
-                if !same_entry_observation(&live, &entry.observation) {
-                    return Err(if summary.removed_entries == 0 {
-                        PermanentSafePlatformError::Changed
-                    } else {
-                        PermanentSafePlatformError::OutcomeUnknown
-                    });
-                }
-                let flags = if entry.observation.is_directory {
-                    nix::unistd::UnlinkatFlags::RemoveDir
-                } else {
-                    nix::unistd::UnlinkatFlags::NoRemoveDir
-                };
-                // DUX-DESTRUCTIVE: allow=permanent-safe-rust-target-descriptor-contents -- unlink only reviewed journal-fenced entries relative to retained target descriptors
-                nix::unistd::unlinkat(&parent, entry.name.as_os_str(), flags).map_err(|_| {
-                    if summary.removed_entries == 0 {
-                        PermanentSafePlatformError::Failed
-                    } else {
-                        PermanentSafePlatformError::OutcomeUnknown
-                    }
-                })?;
-                summary.removed_entries = summary.removed_entries.saturating_add(1);
-                summary.removed_logical_bytes = summary
-                    .removed_logical_bytes
-                    .saturating_add(entry.observation.logical_bytes);
-            }
-            Ok(summary)
+            remove_contents_unix(witness, cancelled, &mut || {})
         }
     }
+}
+
+#[cfg(unix)]
+fn remove_contents_unix(
+    witness: &RustTargetEffectWitness,
+    cancelled: &dyn Fn() -> bool,
+    before_final_inventory: &mut dyn FnMut(),
+) -> Result<PermanentSafeRemovalSummary, PermanentSafePlatformError> {
+    witness
+        .revalidate_current()
+        .map_err(|_| PermanentSafePlatformError::Changed)?;
+    let _ = validated_removal_inventory(
+        witness.target_path(),
+        witness.target_identity(),
+        witness.recency_cutoff(),
+        cancelled,
+    )?;
+    witness
+        .revalidate_current()
+        .map_err(|_| PermanentSafePlatformError::Changed)?;
+    before_final_inventory();
+    // The witness revalidation above may perform bounded Cargo/read-set work.
+    // Inventory again afterward so activity during that widened window is
+    // rejected before the first unlink.
+    let (target, mut entries) = validated_removal_inventory(
+        witness.target_path(),
+        witness.target_identity(),
+        witness.recency_cutoff(),
+        cancelled,
+    )?;
+    if !same_directory_identity(&target, witness.target_identity())? {
+        return Err(PermanentSafePlatformError::Changed);
+    }
+    entries.sort_by_key(|entry| std::cmp::Reverse(entry.relative.len()));
+    let mut summary = PermanentSafeRemovalSummary::default();
+    for entry in entries {
+        if cancelled() {
+            return if summary.removed_entries == 0 {
+                Err(PermanentSafePlatformError::Cancelled)
+            } else {
+                Err(PermanentSafePlatformError::OutcomeUnknown)
+            };
+        }
+        let parent = open_parent(&target, &entry.parent, &entry.ancestors)?;
+        let live = stat_entry(&parent, &entry.name)?;
+        if !same_entry_observation(&live, &entry.observation) {
+            return Err(if summary.removed_entries == 0 {
+                PermanentSafePlatformError::Changed
+            } else {
+                PermanentSafePlatformError::OutcomeUnknown
+            });
+        }
+        let flags = if entry.observation.is_directory {
+            nix::unistd::UnlinkatFlags::RemoveDir
+        } else {
+            nix::unistd::UnlinkatFlags::NoRemoveDir
+        };
+        // DUX-DESTRUCTIVE: allow=permanent-safe-rust-target-descriptor-contents -- unlink only reviewed journal-fenced entries relative to retained target descriptors
+        nix::unistd::unlinkat(&parent, entry.name.as_os_str(), flags).map_err(|_| {
+            if summary.removed_entries == 0 {
+                PermanentSafePlatformError::Failed
+            } else {
+                PermanentSafePlatformError::OutcomeUnknown
+            }
+        })?;
+        summary.removed_entries = summary.removed_entries.saturating_add(1);
+        summary.removed_logical_bytes = summary
+            .removed_logical_bytes
+            .saturating_add(entry.observation.logical_bytes);
+    }
+    Ok(summary)
+}
+
+/// Read-only, bounded descriptor-relative recency validation shared by plan
+/// preview and execution. It opens no mutation capability and rejects any
+/// root or descendant newer than the supplied inclusive cutoff.
+pub(crate) fn validate_rust_target_subtree_recency(
+    target_path: &Path,
+    target_identity: FilesystemIdentity,
+    recency_cutoff: SystemTime,
+) -> Result<(), PermanentSafePlatformError> {
+    #[cfg(not(unix))]
+    {
+        let _ = (target_path, target_identity, recency_cutoff);
+        Err(PermanentSafePlatformError::Unsupported)
+    }
+    #[cfg(unix)]
+    {
+        let _ =
+            validated_removal_inventory(target_path, target_identity, recency_cutoff, &|| false)?;
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+fn validated_removal_inventory(
+    target_path: &Path,
+    target_identity: FilesystemIdentity,
+    recency_cutoff: SystemTime,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<(File, Vec<RemovalEntry>), PermanentSafePlatformError> {
+    let target = open_directory(target_path)?;
+    if !same_directory_identity(&target, target_identity)? {
+        return Err(PermanentSafePlatformError::Changed);
+    }
+    let target_observation = stat_open_directory(&target)?;
+    if target_observation.modified_at > recency_cutoff {
+        return Err(PermanentSafePlatformError::Changed);
+    }
+    let root_observation = DirectoryObservation {
+        relative: Vec::new(),
+        identity: target_observation.identity,
+        modified_at: target_observation.modified_at,
+    };
+    let mut entries = Vec::new();
+    let mut names = 0_usize;
+    inventory(
+        &target,
+        &[],
+        std::slice::from_ref(&root_observation),
+        &mut entries,
+        &mut names,
+        recency_cutoff,
+        cancelled,
+    )?;
+    if cancelled() {
+        return Err(PermanentSafePlatformError::Cancelled);
+    }
+    if stat_open_directory(&target)? != target_observation {
+        return Err(PermanentSafePlatformError::Changed);
+    }
+    let mut verification_entries = Vec::new();
+    let mut verification_names = 0_usize;
+    inventory(
+        &target,
+        &[],
+        std::slice::from_ref(&root_observation),
+        &mut verification_entries,
+        &mut verification_names,
+        recency_cutoff,
+        cancelled,
+    )?;
+    entries.sort_by(|left, right| left.relative.cmp(&right.relative));
+    verification_entries.sort_by(|left, right| left.relative.cmp(&right.relative));
+    if entries != verification_entries || verification_names != names {
+        return Err(PermanentSafePlatformError::Changed);
+    }
+    entries.retain(|entry| !entry.preserve);
+    Ok((target, entries))
 }
 
 #[cfg(unix)]
@@ -728,6 +811,7 @@ impl PermanentSafeContentsDriver for DescriptorRelativePermanentSafeDriver {
 struct DirectoryObservation {
     relative: Vec<Vec<u8>>,
     identity: FilesystemIdentity,
+    modified_at: SystemTime,
 }
 
 #[cfg(unix)]
@@ -737,15 +821,18 @@ struct EntryObservation {
     is_directory: bool,
     hard_links: u64,
     logical_bytes: u64,
+    modified_at: SystemTime,
 }
 
 #[cfg(unix)]
+#[derive(Debug, PartialEq, Eq)]
 struct RemovalEntry {
     relative: Vec<Vec<u8>>,
     parent: Vec<Vec<u8>>,
     name: std::ffi::OsString,
     ancestors: Vec<DirectoryObservation>,
     observation: EntryObservation,
+    preserve: bool,
 }
 
 #[cfg(unix)]
@@ -768,6 +855,23 @@ fn stat_identity(file: &File) -> Result<FilesystemIdentity, PermanentSafePlatfor
 }
 
 #[cfg(unix)]
+fn stat_open_directory(file: &File) -> Result<EntryObservation, PermanentSafePlatformError> {
+    let stat = nix::sys::stat::fstat(file).map_err(|_| PermanentSafePlatformError::Failed)?;
+    let flags =
+        nix::sys::stat::SFlag::from_bits_truncate(stat.st_mode) & nix::sys::stat::SFlag::S_IFMT;
+    if flags != nix::sys::stat::SFlag::S_IFDIR {
+        return Err(PermanentSafePlatformError::Changed);
+    }
+    Ok(EntryObservation {
+        identity: identity_from_stat(&stat),
+        is_directory: true,
+        hard_links: stat.st_nlink as u64,
+        logical_bytes: 0,
+        modified_at: modified_time_from_stat(&stat)?,
+    })
+}
+
+#[cfg(unix)]
 fn same_directory_identity(
     file: &File,
     expected: FilesystemIdentity,
@@ -782,6 +886,22 @@ fn identity_from_stat(stat: &nix::libc::stat) -> FilesystemIdentity {
     #[cfg(not(any(target_os = "linux", target_os = "android")))]
     let volume = stat.st_dev as u64;
     FilesystemIdentity::new(volume, stat.st_ino as u128)
+}
+
+#[cfg(unix)]
+fn modified_time_from_stat(
+    stat: &nix::libc::stat,
+) -> Result<SystemTime, PermanentSafePlatformError> {
+    let (seconds, nanoseconds) = (stat.st_mtime, stat.st_mtime_nsec);
+
+    let seconds = u64::try_from(seconds).map_err(|_| PermanentSafePlatformError::Unsafe)?;
+    let nanoseconds = u32::try_from(nanoseconds).map_err(|_| PermanentSafePlatformError::Unsafe)?;
+    if nanoseconds >= 1_000_000_000 {
+        return Err(PermanentSafePlatformError::Unsafe);
+    }
+    UNIX_EPOCH
+        .checked_add(Duration::new(seconds, nanoseconds))
+        .ok_or(PermanentSafePlatformError::Unsafe)
 }
 
 #[cfg(unix)]
@@ -809,6 +929,7 @@ fn stat_entry(parent: &File, name: &OsStr) -> Result<EntryObservation, Permanent
         is_directory,
         hard_links: stat.st_nlink as u64,
         logical_bytes,
+        modified_at: modified_time_from_stat(&stat)?,
     })
 }
 
@@ -816,7 +937,10 @@ fn stat_entry(parent: &File, name: &OsStr) -> Result<EntryObservation, Permanent
 fn same_entry_observation(actual: &EntryObservation, expected: &EntryObservation) -> bool {
     actual.identity == expected.identity
         && actual.is_directory == expected.is_directory
-        && (actual.is_directory || actual.hard_links == expected.hard_links)
+        && (actual.is_directory
+            || (actual.hard_links == expected.hard_links
+                && actual.logical_bytes == expected.logical_bytes
+                && actual.modified_at == expected.modified_at))
 }
 
 #[cfg(unix)]
@@ -826,6 +950,7 @@ fn inventory(
     ancestors: &[DirectoryObservation],
     entries: &mut Vec<RemovalEntry>,
     name_bytes: &mut usize,
+    recency_cutoff: SystemTime,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<(), PermanentSafePlatformError> {
     use nix::dir::Dir;
@@ -860,11 +985,12 @@ fn inventory(
         }
         let name = std::ffi::OsString::from_vec(bytes.to_vec());
         let observation = stat_entry(directory, name.as_os_str())?;
-        if relative.is_empty() && bytes == PRESERVED_MARKER {
-            if observation.is_directory {
-                return Err(PermanentSafePlatformError::Unsafe);
-            }
-            continue;
+        if observation.modified_at > recency_cutoff {
+            return Err(PermanentSafePlatformError::Changed);
+        }
+        let preserve = relative.is_empty() && bytes == PRESERVED_MARKER;
+        if preserve && observation.is_directory {
+            return Err(PermanentSafePlatformError::Unsafe);
         }
         let mut child_relative = relative.to_vec();
         child_relative.push(bytes.to_vec());
@@ -884,6 +1010,7 @@ fn inventory(
             child_ancestors.push(DirectoryObservation {
                 relative: child_relative.clone(),
                 identity: observation.identity,
+                modified_at: observation.modified_at,
             });
             inventory(
                 &child,
@@ -891,6 +1018,7 @@ fn inventory(
                 &child_ancestors,
                 entries,
                 name_bytes,
+                recency_cutoff,
                 cancelled,
             )?;
         }
@@ -900,6 +1028,7 @@ fn inventory(
             name,
             ancestors: ancestors.to_vec(),
             observation,
+            preserve,
         });
     }
     Ok(())
@@ -993,6 +1122,15 @@ mod tests {
 
     #[cfg(unix)]
     fn witness_fixture() -> (TempDir, RustTargetEffectWitness) {
+        let recency_cutoff = SystemTime::now() - Duration::from_secs(7 * 86_400);
+        witness_fixture_at(recency_cutoff - Duration::from_secs(86_400), recency_cutoff)
+    }
+
+    #[cfg(unix)]
+    fn witness_fixture_at(
+        modified_at: SystemTime,
+        recency_cutoff: SystemTime,
+    ) -> (TempDir, RustTargetEffectWitness) {
         use crate::path_validation::{
             capture_path_snapshot, capture_scan_root, validate_cleanup_path, validate_scan_root,
         };
@@ -1013,11 +1151,13 @@ mod tests {
         .unwrap();
         fs::write(target.join("debug/deps/libfixture.rlib"), b"artifact").unwrap();
         fs::write(target.join("debug/.fingerprint"), b"artifact").unwrap();
+        crate::planner::rust_target_tests::set_subtree_modified_at(&target, modified_at);
         let lexical_root = validate_scan_root(&scan_root_path).unwrap();
         let scan_root = capture_scan_root(lexical_root.clone()).unwrap();
         let lexical_target = validate_cleanup_path(&lexical_root, &target).unwrap();
         let snapshot = capture_path_snapshot(&scan_root, lexical_target).unwrap();
-        let witness = crate::planner::validate_rust_target_effect(snapshot).unwrap();
+        let witness =
+            crate::planner::validate_rust_target_effect(snapshot, recency_cutoff).unwrap();
         (temp, witness)
     }
 
@@ -1041,6 +1181,13 @@ mod tests {
         use std::os::unix::fs::symlink;
         let (temp, witness) = witness_fixture();
         symlink("/tmp", temp.path().join("project/target/debug/link")).unwrap();
+        std::fs::File::open(temp.path().join("project/target/debug"))
+            .unwrap()
+            .set_times(
+                std::fs::FileTimes::new()
+                    .set_modified(witness.recency_cutoff() - Duration::from_secs(1)),
+            )
+            .unwrap();
         let mut driver = DescriptorRelativePermanentSafeDriver;
         assert_eq!(
             driver.remove_contents(&witness, &|| false),
@@ -1051,5 +1198,60 @@ mod tests {
                 .join("project/target/debug/deps/libfixture.rlib")
                 .exists()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn descriptor_driver_rejects_recent_descendant_before_first_unlink() {
+        let (temp, witness) = witness_fixture();
+        let target = temp.path().join("project/target");
+        let recent = target.join("debug/deps/recent.rlib");
+        fs::write(&recent, b"recent").unwrap();
+        let original = target.join("debug/deps/libfixture.rlib");
+        let fingerprint = target.join("debug/.fingerprint");
+
+        let mut driver = DescriptorRelativePermanentSafeDriver;
+        assert_eq!(
+            driver.remove_contents(&witness, &|| false),
+            Err(PermanentSafePlatformError::Changed)
+        );
+        assert!(target.join("CACHEDIR.TAG").exists());
+        assert!(original.exists());
+        assert!(fingerprint.exists());
+        assert!(recent.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn final_inventory_rejects_leaf_activity_after_witness_revalidation() {
+        let (temp, witness) = witness_fixture();
+        let target = temp.path().join("project/target");
+        let changed_leaf = target.join("debug/deps/libfixture.rlib");
+        let untouched_leaf = target.join("debug/.fingerprint");
+        let mut touch_leaf = || {
+            File::open(&changed_leaf)
+                .unwrap()
+                .set_times(std::fs::FileTimes::new().set_modified(SystemTime::now()))
+                .unwrap();
+        };
+
+        assert_eq!(
+            remove_contents_unix(&witness, &|| false, &mut touch_leaf),
+            Err(PermanentSafePlatformError::Changed)
+        );
+        assert!(target.join("CACHEDIR.TAG").exists());
+        assert!(changed_leaf.exists());
+        assert!(untouched_leaf.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn descriptor_recency_cutoff_is_inclusive() {
+        let cutoff = SystemTime::now() - Duration::from_secs(7 * 86_400);
+        let (_temp, witness) = witness_fixture_at(cutoff, cutoff);
+
+        let mut driver = DescriptorRelativePermanentSafeDriver;
+        let summary = driver.remove_contents(&witness, &|| false).unwrap();
+        assert_eq!(summary.removed_entries, 4);
     }
 }

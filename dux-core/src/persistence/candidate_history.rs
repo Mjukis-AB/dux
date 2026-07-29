@@ -64,6 +64,7 @@ impl CandidateBatchMaterializationBudget {
         &mut self,
         path: &Path,
         evidence_paths: &[PathBuf],
+        scalar_evidence_count: usize,
         blocker_count: usize,
     ) -> Result<bool, HistoryError> {
         let path_bytes = prepare_absolute_path(path)?;
@@ -84,6 +85,7 @@ impl CandidateBatchMaterializationBudget {
                 evidence: u64::try_from(evidence_paths.len())
                     .map_err(|_| invalid())?
                     .checked_add(1)
+                    .and_then(|count| count.checked_add(u64::try_from(scalar_evidence_count).ok()?))
                     .ok_or_else(invalid)?,
                 evidence_payload_bytes,
                 blockers: u64::try_from(blocker_count).map_err(|_| invalid())?,
@@ -887,7 +889,7 @@ pub(super) fn mark_trusted_rust_target_candidate_planned(
     candidate: &CompleteCandidateRecord,
 ) -> Result<CandidatePriorReviewStatus, HistoryError> {
     if candidate.rule.id().as_str() != "developer.rust.target"
-        || candidate.rule.revision().get() != 2
+        || candidate.rule.revision().get() != crate::domain::SAFE_RUST_RULE_REVISION
         || candidate.category != CandidateCategory::DeveloperArtifact
         || candidate.safety != SafetyTier::SafeRegenerable
         || candidate.action != CandidateAction::RemoveKnownRegenerableContents
