@@ -106,6 +106,11 @@ impl Fixture {
         let database = temp.path().join("store").join("dux.sqlite3");
         let root = temp.path().join("root");
         let store = StoreCoordinator::open(&database).unwrap();
+        if mode == CleanupMode::PermanentSafe {
+            store
+                .set_permanent_cleanup_enabled(true)
+                .expect("effect-path fixture must opt in explicitly");
+        }
         let scan_id = "scan:cleanup-journal";
         start_scan(&store, &root, scan_id);
 
@@ -1698,6 +1703,7 @@ fn rowless_permanent_cleanup_policy_rejects_before_effect_started() {
         CandidateAction::RemoveKnownRegenerableContents,
         1,
     );
+    fixture.store.reset_permanent_cleanup().unwrap();
     let claim = fixture.claim();
     claim.begin_validation(0, 0).unwrap();
     assert_eq!(

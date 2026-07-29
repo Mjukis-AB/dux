@@ -11,6 +11,24 @@ protocol DuxCapacityTrendServing: Sendable {
     func loadCapacityTrend(stableVolumeID: String, at: Date) async throws -> VolumeCapacityTrend
 }
 
+protocol DuxPressureEpisodeServing: Sendable {
+    func loadPressureEpisodeHistory(
+        stableVolumeID: String,
+        at: Date,
+        limit: UInt16
+    ) async throws -> VolumePressureHistory
+}
+
+extension DuxPressureEpisodeServing {
+    func loadPressureEpisodeHistory(
+        stableVolumeID _: String,
+        at _: Date,
+        limit _: UInt16
+    ) async throws -> VolumePressureHistory {
+        throw EngineServiceError.unavailable
+    }
+}
+
 extension DuxCapacityTrendServing {
     func loadCapacityTrend(stableVolumeID _: String, at _: Date) async throws -> VolumeCapacityTrend {
         throw EngineServiceError.unavailable
@@ -109,8 +127,9 @@ extension DuxPermanentCleanupPolicyServing {
     }
 }
 
-protocol EngineServing: DuxVolumeStatusServing, DuxCapacityTrendServing, DuxPressurePolicyServing,
-    DuxPermanentCleanupPolicyServing, DuxCleanupExclusionsServing,
+protocol EngineServing: DuxVolumeStatusServing, DuxCapacityTrendServing,
+    DuxPressureEpisodeServing, DuxPressurePolicyServing, DuxPermanentCleanupPolicyServing,
+    DuxCleanupExclusionsServing,
     DuxDirectCargoEnrollmentServing, DuxCleanupHistoryServing,
     DuxCleanupHistoryClearing, Sendable
 {
@@ -307,7 +326,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
     DuxSnapshotHistoryServing, DuxCleanupHistoryServing, DuxScanCoverageServing, HomeScanServing,
     Sendable
 {
-    fileprivate static let expectedFFIContractVersion: UInt32 = 35
+    fileprivate static let expectedFFIContractVersion: UInt32 = 36
     fileprivate static let expectedRecordVersion: UInt32 = 1
 
     private let state: EngineServiceState
@@ -416,7 +435,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
     func loadCapacityTrend(stableVolumeID: String, at: Date) async throws -> VolumeCapacityTrend {
         try await state.perform { state in
             precondition(!Thread.isMainThread, "Blocking FFI work reached the main thread")
-            guard let uuid = UUID(uuidString: stableVolumeID) else {
+            guard let uuid = Self.macOSVolumeUUID(stableVolumeID) else {
                 throw EngineServiceError.invalidCapacityObservation
             }
             let milliseconds = at.timeIntervalSince1970 * 1_000
@@ -429,13 +448,54 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
                 let response = try engine.getCapacityTrend(
                     request: CapacityTrendRequest(
                         recordVersion: Self.expectedRecordVersion,
-                        stableVolumeId: stableVolumeID,
+                        stableVolumeId: uuid.uuidString,
                         anchorAtUnixMs: anchorAtUnixMS
                     )
                 )
                 return try Self.capacityTrend(
                     response,
-                    expectedStableVolumeID: "volume:macos:\(uuid.uuidString.lowercased())"
+                    expectedStableVolumeID: "volume:macos:\(uuid.uuidString.lowercased())",
+                    requestedAnchorAtUnixMS: anchorAtUnixMS
+                )
+            } catch let error as EngineError {
+                throw Self.serviceError(error)
+            }
+        }
+    }
+
+    func loadPressureEpisodeHistory(
+        stableVolumeID: String,
+        at: Date,
+        limit: UInt16
+    ) async throws -> VolumePressureHistory {
+        try await state.perform { state in
+            precondition(!Thread.isMainThread, "Blocking FFI work reached the main thread")
+            guard
+                let uuid = Self.macOSVolumeUUID(stableVolumeID),
+                (1 ... UInt16(64)).contains(limit)
+            else {
+                throw EngineServiceError.invalidCapacityObservation
+            }
+            let milliseconds = at.timeIntervalSince1970 * 1_000
+            guard milliseconds.isFinite, milliseconds >= 0, milliseconds <= Double(Int64.max) else {
+                throw EngineServiceError.invalidCapacityObservation
+            }
+            let anchorAtUnixMS = Int64(milliseconds.rounded(.towardZero))
+            let engine = try state.resolveEngine()
+            do {
+                let response = try engine.getPressureEpisodeHistory(
+                    request: PressureEpisodeHistoryRequest(
+                        recordVersion: Self.expectedRecordVersion,
+                        stableVolumeId: uuid.uuidString,
+                        anchorAtUnixMs: anchorAtUnixMS,
+                        limit: limit
+                    )
+                )
+                return try Self.pressureEpisodeHistory(
+                    response,
+                    expectedStableVolumeID: "volume:macos:\(uuid.uuidString.lowercased())",
+                    expectedAnchorAtUnixMS: anchorAtUnixMS,
+                    requestedLimit: limit
                 )
             } catch let error as EngineError {
                 throw Self.serviceError(error)
@@ -1848,11 +1908,14 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
 
     private static func capacityTrend(
         _ response: CapacityTrendStatus,
-        expectedStableVolumeID: String
+        expectedStableVolumeID: String,
+        requestedAnchorAtUnixMS: Int64
     ) throws -> VolumeCapacityTrend {
         guard
             response.recordVersion == expectedRecordVersion,
             response.stableVolumeId == expectedStableVolumeID,
+            response.sampledAtUnixMs >= 0,
+            response.sampledAtUnixMs <= requestedAnchorAtUnixMS,
             response.totalBytes > 0,
             response.availableBytes <= response.totalBytes,
             response.importantAvailableBytes.map({ $0 <= response.totalBytes }) ?? true,
@@ -1892,6 +1955,82 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
             change7d: try response.change7d.map(capacityTrendChange),
             points: points
         )
+    }
+
+    private static func pressureEpisodeHistory(
+        _ response: PressureEpisodeHistoryStatus,
+        expectedStableVolumeID: String,
+        expectedAnchorAtUnixMS: Int64,
+        requestedLimit: UInt16
+    ) throws -> VolumePressureHistory {
+        let maximumCount = Int(requestedLimit)
+        guard
+            response.recordVersion == expectedRecordVersion,
+            response.stableVolumeId == expectedStableVolumeID,
+            response.anchorAtUnixMs == expectedAnchorAtUnixMS,
+            response.anchorAtUnixMs >= 0,
+            response.episodes.count <= maximumCount,
+            !response.hasMore || response.episodes.count == maximumCount
+        else {
+            throw EngineServiceError.unexpected("invalid pressure episode history record")
+        }
+        let episodes = try response.episodes.enumerated().map { index, episode in
+            guard
+                episode.recordVersion == expectedRecordVersion,
+                episode.enteredAtUnixMs >= 0,
+                episode.enteredAtUnixMs <= response.anchorAtUnixMs,
+                episode.exitedAtUnixMs.map({
+                    $0 >= episode.enteredAtUnixMs && $0 <= response.anchorAtUnixMs
+                }) ?? true,
+                index == 0 || episode.exitedAtUnixMs != nil
+            else {
+                throw EngineServiceError.unexpected("invalid pressure episode record")
+            }
+            return VolumePressureEpisode(
+                level: episode.level == .warning ? .warning : .critical,
+                enteredAt: Date(
+                    timeIntervalSince1970: Double(episode.enteredAtUnixMs) / 1_000
+                ),
+                exitedAt: episode.exitedAtUnixMs.map {
+                    Date(timeIntervalSince1970: Double($0) / 1_000)
+                },
+                policyRevision: episode.policyRevision
+            )
+        }
+        guard zip(episodes, episodes.dropFirst()).allSatisfy({
+            let newer = $0.0
+            let older = $0.1
+            return newer.enteredAt > older.enteredAt
+                && older.exitedAt.map { $0 <= newer.enteredAt } == true
+        }) else {
+            throw EngineServiceError.unexpected("pressure episode records are not ordered")
+        }
+        return VolumePressureHistory(
+            stableVolumeID: response.stableVolumeId,
+            anchorAt: Date(
+                timeIntervalSince1970: Double(response.anchorAtUnixMs) / 1_000
+            ),
+            episodes: episodes,
+            hasMore: response.hasMore
+        )
+    }
+
+    private static func macOSVolumeUUID(_ stableVolumeID: String) -> UUID? {
+        let prefix = "volume:macos:"
+        let uuidText: Substring
+        if stableVolumeID.hasPrefix(prefix) {
+            uuidText = stableVolumeID.dropFirst(prefix.count)
+        } else {
+            uuidText = stableVolumeID[...]
+        }
+        guard let uuid = UUID(uuidString: String(uuidText)) else {
+            return nil
+        }
+        if stableVolumeID.hasPrefix(prefix),
+           stableVolumeID != "\(prefix)\(uuid.uuidString.lowercased())" {
+            return nil
+        }
+        return uuid
     }
 
     private static func capacityTrendChange(
@@ -1968,6 +2107,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         case .Busy, .StorageUnavailable, .RegistryUnavailable, .BudgetExceeded:
             .retryable
         case .Closed, .InvalidStorage, .InvalidScanId, .InvalidCapacityObservation,
+             .InvalidPressureEpisodeRequest,
              .ConflictingCapacityObservation, .SupersededCapacityObservation, .ScanNotFound,
              .SnapshotUnavailable, .ReviewExpired, .SnapshotNodeNotFound,
              .SnapshotNodeNotDirectory, .InvalidSnapshotNodePage,

@@ -84,6 +84,52 @@ final class MenuBarPopoverPresentationTests: XCTestCase {
         XCTAssertTrue(snapshot.accessibilitySummary.contains("12.7%"))
     }
 
+    func testMatchingOpenPressurePeriodAddsCompactTruthfulContext() throws {
+        let source = makeSnapshot()
+        let history = VolumePressureHistory(
+            stableVolumeID: "startup",
+            anchorAt: source.sampledAt,
+            episodes: [
+                VolumePressureEpisode(
+                    level: .warning,
+                    enteredAt: source.sampledAt.addingTimeInterval(-900),
+                    exitedAt: nil,
+                    policyRevision: 2
+                ),
+            ],
+            hasMore: false
+        )
+        let matching = try snapshot(
+            from: MenuBarPopoverPresentation.make(
+                volumeState: .loaded(source),
+                scanState: .idle,
+                pressureHistory: history,
+                now: now,
+                locale: en
+            )
+        )
+        XCTAssertTrue(matching.activePressurePeriodText?.contains("Warning since") == true)
+        XCTAssertTrue(
+            matching.activePressurePeriodText?.contains("ongoing at latest sample") == true
+        )
+
+        let mismatched = try snapshot(
+            from: MenuBarPopoverPresentation.make(
+                volumeState: .loaded(source),
+                scanState: .idle,
+                pressureHistory: VolumePressureHistory(
+                    stableVolumeID: "different-volume",
+                    anchorAt: source.sampledAt,
+                    episodes: history.episodes,
+                    hasMore: false
+                ),
+                now: now,
+                locale: en
+            )
+        )
+        XCTAssertNil(mismatched.activePressurePeriodText)
+    }
+
     func testFilesystemFallbackAndFutureTimestampRemainHonest() throws {
         let future = makeSnapshot(
             basis: .filesystemAvailable,

@@ -5641,7 +5641,7 @@ Goal: make DUX proactive and explain recurring disk pressure.
 
 Tasks:
 
-- [ ] Persist disk samples and pressure episodes.
+- [x] Persist disk samples and pressure episodes.
   - [x] 2026-07-19 slice: add schema v11 durable pressure episodes. Warning
     and Critical entries, Healthy recovery, Warning→Critical escalation, and
     policy-revision boundaries are updated in the same immediate transaction
@@ -5649,6 +5649,22 @@ Tasks:
     recovery; exact retries are idempotent; bounded readers reject malformed
     or overlapping history. `StoredPressureEpisode` remains path-free,
     telemetry-only, and is not exposed through FFI yet.
+  - [x] 2026-07-29 slice: expose durable pressure episodes as bounded,
+    anchored, path-free telemetry through the engine and UniFFI contract v36.
+    The persistence reader validates the complete returned page plus one
+    lookahead row, the referenced volume lifetime, strict newest-first order,
+    non-overlap, and the single-newest-open invariant before truncation. The
+    public contract accepts only one stable startup-volume identity, exact
+    observation anchor, and a limit of 1–64; it distinguishes Warning from
+    Critical and returns no path, candidate, plan, recommendation, approval,
+    or mutation command. Swift independently validates the full envelope,
+    identity, anchor, record versions, ordering, intervals, open-state shape,
+    and truncation claim off the main actor. `AppModel` coalesces identical
+    scene requests and generation-fences volume/anchor changes while retaining
+    an explicitly stale last-known history on failure. Final review tightened
+    accepted-anchor proof to an exact durable raw sample or the exact current
+    `last_seen` observation when hourly cadence suppressed its raw row;
+    arbitrary between-observation timestamps fail closed.
 - [x] 2026-07-19 slice: add the bounded core trend contract. `CapacityTrend`
   anchors on the newest durable raw sample at or before the requested time,
   reports signed total/available changes over exact 24-hour and 7-day cutoffs
@@ -5659,7 +5675,7 @@ Tasks:
   are present, and malformed volume/sample facts fail closed. The contract is
   path-free telemetry and remains outside FFI/Swift until the chart adapter
   slice.
-- [ ] Add 24-hour/7-day changes and 30-day chart.
+- [x] Add 24-hour/7-day changes and 30-day chart.
   - [x] 2026-07-19 slice: expose the bounded trend contract through the
     engine and FFI contract v20. `get_capacity_trend` accepts only a validated
     stable macOS volume ID and nonnegative anchor time, returns signed
@@ -5679,7 +5695,23 @@ Tasks:
     authority. The app target's universal Debug build is green; the linked
     test target remains blocked by pre-existing generated/test-source symbol
     mismatches and Observation macro-server failures.
-- [ ] Add transition-based notifications and cooldown.
+  - [x] 2026-07-29 slice: complete the Explorer history surface with signed
+    24-hour/7-day metrics, a full-width 30-day capacity graph, pressure-colored
+    sample points, Warning/Critical episode ribbons, and a textual recent
+    low-space-period list. Loading, warming, stale, truncated, unavailable, and
+    not-enough-history states remain explicit; ongoing durations are frozen to
+    the accepted sample anchor rather than wall-clock time. The menu popover
+    adds only a matching current Warning/Critical period as compact context.
+    Stable accessibility identifiers and summaries cover the chart, timeline,
+    list, and menu context. Focused native integration/presentation coverage is
+    green with the generated v36 bindings. The app tracks the requesting
+    snapshot anchor separately from the trend's older at-or-before durable raw
+    timestamp, preventing cadence-suppressed refreshes from discarding or
+    repeatedly reloading a valid chart. Checkpoint verification includes all
+    413 native tests, focused core/FFI accepted-anchor regressions, workspace
+    clippy with warnings denied, the 244-file destructive-call boundary, and a
+    universal arm64/x86_64 Debug app.
+- [x] Add transition-based notifications and cooldown.
   - [x] 2026-07-19 slice: preserve the Rust-owned previous durable pressure
     through the Swift capacity snapshot, then gate notifications only on newly
     stored Warning/Critical transitions. A versioned, bounded Recommendations
@@ -5691,7 +5723,7 @@ Tasks:
     notification service; no cleanup, approval, or executor authority is
     carried. Notification response routing to the Explorer Recommendations
     surface remains the next deep-link slice.
-- [ ] Deep-link notifications to urgent Recommendations.
+- [x] Deep-link notifications to urgent Recommendations.
   - [x] 2026-07-19 slice: validate notification responses with the exact bounded
     versioned payload before dispatching. Valid responses now route the
     long-lived runtime to Explorer, select a Recommendations destination, and

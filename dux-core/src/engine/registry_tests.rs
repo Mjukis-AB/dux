@@ -96,6 +96,9 @@ fn engine_executes_only_an_approved_permanent_safe_session() {
     );
 
     let engine = EngineHandle::open(config).unwrap();
+    engine
+        .set_permanent_cleanup_enabled(true)
+        .expect("effect-path fixture must opt in explicitly");
     let task = engine.start_scan(root.clone()).unwrap();
     assert_eq!(wait_terminal(&engine, task).phase, TaskPhase::Succeeded);
     let scan_id = engine.scan_result(task).unwrap().unwrap().scan_id().clone();
@@ -246,7 +249,6 @@ struct ApprovedRustTargetFixture {
     engine: EngineHandle,
     session: crate::planner::ApprovedCleanupSession,
     payloads: Vec<PathBuf>,
-    manifests: Vec<PathBuf>,
     session_id: crate::persistence::CleanupSessionId,
 }
 
@@ -268,7 +270,6 @@ fn approved_rust_target_fixture(project_count: usize) -> ApprovedRustTargetFixtu
     .unwrap();
     let root = temp.path().join("scan-root");
     let mut payloads = Vec::with_capacity(project_count);
-    let mut manifests = Vec::with_capacity(project_count);
     for index in 0..project_count {
         let project = root.join(format!("project-{index}"));
         let target = project.join("target");
@@ -277,7 +278,6 @@ fn approved_rust_target_fixture(project_count: usize) -> ApprovedRustTargetFixtu
         std::fs::write(&manifest, b"[package]\nname='fixture'\n").unwrap();
         write_cargo_cache_tag(&target);
         payloads.push(target.join("object"));
-        manifests.push(manifest);
         std::fs::write(payloads.last().unwrap(), b"temporary build output").unwrap();
         std::fs::write(
             target.join("second-object"),
@@ -291,6 +291,9 @@ fn approved_rust_target_fixture(project_count: usize) -> ApprovedRustTargetFixtu
     }
 
     let engine = EngineHandle::open(config).unwrap();
+    engine
+        .set_permanent_cleanup_enabled(true)
+        .expect("effect-path fixture must opt in explicitly");
     let task = engine.start_scan(root).unwrap();
     assert_eq!(wait_terminal(&engine, task).phase, TaskPhase::Succeeded);
     let scan_id = engine.scan_result(task).unwrap().unwrap().scan_id().clone();
@@ -421,7 +424,6 @@ fn approved_rust_target_fixture(project_count: usize) -> ApprovedRustTargetFixtu
         engine,
         session,
         payloads,
-        manifests,
         session_id,
     }
 }
@@ -487,7 +489,7 @@ fn fixture_capacity_observation(
 
 #[cfg(unix)]
 #[test]
-fn engine_executes_all_paths_and_terminalizes_completed_session() {
+fn multi_path_rust_target_session_fails_closed_without_mutation() {
     let mut fixture = approved_rust_target_fixture(2);
     let summary = fixture
         .engine
@@ -509,12 +511,14 @@ fn engine_executes_all_paths_and_terminalizes_completed_session() {
     let history = fixture.engine.cleanup_session_history(&history_id).unwrap();
     assert_eq!(
         summary.terminal_status,
-        crate::persistence::TerminalSessionStatus::Completed
+        crate::persistence::TerminalSessionStatus::Failed
     );
-    assert!(fixture.payloads.iter().all(|payload| !payload.exists()));
+    assert_eq!(summary.removed_entries, 0);
+    assert_eq!(summary.removed_logical_bytes, 0);
+    assert!(fixture.payloads.iter().all(|payload| payload.exists()));
     assert_eq!(
         history.summary().status(),
-        crate::engine::DurableCleanupSessionStatus::Completed
+        crate::engine::DurableCleanupSessionStatus::Failed
     );
     fixture.engine.close();
     assert!(fixture.engine.wait_until_closed(TEST_TIMEOUT));
@@ -984,223 +988,6 @@ fn capacity_sampling_cannot_extend_an_expired_effect_approval() {
         fixture.payloads.iter().all(|payload| payload.exists()),
         "an approval that expired after pre-sampling must not reach mutation"
     );
-    fixture.engine.close();
-    assert!(fixture.engine.wait_until_closed(TEST_TIMEOUT));
-}
-
-#[cfg(unix)]
-#[test]
-#[allow(clippy::disallowed_methods)]
-fn engine_executes_ordered_permanent_safe_session_and_records_partial_outcome() {
-    let mut fixture = approved_rust_target_fixture(2);
-    // DUX-DESTRUCTIVE: allow=test-approved-session-target-change -- remove only a manifest in this temporary test-owned fixture to simulate ordered execution drift
-    std::fs::remove_file(&fixture.manifests[1]).unwrap();
-    let started = SystemTime::now();
-    let summary = fixture
-        .engine
-        .execute_approved_permanent_safe_session(
-            &mut fixture.session,
-            started + Duration::from_secs(1),
-            &|| false,
-        )
-        .unwrap();
-    assert_eq!(
-        summary.terminal_status,
-        crate::persistence::TerminalSessionStatus::PartiallyCompleted
-    );
-    assert!(summary.removed_entries > 0);
-    assert_eq!(
-        fixture
-            .payloads
-            .iter()
-            .filter(|payload| !payload.exists())
-            .count(),
-        1
-    );
-    assert_eq!(
-        fixture
-            .payloads
-            .iter()
-            .filter(|payload| payload.exists())
-            .count(),
-        1
-    );
-    let history_id = fixture
-        .engine
-        .recent_cleanup_history(None, 64)
-        .unwrap()
-        .records()
-        .iter()
-        .find(|record| record.id().as_str() == fixture.session_id.as_str())
-        .map(|record| record.id().clone())
-        .unwrap();
-    let history = fixture.engine.cleanup_session_history(&history_id).unwrap();
-    assert_eq!(
-        history.summary().status(),
-        crate::engine::DurableCleanupSessionStatus::PartiallyCompleted
-    );
-    assert_eq!(
-        history
-            .items()
-            .iter()
-            .filter(|item| item.status() == crate::engine::DurableCleanupItemStatus::Removed)
-            .count(),
-        1
-    );
-    assert_eq!(
-        history
-            .items()
-            .iter()
-            .filter(|item| {
-                item.status() == crate::engine::DurableCleanupItemStatus::ChangedSincePlan
-            })
-            .count(),
-        1
-    );
-    fixture.engine.close();
-    assert!(fixture.engine.wait_until_closed(TEST_TIMEOUT));
-}
-
-#[cfg(unix)]
-#[test]
-fn engine_cancels_ordered_permanent_safe_session_before_next_path() {
-    let mut fixture = approved_rust_target_fixture(2);
-    let payloads = fixture.payloads.clone();
-    let second_entries = payloads
-        .iter()
-        .map(|payload| payload.parent().unwrap().join("second-object"))
-        .collect::<Vec<_>>();
-    let summary = fixture
-        .engine
-        .execute_approved_permanent_safe_session(
-            &mut fixture.session,
-            SystemTime::now() + Duration::from_secs(1),
-            &|| {
-                payloads
-                    .iter()
-                    .zip(&second_entries)
-                    .any(|(payload, second)| !payload.exists() && !second.exists())
-            },
-        )
-        .unwrap();
-    assert_eq!(
-        summary.terminal_status,
-        crate::persistence::TerminalSessionStatus::PartiallyCompleted
-    );
-    assert_eq!(
-        fixture
-            .payloads
-            .iter()
-            .filter(|payload| !payload.exists())
-            .count(),
-        1
-    );
-    assert_eq!(
-        fixture
-            .payloads
-            .iter()
-            .filter(|payload| payload.exists())
-            .count(),
-        1
-    );
-    let history_id = fixture
-        .engine
-        .recent_cleanup_history(None, 64)
-        .unwrap()
-        .records()
-        .iter()
-        .find(|record| record.id().as_str() == fixture.session_id.as_str())
-        .map(|record| record.id().clone())
-        .unwrap();
-    let history = fixture.engine.cleanup_session_history(&history_id).unwrap();
-    assert_eq!(
-        history.summary().status(),
-        crate::engine::DurableCleanupSessionStatus::PartiallyCompleted
-    );
-    assert_eq!(
-        history
-            .items()
-            .iter()
-            .filter(|item| item.status() == crate::engine::DurableCleanupItemStatus::Removed)
-            .count(),
-        1
-    );
-    assert_eq!(
-        history
-            .items()
-            .iter()
-            .filter(|item| item.status() == crate::engine::DurableCleanupItemStatus::Interrupted)
-            .count(),
-        1
-    );
-    fixture.engine.close();
-    assert!(fixture.engine.wait_until_closed(TEST_TIMEOUT));
-}
-
-#[cfg(unix)]
-#[test]
-fn engine_stops_on_unknown_partial_effect_and_leaves_recovery_fence() {
-    let mut fixture = approved_rust_target_fixture(2);
-    let second_entries = fixture
-        .payloads
-        .iter()
-        .map(|payload| payload.parent().unwrap().join("second-object"))
-        .collect::<Vec<_>>();
-    let payloads = fixture.payloads.clone();
-    let now = SystemTime::now() + Duration::from_secs(1);
-    let volume_id = VolumeId::new("volume:fixture-capacity-unknown").unwrap();
-    let pre = fixture_capacity_observation(
-        &fixture._temp,
-        &volume_id,
-        now - Duration::from_secs(1),
-        400,
-    );
-    let mut sampler = FixtureCapacitySampler::new(vec![Some(pre), None]);
-    let result = fixture
-        .engine
-        .execute_approved_permanent_safe_session_with_capacity_for_test(
-            &mut fixture.session,
-            now,
-            &|| {
-                payloads
-                    .iter()
-                    .zip(&second_entries)
-                    .any(|(payload, second)| payload.exists() != second.exists())
-            },
-            &mut sampler,
-        );
-    assert!(matches!(
-        result,
-        Err(
-            crate::cleanup::permanent_safe::PermanentSafeExecutionError::Platform(
-                crate::cleanup::permanent_safe::PermanentSafePlatformError::OutcomeUnknown,
-            )
-        )
-    ));
-    let history_id = fixture
-        .engine
-        .recent_cleanup_history(None, 64)
-        .unwrap()
-        .records()
-        .iter()
-        .find(|record| record.id().as_str() == fixture.session_id.as_str())
-        .map(|record| record.id().clone())
-        .unwrap();
-    let history = fixture.engine.cleanup_session_history(&history_id).unwrap();
-    assert_eq!(
-        history.summary().status(),
-        crate::engine::DurableCleanupSessionStatus::Recovering
-    );
-    assert_eq!(
-        history.items()[0].status(),
-        crate::engine::DurableCleanupItemStatus::OutcomeUnknown
-    );
-    assert_eq!(
-        history.items()[1].status(),
-        crate::engine::DurableCleanupItemStatus::Planned
-    );
-    assert_eq!(sampler.next, 1);
-    assert_eq!(history.summary().verified_capacity_delta_bytes(), None);
     fixture.engine.close();
     assert!(fixture.engine.wait_until_closed(TEST_TIMEOUT));
 }

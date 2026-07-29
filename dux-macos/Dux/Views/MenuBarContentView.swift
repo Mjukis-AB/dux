@@ -10,7 +10,8 @@ struct MenuBarContentView: View {
         let presentation = MenuBarPopoverPresentation.make(
             volumeState: model.volumeState,
             scanState: model.scanState,
-            trend: model.capacityTrend
+            trend: model.capacityTrend,
+            pressureHistory: model.pressureHistoryState.history
         )
 
         VStack(alignment: .leading, spacing: 14) {
@@ -183,6 +184,17 @@ struct MenuBarContentView: View {
 
                 if let trend = snapshot.trend {
                     trendSummary(trend)
+                }
+
+                if let activePressurePeriod = snapshot.activePressurePeriodText {
+                    Label(activePressurePeriod, systemImage: "clock.badge.exclamationmark")
+                        .font(.caption)
+                        .foregroundStyle(
+                            snapshot.pressure == .critical ? Color.red : Color.orange
+                        )
+                        .accessibilityIdentifier(
+                            MenuBarPopoverAccessibility.activePressurePeriod
+                        )
                 }
 
                 if let status {

@@ -132,6 +132,11 @@ unsafe extern "C" {
 #[link(name = "System")]
 unsafe extern "C" {
     fn dispatch_queue_create(label: *const c_char, attributes: *const c_void) -> DispatchQueueRef;
+    fn dispatch_sync_f(
+        queue: DispatchQueueRef,
+        context: *mut c_void,
+        work: extern "C" fn(*mut c_void),
+    );
     fn dispatch_release(object: DispatchQueueRef);
 }
 
@@ -245,11 +250,12 @@ impl ExactManifestEventFence {
             self.candidates.clone(),
             self.watch_root.clone(),
         ));
+        let state_pointer = Arc::into_raw(Arc::clone(&state));
         let mut context = FSEventStreamContext {
             version: 0,
-            info: Arc::as_ptr(&state).cast_mut().cast(),
-            retain: None,
-            release: None,
+            info: state_pointer.cast_mut().cast(),
+            retain: Some(retain_event_state),
+            release: Some(release_event_state),
             copy_description: None,
         };
         let stream = unsafe {
@@ -263,6 +269,9 @@ impl ExactManifestEventFence {
                 CREATE_FLAG_NO_DEFER | CREATE_FLAG_WATCH_ROOT | CREATE_FLAG_FILE_EVENTS,
             )
         };
+        // Recover the raw ownership passed to the synchronous create call.
+        // A successful stream has retained its own Arc through the context.
+        unsafe { drop(Arc::from_raw(state_pointer)) };
         if stream.is_null() {
             self.mark_unavailable();
             return self.poll();
@@ -290,6 +299,10 @@ impl ExactManifestEventFence {
                 FSEventStreamStop(stream);
             }
             FSEventStreamInvalidate(stream);
+            // Invalidation prevents new delivery, and the synchronous no-op
+            // drains callbacks already submitted to this private serial queue
+            // before either the stream-owned or local Arc can be released.
+            dispatch_sync_f(queue, ptr::null_mut(), dispatch_queue_drained);
             FSEventStreamRelease(stream);
             dispatch_release(queue);
         }
@@ -319,6 +332,21 @@ impl ExactManifestEventFence {
         self.terminal.store(OUTCOME_UNAVAILABLE, Ordering::Release);
     }
 }
+
+extern "C" fn retain_event_state(info: *const c_void) -> *const c_void {
+    if !info.is_null() {
+        unsafe { Arc::increment_strong_count(info.cast::<EventState>()) };
+    }
+    info
+}
+
+extern "C" fn release_event_state(info: *const c_void) {
+    if !info.is_null() {
+        unsafe { Arc::decrement_strong_count(info.cast::<EventState>()) };
+    }
+}
+
+extern "C" fn dispatch_queue_drained(_context: *mut c_void) {}
 
 #[derive(Clone)]
 struct CandidatePath {
@@ -512,8 +540,9 @@ mod tests {
     use super::{
         CandidatePath, EVENT_FLAG_HISTORY_DONE, EVENT_FLAG_MUST_SCAN_SUBDIRS,
         EVENT_FLAG_USER_DROPPED, EventState, OUTCOME_CHANGED, OUTCOME_CLEAN, OUTCOME_UNAVAILABLE,
-        is_path_prefix, same_case_insensitive_cargo_name,
+        is_path_prefix, release_event_state, retain_event_state, same_case_insensitive_cargo_name,
     };
+    use std::sync::Arc;
 
     fn state(case_sensitive: bool) -> EventState {
         EventState::new(
@@ -524,6 +553,23 @@ mod tests {
             }],
             b"/tmp".to_vec(),
         )
+    }
+
+    #[test]
+    fn stream_context_retains_event_state_until_release() {
+        let state = Arc::new(state(true));
+        let pointer = Arc::into_raw(Arc::clone(&state));
+        let context_pointer = pointer.cast();
+
+        assert_eq!(Arc::strong_count(&state), 2);
+        assert_eq!(retain_event_state(context_pointer), context_pointer);
+        assert_eq!(Arc::strong_count(&state), 3);
+
+        unsafe { drop(Arc::from_raw(pointer)) };
+        assert_eq!(Arc::strong_count(&state), 2);
+
+        release_event_state(context_pointer);
+        assert_eq!(Arc::strong_count(&state), 1);
     }
 
     #[test]

@@ -63,6 +63,9 @@ use dux_core::engine::{
     PermanentCleanupPolicySource as CorePermanentCleanupPolicySource,
     PermanentCleanupPolicyUpdate as CorePermanentCleanupPolicyUpdate,
     PermanentSafeCleanupFailureKind as CorePermanentSafeCleanupFailureKind,
+    PressureEpisodeHistory as CorePressureEpisodeHistory,
+    PressureEpisodeHistoryError as CorePressureEpisodeHistoryError,
+    PressureEpisodeLevel as CorePressureEpisodeLevel,
     RustTargetCleanupError as CoreRustTargetCleanupError,
     RustTargetCleanupResult as CoreRustTargetCleanupResult,
     RustTargetDryRunError as CoreRustTargetDryRunError,
@@ -113,7 +116,7 @@ use dux_core::{
     VolumeCapacity, VolumeId,
 };
 
-const FFI_CONTRACT_VERSION: u32 = 35;
+const FFI_CONTRACT_VERSION: u32 = 36;
 const FFI_RECORD_VERSION: u32 = 1;
 const RUST_TARGET_MINIMUM_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const SNAPSHOT_NODE_RECORD_VERSION: u32 = 2;
@@ -264,6 +267,42 @@ pub struct CapacityTrendStatus {
     pub change_24h: Option<CapacityTrendChange>,
     pub change_7d: Option<CapacityTrendChange>,
     pub points: Vec<CapacityTrendPoint>,
+}
+
+/// Bounded, path-free pressure-history request anchored to one accepted
+/// startup-volume sample.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct PressureEpisodeHistoryRequest {
+    pub record_version: u32,
+    pub stable_volume_id: String,
+    pub anchor_at_unix_ms: i64,
+    pub limit: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum PressureEpisodeLevel {
+    Warning,
+    Critical,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct PressureEpisodeRecord {
+    pub record_version: u32,
+    pub level: PressureEpisodeLevel,
+    pub entered_at_unix_ms: i64,
+    pub exited_at_unix_ms: Option<i64>,
+    pub policy_revision: u64,
+}
+
+/// Newest-first pressure intervals as of `anchor_at_unix_ms`. This telemetry
+/// contains no paths, candidate identity, plan, approval, or mutation command.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct PressureEpisodeHistoryStatus {
+    pub record_version: u32,
+    pub stable_volume_id: String,
+    pub anchor_at_unix_ms: i64,
+    pub episodes: Vec<PressureEpisodeRecord>,
+    pub has_more: bool,
 }
 
 /// Exact integer policy input. Basis points retain two decimal percentage
@@ -639,6 +678,8 @@ pub enum EngineError {
     InvalidScanId,
     #[error("volume capacity observation is invalid")]
     InvalidCapacityObservation,
+    #[error("pressure episode history request is invalid")]
+    InvalidPressureEpisodeRequest,
     #[error("a different capacity observation already exists at this time")]
     ConflictingCapacityObservation,
     #[error("a newer capacity observation already exists")]
@@ -3650,6 +3691,31 @@ impl DuxEngine {
                 .capacity_trend(&stable_volume_id, anchor_at)
                 .map_err(map_volume_status_error)?;
             capacity_trend_status(trend)
+        })
+    }
+
+    /// Return a bounded newest-first pressure history as of one accepted
+    /// capacity anchor. The response is observation-only telemetry.
+    pub fn get_pressure_episode_history(
+        &self,
+        request: PressureEpisodeHistoryRequest,
+    ) -> Result<PressureEpisodeHistoryStatus, EngineError> {
+        let limit = usize::from(request.limit);
+        if request.record_version != FFI_RECORD_VERSION
+            || !(1..=dux_core::MAX_PRESSURE_EPISODE_HISTORY_LIMIT).contains(&limit)
+        {
+            return Err(EngineError::InvalidPressureEpisodeRequest);
+        }
+        let stable_volume_id = parse_macos_volume_id(Some(request.stable_volume_id))
+            .map_err(|_| EngineError::InvalidPressureEpisodeRequest)?
+            .ok_or(EngineError::InvalidPressureEpisodeRequest)?;
+        let anchor_at = unix_ms_to_system_time(request.anchor_at_unix_ms)
+            .map_err(|_| EngineError::InvalidPressureEpisodeRequest)?;
+        self.with_engine(|engine| {
+            let history = engine
+                .pressure_episode_history(&stable_volume_id, anchor_at, limit)
+                .map_err(map_pressure_episode_history_error)?;
+            pressure_episode_history_status(history)
         })
     }
 
@@ -7871,6 +7937,52 @@ fn map_volume_status_error(error: CoreVolumeStatusError) -> EngineError {
     }
 }
 
+fn map_pressure_episode_history_error(error: CorePressureEpisodeHistoryError) -> EngineError {
+    match error {
+        CorePressureEpisodeHistoryError::Closed => EngineError::Closed,
+        CorePressureEpisodeHistoryError::InvalidLimit { .. }
+        | CorePressureEpisodeHistoryError::InvalidAnchor => {
+            EngineError::InvalidPressureEpisodeRequest
+        }
+        CorePressureEpisodeHistoryError::IncompatibleSchema => EngineError::IncompatibleSchema,
+        CorePressureEpisodeHistoryError::Busy => EngineError::Busy,
+        CorePressureEpisodeHistoryError::UnsafeStorage => EngineError::UnsafeStorage,
+        CorePressureEpisodeHistoryError::BudgetExceeded => EngineError::BudgetExceeded,
+        CorePressureEpisodeHistoryError::CorruptData => EngineError::CorruptData,
+        CorePressureEpisodeHistoryError::Unavailable => EngineError::StorageUnavailable,
+        CorePressureEpisodeHistoryError::OutcomeUnknown => EngineError::OutcomeUnknown,
+        CorePressureEpisodeHistoryError::InternalState => EngineError::InternalState,
+    }
+}
+
+fn pressure_episode_history_status(
+    history: CorePressureEpisodeHistory,
+) -> Result<PressureEpisodeHistoryStatus, EngineError> {
+    let episodes = history
+        .episodes()
+        .iter()
+        .map(|episode| {
+            Ok(PressureEpisodeRecord {
+                record_version: FFI_RECORD_VERSION,
+                level: match episode.level() {
+                    CorePressureEpisodeLevel::Warning => PressureEpisodeLevel::Warning,
+                    CorePressureEpisodeLevel::Critical => PressureEpisodeLevel::Critical,
+                },
+                entered_at_unix_ms: system_time_ms(episode.entered_at())?,
+                exited_at_unix_ms: episode.exited_at().map(system_time_ms).transpose()?,
+                policy_revision: episode.policy_revision(),
+            })
+        })
+        .collect::<Result<Vec<_>, EngineError>>()?;
+    Ok(PressureEpisodeHistoryStatus {
+        record_version: FFI_RECORD_VERSION,
+        stable_volume_id: history.volume_id().to_string(),
+        anchor_at_unix_ms: system_time_ms(history.anchor_at())?,
+        episodes,
+        has_more: history.has_more(),
+    })
+}
+
 fn capacity_trend_status(trend: CoreCapacityTrend) -> Result<CapacityTrendStatus, EngineError> {
     Ok(CapacityTrendStatus {
         record_version: FFI_RECORD_VERSION,
@@ -8860,10 +8972,10 @@ mod tests {
     }
 
     #[test]
-    fn reports_contract_thirty_five_and_preserves_legacy_formatting() {
+    fn reports_contract_thirty_six_and_preserves_legacy_formatting() {
         let _guard = ENGINE_TEST_LOCK.lock().unwrap();
         let (_temp, engine) = engine();
-        assert_eq!(library_version().ffi_contract_version, 35);
+        assert_eq!(library_version().ffi_contract_version, 36);
         assert_eq!(engine.library_version().unwrap(), library_version());
         assert_eq!(engine.format_size(1536).unwrap().display, "1.5 KB");
         assert!(engine.close());
@@ -11581,6 +11693,119 @@ mod tests {
                 .windows(2)
                 .all(|pair| { pair[0].sampled_at_unix_ms < pair[1].sampled_at_unix_ms })
         );
+        assert!(engine.close());
+    }
+
+    #[test]
+    fn pressure_episode_history_round_trip_is_anchored_bounded_and_path_free() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (_temp, engine) = engine();
+        let volume_id = "01234567-89AB-CDEF-0123-456789ABCDEF";
+        let base = 1_800_000_000_000_i64;
+        engine
+            .set_disk_pressure_policy(PressurePolicyInput {
+                record_version: FFI_RECORD_VERSION,
+                critical_available_bytes: 100,
+                critical_available_basis_points: 1_000,
+                warning_available_bytes: 300,
+                warning_available_basis_points: 3_000,
+                recovery_bytes: 20,
+                recovery_basis_points: 100,
+            })
+            .unwrap();
+        for (offset, available) in [(0, 250), (60_000, 50), (120_000, 900)] {
+            engine
+                .observe_startup_volume(StartupVolumeObservation {
+                    record_version: FFI_RECORD_VERSION,
+                    stable_volume_id: Some(volume_id.to_owned()),
+                    display_name: Some("Macintosh HD".to_owned()),
+                    filesystem: Some("APFS".to_owned()),
+                    is_internal: Some(true),
+                    is_removable: Some(false),
+                    sampled_at_unix_ms: base + offset,
+                    total_bytes: 1_000,
+                    ordinary_available_bytes: Some(available),
+                    important_available_bytes: Some(available),
+                })
+                .unwrap();
+        }
+
+        let page = engine
+            .get_pressure_episode_history(PressureEpisodeHistoryRequest {
+                record_version: FFI_RECORD_VERSION,
+                stable_volume_id: volume_id.to_owned(),
+                anchor_at_unix_ms: base + 120_000,
+                limit: 1,
+            })
+            .unwrap();
+        assert_eq!(page.record_version, FFI_RECORD_VERSION);
+        assert_eq!(
+            page.stable_volume_id,
+            "volume:macos:01234567-89ab-cdef-0123-456789abcdef"
+        );
+        assert_eq!(page.anchor_at_unix_ms, base + 120_000);
+        assert!(page.has_more);
+        assert_eq!(
+            page.episodes,
+            vec![PressureEpisodeRecord {
+                record_version: FFI_RECORD_VERSION,
+                level: PressureEpisodeLevel::Critical,
+                entered_at_unix_ms: base + 60_000,
+                exited_at_unix_ms: Some(base + 120_000),
+                policy_revision: 1,
+            }]
+        );
+
+        let at_escalation = engine
+            .get_pressure_episode_history(PressureEpisodeHistoryRequest {
+                record_version: FFI_RECORD_VERSION,
+                stable_volume_id: volume_id.to_owned(),
+                anchor_at_unix_ms: base + 60_000,
+                limit: 2,
+            })
+            .unwrap();
+        assert_eq!(at_escalation.episodes.len(), 2);
+        assert_eq!(
+            at_escalation.episodes[0].level,
+            PressureEpisodeLevel::Critical
+        );
+        assert_eq!(at_escalation.episodes[0].exited_at_unix_ms, None);
+        assert_eq!(
+            at_escalation.episodes[1].exited_at_unix_ms,
+            Some(base + 60_000)
+        );
+
+        for request in [
+            PressureEpisodeHistoryRequest {
+                record_version: FFI_RECORD_VERSION + 1,
+                stable_volume_id: volume_id.to_owned(),
+                anchor_at_unix_ms: base,
+                limit: 1,
+            },
+            PressureEpisodeHistoryRequest {
+                record_version: FFI_RECORD_VERSION,
+                stable_volume_id: volume_id.to_owned(),
+                anchor_at_unix_ms: base,
+                limit: 0,
+            },
+            PressureEpisodeHistoryRequest {
+                record_version: FFI_RECORD_VERSION,
+                stable_volume_id: volume_id.to_owned(),
+                anchor_at_unix_ms: -1,
+                limit: 1,
+            },
+            PressureEpisodeHistoryRequest {
+                record_version: FFI_RECORD_VERSION,
+                stable_volume_id: volume_id.to_owned(),
+                anchor_at_unix_ms: base + 180_000,
+                limit: 1,
+            },
+        ] {
+            assert_eq!(
+                engine.get_pressure_episode_history(request),
+                Err(EngineError::InvalidPressureEpisodeRequest)
+            );
+        }
         assert!(engine.close());
     }
 

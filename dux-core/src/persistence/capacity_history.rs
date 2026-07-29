@@ -638,19 +638,7 @@ pub(super) fn load_exact_raw_capacity_sample(
 ) -> Result<Option<StoredCapacitySample>, HistoryError> {
     let sampled_at_unix_ms = system_time_to_unix_ms(sampled_at, HistoryErrorKind::InvalidInput)?;
     run_bounded_query(connection, || {
-        connection
-            .query_row(
-                &format!(
-                    "{} WHERE volume_id = ?1 AND sample_kind = 'raw' AND sampled_at_unix_ms = ?2",
-                    sample_select()
-                ),
-                params![volume_id.as_str(), sampled_at_unix_ms],
-                raw_sample_row,
-            )
-            .optional()
-            .map_err(map_query_sql_error)?
-            .map(decode_sample_row)
-            .transpose()
+        load_exact_raw_capacity_sample_with_caller_budget(connection, volume_id, sampled_at_unix_ms)
     })
 }
 
@@ -857,21 +845,7 @@ fn load_raw_sample_at_or_before(
     at_or_before_ms: i64,
 ) -> Result<Option<StoredCapacitySample>, HistoryError> {
     run_bounded_query(connection, || {
-        connection
-            .query_row(
-                &format!(
-                    "{} WHERE volume_id = ?1 AND sample_kind = 'raw'
-                     AND sampled_at_unix_ms <= ?2
-                     ORDER BY sampled_at_unix_ms DESC LIMIT 1",
-                    sample_select()
-                ),
-                params![volume_id.as_str(), at_or_before_ms],
-                raw_sample_row,
-            )
-            .optional()
-            .map_err(map_query_sql_error)?
-            .map(decode_sample_row)
-            .transpose()
+        load_raw_sample_at_or_before_with_caller_budget(connection, volume_id, at_or_before_ms)
     })
 }
 
@@ -971,36 +945,98 @@ pub(super) fn load_pressure_episode_page(
     volume_id: &VolumeId,
     limit: usize,
 ) -> Result<Vec<StoredPressureEpisode>, HistoryError> {
+    load_pressure_episode_page_at(connection, volume_id, None, limit)
+}
+
+/// Load pressure history as it was known at one observation anchor. Episodes
+/// that start later are excluded; callers may project an exit after the anchor
+/// as still open at that point in time.
+pub(super) fn load_pressure_episode_page_at_anchor(
+    connection: &Connection,
+    volume_id: &VolumeId,
+    anchor_at: SystemTime,
+    limit: usize,
+) -> Result<Vec<StoredPressureEpisode>, HistoryError> {
+    let anchor_at_unix_ms = system_time_to_unix_ms(anchor_at, HistoryErrorKind::InvalidInput)?;
+    load_pressure_episode_page_at(connection, volume_id, Some(anchor_at_unix_ms), limit)
+}
+
+fn load_pressure_episode_page_at(
+    connection: &Connection,
+    volume_id: &VolumeId,
+    anchor_at_unix_ms: Option<i64>,
+    limit: usize,
+) -> Result<Vec<StoredPressureEpisode>, HistoryError> {
     if !(1..=MAX_PRESSURE_EPISODE_PAGE_SIZE).contains(&limit) {
         return Err(invalid());
     }
     let sql_limit = i64::try_from(limit + 1).map_err(|_| invalid())?;
     run_bounded_query(connection, || {
+        let volume = load_volume_observation_with_caller_budget(connection, volume_id)?
+            .ok_or_else(corrupt)?;
+        if let Some(anchor) = anchor_at_unix_ms {
+            if !volume.contains_sampled_ms(anchor) {
+                return Err(invalid());
+            }
+            // Every raw observation is a durable accepted anchor. Routine
+            // observations suppressed by the hourly cadence are represented
+            // only by the current volume row's exact last_seen timestamp.
+            // An arbitrary instant inside the volume lifetime is not evidence
+            // that the app accepted a capacity snapshot and must fail closed.
+            match load_exact_raw_capacity_sample_with_caller_budget(connection, volume_id, anchor)?
+            {
+                Some(sample) => {
+                    if sample.volume_id != *volume_id || !volume.contains_sample(&sample)? {
+                        return Err(corrupt());
+                    }
+                }
+                None if anchor != volume.last_seen_unix_ms => {
+                    return Err(invalid());
+                }
+                None => {
+                    // A suppressed current observation has no exact raw row,
+                    // but it must still extend an existing valid raw history.
+                    let Some(sample) = load_raw_sample_at_or_before_with_caller_budget(
+                        connection, volume_id, anchor,
+                    )?
+                    else {
+                        return Err(corrupt());
+                    };
+                    if sample.volume_id != *volume_id || !volume.contains_sample(&sample)? {
+                        return Err(corrupt());
+                    }
+                }
+            }
+        }
         let mut statement = connection
             .prepare(
                 "SELECT volume_id, pressure, entered_at_unix_ms, exited_at_unix_ms,
                         policy_revision
                  FROM disk_pressure_episodes
                  WHERE volume_id = ?1
+                   AND (?3 IS NULL OR entered_at_unix_ms <= ?3)
                  ORDER BY entered_at_unix_ms DESC, episode_id DESC
                  LIMIT ?2",
             )
             .map_err(map_query_sql_error)?;
         let rows = statement
-            .query_map(params![volume_id.as_str(), sql_limit], |row| {
-                let volume_id_text: String = row.get(0)?;
-                let pressure: String = row.get(1)?;
-                let entered_at_unix_ms: i64 = row.get(2)?;
-                let exited_at_unix_ms: Option<i64> = row.get(3)?;
-                let policy_revision: i64 = row.get(4)?;
-                Ok((
-                    volume_id_text,
-                    pressure,
-                    entered_at_unix_ms,
-                    exited_at_unix_ms,
-                    policy_revision,
-                ))
-            })
+            .query_map(
+                params![volume_id.as_str(), sql_limit, anchor_at_unix_ms],
+                |row| {
+                    let volume_id_text: String = row.get(0)?;
+                    let pressure: String = row.get(1)?;
+                    let entered_at_unix_ms: i64 = row.get(2)?;
+                    let exited_at_unix_ms: Option<i64> = row.get(3)?;
+                    let policy_revision: i64 = row.get(4)?;
+                    Ok((
+                        volume_id_text,
+                        pressure,
+                        entered_at_unix_ms,
+                        exited_at_unix_ms,
+                        policy_revision,
+                    ))
+                },
+            )
             .map_err(map_query_sql_error)?;
         let mut episodes = Vec::with_capacity(limit.min(64));
         for row in rows {
@@ -1027,19 +1063,36 @@ pub(super) fn load_pressure_episode_page(
                 policy_revision: u64::try_from(policy_revision).map_err(|_| corrupt())?,
             });
         }
-        if episodes.len() > limit {
-            episodes.pop();
-        }
-        // Newest-first rows must not overlap. The open uniqueness index covers
-        // simultaneous episodes, while this check covers malformed closed
-        // rows introduced by external corruption or an incomplete migration.
-        for pair in episodes.windows(2) {
-            if let Some(older_exit) = pair[1].exited_at
-                && older_exit > pair[0].entered_at
+        for episode in &episodes {
+            let entered_at_unix_ms =
+                system_time_to_unix_ms(episode.entered_at, HistoryErrorKind::CorruptData)?;
+            let exited_at_unix_ms = episode
+                .exited_at
+                .map(|value| system_time_to_unix_ms(value, HistoryErrorKind::CorruptData))
+                .transpose()?;
+            if !volume.contains_sampled_ms(entered_at_unix_ms)
+                || exited_at_unix_ms.is_some_and(|value| !volume.contains_sampled_ms(value))
             {
                 return Err(corrupt());
             }
         }
+        // Validate the lookahead row too, so corruption exactly across the
+        // requested-page boundary cannot be hidden by truncation.
+        for (index, episode) in episodes.iter().enumerate() {
+            if index > 0 && episode.exited_at.is_none() {
+                return Err(corrupt());
+            }
+        }
+        for pair in episodes.windows(2) {
+            if pair[0].entered_at <= pair[1].entered_at
+                || pair[1]
+                    .exited_at
+                    .is_none_or(|older_exit| older_exit > pair[0].entered_at)
+            {
+                return Err(corrupt());
+            }
+        }
+        episodes.truncate(limit);
         Ok(episodes)
     })
 }
@@ -1271,6 +1324,48 @@ fn load_volume_observation_with_caller_budget(
         .optional()
         .map_err(map_query_sql_error)?
         .map(decode_volume_row)
+        .transpose()
+}
+
+fn load_exact_raw_capacity_sample_with_caller_budget(
+    connection: &Connection,
+    volume_id: &VolumeId,
+    sampled_at_unix_ms: i64,
+) -> Result<Option<StoredCapacitySample>, HistoryError> {
+    connection
+        .query_row(
+            &format!(
+                "{} WHERE volume_id = ?1 AND sample_kind = 'raw' AND sampled_at_unix_ms = ?2",
+                sample_select()
+            ),
+            params![volume_id.as_str(), sampled_at_unix_ms],
+            raw_sample_row,
+        )
+        .optional()
+        .map_err(map_query_sql_error)?
+        .map(decode_sample_row)
+        .transpose()
+}
+
+fn load_raw_sample_at_or_before_with_caller_budget(
+    connection: &Connection,
+    volume_id: &VolumeId,
+    at_or_before_ms: i64,
+) -> Result<Option<StoredCapacitySample>, HistoryError> {
+    connection
+        .query_row(
+            &format!(
+                "{} WHERE volume_id = ?1 AND sample_kind = 'raw'
+                 AND sampled_at_unix_ms <= ?2
+                 ORDER BY sampled_at_unix_ms DESC LIMIT 1",
+                sample_select()
+            ),
+            params![volume_id.as_str(), at_or_before_ms],
+            raw_sample_row,
+        )
+        .optional()
+        .map_err(map_query_sql_error)?
+        .map(decode_sample_row)
         .transpose()
 }
 
@@ -1634,6 +1729,84 @@ mod tests {
     }
 
     #[test]
+    fn pressure_episode_reader_accepts_only_provable_observation_anchors() {
+        let temp = TempDir::new().unwrap();
+        let store = StoreCoordinator::open(&temp.path().join("store/dux.sqlite3")).unwrap();
+        let volume = "volume:pressure-anchor";
+        let first_at = BASE_HOUR_MS;
+        let current_at = BASE_HOUR_MS + 100;
+        let id = VolumeId::new(volume).unwrap();
+
+        let first = sample_at(volume, first_at, 900, None, DiskPressure::Healthy);
+        assert_eq!(
+            store
+                .record_raw_capacity_sample(&first, CapacityWriteReason::Routine)
+                .unwrap(),
+            CapacityWriteOutcome::Inserted
+        );
+        let current = sample_at(volume, current_at, 890, None, DiskPressure::Healthy);
+        assert_eq!(
+            store
+                .record_raw_capacity_sample(&current, CapacityWriteReason::Routine)
+                .unwrap(),
+            CapacityWriteOutcome::Suppressed
+        );
+
+        assert!(
+            store
+                .load_pressure_episode_page_at_anchor(
+                    &id,
+                    UNIX_EPOCH + Duration::from_millis(first_at),
+                    10,
+                )
+                .unwrap()
+                .is_empty(),
+            "an exact durable raw observation is a valid historical anchor",
+        );
+        assert!(
+            store
+                .load_pressure_episode_page_at_anchor(
+                    &id,
+                    UNIX_EPOCH + Duration::from_millis(current_at),
+                    10,
+                )
+                .unwrap()
+                .is_empty(),
+            "current last_seen proves an accepted cadence-suppressed observation",
+        );
+        assert_eq!(
+            store
+                .load_pressure_episode_page_at_anchor(
+                    &id,
+                    UNIX_EPOCH + Duration::from_millis(first_at + 50),
+                    10,
+                )
+                .unwrap_err()
+                .kind,
+            HistoryErrorKind::InvalidInput,
+            "an arbitrary instant between accepted observations must fail closed",
+        );
+
+        store.with_connection(|connection| {
+            connection
+                .execute("DELETE FROM disk_samples WHERE volume_id = ?1", [volume])
+                .unwrap();
+        });
+        assert_eq!(
+            store
+                .load_pressure_episode_page_at_anchor(
+                    &id,
+                    UNIX_EPOCH + Duration::from_millis(current_at),
+                    10,
+                )
+                .unwrap_err()
+                .kind,
+            HistoryErrorKind::CorruptData,
+            "a current last_seen without the raw history it extends is corrupt",
+        );
+    }
+
+    #[test]
     fn pressure_episode_reader_rejects_overlapping_history() {
         let temp = TempDir::new().unwrap();
         let store = StoreCoordinator::open(&temp.path().join("store/dux.sqlite3")).unwrap();
@@ -1672,6 +1845,61 @@ mod tests {
                 .kind,
             HistoryErrorKind::CorruptData
         );
+    }
+
+    #[test]
+    fn pressure_episode_reader_validates_lookahead_boundary_and_open_order() {
+        for (case, older_exit) in [("overlap", Some(70_i64)), ("older-open", None)] {
+            let temp = TempDir::new().unwrap();
+            let store = StoreCoordinator::open(&temp.path().join("store/dux.sqlite3")).unwrap();
+            let volume = format!("volume:pressure-{case}");
+            for offset in [0_u64, 100] {
+                let sample = sample_at(
+                    &volume,
+                    BASE_HOUR_MS + offset,
+                    900,
+                    None,
+                    DiskPressure::Healthy,
+                );
+                store
+                    .record_raw_capacity_sample(&sample, CapacityWriteReason::Routine)
+                    .unwrap();
+            }
+            let base = i64::try_from(BASE_HOUR_MS).unwrap();
+            store.with_connection(|connection| {
+                connection
+                    .execute(
+                        "INSERT INTO disk_pressure_episodes (
+                             volume_id, pressure, entered_at_unix_ms,
+                             exited_at_unix_ms, policy_revision
+                         ) VALUES (?1, 'warning', ?2, ?3, 0)",
+                        params![
+                            volume.as_str(),
+                            base + 20,
+                            older_exit.map(|value| base + value)
+                        ],
+                    )
+                    .unwrap();
+                connection
+                    .execute(
+                        "INSERT INTO disk_pressure_episodes (
+                             volume_id, pressure, entered_at_unix_ms,
+                             exited_at_unix_ms, policy_revision
+                         ) VALUES (?1, 'critical', ?2, ?3, 0)",
+                        params![volume.as_str(), base + 60, base + 80],
+                    )
+                    .unwrap();
+            });
+
+            assert_eq!(
+                store
+                    .load_pressure_episode_page(&VolumeId::new(&volume).unwrap(), 1)
+                    .unwrap_err()
+                    .kind,
+                HistoryErrorKind::CorruptData,
+                "{case} hidden in the lookahead row must fail closed",
+            );
+        }
     }
 
     #[test]

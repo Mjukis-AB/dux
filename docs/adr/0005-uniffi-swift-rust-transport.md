@@ -56,7 +56,7 @@ Those capabilities retain their own gates below and in ADR 0004.
 
 ## Current realization
 
-FFI contract v34 now carries the real shared engine session first introduced in
+FFI contract v36 now carries the real shared engine session first introduced in
 v4. The app supplies input-only private data/cache roots; storage paths never
 return across the boundary. Eight maintenance kinds use opaque task objects
 with nonblocking versioned path-free poll/cancel records, and exact Explorer
@@ -75,6 +75,26 @@ immediate protection strengthening. A repository regression pins that trusted
 Settings → AppModel → EngineService → UniFFI call graph. The internal
 permanent-safe action remains Debug-only; this contract change does not satisfy
 or bypass the Release gates below.
+
+Contract v35 adds a distinct effect-free Rust-target dry-check task that
+consumes one exact opaque review but cannot create an effect witness or accept
+a platform driver. Its path-free terminal result has zero-effect accounting
+and cannot be upgraded or chained into permanent cleanup.
+
+Contract v36 adds one synchronous, bounded pressure-episode history query. Its
+request contains only record version, stable startup-volume identity, exact
+capacity anchor, and a 1–64 limit. The newest-first response contains only
+Warning/Critical level, entry time, optional recovery/escalation time, policy
+revision, and a truncation bit. Rust validates the referenced volume lifetime,
+proves the anchor as an exact raw sample or the current exact `last_seen`
+observation when hourly cadence suppressed its raw row, and rejects arbitrary
+between-observation timestamps. It also validates strict order, non-overlap,
+single-newest-open shape, and one lookahead row;
+Swift independently repeats the version, identity, anchor, interval, ordering,
+open-state, and truncation checks off the main actor. The query cannot express
+a path, candidate, recommendation, plan, approval, AI input, or mutation
+command. Explorer and the menu-bar popover therefore consume it only as
+anchored presentation telemetry.
 
 Contract v9 adds one path-free newest-available review acquisition. The core
 selects the deterministic newest succeeded, non-tombstoned snapshot and then

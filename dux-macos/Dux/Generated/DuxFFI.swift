@@ -934,6 +934,12 @@ public protocol DuxEngineProtocol: AnyObject, Sendable {
     func getPermanentCleanupPolicy() throws  -> PermanentCleanupPolicyStatus
 
     /**
+     * Return a bounded newest-first pressure history as of one accepted
+     * capacity anchor. The response is observation-only telemetry.
+     */
+    func getPressureEpisodeHistory(request: PressureEpisodeHistoryRequest) throws  -> PressureEpisodeHistoryStatus
+
+    /**
      * Statically inspect one exact Cargo file and return an engine-bound,
      * consume-once preview. Inspection does not run the selected bytes or
      * change durable enrollment.
@@ -1244,6 +1250,19 @@ open func getPermanentCleanupPolicy()throws  -> PermanentCleanupPolicyStatus  {
     return try  FfiConverterTypePermanentCleanupPolicyStatus_lift(try rustCallWithError(FfiConverterTypePermanentCleanupPolicyError_lift) {
     uniffi_dux_ffi_fn_method_duxengine_get_permanent_cleanup_policy(
             self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+    /**
+     * Return a bounded newest-first pressure history as of one accepted
+     * capacity anchor. The response is observation-only telemetry.
+     */
+open func getPressureEpisodeHistory(request: PressureEpisodeHistoryRequest)throws  -> PressureEpisodeHistoryStatus  {
+    return try  FfiConverterTypePressureEpisodeHistoryStatus_lift(try rustCallWithError(FfiConverterTypeEngineError_lift) {
+    uniffi_dux_ffi_fn_method_duxengine_get_pressure_episode_history(
+            self.uniffiCloneHandle(),
+        FfiConverterTypePressureEpisodeHistoryRequest_lower(request),$0
     )
 })
 }
@@ -5753,6 +5772,208 @@ public func FfiConverterTypePermanentCleanupPolicyUpdate_lift(_ buf: RustBuffer)
 #endif
 public func FfiConverterTypePermanentCleanupPolicyUpdate_lower(_ value: PermanentCleanupPolicyUpdate) -> RustBuffer {
     return FfiConverterTypePermanentCleanupPolicyUpdate.lower(value)
+}
+
+
+/**
+ * Bounded, path-free pressure-history request anchored to one accepted
+ * startup-volume sample.
+ */
+public struct PressureEpisodeHistoryRequest: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let stableVolumeId: String
+    public let anchorAtUnixMs: Int64
+    public let limit: UInt16
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, stableVolumeId: String, anchorAtUnixMs: Int64, limit: UInt16) {
+        self.recordVersion = recordVersion
+        self.stableVolumeId = stableVolumeId
+        self.anchorAtUnixMs = anchorAtUnixMs
+        self.limit = limit
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension PressureEpisodeHistoryRequest: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePressureEpisodeHistoryRequest: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PressureEpisodeHistoryRequest {
+        return
+            try PressureEpisodeHistoryRequest(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                stableVolumeId: FfiConverterString.read(from: &buf),
+                anchorAtUnixMs: FfiConverterInt64.read(from: &buf),
+                limit: FfiConverterUInt16.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PressureEpisodeHistoryRequest, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterString.write(value.stableVolumeId, into: &buf)
+        FfiConverterInt64.write(value.anchorAtUnixMs, into: &buf)
+        FfiConverterUInt16.write(value.limit, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePressureEpisodeHistoryRequest_lift(_ buf: RustBuffer) throws -> PressureEpisodeHistoryRequest {
+    return try FfiConverterTypePressureEpisodeHistoryRequest.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePressureEpisodeHistoryRequest_lower(_ value: PressureEpisodeHistoryRequest) -> RustBuffer {
+    return FfiConverterTypePressureEpisodeHistoryRequest.lower(value)
+}
+
+
+/**
+ * Newest-first pressure intervals as of `anchor_at_unix_ms`. This telemetry
+ * contains no paths, candidate identity, plan, approval, or mutation command.
+ */
+public struct PressureEpisodeHistoryStatus: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let stableVolumeId: String
+    public let anchorAtUnixMs: Int64
+    public let episodes: [PressureEpisodeRecord]
+    public let hasMore: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, stableVolumeId: String, anchorAtUnixMs: Int64, episodes: [PressureEpisodeRecord], hasMore: Bool) {
+        self.recordVersion = recordVersion
+        self.stableVolumeId = stableVolumeId
+        self.anchorAtUnixMs = anchorAtUnixMs
+        self.episodes = episodes
+        self.hasMore = hasMore
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension PressureEpisodeHistoryStatus: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePressureEpisodeHistoryStatus: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PressureEpisodeHistoryStatus {
+        return
+            try PressureEpisodeHistoryStatus(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                stableVolumeId: FfiConverterString.read(from: &buf),
+                anchorAtUnixMs: FfiConverterInt64.read(from: &buf),
+                episodes: FfiConverterSequenceTypePressureEpisodeRecord.read(from: &buf),
+                hasMore: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PressureEpisodeHistoryStatus, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterString.write(value.stableVolumeId, into: &buf)
+        FfiConverterInt64.write(value.anchorAtUnixMs, into: &buf)
+        FfiConverterSequenceTypePressureEpisodeRecord.write(value.episodes, into: &buf)
+        FfiConverterBool.write(value.hasMore, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePressureEpisodeHistoryStatus_lift(_ buf: RustBuffer) throws -> PressureEpisodeHistoryStatus {
+    return try FfiConverterTypePressureEpisodeHistoryStatus.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePressureEpisodeHistoryStatus_lower(_ value: PressureEpisodeHistoryStatus) -> RustBuffer {
+    return FfiConverterTypePressureEpisodeHistoryStatus.lower(value)
+}
+
+
+public struct PressureEpisodeRecord: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let level: PressureEpisodeLevel
+    public let enteredAtUnixMs: Int64
+    public let exitedAtUnixMs: Int64?
+    public let policyRevision: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, level: PressureEpisodeLevel, enteredAtUnixMs: Int64, exitedAtUnixMs: Int64?, policyRevision: UInt64) {
+        self.recordVersion = recordVersion
+        self.level = level
+        self.enteredAtUnixMs = enteredAtUnixMs
+        self.exitedAtUnixMs = exitedAtUnixMs
+        self.policyRevision = policyRevision
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension PressureEpisodeRecord: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePressureEpisodeRecord: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PressureEpisodeRecord {
+        return
+            try PressureEpisodeRecord(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                level: FfiConverterTypePressureEpisodeLevel.read(from: &buf),
+                enteredAtUnixMs: FfiConverterInt64.read(from: &buf),
+                exitedAtUnixMs: FfiConverterOptionInt64.read(from: &buf),
+                policyRevision: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PressureEpisodeRecord, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterTypePressureEpisodeLevel.write(value.level, into: &buf)
+        FfiConverterInt64.write(value.enteredAtUnixMs, into: &buf)
+        FfiConverterOptionInt64.write(value.exitedAtUnixMs, into: &buf)
+        FfiConverterUInt64.write(value.policyRevision, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePressureEpisodeRecord_lift(_ buf: RustBuffer) throws -> PressureEpisodeRecord {
+    return try FfiConverterTypePressureEpisodeRecord.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePressureEpisodeRecord_lower(_ value: PressureEpisodeRecord) -> RustBuffer {
+    return FfiConverterTypePressureEpisodeRecord.lower(value)
 }
 
 
@@ -10888,6 +11109,7 @@ public enum EngineError: Swift.Error, Equatable, Hashable, Foundation.LocalizedE
     case RegistryUnavailable
     case InvalidScanId
     case InvalidCapacityObservation
+    case InvalidPressureEpisodeRequest
     case ConflictingCapacityObservation
     case SupersededCapacityObservation
     case ScanNotFound
@@ -10956,39 +11178,40 @@ public struct FfiConverterTypeEngineError: FfiConverterRustBuffer {
         case 4: return .RegistryUnavailable
         case 5: return .InvalidScanId
         case 6: return .InvalidCapacityObservation
-        case 7: return .ConflictingCapacityObservation
-        case 8: return .SupersededCapacityObservation
-        case 9: return .ScanNotFound
-        case 10: return .SnapshotUnavailable
-        case 11: return .ReviewExpired
-        case 12: return .SnapshotNodeNotFound
-        case 13: return .SnapshotNodeNotDirectory
-        case 14: return .InvalidSnapshotNodePage
-        case 15: return .InvalidSnapshotTreemapBudget
-        case 16: return .InvalidSnapshotLargeFileRequest
-        case 17: return .InvalidSnapshotLiveTargetRequest
-        case 18: return .SnapshotLiveTargetUnsupported
-        case 19: return .SnapshotLivePathUnavailable
-        case 20: return .SnapshotLivePathMissing
-        case 21: return .SnapshotLivePathSymlink
-        case 22: return .SnapshotLivePathCrossVolume
-        case 23: return .SnapshotLivePathChanged
-        case 24: return .SnapshotLivePathAccessDenied
-        case 25: return .InvalidScanCoverageDetailsRequest
-        case 26: return .InvalidCandidateDetailRequest
-        case 27: return .CandidateEvaluationNotSucceeded
-        case 28: return .CandidateNotFound
-        case 29: return .CandidateCursorOutOfRange
-        case 30: return .CandidateReviewNotReviewable
-        case 31: return .ReadOnlyStore
-        case 32: return .IncompatibleSchema
-        case 33: return .Busy
-        case 34: return .UnsafeStorage
-        case 35: return .BudgetExceeded
-        case 36: return .CorruptData
-        case 37: return .IncompatibleSnapshot
-        case 38: return .OutcomeUnknown
-        case 39: return .InternalState
+        case 7: return .InvalidPressureEpisodeRequest
+        case 8: return .ConflictingCapacityObservation
+        case 9: return .SupersededCapacityObservation
+        case 10: return .ScanNotFound
+        case 11: return .SnapshotUnavailable
+        case 12: return .ReviewExpired
+        case 13: return .SnapshotNodeNotFound
+        case 14: return .SnapshotNodeNotDirectory
+        case 15: return .InvalidSnapshotNodePage
+        case 16: return .InvalidSnapshotTreemapBudget
+        case 17: return .InvalidSnapshotLargeFileRequest
+        case 18: return .InvalidSnapshotLiveTargetRequest
+        case 19: return .SnapshotLiveTargetUnsupported
+        case 20: return .SnapshotLivePathUnavailable
+        case 21: return .SnapshotLivePathMissing
+        case 22: return .SnapshotLivePathSymlink
+        case 23: return .SnapshotLivePathCrossVolume
+        case 24: return .SnapshotLivePathChanged
+        case 25: return .SnapshotLivePathAccessDenied
+        case 26: return .InvalidScanCoverageDetailsRequest
+        case 27: return .InvalidCandidateDetailRequest
+        case 28: return .CandidateEvaluationNotSucceeded
+        case 29: return .CandidateNotFound
+        case 30: return .CandidateCursorOutOfRange
+        case 31: return .CandidateReviewNotReviewable
+        case 32: return .ReadOnlyStore
+        case 33: return .IncompatibleSchema
+        case 34: return .Busy
+        case 35: return .UnsafeStorage
+        case 36: return .BudgetExceeded
+        case 37: return .CorruptData
+        case 38: return .IncompatibleSnapshot
+        case 39: return .OutcomeUnknown
+        case 40: return .InternalState
 
          default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -11025,136 +11248,140 @@ public struct FfiConverterTypeEngineError: FfiConverterRustBuffer {
             writeInt(&buf, Int32(6))
 
 
-        case .ConflictingCapacityObservation:
+        case .InvalidPressureEpisodeRequest:
             writeInt(&buf, Int32(7))
 
 
-        case .SupersededCapacityObservation:
+        case .ConflictingCapacityObservation:
             writeInt(&buf, Int32(8))
 
 
-        case .ScanNotFound:
+        case .SupersededCapacityObservation:
             writeInt(&buf, Int32(9))
 
 
-        case .SnapshotUnavailable:
+        case .ScanNotFound:
             writeInt(&buf, Int32(10))
 
 
-        case .ReviewExpired:
+        case .SnapshotUnavailable:
             writeInt(&buf, Int32(11))
 
 
-        case .SnapshotNodeNotFound:
+        case .ReviewExpired:
             writeInt(&buf, Int32(12))
 
 
-        case .SnapshotNodeNotDirectory:
+        case .SnapshotNodeNotFound:
             writeInt(&buf, Int32(13))
 
 
-        case .InvalidSnapshotNodePage:
+        case .SnapshotNodeNotDirectory:
             writeInt(&buf, Int32(14))
 
 
-        case .InvalidSnapshotTreemapBudget:
+        case .InvalidSnapshotNodePage:
             writeInt(&buf, Int32(15))
 
 
-        case .InvalidSnapshotLargeFileRequest:
+        case .InvalidSnapshotTreemapBudget:
             writeInt(&buf, Int32(16))
 
 
-        case .InvalidSnapshotLiveTargetRequest:
+        case .InvalidSnapshotLargeFileRequest:
             writeInt(&buf, Int32(17))
 
 
-        case .SnapshotLiveTargetUnsupported:
+        case .InvalidSnapshotLiveTargetRequest:
             writeInt(&buf, Int32(18))
 
 
-        case .SnapshotLivePathUnavailable:
+        case .SnapshotLiveTargetUnsupported:
             writeInt(&buf, Int32(19))
 
 
-        case .SnapshotLivePathMissing:
+        case .SnapshotLivePathUnavailable:
             writeInt(&buf, Int32(20))
 
 
-        case .SnapshotLivePathSymlink:
+        case .SnapshotLivePathMissing:
             writeInt(&buf, Int32(21))
 
 
-        case .SnapshotLivePathCrossVolume:
+        case .SnapshotLivePathSymlink:
             writeInt(&buf, Int32(22))
 
 
-        case .SnapshotLivePathChanged:
+        case .SnapshotLivePathCrossVolume:
             writeInt(&buf, Int32(23))
 
 
-        case .SnapshotLivePathAccessDenied:
+        case .SnapshotLivePathChanged:
             writeInt(&buf, Int32(24))
 
 
-        case .InvalidScanCoverageDetailsRequest:
+        case .SnapshotLivePathAccessDenied:
             writeInt(&buf, Int32(25))
 
 
-        case .InvalidCandidateDetailRequest:
+        case .InvalidScanCoverageDetailsRequest:
             writeInt(&buf, Int32(26))
 
 
-        case .CandidateEvaluationNotSucceeded:
+        case .InvalidCandidateDetailRequest:
             writeInt(&buf, Int32(27))
 
 
-        case .CandidateNotFound:
+        case .CandidateEvaluationNotSucceeded:
             writeInt(&buf, Int32(28))
 
 
-        case .CandidateCursorOutOfRange:
+        case .CandidateNotFound:
             writeInt(&buf, Int32(29))
 
 
-        case .CandidateReviewNotReviewable:
+        case .CandidateCursorOutOfRange:
             writeInt(&buf, Int32(30))
 
 
-        case .ReadOnlyStore:
+        case .CandidateReviewNotReviewable:
             writeInt(&buf, Int32(31))
 
 
-        case .IncompatibleSchema:
+        case .ReadOnlyStore:
             writeInt(&buf, Int32(32))
 
 
-        case .Busy:
+        case .IncompatibleSchema:
             writeInt(&buf, Int32(33))
 
 
-        case .UnsafeStorage:
+        case .Busy:
             writeInt(&buf, Int32(34))
 
 
-        case .BudgetExceeded:
+        case .UnsafeStorage:
             writeInt(&buf, Int32(35))
 
 
-        case .CorruptData:
+        case .BudgetExceeded:
             writeInt(&buf, Int32(36))
 
 
-        case .IncompatibleSnapshot:
+        case .CorruptData:
             writeInt(&buf, Int32(37))
 
 
-        case .OutcomeUnknown:
+        case .IncompatibleSnapshot:
             writeInt(&buf, Int32(38))
 
 
-        case .InternalState:
+        case .OutcomeUnknown:
             writeInt(&buf, Int32(39))
+
+
+        case .InternalState:
+            writeInt(&buf, Int32(40))
 
         }
     }
@@ -12304,6 +12531,73 @@ public func FfiConverterTypePermanentCleanupPolicySource_lift(_ buf: RustBuffer)
 #endif
 public func FfiConverterTypePermanentCleanupPolicySource_lower(_ value: PermanentCleanupPolicySource) -> RustBuffer {
     return FfiConverterTypePermanentCleanupPolicySource.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum PressureEpisodeLevel: Equatable, Hashable {
+
+    case warning
+    case critical
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension PressureEpisodeLevel: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePressureEpisodeLevel: FfiConverterRustBuffer {
+    typealias SwiftType = PressureEpisodeLevel
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PressureEpisodeLevel {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .warning
+
+        case 2: return .critical
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: PressureEpisodeLevel, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .warning:
+            writeInt(&buf, Int32(1))
+
+
+        case .critical:
+            writeInt(&buf, Int32(2))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePressureEpisodeLevel_lift(_ buf: RustBuffer) throws -> PressureEpisodeLevel {
+    return try FfiConverterTypePressureEpisodeLevel.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePressureEpisodeLevel_lower(_ value: PressureEpisodeLevel) -> RustBuffer {
+    return FfiConverterTypePressureEpisodeLevel.lower(value)
 }
 
 
@@ -17110,6 +17404,31 @@ fileprivate struct FfiConverterSequenceTypeHistoricalScanSummary: FfiConverterRu
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypePressureEpisodeRecord: FfiConverterRustBuffer {
+    typealias SwiftType = [PressureEpisodeRecord]
+
+    public static func write(_ value: [PressureEpisodeRecord], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypePressureEpisodeRecord.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [PressureEpisodeRecord] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [PressureEpisodeRecord]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypePressureEpisodeRecord.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeScanEvent: FfiConverterRustBuffer {
     typealias SwiftType = [ScanEvent]
 
@@ -17389,6 +17708,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_get_permanent_cleanup_policy() != 28759) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_duxengine_get_pressure_episode_history() != 13596) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_inspect_direct_cargo_enrollment() != 42063) {

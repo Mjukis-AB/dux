@@ -35,8 +35,17 @@ its entry time, optional Healthy-recovery time, and policy revision. A
 Warning→Critical change closes the Warning episode and opens a Critical one at
 the same observation time; Unknown observations never open or close an
 episode. Episode writes occur in the same transaction as the raw sample and
-bounded readers reject malformed or overlapping rows. A later retention slice
-will define the episode horizon separately from raw and daily samples.
+bounded readers reject malformed or overlapping rows. The public reader is
+anchored to one accepted capacity observation, returns at most 64 newest-first
+records, validates one additional lookahead row before truncation, and treats
+an exit recorded after the anchor as still open at that observation. It also
+requires every interval to remain within the referenced volume lifetime and
+permits only the newest record to be open. An accepted anchor is provable as
+either an exact durable raw sample or the volume's exact current `last_seen`
+timestamp when hourly cadence suppressed that observation's raw row; an
+arbitrary timestamp merely between `first_seen` and `last_seen` is rejected.
+A later retention slice will define the episode horizon separately from raw
+and daily samples.
 
 Trend readers use the newest raw sample at or before the requested observation
 time as the anchor. Twenty-four-hour and seven-day changes compare the newest

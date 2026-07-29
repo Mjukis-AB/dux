@@ -409,11 +409,6 @@ EXCEPTIONS = {
         "rust-filesystem-effect",
         "test:retained_review_boundary_rejects_scan_root_replacement",
     ),
-    "test-approved-session-target-change": ExceptionSpec(
-        "dux-core/src/engine/registry_tests.rs",
-        "rust-filesystem-effect",
-        "test:engine_executes_ordered_permanent_safe_session_and_records_partial_outcome",
-    ),
     "cache-write-failure-temp-remove": ExceptionSpec(
         "dux-core/src/cache/mod.rs", "rust-filesystem-effect", "save_cache"
     ),
@@ -755,7 +750,6 @@ EXCEPTION_PRIMITIVES = {
     "test-exact-review-replacement-rename-away": "rename",
     "test-exact-review-replacement-remove-root": "remove_dir_all",
     "test-exact-review-replacement-rename-back": "rename",
-    "test-approved-session-target-change": "remove_file",
     "cache-write-failure-temp-remove": "remove_file",
     "cache-atomic-publish": "rename",
     "cache-publish-failure-temp-remove": "remove_file",
@@ -846,7 +840,7 @@ CLIPPY_SUPPRESSION_COUNTS = {
     "dux-core/src/planner/cargo_workspace_glob.rs": 2,
     "dux-core/src/planner/rust_target_cargo_tests.rs": 1,
     "dux-core/src/planner/rust_target_source_tests.rs": 2,
-    "dux-core/src/engine/registry_tests.rs": 7,
+    "dux-core/src/engine/registry_tests.rs": 6,
     "dux-core/src/engine/volume_status.rs": 1,
     "dux-core/src/persistence/persistence_tests.rs": 3,
     "dux-core/src/persistence/cleanup_journal/tests.rs": 1,

@@ -1287,6 +1287,25 @@ impl EngineHandle {
         super::volume_status::load_capacity_trend(&self.inner.store, volume_id, anchor_at)
     }
 
+    /// Load a bounded newest-first page of durable Warning/Critical pressure
+    /// intervals. This path-free telemetry grants no cleanup authority.
+    pub fn pressure_episode_history(
+        &self,
+        volume_id: &crate::domain::VolumeId,
+        anchor_at: SystemTime,
+        limit: usize,
+    ) -> Result<super::PressureEpisodeHistory, super::PressureEpisodeHistoryError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(super::PressureEpisodeHistoryError::Closed);
+        }
+        super::volume_status::load_pressure_episode_history(
+            &self.inner.store,
+            volume_id,
+            anchor_at,
+            limit,
+        )
+    }
+
     /// Acquire one exact Explorer-only review lease by durable scan identity.
     ///
     /// The scan observation used to find the reference grants no authority:

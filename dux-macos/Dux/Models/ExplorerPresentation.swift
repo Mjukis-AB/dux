@@ -28,6 +28,11 @@ enum ExplorerAccessibility {
     static let total = "explorer-capacity-total"
     static let pressure = "explorer-pressure"
     static let freshness = "explorer-capacity-freshness"
+    static let capacityHistoryCard = "explorer-capacity-history-card"
+    static let capacityHistoryStatus = "explorer-capacity-history-status"
+    static let capacityHistoryChart = "explorer-capacity-history-chart"
+    static let pressureEpisodeTimeline = "explorer-pressure-episode-timeline"
+    static let pressureEpisodeList = "explorer-pressure-episode-list"
     static let scanCard = "explorer-scan-card"
     static let scanStatus = "explorer-scan-status"
     static let coverage = "explorer-coverage"
@@ -145,6 +150,11 @@ enum ExplorerAccessibility {
         total,
         pressure,
         freshness,
+        capacityHistoryCard,
+        capacityHistoryStatus,
+        capacityHistoryChart,
+        pressureEpisodeTimeline,
+        pressureEpisodeList,
         scanCard,
         scanStatus,
         coverage,

@@ -164,6 +164,50 @@ struct VolumeCapacityTrend: Equatable, Sendable {
     let points: [VolumeCapacityTrendPoint]
 }
 
+enum VolumePressureEpisodeLevel: Equatable, Sendable {
+    case warning
+    case critical
+}
+
+struct VolumePressureEpisode: Equatable, Sendable, Identifiable {
+    let level: VolumePressureEpisodeLevel
+    let enteredAt: Date
+    let exitedAt: Date?
+    let policyRevision: UInt64
+
+    var id: String {
+        "\(level)-\(enteredAt.timeIntervalSince1970.bitPattern)"
+    }
+}
+
+struct VolumePressureHistory: Equatable, Sendable {
+    let stableVolumeID: String
+    let anchorAt: Date
+    let episodes: [VolumePressureEpisode]
+    let hasMore: Bool
+}
+
+enum VolumePressureHistoryFailure: Equatable, Sendable {
+    case unavailable
+}
+
+enum VolumePressureHistoryState: Equatable, Sendable {
+    case idle
+    case loading
+    case loaded(VolumePressureHistory)
+    case stale(VolumePressureHistory, VolumePressureHistoryFailure)
+    case failed(VolumePressureHistoryFailure)
+
+    var history: VolumePressureHistory? {
+        switch self {
+        case let .loaded(history), let .stale(history, _):
+            history
+        case .idle, .loading, .failed:
+            nil
+        }
+    }
+}
+
 enum VolumeCapacityState: Equatable {
     case idle
     case loading

@@ -399,7 +399,7 @@ final class EngineServiceTests: XCTestCase {
         // DUX-DESTRUCTIVE: allow=test-swift-retry-obstruction-remove -- remove only this test fixture's deliberate file obstruction
         try FileManager.default.removeItem(at: dataRoot)
         let status = try await service.loadStatus()
-        XCTAssertEqual(status.ffiContractVersion, 35)
+        XCTAssertEqual(status.ffiContractVersion, 36)
         let closed = await service.close()
         XCTAssertTrue(closed)
     }
@@ -409,7 +409,7 @@ final class EngineServiceTests: XCTestCase {
         let result = try await EngineService(engine: fixture.engine).loadStatus()
 
         XCTAssertEqual(result.libraryVersion, "0.5.0")
-        XCTAssertEqual(result.ffiContractVersion, 35)
+        XCTAssertEqual(result.ffiContractVersion, 36)
         XCTAssertTrue(result.executedOffMainThread)
     }
 
@@ -1597,8 +1597,9 @@ final class EngineServiceTests: XCTestCase {
         let base: TimeInterval = 1_800_000_000
         let available: [UInt64] = [900, 800, 700, 650]
         let offsets: [TimeInterval] = [0, 2 * day, 7 * day, 8 * day]
+        var observedVolumeID: String?
         for (offset, bytes) in zip(offsets, available) {
-            _ = try await service.observeVolumeCapacity(
+            observedVolumeID = try await service.observeVolumeCapacity(
                 VolumeCapacitySnapshot(
                     stableVolumeID: volumeID,
                     displayName: "Macintosh HD",
@@ -1616,11 +1617,11 @@ final class EngineServiceTests: XCTestCase {
                     historyDisposition: nil,
                     sampledAt: Date(timeIntervalSince1970: base + offset)
                 )
-            )
+            ).stableVolumeID
         }
 
         let trend = try await service.loadCapacityTrend(
-            stableVolumeID: volumeID,
+            stableVolumeID: try XCTUnwrap(observedVolumeID),
             at: Date(timeIntervalSince1970: base + 8 * day + 1)
         )
         XCTAssertEqual(trend.stableVolumeID, "volume:macos:01234567-89ab-cdef-0123-456789abcdef")
@@ -1629,6 +1630,207 @@ final class EngineServiceTests: XCTestCase {
         XCTAssertEqual(trend.change7d?.availableBytes, -250)
         XCTAssertEqual(trend.points.map(\.availableBytes), [900, 800, 700, 650])
         XCTAssertEqual(trend.points.map(\.source), [.raw, .raw, .raw, .raw])
+    }
+
+    func testCadenceSuppressedAnchorUsesOlderDurableTrendAndExactPressureAnchor() async throws {
+        let fixture = try TestEngineFixture()
+        let service = EngineService(engine: fixture.engine)
+        let volumeID = "01234567-89AB-CDEF-0123-456789ABCDEF"
+        let base: TimeInterval = 1_800_000_000
+        var observedVolumeID: String?
+
+        for (offset, bytes) in [(0.0, UInt64(900)), (60.0, 890)] {
+            observedVolumeID = try await service.observeVolumeCapacity(
+                VolumeCapacitySnapshot(
+                    stableVolumeID: volumeID,
+                    displayName: "Macintosh HD",
+                    filesystem: "APFS",
+                    isInternal: true,
+                    isRemovable: false,
+                    totalBytes: 1_000,
+                    filesystemAvailableBytes: bytes,
+                    importantAvailableBytes: bytes,
+                    effectiveAvailableBytes: bytes,
+                    availabilityBasis: .importantUsage,
+                    pressure: .unknown,
+                    criticalBoundaryBytes: nil,
+                    warningBoundaryBytes: nil,
+                    historyDisposition: nil,
+                    sampledAt: Date(timeIntervalSince1970: base + offset)
+                )
+            ).stableVolumeID
+        }
+
+        let stableVolumeID = try XCTUnwrap(observedVolumeID)
+        let currentAnchor = Date(timeIntervalSince1970: base + 60)
+        let trend = try await service.loadCapacityTrend(
+            stableVolumeID: stableVolumeID,
+            at: currentAnchor
+        )
+        XCTAssertEqual(trend.sampledAt, Date(timeIntervalSince1970: base))
+        XCTAssertLessThan(trend.sampledAt, currentAnchor)
+
+        let history = try await service.loadPressureEpisodeHistory(
+            stableVolumeID: stableVolumeID,
+            at: currentAnchor,
+            limit: 64
+        )
+        XCTAssertEqual(history.anchorAt, currentAnchor)
+        XCTAssertTrue(history.episodes.isEmpty)
+
+        do {
+            _ = try await service.loadPressureEpisodeHistory(
+                stableVolumeID: stableVolumeID,
+                at: Date(timeIntervalSince1970: base + 30),
+                limit: 64
+            )
+            XCTFail("Expected an unobserved between-sample anchor to fail closed")
+        } catch let error as EngineServiceError {
+            guard case .unexpected = error else {
+                return XCTFail("Expected a typed invalid request response, got \(error)")
+            }
+        }
+    }
+
+    func testPressureEpisodeHistoryRoundTripIsAnchoredAndNewestFirst() async throws {
+        let fixture = try TestEngineFixture()
+        let service = EngineService(engine: fixture.engine)
+        let volumeID = "01234567-89AB-CDEF-0123-456789ABCDEF"
+        let base: TimeInterval = 1_800_000_000
+        var observedVolumeID: String?
+        _ = try fixture.engine.setDiskPressurePolicy(
+            input: PressurePolicyInput(
+                recordVersion: 1,
+                criticalAvailableBytes: 100,
+                criticalAvailableBasisPoints: 1_000,
+                warningAvailableBytes: 300,
+                warningAvailableBasisPoints: 3_000,
+                recoveryBytes: 20,
+                recoveryBasisPoints: 100
+            )
+        )
+        for (offset, bytes) in [(0.0, UInt64(250)), (60.0, 50), (120.0, 900)] {
+            observedVolumeID = try await service.observeVolumeCapacity(
+                VolumeCapacitySnapshot(
+                    stableVolumeID: volumeID,
+                    displayName: "Macintosh HD",
+                    filesystem: "APFS",
+                    isInternal: true,
+                    isRemovable: false,
+                    totalBytes: 1_000,
+                    filesystemAvailableBytes: bytes,
+                    importantAvailableBytes: bytes,
+                    effectiveAvailableBytes: bytes,
+                    availabilityBasis: .importantUsage,
+                    pressure: .unknown,
+                    criticalBoundaryBytes: nil,
+                    warningBoundaryBytes: nil,
+                    historyDisposition: nil,
+                    sampledAt: Date(timeIntervalSince1970: base + offset)
+                )
+            ).stableVolumeID
+        }
+
+        let history = try await service.loadPressureEpisodeHistory(
+            stableVolumeID: try XCTUnwrap(observedVolumeID),
+            at: Date(timeIntervalSince1970: base + 120),
+            limit: 64
+        )
+        XCTAssertEqual(
+            history.stableVolumeID,
+            "volume:macos:01234567-89ab-cdef-0123-456789abcdef"
+        )
+        XCTAssertEqual(history.anchorAt, Date(timeIntervalSince1970: base + 120))
+        XCTAssertFalse(history.hasMore)
+        XCTAssertEqual(history.episodes.map(\.level), [.critical, .warning])
+        XCTAssertEqual(history.episodes[0].enteredAt, Date(timeIntervalSince1970: base + 60))
+        XCTAssertEqual(history.episodes[0].exitedAt, Date(timeIntervalSince1970: base + 120))
+        XCTAssertEqual(history.episodes[0].policyRevision, 1)
+        XCTAssertEqual(history.episodes[1].exitedAt, Date(timeIntervalSince1970: base + 60))
+
+        let anchored = try await service.loadPressureEpisodeHistory(
+            stableVolumeID: try XCTUnwrap(observedVolumeID),
+            at: Date(timeIntervalSince1970: base + 60),
+            limit: 64
+        )
+        XCTAssertNil(anchored.episodes[0].exitedAt)
+    }
+
+    func testPressureEpisodeHistoryRejectsContradictoryTransportEnvelopes() async {
+        let stableID = "01234567-89AB-CDEF-0123-456789ABCDEF"
+        let canonicalID = "volume:macos:01234567-89ab-cdef-0123-456789abcdef"
+        let anchorMS: Int64 = 10_000
+        let invalidResponses = [
+            PressureEpisodeHistoryStatus(
+                recordVersion: 1,
+                stableVolumeId: canonicalID,
+                anchorAtUnixMs: anchorMS,
+                episodes: [],
+                hasMore: true
+            ),
+            PressureEpisodeHistoryStatus(
+                recordVersion: 1,
+                stableVolumeId: canonicalID,
+                anchorAtUnixMs: anchorMS,
+                episodes: [
+                    PressureEpisodeRecord(
+                        recordVersion: 1,
+                        level: .critical,
+                        enteredAtUnixMs: 8_000,
+                        exitedAtUnixMs: 9_000,
+                        policyRevision: 1
+                    ),
+                    PressureEpisodeRecord(
+                        recordVersion: 1,
+                        level: .warning,
+                        enteredAtUnixMs: 7_000,
+                        exitedAtUnixMs: nil,
+                        policyRevision: 1
+                    ),
+                ],
+                hasMore: false
+            ),
+            PressureEpisodeHistoryStatus(
+                recordVersion: 1,
+                stableVolumeId: canonicalID,
+                anchorAtUnixMs: anchorMS,
+                episodes: [
+                    PressureEpisodeRecord(
+                        recordVersion: 1,
+                        level: .critical,
+                        enteredAtUnixMs: 8_000,
+                        exitedAtUnixMs: 9_000,
+                        policyRevision: 1
+                    ),
+                    PressureEpisodeRecord(
+                        recordVersion: 1,
+                        level: .warning,
+                        enteredAtUnixMs: 7_000,
+                        exitedAtUnixMs: 8_500,
+                        policyRevision: 1
+                    ),
+                ],
+                hasMore: false
+            ),
+        ]
+
+        for response in invalidResponses {
+            let service = EngineService(engine: InvalidPressureHistoryEngine(response: response))
+            do {
+                _ = try await service.loadPressureEpisodeHistory(
+                    stableVolumeID: stableID,
+                    at: Date(timeIntervalSince1970: 10),
+                    limit: 64
+                )
+                XCTFail("Expected contradictory pressure history to fail closed")
+            } catch let error as EngineServiceError {
+                guard case .unexpected = error else {
+                    return XCTFail("Expected unexpected response error, got \(error)")
+                }
+            } catch {
+                XCTFail("Expected EngineServiceError, got \(error)")
+            }
+        }
     }
 
     func testRealEngineRejectsMalformedVolumeIdentityWithTypedError() async throws {
@@ -1750,7 +1952,7 @@ final class EngineServiceTests: XCTestCase {
             weakEngine = engine
 
             XCTAssertEqual(liveEngineInstanceCount(), baseline + 1)
-            XCTAssertEqual(try engine.libraryVersion().ffiContractVersion, 35)
+            XCTAssertEqual(try engine.libraryVersion().ffiContractVersion, 36)
             XCTAssertTrue(engine.close())
             XCTAssertTrue(engine.close())
             XCTAssertThrowsError(try engine.formatSize(bytes: 1_536)) { error in
@@ -1800,9 +2002,13 @@ final class EngineServiceTests: XCTestCase {
 
         let engineLoadCount = await engineService.currentLoadCount()
         let volumeObservationCount = await engineService.currentVolumeObservationCount()
+        let capacityTrendLoadCount = await engineService.currentCapacityTrendLoadCount()
+        let pressureHistoryLoadCount = await engineService.currentPressureHistoryLoadCount()
         let volumeLoadCount = await volumeMonitor.currentLoadCount()
         XCTAssertEqual(engineLoadCount, 1)
         XCTAssertEqual(volumeObservationCount, 1)
+        XCTAssertEqual(capacityTrendLoadCount, 1)
+        XCTAssertEqual(pressureHistoryLoadCount, 1)
         XCTAssertEqual(volumeLoadCount, 1)
         guard case .loaded = model.engineState else {
             return XCTFail("Expected one shared loaded engine state")
@@ -1810,6 +2016,23 @@ final class EngineServiceTests: XCTestCase {
         guard case .loaded = model.volumeState else {
             return XCTFail("Expected one shared loaded volume state")
         }
+        guard case .loaded = model.pressureHistoryState else {
+            return XCTFail("Expected one shared loaded pressure history state")
+        }
+        XCTAssertEqual(
+            model.capacityTrend?.sampledAt,
+            Date(timeIntervalSince1970: 0.5),
+            "A cadence-suppressed request may resolve to an older durable raw sample"
+        )
+
+        await model.loadCapacityTrend()
+        let cachedCapacityTrendLoadCount =
+            await engineService.currentCapacityTrendLoadCount()
+        XCTAssertEqual(
+            cachedCapacityTrendLoadCount,
+            1,
+            "The request anchor, not the older raw sample timestamp, keys the loaded trend"
+        )
     }
 
     @MainActor
@@ -2451,6 +2674,8 @@ private final class SuspendedRustTargetPlanReviewEngine: DuxEngine, @unchecked S
 private actor CountingEngineService: EngineServing {
     private var loadCount = 0
     private var volumeObservationCount = 0
+    private var capacityTrendLoadCount = 0
+    private var pressureHistoryLoadCount = 0
 
     func loadStatus() async throws -> EngineStatus {
         loadCount += 1
@@ -2467,6 +2692,40 @@ private actor CountingEngineService: EngineServing {
     ) async throws -> VolumeCapacitySnapshot {
         volumeObservationCount += 1
         return snapshot
+    }
+
+    func loadCapacityTrend(
+        stableVolumeID: String,
+        at: Date
+    ) async throws -> VolumeCapacityTrend {
+        capacityTrendLoadCount += 1
+        await Task.yield()
+        return VolumeCapacityTrend(
+            stableVolumeID: stableVolumeID,
+            sampledAt: at.addingTimeInterval(-0.5),
+            totalBytes: 100,
+            availableBytes: 30,
+            importantAvailableBytes: 30,
+            pressure: .healthy,
+            change24h: nil,
+            change7d: nil,
+            points: []
+        )
+    }
+
+    func loadPressureEpisodeHistory(
+        stableVolumeID: String,
+        at: Date,
+        limit _: UInt16
+    ) async throws -> VolumePressureHistory {
+        pressureHistoryLoadCount += 1
+        await Task.yield()
+        return VolumePressureHistory(
+            stableVolumeID: stableVolumeID,
+            anchorAt: at,
+            episodes: [],
+            hasMore: false
+        )
     }
 
     func loadDiskPressurePolicy() async throws -> DiskPressurePolicy {
@@ -2492,6 +2751,14 @@ private actor CountingEngineService: EngineServing {
 
     func currentVolumeObservationCount() -> Int {
         volumeObservationCount
+    }
+
+    func currentCapacityTrendLoadCount() -> Int {
+        capacityTrendLoadCount
+    }
+
+    func currentPressureHistoryLoadCount() -> Int {
+        pressureHistoryLoadCount
     }
 }
 
@@ -2780,6 +3047,25 @@ private final class InvalidPressurePolicyEngine: DuxEngine, @unchecked Sendable 
             recoveryBasisPoints: 1,
             updatedAtUnixMs: nil
         )
+    }
+}
+
+private final class InvalidPressureHistoryEngine: DuxEngine, @unchecked Sendable {
+    private let response: PressureEpisodeHistoryStatus
+
+    required init(unsafeFromHandle handle: UInt64) {
+        fatalError("InvalidPressureHistoryEngine cannot be lifted: \(handle)")
+    }
+
+    init(response: PressureEpisodeHistoryStatus) {
+        self.response = response
+        super.init(noHandle: NoHandle())
+    }
+
+    override func getPressureEpisodeHistory(
+        request _: PressureEpisodeHistoryRequest
+    ) throws -> PressureEpisodeHistoryStatus {
+        response
     }
 }
 

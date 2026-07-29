@@ -13,6 +13,7 @@ enum MenuBarPopoverAccessibility {
     static let capacityRetry = "menu-popover-capacity-retry"
     static let trend = "menu-popover-trend"
     static let trendChart = "menu-popover-trend-chart"
+    static let activePressurePeriod = "menu-popover-active-pressure-period"
     static let scanStatus = "menu-popover-scan-status"
     static let scanProgress = "menu-popover-scan-progress"
     static let scanCancel = "menu-popover-scan-cancel"
@@ -34,6 +35,7 @@ enum MenuBarPopoverAccessibility {
         capacityRetry,
         trend,
         trendChart,
+        activePressurePeriod,
         scanStatus,
         scanProgress,
         scanCancel,
@@ -76,6 +78,7 @@ struct MenuBarPopoverSnapshotPresentation: Equatable, Sendable {
     let availableFraction: Double
     let freshnessText: String
     let trend: MenuBarPopoverTrendPresentation?
+    let activePressurePeriodText: String?
     let accessibilitySummary: String
 
     var isCritical: Bool { pressure == .critical }
@@ -167,6 +170,7 @@ extension MenuBarPopoverPresentation {
         volumeState: VolumeCapacityState,
         scanState: AppScanState,
         trend: VolumeCapacityTrend? = nil,
+        pressureHistory: VolumePressureHistory? = nil,
         now: Date = .now,
         locale: Locale = .current
     ) -> Self {
@@ -174,6 +178,7 @@ extension MenuBarPopoverPresentation {
             volume: volumePresentation(
                 for: volumeState,
                 trend: trend,
+                pressureHistory: pressureHistory,
                 now: now,
                 locale: locale
             ),
@@ -189,6 +194,7 @@ extension MenuBarPopoverPresentation {
     private static func volumePresentation(
         for state: VolumeCapacityState,
         trend: VolumeCapacityTrend?,
+        pressureHistory: VolumePressureHistory?,
         now: Date,
         locale: Locale
     ) -> MenuBarPopoverVolumePresentation {
@@ -199,12 +205,24 @@ extension MenuBarPopoverPresentation {
             )
         case let .loaded(snapshot):
             .snapshot(
-                snapshotPresentation(snapshot, trend: trend, now: now, locale: locale),
+                snapshotPresentation(
+                    snapshot,
+                    trend: trend,
+                    pressureHistory: pressureHistory,
+                    now: now,
+                    locale: locale
+                ),
                 status: nil
             )
         case let .refreshing(snapshot):
             .snapshot(
-                snapshotPresentation(snapshot, trend: trend, now: now, locale: locale),
+                snapshotPresentation(
+                    snapshot,
+                    trend: trend,
+                    pressureHistory: pressureHistory,
+                    now: now,
+                    locale: locale
+                ),
                 status: MenuBarPopoverCapacityStatus(
                     style: .refreshing,
                     message: String(localized: "Updating capacity…", locale: locale),
@@ -213,7 +231,13 @@ extension MenuBarPopoverPresentation {
             )
         case let .stale(snapshot, failure):
             .snapshot(
-                snapshotPresentation(snapshot, trend: trend, now: now, locale: locale),
+                snapshotPresentation(
+                    snapshot,
+                    trend: trend,
+                    pressureHistory: pressureHistory,
+                    now: now,
+                    locale: locale
+                ),
                 status: MenuBarPopoverCapacityStatus(
                     style: .stale,
                     message: staleCapacityMessage(for: failure, locale: locale),
@@ -231,6 +255,7 @@ extension MenuBarPopoverPresentation {
     private static func snapshotPresentation(
         _ snapshot: VolumeCapacitySnapshot,
         trend: VolumeCapacityTrend?,
+        pressureHistory: VolumePressureHistory?,
         now: Date,
         locale: Locale
     ) -> MenuBarPopoverSnapshotPresentation {
@@ -284,6 +309,11 @@ extension MenuBarPopoverPresentation {
             ]
         }
         let mappedTrend = trend.map { Self.trendPresentation($0, locale: locale) }
+        let activePressurePeriod = activePressurePeriodText(
+            snapshot: snapshot,
+            history: pressureHistory,
+            locale: locale
+        )
         return MenuBarPopoverSnapshotPresentation(
             volumeName: volumeName,
             pressure: snapshot.pressure,
@@ -296,7 +326,36 @@ extension MenuBarPopoverPresentation {
                 / Double(snapshot.totalBytes),
             freshnessText: freshness,
             trend: mappedTrend,
+            activePressurePeriodText: activePressurePeriod,
             accessibilitySummary: summaryParts.joined(separator: ". ")
+        )
+    }
+
+    private static func activePressurePeriodText(
+        snapshot: VolumeCapacitySnapshot,
+        history: VolumePressureHistory?,
+        locale: Locale
+    ) -> String? {
+        guard
+            let history,
+            history.stableVolumeID == snapshot.stableVolumeID,
+            history.anchorAt == snapshot.sampledAt,
+            let episode = history.episodes.first,
+            episode.exitedAt == nil,
+            (episode.level == .warning && snapshot.pressure == .warning)
+                || (episode.level == .critical && snapshot.pressure == .critical)
+        else {
+            return nil
+        }
+        let level = episode.level == .critical
+            ? String(localized: "Critical", locale: locale)
+            : String(localized: "Warning", locale: locale)
+        let entered = episode.enteredAt.formatted(
+            .dateTime.locale(locale).hour().minute()
+        )
+        return String(
+            localized: "\(level) since \(entered) · ongoing at latest sample",
+            locale: locale
         )
     }
 

@@ -37,3 +37,12 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
 
 [workspace.lints.clippy]
 disallowed_methods = "deny"
+
+# Cargo executable attestation hashes the complete signed binary more than once
+# at independent authority boundaries. Keep application code debuggable while
+# avoiding multi-minute software SHA-256 passes in Debug builds and tests.
+[profile.dev.package.sha2]
+opt-level = 3
+
+[profile.test.package.sha2]
+opt-level = 3

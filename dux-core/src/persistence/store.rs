@@ -26,8 +26,9 @@ use super::capacity_history::{
     CapacityTrend, CapacityWriteOutcome, CapacityWriteReason, PreparedCapacitySample,
     RawCapacityObservation, RawCapacitySample, StoredCapacitySample, StoredPressureEpisode,
     exact_raw_and_volume_match, exact_volume_observation_match, load_capacity_trend,
-    load_latest_raw_capacity_sample, load_pressure_episode_page, load_raw_capacity_page,
-    validate_capacity_volume, validate_ephemeral_capacity_observation, write_raw_capacity_sample,
+    load_latest_raw_capacity_sample, load_pressure_episode_page,
+    load_pressure_episode_page_at_anchor, load_raw_capacity_page, validate_capacity_volume,
+    validate_ephemeral_capacity_observation, write_raw_capacity_sample,
 };
 use super::cleanup_history::{
     CleanupSessionId, NewCleanupSessionRecord, PreparedCleanupSession, StoredCleanupSessionRecord,
@@ -833,6 +834,16 @@ impl StoreCoordinator {
     ) -> Result<Vec<StoredPressureEpisode>, HistoryError> {
         let guard = self.lock_current_history_connection()?;
         load_pressure_episode_page(&guard.connection, volume_id, limit)
+    }
+
+    pub(crate) fn load_pressure_episode_page_at_anchor(
+        &self,
+        volume_id: &crate::domain::VolumeId,
+        anchor_at: SystemTime,
+        limit: usize,
+    ) -> Result<Vec<StoredPressureEpisode>, HistoryError> {
+        let guard = self.lock_current_history_connection()?;
+        load_pressure_episode_page_at_anchor(&guard.connection, volume_id, anchor_at, limit)
     }
 
     /// Build a bounded path-free trend view from durable capacity samples.

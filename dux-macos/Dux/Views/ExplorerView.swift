@@ -916,6 +916,10 @@ private struct ExplorerOverviewView: View {
                 }
 
                 capacityCard(presentation.capacity)
+                capacityHistoryCard(
+                    trend: model.capacityTrend,
+                    pressureState: model.pressureHistoryState
+                )
                 scanCard(
                     coverage: presentation.coverage,
                     scan: presentation.scan
@@ -1130,6 +1134,231 @@ private struct ExplorerOverviewView: View {
         .padding(.vertical, 8)
     }
 
+    private func capacityHistoryCard(
+        trend: VolumeCapacityTrend?,
+        pressureState: VolumePressureHistoryState
+    ) -> some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 16) {
+                if let trend {
+                    HStack(spacing: 12) {
+                        historyMetric(title: "24-hour change", change: trend.change24h)
+                        historyMetric(title: "7-day change", change: trend.change7d)
+                    }
+
+                    if trend.points.isEmpty {
+                        Label(
+                            "Recorded samples are still warming up.",
+                            systemImage: "chart.line.uptrend.xyaxis"
+                        )
+                        .foregroundStyle(.secondary)
+                    } else {
+                        ExplorerCapacityHistoryChart(
+                            points: trend.points,
+                            pressureHistory: pressureState.history,
+                            anchorAt: trend.sampledAt
+                        )
+                        .frame(height: 156)
+                        .accessibilityIdentifier(ExplorerAccessibility.capacityHistoryChart)
+                        .accessibilityLabel("30-day available-space history")
+                        .accessibilityValue(
+                            capacityHistoryAccessibilitySummary(
+                                trend: trend,
+                                pressureState: pressureState
+                            )
+                        )
+                    }
+                } else {
+                    Label(
+                        "Not enough recorded samples for 24-hour and 7-day changes yet.",
+                        systemImage: "clock.arrow.circlepath"
+                    )
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier(ExplorerAccessibility.capacityHistoryStatus)
+                }
+
+                Divider()
+                pressureHistorySection(pressureState)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 8)
+        } label: {
+            Label("Capacity history", systemImage: "chart.xyaxis.line")
+        }
+        .accessibilityIdentifier(ExplorerAccessibility.capacityHistoryCard)
+    }
+
+    private func historyMetric(
+        title: LocalizedStringKey,
+        change: VolumeCapacityTrendChange?
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text(verbatim: change.map { signedCapacity($0.availableBytes) } ?? "Not enough history")
+                .font(.headline.monospacedDigit())
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 8))
+        .accessibilityElement(children: .combine)
+    }
+
+    @ViewBuilder
+    private func pressureHistorySection(_ state: VolumePressureHistoryState) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Low-space periods")
+                .font(.headline)
+            Text("Stored Warning and Critical classifications from recorded disk samples.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            switch state {
+            case .idle:
+                Label(
+                    "Low-space history becomes available after the startup disk is identified.",
+                    systemImage: "externaldrive"
+                )
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier(ExplorerAccessibility.capacityHistoryStatus)
+
+            case .loading:
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Loading recorded low-space periods…")
+                        .foregroundStyle(.secondary)
+                }
+                .accessibilityIdentifier(ExplorerAccessibility.capacityHistoryStatus)
+
+            case let .failed(failure):
+                pressureHistoryFailure(failure, stale: false)
+
+            case let .stale(history, failure):
+                pressureHistoryFailure(failure, stale: true)
+                pressureEpisodeList(history)
+
+            case let .loaded(history):
+                pressureEpisodeList(history)
+            }
+        }
+    }
+
+    private func pressureHistoryFailure(
+        _: VolumePressureHistoryFailure,
+        stale: Bool
+    ) -> some View {
+        Label(
+            stale
+                ? "Showing the last confirmed periods; the latest history could not be loaded."
+                : "Recorded low-space periods are temporarily unavailable.",
+            systemImage: "exclamationmark.triangle"
+        )
+        .font(.caption)
+        .foregroundStyle(.orange)
+        .accessibilityIdentifier(ExplorerAccessibility.capacityHistoryStatus)
+    }
+
+    @ViewBuilder
+    private func pressureEpisodeList(_ history: VolumePressureHistory) -> some View {
+        if history.episodes.isEmpty {
+            Text("No low-space periods have been recorded for this startup disk yet.")
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier(ExplorerAccessibility.pressureEpisodeList)
+        } else {
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(history.episodes.prefix(5)) { episode in
+                    HStack(alignment: .top, spacing: 10) {
+                        Image(
+                            systemName: episode.level == .critical
+                                ? "exclamationmark.octagon.fill"
+                                : "exclamationmark.triangle.fill"
+                        )
+                        .foregroundStyle(
+                            episode.level == .critical ? Color.red : Color.orange
+                        )
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(episode.level == .critical ? "Critical" : "Warning")
+                                .font(.subheadline.weight(.semibold))
+                            Text(
+                                episodeDescription(
+                                    episode,
+                                    anchorAt: history.anchorAt
+                                )
+                            )
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        }
+                    }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier(
+                        "\(ExplorerAccessibility.pressureEpisodeList)-\(episode.id)"
+                    )
+                }
+                if history.episodes.count > 5 {
+                    Text("\(history.episodes.count - 5) more recorded periods")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                if history.hasMore {
+                    Text("Showing the 64 most recent recorded periods.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .accessibilityIdentifier(ExplorerAccessibility.pressureEpisodeList)
+        }
+    }
+
+    private func episodeDescription(
+        _ episode: VolumePressureEpisode,
+        anchorAt: Date
+    ) -> String {
+        let end = episode.exitedAt ?? anchorAt
+        let range = if let exitedAt = episode.exitedAt {
+            "\(episode.enteredAt.formatted(date: .abbreviated, time: .shortened)) – \(exitedAt.formatted(date: .abbreviated, time: .shortened))"
+        } else {
+            "\(episode.enteredAt.formatted(date: .abbreviated, time: .shortened)) · ongoing at latest sample"
+        }
+        return "\(range) · \(durationText(end.timeIntervalSince(episode.enteredAt)))"
+    }
+
+    private func durationText(_ interval: TimeInterval) -> String {
+        let seconds = max(0, Int(interval.rounded(.down)))
+        let days = seconds / 86_400
+        let hours = (seconds % 86_400) / 3_600
+        let minutes = (seconds % 3_600) / 60
+        if days > 0 { return "\(days)d \(hours)h" }
+        if hours > 0 { return "\(hours)h \(minutes)m" }
+        return "\(minutes)m"
+    }
+
+    private func signedCapacity(_ value: Int64) -> String {
+        let magnitude = MenuBarCapacityFormatter.gib(value.magnitude, locale: .current)
+        if value > 0 { return "+\(magnitude)" }
+        if value < 0 { return "-\(magnitude)" }
+        return magnitude
+    }
+
+    private func capacityHistoryAccessibilitySummary(
+        trend: VolumeCapacityTrend,
+        pressureState: VolumePressureHistoryState
+    ) -> String {
+        let first = trend.points.first.map { MenuBarCapacityFormatter.gib($0.availableBytes) }
+        let last = trend.points.last.map { MenuBarCapacityFormatter.gib($0.availableBytes) }
+        let pointSummary = if let first, let last {
+            "\(trend.points.count) recorded samples, from \(first) to \(last) available"
+        } else {
+            "No recorded chart samples"
+        }
+        let episodeSummary = pressureState.history.map {
+            "\($0.episodes.count) recorded low-space periods"
+                + ($0.hasMore ? ", additional older periods exist" : "")
+        } ?? "Low-space period history unavailable"
+        return "\(pointSummary). \(episodeSummary)."
+    }
+
     private func metric(
         title: LocalizedStringKey,
         value: String,
@@ -1257,6 +1486,134 @@ private struct ExplorerOverviewView: View {
         case .success: .green
         case .cancelled: .secondary
         case .failure: .red
+        }
+    }
+}
+
+private struct ExplorerCapacityHistoryChart: View {
+    let points: [VolumeCapacityTrendPoint]
+    let pressureHistory: VolumePressureHistory?
+    let anchorAt: Date
+
+    private var windowStart: Date {
+        anchorAt.addingTimeInterval(-30 * 24 * 60 * 60)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Canvas { context, size in
+                drawGrid(context: &context, size: size)
+                drawAvailableSpace(context: &context, size: size)
+                drawPressurePeriods(context: &context, size: size)
+            }
+            .accessibilityIdentifier(ExplorerAccessibility.pressureEpisodeTimeline)
+
+            HStack {
+                Text(windowStart, format: .dateTime.month(.abbreviated).day())
+                Spacer()
+                Label("Recorded available space", systemImage: "circle.fill")
+                Spacer()
+                Text(anchorAt, format: .dateTime.month(.abbreviated).day())
+            }
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+        }
+    }
+
+    private func drawGrid(context: inout GraphicsContext, size: CGSize) {
+        for index in 0 ... 3 {
+            let y = CGFloat(index) * (size.height - 18) / 3
+            var line = Path()
+            line.move(to: CGPoint(x: 0, y: y))
+            line.addLine(to: CGPoint(x: size.width, y: y))
+            context.stroke(line, with: .color(.secondary.opacity(0.16)), lineWidth: 1)
+        }
+    }
+
+    private func drawAvailableSpace(context: inout GraphicsContext, size: CGSize) {
+        let visible = points.filter {
+            $0.sampledAt >= windowStart && $0.sampledAt <= anchorAt
+        }
+        guard !visible.isEmpty else {
+            return
+        }
+        let values = visible.map { Double($0.availableBytes) }
+        guard let minimum = values.min(), let maximum = values.max() else {
+            return
+        }
+        let range = max(1, maximum - minimum)
+        var line = Path()
+        for (index, point) in visible.enumerated() {
+            let coordinate = CGPoint(
+                x: x(for: point.sampledAt, width: size.width),
+                y: 6 + (1 - CGFloat((Double(point.availableBytes) - minimum) / range))
+                    * (size.height - 30)
+            )
+            if index == 0 {
+                line.move(to: coordinate)
+            } else {
+                line.addLine(to: coordinate)
+            }
+            let dot = Path(
+                ellipseIn: CGRect(
+                    x: coordinate.x - 2.5,
+                    y: coordinate.y - 2.5,
+                    width: 5,
+                    height: 5
+                )
+            )
+            context.fill(dot, with: .color(color(for: point.pressure)))
+        }
+        context.stroke(
+            line,
+            with: .color(.accentColor),
+            style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round)
+        )
+    }
+
+    private func drawPressurePeriods(context: inout GraphicsContext, size: CGSize) {
+        guard let pressureHistory else {
+            return
+        }
+        for episode in pressureHistory.episodes {
+            let start = max(episode.enteredAt, windowStart)
+            let end = min(episode.exitedAt ?? pressureHistory.anchorAt, anchorAt)
+            guard end >= start else {
+                continue
+            }
+            let startX = x(for: start, width: size.width)
+            let endX = x(for: end, width: size.width)
+            let rectangle = Path(
+                roundedRect: CGRect(
+                    x: startX,
+                    y: size.height - 10,
+                    width: max(2, endX - startX),
+                    height: 8
+                ),
+                cornerRadius: 2
+            )
+            context.fill(
+                rectangle,
+                with: .color(episode.level == .critical ? .red : .orange)
+            )
+        }
+    }
+
+    private func x(for date: Date, width: CGFloat) -> CGFloat {
+        let duration = anchorAt.timeIntervalSince(windowStart)
+        guard duration > 0 else {
+            return width
+        }
+        let fraction = date.timeIntervalSince(windowStart) / duration
+        return width * CGFloat(min(1, max(0, fraction)))
+    }
+
+    private func color(for pressure: DiskPressureLevel) -> Color {
+        switch pressure {
+        case .healthy: .green
+        case .warning: .orange
+        case .critical: .red
+        case .unknown: .secondary
         }
     }
 }

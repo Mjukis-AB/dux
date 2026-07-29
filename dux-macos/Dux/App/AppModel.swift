@@ -1,3 +1,4 @@
+import Foundation
 import Observation
 
 @MainActor
@@ -14,6 +15,7 @@ final class AppModel: DuxCapacitySampling {
         }
     }
     private(set) var capacityTrend: VolumeCapacityTrend?
+    private(set) var pressureHistoryState = VolumePressureHistoryState.idle
     var menuBarLabelMode: MenuBarLabelMode {
         didSet {
             guard menuBarLabelMode != oldValue else {
@@ -83,6 +85,20 @@ final class AppModel: DuxCapacitySampling {
     private var capacityTrendTask: Task<Void, Never>?
     @ObservationIgnored
     private var capacityTrendGeneration: UInt64 = 0
+    @ObservationIgnored
+    private var capacityTrendRequestVolumeID: String?
+    @ObservationIgnored
+    private var capacityTrendRequestAnchorAt: Date?
+    @ObservationIgnored
+    private var capacityTrendLoadedForAnchorAt: Date?
+    @ObservationIgnored
+    private var pressureHistoryTask: Task<Void, Never>?
+    @ObservationIgnored
+    private var pressureHistoryGeneration: UInt64 = 0
+    @ObservationIgnored
+    private var pressureHistoryRequestVolumeID: String?
+    @ObservationIgnored
+    private var pressureHistoryRequestAnchorAt: Date?
     @ObservationIgnored
     private var pressurePolicyTask: Task<Void, Never>?
     @ObservationIgnored
@@ -224,7 +240,9 @@ final class AppModel: DuxCapacitySampling {
         async let volumeLoad: Void = loadVolumeCapacity()
         async let cleanupHistoryLoad: Void = loadCleanupHistory()
         _ = await (engineLoad, volumeLoad, cleanupHistoryLoad)
-        await loadCapacityTrend()
+        async let trendLoad: Void = loadCapacityTrend()
+        async let pressureHistoryLoad: Void = loadPressureHistory()
+        _ = await (trendLoad, pressureHistoryLoad)
     }
 
     func loadEngineStatus() async {
@@ -302,39 +320,159 @@ final class AppModel: DuxCapacitySampling {
             let stableVolumeID = snapshot.stableVolumeID
         else {
             capacityTrend = nil
+            capacityTrendLoadedForAnchorAt = nil
+            return
+        }
+        if let capacityTrend,
+           capacityTrend.stableVolumeID == stableVolumeID,
+           capacityTrendLoadedForAnchorAt == snapshot.sampledAt
+        {
             return
         }
         if let capacityTrendTask {
-            await capacityTrendTask.value
-            return
+            if capacityTrendRequestVolumeID == stableVolumeID,
+               capacityTrendRequestAnchorAt == snapshot.sampledAt
+            {
+                await capacityTrendTask.value
+                return
+            }
+            capacityTrendGeneration &+= 1
+            capacityTrendTask.cancel()
+            self.capacityTrendTask = nil
         }
         capacityTrendGeneration &+= 1
         let generation = capacityTrendGeneration
+        let anchorAt = snapshot.sampledAt
+        if capacityTrend?.stableVolumeID != stableVolumeID
+            || capacityTrendLoadedForAnchorAt != anchorAt
+        {
+            capacityTrend = nil
+            capacityTrendLoadedForAnchorAt = nil
+        }
         let service = engineService
+        capacityTrendRequestVolumeID = stableVolumeID
+        capacityTrendRequestAnchorAt = anchorAt
         let task = Task { @MainActor [weak self] in
             defer {
-                self?.capacityTrendTask = nil
+                if let self, generation == self.capacityTrendGeneration {
+                    self.capacityTrendTask = nil
+                    self.capacityTrendRequestVolumeID = nil
+                    self.capacityTrendRequestAnchorAt = nil
+                }
             }
             do {
                 let trend = try await service.loadCapacityTrend(
                     stableVolumeID: stableVolumeID,
-                    at: snapshot.sampledAt
+                    at: anchorAt
                 )
                 guard let self,
+                      !Task.isCancelled,
                       generation == self.capacityTrendGeneration,
-                      self.volumeState.snapshot?.stableVolumeID == stableVolumeID else {
+                      self.volumeState.snapshot?.stableVolumeID == stableVolumeID,
+                      self.volumeState.snapshot?.sampledAt == anchorAt,
+                      trend.stableVolumeID == stableVolumeID,
+                      trend.sampledAt <= anchorAt else {
                     return
                 }
                 self.capacityTrend = trend
+                self.capacityTrendLoadedForAnchorAt = anchorAt
             } catch is CancellationError {
                 return
             } catch {
-                // Trend history is optional presentation context. Keep the
-                // last good chart while capacity status remains authoritative.
+                // Trend history is optional presentation context. Capacity
+                // status remains authoritative while this anchor has no chart.
             }
         }
         capacityTrendTask = task
         await task.value
+    }
+
+    func loadPressureHistory() async {
+        guard
+            let snapshot = volumeState.snapshot,
+            let stableVolumeID = snapshot.stableVolumeID
+        else {
+            pressureHistoryState = .idle
+            return
+        }
+        if case let .loaded(history) = pressureHistoryState,
+           history.stableVolumeID == stableVolumeID,
+           history.anchorAt == snapshot.sampledAt
+        {
+            return
+        }
+        if let pressureHistoryTask {
+            if pressureHistoryRequestVolumeID == stableVolumeID,
+               pressureHistoryRequestAnchorAt == snapshot.sampledAt
+            {
+                await pressureHistoryTask.value
+                return
+            }
+            pressureHistoryGeneration &+= 1
+            pressureHistoryTask.cancel()
+            self.pressureHistoryTask = nil
+        }
+        pressureHistoryGeneration &+= 1
+        let generation = pressureHistoryGeneration
+        let anchorAt = snapshot.sampledAt
+        let previous = pressureHistoryState.history
+        pressureHistoryState = .loading
+        let service = engineService
+        pressureHistoryRequestVolumeID = stableVolumeID
+        pressureHistoryRequestAnchorAt = anchorAt
+        let task = Task { @MainActor [weak self] in
+            defer {
+                if let self, generation == self.pressureHistoryGeneration {
+                    self.pressureHistoryTask = nil
+                    self.pressureHistoryRequestVolumeID = nil
+                    self.pressureHistoryRequestAnchorAt = nil
+                }
+            }
+            do {
+                let history = try await service.loadPressureEpisodeHistory(
+                    stableVolumeID: stableVolumeID,
+                    at: anchorAt,
+                    limit: 64
+                )
+                guard let self,
+                      !Task.isCancelled,
+                      generation == self.pressureHistoryGeneration,
+                      self.volumeState.snapshot?.stableVolumeID == stableVolumeID,
+                      self.volumeState.snapshot?.sampledAt == anchorAt else {
+                    return
+                }
+                self.pressureHistoryState = .loaded(history)
+            } catch is CancellationError {
+                return
+            } catch {
+                guard let self,
+                      generation == self.pressureHistoryGeneration,
+                      self.volumeState.snapshot?.stableVolumeID == stableVolumeID,
+                      self.volumeState.snapshot?.sampledAt == anchorAt else {
+                    return
+                }
+                self.pressureHistoryState = if let previous {
+                    .stale(previous, .unavailable)
+                } else {
+                    .failed(.unavailable)
+                }
+            }
+        }
+        pressureHistoryTask = task
+        await task.value
+    }
+
+    func invalidateCapacityHistoryOperations() {
+        capacityTrendGeneration &+= 1
+        pressureHistoryGeneration &+= 1
+        capacityTrendTask?.cancel()
+        pressureHistoryTask?.cancel()
+        capacityTrendTask = nil
+        capacityTrendRequestVolumeID = nil
+        capacityTrendRequestAnchorAt = nil
+        pressureHistoryTask = nil
+        pressureHistoryRequestVolumeID = nil
+        pressureHistoryRequestAnchorAt = nil
     }
 
     func cancelVolumeRefresh() {
@@ -1720,7 +1858,18 @@ final class AppModel: DuxCapacitySampling {
         case let .success(snapshot):
             if volumeState.snapshot?.stableVolumeID != snapshot.stableVolumeID {
                 capacityTrendGeneration &+= 1
+                capacityTrendTask?.cancel()
+                capacityTrendTask = nil
+                capacityTrendRequestVolumeID = nil
+                capacityTrendRequestAnchorAt = nil
                 capacityTrend = nil
+                capacityTrendLoadedForAnchorAt = nil
+                pressureHistoryGeneration &+= 1
+                pressureHistoryTask?.cancel()
+                pressureHistoryTask = nil
+                pressureHistoryRequestVolumeID = nil
+                pressureHistoryRequestAnchorAt = nil
+                pressureHistoryState = .idle
             }
             volumeState = .loaded(snapshot)
             Task { @MainActor [weak self] in
@@ -1728,6 +1877,9 @@ final class AppModel: DuxCapacitySampling {
             }
             Task { @MainActor [weak self] in
                 await self?.loadCapacityTrend()
+            }
+            Task { @MainActor [weak self] in
+                await self?.loadPressureHistory()
             }
         case let .failure(error):
             if error is CancellationError {

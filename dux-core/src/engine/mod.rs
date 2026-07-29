@@ -103,6 +103,7 @@ pub use task::{
 };
 pub use volume_status::{
     CapacityHistoryDisposition, CapacityTrend, CapacityTrendChange, CapacityTrendPoint,
-    CapacityTrendPointSource, VolumeCapacityObservation, VolumeCapacityStatus,
-    VolumeCapacityStatusError,
+    CapacityTrendPointSource, MAX_PRESSURE_EPISODE_HISTORY_LIMIT, PressureEpisode,
+    PressureEpisodeHistory, PressureEpisodeHistoryError, PressureEpisodeLevel,
+    VolumeCapacityObservation, VolumeCapacityStatus, VolumeCapacityStatusError,
 };

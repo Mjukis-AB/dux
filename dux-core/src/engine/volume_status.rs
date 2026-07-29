@@ -13,8 +13,10 @@ use crate::domain::{AvailableCapacitySource, DiskPressure, VolumeCapacity, Volum
 use crate::persistence::{
     CapacityChange, CapacityPressureBaseline, CapacityTrend as StoredCapacityTrend,
     CapacityTrendPointSource as StoredTrendPointSource, CapacityWriteOutcome, HistoryErrorKind,
-    RawCapacityObservation, StoreCoordinator,
+    RawCapacityObservation, StoreCoordinator, StoredPressureEpisode,
 };
+
+pub const MAX_PRESSURE_EPISODE_HISTORY_LIMIT: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CapacityTrendChange {
@@ -179,6 +181,88 @@ fn public_capacity_trend(value: StoredCapacityTrend) -> CapacityTrend {
     }
 }
 
+/// One durable interval where a volume was in Warning or Critical pressure.
+///
+/// This path-free telemetry record describes only an observed state transition.
+/// It cannot select a filesystem object or grant cleanup authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PressureEpisodeLevel {
+    Warning,
+    Critical,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PressureEpisode {
+    level: PressureEpisodeLevel,
+    entered_at: SystemTime,
+    exited_at: Option<SystemTime>,
+    policy_revision: u64,
+}
+
+impl PressureEpisode {
+    pub const fn level(&self) -> PressureEpisodeLevel {
+        self.level
+    }
+
+    pub const fn entered_at(&self) -> SystemTime {
+        self.entered_at
+    }
+
+    pub const fn exited_at(&self) -> Option<SystemTime> {
+        self.exited_at
+    }
+
+    pub const fn policy_revision(&self) -> u64 {
+        self.policy_revision
+    }
+}
+
+/// A bounded newest-first page of durable pressure episodes for one volume.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PressureEpisodeHistory {
+    volume_id: VolumeId,
+    anchor_at: SystemTime,
+    episodes: Vec<PressureEpisode>,
+    has_more: bool,
+}
+
+impl PressureEpisodeHistory {
+    pub fn volume_id(&self) -> &VolumeId {
+        &self.volume_id
+    }
+
+    pub const fn anchor_at(&self) -> SystemTime {
+        self.anchor_at
+    }
+
+    pub fn episodes(&self) -> &[PressureEpisode] {
+        &self.episodes
+    }
+
+    pub const fn has_more(&self) -> bool {
+        self.has_more
+    }
+}
+
+fn public_pressure_episode(
+    value: StoredPressureEpisode,
+    anchor_at: SystemTime,
+) -> Result<PressureEpisode, PressureEpisodeHistoryError> {
+    let level = match value.pressure {
+        DiskPressure::Warning => PressureEpisodeLevel::Warning,
+        DiskPressure::Critical => PressureEpisodeLevel::Critical,
+        DiskPressure::Healthy | DiskPressure::Unknown => {
+            return Err(PressureEpisodeHistoryError::CorruptData);
+        }
+    };
+    Ok(PressureEpisode {
+        level,
+        entered_at: value.entered_at,
+        exited_at: value.exited_at.filter(|exited_at| *exited_at <= anchor_at),
+        policy_revision: value.policy_revision,
+    })
+}
+
 /// One platform capacity observation. Optional metadata remains optional so a
 /// truthful ephemeral result can be shown when Foundation cannot supply every
 /// field required by durable history.
@@ -328,6 +412,32 @@ pub enum VolumeCapacityStatusError {
     SupersededObservation,
     #[error("durable store is read-only")]
     ReadOnlyStore,
+    #[error("durable schema is incompatible")]
+    IncompatibleSchema,
+    #[error("operation is temporarily busy")]
+    Busy,
+    #[error("storage failed its safety checks")]
+    UnsafeStorage,
+    #[error("bounded operation exceeded its budget")]
+    BudgetExceeded,
+    #[error("durable state is corrupt")]
+    CorruptData,
+    #[error("durable storage is unavailable")]
+    Unavailable,
+    #[error("operation outcome is unknown")]
+    OutcomeUnknown,
+    #[error("internal engine state is invalid")]
+    InternalState,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
+pub enum PressureEpisodeHistoryError {
+    #[error("engine session is closed")]
+    Closed,
+    #[error("pressure episode page limit must be between 1 and {maximum}")]
+    InvalidLimit { maximum: usize },
+    #[error("pressure episode anchor is invalid")]
+    InvalidAnchor,
     #[error("durable schema is incompatible")]
     IncompatibleSchema,
     #[error("operation is temporarily busy")]
@@ -536,6 +646,51 @@ pub(super) fn load_capacity_trend(
         .ok_or(VolumeCapacityStatusError::Unavailable)
 }
 
+pub(super) fn load_pressure_episode_history(
+    store: &StoreCoordinator,
+    volume_id: &VolumeId,
+    anchor_at: SystemTime,
+    limit: usize,
+) -> Result<PressureEpisodeHistory, PressureEpisodeHistoryError> {
+    if !(1..=MAX_PRESSURE_EPISODE_HISTORY_LIMIT).contains(&limit) {
+        return Err(PressureEpisodeHistoryError::InvalidLimit {
+            maximum: MAX_PRESSURE_EPISODE_HISTORY_LIMIT,
+        });
+    }
+    let mut stored = store
+        .load_pressure_episode_page_at_anchor(volume_id, anchor_at, limit + 1)
+        .map_err(|error| map_pressure_episode_history_error(error.kind))?;
+    let has_more = stored.len() > limit;
+    stored.truncate(limit);
+    Ok(PressureEpisodeHistory {
+        volume_id: volume_id.clone(),
+        anchor_at,
+        episodes: stored
+            .into_iter()
+            .map(|episode| public_pressure_episode(episode, anchor_at))
+            .collect::<Result<Vec<_>, _>>()?,
+        has_more,
+    })
+}
+
+fn map_pressure_episode_history_error(kind: HistoryErrorKind) -> PressureEpisodeHistoryError {
+    match kind {
+        HistoryErrorKind::InvalidInput => PressureEpisodeHistoryError::InvalidAnchor,
+        HistoryErrorKind::IncompatibleSchema => PressureEpisodeHistoryError::IncompatibleSchema,
+        HistoryErrorKind::QueryLimitExceeded => PressureEpisodeHistoryError::BudgetExceeded,
+        HistoryErrorKind::Busy => PressureEpisodeHistoryError::Busy,
+        HistoryErrorKind::UnsafeStorage => PressureEpisodeHistoryError::UnsafeStorage,
+        HistoryErrorKind::CorruptData | HistoryErrorKind::NotFound => {
+            PressureEpisodeHistoryError::CorruptData
+        }
+        HistoryErrorKind::DatabaseUnavailable => PressureEpisodeHistoryError::Unavailable,
+        HistoryErrorKind::OutcomeUnknown => PressureEpisodeHistoryError::OutcomeUnknown,
+        HistoryErrorKind::AlreadyExists
+        | HistoryErrorKind::InvalidTransition
+        | HistoryErrorKind::InternalState => PressureEpisodeHistoryError::InternalState,
+    }
+}
+
 fn normalize_optional_text(value: Option<String>) -> Option<String> {
     value.and_then(|value| {
         let trimmed = value.trim();
@@ -732,6 +887,84 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
         assert_eq!(revisions, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn pressure_episode_history_is_bounded_newest_first_and_path_free() {
+        let temp = TempDir::new().unwrap();
+        let engine = EngineHandle::open(config(&temp)).unwrap();
+        engine
+            .set_disk_pressure_policy(warning_at_fifty_gib())
+            .unwrap();
+        let id = VolumeId::new("volume:pressure-history").unwrap();
+        let start = UNIX_EPOCH + Duration::from_secs(18_000);
+
+        for (offset, available, expected) in [
+            (0, 40 * GIB, DiskPressure::Warning),
+            (60, 5 * GIB, DiskPressure::Critical),
+            (120, 100 * GIB, DiskPressure::Healthy),
+        ] {
+            let status = engine
+                .observe_volume_capacity(observation(
+                    Some(id.clone()),
+                    start + Duration::from_secs(offset),
+                    Some(available),
+                    Some(available),
+                ))
+                .unwrap();
+            assert_eq!(status.pressure(), expected);
+        }
+
+        let history = engine
+            .pressure_episode_history(&id, start + Duration::from_secs(120), 1)
+            .unwrap();
+        assert_eq!(history.volume_id(), &id);
+        assert_eq!(history.anchor_at(), start + Duration::from_secs(120));
+        assert!(history.has_more());
+        assert_eq!(history.episodes().len(), 1);
+        let newest = &history.episodes()[0];
+        assert_eq!(newest.level(), PressureEpisodeLevel::Critical);
+        assert_eq!(newest.entered_at(), start + Duration::from_secs(60));
+        assert_eq!(newest.exited_at(), Some(start + Duration::from_secs(120)));
+        assert_eq!(newest.policy_revision(), 1);
+
+        let complete = engine
+            .pressure_episode_history(&id, start + Duration::from_secs(120), 2)
+            .unwrap();
+        assert!(!complete.has_more());
+        assert_eq!(
+            complete
+                .episodes()
+                .iter()
+                .map(PressureEpisode::level)
+                .collect::<Vec<_>>(),
+            vec![
+                PressureEpisodeLevel::Critical,
+                PressureEpisodeLevel::Warning
+            ]
+        );
+        assert_eq!(
+            complete.episodes()[1].exited_at(),
+            Some(start + Duration::from_secs(60))
+        );
+
+        assert_eq!(
+            engine.pressure_episode_history(&id, start, 0),
+            Err(PressureEpisodeHistoryError::InvalidLimit {
+                maximum: MAX_PRESSURE_EPISODE_HISTORY_LIMIT
+            })
+        );
+        assert_eq!(
+            engine.pressure_episode_history(&id, start, MAX_PRESSURE_EPISODE_HISTORY_LIMIT + 1),
+            Err(PressureEpisodeHistoryError::InvalidLimit {
+                maximum: MAX_PRESSURE_EPISODE_HISTORY_LIMIT
+            })
+        );
+        engine.close();
+        assert_eq!(
+            engine.pressure_episode_history(&id, start, 1),
+            Err(PressureEpisodeHistoryError::Closed)
+        );
     }
 
     #[test]

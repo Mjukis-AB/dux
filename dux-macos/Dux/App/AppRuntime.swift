@@ -179,6 +179,7 @@ final class AppRuntime {
         let explorerSnapshotBrowser = explorerSnapshotBrowser
         let engineService = engineService
         let task = Task { @MainActor in
+            model.invalidateCapacityHistoryOperations()
             model.invalidatePressurePolicyOperations()
             model.invalidatePermanentCleanupPolicyOperations()
             model.invalidateCleanupExclusionsOperations()

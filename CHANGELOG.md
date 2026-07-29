@@ -1,5 +1,35 @@
 # Changelog
 
+- Completed the first reviewable disk-pressure history surface through UniFFI
+  contract v36. Core now returns at most 64 newest-first Warning/Critical
+  episodes for one validated startup-volume identity at one exact capacity
+  anchor. Persistence validates volume-lifetime bounds, strict ordering,
+  non-overlap, the single-newest-open invariant, and one lookahead row before
+  truncation, so malformed history cannot hide across a page boundary. Swift
+  repeats record, identity, anchor, timestamp, interval, ordering, open-state,
+  and `has_more` validation off the main actor; `AppModel` coalesces identical
+  requests and fences late results across volume or anchor changes. An accepted
+  history anchor must be either an exact durable raw observation or the current
+  exact `last_seen` observation when hourly cadence suppressed its raw row;
+  arbitrary instants inside a volume lifetime fail closed. Capacity-trend
+  caching separately remembers the requesting snapshot anchor, so a legitimate
+  older at-or-before raw trend point does not disappear or trigger reloads.
+  Explorer now combines signed 24-hour/7-day changes with a full 30-day
+  capacity chart, pressure-colored points, Warning/Critical ribbons, and a
+  recent low-space period list with honest loading, stale, truncated, and
+  warming states. The
+  menu popover shows a compact current pressure-period line only when it
+  matches the accepted volume, anchor, and pressure. The transport remains
+  path-free observation-only telemetry and cannot name, approve, or execute
+  cleanup. The broad Rust gate also now models the preceding permanent-cleanup
+  opt-in correctly: effect-path fixtures opt in explicitly, multi-path
+  Rust-target sessions prove zero mutation under the current one-item/one-path
+  seal, and only the pinned SHA-256 dependency is optimized in Debug/test
+  profiles so complete Cargo-executable attestation no longer takes minutes.
+  A macOS FSEvents teardown fix now retains callback state through the stream
+  lifetime and drains the private dispatch queue after invalidation, closing a
+  concurrent callback use-after-free found by the broad gate without weakening
+  dropped-event fail-closed behavior.
 - Exposed the effect-free Rust-target validation path end to end in the native
   app through UniFFI contract v35. The new endpoint consumes only the exact
   opaque reviewed-plan child and returns a separate path-free dry-run task;

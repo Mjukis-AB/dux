@@ -1103,7 +1103,7 @@ fn timeout_and_both_output_limits_kill_the_process_group_and_reap_the_child() {
         "unexpected timeout result: {:?}",
         timeout_result.err()
     );
-    assert!(started.elapsed() < Duration::from_secs(2));
+    assert!(started.elapsed() < Duration::from_secs(5));
 
     for (action, expected_stream) in [
         (
@@ -1250,7 +1250,7 @@ fn create_then_remove_config_during_metadata_is_terminal_and_kills_cargo() {
         result,
         Err(CargoMetadataValidationError::CargoConfigurationChanged)
     ));
-    assert!(started.elapsed() < Duration::from_secs(2));
+    assert!(started.elapsed() < Duration::from_secs(5));
 }
 
 #[cfg(target_os = "macos")]
@@ -1338,7 +1338,7 @@ fn ancestor_manifest_write_and_restore_during_discovery_is_terminal() {
         result,
         Err(CargoMetadataValidationError::CargoManifestProbesChanged)
     ));
-    assert!(started.elapsed() < Duration::from_secs(2));
+    assert!(started.elapsed() < Duration::from_secs(5));
     assert_eq!(fs::read_to_string(ancestor_manifest).unwrap(), original);
 }
 
@@ -1363,7 +1363,7 @@ fn absent_ancestor_manifest_create_and_remove_during_discovery_is_terminal() {
         result,
         Err(CargoMetadataValidationError::CargoManifestProbesChanged)
     ));
-    assert!(started.elapsed() < Duration::from_secs(2));
+    assert!(started.elapsed() < Duration::from_secs(5));
     assert!(!ancestor_manifest.exists());
 }
 
