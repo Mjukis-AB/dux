@@ -2852,6 +2852,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant, UNIX_EPOCH};
 
+    use rusqlite::params;
     use tempfile::TempDir;
 
     use super::*;
@@ -3830,23 +3831,112 @@ mod tests {
     }
 
     #[test]
-    fn scan_process_recovery_preserves_temp_debt_for_terminal_reconciliation() {
+    fn prior_boot_scan_recovery_preserves_exact_temp_lease_for_terminal_reconciliation() {
         let temp = TempDir::new().unwrap();
         let database = temp.path().join("store/dux.sqlite3");
         let root = temp.path().join("scan-root");
         let base = UNIX_EPOCH + Duration::from_millis(1_750_000_031_000);
         let document = document("scan:recovered-temp-debt", &root);
         let (store, repository) = open_repository(&database);
+        let owner = crate::persistence::process_liveness::ProcessInstanceId::from_stored(&format!(
+            "1:l:2a:1234:{}:{}",
+            "11".repeat(32),
+            "22".repeat(16)
+        ))
+        .unwrap();
+        let provenance = crate::persistence::process_liveness::ExecutionProvenance::from_stored(
+            &owner,
+            &[0x33; 32],
+            &[0x11; 32],
+        )
+        .unwrap();
+        store.set_scan_process_identity_for_test(
+            crate::persistence::process_liveness::ProcessExecutionIdentity {
+                owner,
+                provenance: Some(provenance),
+            },
+        );
         record_running_scan(&store, &document, &root, base);
         repository
             .leave_snapshot_temp_residual_for_test(&document, false)
             .unwrap();
         assert_eq!(temp_lease_count(&store), 1);
+        let lease_before: (String, i64, String, String, String, String, String, i64) = store
+            .with_connection(|connection| {
+                connection
+                    .query_row(
+                        "SELECT lease_id, record_format_version, scan_id, scan_status,
+                                final_relative_name, temp_relative_name,
+                                owner_process_instance, created_at_unix_ms
+                         FROM snapshot_temp_leases WHERE scan_id = ?1",
+                        [document.metadata.scan_id.as_str()],
+                        |row| {
+                            Ok((
+                                row.get(0)?,
+                                row.get(1)?,
+                                row.get(2)?,
+                                row.get(3)?,
+                                row.get(4)?,
+                                row.get(5)?,
+                                row.get(6)?,
+                                row.get(7)?,
+                            ))
+                        },
+                    )
+                    .unwrap()
+            });
+        store.with_connection(|connection| {
+            let (owner, claimed_at, host, mut boot): (String, i64, Vec<u8>, Vec<u8>) = connection
+                .query_row(
+                    "SELECT owner_process_instance, claimed_at_unix_ms,
+                            execution_host_identity_v1_sha256,
+                            execution_boot_scope_v1_sha256
+                     FROM scan_process_claims WHERE scan_id = ?1",
+                    [document.metadata.scan_id.as_str()],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .unwrap();
+            boot[0] ^= 0xff;
+            let scope = boot
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            let mut components = owner.split(':').map(str::to_owned).collect::<Vec<_>>();
+            components[4] = scope.clone();
+            let prior_owner = components.join(":");
+            crate::persistence::process_liveness::ProcessInstanceId::from_stored(&prior_owner)
+                .unwrap();
+            connection
+                .execute(
+                    "DELETE FROM scan_process_claims WHERE scan_id = ?1",
+                    [document.metadata.scan_id.as_str()],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO scan_process_claims (
+                         scan_id, record_format_version, owner_process_instance,
+                         recovery_scope, claimed_at_unix_ms,
+                         execution_host_identity_v1_sha256,
+                         execution_boot_scope_v1_sha256,
+                         execution_recovery_policy
+                     ) VALUES (?1, 1, ?2, ?3, ?4, ?5, ?6, 'interrupt_only')",
+                    params![
+                        document.metadata.scan_id.as_str(),
+                        prior_owner,
+                        format!("l:{scope}"),
+                        claimed_at,
+                        host,
+                        boot,
+                    ],
+                )
+                .unwrap();
+        });
 
         let recovered = store
             .run_scan_recovery_batch_with_hooks_for_test(
                 base + Duration::from_secs(1),
-                |_| crate::persistence::process_liveness::ProcessLiveness::DefinitelyGone,
+                |_| panic!("prior-boot interruption must not probe a PID"),
                 || Ok(()),
                 || Ok(()),
             )
@@ -3856,6 +3946,31 @@ mod tests {
             crate::persistence::ScanRecoveryBatchOutcome::Interrupted
         );
         assert_eq!(temp_lease_count(&store), 1);
+        let lease_after: (String, i64, String, String, String, String, String, i64) = store
+            .with_connection(|connection| {
+                connection
+                    .query_row(
+                        "SELECT lease_id, record_format_version, scan_id, scan_status,
+                                final_relative_name, temp_relative_name,
+                                owner_process_instance, created_at_unix_ms
+                         FROM snapshot_temp_leases WHERE scan_id = ?1",
+                        [document.metadata.scan_id.as_str()],
+                        |row| {
+                            Ok((
+                                row.get(0)?,
+                                row.get(1)?,
+                                row.get(2)?,
+                                row.get(3)?,
+                                row.get(4)?,
+                                row.get(5)?,
+                                row.get(6)?,
+                                row.get(7)?,
+                            ))
+                        },
+                    )
+                    .unwrap()
+            });
+        assert_eq!(lease_after, lease_before);
         assert_eq!(
             store
                 .load_scan(&document.metadata.scan_id)

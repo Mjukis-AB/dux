@@ -125,7 +125,7 @@ pub(crate) struct Migration {
     pub(crate) sql: &'static str,
 }
 
-const MIGRATIONS: [Migration; 15] = [
+const MIGRATIONS: [Migration; 16] = [
     Migration {
         version: 1,
         name: "initial-storage-schema",
@@ -275,6 +275,16 @@ const MIGRATIONS: [Migration; 15] = [
             0x0c, 0x39, 0x59, 0x49,
         ],
         sql: include_str!("../../migrations/0015_running_scan_debt_census.sql"),
+    },
+    Migration {
+        version: 16,
+        name: "scan-claim-provenance",
+        checksum_sha256: [
+            0x5e, 0x0b, 0xab, 0x7a, 0x37, 0xa4, 0xba, 0x0d, 0xb0, 0xea, 0xcf, 0x3c, 0x18, 0x93,
+            0xae, 0xad, 0x40, 0xfc, 0xfc, 0x74, 0x71, 0x01, 0x1b, 0x58, 0x0e, 0x13, 0x4c, 0x8f,
+            0xdf, 0xea, 0x89, 0x79,
+        ],
+        sql: include_str!("../../migrations/0016_scan_claim_provenance.sql"),
     },
 ];
 
@@ -931,6 +941,73 @@ const V15_EXPECTED_SCHEMA_OBJECTS: [(&str, &str); 62] = [
     ("trigger", "snapshot_temp_leases_update_guard"),
 ];
 
+const V16_EXPECTED_SCHEMA_OBJECTS: [(&str, &str); 64] = [
+    ("index", "ai_insights_by_expiration"),
+    ("index", "ai_insights_by_identity"),
+    ("index", "candidate_evaluations_by_status"),
+    ("index", "candidates_by_scan_status"),
+    ("index", "candidates_by_scan_time"),
+    ("index", "cleanup_items_by_session"),
+    ("index", "cleanup_sessions_by_recovery"),
+    ("index", "cleanup_sessions_by_time"),
+    ("index", "disk_pressure_episodes_by_volume_time"),
+    ("index", "disk_pressure_episodes_open_by_volume"),
+    ("index", "disk_samples_by_kind_time"),
+    ("index", "disk_samples_by_volume_kind_time"),
+    ("index", "rule_outcomes_by_rule_time"),
+    ("index", "scan_issues_by_scan_kind"),
+    ("index", "scan_process_claims_by_owner"),
+    ("index", "scan_process_claims_by_recovery_time"),
+    ("index", "scan_process_claims_by_time"),
+    ("index", "scans_by_exact_root_start"),
+    ("index", "scans_by_snapshot_path"),
+    ("index", "scans_by_started"),
+    ("index", "scans_by_volume_time"),
+    ("index", "scans_running_by_started"),
+    ("index", "scans_snapshot_identity"),
+    ("index", "schedules_by_next_run"),
+    ("index", "snapshot_retention_tombstones_by_commit"),
+    ("index", "snapshot_review_pins_by_expiration"),
+    ("index", "snapshot_review_pins_by_scan_expiration"),
+    ("table", "ai_insights"),
+    ("table", "candidate_blockers"),
+    ("table", "candidate_evaluations"),
+    ("table", "candidate_evidence"),
+    ("table", "candidate_paths"),
+    ("table", "candidate_plan_claims"),
+    ("table", "candidates"),
+    ("table", "cleanup_item_evidence"),
+    ("table", "cleanup_item_paths"),
+    ("table", "cleanup_items"),
+    ("table", "cleanup_plan_warnings"),
+    ("table", "cleanup_sessions"),
+    ("table", "disk_pressure_episodes"),
+    ("table", "disk_samples"),
+    ("table", "rule_outcomes"),
+    ("table", "scan_aggregates"),
+    ("table", "scan_issues"),
+    ("table", "scan_process_claims"),
+    ("table", "scans"),
+    ("table", "schedules"),
+    ("table", "schema_migrations"),
+    ("table", "settings"),
+    ("table", "snapshot_retention_tombstones"),
+    ("table", "snapshot_review_pins"),
+    ("table", "snapshot_temp_leases"),
+    ("table", "trusted_rust_target_plan_claims"),
+    ("table", "volumes"),
+    ("trigger", "scan_process_claims_insert_guard"),
+    ("trigger", "scan_process_claims_provenance_insert_guard"),
+    ("trigger", "scan_process_claims_update_guard"),
+    ("trigger", "scans_succeeded_without_temp_lease_guard"),
+    ("trigger", "scans_terminal_with_process_claim_guard"),
+    ("trigger", "snapshot_retention_tombstones_delete_guard"),
+    ("trigger", "snapshot_retention_tombstones_update_guard"),
+    ("trigger", "snapshot_review_pins_update_guard"),
+    ("trigger", "snapshot_temp_leases_insert_guard"),
+    ("trigger", "snapshot_temp_leases_update_guard"),
+];
+
 // Canonical sqlite_schema representation produced by v1. A mismatch rejects
 // supported databases rather than guessing about drift.
 const V1_SCHEMA_FINGERPRINT: [u8; 32] = [
@@ -1019,6 +1096,11 @@ const V14_SCHEMA_FINGERPRINT: [u8; 32] = [
 const V15_SCHEMA_FINGERPRINT: [u8; 32] = [
     0x38, 0xde, 0xc1, 0x78, 0x72, 0x45, 0x7b, 0xeb, 0xdd, 0x60, 0x0f, 0x0a, 0xca, 0xa9, 0x7e, 0xee,
     0x15, 0xcc, 0xa9, 0x15, 0x29, 0x9c, 0xde, 0xfd, 0x03, 0x5c, 0x58, 0xee, 0xab, 0x96, 0xd5, 0xe9,
+];
+
+const V16_SCHEMA_FINGERPRINT: [u8; 32] = [
+    0x05, 0x6e, 0x7b, 0xcd, 0xf3, 0x8c, 0x4b, 0x87, 0x5b, 0x2c, 0xd8, 0xc1, 0x49, 0x4e, 0xe3, 0x3a,
+    0x9c, 0x75, 0xef, 0x96, 0x48, 0x08, 0xa0, 0x96, 0x31, 0x6a, 0x07, 0xb5, 0xfa, 0x34, 0x4d, 0x35,
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1385,6 +1467,12 @@ fn validate_supported_schema(
             &V15_EXPECTED_SCHEMA_OBJECTS,
             V15_SCHEMA_FINGERPRINT,
         ),
+        16 => validate_schema(
+            connection,
+            clock,
+            &V16_EXPECTED_SCHEMA_OBJECTS,
+            V16_SCHEMA_FINGERPRINT,
+        ),
         _ => Err(corrupt_error()),
     }
 }
@@ -1700,6 +1788,11 @@ pub(super) const fn test_v14_schema_fingerprint() -> [u8; 32] {
 #[cfg(test)]
 pub(super) const fn test_v15_schema_fingerprint() -> [u8; 32] {
     V15_SCHEMA_FINGERPRINT
+}
+
+#[cfg(test)]
+pub(super) const fn test_v16_schema_fingerprint() -> [u8; 32] {
+    V16_SCHEMA_FINGERPRINT
 }
 
 #[cfg(test)]

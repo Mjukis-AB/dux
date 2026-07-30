@@ -359,6 +359,14 @@ rows cannot be updated, and a scan cannot transition to `succeeded` until the
 exact row is deleted. Failed, cancelled, or interrupted scans may retain a row
 as explicit crash debt.
 
+Schema v16 does not change snapshot v1 bytes or the temp-lease relation. It can
+classify a separately claimed pristine running scan as same-host/prior-boot
+from complete immutable host/boot provenance and change only that scan and its
+process claim to interrupted. This history transition deliberately leaves the
+temp lease and any physical temp untouched. The terminal-temp batch below must
+still independently prove parent state, lease identity, physical quiescence,
+and storage facts before it can reconcile that debt.
+
 The read-only retention inventory uses that index only after a single bounded
 physical directory pass sequentially opens exact no-follow file handles,
 captures identity and handle-derived usage, then closes each entry. After the
@@ -578,12 +586,14 @@ newer database schema has won.
 
 This checkpoint does not implement:
 
-- cross-process overlapping-root scan leases or cross-reboot/legacy-v8 recovery
-  of an engine scan left `running` (schema v9 same-scope claimed recovery is
-  implemented without snapshot authority);
-- cross-reboot or unclaimed legacy recovery of `running` temp-lease parents;
-  schema v9 same-scope recovery preserves the exact lease for terminal-temp
-  reconciliation, and legacy external provisioning stages remain manual debt;
+- cross-process overlapping-root scan leases or recovery of an unclaimed
+  legacy-v8 engine scan left `running`; schema v9 same-scope claimed recovery
+  and schema v16 same-host/prior-boot history interruption are implemented
+  without snapshot authority;
+- unclaimed legacy recovery of `running` temp-lease parents; schema v9
+  same-scope and schema v16 prior-boot recovery preserve the exact lease for
+  terminal-temp reconciliation, and legacy external provisioning stages remain
+  manual debt;
 - explicit user clear-data actions;
 - native Windows temp/final/provisioning-stage removal and
   sparse/compressed-allocation runtime verification plus bounded accounting

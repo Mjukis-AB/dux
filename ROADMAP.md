@@ -6361,6 +6361,42 @@ Tasks:
     archive are universal arm64/x86_64, both apps target macOS 14.0 with
     `LSUIElement=true`, and resolved Release settings omit the internal
     permanent-cleanup condition.
+  - [x] 2026-07-30 claimed prior-boot recovery policy: checksummed schema v16
+    adds immutable nullable stable-host and boot-scope digests plus the sole
+    `interrupt_only` policy to each new running-scan process claim. The tuple
+    is all `NULL` or complete; v9–v15 claims migrate without fabricated
+    provenance. A global 64-row keyset page plus one lookahead classifies
+    complete same-host/current-boot, same-host/prior-boot, foreign-host, and
+    unproven claims. Current-boot claims retain the exact-owner probe and only
+    `DefinitelyGone` is recoverable; a complete same-host prior-boot claim may
+    interrupt one exact pristine parent as history-only reconciliation without
+    probing its old PID. Foreign-host and unproven claims remain typed no-ops,
+    while a legacy all-`NULL` claim whose combined recovery-scope value exactly
+    matches the current owner retains its existing probe; an absent scope can
+    confirm only `Alive` or `Unknown`. The final compare-and-set binds the
+    complete immutable claim and parent; it preserves normal-completion and
+    competing-recovery races, rejects pre-start clocks and schema drift, and
+    adopts an uncertain commit only from the exact terminal post-state.
+    Recovery still retains every snapshot-temp lease and cannot inspect or
+    mutate a file, snapshot, stage, candidate, plan, journal, cleanup lock, AI
+    record, or user path. Public engine/UniFFI/Swift shapes are unchanged.
+    Bounded multi-page tests prove that foreign, unproven, live, and unknown
+    rows do not starve later recoverable work or cause an unbounded immediate
+    retry. Verification: all 23 focused claim tests, the v16 fingerprint and
+    both provenance migration/constraint tests, the exact snapshot-temp lease
+    regression, and all three engine-maintenance projections pass; workspace
+    clippy is clean with warnings denied. The serial core lane completed 1,195
+    tests with three
+    intentional ignores; two unrelated load-sensitive registry tests failed in
+    that nine-minute aggregate run and then both passed alone. UniFFI passes
+    94 tests with two intentional Rust-target ignores, the CLI passes 37 tests,
+    repository scripts pass 31 tests, and the destructive-call audit covers
+    273 source files. Native XCTest passes 566 tests. Generated Debug/Release
+    Swift is byte-identical; the Rust archive and both unsigned apps are
+    universal arm64/x86_64, both apps target macOS 14.0 with
+    `LSUIElement=true`, and resolved Release settings omit the internal
+    permanent-cleanup condition. The parent remains open for a non-fabricating
+    legacy-v8 policy and unattributable external-stage diagnostics.
 - [ ] Require native Windows CI evidence for temp/final/stage mutation,
   DACL/reparse handling, and sparse/compressed allocation before claiming
   Windows persistence-maintenance support.

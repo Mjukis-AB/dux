@@ -1,5 +1,5 @@
 /// Current DUX SQLite schema understood by this binary.
-pub const DATABASE_SCHEMA_VERSION: u32 = 15;
+pub const DATABASE_SCHEMA_VERSION: u32 = 16;
 
 /// Write compatibility of the database attached to one engine session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

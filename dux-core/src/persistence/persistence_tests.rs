@@ -24,7 +24,7 @@ use super::migrations::{
     test_v5_schema_fingerprint, test_v6_schema_fingerprint, test_v7_schema_fingerprint,
     test_v8_schema_fingerprint, test_v9_schema_fingerprint, test_v11_schema_fingerprint,
     test_v12_schema_fingerprint, test_v13_schema_fingerprint, test_v14_schema_fingerprint,
-    test_v15_schema_fingerprint, validate_compiled_migrations,
+    test_v15_schema_fingerprint, test_v16_schema_fingerprint, validate_compiled_migrations,
 };
 use super::process_liveness::current_process_instance;
 #[cfg(any(unix, windows))]
@@ -708,6 +708,32 @@ fn fresh_v14_schema() -> Connection {
     connection
 }
 
+fn fresh_v15_schema() -> Connection {
+    let connection = Connection::open_in_memory().unwrap();
+    for migration in &test_migrations()[..15] {
+        connection.execute_batch(migration.sql).unwrap();
+        connection
+            .execute(
+                "INSERT INTO schema_migrations (
+                     version, name, checksum_sha256, applied_at_unix_ms
+                 ) VALUES (?1, ?2, ?3, 1)",
+                params![
+                    i64::from(migration.version),
+                    migration.name,
+                    migration.checksum_sha256.as_slice(),
+                ],
+            )
+            .unwrap();
+        connection
+            .pragma_update(None, "application_id", DUX_APPLICATION_ID)
+            .unwrap();
+        connection
+            .pragma_update(None, "user_version", migration.version)
+            .unwrap();
+    }
+    connection
+}
+
 fn fresh_current_schema() -> Connection {
     let connection = Connection::open_in_memory().unwrap();
     for migration in test_migrations() {
@@ -1198,12 +1224,147 @@ fn embedded_v14_schema_fingerprint_matches_complete_chain() {
 
 #[test]
 fn embedded_v15_schema_fingerprint_matches_complete_chain() {
-    let connection = fresh_current_schema();
+    let connection = fresh_v15_schema();
     assert_eq!(
         schema_fingerprint(&connection).unwrap(),
         test_v15_schema_fingerprint()
     );
+    assert_eq!(
+        inspect_schema(&connection).unwrap(),
+        SchemaState::Older { found: 15 }
+    );
+}
+
+#[test]
+fn embedded_v16_schema_fingerprint_matches_complete_chain() {
+    let connection = fresh_current_schema();
+    assert_eq!(
+        schema_fingerprint(&connection).unwrap(),
+        test_v16_schema_fingerprint()
+    );
     assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
+}
+
+#[test]
+fn populated_v15_upgrade_keeps_scan_claim_provenance_unproven() {
+    let mut connection = fresh_v15_schema();
+    connection
+        .pragma_update(None, "foreign_keys", true)
+        .unwrap();
+    let scope = format!("l:{}", "11".repeat(32));
+    let owner = format!("1:l:2a:1234:{}:{}", "11".repeat(32), "22".repeat(16));
+    connection
+        .execute(
+            "INSERT INTO scans (
+                 scan_id, root_path, root_path_encoding, started_at_unix_ms,
+                 status, coverage_status
+             ) VALUES ('scan:v15-claim', ?1, 1, 10, 'running', 'unknown')",
+            [b"/v15-claim".as_slice()],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO scan_process_claims (
+                 scan_id, record_format_version, owner_process_instance,
+                 recovery_scope, claimed_at_unix_ms
+             ) VALUES ('scan:v15-claim', 1, ?1, ?2, 10)",
+            params![owner, scope],
+        )
+        .unwrap();
+
+    apply_pending_migrations(&mut connection, 40).unwrap();
+
+    assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
+    type MigratedScanClaim = (String, Option<Vec<u8>>, Option<Vec<u8>>, Option<String>);
+    let claim: MigratedScanClaim = connection
+        .query_row(
+            "SELECT owner_process_instance,
+                    execution_host_identity_v1_sha256,
+                    execution_boot_scope_v1_sha256,
+                    execution_recovery_policy
+             FROM scan_process_claims WHERE scan_id = 'scan:v15-claim'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(claim, (owner, None, None, None));
+}
+
+#[test]
+fn v16_scan_claim_provenance_is_complete_strict_and_bounded() {
+    let connection = fresh_current_schema();
+    let scope = format!("l:{}", "11".repeat(32));
+    let owner = format!("1:l:2a:1234:{}:{}", "11".repeat(32), "22".repeat(16));
+    connection
+        .execute(
+            "INSERT INTO scans (
+                 scan_id, root_path, root_path_encoding, started_at_unix_ms,
+                 status, coverage_status
+             ) VALUES ('scan:v16-claim', ?1, 1, 10, 'running', 'unknown')",
+            [b"/v16-claim".as_slice()],
+        )
+        .unwrap();
+
+    for statement in [
+        "INSERT INTO scan_process_claims (
+             scan_id, record_format_version, owner_process_instance,
+             recovery_scope, claimed_at_unix_ms,
+             execution_host_identity_v1_sha256
+         ) VALUES ('scan:v16-claim', 1, ?1, ?2, 10, zeroblob(32))",
+        "INSERT INTO scan_process_claims (
+             scan_id, record_format_version, owner_process_instance,
+             recovery_scope, claimed_at_unix_ms,
+             execution_host_identity_v1_sha256,
+             execution_boot_scope_v1_sha256, execution_recovery_policy
+         ) VALUES (
+             'scan:v16-claim', 1, ?1, ?2, 10,
+             zeroblob(32), zeroblob(32), NULL
+         )",
+        "INSERT INTO scan_process_claims (
+             scan_id, record_format_version, owner_process_instance,
+             recovery_scope, claimed_at_unix_ms,
+             execution_host_identity_v1_sha256,
+             execution_boot_scope_v1_sha256, execution_recovery_policy
+         ) VALUES (
+             'scan:v16-claim', 1, ?1, ?2, 10,
+             zeroblob(31), zeroblob(32), 'interrupt_only'
+         )",
+        "INSERT INTO scan_process_claims (
+             scan_id, record_format_version, owner_process_instance,
+             recovery_scope, claimed_at_unix_ms,
+             execution_host_identity_v1_sha256,
+             execution_boot_scope_v1_sha256, execution_recovery_policy
+         ) VALUES (
+             'scan:v16-claim', 1, ?1, ?2, 10,
+             zeroblob(32), zeroblob(32), 'resumable'
+         )",
+    ] {
+        assert!(
+            connection
+                .execute(statement, params![owner.as_str(), scope.as_str()])
+                .is_err(),
+            "{statement}"
+        );
+    }
+
+    connection
+        .execute(
+            "INSERT INTO scan_process_claims (
+                 scan_id, record_format_version, owner_process_instance,
+                 recovery_scope, claimed_at_unix_ms,
+                 execution_host_identity_v1_sha256,
+                 execution_boot_scope_v1_sha256, execution_recovery_policy
+             ) VALUES (
+                 'scan:v16-claim', 1, ?1, ?2, 10, ?3, ?4, 'interrupt_only'
+             )",
+            params![
+                owner,
+                scope,
+                [0x22_u8; 32].as_slice(),
+                [0x11_u8; 32].as_slice(),
+            ],
+        )
+        .unwrap();
 }
 
 #[test]
@@ -1345,7 +1506,7 @@ fn populated_v12_upgrade_preserves_legacy_null_scan_identity() {
     assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
     assert_eq!(
         schema_fingerprint(&connection).unwrap(),
-        test_v15_schema_fingerprint()
+        test_v16_schema_fingerprint()
     );
     let identity: Option<Vec<u8>> = connection
         .query_row(
@@ -1370,7 +1531,7 @@ fn populated_v11_upgrade_adds_no_fabricated_trusted_claims() {
     assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
     assert_eq!(
         schema_fingerprint(&connection).unwrap(),
-        test_v15_schema_fingerprint()
+        test_v16_schema_fingerprint()
     );
     let trusted_claims: i64 = connection
         .query_row(
@@ -1555,7 +1716,7 @@ fn populated_v7_upgrade_adds_empty_snapshot_temp_lease_relation() {
     assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
     assert_eq!(
         schema_fingerprint(&connection).unwrap(),
-        test_v15_schema_fingerprint()
+        test_v16_schema_fingerprint()
     );
     let lease_count: i64 = connection
         .query_row("SELECT count(*) FROM snapshot_temp_leases", [], |row| {
@@ -1594,7 +1755,7 @@ fn populated_v8_upgrade_preserves_running_rows_without_fabricating_claims() {
     assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
     assert_eq!(
         schema_fingerprint(&connection).unwrap(),
-        test_v15_schema_fingerprint()
+        test_v16_schema_fingerprint()
     );
     let scan: (String, Option<i64>, i64, i64) = connection
         .query_row(
@@ -1669,7 +1830,7 @@ fn populated_v6_upgrade_adds_snapshot_path_lookup_without_rewriting_scans() {
     assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
     assert_eq!(
         schema_fingerprint(&connection).unwrap(),
-        test_v15_schema_fingerprint()
+        test_v16_schema_fingerprint()
     );
     let scans: Vec<(String, Option<Vec<u8>>)> = connection
         .prepare("SELECT scan_id, snapshot_relative_path FROM scans ORDER BY scan_id")
@@ -2329,7 +2490,7 @@ fn populated_v1_upgrade_preserves_legacy_candidate_and_cleanup_observations() {
     assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
     assert_eq!(
         schema_fingerprint(&connection).unwrap(),
-        test_v15_schema_fingerprint()
+        test_v16_schema_fingerprint()
     );
     let candidate: (i64, Option<String>, Option<String>) = connection
         .query_row(

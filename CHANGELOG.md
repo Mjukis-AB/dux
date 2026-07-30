@@ -1,5 +1,16 @@
 # Changelog
 
+- Added a Rust-only prior-boot running-scan recovery checkpoint in checksummed
+  SQLite schema v16. New immutable scan claims can bind separate fixed-size,
+  domain-separated stable-host and boot-scope observations with the sole
+  `interrupt_only` policy; every v9–v15 claim remains all-`NULL` and explicitly
+  unproven. Same-host prior-boot claims may now change one exact pristine scan
+  to `interrupted` as history-only reconciliation without probing an old PID.
+  Same-boot recovery still requires an exact `DefinitelyGone` process result;
+  foreign-host, out-of-scope legacy, unavailable, partial, and malformed
+  provenance cannot produce a write. Global 64-row keyset pages plus one
+  lookahead preserve bounded convergence, and recovery retains snapshot-temp
+  leases and adds no filesystem, cleanup, AI, FFI, or Swift authority.
 - Added a bounded, read-only running-scan recovery-debt census through
   checksummed SQLite schema v15 and UniFFI v48. Settings can now show up to 64
   unclaimed durable records plus explicit truncation, separating exact

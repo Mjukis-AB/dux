@@ -135,27 +135,47 @@ claim or terminalize a scan, or infer owner death from age or PID. Legacy
 external snapshot stages are intentionally excluded because their marker
 cannot attribute them safely to one store.
 
+Schema v16 adds an immutable nullable provenance tuple to claimed running
+scans: separate 32-byte domain-separated stable-host and boot-scope digests
+plus the sole `interrupt_only` policy. New claims store the tuple only when the
+process owner and both bounded operating-system observations agree. Every
+v9–v15 claim remains all `NULL`; migration never attributes old work to the
+current host or boot. Partial tuples, wrong storage classes or lengths,
+unknown policies, and owner/boot mismatches fail closed.
+
 On macOS, a hardened runtime may deny the boot-session sysctl. New work then
 retains an unscoped exact PID/start-token owner rather than failing persistence.
-It can confirm only an exact live match: it has no recovery-scope key, is not
-selected by scoped recovery, and can never prove death.
+It also retains all-`NULL` execution provenance. It can confirm only an exact
+live match: it has no recovery-scope key, is not recoverable, and cannot use
+prior-boot interruption.
 
-One idle-only `ScanRecoveryMaintenance` batch reads and fully validates a
-64-row keyset page for the current reliable boot/namespace scope, releases the
-SQLite guard, and probes every exact owner. Only `DefinitelyGone` may be chosen.
-The writer guard is then reacquired and one pristine claim/scan tuple is
+One idle-only `ScanRecoveryMaintenance` batch reads and fully validates one
+global 64-row keyset page plus a lookahead. A complete same-host/current-boot
+claim is probed only after releasing the SQLite guard, and only
+`DefinitelyGone` is recoverable. A complete same-host/prior-boot
+`interrupt_only` claim is history-interruptible without probing its old PID.
+Foreign-host and unproven claims are non-executable; a migrated all-`NULL`
+claim retains the old probe only when its combined recovery-scope value exactly
+matches the current owner. An absent scope can confirm only `Alive` or
+`Unknown`, never recovery.
+
+The writer guard is reacquired and one complete pristine claim/scan tuple is
 exact-CASed to `interrupted`; a concurrently completed or recovered row is
-reported without overwrite. `Alive`, `Unknown`, malformed data, newer-schema
-races, and pre-start clocks never produce a recovery write. Page cursors are
-process-local discovery hints, not durable authority, and `has_more` reports a
-sentinel page or additional proven-dead work.
+reported without overwrite. `Alive`, liveness `Unknown`, foreign-host,
+unproven, malformed data, newer-schema races, and pre-start clocks never
+produce a recovery write. Page cursors are process-local discovery hints, not
+durable authority. `has_more` reports a sentinel page or additional recoverable
+work in the inspected page, so retained foreign or unproven debt alone cannot
+cause an endless immediate retry.
 
 Recovery changes history only. It never opens or removes a snapshot, temp file,
 candidate, cleanup plan, or user path. An exact snapshot-temp lease remains
 attached after the parent becomes `interrupted`, so the independently sealed
-terminal-temp batch owns the later physical-first reconciliation. macOS and
-Linux can prove only same-scope death. Reboot/foreign scope stays `Unknown`, and
-Windows remains unable to prove death until it gains reliable host/boot scope.
+terminal-temp batch owns the later physical-first reconciliation. Supported
+macOS and Linux hosts can distinguish same-host prior-boot scan history from a
+foreign database. Foreign-host observations remain unchanged, and Windows
+remains unable to persist the reliable provenance required for prior-boot
+interruption.
 
 ## Snapshot-cap engine orchestration
 

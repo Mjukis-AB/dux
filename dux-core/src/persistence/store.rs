@@ -56,16 +56,17 @@ use super::migrations::{
 };
 use super::pressure_settings::load_disk_pressure_policy;
 use super::process_liveness::{
-    ProcessIdentityError, ProcessInstanceId, ProcessLiveness, current_process_instance,
-    probe_process_instance,
+    ProcessExecutionIdentity, ProcessIdentityError, ProcessInstanceId, ProcessLiveness,
+    current_process_execution_identity, probe_process_instance,
 };
 use super::retention::{RetentionBatchResult, apply_retention_batch, reconcile_retention_batch};
 use super::running_scan_debt::{RunningScanDebtCensus, load_running_scan_debt_census};
 use super::scan_process_claim::{
-    ScanRecoveryBatchOutcome, ScanRecoveryBatchResult, canonical_recovery_time, classify_claims,
-    consume_owned_scan_process_claim, count_remaining_scan_process_claims,
-    exact_recovered_scan_matches, exact_scan_process_claim_matches, insert_scan_process_claim,
-    interrupt_scan_process_claim, load_scan_process_claim_page, scan_process_claim_is_missing,
+    ScanClaimRecoveryState, ScanRecoveryBatchOutcome, ScanRecoveryBatchResult,
+    canonical_recovery_time, classify_claims, consume_owned_scan_process_claim,
+    count_remaining_scan_process_claims, exact_recovered_scan_matches,
+    exact_scan_process_claim_matches, insert_scan_process_claim, interrupt_scan_process_claim,
+    load_scan_process_claim_page, scan_process_claim_is_missing,
 };
 use super::snapshot_temp_lease::{
     PreparedSnapshotTempLease, SnapshotTempLeaseState, delete_snapshot_temp_lease,
@@ -223,7 +224,7 @@ pub(crate) struct StoreCoordinator {
     status: Mutex<DatabaseStatus>,
     paths: SecureStorePaths,
     connection: Mutex<Connection>,
-    scan_process_owner: OnceLock<ProcessInstanceId>,
+    scan_process_owner: OnceLock<ProcessExecutionIdentity>,
     scan_recovery_cursor: Mutex<Option<(i64, String)>>,
 }
 
@@ -354,16 +355,22 @@ impl StoreCoordinator {
         })
     }
 
-    fn scan_process_owner(&self) -> Result<ProcessInstanceId, HistoryError> {
+    fn scan_process_owner(&self) -> Result<ProcessExecutionIdentity, HistoryError> {
         if let Some(owner) = self.scan_process_owner.get() {
             return Ok(owner.clone());
         }
-        let candidate = current_process_instance().map_err(map_scan_process_identity_error)?;
+        let candidate =
+            current_process_execution_identity().map_err(map_scan_process_identity_error)?;
         let _ = self.scan_process_owner.set(candidate);
         self.scan_process_owner
             .get()
             .cloned()
             .ok_or_else(|| HistoryError::new(HistoryErrorKind::InternalState))
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_scan_process_identity_for_test(&self, identity: ProcessExecutionIdentity) {
+        assert!(self.scan_process_owner.set(identity).is_ok());
     }
 
     fn refresh_compatibility(&self) -> Result<(), DatabaseOpenError> {
@@ -1686,8 +1693,9 @@ impl StoreCoordinator {
         load_running_scan_debt_census(&guard.connection)
     }
 
-    /// Recover at most one durably claimed running scan whose exact process
-    /// instance is definitely gone. OS probes run with SQLite locks dropped.
+    /// Recover at most one pristine claimed scan after same-boot process death
+    /// or complete same-host prior-boot proof. OS probes, when needed, run
+    /// with SQLite locks dropped; prior-boot interruption performs no probe.
     pub(crate) fn run_scan_recovery_batch(
         &self,
         observed_at: SystemTime,
@@ -1708,8 +1716,7 @@ impl StoreCoordinator {
         after_commit: impl FnOnce() -> Result<(), HistoryError>,
     ) -> Result<ScanRecoveryBatchResult, HistoryError> {
         let (observed_at, completed_at_unix_ms) = canonical_recovery_time(observed_at)?;
-        let owner = self.scan_process_owner()?;
-        let recovery_scope = owner.recovery_scope_key();
+        let identity = self.scan_process_owner()?;
         let cursor = self
             .scan_recovery_cursor
             .lock()
@@ -1719,33 +1726,22 @@ impl StoreCoordinator {
             let guard = self.lock_current_history_connection()?;
             let mut page = load_scan_process_claim_page(
                 &guard.connection,
-                recovery_scope.as_deref(),
                 cursor.as_ref().map(|cursor| (cursor.0, cursor.1.as_str())),
             )?;
             if page.claims.is_empty() && cursor.is_some() {
-                page = load_scan_process_claim_page(
-                    &guard.connection,
-                    recovery_scope.as_deref(),
-                    None,
-                )?;
+                page = load_scan_process_claim_page(&guard.connection, None)?;
             }
             page
         };
         let page_has_more = page.has_more;
         let claims = page.claims;
-        *self
-            .scan_recovery_cursor
-            .lock()
-            .map_err(|_| HistoryError::new(HistoryErrorKind::InternalState))? = if page_has_more {
-            claims
-                .last()
-                .map(|claim| (claim.cursor().0, claim.cursor().1.to_owned()))
-        } else {
-            None
-        };
         let claimed_count_before = u32::try_from(claims.len())
             .map_err(|_| HistoryError::new(HistoryErrorKind::CorruptData))?;
         if claims.is_empty() {
+            *self
+                .scan_recovery_cursor
+                .lock()
+                .map_err(|_| HistoryError::new(HistoryErrorKind::InternalState))? = None;
             return Ok(ScanRecoveryBatchResult {
                 observed_at,
                 outcome: ScanRecoveryBatchOutcome::NoClaim,
@@ -1758,12 +1754,23 @@ impl StoreCoordinator {
             });
         }
 
-        let (liveness, alive_count, unknown_count, recoverable_count) =
-            classify_claims(&claims, probe);
-        let Some(target_index) = liveness
+        let (states, alive_count, unknown_count, recoverable_count) =
+            classify_claims(&claims, &identity, probe);
+        let Some(target_index) = states
             .iter()
-            .position(|state| *state == ProcessLiveness::DefinitelyGone)
+            .position(|state| *state == ScanClaimRecoveryState::Recoverable)
         else {
+            *self
+                .scan_recovery_cursor
+                .lock()
+                .map_err(|_| HistoryError::new(HistoryErrorKind::InternalState))? = if page_has_more
+            {
+                claims
+                    .last()
+                    .map(|claim| (claim.cursor().0, claim.cursor().1.to_owned()))
+            } else {
+                None
+            };
             return Ok(ScanRecoveryBatchResult {
                 observed_at,
                 outcome: ScanRecoveryBatchOutcome::DeferredUnproven,
@@ -1776,6 +1783,7 @@ impl StoreCoordinator {
             });
         };
         let target = &claims[target_index];
+        let target_cursor = (target.cursor().0, target.cursor().1.to_owned());
         before_write()?;
 
         let mut guard = self.lock_current_history_connection()?;
@@ -1787,6 +1795,11 @@ impl StoreCoordinator {
             drop(transaction);
             let claimed_count_after =
                 count_remaining_scan_process_claims(&guard.connection, &claims)?;
+            *self
+                .scan_recovery_cursor
+                .lock()
+                .map_err(|_| HistoryError::new(HistoryErrorKind::InternalState))? =
+                Some(target_cursor);
             return Ok(ScanRecoveryBatchResult {
                 observed_at,
                 outcome: ScanRecoveryBatchOutcome::ChangedConcurrently,
@@ -1816,6 +1829,12 @@ impl StoreCoordinator {
         let claimed_count_after =
             count_remaining_scan_process_claims(&guard.connection, &claims)
                 .map_err(|_| HistoryError::new(HistoryErrorKind::OutcomeUnknown))?;
+        let has_more = recoverable_count > 1 || page_has_more;
+        *self
+            .scan_recovery_cursor
+            .lock()
+            .map_err(|_| HistoryError::new(HistoryErrorKind::InternalState))? =
+            has_more.then_some(target_cursor);
         Ok(ScanRecoveryBatchResult {
             observed_at,
             outcome: ScanRecoveryBatchOutcome::Interrupted,
@@ -1824,7 +1843,7 @@ impl StoreCoordinator {
             alive_count,
             unknown_count,
             recoverable_count,
-            has_more: recoverable_count > 1 || page_has_more,
+            has_more,
         })
     }
 
