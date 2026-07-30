@@ -21,6 +21,9 @@ use super::SnapshotReviewPurpose;
 use super::candidate_evaluation_history::{
     CandidateEvaluationCompletion, CandidateEvaluationIdentity, NewCandidateEvaluation,
 };
+use super::footprint::{
+    DuxOwnedStorageFootprint, OwnedSnapshotStorageFootprint, OwnedStorageUsage,
+};
 use super::history::{
     HistoryError, HistoryErrorKind, ScanCompletionRecord, ScanCounts, ScanStatus,
     map_write_sql_error, system_time_to_unix_ms, unix_ms_to_system_time,
@@ -32,7 +35,8 @@ use super::snapshot_retention::{
     reconcile_snapshot_retention_tombstone_insert,
 };
 use super::snapshot_retention_inventory::{
-    SnapshotRetentionInventory, build_snapshot_physical_orphan_inventory,
+    SnapshotRetentionInventory, SnapshotRetentionLogicalState, SnapshotRetentionUsage,
+    SnapshotTemporaryState, build_snapshot_physical_orphan_inventory,
     build_snapshot_retention_inventory,
 };
 #[cfg(test)]
@@ -351,6 +355,153 @@ fn map_history(error: HistoryError) -> SnapshotRepositoryError {
 
 const fn history_repository_error(kind: HistoryErrorKind) -> SnapshotRepositoryError {
     repository_error(SnapshotRepositoryErrorKind::History(kind))
+}
+
+fn owned_snapshot_storage_footprint(
+    inventory: &SnapshotRetentionInventory,
+) -> Result<OwnedSnapshotStorageFootprint, SnapshotRepositoryError> {
+    let usage = |value: SnapshotRetentionUsage| OwnedStorageUsage {
+        logical_bytes: value.logical_bytes,
+        allocated_bytes: value.allocated_bytes,
+        charged_bytes: value.charged_bytes,
+    };
+    let controls = usage(inventory.totals.controls);
+    let available = usage(inventory.totals.available);
+    let protected = usage(inventory.totals.protected);
+    let retention_eligible = usage(inventory.totals.eligible);
+    let tombstoned_residual = usage(inventory.totals.tombstoned_residual);
+    let orphan = usage(inventory.totals.orphan);
+    let temporary_active = usage(inventory.totals.temporary_active);
+    let temporary_quiescent = usage(inventory.totals.temporary_quiescent);
+    let temporary_unleased = usage(inventory.totals.temporary_unleased);
+    let total = usage(inventory.totals.store_total);
+
+    let mut available_count = 0_u32;
+    let mut protected_count = 0_u32;
+    let mut retention_eligible_count = 0_u32;
+    let mut tombstoned_residual_count = 0_u32;
+    for entry in &inventory.entries {
+        match entry.logical_state {
+            SnapshotRetentionLogicalState::Available => {
+                available_count = checked_footprint_count_increment(available_count)?;
+                if entry.is_policy_protected() {
+                    protected_count = checked_footprint_count_increment(protected_count)?;
+                } else {
+                    retention_eligible_count =
+                        checked_footprint_count_increment(retention_eligible_count)?;
+                }
+            }
+            SnapshotRetentionLogicalState::Tombstoned { .. } => {
+                tombstoned_residual_count =
+                    checked_footprint_count_increment(tombstoned_residual_count)?;
+            }
+        }
+    }
+    let orphan_count = checked_footprint_count(inventory.orphan_finals.len())?;
+    let mut active_temporary_count = 0_u32;
+    let mut quiescent_temporary_count = 0_u32;
+    let mut unleased_temporary_count = 0_u32;
+    for temporary in &inventory.temporary_files {
+        match temporary.state {
+            SnapshotTemporaryState::Active => {
+                active_temporary_count = checked_footprint_count_increment(active_temporary_count)?;
+            }
+            SnapshotTemporaryState::QuiescentAtObservation => {
+                quiescent_temporary_count =
+                    checked_footprint_count_increment(quiescent_temporary_count)?;
+            }
+            SnapshotTemporaryState::Unleased => {
+                unleased_temporary_count =
+                    checked_footprint_count_increment(unleased_temporary_count)?;
+            }
+        }
+    }
+    let residual_temporary_lease_count =
+        checked_footprint_count(inventory.residual_temp_leases.len())?;
+
+    let classified_available = protected
+        .checked_add(retention_eligible)
+        .map_err(map_history)?;
+    let classified_total = [
+        controls,
+        available,
+        tombstoned_residual,
+        orphan,
+        temporary_active,
+        temporary_quiescent,
+        temporary_unleased,
+    ]
+    .into_iter()
+    .try_fold(OwnedStorageUsage::default(), |sum, value| {
+        sum.checked_add(value)
+    })
+    .map_err(map_history)?;
+    let classified_available_count = protected_count
+        .checked_add(retention_eligible_count)
+        .ok_or_else(|| history_repository_error(HistoryErrorKind::CorruptData))?;
+    let accounting_unstable = active_temporary_count > 0 || unleased_temporary_count > 0;
+    let non_evictable_charged_bytes = [
+        controls,
+        protected,
+        tombstoned_residual,
+        orphan,
+        temporary_active,
+        temporary_quiescent,
+        temporary_unleased,
+    ]
+    .into_iter()
+    .try_fold(0_u64, |sum, value| {
+        sum.checked_add(value.charged_bytes)
+            .ok_or_else(|| HistoryError::new(HistoryErrorKind::CorruptData))
+    })
+    .map_err(map_history)?;
+    if classified_available != available
+        || classified_total != total
+        || classified_available_count != available_count
+        || inventory.cap_excess_bytes != total.charged_bytes.saturating_sub(inventory.cap_bytes)
+        || inventory.accounting_unstable != accounting_unstable
+        || inventory.non_evictable_over_cap != (non_evictable_charged_bytes > inventory.cap_bytes)
+    {
+        return Err(history_repository_error(HistoryErrorKind::CorruptData));
+    }
+
+    Ok(OwnedSnapshotStorageFootprint {
+        cap_bytes: inventory.cap_bytes,
+        cap_excess_bytes: inventory.cap_excess_bytes,
+        controls,
+        available,
+        protected,
+        retention_eligible,
+        tombstoned_residual,
+        orphan,
+        temporary_active,
+        temporary_quiescent,
+        temporary_unleased,
+        total,
+        available_count,
+        protected_count,
+        retention_eligible_count,
+        tombstoned_residual_count,
+        orphan_count,
+        active_temporary_count,
+        quiescent_temporary_count,
+        unleased_temporary_count,
+        residual_temporary_lease_count,
+        active_pin_rows: inventory.totals.active_pin_rows,
+        expired_pin_rows: inventory.totals.expired_pin_rows,
+        non_evictable_over_cap: inventory.non_evictable_over_cap,
+        accounting_unstable: inventory.accounting_unstable,
+    })
+}
+
+fn checked_footprint_count(value: usize) -> Result<u32, SnapshotRepositoryError> {
+    u32::try_from(value).map_err(|_| history_repository_error(HistoryErrorKind::QueryLimitExceeded))
+}
+
+fn checked_footprint_count_increment(value: u32) -> Result<u32, SnapshotRepositoryError> {
+    value
+        .checked_add(1)
+        .ok_or_else(|| history_repository_error(HistoryErrorKind::QueryLimitExceeded))
 }
 
 #[allow(
@@ -768,6 +919,44 @@ impl SnapshotRepository {
             .revalidate_current_history_guard(&database_guard)
             .map_err(map_history)?;
         Ok(inventory)
+    }
+
+    /// Observe only marker-owned database/control and snapshot storage.
+    ///
+    /// The database writer guard remains held before the snapshot writer lease
+    /// is acquired, preserving the permanent database -> snapshot lock order.
+    /// Returned aggregates contain no path, scan ID, file name, or mutation
+    /// capability. Embedded AI content is a logical subset of SQLite.
+    pub(crate) fn inspect_owned_storage_footprint(
+        &self,
+        observed_at: SystemTime,
+    ) -> Result<DuxOwnedStorageFootprint, SnapshotRepositoryError> {
+        if self.access != SnapshotStoreAccess::ReadWrite {
+            return Err(repository_error(SnapshotRepositoryErrorKind::ReadOnly));
+        }
+        let database_guard = self
+            .database
+            .lock_current_history_connection()
+            .map_err(map_history)?;
+        let (database, embedded_ai_cache) = self
+            .database
+            .inspect_owned_database_footprint_with_guard(&database_guard, observed_at)
+            .map_err(map_history)?;
+        let (inventory, storage) =
+            self.build_retention_inventory_with_guard(&database_guard, observed_at)?;
+        let snapshots = owned_snapshot_storage_footprint(&inventory)?;
+        let physical_total = database.checked_add(snapshots.total).map_err(map_history)?;
+        storage.revalidate().map_err(map_storage)?;
+        self.database
+            .revalidate_current_history_guard(&database_guard)
+            .map_err(map_history)?;
+        Ok(DuxOwnedStorageFootprint {
+            observed_at,
+            database,
+            snapshots,
+            embedded_ai_cache,
+            physical_total,
+        })
     }
 
     fn build_retention_inventory_with_guard(
@@ -5155,6 +5344,12 @@ mod tests {
         );
         assert!(inventory.accounting_unstable);
         assert!(inventory.residual_temp_leases.is_empty());
+        let footprint = repository
+            .inspect_owned_storage_footprint(UNIX_EPOCH + Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(footprint.snapshots.unleased_temporary_count, 1);
+        assert_eq!(footprint.snapshots.active_temporary_count, 0);
+        assert!(footprint.snapshots.accounting_unstable);
     }
 
     #[test]
@@ -5333,6 +5528,42 @@ mod tests {
                 + inventory.totals.temporary_active.charged_bytes
                 + inventory.totals.temporary_quiescent.charged_bytes
                 + inventory.totals.temporary_unleased.charged_bytes
+        );
+        let footprint = repository
+            .inspect_owned_storage_footprint(observed_at)
+            .unwrap();
+        assert_eq!(footprint.observed_at, observed_at);
+        assert_eq!(
+            footprint.snapshots.total.charged_bytes,
+            inventory.totals.store_total.charged_bytes
+        );
+        assert_eq!(
+            footprint.snapshots.protected.charged_bytes,
+            inventory.totals.protected.charged_bytes
+        );
+        assert_eq!(
+            footprint.snapshots.retention_eligible.charged_bytes,
+            inventory.totals.eligible.charged_bytes
+        );
+        assert_eq!(footprint.snapshots.available_count, 4);
+        assert_eq!(footprint.snapshots.protected_count, 3);
+        assert_eq!(footprint.snapshots.retention_eligible_count, 1);
+        assert_eq!(footprint.snapshots.tombstoned_residual_count, 1);
+        assert_eq!(footprint.snapshots.orphan_count, 1);
+        assert_eq!(footprint.snapshots.quiescent_temporary_count, 1);
+        assert_eq!(footprint.snapshots.active_temporary_count, 0);
+        assert_eq!(footprint.snapshots.unleased_temporary_count, 0);
+        assert_eq!(footprint.snapshots.residual_temporary_lease_count, 1);
+        assert_eq!(footprint.snapshots.active_pin_rows, 1);
+        assert!(!footprint.snapshots.accounting_unstable);
+        assert_eq!(footprint.embedded_ai_cache.record_count, 0);
+        assert_eq!(
+            footprint.physical_total.charged_bytes,
+            footprint
+                .database
+                .charged_bytes
+                .checked_add(footprint.snapshots.total.charged_bytes)
+                .unwrap()
         );
 
         let after_rows = store.with_connection(|connection| {
@@ -5537,6 +5768,12 @@ mod tests {
             )
             .unwrap();
         let (staged, _, _) = repository.stage_document(&live_document).unwrap();
+        let active_footprint = repository
+            .inspect_owned_storage_footprint(observed_at)
+            .unwrap();
+        assert_eq!(active_footprint.snapshots.active_temporary_count, 1);
+        assert_eq!(active_footprint.snapshots.unleased_temporary_count, 0);
+        assert!(active_footprint.snapshots.accounting_unstable);
         let unstable = repository.enforce_retention_cap(observed_at).unwrap();
         assert_eq!(
             unstable.outcome,

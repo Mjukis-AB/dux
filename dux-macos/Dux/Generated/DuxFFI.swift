@@ -947,6 +947,15 @@ public protocol DuxEngineProtocol: AnyObject, Sendable {
     func getDiskPressurePolicy() throws  -> PressurePolicyStatus
 
     /**
+     * Observe DUX's fixed marker-owned database and snapshot stores.
+     *
+     * This bounded read is path-free and cannot select, approve, schedule,
+     * or execute cleanup. Embedded AI content is already included in the
+     * database component and is never added to the physical total.
+     */
+    func getOwnedStorageFootprint() throws  -> OwnedStorageFootprint
+
+    /**
      * Load the path-free global permanent-cleanup opt-in. The disabled default
      * can only deny effects; this cannot create a plan or authorize a target.
      */
@@ -1370,6 +1379,21 @@ open func getConfiguredProjectRoots()throws  -> ConfiguredProjectRootsStatus  {
 open func getDiskPressurePolicy()throws  -> PressurePolicyStatus  {
     return try  FfiConverterTypePressurePolicyStatus_lift(try rustCallWithError(FfiConverterTypePressurePolicyError_lift) {
     uniffi_dux_ffi_fn_method_duxengine_get_disk_pressure_policy(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+    /**
+     * Observe DUX's fixed marker-owned database and snapshot stores.
+     *
+     * This bounded read is path-free and cannot select, approve, schedule,
+     * or execute cleanup. Embedded AI content is already included in the
+     * database component and is never added to the physical total.
+     */
+open func getOwnedStorageFootprint()throws  -> OwnedStorageFootprint  {
+    return try  FfiConverterTypeOwnedStorageFootprint_lift(try rustCallWithError(FfiConverterTypeOwnedStorageFootprintError_lift) {
+    uniffi_dux_ffi_fn_method_duxengine_get_owned_storage_footprint(
             self.uniffiCloneHandle(),$0
     )
 })
@@ -5952,6 +5976,81 @@ public func FfiConverterTypeDirectCargoExecutablePath_lower(_ value: DirectCargo
 
 
 /**
+ * Logical variable-length AI cache content embedded in the DUX SQLite
+ * database.
+ *
+ * This includes insight IDs, input digests, provider, adapter, optional model
+ * labels, and output payloads. It excludes integer fields and SQLite record,
+ * page, index, and fragmentation overhead. These bytes are a non-additive
+ * subset of `database`, not separate physical or reclaimable bytes.
+ */
+public struct EmbeddedAiCacheFootprint: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let recordCount: UInt32
+    public let logicalContentBytes: UInt64
+    public let expiredRecordCount: UInt32
+    public let expiredLogicalContentBytes: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, recordCount: UInt32, logicalContentBytes: UInt64, expiredRecordCount: UInt32, expiredLogicalContentBytes: UInt64) {
+        self.recordVersion = recordVersion
+        self.recordCount = recordCount
+        self.logicalContentBytes = logicalContentBytes
+        self.expiredRecordCount = expiredRecordCount
+        self.expiredLogicalContentBytes = expiredLogicalContentBytes
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension EmbeddedAiCacheFootprint: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeEmbeddedAiCacheFootprint: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> EmbeddedAiCacheFootprint {
+        return
+            try EmbeddedAiCacheFootprint(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                recordCount: FfiConverterUInt32.read(from: &buf),
+                logicalContentBytes: FfiConverterUInt64.read(from: &buf),
+                expiredRecordCount: FfiConverterUInt32.read(from: &buf),
+                expiredLogicalContentBytes: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: EmbeddedAiCacheFootprint, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterUInt32.write(value.recordCount, into: &buf)
+        FfiConverterUInt64.write(value.logicalContentBytes, into: &buf)
+        FfiConverterUInt32.write(value.expiredRecordCount, into: &buf)
+        FfiConverterUInt64.write(value.expiredLogicalContentBytes, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEmbeddedAiCacheFootprint_lift(_ buf: RustBuffer) throws -> EmbeddedAiCacheFootprint {
+    return try FfiConverterTypeEmbeddedAiCacheFootprint.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEmbeddedAiCacheFootprint_lower(_ value: EmbeddedAiCacheFootprint) -> RustBuffer {
+    return FfiConverterTypeEmbeddedAiCacheFootprint.lower(value)
+}
+
+
+/**
  * Bounded display-only recovery group. Optional shapes are lane-specific and
  * validated before crossing the boundary.
  */
@@ -7235,6 +7334,151 @@ public func FfiConverterTypeMaintenanceStart_lift(_ buf: RustBuffer) throws -> M
 #endif
 public func FfiConverterTypeMaintenanceStart_lower(_ value: MaintenanceStart) -> RustBuffer {
     return FfiConverterTypeMaintenanceStart.lower(value)
+}
+
+
+/**
+ * Bounded observation of fixed marker-owned DUX storage.
+ *
+ * This contains no paths, identifiers, selectors, or mutation authority.
+ * It excludes the legacy caller-selected CLI cache and is not free-space or
+ * cleanup-reclaimability telemetry.
+ */
+public struct OwnedStorageFootprint: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let observedAtUnixMs: Int64
+    public let database: OwnedStorageUsage
+    public let snapshots: SnapshotStorageFootprint
+    public let embeddedAiCache: EmbeddedAiCacheFootprint
+    public let physicalTotal: OwnedStorageUsage
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, observedAtUnixMs: Int64, database: OwnedStorageUsage, snapshots: SnapshotStorageFootprint, embeddedAiCache: EmbeddedAiCacheFootprint, physicalTotal: OwnedStorageUsage) {
+        self.recordVersion = recordVersion
+        self.observedAtUnixMs = observedAtUnixMs
+        self.database = database
+        self.snapshots = snapshots
+        self.embeddedAiCache = embeddedAiCache
+        self.physicalTotal = physicalTotal
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension OwnedStorageFootprint: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeOwnedStorageFootprint: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> OwnedStorageFootprint {
+        return
+            try OwnedStorageFootprint(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                observedAtUnixMs: FfiConverterInt64.read(from: &buf),
+                database: FfiConverterTypeOwnedStorageUsage.read(from: &buf),
+                snapshots: FfiConverterTypeSnapshotStorageFootprint.read(from: &buf),
+                embeddedAiCache: FfiConverterTypeEmbeddedAiCacheFootprint.read(from: &buf),
+                physicalTotal: FfiConverterTypeOwnedStorageUsage.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: OwnedStorageFootprint, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterInt64.write(value.observedAtUnixMs, into: &buf)
+        FfiConverterTypeOwnedStorageUsage.write(value.database, into: &buf)
+        FfiConverterTypeSnapshotStorageFootprint.write(value.snapshots, into: &buf)
+        FfiConverterTypeEmbeddedAiCacheFootprint.write(value.embeddedAiCache, into: &buf)
+        FfiConverterTypeOwnedStorageUsage.write(value.physicalTotal, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeOwnedStorageFootprint_lift(_ buf: RustBuffer) throws -> OwnedStorageFootprint {
+    return try FfiConverterTypeOwnedStorageFootprint.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeOwnedStorageFootprint_lower(_ value: OwnedStorageFootprint) -> RustBuffer {
+    return FfiConverterTypeOwnedStorageFootprint.lower(value)
+}
+
+
+/**
+ * Exact path-free usage for one fixed DUX-owned storage component.
+ *
+ * `charged_bytes` is conservative per-file accounting and can exceed both
+ * aggregate logical and allocated usage.
+ */
+public struct OwnedStorageUsage: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let logicalBytes: UInt64
+    public let allocatedBytes: UInt64
+    public let chargedBytes: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, logicalBytes: UInt64, allocatedBytes: UInt64, chargedBytes: UInt64) {
+        self.recordVersion = recordVersion
+        self.logicalBytes = logicalBytes
+        self.allocatedBytes = allocatedBytes
+        self.chargedBytes = chargedBytes
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension OwnedStorageUsage: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeOwnedStorageUsage: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> OwnedStorageUsage {
+        return
+            try OwnedStorageUsage(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                logicalBytes: FfiConverterUInt64.read(from: &buf),
+                allocatedBytes: FfiConverterUInt64.read(from: &buf),
+                chargedBytes: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: OwnedStorageUsage, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterUInt64.write(value.logicalBytes, into: &buf)
+        FfiConverterUInt64.write(value.allocatedBytes, into: &buf)
+        FfiConverterUInt64.write(value.chargedBytes, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeOwnedStorageUsage_lift(_ buf: RustBuffer) throws -> OwnedStorageUsage {
+    return try FfiConverterTypeOwnedStorageUsage.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeOwnedStorageUsage_lower(_ value: OwnedStorageUsage) -> RustBuffer {
+    return FfiConverterTypeOwnedStorageUsage.lower(value)
 }
 
 
@@ -10963,6 +11207,162 @@ public func FfiConverterTypeSnapshotReviewInfo_lift(_ buf: RustBuffer) throws ->
 #endif
 public func FfiConverterTypeSnapshotReviewInfo_lower(_ value: SnapshotReviewInfo) -> RustBuffer {
     return FfiConverterTypeSnapshotReviewInfo.lower(value)
+}
+
+
+/**
+ * Point-in-time physical and policy accounting for DUX's snapshot store.
+ *
+ * `available` is partitioned by `protected` and `retention_eligible`.
+ * Retention eligibility is descriptive and grants no cleanup authority.
+ */
+public struct SnapshotStorageFootprint: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let capBytes: UInt64
+    public let capExcessBytes: UInt64
+    public let controls: OwnedStorageUsage
+    public let available: OwnedStorageUsage
+    public let protected: OwnedStorageUsage
+    public let retentionEligible: OwnedStorageUsage
+    public let tombstonedResidual: OwnedStorageUsage
+    public let orphan: OwnedStorageUsage
+    public let temporaryActive: OwnedStorageUsage
+    public let temporaryQuiescent: OwnedStorageUsage
+    public let temporaryUnleased: OwnedStorageUsage
+    public let total: OwnedStorageUsage
+    public let availableCount: UInt32
+    public let protectedCount: UInt32
+    public let retentionEligibleCount: UInt32
+    public let tombstonedResidualCount: UInt32
+    public let orphanCount: UInt32
+    public let activeTemporaryCount: UInt32
+    public let quiescentTemporaryCount: UInt32
+    public let unleasedTemporaryCount: UInt32
+    public let residualTemporaryLeaseCount: UInt32
+    public let activePinRows: UInt32
+    public let expiredPinRows: UInt32
+    public let nonEvictableOverCap: Bool
+    public let accountingUnstable: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, capBytes: UInt64, capExcessBytes: UInt64, controls: OwnedStorageUsage, available: OwnedStorageUsage, protected: OwnedStorageUsage, retentionEligible: OwnedStorageUsage, tombstonedResidual: OwnedStorageUsage, orphan: OwnedStorageUsage, temporaryActive: OwnedStorageUsage, temporaryQuiescent: OwnedStorageUsage, temporaryUnleased: OwnedStorageUsage, total: OwnedStorageUsage, availableCount: UInt32, protectedCount: UInt32, retentionEligibleCount: UInt32, tombstonedResidualCount: UInt32, orphanCount: UInt32, activeTemporaryCount: UInt32, quiescentTemporaryCount: UInt32, unleasedTemporaryCount: UInt32, residualTemporaryLeaseCount: UInt32, activePinRows: UInt32, expiredPinRows: UInt32, nonEvictableOverCap: Bool, accountingUnstable: Bool) {
+        self.recordVersion = recordVersion
+        self.capBytes = capBytes
+        self.capExcessBytes = capExcessBytes
+        self.controls = controls
+        self.available = available
+        self.protected = protected
+        self.retentionEligible = retentionEligible
+        self.tombstonedResidual = tombstonedResidual
+        self.orphan = orphan
+        self.temporaryActive = temporaryActive
+        self.temporaryQuiescent = temporaryQuiescent
+        self.temporaryUnleased = temporaryUnleased
+        self.total = total
+        self.availableCount = availableCount
+        self.protectedCount = protectedCount
+        self.retentionEligibleCount = retentionEligibleCount
+        self.tombstonedResidualCount = tombstonedResidualCount
+        self.orphanCount = orphanCount
+        self.activeTemporaryCount = activeTemporaryCount
+        self.quiescentTemporaryCount = quiescentTemporaryCount
+        self.unleasedTemporaryCount = unleasedTemporaryCount
+        self.residualTemporaryLeaseCount = residualTemporaryLeaseCount
+        self.activePinRows = activePinRows
+        self.expiredPinRows = expiredPinRows
+        self.nonEvictableOverCap = nonEvictableOverCap
+        self.accountingUnstable = accountingUnstable
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SnapshotStorageFootprint: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSnapshotStorageFootprint: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SnapshotStorageFootprint {
+        return
+            try SnapshotStorageFootprint(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                capBytes: FfiConverterUInt64.read(from: &buf),
+                capExcessBytes: FfiConverterUInt64.read(from: &buf),
+                controls: FfiConverterTypeOwnedStorageUsage.read(from: &buf),
+                available: FfiConverterTypeOwnedStorageUsage.read(from: &buf),
+                protected: FfiConverterTypeOwnedStorageUsage.read(from: &buf),
+                retentionEligible: FfiConverterTypeOwnedStorageUsage.read(from: &buf),
+                tombstonedResidual: FfiConverterTypeOwnedStorageUsage.read(from: &buf),
+                orphan: FfiConverterTypeOwnedStorageUsage.read(from: &buf),
+                temporaryActive: FfiConverterTypeOwnedStorageUsage.read(from: &buf),
+                temporaryQuiescent: FfiConverterTypeOwnedStorageUsage.read(from: &buf),
+                temporaryUnleased: FfiConverterTypeOwnedStorageUsage.read(from: &buf),
+                total: FfiConverterTypeOwnedStorageUsage.read(from: &buf),
+                availableCount: FfiConverterUInt32.read(from: &buf),
+                protectedCount: FfiConverterUInt32.read(from: &buf),
+                retentionEligibleCount: FfiConverterUInt32.read(from: &buf),
+                tombstonedResidualCount: FfiConverterUInt32.read(from: &buf),
+                orphanCount: FfiConverterUInt32.read(from: &buf),
+                activeTemporaryCount: FfiConverterUInt32.read(from: &buf),
+                quiescentTemporaryCount: FfiConverterUInt32.read(from: &buf),
+                unleasedTemporaryCount: FfiConverterUInt32.read(from: &buf),
+                residualTemporaryLeaseCount: FfiConverterUInt32.read(from: &buf),
+                activePinRows: FfiConverterUInt32.read(from: &buf),
+                expiredPinRows: FfiConverterUInt32.read(from: &buf),
+                nonEvictableOverCap: FfiConverterBool.read(from: &buf),
+                accountingUnstable: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SnapshotStorageFootprint, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterUInt64.write(value.capBytes, into: &buf)
+        FfiConverterUInt64.write(value.capExcessBytes, into: &buf)
+        FfiConverterTypeOwnedStorageUsage.write(value.controls, into: &buf)
+        FfiConverterTypeOwnedStorageUsage.write(value.available, into: &buf)
+        FfiConverterTypeOwnedStorageUsage.write(value.protected, into: &buf)
+        FfiConverterTypeOwnedStorageUsage.write(value.retentionEligible, into: &buf)
+        FfiConverterTypeOwnedStorageUsage.write(value.tombstonedResidual, into: &buf)
+        FfiConverterTypeOwnedStorageUsage.write(value.orphan, into: &buf)
+        FfiConverterTypeOwnedStorageUsage.write(value.temporaryActive, into: &buf)
+        FfiConverterTypeOwnedStorageUsage.write(value.temporaryQuiescent, into: &buf)
+        FfiConverterTypeOwnedStorageUsage.write(value.temporaryUnleased, into: &buf)
+        FfiConverterTypeOwnedStorageUsage.write(value.total, into: &buf)
+        FfiConverterUInt32.write(value.availableCount, into: &buf)
+        FfiConverterUInt32.write(value.protectedCount, into: &buf)
+        FfiConverterUInt32.write(value.retentionEligibleCount, into: &buf)
+        FfiConverterUInt32.write(value.tombstonedResidualCount, into: &buf)
+        FfiConverterUInt32.write(value.orphanCount, into: &buf)
+        FfiConverterUInt32.write(value.activeTemporaryCount, into: &buf)
+        FfiConverterUInt32.write(value.quiescentTemporaryCount, into: &buf)
+        FfiConverterUInt32.write(value.unleasedTemporaryCount, into: &buf)
+        FfiConverterUInt32.write(value.residualTemporaryLeaseCount, into: &buf)
+        FfiConverterUInt32.write(value.activePinRows, into: &buf)
+        FfiConverterUInt32.write(value.expiredPinRows, into: &buf)
+        FfiConverterBool.write(value.nonEvictableOverCap, into: &buf)
+        FfiConverterBool.write(value.accountingUnstable, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotStorageFootprint_lift(_ buf: RustBuffer) throws -> SnapshotStorageFootprint {
+    return try FfiConverterTypeSnapshotStorageFootprint.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotStorageFootprint_lower(_ value: SnapshotStorageFootprint) -> RustBuffer {
+    return FfiConverterTypeSnapshotStorageFootprint.lower(value)
 }
 
 
@@ -17519,6 +17919,124 @@ public func FfiConverterTypeMaintenanceStartDisposition_lower(_ value: Maintenan
     return FfiConverterTypeMaintenanceStartDisposition.lower(value)
 }
 
+
+
+public enum OwnedStorageFootprintError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
+
+
+
+    case Closed
+    case InvalidClock
+    case IncompatibleSchema
+    case Busy
+    case UnsafeStorage
+    case BudgetExceeded
+    case CorruptData
+    case Unavailable
+    case InternalState
+
+
+
+
+
+
+    public var errorDescription: String? {
+        String(reflecting: self)
+    }
+
+}
+
+#if compiler(>=6)
+extension OwnedStorageFootprintError: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeOwnedStorageFootprintError: FfiConverterRustBuffer {
+    typealias SwiftType = OwnedStorageFootprintError
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> OwnedStorageFootprintError {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+
+
+
+        case 1: return .Closed
+        case 2: return .InvalidClock
+        case 3: return .IncompatibleSchema
+        case 4: return .Busy
+        case 5: return .UnsafeStorage
+        case 6: return .BudgetExceeded
+        case 7: return .CorruptData
+        case 8: return .Unavailable
+        case 9: return .InternalState
+
+         default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: OwnedStorageFootprintError, into buf: inout [UInt8]) {
+        switch value {
+
+
+
+
+
+        case .Closed:
+            writeInt(&buf, Int32(1))
+
+
+        case .InvalidClock:
+            writeInt(&buf, Int32(2))
+
+
+        case .IncompatibleSchema:
+            writeInt(&buf, Int32(3))
+
+
+        case .Busy:
+            writeInt(&buf, Int32(4))
+
+
+        case .UnsafeStorage:
+            writeInt(&buf, Int32(5))
+
+
+        case .BudgetExceeded:
+            writeInt(&buf, Int32(6))
+
+
+        case .CorruptData:
+            writeInt(&buf, Int32(7))
+
+
+        case .Unavailable:
+            writeInt(&buf, Int32(8))
+
+
+        case .InternalState:
+            writeInt(&buf, Int32(9))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeOwnedStorageFootprintError_lift(_ buf: RustBuffer) throws -> OwnedStorageFootprintError {
+    return try FfiConverterTypeOwnedStorageFootprintError.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeOwnedStorageFootprintError_lower(_ value: OwnedStorageFootprintError) -> RustBuffer {
+    return FfiConverterTypeOwnedStorageFootprintError.lower(value)
+}
 
 
 public enum PermanentCleanupPolicyError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
@@ -25031,6 +25549,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_get_disk_pressure_policy() != 6278) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_duxengine_get_owned_storage_footprint() != 36594) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_get_permanent_cleanup_policy() != 28759) {

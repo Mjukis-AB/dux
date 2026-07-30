@@ -51,6 +51,19 @@ protocol DuxSnapshotRetentionCapServing: Sendable {
     func resetSnapshotRetentionCap() async throws -> SnapshotRetentionCapUpdateResultModel
 }
 
+protocol DuxOwnedStorageFootprintServing: Sendable {
+    func loadOwnedStorageFootprint() async throws
+        -> DuxOwnedStorageFootprintModel
+}
+
+extension DuxOwnedStorageFootprintServing {
+    func loadOwnedStorageFootprint() async throws
+        -> DuxOwnedStorageFootprintModel
+    {
+        throw DuxOwnedStorageFootprintServiceError.unavailable
+    }
+}
+
 extension DuxSnapshotRetentionCapServing {
     func loadSnapshotRetentionCap() async throws -> SnapshotRetentionCapModel {
         throw SnapshotRetentionCapServiceError.unavailable
@@ -200,9 +213,10 @@ extension DuxPermanentCleanupPolicyServing {
 
 protocol EngineServing: DuxVolumeStatusServing, DuxCapacityTrendServing,
     DuxPressureEpisodeServing, DuxPressurePolicyServing, DuxSnapshotRetentionCapServing,
-    DuxPermanentCleanupPolicyServing, DuxCleanupExclusionsServing, DuxProjectDiscoveryRootsServing,
-    DuxDirectCargoEnrollmentServing, DuxTargetedReclaimScanServing, DuxCleanupHistoryServing,
-    DuxCleanupHistoryClearing, DuxPersistentRecoveryDebtServing,
+    DuxOwnedStorageFootprintServing, DuxPermanentCleanupPolicyServing,
+    DuxCleanupExclusionsServing, DuxProjectDiscoveryRootsServing,
+    DuxDirectCargoEnrollmentServing, DuxTargetedReclaimScanServing,
+    DuxCleanupHistoryServing, DuxCleanupHistoryClearing, DuxPersistentRecoveryDebtServing,
     DuxClaimedRunningScanProvenanceServing, Sendable
 {
     func loadStatus() async throws -> EngineStatus
@@ -459,7 +473,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
     DuxSnapshotHistoryServing, DuxCleanupHistoryServing, DuxScanCoverageServing, HomeScanServing,
     Sendable
 {
-    fileprivate static let expectedFFIContractVersion: UInt32 = 51
+    fileprivate static let expectedFFIContractVersion: UInt32 = 52
     fileprivate static let expectedRecordVersion: UInt32 = 1
     private static let maximumTargetedProjectScanNodes: UInt32 = 50000
     private static let maximumTargetedProjectScanPassNodes: UInt32 = 200_000
@@ -792,6 +806,22 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
                 return update
             } catch let error as SnapshotRetentionCapError {
                 throw Self.snapshotRetentionCapError(error)
+            }
+        }
+    }
+
+    func loadOwnedStorageFootprint() async throws
+        -> DuxOwnedStorageFootprintModel
+    {
+        try await state.perform { state in
+            precondition(!Thread.isMainThread, "Blocking FFI work reached the main thread")
+            let engine = try Self.resolveOwnedStorageFootprintEngine(state)
+            do {
+                return try Self.ownedStorageFootprint(
+                    engine.getOwnedStorageFootprint()
+                )
+            } catch let error as OwnedStorageFootprintError {
+                throw Self.ownedStorageFootprintError(error)
             }
         }
     }
@@ -2018,6 +2048,296 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         }
     }
 
+    static func ownedStorageFootprint(
+        _ footprint: OwnedStorageFootprint
+    ) throws -> DuxOwnedStorageFootprintModel {
+        guard
+            footprint.recordVersion == expectedRecordVersion,
+            footprint.observedAtUnixMs >= 0
+        else {
+            throw DuxOwnedStorageFootprintServiceError.invalidResponse
+        }
+
+        let database = try ownedStorageUsage(footprint.database)
+        let controls = try ownedStorageUsage(footprint.snapshots.controls)
+        let available = try ownedStorageUsage(footprint.snapshots.available)
+        let protected = try ownedStorageUsage(footprint.snapshots.protected)
+        let retentionEligible = try ownedStorageUsage(
+            footprint.snapshots.retentionEligible
+        )
+        let tombstonedResidual = try ownedStorageUsage(
+            footprint.snapshots.tombstonedResidual
+        )
+        let orphan = try ownedStorageUsage(footprint.snapshots.orphan)
+        let temporaryActive = try ownedStorageUsage(
+            footprint.snapshots.temporaryActive
+        )
+        let temporaryQuiescent = try ownedStorageUsage(
+            footprint.snapshots.temporaryQuiescent
+        )
+        let temporaryUnleased = try ownedStorageUsage(
+            footprint.snapshots.temporaryUnleased
+        )
+        let snapshotTotal = try ownedStorageUsage(footprint.snapshots.total)
+        let physicalTotal = try ownedStorageUsage(footprint.physicalTotal)
+
+        guard
+            footprint.snapshots.recordVersion == expectedRecordVersion,
+            footprint.embeddedAiCache.recordVersion == expectedRecordVersion
+        else {
+            throw DuxOwnedStorageFootprintServiceError.invalidResponse
+        }
+
+        let classifiedAvailable = try addOwnedStorageUsage(
+            protected,
+            retentionEligible
+        )
+        let classifiedSnapshotTotal = try [
+            controls,
+            available,
+            tombstonedResidual,
+            orphan,
+            temporaryActive,
+            temporaryQuiescent,
+            temporaryUnleased,
+        ]
+        .reduce(
+            DuxOwnedStorageUsageModel(
+                logicalBytes: 0,
+                allocatedBytes: 0,
+                chargedBytes: 0
+            ),
+            addOwnedStorageUsage
+        )
+        let expectedPhysicalTotal = try addOwnedStorageUsage(
+            database,
+            snapshotTotal
+        )
+        let availableCount = try checkedAdd(
+            footprint.snapshots.protectedCount,
+            footprint.snapshots.retentionEligibleCount
+        )
+        let physicalSnapshotObjectCount = try [
+            footprint.snapshots.availableCount,
+            footprint.snapshots.tombstonedResidualCount,
+            footprint.snapshots.orphanCount,
+            footprint.snapshots.activeTemporaryCount,
+            footprint.snapshots.quiescentTemporaryCount,
+            footprint.snapshots.unleasedTemporaryCount,
+        ]
+        .reduce(UInt32(0), checkedAdd)
+        let pinRowCount = try checkedAdd(
+            footprint.snapshots.activePinRows,
+            footprint.snapshots.expiredPinRows
+        )
+        let nonEvictableChargedBytes = try [
+            controls,
+            protected,
+            tombstonedResidual,
+            orphan,
+            temporaryActive,
+            temporaryQuiescent,
+            temporaryUnleased,
+        ]
+        .reduce(UInt64(0)) { total, usage in
+            try checkedAdd(total, usage.chargedBytes)
+        }
+        let expectedCapExcess = snapshotTotal.chargedBytes
+            > footprint.snapshots.capBytes
+            ? snapshotTotal.chargedBytes - footprint.snapshots.capBytes
+            : 0
+        let expectedAccountingUnstable =
+            footprint.snapshots.activeTemporaryCount > 0
+            || footprint.snapshots.unleasedTemporaryCount > 0
+        let expectedNonEvictableOverCap =
+            nonEvictableChargedBytes > footprint.snapshots.capBytes
+
+        let ai = footprint.embeddedAiCache
+        let aiShapeIsValid = try aiContentShapeIsValid(
+            count: ai.recordCount,
+            bytes: ai.logicalContentBytes
+        )
+        let expiredAiShapeIsValid = try aiContentShapeIsValid(
+            count: ai.expiredRecordCount,
+            bytes: ai.expiredLogicalContentBytes
+        )
+        let allAiExpiredShapeIsValid =
+            (ai.expiredRecordCount == ai.recordCount)
+            == (ai.expiredLogicalContentBytes == ai.logicalContentBytes)
+
+        guard
+            classifiedAvailable == available,
+            classifiedSnapshotTotal == snapshotTotal,
+            expectedPhysicalTotal == physicalTotal,
+            availableCount == footprint.snapshots.availableCount,
+            physicalSnapshotObjectCount
+                <= DuxSnapshotStorageFootprintModel.maximumObjectCount,
+            footprint.snapshots.residualTemporaryLeaseCount
+                <= DuxSnapshotStorageFootprintModel
+                    .maximumResidualTemporaryLeaseCount,
+            pinRowCount <= DuxSnapshotStorageFootprintModel.maximumPinRowCount,
+            footprint.snapshots.capExcessBytes == expectedCapExcess,
+            footprint.snapshots.accountingUnstable
+                == expectedAccountingUnstable,
+            footprint.snapshots.nonEvictableOverCap
+                == expectedNonEvictableOverCap,
+            ai.expiredRecordCount <= ai.recordCount,
+            ai.expiredLogicalContentBytes <= ai.logicalContentBytes,
+            ai.logicalContentBytes <= database.logicalBytes,
+            aiShapeIsValid,
+            expiredAiShapeIsValid,
+            allAiExpiredShapeIsValid
+        else {
+            throw DuxOwnedStorageFootprintServiceError.invalidResponse
+        }
+
+        return DuxOwnedStorageFootprintModel(
+            observedAt: Date(
+                timeIntervalSince1970:
+                    Double(footprint.observedAtUnixMs) / 1_000
+            ),
+            database: database,
+            snapshots: DuxSnapshotStorageFootprintModel(
+                capBytes: footprint.snapshots.capBytes,
+                capExcessBytes: footprint.snapshots.capExcessBytes,
+                controls: controls,
+                available: available,
+                protected: protected,
+                retentionEligible: retentionEligible,
+                tombstonedResidual: tombstonedResidual,
+                orphan: orphan,
+                temporaryActive: temporaryActive,
+                temporaryQuiescent: temporaryQuiescent,
+                temporaryUnleased: temporaryUnleased,
+                total: snapshotTotal,
+                availableCount: footprint.snapshots.availableCount,
+                protectedCount: footprint.snapshots.protectedCount,
+                retentionEligibleCount:
+                    footprint.snapshots.retentionEligibleCount,
+                tombstonedResidualCount:
+                    footprint.snapshots.tombstonedResidualCount,
+                orphanCount: footprint.snapshots.orphanCount,
+                activeTemporaryCount:
+                    footprint.snapshots.activeTemporaryCount,
+                quiescentTemporaryCount:
+                    footprint.snapshots.quiescentTemporaryCount,
+                unleasedTemporaryCount:
+                    footprint.snapshots.unleasedTemporaryCount,
+                residualTemporaryLeaseCount:
+                    footprint.snapshots.residualTemporaryLeaseCount,
+                activePinRows: footprint.snapshots.activePinRows,
+                expiredPinRows: footprint.snapshots.expiredPinRows,
+                nonEvictableOverCap:
+                    footprint.snapshots.nonEvictableOverCap,
+                accountingUnstable:
+                    footprint.snapshots.accountingUnstable
+            ),
+            embeddedAiCache: DuxEmbeddedAiCacheFootprintModel(
+                recordCount: ai.recordCount,
+                logicalContentBytes: ai.logicalContentBytes,
+                expiredRecordCount: ai.expiredRecordCount,
+                expiredLogicalContentBytes: ai.expiredLogicalContentBytes
+            ),
+            physicalTotal: physicalTotal
+        )
+    }
+
+    private static func ownedStorageUsage(
+        _ usage: OwnedStorageUsage
+    ) throws -> DuxOwnedStorageUsageModel {
+        guard
+            usage.recordVersion == expectedRecordVersion,
+            usage.chargedBytes >= usage.logicalBytes,
+            usage.chargedBytes >= usage.allocatedBytes
+        else {
+            throw DuxOwnedStorageFootprintServiceError.invalidResponse
+        }
+        return DuxOwnedStorageUsageModel(
+            logicalBytes: usage.logicalBytes,
+            allocatedBytes: usage.allocatedBytes,
+            chargedBytes: usage.chargedBytes
+        )
+    }
+
+    private static func addOwnedStorageUsage(
+        _ left: DuxOwnedStorageUsageModel,
+        _ right: DuxOwnedStorageUsageModel
+    ) throws -> DuxOwnedStorageUsageModel {
+        DuxOwnedStorageUsageModel(
+            logicalBytes: try checkedAdd(left.logicalBytes, right.logicalBytes),
+            allocatedBytes: try checkedAdd(
+                left.allocatedBytes,
+                right.allocatedBytes
+            ),
+            chargedBytes: try checkedAdd(left.chargedBytes, right.chargedBytes)
+        )
+    }
+
+    private static func checkedAdd(
+        _ left: UInt64,
+        _ right: UInt64
+    ) throws -> UInt64 {
+        let result = left.addingReportingOverflow(right)
+        guard !result.overflow else {
+            throw DuxOwnedStorageFootprintServiceError.invalidResponse
+        }
+        return result.partialValue
+    }
+
+    private static func checkedAdd(
+        _ left: UInt32,
+        _ right: UInt32
+    ) throws -> UInt32 {
+        let result = left.addingReportingOverflow(right)
+        guard !result.overflow else {
+            throw DuxOwnedStorageFootprintServiceError.invalidResponse
+        }
+        return result.partialValue
+    }
+
+    private static func aiContentShapeIsValid(
+        count: UInt32,
+        bytes: UInt64
+    ) throws -> Bool {
+        let count = UInt64(count)
+        let minimum = try checkedMultiply(
+            count,
+            DuxEmbeddedAiCacheFootprintModel.minimumContentBytesPerRecord
+        )
+        let maximum = try checkedMultiply(
+            count,
+            DuxEmbeddedAiCacheFootprintModel.maximumContentBytesPerRecord
+        )
+        return (minimum ... maximum).contains(bytes)
+    }
+
+    private static func checkedMultiply(
+        _ left: UInt64,
+        _ right: UInt64
+    ) throws -> UInt64 {
+        let result = left.multipliedReportingOverflow(by: right)
+        guard !result.overflow else {
+            throw DuxOwnedStorageFootprintServiceError.invalidResponse
+        }
+        return result.partialValue
+    }
+
+    private static func ownedStorageFootprintError(
+        _ error: OwnedStorageFootprintError
+    ) -> DuxOwnedStorageFootprintServiceError {
+        switch error {
+        case .Closed: .closed
+        case .InvalidClock: .invalidClock
+        case .IncompatibleSchema: .incompatibleSchema
+        case .Busy: .retryable
+        case .UnsafeStorage: .unsafeStorage
+        case .BudgetExceeded: .budgetExceeded
+        case .CorruptData: .corruptData
+        case .Unavailable: .unavailable
+        case .InternalState: .internalState
+        }
+    }
+
     private static func permanentCleanupPolicy(
         _ status: PermanentCleanupPolicyStatus
     ) throws -> PermanentCleanupPolicy {
@@ -3195,6 +3515,23 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
             case .invalidCapacityObservation, .conflictingCapacityObservation,
                  .supersededCapacityObservation, .unexpected:
                 SnapshotRetentionCapServiceError.invalidResponse
+            }
+        }
+    }
+
+    private static func resolveOwnedStorageFootprintEngine(
+        _ state: EngineServiceState
+    ) throws -> DuxEngine {
+        do {
+            return try state.resolveEngine()
+        } catch let error as EngineServiceError {
+            throw switch error {
+            case .closed: DuxOwnedStorageFootprintServiceError.closed
+            case .retryable: DuxOwnedStorageFootprintServiceError.retryable
+            case .unavailable: DuxOwnedStorageFootprintServiceError.unavailable
+            case .invalidCapacityObservation, .conflictingCapacityObservation,
+                 .supersededCapacityObservation, .unexpected:
+                DuxOwnedStorageFootprintServiceError.invalidResponse
             }
         }
     }

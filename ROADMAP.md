@@ -6486,8 +6486,53 @@ Tasks:
     arm64/x86_64, target macOS 14.0, and preserve `LSUIElement=true`; Release
     omits the internal permanent-cleanup condition and passes strict Hardened
     Runtime ad-hoc signature verification.
-  - The parent remains open for physical SQLite/snapshot footprint plus
-    embedded AI-cache accounting, marker-owned cache storage, separately
+  - [x] 2026-07-30 DUX-owned storage footprint: UniFFI v52 now exposes one
+    input-free, versioned, path-free observation of the active private database
+    and snapshot stores. The core reports exact logical, handle-derived
+    allocated, and conservative per-file charged usage for the retained SQLite
+    main/sidecar/control files and the complete bounded snapshot inventory. It
+    separates protected and retention-eligible available snapshots,
+    tombstoned residuals, physical orphans, and active, quiescent, and unleased
+    recognized temporary files; revalidates both stores under the permanent
+    database-before-snapshot lock order; and rejects drift, unsafe storage,
+    incompatible schemas, budget exhaustion, or arithmetic inconsistency
+    without a partial result.
+  - Embedded AI accounting sums strictly validated insight IDs, input digests,
+    provider/adapter/model labels, and output payloads through an
+    allocation-constant SQLite pager with VM/time limits and no arbitrary row
+    ceiling. Its total and expired subset are logical content already inside
+    SQLite, never added to the physical total or presented as reclaimable
+    space. Directory metadata, unattributable interrupted provisioning stages,
+    and the unmarked caller-selected legacy CLI cache remain explicitly
+    excluded.
+  - Native **Storage & Privacy** performs the synchronous observation off the
+    main thread, coalesces one lazy load, refreshes only on request,
+    generation-fences shutdown, and preserves the last complete observation
+    after failure. It shows a full-range `UInt64` summary and non-color-only
+    database/snapshot stacked chart, keeps embedded AI content separate, and
+    states that the measurement does not inspect ordinary user files and is
+    neither free space, reclaimable space, nor cleanup authority. Swift repeats
+    the complete accounting algebra and accepts more than 4,096 valid AI rows.
+  - Verification covers the exact core AI/physical/snapshot accounting tests,
+    all 101 ordinary UniFFI tests with two intentional quiescence-only ignores,
+    all 614 native tests, all 39 repository script tests, and the clean
+    296-source destructive-call audit. Formatting, workspace check, and
+    warning-denied workspace Clippy pass. The serialized 1,227-case core
+    aggregate passed 1,205 tests and ignored three intentional host/helper
+    cases; its 19 failures were existing isolation-sensitive cleanup/review
+    cases, while every footprint case and representative `OutsideHome` and
+    `ChangedDuringReview` failures passed in fresh exact processes.
+  - Debug and Release generation produce byte-identical Swift bindings and
+    bundled CLI payloads. The Swift binding SHA-256 is
+    `1ebd5f5ccae60d529da34bb1a5c289fd4d36baa501f8dfff8e812f6aa9bee0ef`
+    and the CLI SHA-256 is
+    `e52f967d11c36ed42b23e3ff35cc195cd78ee4ee111b3e59297ad13a563dfcd5`.
+    The final Debug and Release apps plus their embedded CLIs are universal
+    arm64/x86_64, target macOS 14.0, and preserve `LSUIElement=true`; resolved
+    Release settings omit the internal permanent-cleanup condition. The exact
+    Release app passes strict Hardened Runtime ad-hoc signature verification
+    and is the launched menu-bar process.
+  - The parent remains open for marker-owned cache storage, separately
     confirmed cache/snapshot operations, and the lifecycle/reset-journal
     foundation required before “Reset app data” can be truthful.
 - [x] Add the bounded schema-v14 cleanup-owner provenance checkpoint. New

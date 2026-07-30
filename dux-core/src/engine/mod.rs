@@ -22,6 +22,7 @@ mod scan_coverage_details;
 mod settings;
 mod snapshot_diff_review;
 mod snapshot_review;
+mod storage_footprint;
 mod storage_thief;
 mod targeted_project_scan;
 
@@ -109,6 +110,10 @@ pub use snapshot_review::{
     SnapshotReviewNodeSort, SnapshotReviewReleaseOutcome, SnapshotReviewScanFlags,
     SnapshotReviewSession, SnapshotReviewTimestamp, SnapshotReviewTreemap,
     SnapshotReviewTreemapCell,
+};
+pub use storage_footprint::{
+    DuxEmbeddedAiCacheFootprint, DuxOwnedStorageFootprint, DuxOwnedStorageFootprintError,
+    DuxOwnedStorageUsage, DuxSnapshotStorageFootprint,
 };
 pub use storage_thief::{
     DurableStorageThiefGroup, DurableStorageThiefRanking, MAX_STORAGE_THIEF_RANKING_GROUPS,

@@ -95,6 +95,10 @@ use super::snapshot_review::{
     SnapshotReviewCategoryRoot, SnapshotReviewError, SnapshotReviewOwner, SnapshotReviewSession,
     category_path_bytes, map_repository_error as map_snapshot_review_error,
 };
+use super::storage_footprint::{
+    DuxEmbeddedAiCacheFootprint, DuxOwnedStorageFootprint, DuxOwnedStorageFootprintError,
+    DuxOwnedStorageUsage, DuxSnapshotStorageFootprint,
+};
 use super::storage_thief::{
     DurableStorageThiefGroup, DurableStorageThiefRanking, MAX_STORAGE_THIEF_RANKING_GROUPS,
     MAX_STORAGE_THIEF_RANKING_SOURCE_SESSIONS, StorageThiefError,
@@ -200,7 +204,9 @@ use crate::persistence::{
     SnapshotRetentionCapSettingUpdate, validate_configured_project_roots,
 };
 use crate::persistence::{
-    CleanupJournalLease, DatabaseStatus, ScanScopeLeaseErrorKind, ScanScopeLeaseToken,
+    CleanupJournalLease, DatabaseStatus,
+    DuxOwnedStorageFootprint as StoredDuxOwnedStorageFootprint,
+    OwnedStorageUsage as StoredOwnedStorageUsage, ScanScopeLeaseErrorKind, ScanScopeLeaseToken,
     StoreCoordinator,
 };
 use crate::persistence::{
@@ -1924,6 +1930,31 @@ impl EngineHandle {
             .reset_snapshot_retention_cap()
             .map(public_snapshot_retention_cap_update)
             .map_err(|error| map_snapshot_retention_cap_error(error.kind))
+    }
+
+    /// Observe DUX's active marker-owned database and snapshot stores.
+    ///
+    /// This is a bounded, path-free read. It carries no cleanup authority and
+    /// does not count the legacy caller-selected CLI cache. AI content is an
+    /// embedded SQLite subset and is not added to `physical_total`.
+    pub fn owned_storage_footprint(
+        &self,
+    ) -> Result<DuxOwnedStorageFootprint, DuxOwnedStorageFootprintError> {
+        self.owned_storage_footprint_at(SystemTime::now())
+    }
+
+    fn owned_storage_footprint_at(
+        &self,
+        observed_at: SystemTime,
+    ) -> Result<DuxOwnedStorageFootprint, DuxOwnedStorageFootprintError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(DuxOwnedStorageFootprintError::Closed);
+        }
+        self.inner
+            .snapshots
+            .inspect_owned_storage_footprint(observed_at)
+            .map(public_owned_storage_footprint)
+            .map_err(|error| map_owned_storage_footprint_error(error.kind))
     }
 
     /// Load the effective deterministic disk-pressure policy. This is
@@ -9123,6 +9154,60 @@ fn public_snapshot_retention_cap(setting: SnapshotRetentionCapSetting) -> Snapsh
     }
 }
 
+fn public_owned_storage_usage(usage: StoredOwnedStorageUsage) -> DuxOwnedStorageUsage {
+    DuxOwnedStorageUsage {
+        logical_bytes: usage.logical_bytes,
+        allocated_bytes: usage.allocated_bytes,
+        charged_bytes: usage.charged_bytes,
+    }
+}
+
+fn public_owned_storage_footprint(
+    footprint: StoredDuxOwnedStorageFootprint,
+) -> DuxOwnedStorageFootprint {
+    let snapshots = footprint.snapshots;
+    DuxOwnedStorageFootprint {
+        observed_at: footprint.observed_at,
+        database: public_owned_storage_usage(footprint.database),
+        snapshots: DuxSnapshotStorageFootprint {
+            cap_bytes: snapshots.cap_bytes,
+            cap_excess_bytes: snapshots.cap_excess_bytes,
+            controls: public_owned_storage_usage(snapshots.controls),
+            available: public_owned_storage_usage(snapshots.available),
+            protected: public_owned_storage_usage(snapshots.protected),
+            retention_eligible: public_owned_storage_usage(snapshots.retention_eligible),
+            tombstoned_residual: public_owned_storage_usage(snapshots.tombstoned_residual),
+            orphan: public_owned_storage_usage(snapshots.orphan),
+            temporary_active: public_owned_storage_usage(snapshots.temporary_active),
+            temporary_quiescent: public_owned_storage_usage(snapshots.temporary_quiescent),
+            temporary_unleased: public_owned_storage_usage(snapshots.temporary_unleased),
+            total: public_owned_storage_usage(snapshots.total),
+            available_count: snapshots.available_count,
+            protected_count: snapshots.protected_count,
+            retention_eligible_count: snapshots.retention_eligible_count,
+            tombstoned_residual_count: snapshots.tombstoned_residual_count,
+            orphan_count: snapshots.orphan_count,
+            active_temporary_count: snapshots.active_temporary_count,
+            quiescent_temporary_count: snapshots.quiescent_temporary_count,
+            unleased_temporary_count: snapshots.unleased_temporary_count,
+            residual_temporary_lease_count: snapshots.residual_temporary_lease_count,
+            active_pin_rows: snapshots.active_pin_rows,
+            expired_pin_rows: snapshots.expired_pin_rows,
+            non_evictable_over_cap: snapshots.non_evictable_over_cap,
+            accounting_unstable: snapshots.accounting_unstable,
+        },
+        embedded_ai_cache: DuxEmbeddedAiCacheFootprint {
+            record_count: footprint.embedded_ai_cache.record_count,
+            logical_content_bytes: footprint.embedded_ai_cache.logical_content_bytes,
+            expired_record_count: footprint.embedded_ai_cache.expired_record_count,
+            expired_logical_content_bytes: footprint
+                .embedded_ai_cache
+                .expired_logical_content_bytes,
+        },
+        physical_total: public_owned_storage_usage(footprint.physical_total),
+    }
+}
+
 fn public_disk_pressure_policy(setting: DiskPressurePolicySetting) -> DiskPressurePolicy {
     DiskPressurePolicy {
         config: setting.config,
@@ -9300,6 +9385,52 @@ const fn map_snapshot_retention_cap_error(kind: HistoryErrorKind) -> SnapshotRet
         | HistoryErrorKind::NotFound
         | HistoryErrorKind::InvalidTransition
         | HistoryErrorKind::InternalState => SnapshotRetentionCapError::InternalState,
+    }
+}
+
+const fn map_owned_storage_footprint_error(
+    kind: SnapshotRepositoryErrorKind,
+) -> DuxOwnedStorageFootprintError {
+    match kind {
+        SnapshotRepositoryErrorKind::ReadOnly => DuxOwnedStorageFootprintError::IncompatibleSchema,
+        SnapshotRepositoryErrorKind::MissingStore
+        | SnapshotRepositoryErrorKind::MissingSnapshot
+        | SnapshotRepositoryErrorKind::SnapshotUnavailable => {
+            DuxOwnedStorageFootprintError::Unavailable
+        }
+        SnapshotRepositoryErrorKind::IncompatibleVersion
+        | SnapshotRepositoryErrorKind::ReferenceMismatch
+        | SnapshotRepositoryErrorKind::ReviewLeaseExpired
+        | SnapshotRepositoryErrorKind::Codec(_) => DuxOwnedStorageFootprintError::CorruptData,
+        SnapshotRepositoryErrorKind::Storage(kind) => match kind {
+            SnapshotStorageErrorKind::UnsafeRoot
+            | SnapshotStorageErrorKind::UnsafeObject
+            | SnapshotStorageErrorKind::UnrecognizedStore => {
+                DuxOwnedStorageFootprintError::UnsafeStorage
+            }
+            SnapshotStorageErrorKind::Busy => DuxOwnedStorageFootprintError::Busy,
+            SnapshotStorageErrorKind::Unavailable => DuxOwnedStorageFootprintError::Unavailable,
+            SnapshotStorageErrorKind::InvalidConfiguration
+            | SnapshotStorageErrorKind::InternalState => {
+                DuxOwnedStorageFootprintError::InternalState
+            }
+        },
+        SnapshotRepositoryErrorKind::History(kind) => match kind {
+            HistoryErrorKind::InvalidInput => DuxOwnedStorageFootprintError::InvalidClock,
+            HistoryErrorKind::IncompatibleSchema => {
+                DuxOwnedStorageFootprintError::IncompatibleSchema
+            }
+            HistoryErrorKind::QueryLimitExceeded => DuxOwnedStorageFootprintError::BudgetExceeded,
+            HistoryErrorKind::Busy => DuxOwnedStorageFootprintError::Busy,
+            HistoryErrorKind::UnsafeStorage => DuxOwnedStorageFootprintError::UnsafeStorage,
+            HistoryErrorKind::CorruptData => DuxOwnedStorageFootprintError::CorruptData,
+            HistoryErrorKind::DatabaseUnavailable => DuxOwnedStorageFootprintError::Unavailable,
+            HistoryErrorKind::AlreadyExists
+            | HistoryErrorKind::NotFound
+            | HistoryErrorKind::InvalidTransition
+            | HistoryErrorKind::OutcomeUnknown
+            | HistoryErrorKind::InternalState => DuxOwnedStorageFootprintError::InternalState,
+        },
     }
 }
 

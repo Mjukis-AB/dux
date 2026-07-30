@@ -43,6 +43,7 @@
 		5B2704582F4A5212DD5009FA /* TargetedReclaimScan.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7EA6C57F26E2E092EDDC245E /* TargetedReclaimScan.swift */; };
 		6395D03FA99BF89464308B21 /* SnapshotRetentionCapSettingsModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6DFC4B491CD206E2B97AFC08 /* SnapshotRetentionCapSettingsModel.swift */; };
 		658FFC54EFFE3CBD5757C421 /* ExplorerRustTargetPlanReview.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2474C1A29633D0EA9762D95 /* ExplorerRustTargetPlanReview.swift */; };
+		65A461E9B89E27C3EE933F9C /* DuxOwnedStorageFootprintTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DAF5B3FD94A5C1C15AB0CDB3 /* DuxOwnedStorageFootprintTests.swift */; };
 		67976B691917A5B51F6CFA1A /* SnapshotRetentionCap.swift in Sources */ = {isa = PBXBuildFile; fileRef = 612DAA81619B121C5E3AB89D /* SnapshotRetentionCap.swift */; };
 		67FB40BBEEEFB481CBE219F9 /* ExplorerTreemapLayout.swift in Sources */ = {isa = PBXBuildFile; fileRef = ECF2BF563EFDDD94DDA963D6 /* ExplorerTreemapLayout.swift */; };
 		682874C2EF5117179FEF9FB0 /* ICloudLocalCopyRawFactReaderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C958E8D58ECB6A07595C0020 /* ICloudLocalCopyRawFactReaderTests.swift */; };
@@ -77,6 +78,7 @@
 		A2062D67920A74190DB90038 /* ICloudLocalCopyMetadataDriverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 058432D76EF6842ACA173065 /* ICloudLocalCopyMetadataDriverTests.swift */; };
 		A2E4B158E99A1B2E81F2BA46 /* ExplorerSnapshotHistoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2D14341C731093A7B42D184 /* ExplorerSnapshotHistoryTests.swift */; };
 		A3936C11E7E090E3BDA6E986 /* EngineStatus.swift in Sources */ = {isa = PBXBuildFile; fileRef = ECB9598639A40687815737D2 /* EngineStatus.swift */; };
+		A42B323E6AFBF9A52BF8EA68 /* DuxOwnedStorageFootprint.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C11E40C787EE7F9C316BD2C /* DuxOwnedStorageFootprint.swift */; };
 		A6226BB7C74E61C8C58FE3EC /* CLIInstallationModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CDD77D22ECE473A09052CEAA /* CLIInstallationModelTests.swift */; };
 		AB825F41BF25AC2558888B64 /* PersistentRecoveryDebt.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9454CDFEE641930BD3F50327 /* PersistentRecoveryDebt.swift */; };
 		B184EB4EE1399E7D26F41D7B /* VolumeMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC650EAC7E25F66CC42436F6 /* VolumeMonitor.swift */; };
@@ -99,6 +101,7 @@
 		D1CDD0944327D2028E123D47 /* LoginItemState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 09BEEFC99984A8BEF618627B /* LoginItemState.swift */; };
 		D7774AC65826D44894EEE35C /* ExplorerEmergencyRecoveryPresentationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F95443F6398624093DD506B5 /* ExplorerEmergencyRecoveryPresentationTests.swift */; };
 		DA1ED81D9978B01C96F71C5B /* ExplorerStorageCategoryPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3A4FB349E02B99F8A2C86068 /* ExplorerStorageCategoryPresentation.swift */; };
+		DA3D780367494E373C95CBD6 /* DuxOwnedStorageFootprintSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D6A542CD3D53A5B5A5CF35C1 /* DuxOwnedStorageFootprintSettingsView.swift */; };
 		DCF5B8FBAFD549C1DE06FCA8 /* SnapshotReviewControllerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0EB23A8797C0C79213B54953 /* SnapshotReviewControllerTests.swift */; };
 		DF05169CA19C2B5B8B46A526 /* PermanentCleanupPolicyAppModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C7344DCCD01D4B610AB0D6EE /* PermanentCleanupPolicyAppModelTests.swift */; };
 		DFE0C81F60CB8B06CA50A90E /* SnapshotRetentionCapTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00A03099577360B3C5E0C97E /* SnapshotRetentionCapTests.swift */; };
@@ -108,6 +111,7 @@
 		EBB7BF01A450377B509DBF98 /* PermanentCleanupPolicyServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3465EC90D32D2BF93E5AE40E /* PermanentCleanupPolicyServiceTests.swift */; };
 		EE4142B2E95480842A3D2F6F /* PersistentRecoveryDebtTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA63379EA3729745926AAA25 /* PersistentRecoveryDebtTests.swift */; };
 		F15B5D201B3999357726267B /* ExplorerCandidateDetailTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A6487553410FBD25687B2BAD /* ExplorerCandidateDetailTests.swift */; };
+		F882EEB3ADB88FE6415F3FEB /* DuxOwnedStorageFootprintSettingsModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7B8D53263B68D0C8ECFB4CCE /* DuxOwnedStorageFootprintSettingsModel.swift */; };
 		FA6286B07FD264E2A7D7A755 /* ExplorerPresentationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0F3AFE3DD4D58E3C865B39E /* ExplorerPresentationTests.swift */; };
 		FC8D3C5F78E92C1A2023D472 /* HomeScanAppModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9EA478D2D65F8593B4121C24 /* HomeScanAppModelTests.swift */; };
 		FF16E00002EB5CBC2AEBB6D1 /* VolumeCapacitySnapshot.swift in Sources */ = {isa = PBXBuildFile; fileRef = 682051DD7F1B44E0D477AF57 /* VolumeCapacitySnapshot.swift */; };
@@ -159,6 +163,7 @@
 		44CA5655F3A29195063554CC /* ExplorerLiveFileActions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExplorerLiveFileActions.swift; sourceTree = "<group>"; };
 		4784308B9C780C63519C2F59 /* ICloudLocalCopyMetadataDriver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ICloudLocalCopyMetadataDriver.swift; sourceTree = "<group>"; };
 		481525678A510656C5BCD53E /* DirectCargoEnrollment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectCargoEnrollment.swift; sourceTree = "<group>"; };
+		4C11E40C787EE7F9C316BD2C /* DuxOwnedStorageFootprint.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DuxOwnedStorageFootprint.swift; sourceTree = "<group>"; };
 		4E504B7A8AC2DDFCF50B5EBD /* DuxAppDelegateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DuxAppDelegateTests.swift; sourceTree = "<group>"; };
 		52FFCCF28BCAB4846F17BB92 /* MenuBarVisibilityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarVisibilityTests.swift; sourceTree = "<group>"; };
 		56D9D007E6D5ECD0CC81FA89 /* DuxFFI.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = DuxFFI.xcframework; path = Generated/DuxFFI.xcframework; sourceTree = "<group>"; };
@@ -177,6 +182,7 @@
 		757D490EB8939DA31C6EF02D /* DiskPressurePolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiskPressurePolicyTests.swift; sourceTree = "<group>"; };
 		76FE4A0BA11BA5271764EAEE /* CapacityResampleRouter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CapacityResampleRouter.swift; sourceTree = "<group>"; };
 		78A0F475B15FE85FDC5B8C9A /* EngineService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EngineService.swift; sourceTree = "<group>"; };
+		7B8D53263B68D0C8ECFB4CCE /* DuxOwnedStorageFootprintSettingsModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DuxOwnedStorageFootprintSettingsModel.swift; sourceTree = "<group>"; };
 		7EA6C57F26E2E092EDDC245E /* TargetedReclaimScan.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TargetedReclaimScan.swift; sourceTree = "<group>"; };
 		804D717507C0E3DE20C223E7 /* ExplorerStorageCategoryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExplorerStorageCategoryView.swift; sourceTree = "<group>"; };
 		804F7173DDA1F5152C6D8776 /* CLIInstallation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CLIInstallation.swift; sourceTree = "<group>"; };
@@ -210,6 +216,8 @@
 		CDD77D22ECE473A09052CEAA /* CLIInstallationModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CLIInstallationModelTests.swift; sourceTree = "<group>"; };
 		D1B0106BC09B05FB4A3315F0 /* MenuBarPopoverPresentationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarPopoverPresentationTests.swift; sourceTree = "<group>"; };
 		D62CBDBBBB0B3CE5E59D884E /* MenuBarContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarContentView.swift; sourceTree = "<group>"; };
+		D6A542CD3D53A5B5A5CF35C1 /* DuxOwnedStorageFootprintSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DuxOwnedStorageFootprintSettingsView.swift; sourceTree = "<group>"; };
+		DAF5B3FD94A5C1C15AB0CDB3 /* DuxOwnedStorageFootprintTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DuxOwnedStorageFootprintTests.swift; sourceTree = "<group>"; };
 		DD60DEE8D3093DACB89BB3DA /* CapacitySamplingScheduler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CapacitySamplingScheduler.swift; sourceTree = "<group>"; };
 		E004627B4660D326FE7632E2 /* MenuBarLabelModeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarLabelModeTests.swift; sourceTree = "<group>"; };
 		E0D8C5C31F6E4413F4546D3B /* ExplorerSnapshotBrowserView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExplorerSnapshotBrowserView.swift; sourceTree = "<group>"; };
@@ -261,6 +269,7 @@
 				481525678A510656C5BCD53E /* DirectCargoEnrollment.swift */,
 				C88A0AF7CE6989A83DC99EDE /* DiskPressureNotification.swift */,
 				E680E94BFA1DCB3FAFFC2C49 /* DiskPressurePolicy.swift */,
+				4C11E40C787EE7F9C316BD2C /* DuxOwnedStorageFootprint.swift */,
 				ECB9598639A40687815737D2 /* EngineStatus.swift */,
 				6E19A5F90FB852E3108A2F8C /* ExplorerCandidateDetail.swift */,
 				F480B95422A1B8004A30C552 /* ExplorerEmergencyRecoveryPresentation.swift */,
@@ -316,6 +325,7 @@
 			children = (
 				C762D5BE39976247D2390515 /* CapacityBar.swift */,
 				BC3D3A74B5321BE3B879C232 /* CLIInstallationSettingsView.swift */,
+				D6A542CD3D53A5B5A5CF35C1 /* DuxOwnedStorageFootprintSettingsView.swift */,
 				90E79F7E2E1AE1AE3886E44C /* DuxSettingsView.swift */,
 				E0D8C5C31F6E4413F4546D3B /* ExplorerSnapshotBrowserView.swift */,
 				6B04DB73E6C007DB40215382 /* ExplorerSnapshotDiffView.swift */,
@@ -380,6 +390,7 @@
 				2A273AD2C6071E1FFA9F0058 /* CLIInstallationModel.swift */,
 				992E2D118DDE512C123CF820 /* DuxApp.swift */,
 				5886CE7BF8E925F97031749F /* DuxAppDelegate.swift */,
+				7B8D53263B68D0C8ECFB4CCE /* DuxOwnedStorageFootprintSettingsModel.swift */,
 				6DFC4B491CD206E2B97AFC08 /* SnapshotRetentionCapSettingsModel.swift */,
 			);
 			path = App;
@@ -399,6 +410,7 @@
 				F1477499EB80DB74A899DD2D /* DiskPressurePolicyAppModelTests.swift */,
 				757D490EB8939DA31C6EF02D /* DiskPressurePolicyTests.swift */,
 				4E504B7A8AC2DDFCF50B5EBD /* DuxAppDelegateTests.swift */,
+				DAF5B3FD94A5C1C15AB0CDB3 /* DuxOwnedStorageFootprintTests.swift */,
 				00371DEF2482E0BC47D1A5D0 /* EngineServiceTests.swift */,
 				A6487553410FBD25687B2BAD /* ExplorerCandidateDetailTests.swift */,
 				F95443F6398624093DD506B5 /* ExplorerEmergencyRecoveryPresentationTests.swift */,
@@ -562,6 +574,7 @@
 				C80CD6D9D30C598CBBE00B11 /* DiskPressurePolicyAppModelTests.swift in Sources */,
 				73134C24BA6FC45B5017B336 /* DiskPressurePolicyTests.swift in Sources */,
 				B34BE4E0B8AE46D166283EC0 /* DuxAppDelegateTests.swift in Sources */,
+				65A461E9B89E27C3EE933F9C /* DuxOwnedStorageFootprintTests.swift in Sources */,
 				9033D6BF38DA8C7EE5FC6710 /* EngineServiceTests.swift in Sources */,
 				F15B5D201B3999357726267B /* ExplorerCandidateDetailTests.swift in Sources */,
 				D7774AC65826D44894EEE35C /* ExplorerEmergencyRecoveryPresentationTests.swift in Sources */,
@@ -613,6 +626,9 @@
 				B334563BD340D9E0B20D16D3 /* DuxApp.swift in Sources */,
 				2647F71DC9189100B9FD3096 /* DuxAppDelegate.swift in Sources */,
 				6D2CB0DD262B22CF018B0874 /* DuxFFI.swift in Sources */,
+				A42B323E6AFBF9A52BF8EA68 /* DuxOwnedStorageFootprint.swift in Sources */,
+				F882EEB3ADB88FE6415F3FEB /* DuxOwnedStorageFootprintSettingsModel.swift in Sources */,
+				DA3D780367494E373C95CBD6 /* DuxOwnedStorageFootprintSettingsView.swift in Sources */,
 				E0A86A133058832D8BCD65DF /* DuxSettingsView.swift in Sources */,
 				69E28EFAD6A4109B80F1FC0C /* EngineService.swift in Sources */,
 				A3936C11E7E090E3BDA6E986 /* EngineStatus.swift in Sources */,

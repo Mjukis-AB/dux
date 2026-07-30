@@ -12,6 +12,7 @@ final class AppModel: DuxCapacitySampling {
     private(set) var engineState = EngineConnectionState.idle
     let cliInstallation: CLIInstallationModel
     let snapshotRetentionCapSettings: SnapshotRetentionCapSettingsModel
+    let ownedStorageFootprintSettings: DuxOwnedStorageFootprintSettingsModel
     private(set) var volumeState = VolumeCapacityState.idle {
         didSet {
             updateMenuBarVisibility()
@@ -290,6 +291,9 @@ final class AppModel: DuxCapacitySampling {
         self.storageAccessProbe = storageAccessProbe
         cliInstallation = CLIInstallationModel(service: cliInstallerService)
         snapshotRetentionCapSettings = SnapshotRetentionCapSettingsModel(
+            service: engineService
+        )
+        ownedStorageFootprintSettings = DuxOwnedStorageFootprintSettingsModel(
             service: engineService
         )
         capacityTrend = nil

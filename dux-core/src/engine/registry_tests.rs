@@ -5406,6 +5406,72 @@ fn snapshot_retention_cap_is_shared_versioned_and_closed_with_typed_errors() {
 }
 
 #[test]
+fn owned_storage_footprint_is_path_free_additive_and_ai_is_embedded() {
+    let temp = TempDir::new().unwrap();
+    let engine = EngineHandle::open(config(&temp)).unwrap();
+    seed_ai_insight(&engine, "footprint-insight", 1_000, 2_000);
+    let row_count_before = ai_insight_count(&engine);
+    let observed_at = std::time::UNIX_EPOCH + Duration::from_millis(3_000);
+
+    let footprint = engine.owned_storage_footprint_at(observed_at).unwrap();
+    assert_eq!(footprint.observed_at, observed_at);
+    assert_eq!(
+        footprint.physical_total.logical_bytes,
+        footprint
+            .database
+            .logical_bytes
+            .checked_add(footprint.snapshots.total.logical_bytes)
+            .unwrap()
+    );
+    assert_eq!(
+        footprint.physical_total.allocated_bytes,
+        footprint
+            .database
+            .allocated_bytes
+            .checked_add(footprint.snapshots.total.allocated_bytes)
+            .unwrap()
+    );
+    assert_eq!(
+        footprint.physical_total.charged_bytes,
+        footprint
+            .database
+            .charged_bytes
+            .checked_add(footprint.snapshots.total.charged_bytes)
+            .unwrap()
+    );
+    assert!(footprint.database.charged_bytes >= footprint.database.logical_bytes);
+    assert!(footprint.database.charged_bytes >= footprint.database.allocated_bytes);
+    assert!(footprint.snapshots.total.charged_bytes > 0);
+    assert_eq!(footprint.snapshots.total, footprint.snapshots.controls);
+    assert_eq!(footprint.snapshots.available_count, 0);
+    assert_eq!(
+        footprint.snapshots.available,
+        DuxOwnedStorageUsage::default()
+    );
+    assert_eq!(footprint.embedded_ai_cache.record_count, 1);
+    assert_eq!(footprint.embedded_ai_cache.expired_record_count, 1);
+    assert_eq!(
+        footprint.embedded_ai_cache.expired_logical_content_bytes,
+        footprint.embedded_ai_cache.logical_content_bytes
+    );
+    assert!(footprint.embedded_ai_cache.logical_content_bytes > 0);
+    assert_eq!(ai_insight_count(&engine), row_count_before);
+
+    assert_eq!(
+        engine
+            .owned_storage_footprint_at(std::time::UNIX_EPOCH - Duration::from_millis(1))
+            .unwrap_err(),
+        DuxOwnedStorageFootprintError::InvalidClock
+    );
+    engine.close();
+    assert!(engine.wait_until_closed(TEST_TIMEOUT));
+    assert_eq!(
+        engine.owned_storage_footprint(),
+        Err(DuxOwnedStorageFootprintError::Closed)
+    );
+}
+
+#[test]
 fn configured_project_roots_are_shared_discovery_only_settings_with_typed_errors() {
     let temp = TempDir::new().unwrap();
     let config = config(&temp);
@@ -6529,6 +6595,10 @@ fn newer_database_never_provisions_missing_snapshot_storage() {
     assert_eq!(
         engine.reset_snapshot_retention_cap(),
         Err(SnapshotRetentionCapError::IncompatibleSchema)
+    );
+    assert_eq!(
+        engine.owned_storage_footprint(),
+        Err(DuxOwnedStorageFootprintError::IncompatibleSchema)
     );
     assert!(!config.snapshots_directory().exists());
     engine.close();

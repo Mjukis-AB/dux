@@ -190,6 +190,7 @@ final class AppRuntime {
             model.invalidateCapacityHistoryOperations()
             model.invalidatePressurePolicyOperations()
             await model.snapshotRetentionCapSettings.shutdown()
+            await model.ownedStorageFootprintSettings.shutdown()
             model.invalidatePermanentCleanupPolicyOperations()
             model.invalidateCleanupExclusionsOperations()
             model.invalidateProjectDiscoveryRootsOperations()

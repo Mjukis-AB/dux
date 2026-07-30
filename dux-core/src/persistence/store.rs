@@ -44,6 +44,7 @@ use super::cleanup_history_query::{
     cleanup_history_session as query_cleanup_history_session,
     recent_cleanup_history as query_recent_cleanup_history,
 };
+use super::footprint::{AiCacheFootprint, OwnedStorageUsage, inspect_ai_cache_footprint};
 use super::history::{
     HistoryError, HistoryErrorKind, NewScanRecord, PreparedNewScan, PreparedScanCompletion,
     RecentScanRecords, ScanCompletionRecord, ScanRecord, ScanStatus, insert_scan_started,
@@ -2635,6 +2636,21 @@ impl StoreCoordinator {
             return Err(HistoryError::new(HistoryErrorKind::InternalState));
         }
         Ok(())
+    }
+
+    pub(super) fn inspect_owned_database_footprint_with_guard(
+        &self,
+        guard: &HistoryConnectionGuard<'_>,
+        observed_at: SystemTime,
+    ) -> Result<(OwnedStorageUsage, AiCacheFootprint), HistoryError> {
+        self.validate_history_guard(guard)?;
+        let embedded_ai_cache = inspect_ai_cache_footprint(&guard.connection, observed_at)?;
+        let physical = self
+            .paths
+            .observe_physical_usage(&guard._writer_lock)
+            .map_err(map_history_database_error)?;
+        self.validate_history_guard(guard)?;
+        Ok((physical, embedded_ai_cache))
     }
 
     fn cached_status(&self) -> DatabaseStatus {

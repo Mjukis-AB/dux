@@ -1328,6 +1328,17 @@ pub(super) fn run_bounded_cleanup_history_observation_query<T>(
     run_bounded_query_with_limits(connection, 300_000, Duration::from_secs(3), query)
 }
 
+/// Dedicated budget for exact, allocation-bounded accounting of embedded AI
+/// content. The schema has no fixed row-count ceiling, so the query pages
+/// scalar lengths rather than returning a partial count at an arbitrary row
+/// limit. VM work and elapsed time remain fail-closed and bounded.
+pub(super) fn run_bounded_owned_storage_footprint_query<T>(
+    connection: &Connection,
+    query: impl FnOnce() -> Result<T, HistoryError>,
+) -> Result<T, HistoryError> {
+    run_bounded_query_with_limits(connection, 300_000, Duration::from_secs(3), query)
+}
+
 struct QueryProgressGuard<'connection> {
     connection: &'connection Connection,
     installed: bool,

@@ -49,6 +49,7 @@ mod cleanup_journal;
 )]
 mod codec;
 mod configured_project_roots;
+mod footprint;
 mod history;
 mod migrations;
 mod permanent_cleanup;
@@ -135,6 +136,7 @@ pub(crate) use configured_project_roots::{
     ConfiguredProjectRootSetting, ConfiguredProjectRootSettingSource,
     ConfiguredProjectRootSettingUpdate, validate_configured_project_roots,
 };
+pub(crate) use footprint::{DuxOwnedStorageFootprint, OwnedStorageUsage};
 pub(crate) use history::{
     HistoryError, HistoryErrorKind, MAX_RECENT_SCAN_HISTORY_LIMIT, NewScanRecord,
     ScanCompletionRecord, ScanCounts, ScanRecord, ScanStatus, TerminalScanStatus,

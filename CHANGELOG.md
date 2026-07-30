@@ -1,5 +1,20 @@
 # Changelog
 
+- Added a bounded, read-only DUX private-storage measurement through UniFFI
+  v52 and native **Storage & Privacy**. The core now reports conservative
+  logical, allocated, and per-file charged usage for the exact marker-owned
+  SQLite main/sidecar/control files and the bounded snapshot store, with
+  independently reconciled snapshot policy/debt classes and a checked additive
+  physical total. Embedded AI insight IDs, digests, provider/adapter/model
+  labels, and payload bytes are shown separately as logical content already
+  inside SQLite, never double-counted as physical or reclaimable space. The
+  path-free API accepts no selector and exposes no mutation capability; it
+  excludes directory metadata, unattributable provisioning stages, and the
+  unmarked caller-selected legacy CLI cache. Native Settings performs an
+  explicit off-main measurement, preserves the last complete observation on
+  failure, shows a non-color-only database/snapshot chart with full-range
+  `UInt64` formatting, and states that the result is neither free space nor a
+  cleanup promise.
 - Added snapshot-retention cap controls to native **Storage & Privacy** through
   UniFFI v51. Versioned, path-free get/set/reset records preserve exact
   `u64` values, default/stored provenance, idempotence, and typed

@@ -281,6 +281,49 @@ thread. Setting zero or any other value never invokes retention; the sealed
 writer still rereads the cap and rebuilds its complete proof under the final
 locks.
 
+### Read-only DUX storage footprint
+
+The public footprint observation is a bounded measurement of DUX's active
+private database and snapshot stores, not a retention decision. It accepts no
+path, name, scan ID, inventory, selector, cap override, or capability and
+cannot start maintenance or authorize removal. The database-to-snapshot lock
+order remains live for the whole observation. Both inventories are revalidated
+before return, and an unsafe replacement, size drift, incompatible schema,
+budget limit, or arithmetic inconsistency fails the complete observation
+without returning partial totals.
+
+Database usage includes only the retained SQLite main file, the exact
+`-wal`/`-shm`/`-journal` sidecars when present, and stable marker, writer,
+cleanup, cleanup-ready, and initialization controls. Snapshot usage reuses the
+complete bounded retention inventory and separates controls, protected and
+retention-eligible available finals, tombstoned residuals, physical orphans,
+and active, quiescent, and unleased recognized temporary files. Logical length
+and handle-derived allocation are reported independently; charged usage is the
+checked sum of each file's `max(logical, allocated)`. Database plus snapshot
+usage is the sole additive physical total. Directory-entry metadata and
+unattributable interrupted provisioning stages are excluded.
+
+Embedded AI-cache accounting is deliberately non-additive. One bounded,
+allocation-constant SQLite pager sums the exact variable-length insight ID,
+32-byte input digest, provider, adapter version, optional model label, and
+output payload for every strictly validated record, including the expired
+subset. It excludes integer fields and SQLite record, page, index, and
+fragmentation overhead. The row population has no arbitrary display ceiling;
+SQLite VM-work and elapsed-time budgets fail the whole read instead of
+returning a partial count. These logical bytes are already inside database
+usage, and deleting records does not imply an immediate reduction in the
+database file or free-space increase.
+
+The legacy CLI cache is also excluded. Its directory is selected by the caller
+through the platform cache convention and contains no current DUX ownership
+marker, so neither reporting nor future clearing may claim it until a separate
+marker-owned cache migration proves ownership. UniFFI v52 and Swift revalidate
+the complete path-free accounting algebra before presenting it. Native
+Settings loads on entry and refreshes only on explicit request; a failed
+refresh preserves the last complete observation. Its chart contains only the
+two additive database and snapshot components, while AI content remains a
+separate labelled row.
+
 Terminal scan summaries and their original snapshot references are immutable.
 Snapshot retention is therefore not allowed to clear or rewrite that historical
 tuple. Schema v5 implements the prerequisite as an append-only

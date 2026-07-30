@@ -625,6 +625,7 @@ struct DuxSettingsView: View {
             await model.refreshLoginItemState()
             await model.refreshNotificationAuthorizationState()
             await model.loadDiskPressurePolicy()
+            await model.ownedStorageFootprintSettings.load()
             await model.snapshotRetentionCapSettings.load()
             await model.loadPermanentCleanupPolicy()
             await model.loadCleanupExclusions()
@@ -1382,6 +1383,12 @@ struct DuxSettingsView: View {
     @ViewBuilder
     private func cleanupHistoryClearSettings(model: AppModel) -> some View {
         Section("Storage & Privacy") {
+            DuxOwnedStorageFootprintSettingsView(
+                settings: model.ownedStorageFootprintSettings
+            )
+
+            Divider()
+
             SnapshotRetentionCapSettingsView(
                 settings: model.snapshotRetentionCapSettings
             )
@@ -1396,83 +1403,90 @@ struct DuxSettingsView: View {
 
             Divider()
 
-            Text(
-                "Cleanup history is DUX’s local activity log. Clearing it does not delete "
-                    + "files, snapshots, scan or candidate history, settings, exclusions, "
-                    + "capacity samples, or AI insights."
-            )
-            .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 10) {
+                Text(
+                    "Cleanup history is DUX’s local activity log. Clearing it does not delete "
+                        + "files, snapshots, scan or candidate history, settings, exclusions, "
+                        + "capacity samples, or AI insights."
+                )
+                .foregroundStyle(.secondary)
 
-            Text(
-                "This privacy action does not run cleanup, compact the database, resample "
-                    + "capacity, or promise to free disk space. Active or uncertain cleanup "
-                    + "evidence is preserved automatically."
-            )
-            .font(.caption)
-            .foregroundStyle(.secondary)
+                Text(
+                    "This privacy action does not run cleanup, compact the database, resample "
+                        + "capacity, or promise to free disk space. Active or uncertain cleanup "
+                        + "evidence is preserved automatically."
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
 
-            cleanupHistoryClearStateDetails(model)
+                cleanupHistoryClearStateDetails(model)
 
-            HStack {
-                Button("Clear cleanup history…", role: .destructive) {
-                    Task {
-                        await model.prepareCleanupHistoryClear()
-                        if let confirmation = model.cleanupHistoryClearConfirmation {
-                            cleanupHistoryClearConfirmationAction = confirmation
+                HStack {
+                    Button("Clear cleanup history…", role: .destructive) {
+                        Task {
+                            await model.prepareCleanupHistoryClear()
+                            if let confirmation = model.cleanupHistoryClearConfirmation {
+                                cleanupHistoryClearConfirmationAction = confirmation
+                            }
                         }
                     }
-                }
-                .disabled(
-                    model.cleanupHistoryClearState.isBusy
-                        || model.cleanupHistoryClearConfirmation != nil
-                )
-                .accessibilityIdentifier(CleanupHistoryClearAccessibility.prepare)
-                .accessibilityHint(
-                    "Prepares an exact expiring preview before any history can be removed"
-                )
+                    .disabled(
+                        model.cleanupHistoryClearState.isBusy
+                            || model.cleanupHistoryClearConfirmation != nil
+                    )
+                    .accessibilityIdentifier(CleanupHistoryClearAccessibility.prepare)
+                    .accessibilityHint(
+                        "Prepares an exact expiring preview before any history can be removed"
+                    )
 
-                if model.cleanupHistoryClearState.isBusy {
-                    ProgressView()
-                        .controlSize(.small)
-                        .accessibilityIdentifier(CleanupHistoryClearAccessibility.progress)
-                        .accessibilityLabel(cleanupHistoryClearProgressLabel(model))
+                    if model.cleanupHistoryClearState.isBusy {
+                        ProgressView()
+                            .controlSize(.small)
+                            .accessibilityIdentifier(
+                                CleanupHistoryClearAccessibility.progress
+                            )
+                            .accessibilityLabel(cleanupHistoryClearProgressLabel(model))
+                    }
+
+                    switch model.cleanupHistoryClearState {
+                    case .completed, .failed, .outcomeUnknown:
+                        Button("Dismiss") {
+                            model.dismissCleanupHistoryClearNotice()
+                        }
+                        .accessibilityIdentifier(
+                            CleanupHistoryClearAccessibility.dismiss
+                        )
+                    case .idle, .preparing, .awaitingConfirmation, .clearing:
+                        EmptyView()
+                    }
                 }
 
                 switch model.cleanupHistoryClearState {
-                case .completed, .failed, .outcomeUnknown:
-                    Button("Dismiss") {
-                        model.dismissCleanupHistoryClearNotice()
-                    }
-                    .accessibilityIdentifier(CleanupHistoryClearAccessibility.dismiss)
-                case .idle, .preparing, .awaitingConfirmation, .clearing:
+                case let .failed(failure):
+                    Label(
+                        Self.message(for: failure),
+                        systemImage: failure == .nothingToClear
+                            ? "checkmark.circle"
+                            : "exclamationmark.triangle"
+                    )
+                    .foregroundStyle(
+                        failure == .nothingToClear ? Color.secondary : Color.red
+                    )
+                    .accessibilityIdentifier(CleanupHistoryClearAccessibility.error)
+                case .outcomeUnknown:
+                    Label(
+                        Self.cleanupHistoryClearOutcomeUnknownMessage,
+                        systemImage: "questionmark.diamond"
+                    )
+                    .foregroundStyle(.red)
+                    .accessibilityIdentifier(CleanupHistoryClearAccessibility.error)
+                case .idle, .preparing, .awaitingConfirmation, .clearing, .completed:
                     EmptyView()
                 }
             }
-
-            switch model.cleanupHistoryClearState {
-            case let .failed(failure):
-                Label(
-                    Self.message(for: failure),
-                    systemImage: failure == .nothingToClear
-                        ? "checkmark.circle"
-                        : "exclamationmark.triangle"
-                )
-                .foregroundStyle(
-                    failure == .nothingToClear ? Color.secondary : Color.red
-                )
-                .accessibilityIdentifier(CleanupHistoryClearAccessibility.error)
-            case .outcomeUnknown:
-                Label(
-                    Self.cleanupHistoryClearOutcomeUnknownMessage,
-                    systemImage: "questionmark.diamond"
-                )
-                .foregroundStyle(.red)
-                .accessibilityIdentifier(CleanupHistoryClearAccessibility.error)
-            case .idle, .preparing, .awaitingConfirmation, .clearing, .completed:
-                EmptyView()
-            }
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier(CleanupHistoryClearAccessibility.section)
         }
-        .accessibilityIdentifier(CleanupHistoryClearAccessibility.section)
     }
 
     @ViewBuilder

@@ -10,6 +10,8 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 #[cfg(windows)]
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 
+#[cfg(test)]
+use dux_core::engine::DuxEmbeddedAiCacheFootprint as CoreEmbeddedAiCacheFootprint;
 use dux_core::engine::{
     CancelOutcome as CoreCancelOutcome, CandidateDetailError as CoreCandidateDetailError,
     CandidateEvaluationRecoveryMaintenanceOutcome as CoreCandidateEvaluationRecoveryOutcome,
@@ -67,8 +69,12 @@ use dux_core::engine::{
     DurableObservedPath as CoreObservedPath, DurableRuleOutcomeBatch as CoreRuleOutcomeBatch,
     DurableRuleOutcomeState as CoreRuleOutcomeState,
     DurableScanIssueKind as CoreDurableScanIssueKind, DurableScanStatus as CoreDurableScanStatus,
-    DurableStorageThiefRanking as CoreStorageThiefRanking, EMERGENCY_RECOVERY_POLICY_REVISION,
-    EmergencyRecoveryError as CoreEmergencyRecoveryError,
+    DurableStorageThiefRanking as CoreStorageThiefRanking,
+    DuxOwnedStorageFootprint as CoreOwnedStorageFootprint,
+    DuxOwnedStorageFootprintError as CoreOwnedStorageFootprintError,
+    DuxOwnedStorageUsage as CoreOwnedStorageUsage,
+    DuxSnapshotStorageFootprint as CoreSnapshotStorageFootprint,
+    EMERGENCY_RECOVERY_POLICY_REVISION, EmergencyRecoveryError as CoreEmergencyRecoveryError,
     EmergencyRecoveryGroup as CoreEmergencyRecoveryGroup,
     EmergencyRecoveryLane as CoreEmergencyRecoveryLane,
     EmergencyRecoveryOrdering as CoreEmergencyRecoveryOrdering,
@@ -169,7 +175,7 @@ use dux_core::{
     VolumeCapacity, VolumeId,
 };
 
-const FFI_CONTRACT_VERSION: u32 = 51;
+const FFI_CONTRACT_VERSION: u32 = 52;
 const FFI_RECORD_VERSION: u32 = 1;
 const RUST_TARGET_MINIMUM_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const SNAPSHOT_NODE_RECORD_VERSION: u32 = 2;
@@ -185,6 +191,11 @@ const MAX_RULE_OUTCOMES: usize = 64;
 const MAX_STORAGE_THIEF_GROUPS: usize = 12;
 const MAX_STORAGE_THIEF_SOURCE_SESSIONS: u16 = 32;
 const MAX_RUNNING_SCAN_DEBT_CENSUS_ROWS: u16 = 64;
+const OWNED_STORAGE_MAX_SNAPSHOT_OBJECTS: u32 = 2_048;
+const OWNED_STORAGE_MAX_RESIDUAL_TEMP_LEASES: u32 = 64;
+const OWNED_STORAGE_MAX_PIN_ROWS: u32 = 1_024;
+const OWNED_STORAGE_AI_CONTENT_BYTES_PER_ROW_MIN: u64 = 36;
+const OWNED_STORAGE_AI_CONTENT_BYTES_PER_ROW_MAX: u64 = 16_777_888;
 const MAX_CLEANUP_HISTORY_SESSION_ID_BYTES: usize = 128;
 const MAX_CLEANUP_HISTORY_PLAN_ID_BYTES: usize = 128;
 const MAX_CLEANUP_HISTORY_RULE_ID_BYTES: usize = 128;
@@ -437,6 +448,105 @@ pub struct SnapshotRetentionCapUpdate {
     pub record_version: u32,
     pub settings: SnapshotRetentionCapStatus,
     pub changed: bool,
+}
+
+/// Exact path-free usage for one fixed DUX-owned storage component.
+///
+/// `charged_bytes` is conservative per-file accounting and can exceed both
+/// aggregate logical and allocated usage.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct OwnedStorageUsage {
+    pub record_version: u32,
+    pub logical_bytes: u64,
+    pub allocated_bytes: u64,
+    pub charged_bytes: u64,
+}
+
+/// Point-in-time physical and policy accounting for DUX's snapshot store.
+///
+/// `available` is partitioned by `protected` and `retention_eligible`.
+/// Retention eligibility is descriptive and grants no cleanup authority.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct SnapshotStorageFootprint {
+    pub record_version: u32,
+    pub cap_bytes: u64,
+    pub cap_excess_bytes: u64,
+    pub controls: OwnedStorageUsage,
+    pub available: OwnedStorageUsage,
+    pub protected: OwnedStorageUsage,
+    pub retention_eligible: OwnedStorageUsage,
+    pub tombstoned_residual: OwnedStorageUsage,
+    pub orphan: OwnedStorageUsage,
+    pub temporary_active: OwnedStorageUsage,
+    pub temporary_quiescent: OwnedStorageUsage,
+    pub temporary_unleased: OwnedStorageUsage,
+    pub total: OwnedStorageUsage,
+    pub available_count: u32,
+    pub protected_count: u32,
+    pub retention_eligible_count: u32,
+    pub tombstoned_residual_count: u32,
+    pub orphan_count: u32,
+    pub active_temporary_count: u32,
+    pub quiescent_temporary_count: u32,
+    pub unleased_temporary_count: u32,
+    pub residual_temporary_lease_count: u32,
+    pub active_pin_rows: u32,
+    pub expired_pin_rows: u32,
+    pub non_evictable_over_cap: bool,
+    pub accounting_unstable: bool,
+}
+
+/// Logical variable-length AI cache content embedded in the DUX SQLite
+/// database.
+///
+/// This includes insight IDs, input digests, provider, adapter, optional model
+/// labels, and output payloads. It excludes integer fields and SQLite record,
+/// page, index, and fragmentation overhead. These bytes are a non-additive
+/// subset of `database`, not separate physical or reclaimable bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct EmbeddedAiCacheFootprint {
+    pub record_version: u32,
+    pub record_count: u32,
+    pub logical_content_bytes: u64,
+    pub expired_record_count: u32,
+    pub expired_logical_content_bytes: u64,
+}
+
+/// Bounded observation of fixed marker-owned DUX storage.
+///
+/// This contains no paths, identifiers, selectors, or mutation authority.
+/// It excludes the legacy caller-selected CLI cache and is not free-space or
+/// cleanup-reclaimability telemetry.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct OwnedStorageFootprint {
+    pub record_version: u32,
+    pub observed_at_unix_ms: i64,
+    pub database: OwnedStorageUsage,
+    pub snapshots: SnapshotStorageFootprint,
+    pub embedded_ai_cache: EmbeddedAiCacheFootprint,
+    pub physical_total: OwnedStorageUsage,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error, uniffi::Error)]
+pub enum OwnedStorageFootprintError {
+    #[error("engine session is closed")]
+    Closed,
+    #[error("the system clock cannot be represented")]
+    InvalidClock,
+    #[error("the durable schema is incompatible")]
+    IncompatibleSchema,
+    #[error("storage observation is temporarily busy")]
+    Busy,
+    #[error("storage failed its safety checks")]
+    UnsafeStorage,
+    #[error("the bounded storage observation exceeded its budget")]
+    BudgetExceeded,
+    #[error("DUX-owned storage accounting is corrupt")]
+    CorruptData,
+    #[error("DUX-owned storage is unavailable")]
+    Unavailable,
+    #[error("internal DUX-owned storage accounting state is invalid")]
+    InternalState,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
@@ -5015,6 +5125,22 @@ impl DuxEngine {
         })
     }
 
+    /// Observe DUX's fixed marker-owned database and snapshot stores.
+    ///
+    /// This bounded read is path-free and cannot select, approve, schedule,
+    /// or execute cleanup. Embedded AI content is already included in the
+    /// database component and is never added to the physical total.
+    pub fn get_owned_storage_footprint(
+        &self,
+    ) -> Result<OwnedStorageFootprint, OwnedStorageFootprintError> {
+        self.with_owned_storage_footprint_engine(|engine| {
+            engine
+                .owned_storage_footprint()
+                .map_err(map_owned_storage_footprint_error)
+                .and_then(owned_storage_footprint)
+        })
+    }
+
     /// Store an exact cap value without running retention.
     pub fn set_snapshot_retention_cap(
         &self,
@@ -6452,6 +6578,22 @@ impl DuxEngine {
             EngineState::Open(engine) if !self.closed.load(Ordering::Acquire) => operation(engine),
             EngineState::Open(_) | EngineState::Closing | EngineState::Closed { .. } => {
                 Err(SnapshotRetentionCapError::Closed)
+            }
+        }
+    }
+
+    fn with_owned_storage_footprint_engine<T>(
+        &self,
+        operation: impl FnOnce(&EngineHandle) -> Result<T, OwnedStorageFootprintError>,
+    ) -> Result<T, OwnedStorageFootprintError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| OwnedStorageFootprintError::InternalState)?;
+        match &*state {
+            EngineState::Open(engine) if !self.closed.load(Ordering::Acquire) => operation(engine),
+            EngineState::Open(_) | EngineState::Closing | EngineState::Closed { .. } => {
+                Err(OwnedStorageFootprintError::Closed)
             }
         }
     }
@@ -10867,6 +11009,250 @@ fn pressure_policy_time_ms(value: SystemTime) -> Result<i64, PressurePolicyError
     .map_err(|_| PressurePolicyError::InternalState)
 }
 
+fn map_owned_storage_footprint_error(
+    error: CoreOwnedStorageFootprintError,
+) -> OwnedStorageFootprintError {
+    match error {
+        CoreOwnedStorageFootprintError::Closed => OwnedStorageFootprintError::Closed,
+        CoreOwnedStorageFootprintError::InvalidClock => OwnedStorageFootprintError::InvalidClock,
+        CoreOwnedStorageFootprintError::IncompatibleSchema => {
+            OwnedStorageFootprintError::IncompatibleSchema
+        }
+        CoreOwnedStorageFootprintError::Busy => OwnedStorageFootprintError::Busy,
+        CoreOwnedStorageFootprintError::UnsafeStorage => OwnedStorageFootprintError::UnsafeStorage,
+        CoreOwnedStorageFootprintError::BudgetExceeded => {
+            OwnedStorageFootprintError::BudgetExceeded
+        }
+        CoreOwnedStorageFootprintError::CorruptData => OwnedStorageFootprintError::CorruptData,
+        CoreOwnedStorageFootprintError::Unavailable => OwnedStorageFootprintError::Unavailable,
+        CoreOwnedStorageFootprintError::InternalState => OwnedStorageFootprintError::InternalState,
+        _ => OwnedStorageFootprintError::InternalState,
+    }
+}
+
+fn owned_storage_footprint(
+    footprint: CoreOwnedStorageFootprint,
+) -> Result<OwnedStorageFootprint, OwnedStorageFootprintError> {
+    validate_owned_storage_footprint(&footprint)?;
+    Ok(OwnedStorageFootprint {
+        record_version: FFI_RECORD_VERSION,
+        observed_at_unix_ms: owned_storage_footprint_time_ms(footprint.observed_at)?,
+        database: owned_storage_usage(footprint.database),
+        snapshots: snapshot_storage_footprint(footprint.snapshots),
+        embedded_ai_cache: EmbeddedAiCacheFootprint {
+            record_version: FFI_RECORD_VERSION,
+            record_count: footprint.embedded_ai_cache.record_count,
+            logical_content_bytes: footprint.embedded_ai_cache.logical_content_bytes,
+            expired_record_count: footprint.embedded_ai_cache.expired_record_count,
+            expired_logical_content_bytes: footprint
+                .embedded_ai_cache
+                .expired_logical_content_bytes,
+        },
+        physical_total: owned_storage_usage(footprint.physical_total),
+    })
+}
+
+fn validate_owned_storage_footprint(
+    footprint: &CoreOwnedStorageFootprint,
+) -> Result<(), OwnedStorageFootprintError> {
+    let snapshots = &footprint.snapshots;
+    for usage in [
+        footprint.database,
+        snapshots.controls,
+        snapshots.available,
+        snapshots.protected,
+        snapshots.retention_eligible,
+        snapshots.tombstoned_residual,
+        snapshots.orphan,
+        snapshots.temporary_active,
+        snapshots.temporary_quiescent,
+        snapshots.temporary_unleased,
+        snapshots.total,
+        footprint.physical_total,
+    ] {
+        validate_owned_storage_usage(usage)?;
+    }
+
+    let classified_available =
+        checked_core_storage_usage_add(snapshots.protected, snapshots.retention_eligible)?;
+    let classified_total = [
+        snapshots.controls,
+        snapshots.available,
+        snapshots.tombstoned_residual,
+        snapshots.orphan,
+        snapshots.temporary_active,
+        snapshots.temporary_quiescent,
+        snapshots.temporary_unleased,
+    ]
+    .into_iter()
+    .try_fold(
+        CoreOwnedStorageUsage::default(),
+        checked_core_storage_usage_add,
+    )?;
+    let physical_total = checked_core_storage_usage_add(footprint.database, snapshots.total)?;
+    let available_count = snapshots
+        .protected_count
+        .checked_add(snapshots.retention_eligible_count)
+        .ok_or(OwnedStorageFootprintError::InternalState)?;
+    let physical_snapshot_object_count = [
+        snapshots.available_count,
+        snapshots.tombstoned_residual_count,
+        snapshots.orphan_count,
+        snapshots.active_temporary_count,
+        snapshots.quiescent_temporary_count,
+        snapshots.unleased_temporary_count,
+    ]
+    .into_iter()
+    .try_fold(0_u32, |total, count| {
+        total
+            .checked_add(count)
+            .ok_or(OwnedStorageFootprintError::InternalState)
+    })?;
+    let pin_row_count = snapshots
+        .active_pin_rows
+        .checked_add(snapshots.expired_pin_rows)
+        .ok_or(OwnedStorageFootprintError::InternalState)?;
+    let non_evictable_charged_bytes = [
+        snapshots.controls,
+        snapshots.protected,
+        snapshots.tombstoned_residual,
+        snapshots.orphan,
+        snapshots.temporary_active,
+        snapshots.temporary_quiescent,
+        snapshots.temporary_unleased,
+    ]
+    .into_iter()
+    .try_fold(0_u64, |total, usage| {
+        total
+            .checked_add(usage.charged_bytes)
+            .ok_or(OwnedStorageFootprintError::InternalState)
+    })?;
+    let ai = footprint.embedded_ai_cache;
+    let ai_content_shape_is_valid =
+        ai_content_bytes_fit_count(ai.record_count, ai.logical_content_bytes)?;
+    let expired_ai_content_shape_is_valid =
+        ai_content_bytes_fit_count(ai.expired_record_count, ai.expired_logical_content_bytes)?;
+    let all_ai_expired_shape_is_valid = (ai.expired_record_count == ai.record_count)
+        == (ai.expired_logical_content_bytes == ai.logical_content_bytes);
+
+    if classified_available != snapshots.available
+        || classified_total != snapshots.total
+        || physical_total != footprint.physical_total
+        || available_count != snapshots.available_count
+        || physical_snapshot_object_count > OWNED_STORAGE_MAX_SNAPSHOT_OBJECTS
+        || snapshots.residual_temporary_lease_count > OWNED_STORAGE_MAX_RESIDUAL_TEMP_LEASES
+        || pin_row_count > OWNED_STORAGE_MAX_PIN_ROWS
+        || snapshots.cap_excess_bytes
+            != snapshots
+                .total
+                .charged_bytes
+                .saturating_sub(snapshots.cap_bytes)
+        || snapshots.accounting_unstable
+            != (snapshots.active_temporary_count > 0 || snapshots.unleased_temporary_count > 0)
+        || snapshots.non_evictable_over_cap != (non_evictable_charged_bytes > snapshots.cap_bytes)
+        || ai.expired_record_count > ai.record_count
+        || ai.expired_logical_content_bytes > ai.logical_content_bytes
+        || ai.logical_content_bytes > footprint.database.logical_bytes
+        || !ai_content_shape_is_valid
+        || !expired_ai_content_shape_is_valid
+        || !all_ai_expired_shape_is_valid
+    {
+        return Err(OwnedStorageFootprintError::InternalState);
+    }
+    Ok(())
+}
+
+fn ai_content_bytes_fit_count(count: u32, bytes: u64) -> Result<bool, OwnedStorageFootprintError> {
+    let count = u64::from(count);
+    let minimum = count
+        .checked_mul(OWNED_STORAGE_AI_CONTENT_BYTES_PER_ROW_MIN)
+        .ok_or(OwnedStorageFootprintError::InternalState)?;
+    let maximum = count
+        .checked_mul(OWNED_STORAGE_AI_CONTENT_BYTES_PER_ROW_MAX)
+        .ok_or(OwnedStorageFootprintError::InternalState)?;
+    Ok((minimum..=maximum).contains(&bytes))
+}
+
+fn validate_owned_storage_usage(
+    usage: CoreOwnedStorageUsage,
+) -> Result<(), OwnedStorageFootprintError> {
+    if usage.charged_bytes < usage.logical_bytes || usage.charged_bytes < usage.allocated_bytes {
+        Err(OwnedStorageFootprintError::InternalState)
+    } else {
+        Ok(())
+    }
+}
+
+fn checked_core_storage_usage_add(
+    left: CoreOwnedStorageUsage,
+    right: CoreOwnedStorageUsage,
+) -> Result<CoreOwnedStorageUsage, OwnedStorageFootprintError> {
+    Ok(CoreOwnedStorageUsage {
+        logical_bytes: left
+            .logical_bytes
+            .checked_add(right.logical_bytes)
+            .ok_or(OwnedStorageFootprintError::InternalState)?,
+        allocated_bytes: left
+            .allocated_bytes
+            .checked_add(right.allocated_bytes)
+            .ok_or(OwnedStorageFootprintError::InternalState)?,
+        charged_bytes: left
+            .charged_bytes
+            .checked_add(right.charged_bytes)
+            .ok_or(OwnedStorageFootprintError::InternalState)?,
+    })
+}
+
+fn owned_storage_usage(usage: CoreOwnedStorageUsage) -> OwnedStorageUsage {
+    OwnedStorageUsage {
+        record_version: FFI_RECORD_VERSION,
+        logical_bytes: usage.logical_bytes,
+        allocated_bytes: usage.allocated_bytes,
+        charged_bytes: usage.charged_bytes,
+    }
+}
+
+fn snapshot_storage_footprint(snapshots: CoreSnapshotStorageFootprint) -> SnapshotStorageFootprint {
+    SnapshotStorageFootprint {
+        record_version: FFI_RECORD_VERSION,
+        cap_bytes: snapshots.cap_bytes,
+        cap_excess_bytes: snapshots.cap_excess_bytes,
+        controls: owned_storage_usage(snapshots.controls),
+        available: owned_storage_usage(snapshots.available),
+        protected: owned_storage_usage(snapshots.protected),
+        retention_eligible: owned_storage_usage(snapshots.retention_eligible),
+        tombstoned_residual: owned_storage_usage(snapshots.tombstoned_residual),
+        orphan: owned_storage_usage(snapshots.orphan),
+        temporary_active: owned_storage_usage(snapshots.temporary_active),
+        temporary_quiescent: owned_storage_usage(snapshots.temporary_quiescent),
+        temporary_unleased: owned_storage_usage(snapshots.temporary_unleased),
+        total: owned_storage_usage(snapshots.total),
+        available_count: snapshots.available_count,
+        protected_count: snapshots.protected_count,
+        retention_eligible_count: snapshots.retention_eligible_count,
+        tombstoned_residual_count: snapshots.tombstoned_residual_count,
+        orphan_count: snapshots.orphan_count,
+        active_temporary_count: snapshots.active_temporary_count,
+        quiescent_temporary_count: snapshots.quiescent_temporary_count,
+        unleased_temporary_count: snapshots.unleased_temporary_count,
+        residual_temporary_lease_count: snapshots.residual_temporary_lease_count,
+        active_pin_rows: snapshots.active_pin_rows,
+        expired_pin_rows: snapshots.expired_pin_rows,
+        non_evictable_over_cap: snapshots.non_evictable_over_cap,
+        accounting_unstable: snapshots.accounting_unstable,
+    }
+}
+
+fn owned_storage_footprint_time_ms(value: SystemTime) -> Result<i64, OwnedStorageFootprintError> {
+    i64::try_from(
+        value
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| OwnedStorageFootprintError::InternalState)?
+            .as_millis(),
+    )
+    .map_err(|_| OwnedStorageFootprintError::InternalState)
+}
+
 fn map_snapshot_retention_cap_error(
     error: CoreSnapshotRetentionCapError,
 ) -> SnapshotRetentionCapError {
@@ -12787,12 +13173,12 @@ mod tests {
     }
 
     #[test]
-    fn reports_contract_fifty_one_with_exact_storage_compatibility_and_preserves_formatting() {
+    fn reports_contract_fifty_two_with_exact_storage_compatibility_and_preserves_formatting() {
         let _guard = ENGINE_TEST_LOCK.lock().unwrap();
         let (_temp, engine) = engine();
         let expected = LibraryVersion {
             library_version: env!("CARGO_PKG_VERSION").to_owned(),
-            ffi_contract_version: 51,
+            ffi_contract_version: 52,
             database_schema_version: DATABASE_SCHEMA_VERSION,
             snapshot_format_version: SNAPSHOT_FORMAT_VERSION,
         };
@@ -18332,6 +18718,324 @@ mod tests {
             engine.reset_snapshot_retention_cap(),
             Err(SnapshotRetentionCapError::Closed)
         );
+    }
+
+    fn core_storage_usage(
+        logical_bytes: u64,
+        allocated_bytes: u64,
+        charged_bytes: u64,
+    ) -> CoreOwnedStorageUsage {
+        CoreOwnedStorageUsage {
+            logical_bytes,
+            allocated_bytes,
+            charged_bytes,
+        }
+    }
+
+    fn valid_core_owned_storage_footprint() -> CoreOwnedStorageFootprint {
+        CoreOwnedStorageFootprint {
+            observed_at: UNIX_EPOCH + Duration::from_millis(1_000),
+            database: core_storage_usage(200, 256, 256),
+            snapshots: CoreSnapshotStorageFootprint {
+                cap_bytes: 100,
+                cap_excess_bytes: 8,
+                controls: core_storage_usage(10, 12, 12),
+                available: core_storage_usage(50, 56, 56),
+                protected: core_storage_usage(20, 24, 24),
+                retention_eligible: core_storage_usage(30, 32, 32),
+                tombstoned_residual: core_storage_usage(4, 8, 8),
+                orphan: core_storage_usage(5, 8, 8),
+                temporary_active: core_storage_usage(6, 8, 8),
+                temporary_quiescent: core_storage_usage(7, 8, 8),
+                temporary_unleased: core_storage_usage(8, 8, 8),
+                total: core_storage_usage(90, 108, 108),
+                available_count: 5,
+                protected_count: 2,
+                retention_eligible_count: 3,
+                tombstoned_residual_count: 1,
+                orphan_count: 1,
+                active_temporary_count: 1,
+                quiescent_temporary_count: 1,
+                unleased_temporary_count: 1,
+                residual_temporary_lease_count: 1,
+                active_pin_rows: 2,
+                expired_pin_rows: 1,
+                non_evictable_over_cap: false,
+                accounting_unstable: true,
+            },
+            embedded_ai_cache: CoreEmbeddedAiCacheFootprint {
+                record_count: 2,
+                logical_content_bytes: 100,
+                expired_record_count: 1,
+                expired_logical_content_bytes: 50,
+            },
+            physical_total: core_storage_usage(290, 364, 364),
+        }
+    }
+
+    #[test]
+    fn owned_storage_footprint_round_trip_is_versioned_path_free_and_closed_typed() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (temp, engine) = engine();
+        let footprint = engine.get_owned_storage_footprint().unwrap();
+        assert_eq!(footprint.record_version, FFI_RECORD_VERSION);
+        assert!(footprint.observed_at_unix_ms >= 0);
+        assert_eq!(
+            footprint.physical_total.logical_bytes,
+            footprint
+                .database
+                .logical_bytes
+                .checked_add(footprint.snapshots.total.logical_bytes)
+                .unwrap()
+        );
+        assert_eq!(
+            footprint.physical_total.allocated_bytes,
+            footprint
+                .database
+                .allocated_bytes
+                .checked_add(footprint.snapshots.total.allocated_bytes)
+                .unwrap()
+        );
+        assert_eq!(
+            footprint.physical_total.charged_bytes,
+            footprint
+                .database
+                .charged_bytes
+                .checked_add(footprint.snapshots.total.charged_bytes)
+                .unwrap()
+        );
+        for usage in [
+            footprint.database,
+            footprint.snapshots.controls,
+            footprint.snapshots.available,
+            footprint.snapshots.protected,
+            footprint.snapshots.retention_eligible,
+            footprint.snapshots.tombstoned_residual,
+            footprint.snapshots.orphan,
+            footprint.snapshots.temporary_active,
+            footprint.snapshots.temporary_quiescent,
+            footprint.snapshots.temporary_unleased,
+            footprint.snapshots.total,
+            footprint.physical_total,
+        ] {
+            assert_eq!(usage.record_version, FFI_RECORD_VERSION);
+            assert!(usage.charged_bytes >= usage.logical_bytes);
+            assert!(usage.charged_bytes >= usage.allocated_bytes);
+        }
+        assert_eq!(footprint.snapshots.record_version, FFI_RECORD_VERSION);
+        assert_eq!(
+            footprint.embedded_ai_cache.record_version,
+            FFI_RECORD_VERSION
+        );
+        assert_eq!(footprint.embedded_ai_cache.record_count, 0);
+        assert_eq!(footprint.embedded_ai_cache.logical_content_bytes, 0);
+
+        let debug = format!("{footprint:?}").to_lowercase();
+        assert!(!debug.contains(&temp.path().to_string_lossy().to_lowercase()));
+        for forbidden_shape in ["path", "root", "identifier", "selector"] {
+            assert!(
+                !debug.contains(forbidden_shape),
+                "unexpected path-shaped field in footprint: {forbidden_shape}"
+            );
+        }
+
+        assert!(engine.close());
+        assert_eq!(
+            engine.get_owned_storage_footprint(),
+            Err(OwnedStorageFootprintError::Closed)
+        );
+    }
+
+    #[test]
+    fn owned_storage_footprint_projector_revalidates_every_accounting_layer() {
+        let projected = owned_storage_footprint(valid_core_owned_storage_footprint()).unwrap();
+        assert_eq!(projected.record_version, FFI_RECORD_VERSION);
+        assert_eq!(projected.observed_at_unix_ms, 1_000);
+        assert_eq!(projected.snapshots.available_count, 5);
+        assert!(projected.snapshots.accounting_unstable);
+        assert!(!projected.snapshots.non_evictable_over_cap);
+        assert_eq!(projected.embedded_ai_cache.logical_content_bytes, 100);
+        assert_eq!(projected.physical_total.charged_bytes, 364);
+
+        let mut malformed = Vec::new();
+
+        let mut invalid_charge = valid_core_owned_storage_footprint();
+        invalid_charge.snapshots.controls.charged_bytes = 11;
+        malformed.push(invalid_charge);
+
+        let mut invalid_available = valid_core_owned_storage_footprint();
+        invalid_available.snapshots.available.logical_bytes += 1;
+        invalid_available.snapshots.total.logical_bytes += 1;
+        invalid_available.physical_total.logical_bytes += 1;
+        malformed.push(invalid_available);
+
+        let mut invalid_snapshot_total = valid_core_owned_storage_footprint();
+        invalid_snapshot_total.snapshots.total.charged_bytes += 1;
+        invalid_snapshot_total.physical_total.charged_bytes += 1;
+        malformed.push(invalid_snapshot_total);
+
+        let mut invalid_physical_total = valid_core_owned_storage_footprint();
+        invalid_physical_total.physical_total.logical_bytes += 1;
+        malformed.push(invalid_physical_total);
+
+        let mut invalid_available_count = valid_core_owned_storage_footprint();
+        invalid_available_count.snapshots.available_count += 1;
+        malformed.push(invalid_available_count);
+
+        let mut invalid_cap_excess = valid_core_owned_storage_footprint();
+        invalid_cap_excess.snapshots.cap_excess_bytes += 1;
+        malformed.push(invalid_cap_excess);
+
+        let mut invalid_stability = valid_core_owned_storage_footprint();
+        invalid_stability.snapshots.accounting_unstable = false;
+        malformed.push(invalid_stability);
+
+        let mut invalid_non_evictable = valid_core_owned_storage_footprint();
+        invalid_non_evictable.snapshots.cap_bytes = 70;
+        invalid_non_evictable.snapshots.cap_excess_bytes = 38;
+        malformed.push(invalid_non_evictable);
+
+        let mut invalid_ai_count = valid_core_owned_storage_footprint();
+        invalid_ai_count.embedded_ai_cache.expired_record_count = 3;
+        malformed.push(invalid_ai_count);
+
+        let mut invalid_ai_bytes = valid_core_owned_storage_footprint();
+        invalid_ai_bytes
+            .embedded_ai_cache
+            .expired_logical_content_bytes = 101;
+        malformed.push(invalid_ai_bytes);
+
+        let mut invalid_ai_zero_shape = valid_core_owned_storage_footprint();
+        invalid_ai_zero_shape.embedded_ai_cache.record_count = 0;
+        malformed.push(invalid_ai_zero_shape);
+
+        let mut invalid_ai_all_expired_shape = valid_core_owned_storage_footprint();
+        invalid_ai_all_expired_shape
+            .embedded_ai_cache
+            .expired_record_count = 2;
+        malformed.push(invalid_ai_all_expired_shape);
+
+        let mut invalid_ai_database_bound = valid_core_owned_storage_footprint();
+        invalid_ai_database_bound
+            .embedded_ai_cache
+            .logical_content_bytes = 201;
+        malformed.push(invalid_ai_database_bound);
+
+        let mut invalid_ai_minimum = valid_core_owned_storage_footprint();
+        invalid_ai_minimum.embedded_ai_cache.logical_content_bytes = 71;
+        malformed.push(invalid_ai_minimum);
+
+        let mut invalid_expired_ai_minimum = valid_core_owned_storage_footprint();
+        invalid_expired_ai_minimum
+            .embedded_ai_cache
+            .expired_logical_content_bytes = 35;
+        malformed.push(invalid_expired_ai_minimum);
+
+        let mut invalid_ai_maximum = valid_core_owned_storage_footprint();
+        invalid_ai_maximum.embedded_ai_cache.record_count = 1;
+        invalid_ai_maximum.embedded_ai_cache.logical_content_bytes =
+            OWNED_STORAGE_AI_CONTENT_BYTES_PER_ROW_MAX + 1;
+        invalid_ai_maximum.embedded_ai_cache.expired_record_count = 0;
+        invalid_ai_maximum
+            .embedded_ai_cache
+            .expired_logical_content_bytes = 0;
+        let large_database_bytes =
+            invalid_ai_maximum.embedded_ai_cache.logical_content_bytes + 1_000;
+        invalid_ai_maximum.database = core_storage_usage(
+            large_database_bytes,
+            large_database_bytes,
+            large_database_bytes,
+        );
+        invalid_ai_maximum.physical_total = core_storage_usage(
+            large_database_bytes + invalid_ai_maximum.snapshots.total.logical_bytes,
+            large_database_bytes + invalid_ai_maximum.snapshots.total.allocated_bytes,
+            large_database_bytes + invalid_ai_maximum.snapshots.total.charged_bytes,
+        );
+        malformed.push(invalid_ai_maximum);
+
+        let mut invalid_snapshot_object_count = valid_core_owned_storage_footprint();
+        invalid_snapshot_object_count.snapshots.available_count =
+            OWNED_STORAGE_MAX_SNAPSHOT_OBJECTS + 1;
+        invalid_snapshot_object_count.snapshots.protected_count =
+            OWNED_STORAGE_MAX_SNAPSHOT_OBJECTS + 1;
+        invalid_snapshot_object_count
+            .snapshots
+            .retention_eligible_count = 0;
+        malformed.push(invalid_snapshot_object_count);
+
+        let mut invalid_residual_lease_count = valid_core_owned_storage_footprint();
+        invalid_residual_lease_count
+            .snapshots
+            .residual_temporary_lease_count = OWNED_STORAGE_MAX_RESIDUAL_TEMP_LEASES + 1;
+        malformed.push(invalid_residual_lease_count);
+
+        let mut invalid_pin_count = valid_core_owned_storage_footprint();
+        invalid_pin_count.snapshots.active_pin_rows = OWNED_STORAGE_MAX_PIN_ROWS;
+        invalid_pin_count.snapshots.expired_pin_rows = 1;
+        malformed.push(invalid_pin_count);
+
+        let mut overflow = valid_core_owned_storage_footprint();
+        overflow.database = core_storage_usage(u64::MAX, u64::MAX, u64::MAX);
+        overflow.physical_total = core_storage_usage(u64::MAX, u64::MAX, u64::MAX);
+        malformed.push(overflow);
+
+        for value in malformed {
+            assert_eq!(
+                owned_storage_footprint(value),
+                Err(OwnedStorageFootprintError::InternalState)
+            );
+        }
+
+        let mut invalid_clock = valid_core_owned_storage_footprint();
+        invalid_clock.observed_at = UNIX_EPOCH - Duration::from_millis(1);
+        assert_eq!(
+            owned_storage_footprint(invalid_clock),
+            Err(OwnedStorageFootprintError::InternalState)
+        );
+    }
+
+    #[test]
+    fn owned_storage_footprint_errors_map_one_to_one() {
+        for (core, ffi) in [
+            (
+                CoreOwnedStorageFootprintError::Closed,
+                OwnedStorageFootprintError::Closed,
+            ),
+            (
+                CoreOwnedStorageFootprintError::InvalidClock,
+                OwnedStorageFootprintError::InvalidClock,
+            ),
+            (
+                CoreOwnedStorageFootprintError::IncompatibleSchema,
+                OwnedStorageFootprintError::IncompatibleSchema,
+            ),
+            (
+                CoreOwnedStorageFootprintError::Busy,
+                OwnedStorageFootprintError::Busy,
+            ),
+            (
+                CoreOwnedStorageFootprintError::UnsafeStorage,
+                OwnedStorageFootprintError::UnsafeStorage,
+            ),
+            (
+                CoreOwnedStorageFootprintError::BudgetExceeded,
+                OwnedStorageFootprintError::BudgetExceeded,
+            ),
+            (
+                CoreOwnedStorageFootprintError::CorruptData,
+                OwnedStorageFootprintError::CorruptData,
+            ),
+            (
+                CoreOwnedStorageFootprintError::Unavailable,
+                OwnedStorageFootprintError::Unavailable,
+            ),
+            (
+                CoreOwnedStorageFootprintError::InternalState,
+                OwnedStorageFootprintError::InternalState,
+            ),
+        ] {
+            assert_eq!(map_owned_storage_footprint_error(core), ffi);
+        }
     }
 
     #[test]

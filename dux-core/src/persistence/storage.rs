@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use fs4::{FileExt, TryLockError};
 
+use super::footprint::OwnedStorageUsage;
 use super::status::{DatabaseOpenError, DatabaseOpenErrorKind};
 
 const WRITER_LOCK_SUFFIX: &str = ".writer.lock";
@@ -531,6 +532,45 @@ impl SecureStorePaths {
         Ok(canonical)
     }
 
+    /// Observe only the exact marker-owned SQLite and stable control files.
+    ///
+    /// Directory metadata, snapshots, reserved future cache/log directories,
+    /// and unproven provisioning stages are intentionally excluded. Callers
+    /// hold the cross-process writer lease so compliant SQLite writers cannot
+    /// change the measured objects; two observations reject external drift.
+    pub(crate) fn observe_physical_usage(
+        &self,
+        writer_guard: &WriterLockGuard,
+    ) -> Result<OwnedStorageUsage, DatabaseOpenError> {
+        self.validate_writer_lock_guard(writer_guard)?;
+        self.validate_control_objects()?;
+        validate_sidecars(
+            &self.root_directory,
+            &self.root_path,
+            self.database_name()?,
+            PermissionPolicy::RequirePrivate,
+        )?;
+
+        let fixed = self.observe_fixed_physical_usage()?;
+        let sidecars = self.observe_sidecar_physical_usage()?;
+
+        self.validate_control_objects()?;
+        let fixed_revalidated = self.observe_fixed_physical_usage()?;
+        let sidecars_revalidated = self.observe_sidecar_physical_usage()?;
+        self.validate_writer_lock_guard(writer_guard)?;
+        if fixed != fixed_revalidated || sidecars != sidecars_revalidated {
+            return Err(object_error(DatabaseOpenErrorKind::UnsafeStorageObject));
+        }
+        checked_usage_add(
+            fixed,
+            sidecars
+                .iter()
+                .try_fold(OwnedStorageUsage::default(), |total, observation| {
+                    checked_usage_add(total, observation.2)
+                })?,
+        )
+    }
+
     /// Revalidate every path-based object that SQLite may open or create.
     pub(crate) fn validate_for_database_open(&self) -> Result<(), DatabaseOpenError> {
         self.validate_control_objects()?;
@@ -769,6 +809,19 @@ impl SecureStorePaths {
         result
     }
 
+    fn validate_writer_lock_guard(&self, guard: &WriterLockGuard) -> Result<(), DatabaseOpenError> {
+        if !Arc::ptr_eq(&self.writer_lock_in_use, &guard.in_use) {
+            return Err(DatabaseOpenError::new(DatabaseOpenErrorKind::InternalState));
+        }
+        platform::validate_retained_file(
+            &guard.file,
+            ObjectKind::RegularFile,
+            self.lock_identity,
+            PermissionPolicy::RequirePrivate,
+        )?;
+        self.validate_control_objects()
+    }
+
     /// Acquire store-wide cross-process exclusion for cleanup effects.
     ///
     /// This permanent OS lock has no expiry and cannot be stolen. The guard is
@@ -836,6 +889,67 @@ impl SecureStorePaths {
         self.validate_control_objects()
     }
 
+    fn database_name(&self) -> Result<&OsStr, DatabaseOpenError> {
+        self.database_path
+            .file_name()
+            .ok_or_else(|| object_error(DatabaseOpenErrorKind::UnsafeStorageObject))
+    }
+
+    fn observe_fixed_physical_usage(&self) -> Result<OwnedStorageUsage, DatabaseOpenError> {
+        let mut total = OwnedStorageUsage::default();
+        for file in [
+            &self.database_file,
+            &self.lock_file,
+            &self.cleanup_lock_file,
+            &self.cleanup_lock_ready_file,
+        ] {
+            total = checked_usage_add(total, observe_file_usage(file)?)?;
+        }
+        if let Some(sentinel) = self
+            .initialization_sentinel
+            .lock()
+            .map_err(|_| DatabaseOpenError::new(DatabaseOpenErrorKind::InternalState))?
+            .as_ref()
+        {
+            total = checked_usage_add(total, observe_file_usage(&sentinel.file)?)?;
+        }
+        Ok(total)
+    }
+
+    fn observe_sidecar_physical_usage(
+        &self,
+    ) -> Result<Vec<(OsString, PlatformIdentity, OwnedStorageUsage)>, DatabaseOpenError> {
+        let mut observations = Vec::with_capacity(SIDECAR_SUFFIXES.len());
+        let database_name = self.database_name()?;
+        for suffix in SIDECAR_SUFFIXES {
+            let name = suffixed_name(database_name, suffix);
+            let Some((file, identity)) = platform::open_existing_file(
+                &self.root_directory,
+                &self.root_path,
+                &name,
+                PermissionPolicy::RequirePrivate,
+            )?
+            else {
+                continue;
+            };
+            platform::validate_retained_file(
+                &file,
+                ObjectKind::RegularFile,
+                identity,
+                PermissionPolicy::RequirePrivate,
+            )?;
+            let usage = observe_file_usage(&file)?;
+            platform::validate_path_identity(
+                &self.root_path.join(&name),
+                ObjectKind::RegularFile,
+                identity,
+                PermissionPolicy::RequirePrivate,
+            )?;
+            observations.push((name, identity, usage));
+        }
+        Ok(observations)
+    }
+
     #[cfg(test)]
     fn lock_path(&self) -> &Path {
         &self.lock_path
@@ -845,6 +959,22 @@ impl SecureStorePaths {
     fn cleanup_lock_path(&self) -> &Path {
         &self.cleanup_lock_path
     }
+}
+
+fn observe_file_usage(file: &File) -> Result<OwnedStorageUsage, DatabaseOpenError> {
+    let (logical_bytes, allocated_bytes) = platform::file_usage(file)?;
+    Ok(OwnedStorageUsage::from_sizes(
+        logical_bytes,
+        allocated_bytes,
+    ))
+}
+
+fn checked_usage_add(
+    left: OwnedStorageUsage,
+    right: OwnedStorageUsage,
+) -> Result<OwnedStorageUsage, DatabaseOpenError> {
+    left.checked_add(right)
+        .map_err(|_| object_error(DatabaseOpenErrorKind::UnsafeStorageObject))
 }
 
 /// RAII guard for the stable advisory writer lock.
@@ -1521,6 +1651,19 @@ mod platform {
         directory
             .sync_all()
             .map_err(|_| object_error(DatabaseOpenErrorKind::DatabaseUnavailable))
+    }
+
+    pub(super) fn file_usage(file: &File) -> Result<(u64, u64), DatabaseOpenError> {
+        let status =
+            fstat(file).map_err(|_| object_error(DatabaseOpenErrorKind::DatabaseUnavailable))?;
+        let logical_bytes = u64::try_from(status.st_size)
+            .map_err(|_| object_error(DatabaseOpenErrorKind::UnsafeStorageObject))?;
+        let blocks = u64::try_from(status.st_blocks)
+            .map_err(|_| object_error(DatabaseOpenErrorKind::UnsafeStorageObject))?;
+        let allocated_bytes = blocks
+            .checked_mul(512)
+            .ok_or_else(|| object_error(DatabaseOpenErrorKind::UnsafeStorageObject))?;
+        Ok((logical_bytes, allocated_bytes))
     }
 
     pub(super) fn prepare_root_for_probe(
@@ -2379,6 +2522,10 @@ mod platform {
         Err(DatabaseOpenError::new(DatabaseOpenErrorKind::InternalState))
     }
 
+    pub(super) fn file_usage(_file: &File) -> Result<(u64, u64), DatabaseOpenError> {
+        Err(DatabaseOpenError::new(DatabaseOpenErrorKind::InternalState))
+    }
+
     pub(super) fn prepare_root_for_probe(
         _root_path: &Path,
     ) -> Result<PreparedRoot, DatabaseOpenError> {
@@ -2512,6 +2659,56 @@ mod tests {
                 super::super::migrations::DUX_APPLICATION_ID,
             )
             .unwrap();
+    }
+
+    #[test]
+    fn physical_usage_requires_writer_guard_and_counts_known_sidecars() {
+        let temp = TempDir::new().unwrap();
+        let database = database_path(&temp);
+        let storage = SecureStorePaths::prepare(&database).unwrap();
+        let writer = storage
+            .acquire_writer_lock(Duration::from_millis(20))
+            .unwrap();
+        platform::write_all_at(&storage.database_file, &[0_u8; 123], 0).unwrap();
+        storage.database_file.sync_all().unwrap();
+        storage.mark_initialized().unwrap();
+
+        let before = storage.observe_physical_usage(&writer).unwrap();
+        assert!(before.logical_bytes >= 123);
+        assert!(before.charged_bytes >= before.logical_bytes);
+        assert!(before.charged_bytes >= before.allocated_bytes);
+        let foreign_temp = TempDir::new().unwrap();
+        let foreign_storage = SecureStorePaths::prepare(&database_path(&foreign_temp)).unwrap();
+        let foreign_writer = foreign_storage
+            .acquire_writer_lock(Duration::from_millis(20))
+            .unwrap();
+        assert_eq!(
+            storage
+                .observe_physical_usage(&foreign_writer)
+                .unwrap_err()
+                .kind,
+            DatabaseOpenErrorKind::InternalState
+        );
+
+        let wal_name = suffixed_name(database.file_name().unwrap(), "-wal");
+        let (wal, _) = platform::create_private_file_exclusive(
+            &storage.root_directory,
+            &storage.root_path,
+            &wal_name,
+        )
+        .unwrap();
+        platform::write_all_at(&wal, &[0_u8; 321], 0).unwrap();
+        wal.sync_all().unwrap();
+        platform::sync_directory(&storage.root_directory).unwrap();
+
+        let after = storage.observe_physical_usage(&writer).unwrap();
+        assert_eq!(
+            after.logical_bytes,
+            before.logical_bytes.checked_add(321).unwrap()
+        );
+        assert!(after.allocated_bytes >= before.allocated_bytes);
+        assert!(after.charged_bytes >= after.logical_bytes);
+        assert!(after.charged_bytes >= after.allocated_bytes);
     }
 
     #[cfg(unix)]

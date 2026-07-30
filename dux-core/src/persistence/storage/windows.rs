@@ -60,6 +60,30 @@ pub(super) fn sync_directory(directory: &File) -> Result<(), DatabaseOpenError> 
         .map_err(|_| object_error(DatabaseOpenErrorKind::DatabaseUnavailable))
 }
 
+pub(super) fn file_usage(file: &File) -> Result<(u64, u64), DatabaseOpenError> {
+    let mut standard = MaybeUninit::<FILE_STANDARD_INFO>::zeroed();
+    // SAFETY: the output buffer exactly matches FileStandardInfo and the
+    // retained file handle remains live for the synchronous call.
+    let ok = unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle(),
+            FileStandardInfo,
+            standard.as_mut_ptr().cast(),
+            size_of::<FILE_STANDARD_INFO>() as u32,
+        )
+    };
+    if ok == 0 {
+        return Err(object_error(DatabaseOpenErrorKind::DatabaseUnavailable));
+    }
+    // SAFETY: the successful call initialized the complete output buffer.
+    let standard = unsafe { standard.assume_init() };
+    let logical_bytes = u64::try_from(standard.EndOfFile)
+        .map_err(|_| object_error(DatabaseOpenErrorKind::UnsafeStorageObject))?;
+    let allocated_bytes = u64::try_from(standard.AllocationSize)
+        .map_err(|_| object_error(DatabaseOpenErrorKind::UnsafeStorageObject))?;
+    Ok((logical_bytes, allocated_bytes))
+}
+
 #[repr(C)]
 union IoStatusValue {
     status: i32,
