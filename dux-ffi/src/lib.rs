@@ -109,6 +109,10 @@ use dux_core::engine::{
     SnapshotOrphanMaintenanceOutcome as CoreOrphanOutcome, SnapshotOrphanMaintenanceStartOutcome,
     SnapshotProvisioningStageMaintenanceOutcome as CoreStageOutcome,
     SnapshotProvisioningStageMaintenanceStartOutcome,
+    SnapshotRetentionCap as CoreSnapshotRetentionCap,
+    SnapshotRetentionCapError as CoreSnapshotRetentionCapError,
+    SnapshotRetentionCapSource as CoreSnapshotRetentionCapSource,
+    SnapshotRetentionCapUpdate as CoreSnapshotRetentionCapUpdate,
     SnapshotRetentionOutcome as CoreRetentionOutcome, SnapshotRetentionStartOutcome,
     SnapshotReviewCategory as CoreReviewCategory, SnapshotReviewError as CoreReviewError,
     SnapshotReviewICloudObservationSource as CoreReviewICloudObservationSource,
@@ -165,7 +169,7 @@ use dux_core::{
     VolumeCapacity, VolumeId,
 };
 
-const FFI_CONTRACT_VERSION: u32 = 50;
+const FFI_CONTRACT_VERSION: u32 = 51;
 const FFI_RECORD_VERSION: u32 = 1;
 const RUST_TARGET_MINIMUM_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const SNAPSHOT_NODE_RECORD_VERSION: u32 = 2;
@@ -400,6 +404,38 @@ pub struct PressurePolicyStatus {
 pub struct PressurePolicyUpdate {
     pub record_version: u32,
     pub policy: PressurePolicyStatus,
+    pub changed: bool,
+}
+
+/// Versioned, path-free snapshot-cap input. This is policy metadata only and
+/// cannot select a snapshot or authorize retention work.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct SnapshotRetentionCapInput {
+    pub record_version: u32,
+    pub cap_bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum SnapshotRetentionCapSource {
+    Default,
+    Stored,
+}
+
+/// Effective snapshot-store cap. Changing this value does not itself remove
+/// any snapshot; the separately sealed retention task rereads it under its
+/// final mutation locks.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct SnapshotRetentionCapStatus {
+    pub record_version: u32,
+    pub cap_bytes: u64,
+    pub source: SnapshotRetentionCapSource,
+    pub updated_at_unix_ms: Option<i64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct SnapshotRetentionCapUpdate {
+    pub record_version: u32,
+    pub settings: SnapshotRetentionCapStatus,
     pub changed: bool,
 }
 
@@ -1045,6 +1081,32 @@ pub enum PressurePolicyError {
     #[error("the settings write outcome is unknown")]
     OutcomeUnknown,
     #[error("internal pressure-policy state is invalid")]
+    InternalState,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error, uniffi::Error)]
+pub enum SnapshotRetentionCapError {
+    #[error("engine session is closed")]
+    Closed,
+    #[error("snapshot-cap record version is unsupported")]
+    InvalidRecordVersion,
+    #[error("the system clock cannot be represented")]
+    InvalidClock,
+    #[error("the durable schema is incompatible")]
+    IncompatibleSchema,
+    #[error("the durable store is temporarily busy")]
+    Busy,
+    #[error("storage failed its safety checks")]
+    UnsafeStorage,
+    #[error("the bounded settings query exceeded its budget")]
+    BudgetExceeded,
+    #[error("snapshot-retention settings are corrupt")]
+    CorruptData,
+    #[error("snapshot-retention settings are unavailable")]
+    Unavailable,
+    #[error("the settings write outcome is unknown")]
+    OutcomeUnknown,
+    #[error("internal snapshot-retention state is invalid")]
     InternalState,
 }
 
@@ -4940,6 +5002,48 @@ impl DuxEngine {
         })
     }
 
+    /// Load the effective snapshot-store cap. This returns policy metadata
+    /// only and starts no retention or filesystem work.
+    pub fn get_snapshot_retention_cap(
+        &self,
+    ) -> Result<SnapshotRetentionCapStatus, SnapshotRetentionCapError> {
+        self.with_snapshot_retention_cap_engine(|engine| {
+            engine
+                .snapshot_retention_cap()
+                .map_err(map_snapshot_retention_cap_error)
+                .and_then(snapshot_retention_cap_status)
+        })
+    }
+
+    /// Store an exact cap value without running retention.
+    pub fn set_snapshot_retention_cap(
+        &self,
+        input: SnapshotRetentionCapInput,
+    ) -> Result<SnapshotRetentionCapUpdate, SnapshotRetentionCapError> {
+        if input.record_version != FFI_RECORD_VERSION {
+            return Err(SnapshotRetentionCapError::InvalidRecordVersion);
+        }
+        self.with_snapshot_retention_cap_engine(|engine| {
+            engine
+                .set_snapshot_retention_cap(input.cap_bytes)
+                .map_err(map_snapshot_retention_cap_error)
+                .and_then(snapshot_retention_cap_update)
+        })
+    }
+
+    /// Remove the explicit override and restore the core default without
+    /// running retention.
+    pub fn reset_snapshot_retention_cap(
+        &self,
+    ) -> Result<SnapshotRetentionCapUpdate, SnapshotRetentionCapError> {
+        self.with_snapshot_retention_cap_engine(|engine| {
+            engine
+                .reset_snapshot_retention_cap()
+                .map_err(map_snapshot_retention_cap_error)
+                .and_then(snapshot_retention_cap_update)
+        })
+    }
+
     /// Load the path-free global permanent-cleanup opt-in. The disabled default
     /// can only deny effects; this cannot create a plan or authorize a target.
     pub fn get_permanent_cleanup_policy(
@@ -6332,6 +6436,22 @@ impl DuxEngine {
             EngineState::Open(engine) if !self.closed.load(Ordering::Acquire) => operation(engine),
             EngineState::Open(_) | EngineState::Closing | EngineState::Closed { .. } => {
                 Err(PressurePolicyError::Closed)
+            }
+        }
+    }
+
+    fn with_snapshot_retention_cap_engine<T>(
+        &self,
+        operation: impl FnOnce(&EngineHandle) -> Result<T, SnapshotRetentionCapError>,
+    ) -> Result<T, SnapshotRetentionCapError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| SnapshotRetentionCapError::InternalState)?;
+        match &*state {
+            EngineState::Open(engine) if !self.closed.load(Ordering::Acquire) => operation(engine),
+            EngineState::Open(_) | EngineState::Closing | EngineState::Closed { .. } => {
+                Err(SnapshotRetentionCapError::Closed)
             }
         }
     }
@@ -10747,6 +10867,70 @@ fn pressure_policy_time_ms(value: SystemTime) -> Result<i64, PressurePolicyError
     .map_err(|_| PressurePolicyError::InternalState)
 }
 
+fn map_snapshot_retention_cap_error(
+    error: CoreSnapshotRetentionCapError,
+) -> SnapshotRetentionCapError {
+    match error {
+        CoreSnapshotRetentionCapError::Closed => SnapshotRetentionCapError::Closed,
+        CoreSnapshotRetentionCapError::InvalidClock => SnapshotRetentionCapError::InvalidClock,
+        CoreSnapshotRetentionCapError::IncompatibleSchema => {
+            SnapshotRetentionCapError::IncompatibleSchema
+        }
+        CoreSnapshotRetentionCapError::Busy => SnapshotRetentionCapError::Busy,
+        CoreSnapshotRetentionCapError::UnsafeStorage => SnapshotRetentionCapError::UnsafeStorage,
+        CoreSnapshotRetentionCapError::QueryLimitExceeded => {
+            SnapshotRetentionCapError::BudgetExceeded
+        }
+        CoreSnapshotRetentionCapError::CorruptData => SnapshotRetentionCapError::CorruptData,
+        CoreSnapshotRetentionCapError::Unavailable => SnapshotRetentionCapError::Unavailable,
+        CoreSnapshotRetentionCapError::OutcomeUnknown => SnapshotRetentionCapError::OutcomeUnknown,
+        CoreSnapshotRetentionCapError::InternalState => SnapshotRetentionCapError::InternalState,
+        _ => SnapshotRetentionCapError::InternalState,
+    }
+}
+
+fn snapshot_retention_cap_status(
+    settings: CoreSnapshotRetentionCap,
+) -> Result<SnapshotRetentionCapStatus, SnapshotRetentionCapError> {
+    let updated_at_unix_ms = settings
+        .updated_at
+        .map(snapshot_retention_cap_time_ms)
+        .transpose()?;
+    let source = match settings.source {
+        CoreSnapshotRetentionCapSource::Default => SnapshotRetentionCapSource::Default,
+        CoreSnapshotRetentionCapSource::Stored => SnapshotRetentionCapSource::Stored,
+    };
+    if (source == SnapshotRetentionCapSource::Default) != updated_at_unix_ms.is_none() {
+        return Err(SnapshotRetentionCapError::InternalState);
+    }
+    Ok(SnapshotRetentionCapStatus {
+        record_version: FFI_RECORD_VERSION,
+        cap_bytes: settings.cap_bytes,
+        source,
+        updated_at_unix_ms,
+    })
+}
+
+fn snapshot_retention_cap_update(
+    update: CoreSnapshotRetentionCapUpdate,
+) -> Result<SnapshotRetentionCapUpdate, SnapshotRetentionCapError> {
+    Ok(SnapshotRetentionCapUpdate {
+        record_version: FFI_RECORD_VERSION,
+        settings: snapshot_retention_cap_status(update.settings)?,
+        changed: update.changed,
+    })
+}
+
+fn snapshot_retention_cap_time_ms(value: SystemTime) -> Result<i64, SnapshotRetentionCapError> {
+    i64::try_from(
+        value
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| SnapshotRetentionCapError::InternalState)?
+            .as_millis(),
+    )
+    .map_err(|_| SnapshotRetentionCapError::InternalState)
+}
+
 fn map_permanent_cleanup_policy_error(
     error: CorePermanentCleanupPolicyError,
 ) -> PermanentCleanupPolicyError {
@@ -12603,12 +12787,12 @@ mod tests {
     }
 
     #[test]
-    fn reports_contract_fifty_with_exact_storage_compatibility_and_preserves_formatting() {
+    fn reports_contract_fifty_one_with_exact_storage_compatibility_and_preserves_formatting() {
         let _guard = ENGINE_TEST_LOCK.lock().unwrap();
         let (_temp, engine) = engine();
         let expected = LibraryVersion {
             library_version: env!("CARGO_PKG_VERSION").to_owned(),
-            ffi_contract_version: 50,
+            ffi_contract_version: 51,
             database_schema_version: DATABASE_SCHEMA_VERSION,
             snapshot_format_version: SNAPSHOT_FORMAT_VERSION,
         };
@@ -18047,6 +18231,106 @@ mod tests {
         assert_eq!(
             engine.reset_disk_pressure_policy(),
             Err(PressurePolicyError::Closed)
+        );
+    }
+
+    #[test]
+    fn snapshot_retention_cap_get_set_reset_is_versioned_typed_and_path_free() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (_temp, engine) = engine();
+        let initial = engine.get_snapshot_retention_cap().unwrap();
+        assert_eq!(
+            initial,
+            SnapshotRetentionCapStatus {
+                record_version: FFI_RECORD_VERSION,
+                cap_bytes: 2 * 1024 * 1024 * 1024,
+                source: SnapshotRetentionCapSource::Default,
+                updated_at_unix_ms: None,
+            }
+        );
+
+        let zero = engine
+            .set_snapshot_retention_cap(SnapshotRetentionCapInput {
+                record_version: FFI_RECORD_VERSION,
+                cap_bytes: 0,
+            })
+            .unwrap();
+        assert!(zero.changed);
+        assert_eq!(zero.record_version, FFI_RECORD_VERSION);
+        assert_eq!(zero.settings.cap_bytes, 0);
+        assert_eq!(zero.settings.source, SnapshotRetentionCapSource::Stored);
+        assert!(
+            zero.settings
+                .updated_at_unix_ms
+                .is_some_and(|time| time >= 0)
+        );
+        assert_eq!(engine.get_snapshot_retention_cap().unwrap(), zero.settings);
+
+        let exact = engine
+            .set_snapshot_retention_cap(SnapshotRetentionCapInput {
+                record_version: FFI_RECORD_VERSION,
+                cap_bytes: 0,
+            })
+            .unwrap();
+        assert!(!exact.changed);
+        assert_eq!(exact.settings, zero.settings);
+
+        let maximum = engine
+            .set_snapshot_retention_cap(SnapshotRetentionCapInput {
+                record_version: FFI_RECORD_VERSION,
+                cap_bytes: u64::MAX,
+            })
+            .unwrap();
+        assert!(maximum.changed);
+        assert_eq!(maximum.settings.cap_bytes, u64::MAX);
+        assert_eq!(maximum.settings.source, SnapshotRetentionCapSource::Stored);
+
+        let reset = engine.reset_snapshot_retention_cap().unwrap();
+        assert!(reset.changed);
+        assert_eq!(reset.settings, initial);
+        let exact_reset = engine.reset_snapshot_retention_cap().unwrap();
+        assert!(!exact_reset.changed);
+        assert_eq!(exact_reset.settings, initial);
+
+        assert_eq!(
+            engine.set_snapshot_retention_cap(SnapshotRetentionCapInput {
+                record_version: FFI_RECORD_VERSION + 1,
+                cap_bytes: 1,
+            }),
+            Err(SnapshotRetentionCapError::InvalidRecordVersion)
+        );
+        assert_eq!(engine.get_snapshot_retention_cap().unwrap(), initial);
+        assert_eq!(
+            snapshot_retention_cap_status(CoreSnapshotRetentionCap {
+                cap_bytes: 1,
+                source: CoreSnapshotRetentionCapSource::Default,
+                updated_at: Some(UNIX_EPOCH),
+            }),
+            Err(SnapshotRetentionCapError::InternalState)
+        );
+        assert_eq!(
+            snapshot_retention_cap_status(CoreSnapshotRetentionCap {
+                cap_bytes: 1,
+                source: CoreSnapshotRetentionCapSource::Stored,
+                updated_at: None,
+            }),
+            Err(SnapshotRetentionCapError::InternalState)
+        );
+        assert!(engine.close());
+        assert_eq!(
+            engine.get_snapshot_retention_cap(),
+            Err(SnapshotRetentionCapError::Closed)
+        );
+        assert_eq!(
+            engine.set_snapshot_retention_cap(SnapshotRetentionCapInput {
+                record_version: FFI_RECORD_VERSION,
+                cap_bytes: 1,
+            }),
+            Err(SnapshotRetentionCapError::Closed)
+        );
+        assert_eq!(
+            engine.reset_snapshot_retention_cap(),
+            Err(SnapshotRetentionCapError::Closed)
         );
     }
 

@@ -6457,6 +6457,39 @@ Tasks:
   FFI/Swift, report DUX-owned SQLite/snapshot/AI footprint, and provide
   separately confirmed cache, history, snapshot, and reset-app-data operations
   through narrow marker-validated core boundaries that never touch user data.
+  - [x] 2026-07-30 snapshot-cap Settings transport: UniFFI v51 projects the
+    existing exact-key core policy as versioned, path-free get/set/reset
+    records with default/stored provenance, optional update time, idempotence,
+    and a typed error taxonomy. Zero and `u64::MAX` cross the boundary exactly.
+    The adapter rejects unsupported record versions and inconsistent
+    source/time shapes; Swift independently validates every response before
+    publishing it.
+  - Native Settings now presents the effective cap, provenance, exact GiB
+    editor, Save, and Restore DUX default controls. The isolated observable
+    model serializes operations off the main thread, generation-fences stale
+    completions, preserves its last confirmed value on failure, and requires
+    an explicit authoritative reload after an unknown or malformed write
+    result. Shutdown cancels and joins the model before closing the engine.
+    Copy states plainly that changing or zeroing the cap does not run
+    retention, that protected or uncertain storage may exceed it, and that the
+    setting cannot select a snapshot or touch user data.
+  - Verification covers the exact core policy boundary, all 98 ordinary
+    UniFFI tests with two intentional quiescence-only ignores, workspace Clippy
+    with warnings denied, all 606 native tests, all 39 repository script tests,
+    and the clean 290-file destructive-call audit. Debug and Release generation
+    produce byte-identical Swift bindings, bundled CLI, and schema-v17 metadata;
+    the Swift binding SHA-256 is
+    `1271adec2b7b3afe2e3a783888771cb39827dc4e92644f04ecc3eb6eb4288e36`
+    and the CLI SHA-256 is
+    `afd17c9fda533b64ef56e23f082193d03634dc31034f77d7bc07e3d9baf123b9`.
+    The final Debug and Release apps plus their embedded CLIs are universal
+    arm64/x86_64, target macOS 14.0, and preserve `LSUIElement=true`; Release
+    omits the internal permanent-cleanup condition and passes strict Hardened
+    Runtime ad-hoc signature verification.
+  - The parent remains open for physical SQLite/snapshot footprint plus
+    embedded AI-cache accounting, marker-owned cache storage, separately
+    confirmed cache/snapshot operations, and the lifecycle/reset-journal
+    foundation required before “Reset app data” can be truthful.
 - [x] Add the bounded schema-v14 cleanup-owner provenance checkpoint. New
   cleanup claims can bind separate domain-separated stable-host and boot-scope
   digests plus the only current recovery policy, `resumable`; every migrated

@@ -45,10 +45,13 @@ and accepted technical decisions in the
 The current macOS checkpoint is a read-only menu-bar helper with cached
 startup-disk pressure, an explicit Home scan, an Explorer Overview, configurable
 pressure thresholds, configurable conditional menu-bar visibility, Launch at
-Login, notification authorization Settings, and truthful storage-access
-onboarding. Full Disk Access is optional: broader guidance appears only after a
-measured Home-coverage gap and an explicit request, while its bounded check
-reports observed access rather than inventing a macOS permission status.
+Login, notification authorization Settings, an exact snapshot-retention limit,
+and truthful storage-access onboarding. The snapshot limit is policy for later
+idle retention—not an immediate clear command or a hard physical ceiling—and
+changing it never touches files outside DUX’s private storage. Full Disk Access
+is optional: broader guidance appears only after a measured Home-coverage gap
+and an explicit request, while its bounded check reports observed access rather
+than inventing a macOS permission status.
 Notification permission is also optional and explicit; this version schedules
 and delivers no alerts. Drill-down, recommendations, notification delivery, AI
 explanations, and cleanup remain later roadmap milestones.

@@ -625,6 +625,7 @@ struct DuxSettingsView: View {
             await model.refreshLoginItemState()
             await model.refreshNotificationAuthorizationState()
             await model.loadDiskPressurePolicy()
+            await model.snapshotRetentionCapSettings.load()
             await model.loadPermanentCleanupPolicy()
             await model.loadCleanupExclusions()
             await model.loadProjectDiscoveryRoots()
@@ -1381,6 +1382,12 @@ struct DuxSettingsView: View {
     @ViewBuilder
     private func cleanupHistoryClearSettings(model: AppModel) -> some View {
         Section("Storage & Privacy") {
+            SnapshotRetentionCapSettingsView(
+                settings: model.snapshotRetentionCapSettings
+            )
+
+            Divider()
+
             persistentRecoveryDebtSettings(model)
 
             Divider()

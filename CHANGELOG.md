@@ -1,5 +1,15 @@
 # Changelog
 
+- Added snapshot-retention cap controls to native **Storage & Privacy** through
+  UniFFI v51. Versioned, path-free get/set/reset records preserve exact
+  `u64` values, default/stored provenance, idempotence, and typed
+  compatibility/uncertainty failures without starting retention or granting
+  snapshot-removal authority. The isolated native model serializes work off
+  the main thread, generation-fences stale completions, preserves the last
+  confirmed value on failure, and requires an explicit reload after an unknown
+  result. Settings accepts exact GiB values including zero, clearly explains
+  that the cap is neither an immediate clear command nor a hard physical
+  ceiling, and restores the versioned core default separately.
 - Added checksummed SQLite schema v17 and one bounded, durable
   cross-process scan-scope lease shared by the native app, engine-backed
   scans, and the progressive CLI. A random move-only lease is acquired before

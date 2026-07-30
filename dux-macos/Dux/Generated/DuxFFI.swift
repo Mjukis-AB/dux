@@ -959,6 +959,12 @@ public protocol DuxEngineProtocol: AnyObject, Sendable {
     func getPressureEpisodeHistory(request: PressureEpisodeHistoryRequest) throws  -> PressureEpisodeHistoryStatus
 
     /**
+     * Load the effective snapshot-store cap. This returns policy metadata
+     * only and starts no retention or filesystem work.
+     */
+    func getSnapshotRetentionCap() throws  -> SnapshotRetentionCapStatus
+
+    /**
      * Statically inspect one exact Cargo file and return an engine-bound,
      * consume-once preview. Inspection does not run the selected bytes or
      * change durable enrollment.
@@ -1033,6 +1039,12 @@ public protocol DuxEngineProtocol: AnyObject, Sendable {
     func resetPermanentCleanup() throws  -> PermanentCleanupPolicyUpdate
 
     /**
+     * Remove the explicit override and restore the core default without
+     * running retention.
+     */
+    func resetSnapshotRetentionCap() throws  -> SnapshotRetentionCapUpdate
+
+    /**
      * Revoke any active discovery enrollment and retain core's revisioned
      * tombstone. Previously issued previews become stale in core.
      */
@@ -1073,6 +1085,11 @@ public protocol DuxEngineProtocol: AnyObject, Sendable {
     func setDiskPressurePolicy(input: PressurePolicyInput) throws  -> PressurePolicyUpdate
 
     func setPermanentCleanupEnabled(enabled: Bool) throws  -> PermanentCleanupPolicyUpdate
+
+    /**
+     * Store an exact cap value without running retention.
+     */
+    func setSnapshotRetentionCap(input: SnapshotRetentionCapInput) throws  -> SnapshotRetentionCapUpdate
 
     func startMaintenance(kind: MaintenanceKind) throws  -> MaintenanceStart
 
@@ -1384,6 +1401,18 @@ open func getPressureEpisodeHistory(request: PressureEpisodeHistoryRequest)throw
 }
 
     /**
+     * Load the effective snapshot-store cap. This returns policy metadata
+     * only and starts no retention or filesystem work.
+     */
+open func getSnapshotRetentionCap()throws  -> SnapshotRetentionCapStatus  {
+    return try  FfiConverterTypeSnapshotRetentionCapStatus_lift(try rustCallWithError(FfiConverterTypeSnapshotRetentionCapError_lift) {
+    uniffi_dux_ffi_fn_method_duxengine_get_snapshot_retention_cap(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+    /**
      * Statically inspect one exact Cargo file and return an engine-bound,
      * consume-once preview. Inspection does not run the selected bytes or
      * change durable enrollment.
@@ -1553,6 +1582,18 @@ open func resetPermanentCleanup()throws  -> PermanentCleanupPolicyUpdate  {
 }
 
     /**
+     * Remove the explicit override and restore the core default without
+     * running retention.
+     */
+open func resetSnapshotRetentionCap()throws  -> SnapshotRetentionCapUpdate  {
+    return try  FfiConverterTypeSnapshotRetentionCapUpdate_lift(try rustCallWithError(FfiConverterTypeSnapshotRetentionCapError_lift) {
+    uniffi_dux_ffi_fn_method_duxengine_reset_snapshot_retention_cap(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+    /**
      * Revoke any active discovery enrollment and retain core's revisioned
      * tombstone. Previously issued previews become stale in core.
      */
@@ -1645,6 +1686,18 @@ open func setPermanentCleanupEnabled(enabled: Bool)throws  -> PermanentCleanupPo
     uniffi_dux_ffi_fn_method_duxengine_set_permanent_cleanup_enabled(
             self.uniffiCloneHandle(),
         FfiConverterBool.lower(enabled),$0
+    )
+})
+}
+
+    /**
+     * Store an exact cap value without running retention.
+     */
+open func setSnapshotRetentionCap(input: SnapshotRetentionCapInput)throws  -> SnapshotRetentionCapUpdate  {
+    return try  FfiConverterTypeSnapshotRetentionCapUpdate_lift(try rustCallWithError(FfiConverterTypeSnapshotRetentionCapError_lift) {
+    uniffi_dux_ffi_fn_method_duxengine_set_snapshot_retention_cap(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeSnapshotRetentionCapInput_lower(input),$0
     )
 })
 }
@@ -10665,6 +10718,189 @@ public func FfiConverterTypeSnapshotNodeTimestamp_lift(_ buf: RustBuffer) throws
 #endif
 public func FfiConverterTypeSnapshotNodeTimestamp_lower(_ value: SnapshotNodeTimestamp) -> RustBuffer {
     return FfiConverterTypeSnapshotNodeTimestamp.lower(value)
+}
+
+
+/**
+ * Versioned, path-free snapshot-cap input. This is policy metadata only and
+ * cannot select a snapshot or authorize retention work.
+ */
+public struct SnapshotRetentionCapInput: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let capBytes: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, capBytes: UInt64) {
+        self.recordVersion = recordVersion
+        self.capBytes = capBytes
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SnapshotRetentionCapInput: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSnapshotRetentionCapInput: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SnapshotRetentionCapInput {
+        return
+            try SnapshotRetentionCapInput(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                capBytes: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SnapshotRetentionCapInput, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterUInt64.write(value.capBytes, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotRetentionCapInput_lift(_ buf: RustBuffer) throws -> SnapshotRetentionCapInput {
+    return try FfiConverterTypeSnapshotRetentionCapInput.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotRetentionCapInput_lower(_ value: SnapshotRetentionCapInput) -> RustBuffer {
+    return FfiConverterTypeSnapshotRetentionCapInput.lower(value)
+}
+
+
+/**
+ * Effective snapshot-store cap. Changing this value does not itself remove
+ * any snapshot; the separately sealed retention task rereads it under its
+ * final mutation locks.
+ */
+public struct SnapshotRetentionCapStatus: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let capBytes: UInt64
+    public let source: SnapshotRetentionCapSource
+    public let updatedAtUnixMs: Int64?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, capBytes: UInt64, source: SnapshotRetentionCapSource, updatedAtUnixMs: Int64?) {
+        self.recordVersion = recordVersion
+        self.capBytes = capBytes
+        self.source = source
+        self.updatedAtUnixMs = updatedAtUnixMs
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SnapshotRetentionCapStatus: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSnapshotRetentionCapStatus: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SnapshotRetentionCapStatus {
+        return
+            try SnapshotRetentionCapStatus(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                capBytes: FfiConverterUInt64.read(from: &buf),
+                source: FfiConverterTypeSnapshotRetentionCapSource.read(from: &buf),
+                updatedAtUnixMs: FfiConverterOptionInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SnapshotRetentionCapStatus, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterUInt64.write(value.capBytes, into: &buf)
+        FfiConverterTypeSnapshotRetentionCapSource.write(value.source, into: &buf)
+        FfiConverterOptionInt64.write(value.updatedAtUnixMs, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotRetentionCapStatus_lift(_ buf: RustBuffer) throws -> SnapshotRetentionCapStatus {
+    return try FfiConverterTypeSnapshotRetentionCapStatus.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotRetentionCapStatus_lower(_ value: SnapshotRetentionCapStatus) -> RustBuffer {
+    return FfiConverterTypeSnapshotRetentionCapStatus.lower(value)
+}
+
+
+public struct SnapshotRetentionCapUpdate: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let settings: SnapshotRetentionCapStatus
+    public let changed: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, settings: SnapshotRetentionCapStatus, changed: Bool) {
+        self.recordVersion = recordVersion
+        self.settings = settings
+        self.changed = changed
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SnapshotRetentionCapUpdate: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSnapshotRetentionCapUpdate: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SnapshotRetentionCapUpdate {
+        return
+            try SnapshotRetentionCapUpdate(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                settings: FfiConverterTypeSnapshotRetentionCapStatus.read(from: &buf),
+                changed: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SnapshotRetentionCapUpdate, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterTypeSnapshotRetentionCapStatus.write(value.settings, into: &buf)
+        FfiConverterBool.write(value.changed, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotRetentionCapUpdate_lift(_ buf: RustBuffer) throws -> SnapshotRetentionCapUpdate {
+    return try FfiConverterTypeSnapshotRetentionCapUpdate.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotRetentionCapUpdate_lower(_ value: SnapshotRetentionCapUpdate) -> RustBuffer {
+    return FfiConverterTypeSnapshotRetentionCapUpdate.lower(value)
 }
 
 
@@ -21129,6 +21365,203 @@ public func FfiConverterTypeSnapshotNodeSort_lower(_ value: SnapshotNodeSort) ->
 }
 
 
+
+public enum SnapshotRetentionCapError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
+
+
+
+    case Closed
+    case InvalidRecordVersion
+    case InvalidClock
+    case IncompatibleSchema
+    case Busy
+    case UnsafeStorage
+    case BudgetExceeded
+    case CorruptData
+    case Unavailable
+    case OutcomeUnknown
+    case InternalState
+
+
+
+
+
+
+    public var errorDescription: String? {
+        String(reflecting: self)
+    }
+
+}
+
+#if compiler(>=6)
+extension SnapshotRetentionCapError: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSnapshotRetentionCapError: FfiConverterRustBuffer {
+    typealias SwiftType = SnapshotRetentionCapError
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SnapshotRetentionCapError {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+
+
+
+        case 1: return .Closed
+        case 2: return .InvalidRecordVersion
+        case 3: return .InvalidClock
+        case 4: return .IncompatibleSchema
+        case 5: return .Busy
+        case 6: return .UnsafeStorage
+        case 7: return .BudgetExceeded
+        case 8: return .CorruptData
+        case 9: return .Unavailable
+        case 10: return .OutcomeUnknown
+        case 11: return .InternalState
+
+         default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: SnapshotRetentionCapError, into buf: inout [UInt8]) {
+        switch value {
+
+
+
+
+
+        case .Closed:
+            writeInt(&buf, Int32(1))
+
+
+        case .InvalidRecordVersion:
+            writeInt(&buf, Int32(2))
+
+
+        case .InvalidClock:
+            writeInt(&buf, Int32(3))
+
+
+        case .IncompatibleSchema:
+            writeInt(&buf, Int32(4))
+
+
+        case .Busy:
+            writeInt(&buf, Int32(5))
+
+
+        case .UnsafeStorage:
+            writeInt(&buf, Int32(6))
+
+
+        case .BudgetExceeded:
+            writeInt(&buf, Int32(7))
+
+
+        case .CorruptData:
+            writeInt(&buf, Int32(8))
+
+
+        case .Unavailable:
+            writeInt(&buf, Int32(9))
+
+
+        case .OutcomeUnknown:
+            writeInt(&buf, Int32(10))
+
+
+        case .InternalState:
+            writeInt(&buf, Int32(11))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotRetentionCapError_lift(_ buf: RustBuffer) throws -> SnapshotRetentionCapError {
+    return try FfiConverterTypeSnapshotRetentionCapError.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotRetentionCapError_lower(_ value: SnapshotRetentionCapError) -> RustBuffer {
+    return FfiConverterTypeSnapshotRetentionCapError.lower(value)
+}
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum SnapshotRetentionCapSource: Equatable, Hashable {
+
+    case `default`
+    case stored
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SnapshotRetentionCapSource: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSnapshotRetentionCapSource: FfiConverterRustBuffer {
+    typealias SwiftType = SnapshotRetentionCapSource
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SnapshotRetentionCapSource {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .`default`
+
+        case 2: return .stored
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: SnapshotRetentionCapSource, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .`default`:
+            writeInt(&buf, Int32(1))
+
+
+        case .stored:
+            writeInt(&buf, Int32(2))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotRetentionCapSource_lift(_ buf: RustBuffer) throws -> SnapshotRetentionCapSource {
+    return try FfiConverterTypeSnapshotRetentionCapSource.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotRetentionCapSource_lower(_ value: SnapshotRetentionCapSource) -> RustBuffer {
+    return FfiConverterTypeSnapshotRetentionCapSource.lower(value)
+}
+
+
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 /**
@@ -24606,6 +25039,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_dux_ffi_checksum_method_duxengine_get_pressure_episode_history() != 13596) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_dux_ffi_checksum_method_duxengine_get_snapshot_retention_cap() != 43923) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_dux_ffi_checksum_method_duxengine_inspect_direct_cargo_enrollment() != 42063) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -24648,6 +25084,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_dux_ffi_checksum_method_duxengine_reset_permanent_cleanup() != 25182) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_dux_ffi_checksum_method_duxengine_reset_snapshot_retention_cap() != 56845) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_dux_ffi_checksum_method_duxengine_revoke_direct_cargo_enrollment() != 61450) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -24670,6 +25109,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_set_permanent_cleanup_enabled() != 50449) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_duxengine_set_snapshot_retention_cap() != 55214) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_start_maintenance() != 4775) {

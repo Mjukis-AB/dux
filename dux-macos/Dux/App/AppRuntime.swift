@@ -189,6 +189,7 @@ final class AppRuntime {
         let task = Task { @MainActor in
             model.invalidateCapacityHistoryOperations()
             model.invalidatePressurePolicyOperations()
+            await model.snapshotRetentionCapSettings.shutdown()
             model.invalidatePermanentCleanupPolicyOperations()
             model.invalidateCleanupExclusionsOperations()
             model.invalidateProjectDiscoveryRootsOperations()

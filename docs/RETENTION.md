@@ -273,9 +273,13 @@ commits; automatic history retention remains forbidden from mutating settings.
 The retention inventory reads the effective setting while holding its
 current-schema database guard and before acquiring the snapshot lock. A future
 writer must repeat that read under its final database-to-snapshot boundary;
-neither an engine settings DTO nor an earlier inventory is authority. FFI and
-Swift settings presentation remain unimplemented and must call these
-synchronous core operations off the main actor.
+neither an engine settings DTO nor an earlier inventory is authority. UniFFI
+v51 and native Settings expose only the effective cap, default/stored
+provenance, update time, and idempotent set/reset result. Swift independently
+validates those records and calls every synchronous core operation off the main
+thread. Setting zero or any other value never invokes retention; the sealed
+writer still rereads the cap and rebuilds its complete proof under the final
+locks.
 
 Terminal scan summaries and their original snapshot references are immutable.
 Snapshot retention is therefore not allowed to clear or rewrite that historical

@@ -43,6 +43,30 @@ protocol DuxPressurePolicyServing: Sendable {
     func resetDiskPressurePolicy() async throws -> DiskPressurePolicyUpdateResult
 }
 
+protocol DuxSnapshotRetentionCapServing: Sendable {
+    func loadSnapshotRetentionCap() async throws -> SnapshotRetentionCapModel
+    func setSnapshotRetentionCap(
+        _ capBytes: UInt64
+    ) async throws -> SnapshotRetentionCapUpdateResultModel
+    func resetSnapshotRetentionCap() async throws -> SnapshotRetentionCapUpdateResultModel
+}
+
+extension DuxSnapshotRetentionCapServing {
+    func loadSnapshotRetentionCap() async throws -> SnapshotRetentionCapModel {
+        throw SnapshotRetentionCapServiceError.unavailable
+    }
+
+    func setSnapshotRetentionCap(
+        _: UInt64
+    ) async throws -> SnapshotRetentionCapUpdateResultModel {
+        throw SnapshotRetentionCapServiceError.unavailable
+    }
+
+    func resetSnapshotRetentionCap() async throws -> SnapshotRetentionCapUpdateResultModel {
+        throw SnapshotRetentionCapServiceError.unavailable
+    }
+}
+
 protocol DuxPermanentCleanupPolicyServing: Sendable {
     func loadPermanentCleanupPolicy() async throws -> PermanentCleanupPolicy
     func setPermanentCleanupEnabled(
@@ -175,8 +199,8 @@ extension DuxPermanentCleanupPolicyServing {
 }
 
 protocol EngineServing: DuxVolumeStatusServing, DuxCapacityTrendServing,
-    DuxPressureEpisodeServing, DuxPressurePolicyServing, DuxPermanentCleanupPolicyServing,
-    DuxCleanupExclusionsServing, DuxProjectDiscoveryRootsServing,
+    DuxPressureEpisodeServing, DuxPressurePolicyServing, DuxSnapshotRetentionCapServing,
+    DuxPermanentCleanupPolicyServing, DuxCleanupExclusionsServing, DuxProjectDiscoveryRootsServing,
     DuxDirectCargoEnrollmentServing, DuxTargetedReclaimScanServing, DuxCleanupHistoryServing,
     DuxCleanupHistoryClearing, DuxPersistentRecoveryDebtServing,
     DuxClaimedRunningScanProvenanceServing, Sendable
@@ -435,7 +459,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
     DuxSnapshotHistoryServing, DuxCleanupHistoryServing, DuxScanCoverageServing, HomeScanServing,
     Sendable
 {
-    fileprivate static let expectedFFIContractVersion: UInt32 = 50
+    fileprivate static let expectedFFIContractVersion: UInt32 = 51
     fileprivate static let expectedRecordVersion: UInt32 = 1
     private static let maximumTargetedProjectScanNodes: UInt32 = 50000
     private static let maximumTargetedProjectScanPassNodes: UInt32 = 200_000
@@ -706,6 +730,68 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
                 return update
             } catch let error as PressurePolicyError {
                 throw Self.pressurePolicyError(error)
+            }
+        }
+    }
+
+    func loadSnapshotRetentionCap() async throws -> SnapshotRetentionCapModel {
+        try await state.perform { state in
+            precondition(!Thread.isMainThread, "Blocking FFI work reached the main thread")
+            let engine = try Self.resolveSnapshotRetentionCapEngine(state)
+            do {
+                return try Self.snapshotRetentionCap(
+                    engine.getSnapshotRetentionCap()
+                )
+            } catch let error as SnapshotRetentionCapError {
+                throw Self.snapshotRetentionCapError(error)
+            }
+        }
+    }
+
+    func setSnapshotRetentionCap(
+        _ capBytes: UInt64
+    ) async throws -> SnapshotRetentionCapUpdateResultModel {
+        try await state.perform { state in
+            precondition(!Thread.isMainThread, "Blocking FFI work reached the main thread")
+            let engine = try Self.resolveSnapshotRetentionCapEngine(state)
+            do {
+                let update = try Self.snapshotRetentionCapUpdate(
+                    engine.setSnapshotRetentionCap(
+                        input: SnapshotRetentionCapInput(
+                            recordVersion: Self.expectedRecordVersion,
+                            capBytes: capBytes
+                        )
+                    )
+                )
+                guard
+                    update.settings.source == .stored,
+                    update.settings.capBytes == capBytes
+                else {
+                    throw SnapshotRetentionCapServiceError.invalidResponse
+                }
+                return update
+            } catch let error as SnapshotRetentionCapError {
+                throw Self.snapshotRetentionCapError(error)
+            }
+        }
+    }
+
+    func resetSnapshotRetentionCap() async throws
+        -> SnapshotRetentionCapUpdateResultModel
+    {
+        try await state.perform { state in
+            precondition(!Thread.isMainThread, "Blocking FFI work reached the main thread")
+            let engine = try Self.resolveSnapshotRetentionCapEngine(state)
+            do {
+                let update = try Self.snapshotRetentionCapUpdate(
+                    engine.resetSnapshotRetentionCap()
+                )
+                guard update.settings.source == .default else {
+                    throw SnapshotRetentionCapServiceError.invalidResponse
+                }
+                return update
+            } catch let error as SnapshotRetentionCapError {
+                throw Self.snapshotRetentionCapError(error)
             }
         }
     }
@@ -1880,6 +1966,58 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         }
     }
 
+    private static func snapshotRetentionCap(
+        _ status: SnapshotRetentionCapStatus
+    ) throws -> SnapshotRetentionCapModel {
+        let source: SnapshotRetentionCapSourceModel = switch status.source {
+        case .default: .default
+        case .stored: .stored
+        }
+        guard
+            status.recordVersion == expectedRecordVersion,
+            (source == .default && status.updatedAtUnixMs == nil)
+                || (source == .stored
+                    && status.updatedAtUnixMs.map { $0 >= 0 } == true)
+        else {
+            throw SnapshotRetentionCapServiceError.invalidResponse
+        }
+        return SnapshotRetentionCapModel(
+            capBytes: status.capBytes,
+            source: source,
+            updatedAtUnixMilliseconds: status.updatedAtUnixMs
+        )
+    }
+
+    private static func snapshotRetentionCapUpdate(
+        _ response: SnapshotRetentionCapUpdate
+    ) throws -> SnapshotRetentionCapUpdateResultModel {
+        guard response.recordVersion == expectedRecordVersion else {
+            throw SnapshotRetentionCapServiceError.invalidResponse
+        }
+        return SnapshotRetentionCapUpdateResultModel(
+            settings: try snapshotRetentionCap(response.settings),
+            changed: response.changed
+        )
+    }
+
+    private static func snapshotRetentionCapError(
+        _ error: SnapshotRetentionCapError
+    ) -> SnapshotRetentionCapServiceError {
+        switch error {
+        case .Closed: .closed
+        case .InvalidRecordVersion: .invalidRecordVersion
+        case .InvalidClock: .invalidClock
+        case .IncompatibleSchema: .incompatibleSchema
+        case .Busy: .retryable
+        case .UnsafeStorage: .unsafeStorage
+        case .BudgetExceeded: .budgetExceeded
+        case .CorruptData: .corruptData
+        case .Unavailable: .unavailable
+        case .OutcomeUnknown: .outcomeUnknown
+        case .InternalState: .internalState
+        }
+    }
+
     private static func permanentCleanupPolicy(
         _ status: PermanentCleanupPolicyStatus
     ) throws -> PermanentCleanupPolicy {
@@ -3040,6 +3178,23 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
             case .invalidCapacityObservation, .conflictingCapacityObservation,
                  .supersededCapacityObservation, .unexpected:
                 DiskPressurePolicyServiceError.invalidResponse
+            }
+        }
+    }
+
+    private static func resolveSnapshotRetentionCapEngine(
+        _ state: EngineServiceState
+    ) throws -> DuxEngine {
+        do {
+            return try state.resolveEngine()
+        } catch let error as EngineServiceError {
+            throw switch error {
+            case .closed: SnapshotRetentionCapServiceError.closed
+            case .retryable: SnapshotRetentionCapServiceError.retryable
+            case .unavailable: SnapshotRetentionCapServiceError.unavailable
+            case .invalidCapacityObservation, .conflictingCapacityObservation,
+                 .supersededCapacityObservation, .unexpected:
+                SnapshotRetentionCapServiceError.invalidResponse
             }
         }
     }

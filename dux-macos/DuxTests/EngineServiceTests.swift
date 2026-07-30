@@ -628,7 +628,7 @@ final class EngineServiceTests: XCTestCase {
         // DUX-DESTRUCTIVE: allow=test-swift-retry-obstruction-remove -- remove only this test fixture's deliberate file obstruction
         try FileManager.default.removeItem(at: dataRoot)
         let status = try await service.loadStatus()
-        XCTAssertEqual(status.ffiContractVersion, 50)
+        XCTAssertEqual(status.ffiContractVersion, 51)
         XCTAssertEqual(status.databaseSchemaVersion, 17)
         XCTAssertEqual(status.snapshotFormatVersion, 1)
         let closed = await service.close()
@@ -640,7 +640,7 @@ final class EngineServiceTests: XCTestCase {
         let result = try await EngineService(engine: fixture.engine).loadStatus()
 
         XCTAssertEqual(result.libraryVersion, "0.5.0")
-        XCTAssertEqual(result.ffiContractVersion, 50)
+        XCTAssertEqual(result.ffiContractVersion, 51)
         XCTAssertEqual(result.databaseSchemaVersion, 17)
         XCTAssertEqual(result.snapshotFormatVersion, 1)
         XCTAssertTrue(result.executedOffMainThread)
@@ -1324,6 +1324,70 @@ final class EngineServiceTests: XCTestCase {
             XCTAssertEqual(error, .invalidResponse)
         } catch {
             XCTFail("Unexpected error: \(error)")
+        }
+    }
+
+    func testRealSnapshotRetentionCapRoundTripPreservesZeroMaximumAndProvenance() async throws {
+        let fixture = try TestEngineFixture()
+        let service = EngineService(engine: fixture.engine)
+
+        let initial = try await service.loadSnapshotRetentionCap()
+        XCTAssertEqual(
+            initial,
+            SnapshotRetentionCapModel(
+                capBytes: 2 * DiskPressurePolicyConfiguration.bytesPerGiB,
+                source: .default,
+                updatedAtUnixMilliseconds: nil
+            )
+        )
+
+        let zero = try await service.setSnapshotRetentionCap(0)
+        XCTAssertTrue(zero.changed)
+        XCTAssertEqual(zero.settings.capBytes, 0)
+        XCTAssertEqual(zero.settings.source, .stored)
+        XCTAssertNotNil(zero.settings.updatedAtUnixMilliseconds)
+
+        let exactZero = try await service.setSnapshotRetentionCap(0)
+        XCTAssertFalse(exactZero.changed)
+        XCTAssertEqual(exactZero.settings, zero.settings)
+
+        let maximum = try await service.setSnapshotRetentionCap(UInt64.max)
+        XCTAssertTrue(maximum.changed)
+        XCTAssertEqual(maximum.settings.capBytes, UInt64.max)
+        XCTAssertEqual(maximum.settings.source, .stored)
+
+        let reset = try await service.resetSnapshotRetentionCap()
+        XCTAssertTrue(reset.changed)
+        XCTAssertEqual(reset.settings, initial)
+        let exactReset = try await service.resetSnapshotRetentionCap()
+        XCTAssertFalse(exactReset.changed)
+        XCTAssertEqual(exactReset.settings, initial)
+    }
+
+    func testSnapshotRetentionCapServiceMapsClosedAndRejectsMalformedResponses() async throws {
+        let fixture = try TestEngineFixture()
+        let service = EngineService(engine: fixture.engine)
+        let closed = await service.close()
+        XCTAssertTrue(closed)
+        do {
+            _ = try await service.loadSnapshotRetentionCap()
+            XCTFail("Expected a closed snapshot-cap service")
+        } catch let error as SnapshotRetentionCapServiceError {
+            XCTAssertEqual(error, .closed)
+        }
+
+        let malformed = EngineService(engine: InvalidSnapshotRetentionCapEngine())
+        do {
+            _ = try await malformed.loadSnapshotRetentionCap()
+            XCTFail("Expected malformed snapshot-cap response rejection")
+        } catch let error as SnapshotRetentionCapServiceError {
+            XCTAssertEqual(error, .invalidResponse)
+        }
+        do {
+            _ = try await malformed.resetSnapshotRetentionCap()
+            XCTFail("Expected misleading default reset rejection")
+        } catch let error as SnapshotRetentionCapServiceError {
+            XCTAssertEqual(error, .invalidResponse)
         }
     }
 
@@ -2850,7 +2914,7 @@ final class EngineServiceTests: XCTestCase {
             weakEngine = engine
 
             XCTAssertEqual(liveEngineInstanceCount(), baseline + 1)
-            XCTAssertEqual(try engine.libraryVersion().ffiContractVersion, 50)
+            XCTAssertEqual(try engine.libraryVersion().ffiContractVersion, 51)
             XCTAssertTrue(engine.close())
             XCTAssertTrue(engine.close())
             XCTAssertThrowsError(try engine.formatSize(bytes: 1536)) { error in
@@ -4902,6 +4966,38 @@ private final class InvalidPressurePolicyEngine: DuxEngine, @unchecked Sendable 
             recoveryBytes: 1,
             recoveryBasisPoints: 1,
             updatedAtUnixMs: nil
+        )
+    }
+}
+
+private final class InvalidSnapshotRetentionCapEngine: DuxEngine, @unchecked Sendable {
+    required init(unsafeFromHandle handle: UInt64) {
+        super.init(unsafeFromHandle: handle)
+    }
+
+    init() {
+        super.init(noHandle: NoHandle())
+    }
+
+    override func getSnapshotRetentionCap() throws -> SnapshotRetentionCapStatus {
+        SnapshotRetentionCapStatus(
+            recordVersion: 2,
+            capBytes: 1,
+            source: .default,
+            updatedAtUnixMs: nil
+        )
+    }
+
+    override func resetSnapshotRetentionCap() throws -> SnapshotRetentionCapUpdate {
+        SnapshotRetentionCapUpdate(
+            recordVersion: 1,
+            settings: SnapshotRetentionCapStatus(
+                recordVersion: 1,
+                capBytes: 1,
+                source: .default,
+                updatedAtUnixMs: 0
+            ),
+            changed: true
         )
     }
 }
