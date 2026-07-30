@@ -48,7 +48,8 @@ use super::history::{
     HistoryError, HistoryErrorKind, NewScanRecord, PreparedNewScan, PreparedScanCompletion,
     RecentScanRecords, ScanCompletionRecord, ScanRecord, ScanStatus, insert_scan_started,
     load_latest_available_snapshot_scan_record, load_latest_scan_record_for_exact_root_since,
-    load_recent_scan_records, load_scan_record, map_write_sql_error, update_scan_finished,
+    load_previous_comparable_snapshot_scan_record, load_recent_scan_records, load_scan_record,
+    map_write_sql_error, update_scan_finished,
 };
 use super::migrations::{
     SchemaState, apply_pending_migrations, inspect_schema, inspect_schema_for_status,
@@ -1667,6 +1668,14 @@ impl StoreCoordinator {
     ) -> Result<Option<ScanRecord>, HistoryError> {
         let guard = self.lock_current_history_connection()?;
         load_latest_available_snapshot_scan_record(&guard.connection)
+    }
+
+    pub(crate) fn load_previous_comparable_snapshot_scan(
+        &self,
+        current: &ScanRecord,
+    ) -> Result<Option<ScanRecord>, HistoryError> {
+        let guard = self.lock_current_history_connection()?;
+        load_previous_comparable_snapshot_scan_record(&guard.connection, current)
     }
 
     /// Recover at most one durably claimed running scan whose exact process

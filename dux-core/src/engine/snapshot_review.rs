@@ -368,6 +368,10 @@ pub enum SnapshotReviewError {
     ScanNotFound,
     #[error("the scan has no available snapshot")]
     SnapshotUnavailable,
+    #[error("the snapshot has no preceding comparable retained snapshot")]
+    ComparableSnapshotUnavailable,
+    #[error("the comparison does not belong to this exact snapshot review")]
+    WrongParentReview,
     #[error("the review lease expired")]
     LeaseExpired,
     #[error("the snapshot node does not exist")]
@@ -484,6 +488,42 @@ impl SnapshotReviewSession {
 
     pub(super) fn plan_review_liveness(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.plan_review_live)
+    }
+
+    pub(super) fn document_for_diff(
+        &mut self,
+    ) -> Result<&StoredReviewDocument, SnapshotReviewError> {
+        self.ensure_document(SystemTime::now())?;
+        self.document
+            .as_ref()
+            .ok_or(SnapshotReviewError::InternalState)
+    }
+
+    pub(super) fn document_for_diff_readonly(&self) -> Option<&StoredReviewDocument> {
+        self.document.as_ref()
+    }
+
+    pub(super) fn project_node_for_diff(
+        &self,
+        node_id: u64,
+    ) -> Result<SnapshotReviewNode, SnapshotReviewError> {
+        let document = self
+            .document
+            .as_deref()
+            .ok_or(SnapshotReviewError::InternalState)?;
+        let node_index = usize::try_from(node_id).map_err(|_| SnapshotReviewError::NodeNotFound)?;
+        let node = document
+            .nodes
+            .get(node_index)
+            .filter(|node| node.id == node_id)
+            .ok_or(SnapshotReviewError::NodeNotFound)?;
+        let category = category_for_node(document, node, &self.category_index)?;
+        let name = if node.id == 0 {
+            &document.metadata.root
+        } else {
+            node.name.as_ref().ok_or(SnapshotReviewError::CorruptData)?
+        };
+        Ok(project_node(node, name, category))
     }
 
     /// Resolve a historical directory into a sealed current scan target. This

@@ -19,6 +19,7 @@ mod rust_target_dry_run;
 mod rust_target_plan_review;
 mod scan_coverage_details;
 mod settings;
+mod snapshot_diff_review;
 mod snapshot_review;
 mod storage_thief;
 mod targeted_project_scan;
@@ -84,6 +85,11 @@ pub use settings::{
     PermanentCleanupPolicy, PermanentCleanupPolicyError, PermanentCleanupPolicySource,
     PermanentCleanupPolicyUpdate, SnapshotRetentionCap, SnapshotRetentionCapError,
     SnapshotRetentionCapSource, SnapshotRetentionCapUpdate,
+};
+pub use snapshot_diff_review::{
+    SnapshotDiffChange, SnapshotDiffCoverage, SnapshotDiffDirection, SnapshotDiffInfo,
+    SnapshotDiffNode, SnapshotDiffNodePage, SnapshotDiffNodeSort, SnapshotDiffReviewSession,
+    SnapshotDiffTreemap, SnapshotDiffTreemapCell, SnapshotDiffValue,
 };
 pub use snapshot_review::{
     MAX_SNAPSHOT_REVIEW_ICLOUD_OBSERVATION_TARGETS,

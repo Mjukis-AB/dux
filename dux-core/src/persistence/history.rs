@@ -815,7 +815,9 @@ pub(super) fn load_latest_available_snapshot_scan_record(
                      scan.snapshot_relative_path_encoding IS NOT NULL OR
                      scan.snapshot_checksum_sha256 IS NOT NULL
                    )
-                 ORDER BY scan.started_at_unix_ms DESC, scan.scan_id ASC
+                 ORDER BY scan.completed_at_unix_ms DESC,
+                          scan.started_at_unix_ms DESC,
+                          scan.scan_id ASC
                  LIMIT 1",
                 [],
                 |row| {
@@ -833,6 +835,104 @@ pub(super) fn load_latest_available_snapshot_scan_record(
         let record = load_scan_record_within_budget(connection, &id)?
             .ok_or_else(|| HistoryError::new(HistoryErrorKind::CorruptData))?;
         if record.status() != ScanStatus::Succeeded || record.snapshot().is_none() {
+            return Err(HistoryError::new(HistoryErrorKind::CorruptData));
+        }
+        Ok(Some(record))
+    })
+}
+
+/// Load the immediately preceding available snapshot for the current scan's
+/// exact lossless root and non-legacy root identity.
+///
+/// Ordering deliberately matches snapshot retention's per-root latest-two
+/// policy: completion descending, start descending, then scan ID ascending.
+/// The returned row is selection evidence only; repository lease acquisition
+/// repeats the complete durable and physical snapshot validation.
+pub(super) fn load_previous_comparable_snapshot_scan_record(
+    connection: &Connection,
+    current: &ScanRecord,
+) -> Result<Option<ScanRecord>, HistoryError> {
+    if current.status() != ScanStatus::Succeeded || current.snapshot().is_none() {
+        return Err(HistoryError::new(HistoryErrorKind::InvalidInput));
+    }
+    let current_completed_at = current
+        .completed_at()
+        .ok_or_else(|| HistoryError::new(HistoryErrorKind::CorruptData))?;
+    let current_identity = current
+        .root_identity_v1_sha256()
+        .ok_or_else(|| HistoryError::new(HistoryErrorKind::NotFound))?;
+    let encoded_root = encode_host_path(current.root())
+        .map_err(|_| HistoryError::new(HistoryErrorKind::CorruptData))?;
+    let current_completed_at_unix_ms =
+        system_time_to_unix_ms(current_completed_at, HistoryErrorKind::CorruptData)?;
+    let current_started_at_unix_ms =
+        system_time_to_unix_ms(current.started_at(), HistoryErrorKind::CorruptData)?;
+
+    run_bounded_query(connection, || {
+        let raw_id = connection
+            .query_row(
+                "SELECT typeof(scan.scan_id),
+                        length(CAST(scan.scan_id AS BLOB)), scan.scan_id
+                 FROM scans AS scan
+                 LEFT JOIN snapshot_retention_tombstones AS tombstone
+                   ON tombstone.scan_id = scan.scan_id
+                 WHERE scan.status = 'succeeded'
+                   AND scan.scan_id NOT GLOB 'scan:targeted:*'
+                   AND tombstone.scan_id IS NULL
+                   AND scan.root_path_encoding = ?1
+                   AND scan.root_path = ?2
+                   AND scan.root_identity_v1_sha256 = ?3
+                   AND scan.completed_at_unix_ms IS NOT NULL
+                   AND (
+                     scan.completed_at_unix_ms < ?4 OR
+                     (
+                       scan.completed_at_unix_ms = ?4 AND
+                       scan.started_at_unix_ms < ?5
+                     ) OR
+                     (
+                       scan.completed_at_unix_ms = ?4 AND
+                       scan.started_at_unix_ms = ?5 AND
+                       scan.scan_id > ?6
+                     )
+                   )
+                   AND (
+                     scan.snapshot_version IS NOT NULL OR
+                     scan.snapshot_relative_path IS NOT NULL OR
+                     scan.snapshot_relative_path_encoding IS NOT NULL OR
+                     scan.snapshot_checksum_sha256 IS NOT NULL
+                   )
+                 ORDER BY scan.completed_at_unix_ms DESC,
+                          scan.started_at_unix_ms DESC,
+                          scan.scan_id ASC
+                 LIMIT 1",
+                params![
+                    encoded_root.encoding as i64,
+                    encoded_root.bytes,
+                    current_identity.as_slice(),
+                    current_completed_at_unix_ms,
+                    current_started_at_unix_ms,
+                    current.id().as_str(),
+                ],
+                |row| {
+                    validate_stored_value(row, 0, 1, "text", 1, MAX_STORED_ID_BYTES)?;
+                    row.get::<_, String>(2)
+                },
+            )
+            .optional()
+            .map_err(map_query_sql_error)?;
+        let Some(raw_id) = raw_id else {
+            return Ok(None);
+        };
+        let id =
+            ScanId::new(raw_id).map_err(|_| HistoryError::new(HistoryErrorKind::CorruptData))?;
+        let record = load_scan_record_within_budget(connection, &id)?
+            .ok_or_else(|| HistoryError::new(HistoryErrorKind::CorruptData))?;
+        if record.status() != ScanStatus::Succeeded
+            || record.snapshot().is_none()
+            || record.completed_at().is_none()
+            || record.root() != current.root()
+            || record.root_identity_v1_sha256() != Some(current_identity)
+        {
             return Err(HistoryError::new(HistoryErrorKind::CorruptData));
         }
         Ok(Some(record))

@@ -16,7 +16,8 @@ use crate::engine::{
     EMERGENCY_RECOVERY_MAX_EVIDENCE_AGE, EmergencyRecoveryLane,
     MAX_SNAPSHOT_REVIEW_ICLOUD_OBSERVATION_TARGETS, MAX_SNAPSHOT_REVIEW_LARGE_FILE_RESULTS,
     MAX_SNAPSHOT_REVIEW_NODE_PAGE_LIMIT, MAX_SNAPSHOT_REVIEW_PARENT_CONTEXT_COMPONENTS,
-    MAX_SNAPSHOT_REVIEW_TREEMAP_CELLS, SnapshotReviewCategory, SnapshotReviewLiveTargetKind,
+    MAX_SNAPSHOT_REVIEW_TREEMAP_CELLS, SnapshotDiffChange, SnapshotDiffDirection,
+    SnapshotDiffNodeSort, SnapshotReviewCategory, SnapshotReviewLiveTargetKind,
     SnapshotReviewLiveTargetPurpose, SnapshotReviewNodeKind, SnapshotReviewNodeSort,
     SnapshotReviewTimestamp,
 };
@@ -2606,6 +2607,214 @@ fn explorer_review_facade_is_scan_bound_expiring_and_idempotently_released() {
         engine.acquire_explorer_snapshot_review(&scan_id),
         Err(SnapshotReviewError::Closed)
     ));
+}
+
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test renames only TempDir-owned fixtures to exercise added, removed, and replaced snapshot observations"
+)]
+fn explorer_snapshot_diff_projects_lossless_union_and_separate_change_totals() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("diff-root");
+    std::fs::create_dir_all(root.join("removed")).unwrap();
+    std::fs::write(root.join("removed/old.bin"), [1_u8; 7]).unwrap();
+    std::fs::write(root.join("changed.bin"), [2_u8; 3]).unwrap();
+    std::fs::write(root.join("stable.bin"), [3_u8; 5]).unwrap();
+    std::fs::write(root.join("replaced"), [4_u8; 4]).unwrap();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        std::fs::write(
+            root.join(std::ffi::OsString::from_vec(vec![b'n', 0xff])),
+            [8_u8; 2],
+        )
+        .unwrap();
+    }
+    let engine = EngineHandle::open(config(&temp)).unwrap();
+
+    let baseline_task = engine.start_scan(root.clone()).unwrap();
+    assert_eq!(
+        wait_terminal(&engine, baseline_task).phase,
+        TaskPhase::Succeeded
+    );
+    let baseline_scan_id = engine
+        .scan_result(baseline_task)
+        .unwrap()
+        .unwrap()
+        .scan_id()
+        .clone();
+    std::thread::sleep(Duration::from_millis(2));
+
+    // DUX-DESTRUCTIVE: allow=test-snapshot-diff-removed-rename -- move only one TempDir-owned fixture outside the scanned root to create a historical removed observation
+    std::fs::rename(
+        root.join("removed"),
+        temp.path().join("removed-outside-root"),
+    )
+    .unwrap();
+    std::fs::write(root.join("changed.bin"), [5_u8; 13]).unwrap();
+    // DUX-DESTRUCTIVE: allow=test-snapshot-diff-replaced-rename -- move only one TempDir-owned fixture outside the scanned root before creating a different-kind replacement
+    std::fs::rename(
+        root.join("replaced"),
+        temp.path().join("replaced-outside-root"),
+    )
+    .unwrap();
+    std::fs::create_dir(root.join("replaced")).unwrap();
+    std::fs::write(root.join("replaced/new.bin"), [6_u8; 6]).unwrap();
+    std::fs::create_dir(root.join("added")).unwrap();
+    std::fs::write(root.join("added/new.bin"), [7_u8; 11]).unwrap();
+
+    let current_task = engine.start_scan(root).unwrap();
+    assert_eq!(
+        wait_terminal(&engine, current_task).phase,
+        TaskPhase::Succeeded
+    );
+    let current_scan_id = engine
+        .scan_result(current_task)
+        .unwrap()
+        .unwrap()
+        .scan_id()
+        .clone();
+    let mut current = engine
+        .acquire_explorer_snapshot_review(&current_scan_id)
+        .unwrap();
+    let mut diff = engine
+        .prepare_explorer_snapshot_diff_review(&current)
+        .unwrap();
+
+    let info = diff.info(&mut current).unwrap();
+    assert_eq!(info.current_scan_id, current_scan_id);
+    assert_eq!(info.baseline_scan_id, baseline_scan_id);
+    assert!(info.current_completed_at >= info.baseline_completed_at);
+
+    let root_node = diff.root_node(&mut current).unwrap();
+    assert_eq!(root_node.id, 0);
+    assert_eq!(root_node.parent_id, None);
+    assert!(root_node.can_descend);
+
+    let page = diff
+        .child_nodes(&mut current, 0, SnapshotDiffNodeSort::NameAscending, 0, 20)
+        .unwrap();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    assert_eq!(page.total_children, 6);
+    #[cfg(any(not(unix), target_os = "macos"))]
+    assert_eq!(page.total_children, 5);
+    assert!(page.total_growth_bytes > 0);
+    assert!(page.total_shrinkage_bytes > 0);
+    let by_name = page
+        .nodes
+        .iter()
+        .map(|node| (node.name.display.as_ref(), node))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert!(
+        by_name.contains_key("added"),
+        "unexpected diff names: {:?}",
+        by_name.keys().collect::<Vec<_>>()
+    );
+    assert_eq!(by_name["added"].change, SnapshotDiffChange::Added);
+    assert_eq!(by_name["removed"].change, SnapshotDiffChange::Removed);
+    assert_eq!(by_name["changed.bin"].change, SnapshotDiffChange::Grew);
+    assert_eq!(by_name["stable.bin"].change, SnapshotDiffChange::Unchanged);
+    assert_eq!(by_name["replaced"].change, SnapshotDiffChange::Replaced);
+    #[cfg(all(unix, not(target_os = "macos")))]
+    assert!(page.nodes.iter().any(|node| {
+        node.name.encoded_bytes.as_ref() == [b'n', 0xff]
+            && node.change == SnapshotDiffChange::Unchanged
+    }));
+    assert_eq!(
+        by_name["removed"].logical_change.direction,
+        SnapshotDiffDirection::Shrinkage
+    );
+    assert!(by_name["removed"].can_descend);
+
+    let removed_page = diff
+        .child_nodes(
+            &mut current,
+            by_name["removed"].id,
+            SnapshotDiffNodeSort::NameAscending,
+            0,
+            20,
+        )
+        .unwrap();
+    assert_eq!(removed_page.nodes.len(), 1);
+    assert_eq!(removed_page.nodes[0].name.display.as_ref(), "old.bin");
+    assert_eq!(removed_page.nodes[0].change, SnapshotDiffChange::Removed);
+
+    let treemap = diff.treemap(&mut current, 0, 2).unwrap();
+    assert_eq!(treemap.cells.len(), 2);
+    assert!(treemap.other_growth_bytes > 0 || treemap.other_shrinkage_bytes > 0);
+    assert_eq!(
+        treemap.changed_child_count + treemap.unchanged_child_count,
+        treemap.total_children
+    );
+    assert_eq!(
+        diff.release().unwrap(),
+        super::super::snapshot_review::SnapshotReviewReleaseOutcome::Released
+    );
+    assert!(current.root_node().is_ok());
+    assert_eq!(
+        current.release().unwrap(),
+        super::super::snapshot_review::SnapshotReviewReleaseOutcome::Released
+    );
+
+    let mut invalidated_parent = engine
+        .acquire_explorer_snapshot_review(&current_scan_id)
+        .unwrap();
+    let mut invalidated_diff = engine
+        .prepare_explorer_snapshot_diff_review(&invalidated_parent)
+        .unwrap();
+    invalidated_parent.release().unwrap();
+    assert_eq!(
+        invalidated_diff
+            .root_node(&mut invalidated_parent)
+            .unwrap_err(),
+        SnapshotReviewError::WrongParentReview
+    );
+    assert_eq!(
+        invalidated_diff.release().unwrap(),
+        super::super::snapshot_review::SnapshotReviewReleaseOutcome::Released
+    );
+    engine.close();
+    assert!(engine.wait_until_closed(TEST_TIMEOUT));
+}
+
+#[test]
+fn explorer_snapshot_diff_requires_a_nonlegacy_predecessor_for_the_exact_root() {
+    let temp = TempDir::new().unwrap();
+    let first_root = temp.path().join("first-root");
+    let second_root = temp.path().join("second-root");
+    std::fs::create_dir(&first_root).unwrap();
+    std::fs::create_dir(&second_root).unwrap();
+    std::fs::write(first_root.join("payload"), b"first").unwrap();
+    std::fs::write(second_root.join("payload"), b"second").unwrap();
+    let engine = EngineHandle::open(config(&temp)).unwrap();
+
+    let first_task = engine.start_scan(first_root).unwrap();
+    assert_eq!(
+        wait_terminal(&engine, first_task).phase,
+        TaskPhase::Succeeded
+    );
+    let second_task = engine.start_scan(second_root).unwrap();
+    assert_eq!(
+        wait_terminal(&engine, second_task).phase,
+        TaskPhase::Succeeded
+    );
+    let second_scan_id = engine
+        .scan_result(second_task)
+        .unwrap()
+        .unwrap()
+        .scan_id()
+        .clone();
+    let mut current = engine
+        .acquire_explorer_snapshot_review(&second_scan_id)
+        .unwrap();
+    assert!(matches!(
+        engine.prepare_explorer_snapshot_diff_review(&current),
+        Err(SnapshotReviewError::ComparableSnapshotUnavailable)
+    ));
+    current.release().unwrap();
+    engine.close();
+    assert!(engine.wait_until_closed(TEST_TIMEOUT));
 }
 
 #[test]

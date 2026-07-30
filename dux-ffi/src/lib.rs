@@ -93,8 +93,15 @@ use dux_core::engine::{
     ScanHistoryError as CoreScanHistoryError,
     ScanRecoveryMaintenanceOutcome as CoreScanRecoveryOutcome, ScanRecoveryMaintenanceStartOutcome,
     ScanRootErrorKind, ScanTaskOrigin as CoreScanTaskOrigin, ScanTaskResult as CoreScanTaskResult,
-    ScanTaskStatus as CoreScanTaskStatus, SnapshotOrphanMaintenanceOutcome as CoreOrphanOutcome,
-    SnapshotOrphanMaintenanceStartOutcome,
+    ScanTaskStatus as CoreScanTaskStatus, SnapshotDiffChange as CoreSnapshotDiffChange,
+    SnapshotDiffDirection as CoreSnapshotDiffDirection, SnapshotDiffInfo as CoreSnapshotDiffInfo,
+    SnapshotDiffNode as CoreSnapshotDiffNode, SnapshotDiffNodePage as CoreSnapshotDiffNodePage,
+    SnapshotDiffNodeSort as CoreSnapshotDiffNodeSort,
+    SnapshotDiffReviewSession as CoreSnapshotDiffReviewSession,
+    SnapshotDiffTreemap as CoreSnapshotDiffTreemap,
+    SnapshotDiffTreemapCell as CoreSnapshotDiffTreemapCell,
+    SnapshotDiffValue as CoreSnapshotDiffValue,
+    SnapshotOrphanMaintenanceOutcome as CoreOrphanOutcome, SnapshotOrphanMaintenanceStartOutcome,
     SnapshotProvisioningStageMaintenanceOutcome as CoreStageOutcome,
     SnapshotProvisioningStageMaintenanceStartOutcome,
     SnapshotRetentionOutcome as CoreRetentionOutcome, SnapshotRetentionStartOutcome,
@@ -153,7 +160,7 @@ use dux_core::{
     VolumeCapacity, VolumeId,
 };
 
-const FFI_CONTRACT_VERSION: u32 = 45;
+const FFI_CONTRACT_VERSION: u32 = 46;
 const FFI_RECORD_VERSION: u32 = 1;
 const RUST_TARGET_MINIMUM_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const SNAPSHOT_NODE_RECORD_VERSION: u32 = 2;
@@ -1064,6 +1071,10 @@ pub enum EngineError {
     ScanNotFound,
     #[error("scan snapshot is unavailable")]
     SnapshotUnavailable,
+    #[error("the snapshot has no preceding comparable retained snapshot")]
+    ComparableSnapshotUnavailable,
+    #[error("the comparison does not belong to this exact snapshot review")]
+    WrongParentReview,
     #[error("snapshot review lease expired")]
     ReviewExpired,
     #[error("snapshot node does not exist")]
@@ -2566,6 +2577,115 @@ pub struct SnapshotTreemap {
     pub cells: Vec<SnapshotTreemapCell>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum SnapshotDiffNodeSort {
+    NameAscending,
+    MagnitudeDescending,
+    CurrentBytesDescending,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum SnapshotDiffChange {
+    Added,
+    Removed,
+    Grew,
+    Shrank,
+    Unchanged,
+    Replaced,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum SnapshotDiffDirection {
+    Growth,
+    Shrinkage,
+    Unchanged,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct SnapshotDiffValue {
+    pub direction: SnapshotDiffDirection,
+    pub magnitude_bytes: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct SnapshotDiffInfo {
+    pub record_version: u32,
+    pub current_scan_id: String,
+    pub baseline_scan_id: String,
+    pub current_started_at_unix_ms: i64,
+    pub current_completed_at_unix_ms: i64,
+    pub baseline_started_at_unix_ms: i64,
+    pub baseline_completed_at_unix_ms: i64,
+    pub current_coverage: ScanCoverageSummary,
+    pub baseline_coverage: ScanCoverageSummary,
+    pub released: bool,
+}
+
+/// One union node from two retained historical snapshots. Its ID is opaque
+/// outside the exact comparison session and grants no live-path authority.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct SnapshotDiffNode {
+    pub record_version: u32,
+    pub id: u64,
+    pub parent_id: Option<u64>,
+    pub depth: u32,
+    pub name: SnapshotNodeName,
+    pub kind: SnapshotNodeKind,
+    pub category: SnapshotStorageCategory,
+    pub change: SnapshotDiffChange,
+    pub logical_change: SnapshotDiffValue,
+    pub current_logical_bytes: Option<u64>,
+    pub baseline_logical_bytes: Option<u64>,
+    pub current_allocated_bytes: Option<u64>,
+    pub baseline_allocated_bytes: Option<u64>,
+    pub allocated_change: Option<SnapshotDiffValue>,
+    pub current_file_count: Option<u64>,
+    pub baseline_file_count: Option<u64>,
+    pub current_child_count: Option<u64>,
+    pub baseline_child_count: Option<u64>,
+    pub current_scan_flags: Option<SnapshotNodeScanFlags>,
+    pub baseline_scan_flags: Option<SnapshotNodeScanFlags>,
+    pub can_descend: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct SnapshotDiffNodePage {
+    pub record_version: u32,
+    pub parent_id: u64,
+    pub offset: u64,
+    pub total_children: u64,
+    pub has_more: bool,
+    pub total_growth_bytes: u64,
+    pub total_shrinkage_bytes: u64,
+    pub unchanged_child_count: u64,
+    pub replaced_child_count: u64,
+    pub nodes: Vec<SnapshotDiffNode>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct SnapshotDiffTreemapCell {
+    pub record_version: u32,
+    pub node: SnapshotDiffNode,
+    pub magnitude_rank: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct SnapshotDiffTreemap {
+    pub record_version: u32,
+    pub parent_id: u64,
+    pub total_children: u64,
+    pub changed_child_count: u64,
+    pub total_growth_bytes: u64,
+    pub total_shrinkage_bytes: u64,
+    pub other_growth_child_count: u64,
+    pub other_growth_bytes: u64,
+    pub other_shrinkage_child_count: u64,
+    pub other_shrinkage_bytes: u64,
+    pub unchanged_child_count: u64,
+    pub replaced_child_count: u64,
+    pub cells: Vec<SnapshotDiffTreemapCell>,
+}
+
 /// Versioned, bounded historical large-file discovery input. It grants no
 /// cleanup authority.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
@@ -4042,6 +4162,118 @@ impl SnapshotReviewSession {
     }
 }
 
+#[derive(uniffi::Object)]
+pub struct SnapshotDiffReviewSession {
+    inner: Mutex<CoreSnapshotDiffReviewSession>,
+    parent: Weak<SnapshotReviewSession>,
+    engine_closed: Arc<AtomicBool>,
+}
+
+#[uniffi::export]
+impl SnapshotDiffReviewSession {
+    pub fn info(&self) -> Result<SnapshotDiffInfo, EngineError> {
+        {
+            let diff = self.inner.lock().map_err(|_| EngineError::InternalState)?;
+            if let Some(info) = diff.released_info() {
+                return project_snapshot_diff_info(info, true);
+            }
+        }
+        self.with_open_pair(|diff, current| {
+            diff.info(current)
+                .map_err(map_review_error)
+                .and_then(|info| project_snapshot_diff_info(info, false))
+        })
+    }
+
+    pub fn renew(&self) -> Result<SnapshotDiffInfo, EngineError> {
+        self.with_open_pair(|diff, current| {
+            diff.renew(current).map_err(map_review_error)?;
+            diff.info(current)
+                .map_err(map_review_error)
+                .and_then(|info| project_snapshot_diff_info(info, false))
+        })
+    }
+
+    pub fn release(&self) -> Result<ReviewReleaseOutcome, EngineError> {
+        self.release_inner()
+    }
+
+    pub fn root_node(&self) -> Result<SnapshotDiffNode, EngineError> {
+        self.with_open_pair(|diff, current| {
+            diff.root_node(current)
+                .map(project_snapshot_diff_node)
+                .map_err(map_review_error)
+        })
+    }
+
+    pub fn child_nodes(
+        &self,
+        parent_id: u64,
+        sort: SnapshotDiffNodeSort,
+        offset: u64,
+        limit: u16,
+    ) -> Result<SnapshotDiffNodePage, EngineError> {
+        self.with_open_pair(|diff, current| {
+            diff.child_nodes(
+                current,
+                parent_id,
+                map_snapshot_diff_node_sort(sort),
+                offset,
+                limit,
+            )
+            .map(project_snapshot_diff_node_page)
+            .map_err(map_review_error)
+        })
+    }
+
+    pub fn treemap(
+        &self,
+        parent_id: u64,
+        max_cells: u16,
+    ) -> Result<SnapshotDiffTreemap, EngineError> {
+        self.with_open_pair(|diff, current| {
+            diff.treemap(current, parent_id, max_cells)
+                .map(project_snapshot_diff_treemap)
+                .map_err(map_review_error)
+        })
+    }
+}
+
+impl SnapshotDiffReviewSession {
+    fn with_open_pair<T>(
+        &self,
+        operation: impl FnOnce(
+            &mut CoreSnapshotDiffReviewSession,
+            &mut CoreReviewSession,
+        ) -> Result<T, EngineError>,
+    ) -> Result<T, EngineError> {
+        if self.engine_closed.load(Ordering::Acquire) {
+            return Err(EngineError::Closed);
+        }
+        let parent = self
+            .parent
+            .upgrade()
+            .ok_or(EngineError::WrongParentReview)?;
+        let mut current = parent
+            .inner
+            .lock()
+            .map_err(|_| EngineError::InternalState)?;
+        let mut diff = self.inner.lock().map_err(|_| EngineError::InternalState)?;
+        if self.engine_closed.load(Ordering::Acquire) {
+            return Err(EngineError::Closed);
+        }
+        operation(&mut diff, &mut current)
+    }
+
+    fn release_inner(&self) -> Result<ReviewReleaseOutcome, EngineError> {
+        let mut diff = self.inner.lock().map_err(|_| EngineError::InternalState)?;
+        match diff.release().map_err(map_review_error)? {
+            CoreReviewReleaseOutcome::Released => Ok(ReviewReleaseOutcome::Released),
+            CoreReviewReleaseOutcome::AlreadyReleased => Ok(ReviewReleaseOutcome::AlreadyReleased),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct ScanProgressState {
     event_cursor: u64,
@@ -4455,6 +4687,7 @@ pub struct DuxEngine {
     state: Arc<Mutex<EngineState>>,
     close_completed: Arc<Condvar>,
     reviews: Arc<Mutex<Vec<Weak<SnapshotReviewSession>>>>,
+    diff_reviews: Arc<Mutex<Vec<Weak<SnapshotDiffReviewSession>>>>,
     direct_cargo_previews: Arc<Mutex<Vec<Weak<DirectCargoEnrollmentPreviewSession>>>>,
     cleanup_history_clear_previews: Arc<Mutex<Vec<Weak<CleanupHistoryClearPreviewSession>>>>,
     rust_target_plan_reviews: Arc<Mutex<Vec<Weak<RustTargetPlanReviewSession>>>>,
@@ -4481,6 +4714,7 @@ impl DuxEngine {
             state: Arc::new(Mutex::new(EngineState::Open(engine))),
             close_completed: Arc::new(Condvar::new()),
             reviews: Arc::new(Mutex::new(Vec::new())),
+            diff_reviews: Arc::new(Mutex::new(Vec::new())),
             direct_cargo_previews: Arc::new(Mutex::new(Vec::new())),
             cleanup_history_clear_previews: Arc::new(Mutex::new(Vec::new())),
             rust_target_plan_reviews: Arc::new(Mutex::new(Vec::new())),
@@ -5305,6 +5539,34 @@ impl DuxEngine {
         self.register_snapshot_review(engine, session)
     }
 
+    /// Prepare a read-only comparison against the exact review's immediately
+    /// preceding comparable retained snapshot. Rust selects and matches both
+    /// histories; the child exposes no current path or cleanup capability.
+    pub fn prepare_explorer_snapshot_diff_review(
+        &self,
+        parent: Arc<SnapshotReviewSession>,
+    ) -> Result<Arc<SnapshotDiffReviewSession>, EngineError> {
+        if !Arc::ptr_eq(&parent.engine_closed, &self.closed) {
+            return Err(EngineError::WrongParentReview);
+        }
+        let state = self.state.lock().map_err(|_| EngineError::InternalState)?;
+        let EngineState::Open(engine) = &*state else {
+            return Err(EngineError::Closed);
+        };
+        if self.closed.load(Ordering::Acquire) {
+            return Err(EngineError::Closed);
+        }
+        let current = parent
+            .inner
+            .lock()
+            .map_err(|_| EngineError::InternalState)?;
+        let diff = engine
+            .prepare_explorer_snapshot_diff_review(&current)
+            .map_err(map_review_error)?;
+        drop(current);
+        self.register_snapshot_diff_review(diff, &parent)
+    }
+
     /// Read Foundation iCloud metadata for one exact retained Explorer file.
     ///
     /// Rust selects and revalidates the path, owns provider/kind/allocation/
@@ -5598,6 +5860,7 @@ impl DuxEngine {
         let close_completed = Arc::clone(&self.close_completed);
         let operations = Arc::clone(&self.rust_target_plan_preparations);
         let reviews = Arc::clone(&self.reviews);
+        let diff_reviews = Arc::clone(&self.diff_reviews);
         let plan_reviews = Arc::clone(&self.rust_target_plan_reviews);
         let cargo_previews = Arc::clone(&self.direct_cargo_previews);
         let cleanup_history_clear_previews = Arc::clone(&self.cleanup_history_clear_previews);
@@ -5628,6 +5891,7 @@ impl DuxEngine {
             };
             if let Some(engine) = engine {
                 release_plan_review_registry(&plan_reviews);
+                release_snapshot_diff_review_registry(&diff_reviews);
                 release_snapshot_review_registry(&reviews, &operations);
                 release_direct_cargo_preview_registry(&cargo_previews, &operations);
                 release_cleanup_history_clear_preview_registry(&cleanup_history_clear_previews);
@@ -5909,6 +6173,37 @@ impl DuxEngine {
         reviews.push(Arc::downgrade(&review));
         Ok(review)
     }
+
+    fn register_snapshot_diff_review(
+        &self,
+        diff: CoreSnapshotDiffReviewSession,
+        parent: &Arc<SnapshotReviewSession>,
+    ) -> Result<Arc<SnapshotDiffReviewSession>, EngineError> {
+        let review = Arc::new(SnapshotDiffReviewSession {
+            inner: Mutex::new(diff),
+            parent: Arc::downgrade(parent),
+            engine_closed: Arc::clone(&self.closed),
+        });
+        if self.closed.load(Ordering::Acquire) {
+            let _ = review.release_inner();
+            return Err(EngineError::Closed);
+        }
+        let mut reviews = match self.diff_reviews.lock() {
+            Ok(reviews) => reviews,
+            Err(_) => {
+                let _ = review.release_inner();
+                return Err(EngineError::InternalState);
+            }
+        };
+        reviews.retain(|review| review.strong_count() != 0);
+        if self.closed.load(Ordering::Acquire) {
+            drop(reviews);
+            let _ = review.release_inner();
+            return Err(EngineError::Closed);
+        }
+        reviews.push(Arc::downgrade(&review));
+        Ok(review)
+    }
     fn with_engine<T>(
         &self,
         operation: impl FnOnce(&EngineHandle) -> Result<T, EngineError>,
@@ -6096,6 +6391,7 @@ impl DuxEngine {
     }
 
     fn release_registered_reviews(&self) {
+        release_snapshot_diff_review_registry(&self.diff_reviews);
         release_snapshot_review_registry(&self.reviews, &self.rust_target_plan_preparations);
     }
 
@@ -6138,6 +6434,16 @@ fn release_snapshot_review_registry(
         }
         drop(operation);
     });
+}
+
+fn release_snapshot_diff_review_registry(registry: &Mutex<Vec<Weak<SnapshotDiffReviewSession>>>) {
+    let reviews = match registry.lock() {
+        Ok(mut reviews) => std::mem::take(&mut *reviews),
+        Err(poisoned) => std::mem::take(&mut *poisoned.into_inner()),
+    };
+    for review in reviews.into_iter().filter_map(|review| review.upgrade()) {
+        let _ = review.release_inner();
+    }
 }
 
 fn release_plan_review_registry(registry: &Mutex<Vec<Weak<RustTargetPlanReviewSession>>>) {
@@ -7127,6 +7433,10 @@ fn map_review_error(error: CoreReviewError) -> EngineError {
         CoreReviewError::Closed => EngineError::Closed,
         CoreReviewError::ScanNotFound => EngineError::ScanNotFound,
         CoreReviewError::SnapshotUnavailable => EngineError::SnapshotUnavailable,
+        CoreReviewError::ComparableSnapshotUnavailable => {
+            EngineError::ComparableSnapshotUnavailable
+        }
+        CoreReviewError::WrongParentReview => EngineError::WrongParentReview,
         CoreReviewError::LeaseExpired => EngineError::ReviewExpired,
         CoreReviewError::NodeNotFound => EngineError::SnapshotNodeNotFound,
         CoreReviewError::NodeNotDirectory => EngineError::SnapshotNodeNotDirectory,
@@ -8663,6 +8973,141 @@ fn project_snapshot_treemap_cell(cell: CoreReviewTreemapCell) -> SnapshotTreemap
     }
 }
 
+const fn map_snapshot_diff_node_sort(sort: SnapshotDiffNodeSort) -> CoreSnapshotDiffNodeSort {
+    match sort {
+        SnapshotDiffNodeSort::NameAscending => CoreSnapshotDiffNodeSort::NameAscending,
+        SnapshotDiffNodeSort::MagnitudeDescending => CoreSnapshotDiffNodeSort::MagnitudeDescending,
+        SnapshotDiffNodeSort::CurrentBytesDescending => {
+            CoreSnapshotDiffNodeSort::CurrentBytesDescending
+        }
+    }
+}
+
+fn project_snapshot_diff_info(
+    info: CoreSnapshotDiffInfo,
+    released: bool,
+) -> Result<SnapshotDiffInfo, EngineError> {
+    Ok(SnapshotDiffInfo {
+        record_version: FFI_RECORD_VERSION,
+        current_scan_id: info.current_scan_id.as_str().to_owned(),
+        baseline_scan_id: info.baseline_scan_id.as_str().to_owned(),
+        current_started_at_unix_ms: system_time_ms(info.current_started_at)?,
+        current_completed_at_unix_ms: system_time_ms(info.current_completed_at)?,
+        baseline_started_at_unix_ms: system_time_ms(info.baseline_started_at)?,
+        baseline_completed_at_unix_ms: system_time_ms(info.baseline_completed_at)?,
+        current_coverage: ScanCoverageSummary {
+            record_version: FFI_RECORD_VERSION,
+            status: map_scan_coverage_status(info.current_coverage.status),
+            measured_permille: info.current_coverage.measured_permille,
+            issue_record_count: info.current_coverage.issue_record_count,
+            issue_occurrence_count: info.current_coverage.issue_occurrence_count,
+        },
+        baseline_coverage: ScanCoverageSummary {
+            record_version: FFI_RECORD_VERSION,
+            status: map_scan_coverage_status(info.baseline_coverage.status),
+            measured_permille: info.baseline_coverage.measured_permille,
+            issue_record_count: info.baseline_coverage.issue_record_count,
+            issue_occurrence_count: info.baseline_coverage.issue_occurrence_count,
+        },
+        released,
+    })
+}
+
+fn project_snapshot_diff_node(node: CoreSnapshotDiffNode) -> SnapshotDiffNode {
+    SnapshotDiffNode {
+        record_version: FFI_RECORD_VERSION,
+        id: node.id,
+        parent_id: node.parent_id,
+        depth: node.depth,
+        name: project_snapshot_node_name(node.name),
+        kind: project_snapshot_node_kind(node.kind),
+        category: project_snapshot_category(node.category),
+        change: match node.change {
+            CoreSnapshotDiffChange::Added => SnapshotDiffChange::Added,
+            CoreSnapshotDiffChange::Removed => SnapshotDiffChange::Removed,
+            CoreSnapshotDiffChange::Grew => SnapshotDiffChange::Grew,
+            CoreSnapshotDiffChange::Shrank => SnapshotDiffChange::Shrank,
+            CoreSnapshotDiffChange::Unchanged => SnapshotDiffChange::Unchanged,
+            CoreSnapshotDiffChange::Replaced => SnapshotDiffChange::Replaced,
+        },
+        logical_change: project_snapshot_diff_value(node.logical_change),
+        current_logical_bytes: node.current_logical_bytes,
+        baseline_logical_bytes: node.baseline_logical_bytes,
+        current_allocated_bytes: node.current_allocated_bytes,
+        baseline_allocated_bytes: node.baseline_allocated_bytes,
+        allocated_change: node.allocated_change.map(project_snapshot_diff_value),
+        current_file_count: node.current_file_count,
+        baseline_file_count: node.baseline_file_count,
+        current_child_count: node.current_child_count,
+        baseline_child_count: node.baseline_child_count,
+        current_scan_flags: node.current_scan_flags.map(project_snapshot_scan_flags),
+        baseline_scan_flags: node.baseline_scan_flags.map(project_snapshot_scan_flags),
+        can_descend: node.can_descend,
+    }
+}
+
+const fn project_snapshot_diff_value(value: CoreSnapshotDiffValue) -> SnapshotDiffValue {
+    SnapshotDiffValue {
+        direction: match value.direction {
+            CoreSnapshotDiffDirection::Growth => SnapshotDiffDirection::Growth,
+            CoreSnapshotDiffDirection::Shrinkage => SnapshotDiffDirection::Shrinkage,
+            CoreSnapshotDiffDirection::Unchanged => SnapshotDiffDirection::Unchanged,
+        },
+        magnitude_bytes: value.magnitude_bytes,
+    }
+}
+
+fn project_snapshot_diff_node_page(page: CoreSnapshotDiffNodePage) -> SnapshotDiffNodePage {
+    SnapshotDiffNodePage {
+        record_version: FFI_RECORD_VERSION,
+        parent_id: page.parent_id,
+        offset: page.offset,
+        total_children: page.total_children,
+        has_more: page.has_more,
+        total_growth_bytes: page.total_growth_bytes,
+        total_shrinkage_bytes: page.total_shrinkage_bytes,
+        unchanged_child_count: page.unchanged_child_count,
+        replaced_child_count: page.replaced_child_count,
+        nodes: page
+            .nodes
+            .into_iter()
+            .map(project_snapshot_diff_node)
+            .collect(),
+    }
+}
+
+fn project_snapshot_diff_treemap(treemap: CoreSnapshotDiffTreemap) -> SnapshotDiffTreemap {
+    SnapshotDiffTreemap {
+        record_version: FFI_RECORD_VERSION,
+        parent_id: treemap.parent_id,
+        total_children: treemap.total_children,
+        changed_child_count: treemap.changed_child_count,
+        total_growth_bytes: treemap.total_growth_bytes,
+        total_shrinkage_bytes: treemap.total_shrinkage_bytes,
+        other_growth_child_count: treemap.other_growth_child_count,
+        other_growth_bytes: treemap.other_growth_bytes,
+        other_shrinkage_child_count: treemap.other_shrinkage_child_count,
+        other_shrinkage_bytes: treemap.other_shrinkage_bytes,
+        unchanged_child_count: treemap.unchanged_child_count,
+        replaced_child_count: treemap.replaced_child_count,
+        cells: treemap
+            .cells
+            .into_iter()
+            .map(project_snapshot_diff_treemap_cell)
+            .collect(),
+    }
+}
+
+fn project_snapshot_diff_treemap_cell(
+    cell: CoreSnapshotDiffTreemapCell,
+) -> SnapshotDiffTreemapCell {
+    SnapshotDiffTreemapCell {
+        record_version: FFI_RECORD_VERSION,
+        node: project_snapshot_diff_node(cell.node),
+        magnitude_rank: cell.magnitude_rank,
+    }
+}
+
 fn project_snapshot_large_file_page(page: CoreReviewLargeFilePage) -> SnapshotLargeFilePage {
     SnapshotLargeFilePage {
         record_version: FFI_RECORD_VERSION,
@@ -8732,13 +9177,7 @@ fn project_snapshot_node(node: CoreReviewNode) -> SnapshotNode {
         id: node.id,
         parent_id: node.parent_id,
         depth: node.depth,
-        kind: match node.kind {
-            CoreReviewNodeKind::Directory => SnapshotNodeKind::Directory,
-            CoreReviewNodeKind::File => SnapshotNodeKind::File,
-            CoreReviewNodeKind::Symlink => SnapshotNodeKind::Symlink,
-            CoreReviewNodeKind::Other => SnapshotNodeKind::Other,
-            CoreReviewNodeKind::Error => SnapshotNodeKind::Error,
-        },
+        kind: project_snapshot_node_kind(node.kind),
         category: project_snapshot_category(node.category),
         name: project_snapshot_node_name(node.name),
         logical_bytes: node.logical_bytes,
@@ -8753,12 +9192,28 @@ fn project_snapshot_node(node: CoreReviewNode) -> SnapshotNode {
             seconds_since_unix_epoch: timestamp.seconds_since_unix_epoch,
             nanoseconds: timestamp.nanoseconds,
         }),
-        scan_flags: SnapshotNodeScanFlags {
-            inaccessible: node.scan_flags.inaccessible,
-            timed_out: node.scan_flags.timed_out,
-            hard_link_duplicate: node.scan_flags.hard_link_duplicate,
-            mount_boundary: node.scan_flags.mount_boundary,
-        },
+        scan_flags: project_snapshot_scan_flags(node.scan_flags),
+    }
+}
+
+const fn project_snapshot_node_kind(kind: CoreReviewNodeKind) -> SnapshotNodeKind {
+    match kind {
+        CoreReviewNodeKind::Directory => SnapshotNodeKind::Directory,
+        CoreReviewNodeKind::File => SnapshotNodeKind::File,
+        CoreReviewNodeKind::Symlink => SnapshotNodeKind::Symlink,
+        CoreReviewNodeKind::Other => SnapshotNodeKind::Other,
+        CoreReviewNodeKind::Error => SnapshotNodeKind::Error,
+    }
+}
+
+const fn project_snapshot_scan_flags(
+    flags: dux_core::engine::SnapshotReviewScanFlags,
+) -> SnapshotNodeScanFlags {
+    SnapshotNodeScanFlags {
+        inaccessible: flags.inaccessible,
+        timed_out: flags.timed_out,
+        hard_link_duplicate: flags.hard_link_duplicate,
+        mount_boundary: flags.mount_boundary,
     }
 }
 
@@ -11814,6 +12269,13 @@ mod tests {
         (temp, engine)
     }
 
+    fn scan_snapshot(engine: &DuxEngine, root: &Path) -> String {
+        let scan = engine.start_scan(scan_request(root)).unwrap();
+        let terminal = wait_for_scan(&scan.task);
+        assert_eq!(terminal.phase, TaskPhase::Succeeded);
+        terminal.result.unwrap().scan_id
+    }
+
     fn seed_terminal_cleanup_history(temp: &TempDir, engine: &DuxEngine, fixture: &str) -> String {
         let root = temp.path().join(fixture);
         std::fs::create_dir_all(&root).unwrap();
@@ -11879,10 +12341,10 @@ mod tests {
     }
 
     #[test]
-    fn reports_contract_forty_five_and_preserves_legacy_formatting() {
+    fn reports_contract_forty_six_and_preserves_legacy_formatting() {
         let _guard = ENGINE_TEST_LOCK.lock().unwrap();
         let (_temp, engine) = engine();
-        assert_eq!(library_version().ffi_contract_version, 45);
+        assert_eq!(library_version().ffi_contract_version, 46);
         assert_eq!(engine.library_version().unwrap(), library_version());
         assert_eq!(engine.format_size(1536).unwrap().display, "1.5 KB");
         assert!(engine.close());
@@ -18235,6 +18697,113 @@ mod tests {
             close_drained.release().unwrap(),
             ReviewReleaseOutcome::AlreadyReleased
         );
+    }
+
+    #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test renames only a TempDir-owned fixture to exercise removed snapshot transport"
+    )]
+    fn snapshot_diff_transport_is_parent_scoped_versioned_and_path_free() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (temp, engine) = engine();
+        let root = temp.path().join("diff-transport-root");
+        std::fs::create_dir_all(root.join("removed")).unwrap();
+        std::fs::write(root.join("removed/old"), [1_u8; 9]).unwrap();
+        std::fs::write(root.join("grown"), [2_u8; 3]).unwrap();
+        let baseline_scan_id = scan_snapshot(&engine, &root);
+        std::thread::sleep(Duration::from_millis(2));
+        // DUX-DESTRUCTIVE: allow=test-ffi-snapshot-diff-removed-rename -- move only one TempDir-owned fixture outside the scanned root to create a historical removed observation
+        std::fs::rename(root.join("removed"), temp.path().join("removed-outside")).unwrap();
+        std::fs::write(root.join("grown"), [3_u8; 17]).unwrap();
+        std::fs::write(root.join("added"), [4_u8; 5]).unwrap();
+        let current_scan_id = scan_snapshot(&engine, &root);
+
+        let parent = engine
+            .acquire_explorer_snapshot_review(current_scan_id.clone())
+            .unwrap();
+        let diff = engine
+            .prepare_explorer_snapshot_diff_review(Arc::clone(&parent))
+            .unwrap();
+        let info = diff.info().unwrap();
+        assert_eq!(info.record_version, FFI_RECORD_VERSION);
+        assert_eq!(info.current_scan_id, current_scan_id);
+        assert_eq!(info.baseline_scan_id, baseline_scan_id);
+        assert!(info.current_completed_at_unix_ms >= info.baseline_completed_at_unix_ms);
+        assert!(!info.released);
+
+        let root_node = diff.root_node().unwrap();
+        assert_eq!(root_node.record_version, FFI_RECORD_VERSION);
+        assert_eq!(root_node.id, 0);
+        assert!(root_node.can_descend);
+        let page = diff
+            .child_nodes(0, SnapshotDiffNodeSort::NameAscending, 0, 10)
+            .unwrap();
+        assert_eq!(page.record_version, FFI_RECORD_VERSION);
+        assert_eq!(page.total_children, 3);
+        assert!(page.total_growth_bytes > 0);
+        assert!(page.total_shrinkage_bytes > 0);
+        assert!(page.nodes.iter().any(|node| {
+            node.name.display == "added"
+                && node.change == SnapshotDiffChange::Added
+                && node.logical_change.direction == SnapshotDiffDirection::Growth
+        }));
+        let removed = page
+            .nodes
+            .iter()
+            .find(|node| node.name.display == "removed")
+            .unwrap();
+        assert_eq!(removed.change, SnapshotDiffChange::Removed);
+        assert!(removed.can_descend);
+        let removed_page = diff
+            .child_nodes(removed.id, SnapshotDiffNodeSort::MagnitudeDescending, 0, 10)
+            .unwrap();
+        assert_eq!(removed_page.nodes[0].name.display, "old");
+        assert_eq!(removed_page.nodes[0].change, SnapshotDiffChange::Removed);
+        let treemap = diff.treemap(0, 1).unwrap();
+        assert_eq!(treemap.record_version, FFI_RECORD_VERSION);
+        assert_eq!(treemap.cells.len(), 1);
+        assert!(treemap.other_growth_child_count > 0 || treemap.other_shrinkage_child_count > 0);
+        assert_eq!(
+            diff.child_nodes(0, SnapshotDiffNodeSort::NameAscending, 0, 0),
+            Err(EngineError::InvalidSnapshotNodePage)
+        );
+        assert_eq!(
+            diff.treemap(0, 0),
+            Err(EngineError::InvalidSnapshotTreemapBudget)
+        );
+        assert_eq!(diff.release().unwrap(), ReviewReleaseOutcome::Released);
+        assert_eq!(
+            diff.release().unwrap(),
+            ReviewReleaseOutcome::AlreadyReleased
+        );
+        let released_info = diff.info().unwrap();
+        assert!(released_info.released);
+        assert_eq!(released_info.current_scan_id, current_scan_id);
+        assert_eq!(released_info.baseline_scan_id, baseline_scan_id);
+        assert_eq!(diff.root_node(), Err(EngineError::ReviewExpired));
+        assert!(parent.root_node().is_ok());
+        assert_eq!(parent.release().unwrap(), ReviewReleaseOutcome::Released);
+
+        let invalidated_parent = engine
+            .acquire_explorer_snapshot_review(current_scan_id)
+            .unwrap();
+        let invalidated_diff = engine
+            .prepare_explorer_snapshot_diff_review(Arc::clone(&invalidated_parent))
+            .unwrap();
+        assert_eq!(
+            invalidated_parent.release().unwrap(),
+            ReviewReleaseOutcome::Released
+        );
+        assert_eq!(
+            invalidated_diff.root_node(),
+            Err(EngineError::WrongParentReview)
+        );
+        assert_eq!(
+            invalidated_diff.release().unwrap(),
+            ReviewReleaseOutcome::Released
+        );
+        assert!(engine.close());
     }
 
     #[test]

@@ -389,7 +389,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
     DuxSnapshotHistoryServing, DuxCleanupHistoryServing, DuxScanCoverageServing, HomeScanServing,
     Sendable
 {
-    fileprivate static let expectedFFIContractVersion: UInt32 = 45
+    fileprivate static let expectedFFIContractVersion: UInt32 = 46
     fileprivate static let expectedRecordVersion: UInt32 = 1
     private static let maximumTargetedProjectScanNodes: UInt32 = 50000
     private static let maximumTargetedProjectScanPassNodes: UInt32 = 200_000
@@ -3183,7 +3183,8 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         case .Closed, .InvalidStorage, .InvalidScanId, .InvalidCapacityObservation,
              .InvalidPressureEpisodeRequest,
              .ConflictingCapacityObservation, .SupersededCapacityObservation, .ScanNotFound,
-             .SnapshotUnavailable, .ReviewExpired, .SnapshotNodeNotFound,
+             .SnapshotUnavailable, .ComparableSnapshotUnavailable, .WrongParentReview,
+             .ReviewExpired, .SnapshotNodeNotFound,
              .SnapshotNodeNotDirectory, .InvalidSnapshotNodePage,
              .InvalidSnapshotTreemapBudget, .InvalidSnapshotLargeFileRequest,
              .InvalidSnapshotICloudObservationSourceRequest,

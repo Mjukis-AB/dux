@@ -578,14 +578,12 @@ newer database schema has won.
 
 This checkpoint does not implement:
 
-- last-complete-snapshot selection per root;
 - cross-process overlapping-root scan leases or cross-reboot/legacy-v8 recovery
   of an engine scan left `running` (schema v9 same-scope claimed recovery is
   implemented without snapshot authority);
-- FFI, Swift, or CLI scan/history transport;
-- candidate-path/evidence FFI/Swift browsing (contract v12 now provides bounded
-  root/direct-child pages, a coarse logical-size treemap, and a path-free Large
-  Files projection under review leases without changing the snapshot wire);
+- the native Explorer Changes presentation over contract v46's exact
+  same-root/same-identity predecessor selection, bounded union pages, and
+  separately accounted change treemap;
 - cross-reboot or unclaimed legacy recovery of `running` temp-lease parents;
   schema v9 same-scope recovery preserves the exact lease for terminal-temp
   reconciliation, and legacy external provisioning stages remain manual debt;

@@ -170,6 +170,29 @@ and unsupported lanes. Swift consumes the retained exact proof only after the
 entire graph validates. Native actions can therefore open exact read-only
 Candidates, Browse, or Coverage state, but cannot enter a planner or executor.
 
+Contract v46 adds a parent-scoped snapshot-comparison child to one exact
+Explorer review. Rust selects the immediately preceding succeeded,
+non-targeted, non-tombstoned snapshot only when its lossless root and non-null
+root-identity digest equal the parent. Selection follows retention's completion
+descending, start descending, scan-ID ascending order. The child reuses the
+parent's decoded document and owns exactly one baseline lease, so the existing
+two-document/1 GiB per-engine ceiling remains unchanged. Parent release,
+replacement, wrong-engine use, either lease's expiry, close, or partial
+acquisition invalidates the comparison and releases the baseline without
+consuming the parent.
+
+The v46 records contain opaque comparison-local IDs, lossless names, historical
+current/baseline values, explicit added/removed/grown/shrunk/unchanged/replaced
+states, direction plus `u64` magnitude, coverage summaries, bounded union
+pages, and magnitude-ranked treemaps with separate omitted-growth and
+omitted-shrinkage accounting. Rust matches hierarchical component bytes;
+snapshot-local node IDs, inode observations, and lossy display strings are not
+longitudinal keys. Removed-only directories remain navigable as history.
+Neither the comparison object nor any record exposes a current path,
+filesystem witness, candidate, reclaimability claim, plan, approval, AI input,
+schedule, callback, driver, or effect. Native presentation is a separate
+follow-up and must preserve those limitations.
+
 Contract v9 adds one path-free newest-available review acquisition. The core
 selects the deterministic newest succeeded, non-tombstoned snapshot and then
 uses the same exact scan-bound lease acquisition, which repeats catalog,

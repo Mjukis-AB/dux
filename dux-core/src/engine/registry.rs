@@ -82,6 +82,9 @@ use super::settings::{
     PermanentCleanupPolicyUpdate, SnapshotRetentionCap, SnapshotRetentionCapError,
     SnapshotRetentionCapSource, SnapshotRetentionCapUpdate,
 };
+use super::snapshot_diff_review::{
+    SnapshotDiffCoverage, SnapshotDiffMetadata, SnapshotDiffReviewSession,
+};
 use super::snapshot_review::{
     MAX_SNAPSHOT_REVIEW_CATEGORY_BYTES, MAX_SNAPSHOT_REVIEW_CATEGORY_ROOTS,
     SnapshotReviewCategoryRoot, SnapshotReviewError, SnapshotReviewOwner, SnapshotReviewSession,
@@ -1562,6 +1565,90 @@ impl EngineHandle {
             .cloned()
             .ok_or(SnapshotReviewError::InternalState)?;
         self.acquire_explorer_snapshot_review_reference(scan.id(), &reference)
+    }
+
+    /// Attach the immediately preceding comparable retained snapshot to one
+    /// exact Explorer review. The returned child is historical display state
+    /// only and cannot resolve live paths or enter any cleanup boundary.
+    pub fn prepare_explorer_snapshot_diff_review(
+        &self,
+        current: &SnapshotReviewSession,
+    ) -> Result<SnapshotDiffReviewSession, SnapshotReviewError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(SnapshotReviewError::Closed);
+        }
+        if !current.belongs_to(&self.inner.snapshot_review_owner)
+            || current.is_released()
+            || current.scan_id().as_str().starts_with("scan:targeted:")
+        {
+            return Err(SnapshotReviewError::WrongParentReview);
+        }
+        current.validate_current()?;
+        let current_scan = self
+            .inner
+            .store
+            .load_scan(current.scan_id())
+            .map_err(|error| {
+                map_snapshot_review_error(SnapshotRepositoryErrorKind::History(error.kind))
+            })?
+            .ok_or(SnapshotReviewError::ScanNotFound)?;
+        let baseline_scan = match self
+            .inner
+            .store
+            .load_previous_comparable_snapshot_scan(&current_scan)
+        {
+            Ok(Some(scan)) => scan,
+            Ok(None) => return Err(SnapshotReviewError::ComparableSnapshotUnavailable),
+            Err(error) if error.kind == HistoryErrorKind::NotFound => {
+                return Err(SnapshotReviewError::ComparableSnapshotUnavailable);
+            }
+            Err(error) => {
+                return Err(map_snapshot_review_error(
+                    SnapshotRepositoryErrorKind::History(error.kind),
+                ));
+            }
+        };
+        let baseline_reference = baseline_scan
+            .snapshot()
+            .cloned()
+            .ok_or(SnapshotReviewError::InternalState)?;
+        if current_scan.root() != baseline_scan.root()
+            || current_scan.root_identity_v1_sha256().is_none()
+            || current_scan.root_identity_v1_sha256() != baseline_scan.root_identity_v1_sha256()
+        {
+            return Err(SnapshotReviewError::ComparableSnapshotUnavailable);
+        }
+        let metadata = SnapshotDiffMetadata {
+            current_scan_id: current_scan.id().clone(),
+            baseline_scan_id: baseline_scan.id().clone(),
+            current_started_at: current_scan.started_at(),
+            current_completed_at: current_scan
+                .completed_at()
+                .ok_or(SnapshotReviewError::InternalState)?,
+            baseline_started_at: baseline_scan.started_at(),
+            baseline_completed_at: baseline_scan
+                .completed_at()
+                .ok_or(SnapshotReviewError::InternalState)?,
+            current_coverage: snapshot_diff_coverage(current_scan.coverage())?,
+            baseline_coverage: snapshot_diff_coverage(baseline_scan.coverage())?,
+        };
+        let mut baseline = self
+            .acquire_explorer_snapshot_review_reference(baseline_scan.id(), &baseline_reference)?;
+        if self.lifecycle() != EngineLifecycle::Open {
+            let _ = baseline.release();
+            return Err(SnapshotReviewError::Closed);
+        }
+        if let Err(error) = current.validate_current() {
+            let _ = baseline.release();
+            return Err(error);
+        }
+        Ok(SnapshotDiffReviewSession::new(
+            Arc::clone(&self.inner.snapshot_review_owner),
+            current.session_identity(),
+            current.plan_review_liveness(),
+            metadata,
+            baseline,
+        ))
     }
 
     fn acquire_explorer_snapshot_review_reference(
@@ -8011,6 +8098,23 @@ fn public_scan_summary(record: &ScanRecord) -> DurableScanSummary {
         },
         snapshot_recorded: record.snapshot().is_some(),
     }
+}
+
+fn snapshot_diff_coverage(
+    coverage: &crate::domain::ScanCoverage,
+) -> Result<SnapshotDiffCoverage, SnapshotReviewError> {
+    let issue_record_count =
+        u64::try_from(coverage.issues().len()).map_err(|_| SnapshotReviewError::BudgetExceeded)?;
+    let issue_occurrence_count = coverage.issues().iter().try_fold(0_u64, |total, issue| {
+        total.checked_add(u64::from(issue.occurrence_count()))
+    });
+    Ok(SnapshotDiffCoverage {
+        status: coverage.status(),
+        measured_permille: coverage.measured_permille().map(|value| value.get()),
+        issue_record_count,
+        issue_occurrence_count: issue_occurrence_count
+            .ok_or(SnapshotReviewError::BudgetExceeded)?,
+    })
 }
 
 const fn map_targeted_project_scan_history_error(

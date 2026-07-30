@@ -1,5 +1,25 @@
 # Changelog
 
+- Added the Rust-owned foundation for Explorer snapshot changes through UniFFI
+  contract v46. An exact active Explorer review can now prepare one subordinate
+  comparison against its immediately preceding succeeded, non-targeted,
+  non-tombstoned snapshot only when the lossless root bytes and non-null
+  code-owned root-identity digest match. Selection uses the same completion,
+  start, and scan-ID order as latest-two retention. The child reuses the parent
+  review and owns exactly one baseline lease, preserving the existing
+  two-document/1 GiB decoded-review ceiling; partial acquisition, close,
+  release, expiry, and wrong-parent cases fail closed. Rust matches
+  root-relative component bytes rather than snapshot-local IDs or lossy
+  display names and exposes bounded union pages plus magnitude-ranked treemaps,
+  so additions, removals, growth, shrinkage, unchanged entries, type
+  replacements, and removed-only directory drill-down remain explicit.
+  Logical change is represented as direction plus `u64` magnitude, and
+  treemaps account for omitted growth and shrinkage separately so opposing
+  changes never cancel in “Other.” The transport contains no live path,
+  candidate, reclaimability, plan, approval, AI input, provider command, or
+  cleanup capability. The native Changes visualization remains the next slice,
+  and the roadmap parent stays open until that accessible tree/treemap,
+  lifecycle fencing, and disclosure UI ships.
 - Added a read-only iCloud identity-capability probe through UniFFI contract
   v45. A manual item check now brackets two complete Foundation samples with
   current-account and current-file-version observations, then reports bounded

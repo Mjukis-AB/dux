@@ -969,6 +969,13 @@ public protocol DuxEngineProtocol: AnyObject, Sendable {
     func prepareCleanupHistoryClear() throws  -> CleanupHistoryClearPreviewSession
 
     /**
+     * Prepare a read-only comparison against the exact review's immediately
+     * preceding comparable retained snapshot. Rust selects and matches both
+     * histories; the child exposes no current path or cleanup capability.
+     */
+    func prepareExplorerSnapshotDiffReview(parent: SnapshotReviewSession) throws  -> SnapshotDiffReviewSession
+
+    /**
      * Prepare one exact Rust-target plan for presentation through an active
      * snapshot review. The request supplies only a candidate ID; Rust derives
      * the scan, path, mode, policy, plan identity, and time.
@@ -1389,6 +1396,20 @@ open func prepareCleanupHistoryClear()throws  -> CleanupHistoryClearPreviewSessi
     return try  FfiConverterTypeCleanupHistoryClearPreviewSession_lift(try rustCallWithError(FfiConverterTypeCleanupHistoryClearError_lift) {
     uniffi_dux_ffi_fn_method_duxengine_prepare_cleanup_history_clear(
             self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+    /**
+     * Prepare a read-only comparison against the exact review's immediately
+     * preceding comparable retained snapshot. Rust selects and matches both
+     * histories; the child exposes no current path or cleanup capability.
+     */
+open func prepareExplorerSnapshotDiffReview(parent: SnapshotReviewSession)throws  -> SnapshotDiffReviewSession  {
+    return try  FfiConverterTypeSnapshotDiffReviewSession_lift(try rustCallWithError(FfiConverterTypeEngineError_lift) {
+    uniffi_dux_ffi_fn_method_duxengine_prepare_explorer_snapshot_diff_review(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeSnapshotReviewSession_lower(parent),$0
     )
 })
 }
@@ -2538,6 +2559,178 @@ public func FfiConverterTypeScanTask_lift(_ handle: UInt64) throws -> ScanTask {
 #endif
 public func FfiConverterTypeScanTask_lower(_ value: ScanTask) -> UInt64 {
     return FfiConverterTypeScanTask.lower(value)
+}
+
+
+
+
+
+
+public protocol SnapshotDiffReviewSessionProtocol: AnyObject, Sendable {
+
+    func childNodes(parentId: UInt64, sort: SnapshotDiffNodeSort, offset: UInt64, limit: UInt16) throws  -> SnapshotDiffNodePage
+
+    func info() throws  -> SnapshotDiffInfo
+
+    func release() throws  -> ReviewReleaseOutcome
+
+    func renew() throws  -> SnapshotDiffInfo
+
+    func rootNode() throws  -> SnapshotDiffNode
+
+    func treemap(parentId: UInt64, maxCells: UInt16) throws  -> SnapshotDiffTreemap
+
+}
+open class SnapshotDiffReviewSession: SnapshotDiffReviewSessionProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_dux_ffi_fn_clone_snapshotdiffreviewsession(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_dux_ffi_fn_free_snapshotdiffreviewsession(handle, $0) }
+    }
+
+
+
+
+open func childNodes(parentId: UInt64, sort: SnapshotDiffNodeSort, offset: UInt64, limit: UInt16)throws  -> SnapshotDiffNodePage  {
+    return try  FfiConverterTypeSnapshotDiffNodePage_lift(try rustCallWithError(FfiConverterTypeEngineError_lift) {
+    uniffi_dux_ffi_fn_method_snapshotdiffreviewsession_child_nodes(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt64.lower(parentId),
+        FfiConverterTypeSnapshotDiffNodeSort_lower(sort),
+        FfiConverterUInt64.lower(offset),
+        FfiConverterUInt16.lower(limit),$0
+    )
+})
+}
+
+open func info()throws  -> SnapshotDiffInfo  {
+    return try  FfiConverterTypeSnapshotDiffInfo_lift(try rustCallWithError(FfiConverterTypeEngineError_lift) {
+    uniffi_dux_ffi_fn_method_snapshotdiffreviewsession_info(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+open func release()throws  -> ReviewReleaseOutcome  {
+    return try  FfiConverterTypeReviewReleaseOutcome_lift(try rustCallWithError(FfiConverterTypeEngineError_lift) {
+    uniffi_dux_ffi_fn_method_snapshotdiffreviewsession_release(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+open func renew()throws  -> SnapshotDiffInfo  {
+    return try  FfiConverterTypeSnapshotDiffInfo_lift(try rustCallWithError(FfiConverterTypeEngineError_lift) {
+    uniffi_dux_ffi_fn_method_snapshotdiffreviewsession_renew(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+open func rootNode()throws  -> SnapshotDiffNode  {
+    return try  FfiConverterTypeSnapshotDiffNode_lift(try rustCallWithError(FfiConverterTypeEngineError_lift) {
+    uniffi_dux_ffi_fn_method_snapshotdiffreviewsession_root_node(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+open func treemap(parentId: UInt64, maxCells: UInt16)throws  -> SnapshotDiffTreemap  {
+    return try  FfiConverterTypeSnapshotDiffTreemap_lift(try rustCallWithError(FfiConverterTypeEngineError_lift) {
+    uniffi_dux_ffi_fn_method_snapshotdiffreviewsession_treemap(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt64.lower(parentId),
+        FfiConverterUInt16.lower(maxCells),$0
+    )
+})
+}
+
+
+
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSnapshotDiffReviewSession: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = SnapshotDiffReviewSession
+
+    public static func lift(_ handle: UInt64) throws -> SnapshotDiffReviewSession {
+        return SnapshotDiffReviewSession(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: SnapshotDiffReviewSession) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SnapshotDiffReviewSession {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: SnapshotDiffReviewSession, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotDiffReviewSession_lift(_ handle: UInt64) throws -> SnapshotDiffReviewSession {
+    return try FfiConverterTypeSnapshotDiffReviewSession.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotDiffReviewSession_lower(_ value: SnapshotDiffReviewSession) -> UInt64 {
+    return FfiConverterTypeSnapshotDiffReviewSession.lower(value)
 }
 
 
@@ -8839,6 +9032,522 @@ public func FfiConverterTypeScanTaskResult_lower(_ value: ScanTaskResult) -> Rus
 }
 
 
+public struct SnapshotDiffInfo: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let currentScanId: String
+    public let baselineScanId: String
+    public let currentStartedAtUnixMs: Int64
+    public let currentCompletedAtUnixMs: Int64
+    public let baselineStartedAtUnixMs: Int64
+    public let baselineCompletedAtUnixMs: Int64
+    public let currentCoverage: ScanCoverageSummary
+    public let baselineCoverage: ScanCoverageSummary
+    public let released: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, currentScanId: String, baselineScanId: String, currentStartedAtUnixMs: Int64, currentCompletedAtUnixMs: Int64, baselineStartedAtUnixMs: Int64, baselineCompletedAtUnixMs: Int64, currentCoverage: ScanCoverageSummary, baselineCoverage: ScanCoverageSummary, released: Bool) {
+        self.recordVersion = recordVersion
+        self.currentScanId = currentScanId
+        self.baselineScanId = baselineScanId
+        self.currentStartedAtUnixMs = currentStartedAtUnixMs
+        self.currentCompletedAtUnixMs = currentCompletedAtUnixMs
+        self.baselineStartedAtUnixMs = baselineStartedAtUnixMs
+        self.baselineCompletedAtUnixMs = baselineCompletedAtUnixMs
+        self.currentCoverage = currentCoverage
+        self.baselineCoverage = baselineCoverage
+        self.released = released
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SnapshotDiffInfo: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSnapshotDiffInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SnapshotDiffInfo {
+        return
+            try SnapshotDiffInfo(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                currentScanId: FfiConverterString.read(from: &buf),
+                baselineScanId: FfiConverterString.read(from: &buf),
+                currentStartedAtUnixMs: FfiConverterInt64.read(from: &buf),
+                currentCompletedAtUnixMs: FfiConverterInt64.read(from: &buf),
+                baselineStartedAtUnixMs: FfiConverterInt64.read(from: &buf),
+                baselineCompletedAtUnixMs: FfiConverterInt64.read(from: &buf),
+                currentCoverage: FfiConverterTypeScanCoverageSummary.read(from: &buf),
+                baselineCoverage: FfiConverterTypeScanCoverageSummary.read(from: &buf),
+                released: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SnapshotDiffInfo, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterString.write(value.currentScanId, into: &buf)
+        FfiConverterString.write(value.baselineScanId, into: &buf)
+        FfiConverterInt64.write(value.currentStartedAtUnixMs, into: &buf)
+        FfiConverterInt64.write(value.currentCompletedAtUnixMs, into: &buf)
+        FfiConverterInt64.write(value.baselineStartedAtUnixMs, into: &buf)
+        FfiConverterInt64.write(value.baselineCompletedAtUnixMs, into: &buf)
+        FfiConverterTypeScanCoverageSummary.write(value.currentCoverage, into: &buf)
+        FfiConverterTypeScanCoverageSummary.write(value.baselineCoverage, into: &buf)
+        FfiConverterBool.write(value.released, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotDiffInfo_lift(_ buf: RustBuffer) throws -> SnapshotDiffInfo {
+    return try FfiConverterTypeSnapshotDiffInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotDiffInfo_lower(_ value: SnapshotDiffInfo) -> RustBuffer {
+    return FfiConverterTypeSnapshotDiffInfo.lower(value)
+}
+
+
+/**
+ * One union node from two retained historical snapshots. Its ID is opaque
+ * outside the exact comparison session and grants no live-path authority.
+ */
+public struct SnapshotDiffNode: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let id: UInt64
+    public let parentId: UInt64?
+    public let depth: UInt32
+    public let name: SnapshotNodeName
+    public let kind: SnapshotNodeKind
+    public let category: SnapshotStorageCategory
+    public let change: SnapshotDiffChange
+    public let logicalChange: SnapshotDiffValue
+    public let currentLogicalBytes: UInt64?
+    public let baselineLogicalBytes: UInt64?
+    public let currentAllocatedBytes: UInt64?
+    public let baselineAllocatedBytes: UInt64?
+    public let allocatedChange: SnapshotDiffValue?
+    public let currentFileCount: UInt64?
+    public let baselineFileCount: UInt64?
+    public let currentChildCount: UInt64?
+    public let baselineChildCount: UInt64?
+    public let currentScanFlags: SnapshotNodeScanFlags?
+    public let baselineScanFlags: SnapshotNodeScanFlags?
+    public let canDescend: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, id: UInt64, parentId: UInt64?, depth: UInt32, name: SnapshotNodeName, kind: SnapshotNodeKind, category: SnapshotStorageCategory, change: SnapshotDiffChange, logicalChange: SnapshotDiffValue, currentLogicalBytes: UInt64?, baselineLogicalBytes: UInt64?, currentAllocatedBytes: UInt64?, baselineAllocatedBytes: UInt64?, allocatedChange: SnapshotDiffValue?, currentFileCount: UInt64?, baselineFileCount: UInt64?, currentChildCount: UInt64?, baselineChildCount: UInt64?, currentScanFlags: SnapshotNodeScanFlags?, baselineScanFlags: SnapshotNodeScanFlags?, canDescend: Bool) {
+        self.recordVersion = recordVersion
+        self.id = id
+        self.parentId = parentId
+        self.depth = depth
+        self.name = name
+        self.kind = kind
+        self.category = category
+        self.change = change
+        self.logicalChange = logicalChange
+        self.currentLogicalBytes = currentLogicalBytes
+        self.baselineLogicalBytes = baselineLogicalBytes
+        self.currentAllocatedBytes = currentAllocatedBytes
+        self.baselineAllocatedBytes = baselineAllocatedBytes
+        self.allocatedChange = allocatedChange
+        self.currentFileCount = currentFileCount
+        self.baselineFileCount = baselineFileCount
+        self.currentChildCount = currentChildCount
+        self.baselineChildCount = baselineChildCount
+        self.currentScanFlags = currentScanFlags
+        self.baselineScanFlags = baselineScanFlags
+        self.canDescend = canDescend
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SnapshotDiffNode: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSnapshotDiffNode: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SnapshotDiffNode {
+        return
+            try SnapshotDiffNode(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                id: FfiConverterUInt64.read(from: &buf),
+                parentId: FfiConverterOptionUInt64.read(from: &buf),
+                depth: FfiConverterUInt32.read(from: &buf),
+                name: FfiConverterTypeSnapshotNodeName.read(from: &buf),
+                kind: FfiConverterTypeSnapshotNodeKind.read(from: &buf),
+                category: FfiConverterTypeSnapshotStorageCategory.read(from: &buf),
+                change: FfiConverterTypeSnapshotDiffChange.read(from: &buf),
+                logicalChange: FfiConverterTypeSnapshotDiffValue.read(from: &buf),
+                currentLogicalBytes: FfiConverterOptionUInt64.read(from: &buf),
+                baselineLogicalBytes: FfiConverterOptionUInt64.read(from: &buf),
+                currentAllocatedBytes: FfiConverterOptionUInt64.read(from: &buf),
+                baselineAllocatedBytes: FfiConverterOptionUInt64.read(from: &buf),
+                allocatedChange: FfiConverterOptionTypeSnapshotDiffValue.read(from: &buf),
+                currentFileCount: FfiConverterOptionUInt64.read(from: &buf),
+                baselineFileCount: FfiConverterOptionUInt64.read(from: &buf),
+                currentChildCount: FfiConverterOptionUInt64.read(from: &buf),
+                baselineChildCount: FfiConverterOptionUInt64.read(from: &buf),
+                currentScanFlags: FfiConverterOptionTypeSnapshotNodeScanFlags.read(from: &buf),
+                baselineScanFlags: FfiConverterOptionTypeSnapshotNodeScanFlags.read(from: &buf),
+                canDescend: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SnapshotDiffNode, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterUInt64.write(value.id, into: &buf)
+        FfiConverterOptionUInt64.write(value.parentId, into: &buf)
+        FfiConverterUInt32.write(value.depth, into: &buf)
+        FfiConverterTypeSnapshotNodeName.write(value.name, into: &buf)
+        FfiConverterTypeSnapshotNodeKind.write(value.kind, into: &buf)
+        FfiConverterTypeSnapshotStorageCategory.write(value.category, into: &buf)
+        FfiConverterTypeSnapshotDiffChange.write(value.change, into: &buf)
+        FfiConverterTypeSnapshotDiffValue.write(value.logicalChange, into: &buf)
+        FfiConverterOptionUInt64.write(value.currentLogicalBytes, into: &buf)
+        FfiConverterOptionUInt64.write(value.baselineLogicalBytes, into: &buf)
+        FfiConverterOptionUInt64.write(value.currentAllocatedBytes, into: &buf)
+        FfiConverterOptionUInt64.write(value.baselineAllocatedBytes, into: &buf)
+        FfiConverterOptionTypeSnapshotDiffValue.write(value.allocatedChange, into: &buf)
+        FfiConverterOptionUInt64.write(value.currentFileCount, into: &buf)
+        FfiConverterOptionUInt64.write(value.baselineFileCount, into: &buf)
+        FfiConverterOptionUInt64.write(value.currentChildCount, into: &buf)
+        FfiConverterOptionUInt64.write(value.baselineChildCount, into: &buf)
+        FfiConverterOptionTypeSnapshotNodeScanFlags.write(value.currentScanFlags, into: &buf)
+        FfiConverterOptionTypeSnapshotNodeScanFlags.write(value.baselineScanFlags, into: &buf)
+        FfiConverterBool.write(value.canDescend, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotDiffNode_lift(_ buf: RustBuffer) throws -> SnapshotDiffNode {
+    return try FfiConverterTypeSnapshotDiffNode.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotDiffNode_lower(_ value: SnapshotDiffNode) -> RustBuffer {
+    return FfiConverterTypeSnapshotDiffNode.lower(value)
+}
+
+
+public struct SnapshotDiffNodePage: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let parentId: UInt64
+    public let offset: UInt64
+    public let totalChildren: UInt64
+    public let hasMore: Bool
+    public let totalGrowthBytes: UInt64
+    public let totalShrinkageBytes: UInt64
+    public let unchangedChildCount: UInt64
+    public let replacedChildCount: UInt64
+    public let nodes: [SnapshotDiffNode]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, parentId: UInt64, offset: UInt64, totalChildren: UInt64, hasMore: Bool, totalGrowthBytes: UInt64, totalShrinkageBytes: UInt64, unchangedChildCount: UInt64, replacedChildCount: UInt64, nodes: [SnapshotDiffNode]) {
+        self.recordVersion = recordVersion
+        self.parentId = parentId
+        self.offset = offset
+        self.totalChildren = totalChildren
+        self.hasMore = hasMore
+        self.totalGrowthBytes = totalGrowthBytes
+        self.totalShrinkageBytes = totalShrinkageBytes
+        self.unchangedChildCount = unchangedChildCount
+        self.replacedChildCount = replacedChildCount
+        self.nodes = nodes
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SnapshotDiffNodePage: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSnapshotDiffNodePage: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SnapshotDiffNodePage {
+        return
+            try SnapshotDiffNodePage(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                parentId: FfiConverterUInt64.read(from: &buf),
+                offset: FfiConverterUInt64.read(from: &buf),
+                totalChildren: FfiConverterUInt64.read(from: &buf),
+                hasMore: FfiConverterBool.read(from: &buf),
+                totalGrowthBytes: FfiConverterUInt64.read(from: &buf),
+                totalShrinkageBytes: FfiConverterUInt64.read(from: &buf),
+                unchangedChildCount: FfiConverterUInt64.read(from: &buf),
+                replacedChildCount: FfiConverterUInt64.read(from: &buf),
+                nodes: FfiConverterSequenceTypeSnapshotDiffNode.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SnapshotDiffNodePage, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterUInt64.write(value.parentId, into: &buf)
+        FfiConverterUInt64.write(value.offset, into: &buf)
+        FfiConverterUInt64.write(value.totalChildren, into: &buf)
+        FfiConverterBool.write(value.hasMore, into: &buf)
+        FfiConverterUInt64.write(value.totalGrowthBytes, into: &buf)
+        FfiConverterUInt64.write(value.totalShrinkageBytes, into: &buf)
+        FfiConverterUInt64.write(value.unchangedChildCount, into: &buf)
+        FfiConverterUInt64.write(value.replacedChildCount, into: &buf)
+        FfiConverterSequenceTypeSnapshotDiffNode.write(value.nodes, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotDiffNodePage_lift(_ buf: RustBuffer) throws -> SnapshotDiffNodePage {
+    return try FfiConverterTypeSnapshotDiffNodePage.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotDiffNodePage_lower(_ value: SnapshotDiffNodePage) -> RustBuffer {
+    return FfiConverterTypeSnapshotDiffNodePage.lower(value)
+}
+
+
+public struct SnapshotDiffTreemap: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let parentId: UInt64
+    public let totalChildren: UInt64
+    public let changedChildCount: UInt64
+    public let totalGrowthBytes: UInt64
+    public let totalShrinkageBytes: UInt64
+    public let otherGrowthChildCount: UInt64
+    public let otherGrowthBytes: UInt64
+    public let otherShrinkageChildCount: UInt64
+    public let otherShrinkageBytes: UInt64
+    public let unchangedChildCount: UInt64
+    public let replacedChildCount: UInt64
+    public let cells: [SnapshotDiffTreemapCell]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, parentId: UInt64, totalChildren: UInt64, changedChildCount: UInt64, totalGrowthBytes: UInt64, totalShrinkageBytes: UInt64, otherGrowthChildCount: UInt64, otherGrowthBytes: UInt64, otherShrinkageChildCount: UInt64, otherShrinkageBytes: UInt64, unchangedChildCount: UInt64, replacedChildCount: UInt64, cells: [SnapshotDiffTreemapCell]) {
+        self.recordVersion = recordVersion
+        self.parentId = parentId
+        self.totalChildren = totalChildren
+        self.changedChildCount = changedChildCount
+        self.totalGrowthBytes = totalGrowthBytes
+        self.totalShrinkageBytes = totalShrinkageBytes
+        self.otherGrowthChildCount = otherGrowthChildCount
+        self.otherGrowthBytes = otherGrowthBytes
+        self.otherShrinkageChildCount = otherShrinkageChildCount
+        self.otherShrinkageBytes = otherShrinkageBytes
+        self.unchangedChildCount = unchangedChildCount
+        self.replacedChildCount = replacedChildCount
+        self.cells = cells
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SnapshotDiffTreemap: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSnapshotDiffTreemap: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SnapshotDiffTreemap {
+        return
+            try SnapshotDiffTreemap(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                parentId: FfiConverterUInt64.read(from: &buf),
+                totalChildren: FfiConverterUInt64.read(from: &buf),
+                changedChildCount: FfiConverterUInt64.read(from: &buf),
+                totalGrowthBytes: FfiConverterUInt64.read(from: &buf),
+                totalShrinkageBytes: FfiConverterUInt64.read(from: &buf),
+                otherGrowthChildCount: FfiConverterUInt64.read(from: &buf),
+                otherGrowthBytes: FfiConverterUInt64.read(from: &buf),
+                otherShrinkageChildCount: FfiConverterUInt64.read(from: &buf),
+                otherShrinkageBytes: FfiConverterUInt64.read(from: &buf),
+                unchangedChildCount: FfiConverterUInt64.read(from: &buf),
+                replacedChildCount: FfiConverterUInt64.read(from: &buf),
+                cells: FfiConverterSequenceTypeSnapshotDiffTreemapCell.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SnapshotDiffTreemap, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterUInt64.write(value.parentId, into: &buf)
+        FfiConverterUInt64.write(value.totalChildren, into: &buf)
+        FfiConverterUInt64.write(value.changedChildCount, into: &buf)
+        FfiConverterUInt64.write(value.totalGrowthBytes, into: &buf)
+        FfiConverterUInt64.write(value.totalShrinkageBytes, into: &buf)
+        FfiConverterUInt64.write(value.otherGrowthChildCount, into: &buf)
+        FfiConverterUInt64.write(value.otherGrowthBytes, into: &buf)
+        FfiConverterUInt64.write(value.otherShrinkageChildCount, into: &buf)
+        FfiConverterUInt64.write(value.otherShrinkageBytes, into: &buf)
+        FfiConverterUInt64.write(value.unchangedChildCount, into: &buf)
+        FfiConverterUInt64.write(value.replacedChildCount, into: &buf)
+        FfiConverterSequenceTypeSnapshotDiffTreemapCell.write(value.cells, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotDiffTreemap_lift(_ buf: RustBuffer) throws -> SnapshotDiffTreemap {
+    return try FfiConverterTypeSnapshotDiffTreemap.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotDiffTreemap_lower(_ value: SnapshotDiffTreemap) -> RustBuffer {
+    return FfiConverterTypeSnapshotDiffTreemap.lower(value)
+}
+
+
+public struct SnapshotDiffTreemapCell: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let node: SnapshotDiffNode
+    public let magnitudeRank: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, node: SnapshotDiffNode, magnitudeRank: UInt64) {
+        self.recordVersion = recordVersion
+        self.node = node
+        self.magnitudeRank = magnitudeRank
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SnapshotDiffTreemapCell: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSnapshotDiffTreemapCell: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SnapshotDiffTreemapCell {
+        return
+            try SnapshotDiffTreemapCell(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                node: FfiConverterTypeSnapshotDiffNode.read(from: &buf),
+                magnitudeRank: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SnapshotDiffTreemapCell, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterTypeSnapshotDiffNode.write(value.node, into: &buf)
+        FfiConverterUInt64.write(value.magnitudeRank, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotDiffTreemapCell_lift(_ buf: RustBuffer) throws -> SnapshotDiffTreemapCell {
+    return try FfiConverterTypeSnapshotDiffTreemapCell.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotDiffTreemapCell_lower(_ value: SnapshotDiffTreemapCell) -> RustBuffer {
+    return FfiConverterTypeSnapshotDiffTreemapCell.lower(value)
+}
+
+
+public struct SnapshotDiffValue: Equatable, Hashable {
+    public let direction: SnapshotDiffDirection
+    public let magnitudeBytes: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(direction: SnapshotDiffDirection, magnitudeBytes: UInt64) {
+        self.direction = direction
+        self.magnitudeBytes = magnitudeBytes
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SnapshotDiffValue: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSnapshotDiffValue: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SnapshotDiffValue {
+        return
+            try SnapshotDiffValue(
+                direction: FfiConverterTypeSnapshotDiffDirection.read(from: &buf),
+                magnitudeBytes: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SnapshotDiffValue, into buf: inout [UInt8]) {
+        FfiConverterTypeSnapshotDiffDirection.write(value.direction, into: &buf)
+        FfiConverterUInt64.write(value.magnitudeBytes, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotDiffValue_lift(_ buf: RustBuffer) throws -> SnapshotDiffValue {
+    return try FfiConverterTypeSnapshotDiffValue.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotDiffValue_lower(_ value: SnapshotDiffValue) -> RustBuffer {
+    return FfiConverterTypeSnapshotDiffValue.lower(value)
+}
+
+
 /**
  * Exact traversal accounting plus a bounded deterministic projection. The
  * source does not establish provider identity, current allocation, or
@@ -13884,6 +14593,8 @@ public enum EngineError: Swift.Error, Equatable, Hashable, Foundation.LocalizedE
     case SupersededCapacityObservation
     case ScanNotFound
     case SnapshotUnavailable
+    case ComparableSnapshotUnavailable
+    case WrongParentReview
     case ReviewExpired
     case SnapshotNodeNotFound
     case SnapshotNodeNotDirectory
@@ -13954,36 +14665,38 @@ public struct FfiConverterTypeEngineError: FfiConverterRustBuffer {
         case 9: return .SupersededCapacityObservation
         case 10: return .ScanNotFound
         case 11: return .SnapshotUnavailable
-        case 12: return .ReviewExpired
-        case 13: return .SnapshotNodeNotFound
-        case 14: return .SnapshotNodeNotDirectory
-        case 15: return .InvalidSnapshotNodePage
-        case 16: return .InvalidSnapshotTreemapBudget
-        case 17: return .InvalidSnapshotLargeFileRequest
-        case 18: return .InvalidSnapshotICloudObservationSourceRequest
-        case 19: return .InvalidSnapshotLiveTargetRequest
-        case 20: return .SnapshotLiveTargetUnsupported
-        case 21: return .SnapshotLivePathUnavailable
-        case 22: return .SnapshotLivePathMissing
-        case 23: return .SnapshotLivePathSymlink
-        case 24: return .SnapshotLivePathCrossVolume
-        case 25: return .SnapshotLivePathChanged
-        case 26: return .SnapshotLivePathAccessDenied
-        case 27: return .InvalidScanCoverageDetailsRequest
-        case 28: return .InvalidCandidateDetailRequest
-        case 29: return .CandidateEvaluationNotSucceeded
-        case 30: return .CandidateNotFound
-        case 31: return .CandidateCursorOutOfRange
-        case 32: return .CandidateReviewNotReviewable
-        case 33: return .ReadOnlyStore
-        case 34: return .IncompatibleSchema
-        case 35: return .Busy
-        case 36: return .UnsafeStorage
-        case 37: return .BudgetExceeded
-        case 38: return .CorruptData
-        case 39: return .IncompatibleSnapshot
-        case 40: return .OutcomeUnknown
-        case 41: return .InternalState
+        case 12: return .ComparableSnapshotUnavailable
+        case 13: return .WrongParentReview
+        case 14: return .ReviewExpired
+        case 15: return .SnapshotNodeNotFound
+        case 16: return .SnapshotNodeNotDirectory
+        case 17: return .InvalidSnapshotNodePage
+        case 18: return .InvalidSnapshotTreemapBudget
+        case 19: return .InvalidSnapshotLargeFileRequest
+        case 20: return .InvalidSnapshotICloudObservationSourceRequest
+        case 21: return .InvalidSnapshotLiveTargetRequest
+        case 22: return .SnapshotLiveTargetUnsupported
+        case 23: return .SnapshotLivePathUnavailable
+        case 24: return .SnapshotLivePathMissing
+        case 25: return .SnapshotLivePathSymlink
+        case 26: return .SnapshotLivePathCrossVolume
+        case 27: return .SnapshotLivePathChanged
+        case 28: return .SnapshotLivePathAccessDenied
+        case 29: return .InvalidScanCoverageDetailsRequest
+        case 30: return .InvalidCandidateDetailRequest
+        case 31: return .CandidateEvaluationNotSucceeded
+        case 32: return .CandidateNotFound
+        case 33: return .CandidateCursorOutOfRange
+        case 34: return .CandidateReviewNotReviewable
+        case 35: return .ReadOnlyStore
+        case 36: return .IncompatibleSchema
+        case 37: return .Busy
+        case 38: return .UnsafeStorage
+        case 39: return .BudgetExceeded
+        case 40: return .CorruptData
+        case 41: return .IncompatibleSnapshot
+        case 42: return .OutcomeUnknown
+        case 43: return .InternalState
 
          default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -14040,124 +14753,132 @@ public struct FfiConverterTypeEngineError: FfiConverterRustBuffer {
             writeInt(&buf, Int32(11))
 
 
-        case .ReviewExpired:
+        case .ComparableSnapshotUnavailable:
             writeInt(&buf, Int32(12))
 
 
-        case .SnapshotNodeNotFound:
+        case .WrongParentReview:
             writeInt(&buf, Int32(13))
 
 
-        case .SnapshotNodeNotDirectory:
+        case .ReviewExpired:
             writeInt(&buf, Int32(14))
 
 
-        case .InvalidSnapshotNodePage:
+        case .SnapshotNodeNotFound:
             writeInt(&buf, Int32(15))
 
 
-        case .InvalidSnapshotTreemapBudget:
+        case .SnapshotNodeNotDirectory:
             writeInt(&buf, Int32(16))
 
 
-        case .InvalidSnapshotLargeFileRequest:
+        case .InvalidSnapshotNodePage:
             writeInt(&buf, Int32(17))
 
 
-        case .InvalidSnapshotICloudObservationSourceRequest:
+        case .InvalidSnapshotTreemapBudget:
             writeInt(&buf, Int32(18))
 
 
-        case .InvalidSnapshotLiveTargetRequest:
+        case .InvalidSnapshotLargeFileRequest:
             writeInt(&buf, Int32(19))
 
 
-        case .SnapshotLiveTargetUnsupported:
+        case .InvalidSnapshotICloudObservationSourceRequest:
             writeInt(&buf, Int32(20))
 
 
-        case .SnapshotLivePathUnavailable:
+        case .InvalidSnapshotLiveTargetRequest:
             writeInt(&buf, Int32(21))
 
 
-        case .SnapshotLivePathMissing:
+        case .SnapshotLiveTargetUnsupported:
             writeInt(&buf, Int32(22))
 
 
-        case .SnapshotLivePathSymlink:
+        case .SnapshotLivePathUnavailable:
             writeInt(&buf, Int32(23))
 
 
-        case .SnapshotLivePathCrossVolume:
+        case .SnapshotLivePathMissing:
             writeInt(&buf, Int32(24))
 
 
-        case .SnapshotLivePathChanged:
+        case .SnapshotLivePathSymlink:
             writeInt(&buf, Int32(25))
 
 
-        case .SnapshotLivePathAccessDenied:
+        case .SnapshotLivePathCrossVolume:
             writeInt(&buf, Int32(26))
 
 
-        case .InvalidScanCoverageDetailsRequest:
+        case .SnapshotLivePathChanged:
             writeInt(&buf, Int32(27))
 
 
-        case .InvalidCandidateDetailRequest:
+        case .SnapshotLivePathAccessDenied:
             writeInt(&buf, Int32(28))
 
 
-        case .CandidateEvaluationNotSucceeded:
+        case .InvalidScanCoverageDetailsRequest:
             writeInt(&buf, Int32(29))
 
 
-        case .CandidateNotFound:
+        case .InvalidCandidateDetailRequest:
             writeInt(&buf, Int32(30))
 
 
-        case .CandidateCursorOutOfRange:
+        case .CandidateEvaluationNotSucceeded:
             writeInt(&buf, Int32(31))
 
 
-        case .CandidateReviewNotReviewable:
+        case .CandidateNotFound:
             writeInt(&buf, Int32(32))
 
 
-        case .ReadOnlyStore:
+        case .CandidateCursorOutOfRange:
             writeInt(&buf, Int32(33))
 
 
-        case .IncompatibleSchema:
+        case .CandidateReviewNotReviewable:
             writeInt(&buf, Int32(34))
 
 
-        case .Busy:
+        case .ReadOnlyStore:
             writeInt(&buf, Int32(35))
 
 
-        case .UnsafeStorage:
+        case .IncompatibleSchema:
             writeInt(&buf, Int32(36))
 
 
-        case .BudgetExceeded:
+        case .Busy:
             writeInt(&buf, Int32(37))
 
 
-        case .CorruptData:
+        case .UnsafeStorage:
             writeInt(&buf, Int32(38))
 
 
-        case .IncompatibleSnapshot:
+        case .BudgetExceeded:
             writeInt(&buf, Int32(39))
 
 
-        case .OutcomeUnknown:
+        case .CorruptData:
             writeInt(&buf, Int32(40))
 
 
-        case .InternalState:
+        case .IncompatibleSnapshot:
             writeInt(&buf, Int32(41))
+
+
+        case .OutcomeUnknown:
+            writeInt(&buf, Int32(42))
+
+
+        case .InternalState:
+            writeInt(&buf, Int32(43))
 
         }
     }
@@ -19360,6 +20081,249 @@ public func FfiConverterTypeScanTerminalStatus_lower(_ value: ScanTerminalStatus
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 
+public enum SnapshotDiffChange: Equatable, Hashable {
+
+    case added
+    case removed
+    case grew
+    case shrank
+    case unchanged
+    case replaced
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SnapshotDiffChange: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSnapshotDiffChange: FfiConverterRustBuffer {
+    typealias SwiftType = SnapshotDiffChange
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SnapshotDiffChange {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .added
+
+        case 2: return .removed
+
+        case 3: return .grew
+
+        case 4: return .shrank
+
+        case 5: return .unchanged
+
+        case 6: return .replaced
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: SnapshotDiffChange, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .added:
+            writeInt(&buf, Int32(1))
+
+
+        case .removed:
+            writeInt(&buf, Int32(2))
+
+
+        case .grew:
+            writeInt(&buf, Int32(3))
+
+
+        case .shrank:
+            writeInt(&buf, Int32(4))
+
+
+        case .unchanged:
+            writeInt(&buf, Int32(5))
+
+
+        case .replaced:
+            writeInt(&buf, Int32(6))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotDiffChange_lift(_ buf: RustBuffer) throws -> SnapshotDiffChange {
+    return try FfiConverterTypeSnapshotDiffChange.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotDiffChange_lower(_ value: SnapshotDiffChange) -> RustBuffer {
+    return FfiConverterTypeSnapshotDiffChange.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum SnapshotDiffDirection: Equatable, Hashable {
+
+    case growth
+    case shrinkage
+    case unchanged
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SnapshotDiffDirection: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSnapshotDiffDirection: FfiConverterRustBuffer {
+    typealias SwiftType = SnapshotDiffDirection
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SnapshotDiffDirection {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .growth
+
+        case 2: return .shrinkage
+
+        case 3: return .unchanged
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: SnapshotDiffDirection, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .growth:
+            writeInt(&buf, Int32(1))
+
+
+        case .shrinkage:
+            writeInt(&buf, Int32(2))
+
+
+        case .unchanged:
+            writeInt(&buf, Int32(3))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotDiffDirection_lift(_ buf: RustBuffer) throws -> SnapshotDiffDirection {
+    return try FfiConverterTypeSnapshotDiffDirection.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotDiffDirection_lower(_ value: SnapshotDiffDirection) -> RustBuffer {
+    return FfiConverterTypeSnapshotDiffDirection.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum SnapshotDiffNodeSort: Equatable, Hashable {
+
+    case nameAscending
+    case magnitudeDescending
+    case currentBytesDescending
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SnapshotDiffNodeSort: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSnapshotDiffNodeSort: FfiConverterRustBuffer {
+    typealias SwiftType = SnapshotDiffNodeSort
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SnapshotDiffNodeSort {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .nameAscending
+
+        case 2: return .magnitudeDescending
+
+        case 3: return .currentBytesDescending
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: SnapshotDiffNodeSort, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .nameAscending:
+            writeInt(&buf, Int32(1))
+
+
+        case .magnitudeDescending:
+            writeInt(&buf, Int32(2))
+
+
+        case .currentBytesDescending:
+            writeInt(&buf, Int32(3))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotDiffNodeSort_lift(_ buf: RustBuffer) throws -> SnapshotDiffNodeSort {
+    return try FfiConverterTypeSnapshotDiffNodeSort.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotDiffNodeSort_lower(_ value: SnapshotDiffNodeSort) -> RustBuffer {
+    return FfiConverterTypeSnapshotDiffNodeSort.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
 public enum SnapshotLiveTargetKind: Equatable, Hashable {
 
     case directory
@@ -21960,6 +22924,54 @@ fileprivate struct FfiConverterOptionTypeScanTaskResult: FfiConverterRustBuffer 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeSnapshotDiffValue: FfiConverterRustBuffer {
+    typealias SwiftType = SnapshotDiffValue?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeSnapshotDiffValue.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeSnapshotDiffValue.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeSnapshotNodeScanFlags: FfiConverterRustBuffer {
+    typealias SwiftType = SnapshotNodeScanFlags?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeSnapshotNodeScanFlags.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeSnapshotNodeScanFlags.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeSnapshotNodeTimestamp: FfiConverterRustBuffer {
     typealias SwiftType = SnapshotNodeTimestamp?
 
@@ -22721,6 +23733,56 @@ fileprivate struct FfiConverterSequenceTypeScanEvent: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeSnapshotDiffNode: FfiConverterRustBuffer {
+    typealias SwiftType = [SnapshotDiffNode]
+
+    public static func write(_ value: [SnapshotDiffNode], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeSnapshotDiffNode.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [SnapshotDiffNode] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [SnapshotDiffNode]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeSnapshotDiffNode.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeSnapshotDiffTreemapCell: FfiConverterRustBuffer {
+    typealias SwiftType = [SnapshotDiffTreemapCell]
+
+    public static func write(_ value: [SnapshotDiffTreemapCell], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeSnapshotDiffTreemapCell.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [SnapshotDiffTreemapCell] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [SnapshotDiffTreemapCell]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeSnapshotDiffTreemapCell.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeSnapshotICloudObservationTarget: FfiConverterRustBuffer {
     typealias SwiftType = [SnapshotICloudObservationTarget]
 
@@ -23098,6 +24160,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_dux_ffi_checksum_method_duxengine_prepare_cleanup_history_clear() != 64565) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_dux_ffi_checksum_method_duxengine_prepare_explorer_snapshot_diff_review() != 3591) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_dux_ffi_checksum_method_duxengine_prepare_rust_target_plan_review() != 60431) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -23204,6 +24269,24 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_scantask_poll() != 54370) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_snapshotdiffreviewsession_child_nodes() != 54489) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_snapshotdiffreviewsession_info() != 35105) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_snapshotdiffreviewsession_release() != 4379) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_snapshotdiffreviewsession_renew() != 57409) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_snapshotdiffreviewsession_root_node() != 61869) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_snapshotdiffreviewsession_treemap() != 15719) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_snapshotreviewsession_candidate_evidence() != 16596) {
