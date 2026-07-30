@@ -746,7 +746,7 @@ mod tests {
         EngineConfig::new(
             root.join("data/dux.sqlite3"),
             root.join("data/snapshots"),
-            root.join("cache"),
+            root.join("cache/Dux"),
         )
         .unwrap()
     }

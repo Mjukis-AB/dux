@@ -12,6 +12,7 @@ mod cleanup_history_clear;
 mod cloud_eviction_probe;
 mod config;
 mod emergency_recovery;
+mod managed_scan_cache;
 mod registry;
 mod rule_outcome;
 mod running_scan_debt;
@@ -57,6 +58,10 @@ pub use emergency_recovery::{
     EMERGENCY_RECOVERY_MAX_EVIDENCE_AGE, EMERGENCY_RECOVERY_POLICY_REVISION,
     EmergencyRecoveryError, EmergencyRecoveryGroup, EmergencyRecoveryLane,
     EmergencyRecoveryOrdering, EmergencyRecoverySource, MAX_EMERGENCY_RECOVERY_GROUPS,
+};
+pub use managed_scan_cache::{
+    DuxManagedScanCacheClearError, DuxManagedScanCacheClearPreview,
+    DuxManagedScanCacheClearPreviewInfo, DuxManagedScanCacheClearResult, DuxManagedScanCacheError,
 };
 pub use registry::{EngineHandle, StandaloneScanScopeLease};
 pub use rule_outcome::{
@@ -112,8 +117,8 @@ pub use snapshot_review::{
     SnapshotReviewTreemapCell,
 };
 pub use storage_footprint::{
-    DuxEmbeddedAiCacheFootprint, DuxOwnedStorageFootprint, DuxOwnedStorageFootprintError,
-    DuxOwnedStorageUsage, DuxSnapshotStorageFootprint,
+    DuxEmbeddedAiCacheFootprint, DuxManagedScanCacheFootprint, DuxOwnedStorageFootprint,
+    DuxOwnedStorageFootprintError, DuxOwnedStorageUsage, DuxSnapshotStorageFootprint,
 };
 pub use storage_thief::{
     DurableStorageThiefGroup, DurableStorageThiefRanking, MAX_STORAGE_THIEF_RANKING_GROUPS,

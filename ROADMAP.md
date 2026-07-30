@@ -2,7 +2,7 @@
 
 Status: Draft implementation specification
 
-Last updated: 2026-07-30
+Last updated: 2026-07-31
 
 Primary platform: macOS 14 or later
 
@@ -6535,9 +6535,62 @@ Tasks:
     Release settings omit the internal permanent-cleanup condition. The exact
     Release app passes strict Hardened Runtime ad-hoc signature verification
     and is the launched menu-bar process.
-  - The parent remains open for marker-owned cache storage, separately
-    confirmed cache/snapshot operations, and the lifecycle/reset-journal
-    foundation required before “Reset app data” can be truthful.
+  - [x] 2026-07-31 marker-owned managed scan cache: the progressive CLI has
+    migrated from caller-selected legacy cache files to the engine-owned fixed
+    `Dux/scan-cache-v1` child. The conventional outer cache directory remains
+    unmarked and outside DUX ownership, so existing legacy and unknown siblings
+    are never adopted, inventoried, attributed, migrated, or cleared. Cache
+    load/write failures are non-fatal presentation failures; the CLI scans
+    fresh, retains its exact standalone scan-scope lease through completed
+    cache publication, joins an older writer before rescan, and joins the final
+    writer before engine close. `--no-cache` skips reading but still refreshes
+    the managed cache after a successful scan.
+  - The independent SHA-256-bound managed wire format never falls back to the
+    legacy decoder. It preflights a fixed header before body allocation and
+    validates root/config binding, metadata/tree equality, contiguous graph,
+    unique sibling components, depths, aggregates, timestamps, paths, and
+    checksum. Hard caps admit at most a 64 MiB file, 200,000 nodes, depth 512,
+    8 KiB metadata, 24 MiB of names, 64 MiB of reconstructed paths, and 192 MiB
+    of modeled decode residency. The Unix store is descriptor-relative and
+    no-follow, requires current-user ownership, exact 0700/0600 permissions,
+    single-link files and acceptable ACLs, uses a retained cross-process writer
+    lock, fixed controls, create-new temporaries, atomic publication, bounded
+    inventories, and typed before-publication versus outcome-unknown results.
+    Normal save admission is 2,048 objects/64 temporaries; bounded recovery can
+    observe and clear one additional object and temporary, then fails closed.
+    Windows deliberately reports unsupported until equivalent handle/DACL
+    evidence exists.
+  - UniFFI v53 extends the path-free DUX-owned footprint with exact managed
+    cache control, published-entry, temporary-remnant, and total usage. The
+    checked additive physical total is now database/history + snapshots +
+    managed cache; embedded AI remains a non-additive SQLite subset. Native
+    **Storage & Privacy** presents all three physical shares with redundant
+    labels, symbols, colors, and patterns plus exact cache counts and charged
+    usage.
+  - Clearing uses one engine-bound, consume-once preview over the exact current
+    entries and recognized temporaries, expires after two monotonic minutes,
+    accepts no path/key/name/selector, and requires a separate native
+    destructive confirmation spelling out counts, accounting, exclusions, and
+    the absence of a free-space promise. The final locked inventory must match
+    before effect. Controls, outer/legacy cache siblings, embedded AI,
+    database/history, snapshots, settings, and user files are unreachable.
+    Changed state is rejected before effect; a possibly committed result is
+    reported as outcome unknown, remeasured once, and never retried.
+  - Verification passes formatting, workspace check, warning-denied Clippy,
+    the full 1,263-case serialized core lane, all 48 CLI unit and six
+    process-boundary tests, all ordinary UniFFI tests, all 39 repository script
+    tests, the clean 299-source destructive-call audit, and all 622 linked
+    native tests. Debug and Release generation produce byte-identical Swift
+    bindings with SHA-256
+    `fea84f8edf0693aa407c9e1cf401134161b7de1e17902a59c3fbcdffbe06177c`;
+    the generated and embedded CLI SHA-256 is
+    `8e2838b6cbf8184a2da4031c59454c237679b3fc9f4e7539c5c888105d9a440a`.
+    Both unsigned apps and embedded CLIs are universal arm64/x86_64, target
+    macOS 14.0, retain `LSUIElement=true`, and have identical three-file app
+    layouts.
+  - The parent remains open for separately confirmed snapshot operations and
+    the lifecycle/reset-journal foundation required before “Reset app data”
+    can be truthful.
 - [x] Add the bounded schema-v14 cleanup-owner provenance checkpoint. New
   cleanup claims can bind separate domain-separated stable-host and boot-scope
   digests plus the only current recovery policy, `resumable`; every migrated

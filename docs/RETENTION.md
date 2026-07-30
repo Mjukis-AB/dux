@@ -284,13 +284,14 @@ locks.
 ### Read-only DUX storage footprint
 
 The public footprint observation is a bounded measurement of DUX's active
-private database and snapshot stores, not a retention decision. It accepts no
-path, name, scan ID, inventory, selector, cap override, or capability and
-cannot start maintenance or authorize removal. The database-to-snapshot lock
-order remains live for the whole observation. Both inventories are revalidated
-before return, and an unsafe replacement, size drift, incompatible schema,
-budget limit, or arithmetic inconsistency fails the complete observation
-without returning partial totals.
+private database, snapshot, and marker-owned scan-cache stores, not a
+retention decision. It accepts no path, name, scan ID, inventory, selector,
+cap override, or capability and cannot start maintenance or authorize
+user-file removal. The database-to-snapshot-to-cache lock order remains live
+for the whole observation. All retained stores are revalidated before return,
+and an unsafe replacement, size drift, incompatible schema, budget limit, or
+arithmetic inconsistency fails the complete observation without returning
+partial totals.
 
 Database usage includes only the retained SQLite main file, the exact
 `-wal`/`-shm`/`-journal` sidecars when present, and stable marker, writer,
@@ -299,9 +300,12 @@ complete bounded retention inventory and separates controls, protected and
 retention-eligible available finals, tombstoned residuals, physical orphans,
 and active, quiescent, and unleased recognized temporary files. Logical length
 and handle-derived allocation are reported independently; charged usage is the
-checked sum of each file's `max(logical, allocated)`. Database plus snapshot
-usage is the sole additive physical total. Directory-entry metadata and
-unattributable interrupted provisioning stages are excluded.
+checked sum of each file's `max(logical, allocated)`. The managed-cache
+component separately reports its marker/lock controls, published entries, and
+recognized quiescent temporary remnants. Database plus snapshot plus managed
+cache usage is the checked additive physical total. Directory-entry metadata,
+the conventional outer cache container, and unattributable interrupted
+provisioning stages are excluded.
 
 Embedded AI-cache accounting is deliberately non-additive. One bounded,
 allocation-constant SQLite pager sums the exact variable-length insight ID,
@@ -314,15 +318,29 @@ returning a partial count. These logical bytes are already inside database
 usage, and deleting records does not imply an immediate reduction in the
 database file or free-space increase.
 
-The legacy CLI cache is also excluded. Its directory is selected by the caller
-through the platform cache convention and contains no current DUX ownership
-marker, so neither reporting nor future clearing may claim it until a separate
-marker-owned cache migration proves ownership. UniFFI v52 and Swift revalidate
-the complete path-free accounting algebra before presenting it. Native
-Settings loads on entry and refreshes only on explicit request; a failed
-refresh preserves the last complete observation. Its chart contains only the
-two additive database and snapshot components, while AI content remains a
-separate labelled row.
+Legacy caller-selected CLI cache files remain excluded. The conventional
+platform `Dux` cache directory is only a container: ownership begins at its
+fixed `scan-cache-v1` child after exact marker, control, identity, ownership,
+mode, link, and bounded-inventory validation. DUX never adopts or inventories
+outer siblings. UniFFI v53 and Swift revalidate the complete path-free
+accounting algebra before presenting it. Native Settings loads on entry and
+refreshes only on explicit request; a failed refresh preserves the last
+complete observation. Its chart contains the three additive database,
+snapshot, and managed-cache components, while AI content remains a separate
+labelled row.
+
+The managed-cache clear operation is separate from retention. The engine
+prepares one consume-once, engine-bound, path-free preview of the exact current
+published entries and recognized temporaries. Its two-minute lifetime is
+enforced by monotonic time. Confirmation carries counts and logical,
+allocated, and charged usage but no path, filename, key, selector, or general
+delete capability. The final writer-lock inventory must match the preview
+exactly before the first unlink. Clearing preserves the ownership controls and
+cannot reach the outer/legacy cache, embedded AI, SQLite/history, snapshots,
+settings, or user files. Changed state is rejected before effect. Once an
+effect may have occurred, uncertainty is reported as `outcome_unknown`; native
+code remeasures storage and never retries the deletion. Reported charged bytes
+are accounting, not a promise that free space will increase.
 
 Terminal scan summaries and their original snapshot references are immutable.
 Snapshot retention is therefore not allowed to clear or rewrite that historical

@@ -51,9 +51,19 @@ protocol DuxSnapshotRetentionCapServing: Sendable {
     func resetSnapshotRetentionCap() async throws -> SnapshotRetentionCapUpdateResultModel
 }
 
+protocol DuxManagedScanCacheClearPreviewLease: AnyObject, Sendable {
+    var preview: DuxManagedScanCacheClearPreviewModel { get }
+    func release() async
+}
+
 protocol DuxOwnedStorageFootprintServing: Sendable {
     func loadOwnedStorageFootprint() async throws
         -> DuxOwnedStorageFootprintModel
+    func prepareManagedScanCacheClear() async throws
+        -> any DuxManagedScanCacheClearPreviewLease
+    func clearManagedScanCache(
+        _ preview: any DuxManagedScanCacheClearPreviewLease
+    ) async throws -> DuxManagedScanCacheClearResultModel
 }
 
 extension DuxOwnedStorageFootprintServing {
@@ -61,6 +71,18 @@ extension DuxOwnedStorageFootprintServing {
         -> DuxOwnedStorageFootprintModel
     {
         throw DuxOwnedStorageFootprintServiceError.unavailable
+    }
+
+    func prepareManagedScanCacheClear() async throws
+        -> any DuxManagedScanCacheClearPreviewLease
+    {
+        throw DuxManagedScanCacheClearServiceError.unavailable
+    }
+
+    func clearManagedScanCache(
+        _: any DuxManagedScanCacheClearPreviewLease
+    ) async throws -> DuxManagedScanCacheClearResultModel {
+        throw DuxManagedScanCacheClearServiceError.unavailable
     }
 }
 
@@ -473,7 +495,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
     DuxSnapshotHistoryServing, DuxCleanupHistoryServing, DuxScanCoverageServing, HomeScanServing,
     Sendable
 {
-    fileprivate static let expectedFFIContractVersion: UInt32 = 52
+    fileprivate static let expectedFFIContractVersion: UInt32 = 53
     fileprivate static let expectedRecordVersion: UInt32 = 1
     private static let maximumTargetedProjectScanNodes: UInt32 = 50000
     private static let maximumTargetedProjectScanPassNodes: UInt32 = 200_000
@@ -823,6 +845,80 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
             } catch let error as OwnedStorageFootprintError {
                 throw Self.ownedStorageFootprintError(error)
             }
+        }
+    }
+
+    func prepareManagedScanCacheClear() async throws
+        -> any DuxManagedScanCacheClearPreviewLease
+    {
+        try await state.perform { state in
+            precondition(!Thread.isMainThread, "Blocking FFI work reached the main thread")
+            let engine = try Self.resolveManagedScanCacheClearEngine(state)
+            do {
+                let preview = try engine.prepareManagedScanCacheClear()
+                do {
+                    let model = try Self.managedScanCacheClearPreview(
+                        preview.info()
+                    )
+                    return FFIManagedScanCacheClearPreviewLease(
+                        ffiPreview: preview,
+                        preview: model,
+                        state: state
+                    )
+                } catch {
+                    _ = try? preview.release()
+                    throw error
+                }
+            } catch let error as ManagedScanCacheClearError {
+                throw Self.managedScanCacheClearError(error)
+            }
+        }
+    }
+
+    func clearManagedScanCache(
+        _ preview: any DuxManagedScanCacheClearPreviewLease
+    ) async throws -> DuxManagedScanCacheClearResultModel {
+        try await state.perform { state in
+            precondition(!Thread.isMainThread, "Blocking FFI work reached the main thread")
+            guard let preview = preview as? FFIManagedScanCacheClearPreviewLease else {
+                throw DuxManagedScanCacheClearServiceError.wrongEngine
+            }
+            let engine = try Self.resolveManagedScanCacheClearEngine(state)
+            let ffiPreview = try preview.take(for: state)
+            let response: ManagedScanCacheClearResult
+            do {
+                response = try engine.clearManagedScanCache(preview: ffiPreview)
+            } catch let error as ManagedScanCacheClearError {
+                throw Self.managedScanCacheClearError(error)
+            }
+            let clearedUsage: DuxOwnedStorageUsageModel
+            do {
+                clearedUsage = try Self.ownedStorageUsage(response.clearedUsage)
+            } catch {
+                throw DuxManagedScanCacheClearServiceError.outcomeUnknown
+            }
+            let expected = preview.preview
+            let expectedClearedCount = response.clearedEntryCount
+                .addingReportingOverflow(response.clearedTemporaryCount)
+            guard
+                response.recordVersion == Self.expectedRecordVersion,
+                !expectedClearedCount.overflow,
+                response.clearedEntryCount == expected.entryCount,
+                response.clearedTemporaryCount == expected.temporaryCount,
+                response.clearedCount == expected.clearableCount,
+                response.clearedCount == expectedClearedCount.partialValue,
+                clearedUsage == expected.clearable
+            else {
+                // Rust may already have committed deletion. A malformed
+                // success is uncertain and must never become retry authority.
+                throw DuxManagedScanCacheClearServiceError.outcomeUnknown
+            }
+            return DuxManagedScanCacheClearResultModel(
+                clearedEntryCount: response.clearedEntryCount,
+                clearedTemporaryCount: response.clearedTemporaryCount,
+                clearedCount: response.clearedCount,
+                clearedUsage: clearedUsage
+            )
         }
     }
 
@@ -1593,7 +1689,10 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
             )
             return EngineStorageRoots(
                 dataRoot: root.appending(path: "data", directoryHint: .isDirectory).path,
-                cacheRoot: root.appending(path: "cache", directoryHint: .isDirectory).path
+                cacheRoot: root
+                    .appending(path: "cache", directoryHint: .isDirectory)
+                    .appending(path: "Dux", directoryHint: .isDirectory)
+                    .path
             )
         }
         let manager = FileManager.default
@@ -2079,10 +2178,24 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
             footprint.snapshots.temporaryUnleased
         )
         let snapshotTotal = try ownedStorageUsage(footprint.snapshots.total)
+        let managedScanCacheControls = try ownedStorageUsage(
+            footprint.managedScanCache.controls
+        )
+        let managedScanCacheEntries = try ownedStorageUsage(
+            footprint.managedScanCache.entries
+        )
+        let managedScanCacheTemporary = try ownedStorageUsage(
+            footprint.managedScanCache.temporary
+        )
+        let managedScanCacheTotal = try ownedStorageUsage(
+            footprint.managedScanCache.total
+        )
         let physicalTotal = try ownedStorageUsage(footprint.physicalTotal)
 
         guard
             footprint.snapshots.recordVersion == expectedRecordVersion,
+            footprint.managedScanCache.recordVersion
+                == expectedRecordVersion,
             footprint.embeddedAiCache.recordVersion == expectedRecordVersion
         else {
             throw DuxOwnedStorageFootprintServiceError.invalidResponse
@@ -2109,9 +2222,22 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
             ),
             addOwnedStorageUsage
         )
+        let classifiedManagedScanCacheTotal = try [
+            managedScanCacheControls,
+            managedScanCacheEntries,
+            managedScanCacheTemporary,
+        ]
+        .reduce(
+            DuxOwnedStorageUsageModel.zero,
+            addOwnedStorageUsage
+        )
         let expectedPhysicalTotal = try addOwnedStorageUsage(
-            database,
-            snapshotTotal
+            try addOwnedStorageUsage(database, snapshotTotal),
+            managedScanCacheTotal
+        )
+        let managedScanCacheObjectCount = try checkedAdd(
+            footprint.managedScanCache.entryCount,
+            footprint.managedScanCache.temporaryCount
         )
         let availableCount = try checkedAdd(
             footprint.snapshots.protectedCount,
@@ -2168,7 +2294,20 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         guard
             classifiedAvailable == available,
             classifiedSnapshotTotal == snapshotTotal,
+            classifiedManagedScanCacheTotal == managedScanCacheTotal,
             expectedPhysicalTotal == physicalTotal,
+            managedScanCacheObjectCount
+                <= DuxManagedScanCacheFootprintModel.maximumObjectCount,
+            footprint.managedScanCache.temporaryCount
+                <= DuxManagedScanCacheFootprintModel
+                    .maximumTemporaryObjectCount,
+            footprint.managedScanCache.entryCount > 0
+                || managedScanCacheEntries == .zero,
+            footprint.managedScanCache.temporaryCount > 0
+                || managedScanCacheTemporary == .zero,
+            managedScanCacheControls != .zero
+                || (managedScanCacheObjectCount == 0
+                    && managedScanCacheTotal == .zero),
             availableCount == footprint.snapshots.availableCount,
             physicalSnapshotObjectCount
                 <= DuxSnapshotStorageFootprintModel.maximumObjectCount,
@@ -2231,6 +2370,15 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
                     footprint.snapshots.nonEvictableOverCap,
                 accountingUnstable:
                     footprint.snapshots.accountingUnstable
+            ),
+            managedScanCache: DuxManagedScanCacheFootprintModel(
+                controls: managedScanCacheControls,
+                entries: managedScanCacheEntries,
+                temporary: managedScanCacheTemporary,
+                total: managedScanCacheTotal,
+                entryCount: footprint.managedScanCache.entryCount,
+                temporaryCount:
+                    footprint.managedScanCache.temporaryCount
             ),
             embeddedAiCache: DuxEmbeddedAiCacheFootprintModel(
                 recordCount: ai.recordCount,
@@ -2320,6 +2468,68 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
             throw DuxOwnedStorageFootprintServiceError.invalidResponse
         }
         return result.partialValue
+    }
+
+    private static func managedScanCacheClearPreview(
+        _ response: ManagedScanCacheClearPreviewInfo
+    ) throws -> DuxManagedScanCacheClearPreviewModel {
+        let clearable: DuxOwnedStorageUsageModel
+        do {
+            clearable = try ownedStorageUsage(response.clearable)
+        } catch {
+            throw DuxManagedScanCacheClearServiceError.invalidResponse
+        }
+        let expectedCount = response.entryCount.addingReportingOverflow(
+            response.temporaryCount
+        )
+        guard
+            response.recordVersion == expectedRecordVersion,
+            !expectedCount.overflow,
+            response.clearableCount == expectedCount.partialValue,
+            (1 ... DuxManagedScanCacheFootprintModel.maximumObjectCount)
+                .contains(response.clearableCount),
+            response.temporaryCount
+                <= DuxManagedScanCacheFootprintModel.maximumTemporaryObjectCount,
+            response.preparedAtUnixMs >= 0,
+            response.expiresAtUnixMs > response.preparedAtUnixMs
+        else {
+            throw DuxManagedScanCacheClearServiceError.invalidResponse
+        }
+        return DuxManagedScanCacheClearPreviewModel(
+            entryCount: response.entryCount,
+            temporaryCount: response.temporaryCount,
+            clearableCount: response.clearableCount,
+            clearable: clearable,
+            preparedAt: Date(
+                timeIntervalSince1970:
+                    Double(response.preparedAtUnixMs) / 1_000
+            ),
+            expiresAt: Date(
+                timeIntervalSince1970:
+                    Double(response.expiresAtUnixMs) / 1_000
+            )
+        )
+    }
+
+    private static func managedScanCacheClearError(
+        _ error: ManagedScanCacheClearError
+    ) -> DuxManagedScanCacheClearServiceError {
+        switch error {
+        case .Closed: .closed
+        case .NothingToClear: .nothingToClear
+        case .ReadOnlyStore: .readOnlyStore
+        case .ChangedSincePreview: .changedSincePreview
+        case .PreviewExpired: .previewExpired
+        case .WrongEngine: .wrongEngine
+        case .PreviewUnavailable: .previewUnavailable
+        case .Busy: .retryable
+        case .UnsafeStorage: .unsafeStorage
+        case .BudgetExceeded: .budgetExceeded
+        case .CorruptData: .corruptData
+        case .OutcomeUnknown: .outcomeUnknown
+        case .Unavailable: .unavailable
+        case .InternalState: .internalState
+        }
     }
 
     private static func ownedStorageFootprintError(
@@ -3536,6 +3746,23 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         }
     }
 
+    private static func resolveManagedScanCacheClearEngine(
+        _ state: EngineServiceState
+    ) throws -> DuxEngine {
+        do {
+            return try state.resolveEngine()
+        } catch let error as EngineServiceError {
+            throw switch error {
+            case .closed: DuxManagedScanCacheClearServiceError.closed
+            case .retryable: DuxManagedScanCacheClearServiceError.retryable
+            case .unavailable: DuxManagedScanCacheClearServiceError.unavailable
+            case .invalidCapacityObservation, .conflictingCapacityObservation,
+                 .supersededCapacityObservation, .unexpected:
+                DuxManagedScanCacheClearServiceError.invalidResponse
+            }
+        }
+    }
+
     private static func resolvePermanentCleanupEngine(
         _ state: EngineServiceState
     ) throws -> DuxEngine {
@@ -4125,6 +4352,51 @@ private final class FFICleanupHistoryClearPreviewLease:
         dispatchPrecondition(condition: .onQueue(state.queue))
         guard isAvailable else {
             throw CleanupHistoryClearServiceError.previewUnavailable
+        }
+        isAvailable = false
+        return ffiPreview
+    }
+
+    func release() async {
+        let ffiPreview = ffiPreview
+        await state.performNonthrowing { [self] _ in
+            guard isAvailable else {
+                return
+            }
+            isAvailable = false
+            _ = try? ffiPreview.release()
+        }
+    }
+}
+
+private final class FFIManagedScanCacheClearPreviewLease:
+    DuxManagedScanCacheClearPreviewLease, @unchecked Sendable
+{
+    let preview: DuxManagedScanCacheClearPreviewModel
+
+    private let ffiPreview: ManagedScanCacheClearPreviewSession
+    private let state: EngineServiceState
+    private var isAvailable = true
+
+    init(
+        ffiPreview: ManagedScanCacheClearPreviewSession,
+        preview: DuxManagedScanCacheClearPreviewModel,
+        state: EngineServiceState
+    ) {
+        self.ffiPreview = ffiPreview
+        self.preview = preview
+        self.state = state
+    }
+
+    fileprivate func take(
+        for expectedState: EngineServiceState
+    ) throws -> ManagedScanCacheClearPreviewSession {
+        guard state === expectedState else {
+            throw DuxManagedScanCacheClearServiceError.wrongEngine
+        }
+        dispatchPrecondition(condition: .onQueue(state.queue))
+        guard isAvailable else {
+            throw DuxManagedScanCacheClearServiceError.previewUnavailable
         }
         isAvailable = false
         return ffiPreview

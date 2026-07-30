@@ -58,16 +58,32 @@ pub struct DuxEmbeddedAiCacheFootprint {
     pub expired_logical_content_bytes: u64,
 }
 
+/// Physical usage inside DUX's fixed marker-owned managed scan-cache child.
+///
+/// The conventional outer cache container and legacy caller-selected cache
+/// files are outside this ownership boundary.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DuxManagedScanCacheFootprint {
+    pub controls: DuxOwnedStorageUsage,
+    pub entries: DuxOwnedStorageUsage,
+    pub temporary: DuxOwnedStorageUsage,
+    pub total: DuxOwnedStorageUsage,
+    pub entry_count: u32,
+    pub temporary_count: u32,
+}
+
 /// A bounded point-in-time observation of DUX's active private stores.
 ///
-/// This excludes directory metadata, the legacy caller-selected CLI cache,
-/// and unattributable interrupted provisioning stages. It is neither free
-/// space nor an estimate of bytes that cleanup would reclaim.
+/// This excludes directory metadata, the conventional outer cache container,
+/// legacy caller-selected CLI cache files, and unattributable interrupted
+/// provisioning stages. It is neither free space nor an estimate of bytes
+/// that cleanup would reclaim.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DuxOwnedStorageFootprint {
     pub observed_at: SystemTime,
     pub database: DuxOwnedStorageUsage,
     pub snapshots: DuxSnapshotStorageFootprint,
+    pub managed_scan_cache: DuxManagedScanCacheFootprint,
     pub embedded_ai_cache: DuxEmbeddedAiCacheFootprint,
     pub physical_total: DuxOwnedStorageUsage,
 }

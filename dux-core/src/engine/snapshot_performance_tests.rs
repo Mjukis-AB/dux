@@ -152,7 +152,7 @@ fn run_fixture(node_count: usize, shape: FixtureShape) -> PerformanceReport {
     let config = EngineConfig::new(
         temp.path().join("data/dux.sqlite3"),
         temp.path().join("data/snapshots"),
-        temp.path().join("cache"),
+        temp.path().join("cache/Dux"),
     )
     .unwrap();
     let root = temp.path().join("synthetic-snapshot-root");

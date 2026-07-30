@@ -889,6 +889,13 @@ public protocol DuxEngineProtocol: AnyObject, Sendable {
     func clearCleanupHistory(preview: CleanupHistoryClearPreviewSession) throws  -> CleanupHistoryClearResult
 
     /**
+     * Consume one confirmation from this exact engine. Consumption occurs
+     * before the core mutation is called and is never restored after any
+     * result.
+     */
+    func clearManagedScanCache(preview: ManagedScanCacheClearPreviewSession) throws  -> ManagedScanCacheClearResult
+
+    /**
      * Close the engine and wait for at most five seconds for worker quiescence.
      * Returns whether all workers have quiesced; repeated calls return the
      * first call's final observation without reopening storage.
@@ -996,6 +1003,12 @@ public protocol DuxEngineProtocol: AnyObject, Sendable {
      * histories; the child exposes no current path or cleanup capability.
      */
     func prepareExplorerSnapshotDiffReview(parent: SnapshotReviewSession) throws  -> SnapshotDiffReviewSession
+
+    /**
+     * Prepare one path-free, short-lived confirmation for clearing the exact
+     * current marker-owned managed scan-cache population.
+     */
+    func prepareManagedScanCacheClear() throws  -> ManagedScanCacheClearPreviewSession
 
     /**
      * Prepare one exact Rust-target plan for presentation through an active
@@ -1260,6 +1273,20 @@ open func clearCleanupHistory(preview: CleanupHistoryClearPreviewSession)throws 
 }
 
     /**
+     * Consume one confirmation from this exact engine. Consumption occurs
+     * before the core mutation is called and is never restored after any
+     * result.
+     */
+open func clearManagedScanCache(preview: ManagedScanCacheClearPreviewSession)throws  -> ManagedScanCacheClearResult  {
+    return try  FfiConverterTypeManagedScanCacheClearResult_lift(try rustCallWithError(FfiConverterTypeManagedScanCacheClearError_lift) {
+    uniffi_dux_ffi_fn_method_duxengine_clear_managed_scan_cache(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeManagedScanCacheClearPreviewSession_lower(preview),$0
+    )
+})
+}
+
+    /**
      * Close the engine and wait for at most five seconds for worker quiescence.
      * Returns whether all workers have quiesced; repeated calls return the
      * first call's final observation without reopening storage.
@@ -1489,6 +1516,18 @@ open func prepareExplorerSnapshotDiffReview(parent: SnapshotReviewSession)throws
     uniffi_dux_ffi_fn_method_duxengine_prepare_explorer_snapshot_diff_review(
             self.uniffiCloneHandle(),
         FfiConverterTypeSnapshotReviewSession_lower(parent),$0
+    )
+})
+}
+
+    /**
+     * Prepare one path-free, short-lived confirmation for clearing the exact
+     * current marker-owned managed scan-cache population.
+     */
+open func prepareManagedScanCacheClear()throws  -> ManagedScanCacheClearPreviewSession  {
+    return try  FfiConverterTypeManagedScanCacheClearPreviewSession_lift(try rustCallWithError(FfiConverterTypeManagedScanCacheClearError_lift) {
+    uniffi_dux_ffi_fn_method_duxengine_prepare_managed_scan_cache_clear(
+            self.uniffiCloneHandle(),$0
     )
 })
 }
@@ -2142,6 +2181,156 @@ public func FfiConverterTypeMaintenanceTask_lift(_ handle: UInt64) throws -> Mai
 #endif
 public func FfiConverterTypeMaintenanceTask_lower(_ value: MaintenanceTask) -> UInt64 {
     return FfiConverterTypeMaintenanceTask.lower(value)
+}
+
+
+
+
+
+
+/**
+ * Engine-bound, consume-once confirmation for deleting only the complete
+ * current marker-owned managed scan-cache population.
+ */
+public protocol ManagedScanCacheClearPreviewSessionProtocol: AnyObject, Sendable {
+
+    /**
+     * Return immutable, path-free confirmation facts while this preview
+     * remains available.
+     */
+    func info() throws  -> ManagedScanCacheClearPreviewInfo
+
+    /**
+     * Explicitly discard this preview. Releasing an already consumed or
+     * released preview is an idempotent no-op.
+     */
+    func release() throws  -> ManagedScanCacheClearPreviewReleaseOutcome
+
+}
+/**
+ * Engine-bound, consume-once confirmation for deleting only the complete
+ * current marker-owned managed scan-cache population.
+ */
+open class ManagedScanCacheClearPreviewSession: ManagedScanCacheClearPreviewSessionProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_dux_ffi_fn_clone_managedscancacheclearpreviewsession(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_dux_ffi_fn_free_managedscancacheclearpreviewsession(handle, $0) }
+    }
+
+
+
+
+    /**
+     * Return immutable, path-free confirmation facts while this preview
+     * remains available.
+     */
+open func info()throws  -> ManagedScanCacheClearPreviewInfo  {
+    return try  FfiConverterTypeManagedScanCacheClearPreviewInfo_lift(try rustCallWithError(FfiConverterTypeManagedScanCacheClearError_lift) {
+    uniffi_dux_ffi_fn_method_managedscancacheclearpreviewsession_info(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+    /**
+     * Explicitly discard this preview. Releasing an already consumed or
+     * released preview is an idempotent no-op.
+     */
+open func release()throws  -> ManagedScanCacheClearPreviewReleaseOutcome  {
+    return try  FfiConverterTypeManagedScanCacheClearPreviewReleaseOutcome_lift(try rustCallWithError(FfiConverterTypeManagedScanCacheClearError_lift) {
+    uniffi_dux_ffi_fn_method_managedscancacheclearpreviewsession_release(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+
+
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeManagedScanCacheClearPreviewSession: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = ManagedScanCacheClearPreviewSession
+
+    public static func lift(_ handle: UInt64) throws -> ManagedScanCacheClearPreviewSession {
+        return ManagedScanCacheClearPreviewSession(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: ManagedScanCacheClearPreviewSession) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ManagedScanCacheClearPreviewSession {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: ManagedScanCacheClearPreviewSession, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeManagedScanCacheClearPreviewSession_lift(_ handle: UInt64) throws -> ManagedScanCacheClearPreviewSession {
+    return try FfiConverterTypeManagedScanCacheClearPreviewSession.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeManagedScanCacheClearPreviewSession_lower(_ value: ManagedScanCacheClearPreviewSession) -> UInt64 {
+    return FfiConverterTypeManagedScanCacheClearPreviewSession.lower(value)
 }
 
 
@@ -7338,6 +7527,235 @@ public func FfiConverterTypeMaintenanceStart_lower(_ value: MaintenanceStart) ->
 
 
 /**
+ * Exact path-free confirmation facts for clearing the complete current
+ * marker-owned managed scan-cache population.
+ *
+ * This record contains no cache key, file name, digest, path, token, or
+ * selector. Only its opaque companion session can be consumed.
+ */
+public struct ManagedScanCacheClearPreviewInfo: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let entryCount: UInt32
+    public let temporaryCount: UInt32
+    public let clearableCount: UInt32
+    public let clearable: OwnedStorageUsage
+    public let preparedAtUnixMs: Int64
+    public let expiresAtUnixMs: Int64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, entryCount: UInt32, temporaryCount: UInt32, clearableCount: UInt32, clearable: OwnedStorageUsage, preparedAtUnixMs: Int64, expiresAtUnixMs: Int64) {
+        self.recordVersion = recordVersion
+        self.entryCount = entryCount
+        self.temporaryCount = temporaryCount
+        self.clearableCount = clearableCount
+        self.clearable = clearable
+        self.preparedAtUnixMs = preparedAtUnixMs
+        self.expiresAtUnixMs = expiresAtUnixMs
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension ManagedScanCacheClearPreviewInfo: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeManagedScanCacheClearPreviewInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ManagedScanCacheClearPreviewInfo {
+        return
+            try ManagedScanCacheClearPreviewInfo(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                entryCount: FfiConverterUInt32.read(from: &buf),
+                temporaryCount: FfiConverterUInt32.read(from: &buf),
+                clearableCount: FfiConverterUInt32.read(from: &buf),
+                clearable: FfiConverterTypeOwnedStorageUsage.read(from: &buf),
+                preparedAtUnixMs: FfiConverterInt64.read(from: &buf),
+                expiresAtUnixMs: FfiConverterInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ManagedScanCacheClearPreviewInfo, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterUInt32.write(value.entryCount, into: &buf)
+        FfiConverterUInt32.write(value.temporaryCount, into: &buf)
+        FfiConverterUInt32.write(value.clearableCount, into: &buf)
+        FfiConverterTypeOwnedStorageUsage.write(value.clearable, into: &buf)
+        FfiConverterInt64.write(value.preparedAtUnixMs, into: &buf)
+        FfiConverterInt64.write(value.expiresAtUnixMs, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeManagedScanCacheClearPreviewInfo_lift(_ buf: RustBuffer) throws -> ManagedScanCacheClearPreviewInfo {
+    return try FfiConverterTypeManagedScanCacheClearPreviewInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeManagedScanCacheClearPreviewInfo_lower(_ value: ManagedScanCacheClearPreviewInfo) -> RustBuffer {
+    return FfiConverterTypeManagedScanCacheClearPreviewInfo.lower(value)
+}
+
+
+public struct ManagedScanCacheClearResult: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let clearedEntryCount: UInt32
+    public let clearedTemporaryCount: UInt32
+    public let clearedCount: UInt32
+    public let clearedUsage: OwnedStorageUsage
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, clearedEntryCount: UInt32, clearedTemporaryCount: UInt32, clearedCount: UInt32, clearedUsage: OwnedStorageUsage) {
+        self.recordVersion = recordVersion
+        self.clearedEntryCount = clearedEntryCount
+        self.clearedTemporaryCount = clearedTemporaryCount
+        self.clearedCount = clearedCount
+        self.clearedUsage = clearedUsage
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension ManagedScanCacheClearResult: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeManagedScanCacheClearResult: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ManagedScanCacheClearResult {
+        return
+            try ManagedScanCacheClearResult(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                clearedEntryCount: FfiConverterUInt32.read(from: &buf),
+                clearedTemporaryCount: FfiConverterUInt32.read(from: &buf),
+                clearedCount: FfiConverterUInt32.read(from: &buf),
+                clearedUsage: FfiConverterTypeOwnedStorageUsage.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ManagedScanCacheClearResult, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterUInt32.write(value.clearedEntryCount, into: &buf)
+        FfiConverterUInt32.write(value.clearedTemporaryCount, into: &buf)
+        FfiConverterUInt32.write(value.clearedCount, into: &buf)
+        FfiConverterTypeOwnedStorageUsage.write(value.clearedUsage, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeManagedScanCacheClearResult_lift(_ buf: RustBuffer) throws -> ManagedScanCacheClearResult {
+    return try FfiConverterTypeManagedScanCacheClearResult.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeManagedScanCacheClearResult_lower(_ value: ManagedScanCacheClearResult) -> RustBuffer {
+    return FfiConverterTypeManagedScanCacheClearResult.lower(value)
+}
+
+
+/**
+ * Physical usage inside DUX's fixed marker-owned managed scan-cache child.
+ *
+ * `temporary` contains only recognized, quiescent publication remnants
+ * observed while holding the exclusive cache-store inventory lease. The
+ * outer platform cache container and every legacy caller-selected cache file
+ * are excluded.
+ */
+public struct ManagedScanCacheFootprint: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let controls: OwnedStorageUsage
+    public let entries: OwnedStorageUsage
+    public let temporary: OwnedStorageUsage
+    public let total: OwnedStorageUsage
+    public let entryCount: UInt32
+    public let temporaryCount: UInt32
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, controls: OwnedStorageUsage, entries: OwnedStorageUsage, temporary: OwnedStorageUsage, total: OwnedStorageUsage, entryCount: UInt32, temporaryCount: UInt32) {
+        self.recordVersion = recordVersion
+        self.controls = controls
+        self.entries = entries
+        self.temporary = temporary
+        self.total = total
+        self.entryCount = entryCount
+        self.temporaryCount = temporaryCount
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension ManagedScanCacheFootprint: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeManagedScanCacheFootprint: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ManagedScanCacheFootprint {
+        return
+            try ManagedScanCacheFootprint(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                controls: FfiConverterTypeOwnedStorageUsage.read(from: &buf),
+                entries: FfiConverterTypeOwnedStorageUsage.read(from: &buf),
+                temporary: FfiConverterTypeOwnedStorageUsage.read(from: &buf),
+                total: FfiConverterTypeOwnedStorageUsage.read(from: &buf),
+                entryCount: FfiConverterUInt32.read(from: &buf),
+                temporaryCount: FfiConverterUInt32.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ManagedScanCacheFootprint, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterTypeOwnedStorageUsage.write(value.controls, into: &buf)
+        FfiConverterTypeOwnedStorageUsage.write(value.entries, into: &buf)
+        FfiConverterTypeOwnedStorageUsage.write(value.temporary, into: &buf)
+        FfiConverterTypeOwnedStorageUsage.write(value.total, into: &buf)
+        FfiConverterUInt32.write(value.entryCount, into: &buf)
+        FfiConverterUInt32.write(value.temporaryCount, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeManagedScanCacheFootprint_lift(_ buf: RustBuffer) throws -> ManagedScanCacheFootprint {
+    return try FfiConverterTypeManagedScanCacheFootprint.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeManagedScanCacheFootprint_lower(_ value: ManagedScanCacheFootprint) -> RustBuffer {
+    return FfiConverterTypeManagedScanCacheFootprint.lower(value)
+}
+
+
+/**
  * Bounded observation of fixed marker-owned DUX storage.
  *
  * This contains no paths, identifiers, selectors, or mutation authority.
@@ -7349,16 +7767,18 @@ public struct OwnedStorageFootprint: Equatable, Hashable {
     public let observedAtUnixMs: Int64
     public let database: OwnedStorageUsage
     public let snapshots: SnapshotStorageFootprint
+    public let managedScanCache: ManagedScanCacheFootprint
     public let embeddedAiCache: EmbeddedAiCacheFootprint
     public let physicalTotal: OwnedStorageUsage
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(recordVersion: UInt32, observedAtUnixMs: Int64, database: OwnedStorageUsage, snapshots: SnapshotStorageFootprint, embeddedAiCache: EmbeddedAiCacheFootprint, physicalTotal: OwnedStorageUsage) {
+    public init(recordVersion: UInt32, observedAtUnixMs: Int64, database: OwnedStorageUsage, snapshots: SnapshotStorageFootprint, managedScanCache: ManagedScanCacheFootprint, embeddedAiCache: EmbeddedAiCacheFootprint, physicalTotal: OwnedStorageUsage) {
         self.recordVersion = recordVersion
         self.observedAtUnixMs = observedAtUnixMs
         self.database = database
         self.snapshots = snapshots
+        self.managedScanCache = managedScanCache
         self.embeddedAiCache = embeddedAiCache
         self.physicalTotal = physicalTotal
     }
@@ -7383,6 +7803,7 @@ public struct FfiConverterTypeOwnedStorageFootprint: FfiConverterRustBuffer {
                 observedAtUnixMs: FfiConverterInt64.read(from: &buf),
                 database: FfiConverterTypeOwnedStorageUsage.read(from: &buf),
                 snapshots: FfiConverterTypeSnapshotStorageFootprint.read(from: &buf),
+                managedScanCache: FfiConverterTypeManagedScanCacheFootprint.read(from: &buf),
                 embeddedAiCache: FfiConverterTypeEmbeddedAiCacheFootprint.read(from: &buf),
                 physicalTotal: FfiConverterTypeOwnedStorageUsage.read(from: &buf)
         )
@@ -7393,6 +7814,7 @@ public struct FfiConverterTypeOwnedStorageFootprint: FfiConverterRustBuffer {
         FfiConverterInt64.write(value.observedAtUnixMs, into: &buf)
         FfiConverterTypeOwnedStorageUsage.write(value.database, into: &buf)
         FfiConverterTypeSnapshotStorageFootprint.write(value.snapshots, into: &buf)
+        FfiConverterTypeManagedScanCacheFootprint.write(value.managedScanCache, into: &buf)
         FfiConverterTypeEmbeddedAiCacheFootprint.write(value.embeddedAiCache, into: &buf)
         FfiConverterTypeOwnedStorageUsage.write(value.physicalTotal, into: &buf)
     }
@@ -17921,6 +18343,221 @@ public func FfiConverterTypeMaintenanceStartDisposition_lower(_ value: Maintenan
 
 
 
+public enum ManagedScanCacheClearError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
+
+
+
+    case Closed
+    case NothingToClear
+    case ReadOnlyStore
+    case ChangedSincePreview
+    case PreviewExpired
+    case WrongEngine
+    case PreviewUnavailable
+    case Busy
+    case UnsafeStorage
+    case BudgetExceeded
+    case CorruptData
+    case OutcomeUnknown
+    case Unavailable
+    case InternalState
+
+
+
+
+
+
+    public var errorDescription: String? {
+        String(reflecting: self)
+    }
+
+}
+
+#if compiler(>=6)
+extension ManagedScanCacheClearError: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeManagedScanCacheClearError: FfiConverterRustBuffer {
+    typealias SwiftType = ManagedScanCacheClearError
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ManagedScanCacheClearError {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+
+
+
+        case 1: return .Closed
+        case 2: return .NothingToClear
+        case 3: return .ReadOnlyStore
+        case 4: return .ChangedSincePreview
+        case 5: return .PreviewExpired
+        case 6: return .WrongEngine
+        case 7: return .PreviewUnavailable
+        case 8: return .Busy
+        case 9: return .UnsafeStorage
+        case 10: return .BudgetExceeded
+        case 11: return .CorruptData
+        case 12: return .OutcomeUnknown
+        case 13: return .Unavailable
+        case 14: return .InternalState
+
+         default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: ManagedScanCacheClearError, into buf: inout [UInt8]) {
+        switch value {
+
+
+
+
+
+        case .Closed:
+            writeInt(&buf, Int32(1))
+
+
+        case .NothingToClear:
+            writeInt(&buf, Int32(2))
+
+
+        case .ReadOnlyStore:
+            writeInt(&buf, Int32(3))
+
+
+        case .ChangedSincePreview:
+            writeInt(&buf, Int32(4))
+
+
+        case .PreviewExpired:
+            writeInt(&buf, Int32(5))
+
+
+        case .WrongEngine:
+            writeInt(&buf, Int32(6))
+
+
+        case .PreviewUnavailable:
+            writeInt(&buf, Int32(7))
+
+
+        case .Busy:
+            writeInt(&buf, Int32(8))
+
+
+        case .UnsafeStorage:
+            writeInt(&buf, Int32(9))
+
+
+        case .BudgetExceeded:
+            writeInt(&buf, Int32(10))
+
+
+        case .CorruptData:
+            writeInt(&buf, Int32(11))
+
+
+        case .OutcomeUnknown:
+            writeInt(&buf, Int32(12))
+
+
+        case .Unavailable:
+            writeInt(&buf, Int32(13))
+
+
+        case .InternalState:
+            writeInt(&buf, Int32(14))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeManagedScanCacheClearError_lift(_ buf: RustBuffer) throws -> ManagedScanCacheClearError {
+    return try FfiConverterTypeManagedScanCacheClearError.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeManagedScanCacheClearError_lower(_ value: ManagedScanCacheClearError) -> RustBuffer {
+    return FfiConverterTypeManagedScanCacheClearError.lower(value)
+}
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum ManagedScanCacheClearPreviewReleaseOutcome: Equatable, Hashable {
+
+    case released
+    case alreadyUnavailable
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension ManagedScanCacheClearPreviewReleaseOutcome: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeManagedScanCacheClearPreviewReleaseOutcome: FfiConverterRustBuffer {
+    typealias SwiftType = ManagedScanCacheClearPreviewReleaseOutcome
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ManagedScanCacheClearPreviewReleaseOutcome {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .released
+
+        case 2: return .alreadyUnavailable
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: ManagedScanCacheClearPreviewReleaseOutcome, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .released:
+            writeInt(&buf, Int32(1))
+
+
+        case .alreadyUnavailable:
+            writeInt(&buf, Int32(2))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeManagedScanCacheClearPreviewReleaseOutcome_lift(_ buf: RustBuffer) throws -> ManagedScanCacheClearPreviewReleaseOutcome {
+    return try FfiConverterTypeManagedScanCacheClearPreviewReleaseOutcome.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeManagedScanCacheClearPreviewReleaseOutcome_lower(_ value: ManagedScanCacheClearPreviewReleaseOutcome) -> RustBuffer {
+    return FfiConverterTypeManagedScanCacheClearPreviewReleaseOutcome.lower(value)
+}
+
+
+
 public enum OwnedStorageFootprintError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
 
 
@@ -25521,6 +26158,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_dux_ffi_checksum_method_duxengine_clear_cleanup_history() != 34237) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_dux_ffi_checksum_method_duxengine_clear_managed_scan_cache() != 21185) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_dux_ffi_checksum_method_duxengine_close() != 17149) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -25576,6 +26216,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_prepare_explorer_snapshot_diff_review() != 3591) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_duxengine_prepare_managed_scan_cache_clear() != 18454) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_prepare_rust_target_plan_review() != 60431) {
@@ -25669,6 +26312,12 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_maintenancetask_poll() != 5519) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_managedscancacheclearpreviewsession_info() != 3273) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_managedscancacheclearpreviewsession_release() != 30882) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_rusttargetcleanuptask_cancel() != 18585) {

@@ -38,6 +38,10 @@ use super::emergency_recovery::{
     EmergencyRecoveryScanObservation, build_emergency_recovery_groups,
     emergency_recovery_evidence_is_fresh,
 };
+use super::managed_scan_cache::{
+    DuxManagedScanCacheClearError, DuxManagedScanCacheClearPreview, DuxManagedScanCacheClearResult,
+    DuxManagedScanCacheError, DuxOwnedStorageFootprintCacheError, ManagedScanCache,
+};
 use super::rule_outcome::{
     DurableRuleOutcome, DurableRuleOutcomeBatch, DurableRuleOutcomeState, RuleOutcomeError,
     RuleOutcomeNotEligibleReason,
@@ -96,8 +100,8 @@ use super::snapshot_review::{
     category_path_bytes, map_repository_error as map_snapshot_review_error,
 };
 use super::storage_footprint::{
-    DuxEmbeddedAiCacheFootprint, DuxOwnedStorageFootprint, DuxOwnedStorageFootprintError,
-    DuxOwnedStorageUsage, DuxSnapshotStorageFootprint,
+    DuxEmbeddedAiCacheFootprint, DuxManagedScanCacheFootprint, DuxOwnedStorageFootprint,
+    DuxOwnedStorageFootprintError, DuxOwnedStorageUsage, DuxSnapshotStorageFootprint,
 };
 use super::storage_thief::{
     DurableStorageThiefGroup, DurableStorageThiefRanking, MAX_STORAGE_THIEF_RANKING_GROUPS,
@@ -137,6 +141,9 @@ use super::task::{
     SnapshotUnleasedTempMaintenanceStartOutcome, StartSubtreeScanError, StartTaskError,
     TaskAccessError, TaskEvent, TaskEventBatch, TaskEventKind, TaskFailureKind, TaskId, TaskKind,
     TaskPhase, TaskPriority, TaskSnapshot,
+};
+use crate::cache::{
+    CacheMetadata, CachedScanConfig, ManagedCacheStoreAccess, is_cache_valid, spot_check_mtimes,
 };
 #[cfg(any(test, target_os = "macos"))]
 use crate::cleanup::capacity::CleanupCapacitySampler;
@@ -233,7 +240,7 @@ use crate::planner::{RustTargetJournalRequest, begin_rust_target_cleanup_session
 use crate::scanner::{
     CancellationToken, ScanConfig, ScanMessage, ScanObjectIdentity, ScanTermination, Scanner,
 };
-use crate::tree::NodeId;
+use crate::tree::{DiskTree, NodeId};
 
 const FORMAT_BATCH_LIMIT: usize = 256;
 
@@ -1163,6 +1170,7 @@ struct EngineInner {
     config: EngineConfig,
     store: Arc<StoreCoordinator>,
     snapshots: Arc<SnapshotRepository>,
+    managed_scan_cache: ManagedScanCache,
     snapshot_review_owner: Arc<SnapshotReviewOwner>,
     startup_volume_pressure: Mutex<super::volume_status::StartupVolumePressureBaseline>,
     scan_admission: Mutex<()>,
@@ -1328,6 +1336,20 @@ impl EngineHandle {
             SnapshotRepository::open(Arc::clone(&store), snapshot_access)
                 .map_err(|error| EngineOpenError::Snapshot(error.open_kind()))?,
         );
+        let cache_access = match database_status.access {
+            crate::persistence::DatabaseAccess::ReadWriteCurrent => {
+                ManagedCacheStoreAccess::ReadWrite
+            }
+            crate::persistence::DatabaseAccess::ReadOnlyNewer { .. } => {
+                ManagedCacheStoreAccess::ReadOnly
+            }
+        };
+        // The managed cache accelerates presentation only. An unsafe,
+        // unavailable, or unsupported cache is retained as typed state for
+        // diagnostics, but it cannot prevent the engine from opening or a
+        // fresh scan from running.
+        let managed_scan_cache =
+            ManagedScanCache::new(config.cache_directory().to_path_buf(), cache_access);
         let shared = Arc::new(Shared::new(limits));
         let mut workers = Vec::with_capacity(limits.workers);
         for index in 0..limits.workers {
@@ -1356,6 +1378,7 @@ impl EngineHandle {
                 config,
                 store,
                 snapshots,
+                managed_scan_cache,
                 snapshot_review_owner: Arc::new(SnapshotReviewOwner::new()),
                 startup_volume_pressure: Mutex::new(
                     super::volume_status::StartupVolumePressureBaseline::new(),
@@ -1932,11 +1955,56 @@ impl EngineHandle {
             .map_err(|error| map_snapshot_retention_cap_error(error.kind))
     }
 
-    /// Observe DUX's active marker-owned database and snapshot stores.
+    /// Load one managed scan-cache entry for presentation acceleration.
+    ///
+    /// Failure never authorizes fallback decoding or cleanup. Callers may
+    /// treat every error as a cache miss and perform a fresh scan.
+    pub fn load_managed_scan_cache(
+        &self,
+        root: &Path,
+        config: &CachedScanConfig,
+    ) -> Result<Option<(CacheMetadata, DiskTree)>, DuxManagedScanCacheError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(DuxManagedScanCacheError::Closed);
+        }
+        match self.inner.managed_scan_cache.load(root, config)? {
+            Some((metadata, tree))
+                if is_cache_valid(&metadata, root, config) && spot_check_mtimes(&tree, 32) =>
+            {
+                Ok(Some((metadata, tree)))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Publish one completed scan into the private managed cache.
+    ///
+    /// This is cache-only persistence. The matching standalone scan-scope
+    /// lease is consumed and remains held through publication.
+    pub fn save_managed_scan_cache(
+        &self,
+        lease: StandaloneScanScopeLease,
+        config: &CachedScanConfig,
+        metadata: &CacheMetadata,
+        tree: &DiskTree,
+    ) -> Result<(), DuxManagedScanCacheError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(DuxManagedScanCacheError::Closed);
+        }
+        if !Arc::ptr_eq(&lease.store, &self.inner.store) {
+            return Err(DuxManagedScanCacheError::InternalState);
+        }
+        self.inner
+            .managed_scan_cache
+            .save(lease.canonical_root(), config, metadata, tree)
+    }
+
+    /// Observe DUX's active marker-owned database, snapshot, and cache stores.
     ///
     /// This is a bounded, path-free read. It carries no cleanup authority and
-    /// does not count the legacy caller-selected CLI cache. AI content is an
-    /// embedded SQLite subset and is not added to `physical_total`.
+    /// does not count the conventional outer cache container or legacy
+    /// caller-selected CLI cache files. AI content is an embedded SQLite
+    /// subset and is not added to `physical_total`.
     pub fn owned_storage_footprint(
         &self,
     ) -> Result<DuxOwnedStorageFootprint, DuxOwnedStorageFootprintError> {
@@ -1950,11 +2018,59 @@ impl EngineHandle {
         if self.lifecycle() != EngineLifecycle::Open {
             return Err(DuxOwnedStorageFootprintError::Closed);
         }
-        self.inner
+        let observed = self
+            .inner
             .snapshots
-            .inspect_owned_storage_footprint(observed_at)
-            .map(public_owned_storage_footprint)
-            .map_err(|error| map_owned_storage_footprint_error(error.kind))
+            .inspect_owned_storage_footprint_with(observed_at, || {
+                self.inner.managed_scan_cache.footprint()
+            })
+            .map_err(|error| map_owned_storage_footprint_error(error.kind))?;
+        let (footprint, managed_scan_cache) =
+            observed.map_err(map_owned_storage_footprint_cache_error)?;
+        public_owned_storage_footprint(footprint, managed_scan_cache)
+    }
+
+    /// Prepare one short-lived, path-free confirmation for clearing the exact
+    /// current marker-owned scan-cache population.
+    pub fn prepare_managed_scan_cache_clear(
+        &self,
+    ) -> Result<DuxManagedScanCacheClearPreview, DuxManagedScanCacheClearError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(DuxManagedScanCacheClearError::Closed);
+        }
+        self.inner
+            .managed_scan_cache
+            .prepare_clear(SystemTime::now(), Instant::now())
+    }
+
+    /// Consume one exact preview and clear only the unchanged managed cache.
+    ///
+    /// The caller supplies no path, key, selector, or cleanup effect.
+    pub fn clear_managed_scan_cache(
+        &self,
+        preview: DuxManagedScanCacheClearPreview,
+    ) -> Result<DuxManagedScanCacheClearResult, DuxManagedScanCacheClearError> {
+        self.clear_managed_scan_cache_at(preview, Instant::now())
+    }
+
+    fn clear_managed_scan_cache_at(
+        &self,
+        preview: DuxManagedScanCacheClearPreview,
+        now: Instant,
+    ) -> Result<DuxManagedScanCacheClearResult, DuxManagedScanCacheClearError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(DuxManagedScanCacheClearError::Closed);
+        }
+        self.inner.managed_scan_cache.clear(preview, now)
+    }
+
+    #[cfg(test)]
+    fn clear_managed_scan_cache_at_expiry_for_test(
+        &self,
+        preview: DuxManagedScanCacheClearPreview,
+    ) -> Result<DuxManagedScanCacheClearResult, DuxManagedScanCacheClearError> {
+        let expires_at = preview.monotonic_expires_at_for_test();
+        self.clear_managed_scan_cache_at(preview, expires_at)
     }
 
     /// Load the effective deterministic disk-pressure policy. This is
@@ -9164,11 +9280,20 @@ fn public_owned_storage_usage(usage: StoredOwnedStorageUsage) -> DuxOwnedStorage
 
 fn public_owned_storage_footprint(
     footprint: StoredDuxOwnedStorageFootprint,
-) -> DuxOwnedStorageFootprint {
+    managed_scan_cache: DuxManagedScanCacheFootprint,
+) -> Result<DuxOwnedStorageFootprint, DuxOwnedStorageFootprintError> {
     let snapshots = footprint.snapshots;
-    DuxOwnedStorageFootprint {
+    let database = public_owned_storage_usage(footprint.database);
+    let snapshot_total = public_owned_storage_usage(snapshots.total);
+    let database_and_snapshots = checked_public_storage_usage_add(database, snapshot_total)?;
+    if database_and_snapshots != public_owned_storage_usage(footprint.physical_total) {
+        return Err(DuxOwnedStorageFootprintError::InternalState);
+    }
+    let physical_total =
+        checked_public_storage_usage_add(database_and_snapshots, managed_scan_cache.total)?;
+    Ok(DuxOwnedStorageFootprint {
         observed_at: footprint.observed_at,
-        database: public_owned_storage_usage(footprint.database),
+        database,
         snapshots: DuxSnapshotStorageFootprint {
             cap_bytes: snapshots.cap_bytes,
             cap_excess_bytes: snapshots.cap_excess_bytes,
@@ -9196,6 +9321,7 @@ fn public_owned_storage_footprint(
             non_evictable_over_cap: snapshots.non_evictable_over_cap,
             accounting_unstable: snapshots.accounting_unstable,
         },
+        managed_scan_cache,
         embedded_ai_cache: DuxEmbeddedAiCacheFootprint {
             record_count: footprint.embedded_ai_cache.record_count,
             logical_content_bytes: footprint.embedded_ai_cache.logical_content_bytes,
@@ -9204,8 +9330,28 @@ fn public_owned_storage_footprint(
                 .embedded_ai_cache
                 .expired_logical_content_bytes,
         },
-        physical_total: public_owned_storage_usage(footprint.physical_total),
-    }
+        physical_total,
+    })
+}
+
+fn checked_public_storage_usage_add(
+    left: DuxOwnedStorageUsage,
+    right: DuxOwnedStorageUsage,
+) -> Result<DuxOwnedStorageUsage, DuxOwnedStorageFootprintError> {
+    Ok(DuxOwnedStorageUsage {
+        logical_bytes: left
+            .logical_bytes
+            .checked_add(right.logical_bytes)
+            .ok_or(DuxOwnedStorageFootprintError::InternalState)?,
+        allocated_bytes: left
+            .allocated_bytes
+            .checked_add(right.allocated_bytes)
+            .ok_or(DuxOwnedStorageFootprintError::InternalState)?,
+        charged_bytes: left
+            .charged_bytes
+            .checked_add(right.charged_bytes)
+            .ok_or(DuxOwnedStorageFootprintError::InternalState)?,
+    })
 }
 
 fn public_disk_pressure_policy(setting: DiskPressurePolicySetting) -> DiskPressurePolicy {
@@ -9431,6 +9577,29 @@ const fn map_owned_storage_footprint_error(
             | HistoryErrorKind::OutcomeUnknown
             | HistoryErrorKind::InternalState => DuxOwnedStorageFootprintError::InternalState,
         },
+    }
+}
+
+const fn map_owned_storage_footprint_cache_error(
+    error: DuxOwnedStorageFootprintCacheError,
+) -> DuxOwnedStorageFootprintError {
+    match error {
+        DuxOwnedStorageFootprintCacheError::Busy => DuxOwnedStorageFootprintError::Busy,
+        DuxOwnedStorageFootprintCacheError::UnsafeStorage => {
+            DuxOwnedStorageFootprintError::UnsafeStorage
+        }
+        DuxOwnedStorageFootprintCacheError::BudgetExceeded => {
+            DuxOwnedStorageFootprintError::BudgetExceeded
+        }
+        DuxOwnedStorageFootprintCacheError::CorruptData => {
+            DuxOwnedStorageFootprintError::CorruptData
+        }
+        DuxOwnedStorageFootprintCacheError::Unavailable => {
+            DuxOwnedStorageFootprintError::Unavailable
+        }
+        DuxOwnedStorageFootprintCacheError::InternalState => {
+            DuxOwnedStorageFootprintError::InternalState
+        }
     }
 }
 

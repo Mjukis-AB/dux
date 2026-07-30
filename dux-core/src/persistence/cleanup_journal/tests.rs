@@ -716,7 +716,7 @@ fn rule_outcome_engine_query_derives_regrowth_ignores_legacy_rows_and_writes_no_
     let config = EngineConfig::new(
         fixture.database.clone(),
         fixture.database.parent().unwrap().join("snapshots"),
-        fixture._temp.path().join("cache"),
+        fixture._temp.path().join("cache/Dux"),
     )
     .unwrap();
     let engine = EngineHandle::open(config).unwrap();
@@ -793,7 +793,7 @@ fn recurring_storage_thieves_rank_confirmed_growth_and_count_sessions_once() {
         EngineConfig::new(
             fixture.database.clone(),
             fixture.database.parent().unwrap().join("snapshots"),
-            fixture._temp.path().join("cache"),
+            fixture._temp.path().join("cache/Dux"),
         )
         .unwrap(),
     )

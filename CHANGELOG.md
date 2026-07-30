@@ -1,5 +1,30 @@
 # Changelog
 
+- Added the engine-owned managed TUI scan cache and its exact native
+  **Storage & Privacy** lifecycle through UniFFI v53. DUX now owns only the
+  fixed, marker-validated `Dux/scan-cache-v1` child beneath the conventional
+  cache container; legacy caller-selected cache files and every unknown outer
+  sibling remain excluded from accounting and clearing. The independent
+  SHA-256-bound wire format validates headers before allocation, never falls
+  back to the legacy decoder, and caps files at 64 MiB, trees at 200,000
+  nodes, depth at 512, and modeled decode residency at 192 MiB. The private
+  store uses descriptor-relative no-follow validation, exact ownership,
+  permissions and link checks, bounded inventories, retained writer locks,
+  atomic publication, and typed pre-effect versus outcome-unknown failures.
+  Completed CLI scans publish only while consuming their exact scan-scope
+  lease; cache read/write failure remains non-fatal and triggers or preserves
+  a fresh scan.
+- Extended DUX-owned storage accounting with a third additive managed-cache
+  share and an exact, path-free two-minute clear preview. Native Settings
+  shows database/history, snapshots, and scan cache with distinct text,
+  symbols, colors, and patterns; exposes entry, temporary-remnant, control,
+  and charged-byte accounting; and requires a separate destructive
+  confirmation that names the exact object counts and exclusions. Clearing
+  can remove only the unchanged marker-owned entries and recognized
+  temporaries. It cannot remove controls, the outer/legacy cache, embedded AI,
+  database/history, snapshots, settings, or user files, and it makes no
+  free-space promise. Changed or uncertain outcomes are remeasured and never
+  retried automatically.
 - Added a bounded, read-only DUX private-storage measurement through UniFFI
   v52 and native **Storage & Privacy**. The core now reports conservative
   logical, allocated, and per-file charged usage for the exact marker-owned

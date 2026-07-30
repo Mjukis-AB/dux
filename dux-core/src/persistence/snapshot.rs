@@ -927,10 +927,30 @@ impl SnapshotRepository {
     /// is acquired, preserving the permanent database -> snapshot lock order.
     /// Returned aggregates contain no path, scan ID, file name, or mutation
     /// capability. Embedded AI content is a logical subset of SQLite.
+    #[cfg(test)]
     pub(crate) fn inspect_owned_storage_footprint(
         &self,
         observed_at: SystemTime,
     ) -> Result<DuxOwnedStorageFootprint, SnapshotRepositoryError> {
+        match self.inspect_owned_storage_footprint_with(observed_at, || {
+            Ok::<(), std::convert::Infallible>(())
+        })? {
+            Ok((footprint, ())) => Ok(footprint),
+            Err(error) => match error {},
+        }
+    }
+
+    /// Observe database and snapshot usage while one additional read acquires
+    /// its lock after the permanent database -> snapshot order.
+    ///
+    /// The callback must only acquire the final managed-cache inventory lock.
+    /// Both earlier stores are revalidated after it returns, including when
+    /// the callback reports an error.
+    pub(crate) fn inspect_owned_storage_footprint_with<T, E>(
+        &self,
+        observed_at: SystemTime,
+        inspect_managed_cache: impl FnOnce() -> Result<T, E>,
+    ) -> Result<Result<(DuxOwnedStorageFootprint, T), E>, SnapshotRepositoryError> {
         if self.access != SnapshotStoreAccess::ReadWrite {
             return Err(repository_error(SnapshotRepositoryErrorKind::ReadOnly));
         }
@@ -946,17 +966,19 @@ impl SnapshotRepository {
             self.build_retention_inventory_with_guard(&database_guard, observed_at)?;
         let snapshots = owned_snapshot_storage_footprint(&inventory)?;
         let physical_total = database.checked_add(snapshots.total).map_err(map_history)?;
+        let managed_cache = inspect_managed_cache();
         storage.revalidate().map_err(map_storage)?;
         self.database
             .revalidate_current_history_guard(&database_guard)
             .map_err(map_history)?;
-        Ok(DuxOwnedStorageFootprint {
+        let footprint = DuxOwnedStorageFootprint {
             observed_at,
             database,
             snapshots,
             embedded_ai_cache,
             physical_total,
-        })
+        };
+        Ok(managed_cache.map(|managed_cache| (footprint, managed_cache)))
     }
 
     fn build_retention_inventory_with_guard(

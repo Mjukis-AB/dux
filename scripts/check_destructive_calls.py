@@ -60,7 +60,7 @@ RUST_RULES = (
             r"\b(?:unlink|unlinkat|rmdir|DeleteFile[AW]?|RemoveDirectory[AW]?|"
             r"SHFileOperation[AW]?)\s*\("
             r"|\b(?:libc|nix\s*::\s*libc|nix\s*::\s*unistd|rustix\s*::\s*fs)"
-            r"\s*::\s*(?:remove|unlink|unlinkat|rmdir)\b"
+            r"\s*::\s*(?:remove|unlink|unlinkat|rmdir|renameat)\b"
             r"|\b(?:FileDispositionInfo(?:Ex)?|FILE_DISPOSITION_INFO|"
             r"SetFileInformationByHandle)\b"
             r"|\bnix\s*::\s*libc\s*::\s*SYS_renameat2\b"
@@ -554,6 +554,29 @@ EXCEPTIONS = {
     "snapshot-windows-handle-publish": ExceptionSpec(
         "dux-core/src/persistence/snapshot/storage/windows.rs", "rust-platform-delete"
     ),
+    "managed-cache-entry-publish": ExceptionSpec(
+        "dux-core/src/cache/managed_store.rs",
+        "rust-platform-delete",
+        "publish_file_replace",
+    ),
+    "managed-cache-exact-clear": ExceptionSpec(
+        "dux-core/src/cache/managed_store.rs",
+        "rust-platform-delete",
+        "remove_retained_file",
+    ),
+    "managed-cache-exact-stage-remove": ExceptionSpec(
+        "dux-core/src/cache/managed_store.rs",
+        "rust-platform-delete",
+        "remove_retained_directory",
+    ),
+    "managed-cache-linux-store-publish": ExceptionSpec(
+        "dux-core/src/cache/managed_store.rs",
+        "rust-platform-delete",
+    ),
+    "managed-cache-macos-store-publish": ExceptionSpec(
+        "dux-core/src/cache/managed_store.rs",
+        "rust-platform-delete",
+    ),
     "test-snapshot-lock-helper-spawn": ExceptionSpec(
         "dux-core/src/persistence/snapshot/storage.rs",
         "rust-process-spawn",
@@ -916,6 +939,11 @@ EXCEPTION_PRIMITIVES = {
     "snapshot-windows-observed-final-delete": "SetFileInformationByHandle",
     "snapshot-windows-provisioning-stage-delete": "SetFileInformationByHandle",
     "snapshot-windows-handle-publish": "SetFileInformationByHandle",
+    "managed-cache-entry-publish": "renameat",
+    "managed-cache-exact-clear": "unlinkat",
+    "managed-cache-exact-stage-remove": "unlinkat",
+    "managed-cache-linux-store-publish": "SYS_renameat2",
+    "managed-cache-macos-store-publish": "renameatx_np",
     "test-snapshot-lock-helper-spawn": "Command::new",
     "test-snapshot-temp-lock-helper-spawn": "Command::new",
     "test-snapshot-durable-temp-helper-spawn": "Command::new",

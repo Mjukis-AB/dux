@@ -35,10 +35,11 @@ fn write_cargo_cache_tag(target: &Path) {
 }
 
 fn config(temp: &TempDir) -> EngineConfig {
+    std::fs::create_dir_all(temp.path().join("cache")).unwrap();
     EngineConfig::new(
         temp.path().join("data/dux.sqlite3"),
         temp.path().join("data/snapshots"),
-        temp.path().join("cache"),
+        temp.path().join("cache/Dux"),
     )
     .unwrap()
 }
@@ -104,7 +105,7 @@ fn engine_executes_only_an_approved_permanent_safe_session() {
     let config = EngineConfig::new(
         temp.path().join("data/dux.sqlite3"),
         temp.path().join("data/snapshots"),
-        temp.path().join("cache"),
+        temp.path().join("cache/Dux"),
     )
     .unwrap();
     let root = temp.path().join("scan-root");
@@ -290,7 +291,7 @@ fn approved_rust_target_fixture(project_count: usize) -> ApprovedRustTargetFixtu
     let config = EngineConfig::new(
         temp.path().join("data/dux.sqlite3"),
         temp.path().join("data/snapshots"),
-        temp.path().join("cache"),
+        temp.path().join("cache/Dux"),
     )
     .unwrap();
     let root = temp.path().join("scan-root");
@@ -5421,6 +5422,7 @@ fn owned_storage_footprint_is_path_free_additive_and_ai_is_embedded() {
             .database
             .logical_bytes
             .checked_add(footprint.snapshots.total.logical_bytes)
+            .and_then(|total| total.checked_add(footprint.managed_scan_cache.total.logical_bytes))
             .unwrap()
     );
     assert_eq!(
@@ -5429,6 +5431,9 @@ fn owned_storage_footprint_is_path_free_additive_and_ai_is_embedded() {
             .database
             .allocated_bytes
             .checked_add(footprint.snapshots.total.allocated_bytes)
+            .and_then(|total| {
+                total.checked_add(footprint.managed_scan_cache.total.allocated_bytes)
+            })
             .unwrap()
     );
     assert_eq!(
@@ -5437,11 +5442,27 @@ fn owned_storage_footprint_is_path_free_additive_and_ai_is_embedded() {
             .database
             .charged_bytes
             .checked_add(footprint.snapshots.total.charged_bytes)
+            .and_then(|total| total.checked_add(footprint.managed_scan_cache.total.charged_bytes))
             .unwrap()
     );
     assert!(footprint.database.charged_bytes >= footprint.database.logical_bytes);
     assert!(footprint.database.charged_bytes >= footprint.database.allocated_bytes);
     assert!(footprint.snapshots.total.charged_bytes > 0);
+    assert_eq!(footprint.managed_scan_cache.entry_count, 0);
+    assert_eq!(footprint.managed_scan_cache.temporary_count, 0);
+    assert_eq!(
+        footprint.managed_scan_cache.entries,
+        DuxOwnedStorageUsage::default()
+    );
+    assert_eq!(
+        footprint.managed_scan_cache.temporary,
+        DuxOwnedStorageUsage::default()
+    );
+    assert!(footprint.managed_scan_cache.controls.charged_bytes > 0);
+    assert_eq!(
+        footprint.managed_scan_cache.total,
+        footprint.managed_scan_cache.controls
+    );
     assert_eq!(footprint.snapshots.total, footprint.snapshots.controls);
     assert_eq!(footprint.snapshots.available_count, 0);
     assert_eq!(
@@ -5469,6 +5490,158 @@ fn owned_storage_footprint_is_path_free_additive_and_ai_is_embedded() {
         engine.owned_storage_footprint(),
         Err(DuxOwnedStorageFootprintError::Closed)
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn managed_scan_cache_is_engine_owned_exactly_confirmed_and_non_authoritative() {
+    let temp = TempDir::new().unwrap();
+    let engine_config = config(&temp);
+    let first = EngineHandle::open(engine_config.clone()).unwrap();
+    let second = EngineHandle::open(engine_config).unwrap();
+    let root = temp.path().join("scan-root");
+    std::fs::create_dir(&root).unwrap();
+    let root = root.canonicalize().unwrap();
+    let cache_config = CachedScanConfig {
+        follow_symlinks: false,
+        same_filesystem: true,
+        max_depth: None,
+    };
+    let tree = DiskTree::new(root.clone());
+    let metadata = CacheMetadata {
+        version: crate::CACHE_VERSION,
+        root_path: root.clone(),
+        scan_time: UNIX_EPOCH + Duration::from_secs(10),
+        root_mtime: std::fs::metadata(&root).unwrap().modified().unwrap(),
+        total_size: 0,
+        node_count: 1,
+        config: cache_config.clone(),
+    };
+
+    assert_eq!(
+        first.prepare_managed_scan_cache_clear().unwrap_err(),
+        DuxManagedScanCacheClearError::NothingToClear
+    );
+    let lease = first.acquire_standalone_scan_scope(root.clone()).unwrap();
+    first
+        .save_managed_scan_cache(lease, &cache_config, &metadata, &tree)
+        .unwrap();
+    let (loaded_metadata, loaded_tree) = first
+        .load_managed_scan_cache(&root, &cache_config)
+        .unwrap()
+        .unwrap();
+    assert_eq!(loaded_metadata.scan_time, metadata.scan_time);
+    assert_eq!(loaded_tree.total_size(), tree.total_size());
+    assert_eq!(loaded_tree.live_count(), tree.live_count());
+    std::fs::write(root.join("changed-after-scan"), b"new").unwrap();
+    std::fs::File::open(&root)
+        .unwrap()
+        .set_times(
+            std::fs::FileTimes::new().set_modified(metadata.root_mtime + Duration::from_secs(2)),
+        )
+        .unwrap();
+    assert!(
+        first
+            .load_managed_scan_cache(&root, &cache_config)
+            .unwrap()
+            .is_none(),
+        "engine freshness checks must turn stale managed entries into misses"
+    );
+
+    let footprint = first.owned_storage_footprint().unwrap();
+    assert_eq!(footprint.managed_scan_cache.entry_count, 1);
+    assert_eq!(footprint.managed_scan_cache.temporary_count, 0);
+    assert!(footprint.managed_scan_cache.entries.charged_bytes > 0);
+    assert_eq!(
+        footprint.managed_scan_cache.total.charged_bytes,
+        footprint
+            .managed_scan_cache
+            .controls
+            .charged_bytes
+            .checked_add(footprint.managed_scan_cache.entries.charged_bytes)
+            .unwrap()
+    );
+
+    let foreign = first.prepare_managed_scan_cache_clear().unwrap();
+    assert_eq!(
+        second.clear_managed_scan_cache(foreign),
+        Err(DuxManagedScanCacheClearError::WrongEngine)
+    );
+    assert_eq!(
+        first
+            .owned_storage_footprint()
+            .unwrap()
+            .managed_scan_cache
+            .entry_count,
+        1,
+        "a foreign engine rejection must not remove the stale physical entry"
+    );
+
+    let expiring = first.prepare_managed_scan_cache_clear().unwrap();
+    assert_eq!(
+        first.clear_managed_scan_cache_at_expiry_for_test(expiring),
+        Err(DuxManagedScanCacheClearError::PreviewExpired)
+    );
+
+    let changed = first.prepare_managed_scan_cache_clear().unwrap();
+    let other_root = temp.path().join("other-root");
+    std::fs::create_dir(&other_root).unwrap();
+    let other_root = other_root.canonicalize().unwrap();
+    let other_tree = DiskTree::new(other_root.clone());
+    let other_metadata = CacheMetadata {
+        root_path: other_root.clone(),
+        root_mtime: std::fs::metadata(&other_root).unwrap().modified().unwrap(),
+        node_count: 1,
+        ..metadata.clone()
+    };
+    let other_lease = first
+        .acquire_standalone_scan_scope(other_root.clone())
+        .unwrap();
+    first
+        .save_managed_scan_cache(other_lease, &cache_config, &other_metadata, &other_tree)
+        .unwrap();
+    assert_eq!(
+        first.clear_managed_scan_cache(changed),
+        Err(DuxManagedScanCacheClearError::ChangedSincePreview)
+    );
+
+    let preview = first.prepare_managed_scan_cache_clear().unwrap();
+    let info = preview.info().unwrap();
+    assert_eq!(info.entry_count(), 2);
+    assert_eq!(info.temporary_count(), 0);
+    assert_eq!(info.clearable_count(), 2);
+    assert!(info.clearable().charged_bytes > 0);
+    assert!(info.prepared_at() < info.expires_at());
+    let result = first.clear_managed_scan_cache(preview).unwrap();
+    assert_eq!(result.cleared_entry_count(), 2);
+    assert_eq!(result.cleared_temporary_count(), 0);
+    assert_eq!(result.cleared_count(), 2);
+    assert_eq!(result.cleared_usage(), info.clearable());
+    assert!(
+        first
+            .load_managed_scan_cache(&root, &cache_config)
+            .unwrap()
+            .is_none()
+    );
+    let after = first.owned_storage_footprint().unwrap();
+    assert_eq!(after.managed_scan_cache.entry_count, 0);
+    assert_eq!(
+        after.managed_scan_cache.total,
+        after.managed_scan_cache.controls
+    );
+
+    first.close();
+    assert!(first.wait_until_closed(TEST_TIMEOUT));
+    assert!(matches!(
+        first.load_managed_scan_cache(&root, &cache_config),
+        Err(DuxManagedScanCacheError::Closed)
+    ));
+    assert!(matches!(
+        first.prepare_managed_scan_cache_clear(),
+        Err(DuxManagedScanCacheClearError::Closed)
+    ));
+    second.close();
+    assert!(second.wait_until_closed(TEST_TIMEOUT));
 }
 
 #[test]
@@ -6467,7 +6640,7 @@ fn database_failure_prevents_engine_publication_without_echoing_paths() {
     let config = EngineConfig::new(
         blocked_root.join("dux.sqlite3"),
         blocked_root.join("snapshots"),
-        temp.path().join("cache"),
+        temp.path().join("cache/Dux"),
     )
     .unwrap();
 

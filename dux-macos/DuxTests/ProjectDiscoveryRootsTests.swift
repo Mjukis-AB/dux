@@ -249,7 +249,10 @@ private final class ProjectDiscoveryRootsEngineFixture {
         engine = try DuxEngine(
             storage: EngineStorageRoots(
                 dataRoot: root.appending(path: "data", directoryHint: .isDirectory).path,
-                cacheRoot: root.appending(path: "cache", directoryHint: .isDirectory).path
+                cacheRoot: root
+                    .appending(path: "cache", directoryHint: .isDirectory)
+                    .appending(path: "Dux", directoryHint: .isDirectory)
+                    .path
             )
         )
     }

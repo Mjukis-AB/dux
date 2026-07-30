@@ -72,6 +72,13 @@ does not take a lease. If a scan is already active, retry after it finishes;
 older binaries that encounter a newer database remain read-only and should be
 upgraded rather than forced through the compatibility boundary.
 
+The TUI cache is now engine-owned beneath the fixed marker-validated
+`~/Library/Caches/Dux/scan-cache-v1` child. Legacy cache siblings are never
+adopted or cleared. **Storage & Privacy** includes this private cache as a
+separate chart share and offers an exact, separately confirmed cache-only
+clear; that action cannot touch AI records, history, snapshots, settings, or
+user files and makes no promise about resulting free space.
+
 ```bash
 # Build and run directly from the repo
 cargo run -p dux-cli

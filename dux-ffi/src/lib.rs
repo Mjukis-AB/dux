@@ -70,6 +70,11 @@ use dux_core::engine::{
     DurableRuleOutcomeState as CoreRuleOutcomeState,
     DurableScanIssueKind as CoreDurableScanIssueKind, DurableScanStatus as CoreDurableScanStatus,
     DurableStorageThiefRanking as CoreStorageThiefRanking,
+    DuxManagedScanCacheClearError as CoreManagedScanCacheClearError,
+    DuxManagedScanCacheClearPreview as CoreManagedScanCacheClearPreview,
+    DuxManagedScanCacheClearPreviewInfo as CoreManagedScanCacheClearPreviewInfo,
+    DuxManagedScanCacheClearResult as CoreManagedScanCacheClearResult,
+    DuxManagedScanCacheFootprint as CoreManagedScanCacheFootprint,
     DuxOwnedStorageFootprint as CoreOwnedStorageFootprint,
     DuxOwnedStorageFootprintError as CoreOwnedStorageFootprintError,
     DuxOwnedStorageUsage as CoreOwnedStorageUsage,
@@ -174,8 +179,10 @@ use dux_core::{
     TrashPlatformResult as CoreTrashPlatformResult, TrashSelectionError as CoreTrashSelectionError,
     VolumeCapacity, VolumeId,
 };
+#[cfg(test)]
+use dux_core::{CACHE_VERSION, CacheMetadata, CachedScanConfig, DiskTree};
 
-const FFI_CONTRACT_VERSION: u32 = 52;
+const FFI_CONTRACT_VERSION: u32 = 53;
 const FFI_RECORD_VERSION: u32 = 1;
 const RUST_TARGET_MINIMUM_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const SNAPSHOT_NODE_RECORD_VERSION: u32 = 2;
@@ -196,6 +203,11 @@ const OWNED_STORAGE_MAX_RESIDUAL_TEMP_LEASES: u32 = 64;
 const OWNED_STORAGE_MAX_PIN_ROWS: u32 = 1_024;
 const OWNED_STORAGE_AI_CONTENT_BYTES_PER_ROW_MIN: u64 = 36;
 const OWNED_STORAGE_AI_CONTENT_BYTES_PER_ROW_MAX: u64 = 16_777_888;
+// The store admits at most 2,048 objects / 64 temporaries for new writes, but
+// observes one extra object in each dimension so a prior interrupted or buggy
+// writer can still be measured and cleared through the narrow recovery path.
+const MANAGED_SCAN_CACHE_MAX_NON_CONTROL_OBJECTS: u32 = 2_049;
+const MANAGED_SCAN_CACHE_MAX_TEMPORARY_OBJECTS: u32 = 65;
 const MAX_CLEANUP_HISTORY_SESSION_ID_BYTES: usize = 128;
 const MAX_CLEANUP_HISTORY_PLAN_ID_BYTES: usize = 128;
 const MAX_CLEANUP_HISTORY_RULE_ID_BYTES: usize = 128;
@@ -512,6 +524,23 @@ pub struct EmbeddedAiCacheFootprint {
     pub expired_logical_content_bytes: u64,
 }
 
+/// Physical usage inside DUX's fixed marker-owned managed scan-cache child.
+///
+/// `temporary` contains only recognized, quiescent publication remnants
+/// observed while holding the exclusive cache-store inventory lease. The
+/// outer platform cache container and every legacy caller-selected cache file
+/// are excluded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct ManagedScanCacheFootprint {
+    pub record_version: u32,
+    pub controls: OwnedStorageUsage,
+    pub entries: OwnedStorageUsage,
+    pub temporary: OwnedStorageUsage,
+    pub total: OwnedStorageUsage,
+    pub entry_count: u32,
+    pub temporary_count: u32,
+}
+
 /// Bounded observation of fixed marker-owned DUX storage.
 ///
 /// This contains no paths, identifiers, selectors, or mutation authority.
@@ -523,6 +552,7 @@ pub struct OwnedStorageFootprint {
     pub observed_at_unix_ms: i64,
     pub database: OwnedStorageUsage,
     pub snapshots: SnapshotStorageFootprint,
+    pub managed_scan_cache: ManagedScanCacheFootprint,
     pub embedded_ai_cache: EmbeddedAiCacheFootprint,
     pub physical_total: OwnedStorageUsage,
 }
@@ -546,6 +576,69 @@ pub enum OwnedStorageFootprintError {
     #[error("DUX-owned storage is unavailable")]
     Unavailable,
     #[error("internal DUX-owned storage accounting state is invalid")]
+    InternalState,
+}
+
+/// Exact path-free confirmation facts for clearing the complete current
+/// marker-owned managed scan-cache population.
+///
+/// This record contains no cache key, file name, digest, path, token, or
+/// selector. Only its opaque companion session can be consumed.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct ManagedScanCacheClearPreviewInfo {
+    pub record_version: u32,
+    pub entry_count: u32,
+    pub temporary_count: u32,
+    pub clearable_count: u32,
+    pub clearable: OwnedStorageUsage,
+    pub prepared_at_unix_ms: i64,
+    pub expires_at_unix_ms: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct ManagedScanCacheClearResult {
+    pub record_version: u32,
+    pub cleared_entry_count: u32,
+    pub cleared_temporary_count: u32,
+    pub cleared_count: u32,
+    pub cleared_usage: OwnedStorageUsage,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum ManagedScanCacheClearPreviewReleaseOutcome {
+    Released,
+    AlreadyUnavailable,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error, uniffi::Error)]
+pub enum ManagedScanCacheClearError {
+    #[error("engine session is closed")]
+    Closed,
+    #[error("there is no managed scan cache to clear")]
+    NothingToClear,
+    #[error("the durable store is read-only")]
+    ReadOnlyStore,
+    #[error("the managed scan cache changed after confirmation")]
+    ChangedSincePreview,
+    #[error("the managed scan-cache clear preview expired")]
+    PreviewExpired,
+    #[error("the managed scan-cache clear preview belongs to another engine")]
+    WrongEngine,
+    #[error("the managed scan-cache clear preview was consumed or released")]
+    PreviewUnavailable,
+    #[error("the managed scan-cache store is busy")]
+    Busy,
+    #[error("the managed scan-cache store is unsafe")]
+    UnsafeStorage,
+    #[error("managed scan-cache clearing exceeded its fixed resource budget")]
+    BudgetExceeded,
+    #[error("the managed scan-cache store is corrupt")]
+    CorruptData,
+    #[error("the result of clearing the managed scan cache is unknown")]
+    OutcomeUnknown,
+    #[error("the managed scan-cache store is unavailable")]
+    Unavailable,
+    #[error("managed scan-cache clearing state is unavailable")]
     InternalState,
 }
 
@@ -3518,6 +3611,12 @@ enum CleanupHistoryClearPreviewState {
     Released,
 }
 
+enum ManagedScanCacheClearPreviewState {
+    Available(Box<CoreManagedScanCacheClearPreview>),
+    Consumed,
+    Released,
+}
+
 enum RustTargetPlanReviewState {
     Available(Box<CoreRustTargetPlanReview>),
     Inspecting,
@@ -4101,6 +4200,111 @@ impl CleanupHistoryClearPreviewSession {
             | CleanupHistoryClearPreviewState::Released) => {
                 *state = prior;
                 Ok(CleanupHistoryClearPreviewReleaseOutcome::AlreadyUnavailable)
+            }
+        }
+    }
+}
+
+/// Engine-bound, consume-once confirmation for deleting only the complete
+/// current marker-owned managed scan-cache population.
+#[derive(uniffi::Object)]
+pub struct ManagedScanCacheClearPreviewSession {
+    state: Mutex<ManagedScanCacheClearPreviewState>,
+    info: ManagedScanCacheClearPreviewInfo,
+    engine_closed: Arc<AtomicBool>,
+}
+
+#[uniffi::export]
+impl ManagedScanCacheClearPreviewSession {
+    /// Return immutable, path-free confirmation facts while this preview
+    /// remains available.
+    pub fn info(&self) -> Result<ManagedScanCacheClearPreviewInfo, ManagedScanCacheClearError> {
+        if self.engine_closed.load(Ordering::Acquire) {
+            return Err(ManagedScanCacheClearError::Closed);
+        }
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| ManagedScanCacheClearError::InternalState)?;
+        if self.engine_closed.load(Ordering::Acquire) {
+            return Err(ManagedScanCacheClearError::Closed);
+        }
+        match &*state {
+            ManagedScanCacheClearPreviewState::Available(preview) => {
+                preview.info().map_err(map_managed_scan_cache_clear_error)?;
+                if self.engine_closed.load(Ordering::Acquire) {
+                    return Err(ManagedScanCacheClearError::Closed);
+                }
+                Ok(self.info.clone())
+            }
+            ManagedScanCacheClearPreviewState::Consumed
+            | ManagedScanCacheClearPreviewState::Released => {
+                Err(ManagedScanCacheClearError::PreviewUnavailable)
+            }
+        }
+    }
+
+    /// Explicitly discard this preview. Releasing an already consumed or
+    /// released preview is an idempotent no-op.
+    pub fn release(
+        &self,
+    ) -> Result<ManagedScanCacheClearPreviewReleaseOutcome, ManagedScanCacheClearError> {
+        self.release_inner()
+    }
+}
+
+impl ManagedScanCacheClearPreviewSession {
+    fn is_available(&self) -> Result<bool, ManagedScanCacheClearError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| ManagedScanCacheClearError::InternalState)?;
+        match &*state {
+            ManagedScanCacheClearPreviewState::Available(preview) => match preview.info() {
+                Ok(_) => Ok(true),
+                Err(CoreManagedScanCacheClearError::PreviewExpired) => {
+                    *state = ManagedScanCacheClearPreviewState::Released;
+                    Ok(false)
+                }
+                Err(error) => Err(map_managed_scan_cache_clear_error(error)),
+            },
+            ManagedScanCacheClearPreviewState::Consumed
+            | ManagedScanCacheClearPreviewState::Released => Ok(false),
+        }
+    }
+
+    fn take_for_clear(
+        &self,
+    ) -> Result<CoreManagedScanCacheClearPreview, ManagedScanCacheClearError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| ManagedScanCacheClearError::InternalState)?;
+        match std::mem::replace(&mut *state, ManagedScanCacheClearPreviewState::Consumed) {
+            ManagedScanCacheClearPreviewState::Available(preview) => Ok(*preview),
+            prior @ (ManagedScanCacheClearPreviewState::Consumed
+            | ManagedScanCacheClearPreviewState::Released) => {
+                *state = prior;
+                Err(ManagedScanCacheClearError::PreviewUnavailable)
+            }
+        }
+    }
+
+    fn release_inner(
+        &self,
+    ) -> Result<ManagedScanCacheClearPreviewReleaseOutcome, ManagedScanCacheClearError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| ManagedScanCacheClearError::InternalState)?;
+        match std::mem::replace(&mut *state, ManagedScanCacheClearPreviewState::Released) {
+            ManagedScanCacheClearPreviewState::Available(_) => {
+                Ok(ManagedScanCacheClearPreviewReleaseOutcome::Released)
+            }
+            prior @ (ManagedScanCacheClearPreviewState::Consumed
+            | ManagedScanCacheClearPreviewState::Released) => {
+                *state = prior;
+                Ok(ManagedScanCacheClearPreviewReleaseOutcome::AlreadyUnavailable)
             }
         }
     }
@@ -4938,6 +5142,7 @@ pub struct DuxEngine {
     diff_reviews: Arc<Mutex<Vec<Weak<SnapshotDiffReviewSession>>>>,
     direct_cargo_previews: Arc<Mutex<Vec<Weak<DirectCargoEnrollmentPreviewSession>>>>,
     cleanup_history_clear_previews: Arc<Mutex<Vec<Weak<CleanupHistoryClearPreviewSession>>>>,
+    managed_scan_cache_clear_previews: Arc<Mutex<Vec<Weak<ManagedScanCacheClearPreviewSession>>>>,
     rust_target_plan_reviews: Arc<Mutex<Vec<Weak<RustTargetPlanReviewSession>>>>,
     rust_target_plan_preparations: Arc<RustTargetPlanPreparationTracker>,
     background_close_started: Arc<AtomicBool>,
@@ -4965,6 +5170,7 @@ impl DuxEngine {
             diff_reviews: Arc::new(Mutex::new(Vec::new())),
             direct_cargo_previews: Arc::new(Mutex::new(Vec::new())),
             cleanup_history_clear_previews: Arc::new(Mutex::new(Vec::new())),
+            managed_scan_cache_clear_previews: Arc::new(Mutex::new(Vec::new())),
             rust_target_plan_reviews: Arc::new(Mutex::new(Vec::new())),
             rust_target_plan_preparations: Arc::new(RustTargetPlanPreparationTracker::default()),
             background_close_started: Arc::new(AtomicBool::new(false)),
@@ -5777,6 +5983,60 @@ impl DuxEngine {
         cleanup_history_clear_result(result, expected_session_count)
     }
 
+    /// Prepare one path-free, short-lived confirmation for clearing the exact
+    /// current marker-owned managed scan-cache population.
+    pub fn prepare_managed_scan_cache_clear(
+        &self,
+    ) -> Result<Arc<ManagedScanCacheClearPreviewSession>, ManagedScanCacheClearError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| ManagedScanCacheClearError::InternalState)?;
+        let EngineState::Open(engine) = &*state else {
+            return Err(ManagedScanCacheClearError::Closed);
+        };
+        if self.closed.load(Ordering::Acquire) {
+            return Err(ManagedScanCacheClearError::Closed);
+        }
+        self.ensure_managed_scan_cache_clear_preview_capacity()?;
+        let preview = engine
+            .prepare_managed_scan_cache_clear()
+            .map_err(map_managed_scan_cache_clear_error)?;
+        let info = preview
+            .info()
+            .map_err(map_managed_scan_cache_clear_error)
+            .and_then(managed_scan_cache_clear_preview_info)?;
+        self.register_managed_scan_cache_clear_preview(preview, info)
+    }
+
+    /// Consume one confirmation from this exact engine. Consumption occurs
+    /// before the core mutation is called and is never restored after any
+    /// result.
+    pub fn clear_managed_scan_cache(
+        &self,
+        preview: Arc<ManagedScanCacheClearPreviewSession>,
+    ) -> Result<ManagedScanCacheClearResult, ManagedScanCacheClearError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| ManagedScanCacheClearError::InternalState)?;
+        let EngineState::Open(engine) = &*state else {
+            return Err(ManagedScanCacheClearError::Closed);
+        };
+        if self.closed.load(Ordering::Acquire) {
+            return Err(ManagedScanCacheClearError::Closed);
+        }
+        if !Arc::ptr_eq(&preview.engine_closed, &self.closed) {
+            return Err(ManagedScanCacheClearError::WrongEngine);
+        }
+        let expected = preview.info.clone();
+        let core_preview = preview.take_for_clear()?;
+        let result = engine
+            .clear_managed_scan_cache(core_preview)
+            .map_err(map_managed_scan_cache_clear_error)?;
+        managed_scan_cache_clear_result(result, &expected)
+    }
+
     pub fn recent_scan_history(&self, limit: u16) -> Result<RecentScanHistoryPage, EngineError> {
         if !(1..=RECENT_SCAN_HISTORY_PAGE_LIMIT).contains(&limit) {
             return Err(EngineError::BudgetExceeded);
@@ -6050,6 +6310,7 @@ impl DuxEngine {
                         self.release_registered_reviews();
                         self.release_registered_direct_cargo_previews();
                         self.release_registered_cleanup_history_clear_previews();
+                        self.release_registered_managed_scan_cache_clear_previews();
                         return finish_ffi_engine_close(
                             &self.state,
                             &self.close_completed,
@@ -6089,6 +6350,7 @@ impl DuxEngine {
                             self.release_registered_reviews();
                             self.release_registered_direct_cargo_previews();
                             self.release_registered_cleanup_history_clear_previews();
+                            self.release_registered_managed_scan_cache_clear_previews();
                             return finish_ffi_engine_close(
                                 &self.state,
                                 &self.close_completed,
@@ -6197,6 +6459,7 @@ impl DuxEngine {
         let plan_reviews = Arc::clone(&self.rust_target_plan_reviews);
         let cargo_previews = Arc::clone(&self.direct_cargo_previews);
         let cleanup_history_clear_previews = Arc::clone(&self.cleanup_history_clear_previews);
+        let managed_scan_cache_clear_previews = Arc::clone(&self.managed_scan_cache_clear_previews);
         std::thread::spawn(move || {
             let engine = loop {
                 let mut state_guard = state
@@ -6228,6 +6491,9 @@ impl DuxEngine {
                 release_snapshot_review_registry(&reviews, &operations);
                 release_direct_cargo_preview_registry(&cargo_previews, &operations);
                 release_cleanup_history_clear_preview_registry(&cleanup_history_clear_previews);
+                release_managed_scan_cache_clear_preview_registry(
+                    &managed_scan_cache_clear_previews,
+                );
                 let _ = finish_ffi_engine_close(
                     &state,
                     &close_completed,
@@ -6402,6 +6668,76 @@ impl DuxEngine {
             drop(previews);
             let _ = preview.release_inner();
             return Err(CleanupHistoryClearError::Closed);
+        }
+        *previews = retained;
+        previews.push(Arc::downgrade(&preview));
+        Ok(preview)
+    }
+
+    fn ensure_managed_scan_cache_clear_preview_capacity(
+        &self,
+    ) -> Result<(), ManagedScanCacheClearError> {
+        let mut previews = self
+            .managed_scan_cache_clear_previews
+            .lock()
+            .map_err(|_| ManagedScanCacheClearError::InternalState)?;
+        let mut retained = Vec::with_capacity(previews.len());
+        let mut available = false;
+        for preview in previews.iter().filter_map(Weak::upgrade) {
+            if preview.is_available()? {
+                available = true;
+                retained.push(Arc::downgrade(&preview));
+            }
+        }
+        *previews = retained;
+        if available {
+            Err(ManagedScanCacheClearError::Busy)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn register_managed_scan_cache_clear_preview(
+        &self,
+        preview: CoreManagedScanCacheClearPreview,
+        info: ManagedScanCacheClearPreviewInfo,
+    ) -> Result<Arc<ManagedScanCacheClearPreviewSession>, ManagedScanCacheClearError> {
+        let preview = Arc::new(ManagedScanCacheClearPreviewSession {
+            state: Mutex::new(ManagedScanCacheClearPreviewState::Available(Box::new(
+                preview,
+            ))),
+            info,
+            engine_closed: Arc::clone(&self.closed),
+        });
+        if self.closed.load(Ordering::Acquire) {
+            let _ = preview.release_inner();
+            return Err(ManagedScanCacheClearError::Closed);
+        }
+        let mut previews = match self.managed_scan_cache_clear_previews.lock() {
+            Ok(previews) => previews,
+            Err(_) => {
+                let _ = preview.release_inner();
+                return Err(ManagedScanCacheClearError::InternalState);
+            }
+        };
+        let mut retained = Vec::with_capacity(previews.len().saturating_add(1));
+        let mut existing_busy = false;
+        for retained_preview in previews.iter().filter_map(Weak::upgrade) {
+            if retained_preview.is_available()? {
+                existing_busy = true;
+                retained.push(Arc::downgrade(&retained_preview));
+                break;
+            }
+        }
+        if existing_busy {
+            drop(previews);
+            let _ = preview.release_inner();
+            return Err(ManagedScanCacheClearError::Busy);
+        }
+        if self.closed.load(Ordering::Acquire) {
+            drop(previews);
+            let _ = preview.release_inner();
+            return Err(ManagedScanCacheClearError::Closed);
         }
         *previews = retained;
         previews.push(Arc::downgrade(&preview));
@@ -6806,6 +7142,10 @@ impl DuxEngine {
     fn release_registered_cleanup_history_clear_previews(&self) {
         release_cleanup_history_clear_preview_registry(&self.cleanup_history_clear_previews);
     }
+
+    fn release_registered_managed_scan_cache_clear_previews(&self) {
+        release_managed_scan_cache_clear_preview_registry(&self.managed_scan_cache_clear_previews);
+    }
 }
 
 fn release_snapshot_review_registry(
@@ -6880,6 +7220,18 @@ fn release_direct_cargo_preview_registry(
 
 fn release_cleanup_history_clear_preview_registry(
     registry: &Mutex<Vec<Weak<CleanupHistoryClearPreviewSession>>>,
+) {
+    let previews = match registry.lock() {
+        Ok(mut previews) => std::mem::take(&mut *previews),
+        Err(poisoned) => std::mem::take(&mut *poisoned.into_inner()),
+    };
+    for preview in previews.into_iter().filter_map(|preview| preview.upgrade()) {
+        let _ = preview.release_inner();
+    }
+}
+
+fn release_managed_scan_cache_clear_preview_registry(
+    registry: &Mutex<Vec<Weak<ManagedScanCacheClearPreviewSession>>>,
 ) {
     let previews = match registry.lock() {
         Ok(mut previews) => std::mem::take(&mut *previews),
@@ -10261,6 +10613,144 @@ fn cleanup_history_clear_result_count(
     })
 }
 
+fn map_managed_scan_cache_clear_error(
+    error: CoreManagedScanCacheClearError,
+) -> ManagedScanCacheClearError {
+    match error {
+        CoreManagedScanCacheClearError::Closed => ManagedScanCacheClearError::Closed,
+        CoreManagedScanCacheClearError::NothingToClear => {
+            ManagedScanCacheClearError::NothingToClear
+        }
+        CoreManagedScanCacheClearError::ReadOnlyStore => ManagedScanCacheClearError::ReadOnlyStore,
+        CoreManagedScanCacheClearError::ChangedSincePreview => {
+            ManagedScanCacheClearError::ChangedSincePreview
+        }
+        CoreManagedScanCacheClearError::PreviewExpired => {
+            ManagedScanCacheClearError::PreviewExpired
+        }
+        CoreManagedScanCacheClearError::WrongEngine => ManagedScanCacheClearError::WrongEngine,
+        CoreManagedScanCacheClearError::Busy => ManagedScanCacheClearError::Busy,
+        CoreManagedScanCacheClearError::UnsafeStorage => ManagedScanCacheClearError::UnsafeStorage,
+        CoreManagedScanCacheClearError::BudgetExceeded => {
+            ManagedScanCacheClearError::BudgetExceeded
+        }
+        CoreManagedScanCacheClearError::CorruptData => ManagedScanCacheClearError::CorruptData,
+        CoreManagedScanCacheClearError::OutcomeUnknown => {
+            ManagedScanCacheClearError::OutcomeUnknown
+        }
+        CoreManagedScanCacheClearError::Unavailable => ManagedScanCacheClearError::Unavailable,
+        CoreManagedScanCacheClearError::InternalState => ManagedScanCacheClearError::InternalState,
+        _ => ManagedScanCacheClearError::InternalState,
+    }
+}
+
+fn managed_scan_cache_clear_time_ms(value: SystemTime) -> Result<i64, ManagedScanCacheClearError> {
+    i64::try_from(
+        value
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| ManagedScanCacheClearError::CorruptData)?
+            .as_millis(),
+    )
+    .map_err(|_| ManagedScanCacheClearError::CorruptData)
+}
+
+fn managed_scan_cache_clear_preview_info(
+    info: CoreManagedScanCacheClearPreviewInfo,
+) -> Result<ManagedScanCacheClearPreviewInfo, ManagedScanCacheClearError> {
+    managed_scan_cache_clear_preview_info_values(
+        info.entry_count(),
+        info.temporary_count(),
+        info.clearable_count(),
+        info.clearable(),
+        info.prepared_at(),
+        info.expires_at(),
+    )
+}
+
+fn managed_scan_cache_clear_preview_info_values(
+    entry_count: u32,
+    temporary_count: u32,
+    clearable_count: u32,
+    clearable: CoreOwnedStorageUsage,
+    prepared_at: SystemTime,
+    expires_at: SystemTime,
+) -> Result<ManagedScanCacheClearPreviewInfo, ManagedScanCacheClearError> {
+    validate_managed_scan_cache_clear_usage(clearable)?;
+    let expected_count = entry_count
+        .checked_add(temporary_count)
+        .ok_or(ManagedScanCacheClearError::CorruptData)?;
+    let projected = ManagedScanCacheClearPreviewInfo {
+        record_version: FFI_RECORD_VERSION,
+        entry_count,
+        temporary_count,
+        clearable_count,
+        clearable: owned_storage_usage(clearable),
+        prepared_at_unix_ms: managed_scan_cache_clear_time_ms(prepared_at)?,
+        expires_at_unix_ms: managed_scan_cache_clear_time_ms(expires_at)?,
+    };
+    if projected.clearable_count != expected_count
+        || !(1..=MANAGED_SCAN_CACHE_MAX_NON_CONTROL_OBJECTS).contains(&projected.clearable_count)
+        || projected.temporary_count > MANAGED_SCAN_CACHE_MAX_TEMPORARY_OBJECTS
+        || projected.prepared_at_unix_ms >= projected.expires_at_unix_ms
+    {
+        return Err(ManagedScanCacheClearError::CorruptData);
+    }
+    Ok(projected)
+}
+
+fn managed_scan_cache_clear_result(
+    result: CoreManagedScanCacheClearResult,
+    expected: &ManagedScanCacheClearPreviewInfo,
+) -> Result<ManagedScanCacheClearResult, ManagedScanCacheClearError> {
+    managed_scan_cache_clear_result_values(
+        result.cleared_entry_count(),
+        result.cleared_temporary_count(),
+        result.cleared_count(),
+        result.cleared_usage(),
+        expected,
+    )
+}
+
+fn managed_scan_cache_clear_result_values(
+    cleared_entry_count: u32,
+    cleared_temporary_count: u32,
+    cleared_count: u32,
+    cleared_usage: CoreOwnedStorageUsage,
+    expected: &ManagedScanCacheClearPreviewInfo,
+) -> Result<ManagedScanCacheClearResult, ManagedScanCacheClearError> {
+    validate_managed_scan_cache_clear_usage(cleared_usage)
+        .map_err(|_| ManagedScanCacheClearError::OutcomeUnknown)?;
+    let expected_cleared_count = cleared_entry_count
+        .checked_add(cleared_temporary_count)
+        .ok_or(ManagedScanCacheClearError::OutcomeUnknown)?;
+    let projected = ManagedScanCacheClearResult {
+        record_version: FFI_RECORD_VERSION,
+        cleared_entry_count,
+        cleared_temporary_count,
+        cleared_count,
+        cleared_usage: owned_storage_usage(cleared_usage),
+    };
+    if projected.cleared_entry_count != expected.entry_count
+        || projected.cleared_temporary_count != expected.temporary_count
+        || projected.cleared_count != expected.clearable_count
+        || projected.cleared_count != expected_cleared_count
+        || projected.cleared_usage != expected.clearable
+    {
+        return Err(ManagedScanCacheClearError::OutcomeUnknown);
+    }
+    Ok(projected)
+}
+
+fn validate_managed_scan_cache_clear_usage(
+    usage: CoreOwnedStorageUsage,
+) -> Result<(), ManagedScanCacheClearError> {
+    if usage.charged_bytes < usage.logical_bytes || usage.charged_bytes < usage.allocated_bytes {
+        Err(ManagedScanCacheClearError::CorruptData)
+    } else {
+        Ok(())
+    }
+}
+
 fn core_cleanup_history_cursor(
     cursor: CleanupHistoryCursor,
 ) -> Result<CoreCleanupHistoryCursor, CleanupHistoryError> {
@@ -11039,6 +11529,7 @@ fn owned_storage_footprint(
         observed_at_unix_ms: owned_storage_footprint_time_ms(footprint.observed_at)?,
         database: owned_storage_usage(footprint.database),
         snapshots: snapshot_storage_footprint(footprint.snapshots),
+        managed_scan_cache: managed_scan_cache_footprint(footprint.managed_scan_cache),
         embedded_ai_cache: EmbeddedAiCacheFootprint {
             record_version: FFI_RECORD_VERSION,
             record_count: footprint.embedded_ai_cache.record_count,
@@ -11056,6 +11547,7 @@ fn validate_owned_storage_footprint(
     footprint: &CoreOwnedStorageFootprint,
 ) -> Result<(), OwnedStorageFootprintError> {
     let snapshots = &footprint.snapshots;
+    let managed_scan_cache = &footprint.managed_scan_cache;
     for usage in [
         footprint.database,
         snapshots.controls,
@@ -11068,6 +11560,10 @@ fn validate_owned_storage_footprint(
         snapshots.temporary_quiescent,
         snapshots.temporary_unleased,
         snapshots.total,
+        managed_scan_cache.controls,
+        managed_scan_cache.entries,
+        managed_scan_cache.temporary,
+        managed_scan_cache.total,
         footprint.physical_total,
     ] {
         validate_owned_storage_usage(usage)?;
@@ -11089,7 +11585,24 @@ fn validate_owned_storage_footprint(
         CoreOwnedStorageUsage::default(),
         checked_core_storage_usage_add,
     )?;
-    let physical_total = checked_core_storage_usage_add(footprint.database, snapshots.total)?;
+    let managed_scan_cache_total = [
+        managed_scan_cache.controls,
+        managed_scan_cache.entries,
+        managed_scan_cache.temporary,
+    ]
+    .into_iter()
+    .try_fold(
+        CoreOwnedStorageUsage::default(),
+        checked_core_storage_usage_add,
+    )?;
+    let managed_scan_cache_object_count = managed_scan_cache
+        .entry_count
+        .checked_add(managed_scan_cache.temporary_count)
+        .ok_or(OwnedStorageFootprintError::InternalState)?;
+    let physical_total = checked_core_storage_usage_add(
+        checked_core_storage_usage_add(footprint.database, snapshots.total)?,
+        managed_scan_cache.total,
+    )?;
     let available_count = snapshots
         .protected_count
         .checked_add(snapshots.retention_eligible_count)
@@ -11137,6 +11650,7 @@ fn validate_owned_storage_footprint(
 
     if classified_available != snapshots.available
         || classified_total != snapshots.total
+        || managed_scan_cache_total != managed_scan_cache.total
         || physical_total != footprint.physical_total
         || available_count != snapshots.available_count
         || physical_snapshot_object_count > OWNED_STORAGE_MAX_SNAPSHOT_OBJECTS
@@ -11150,6 +11664,12 @@ fn validate_owned_storage_footprint(
         || snapshots.accounting_unstable
             != (snapshots.active_temporary_count > 0 || snapshots.unleased_temporary_count > 0)
         || snapshots.non_evictable_over_cap != (non_evictable_charged_bytes > snapshots.cap_bytes)
+        || managed_scan_cache_object_count > MANAGED_SCAN_CACHE_MAX_NON_CONTROL_OBJECTS
+        || managed_scan_cache.temporary_count > MANAGED_SCAN_CACHE_MAX_TEMPORARY_OBJECTS
+        || (managed_scan_cache.entry_count == 0
+            && managed_scan_cache.entries != CoreOwnedStorageUsage::default())
+        || (managed_scan_cache.temporary_count == 0
+            && managed_scan_cache.temporary != CoreOwnedStorageUsage::default())
         || ai.expired_record_count > ai.record_count
         || ai.expired_logical_content_bytes > ai.logical_content_bytes
         || ai.logical_content_bytes > footprint.database.logical_bytes
@@ -11209,6 +11729,20 @@ fn owned_storage_usage(usage: CoreOwnedStorageUsage) -> OwnedStorageUsage {
         logical_bytes: usage.logical_bytes,
         allocated_bytes: usage.allocated_bytes,
         charged_bytes: usage.charged_bytes,
+    }
+}
+
+fn managed_scan_cache_footprint(
+    footprint: CoreManagedScanCacheFootprint,
+) -> ManagedScanCacheFootprint {
+    ManagedScanCacheFootprint {
+        record_version: FFI_RECORD_VERSION,
+        controls: owned_storage_usage(footprint.controls),
+        entries: owned_storage_usage(footprint.entries),
+        temporary: owned_storage_usage(footprint.temporary),
+        total: owned_storage_usage(footprint.total),
+        entry_count: footprint.entry_count,
+        temporary_count: footprint.temporary_count,
     }
 }
 
@@ -13093,9 +13627,10 @@ mod tests {
 
     fn engine() -> (TempDir, DuxEngine) {
         let temp = TempDir::new().unwrap();
+        std::fs::create_dir_all(temp.path().join("cache")).unwrap();
         let engine = DuxEngine::new(EngineStorageRoots {
             data_root: temp.path().join("data").to_string_lossy().into_owned(),
-            cache_root: temp.path().join("cache").to_string_lossy().into_owned(),
+            cache_root: temp.path().join("cache/Dux").to_string_lossy().into_owned(),
         })
         .unwrap();
         (temp, engine)
@@ -13106,6 +13641,34 @@ mod tests {
         let terminal = wait_for_scan(&scan.task);
         assert_eq!(terminal.phase, TaskPhase::Succeeded);
         terminal.result.unwrap().scan_id
+    }
+
+    fn seed_managed_scan_cache(temp: &TempDir, engine: &DuxEngine, name: &str) {
+        let root = temp.path().join(name);
+        std::fs::create_dir(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let config = CachedScanConfig {
+            follow_symlinks: false,
+            same_filesystem: true,
+            max_depth: None,
+        };
+        let tree = DiskTree::new(root.clone());
+        let metadata = CacheMetadata {
+            version: CACHE_VERSION,
+            root_path: root.clone(),
+            scan_time: UNIX_EPOCH + Duration::from_secs(10),
+            root_mtime: std::fs::metadata(&root).unwrap().modified().unwrap(),
+            total_size: 0,
+            node_count: 1,
+            config: config.clone(),
+        };
+        let state = engine.state.lock().unwrap();
+        let EngineState::Open(core) = &*state else {
+            panic!("test engine is not open");
+        };
+        let lease = core.acquire_standalone_scan_scope(root).unwrap();
+        core.save_managed_scan_cache(lease, &config, &metadata, &tree)
+            .unwrap();
     }
 
     fn seed_terminal_cleanup_history(temp: &TempDir, engine: &DuxEngine, fixture: &str) -> String {
@@ -13173,12 +13736,12 @@ mod tests {
     }
 
     #[test]
-    fn reports_contract_fifty_two_with_exact_storage_compatibility_and_preserves_formatting() {
+    fn reports_contract_fifty_three_with_exact_storage_compatibility_and_preserves_formatting() {
         let _guard = ENGINE_TEST_LOCK.lock().unwrap();
         let (_temp, engine) = engine();
         let expected = LibraryVersion {
             library_version: env!("CARGO_PKG_VERSION").to_owned(),
-            ffi_contract_version: 52,
+            ffi_contract_version: 53,
             database_schema_version: DATABASE_SCHEMA_VERSION,
             snapshot_format_version: SNAPSHOT_FORMAT_VERSION,
         };
@@ -14143,10 +14706,11 @@ mod tests {
         }
 
         let data_root = temp.path().join("data");
+        std::fs::create_dir_all(temp.path().join("cache")).unwrap();
         let engine = Arc::new(
             DuxEngine::new(EngineStorageRoots {
                 data_root: data_root.to_string_lossy().into_owned(),
-                cache_root: temp.path().join("cache").to_string_lossy().into_owned(),
+                cache_root: temp.path().join("cache/Dux").to_string_lossy().into_owned(),
             })
             .unwrap(),
         );
@@ -14240,7 +14804,7 @@ mod tests {
                 .data_root
                 .parent()
                 .unwrap()
-                .join("peer-cache")
+                .join("peer-cache/Dux")
                 .to_string_lossy()
                 .into_owned(),
         })
@@ -14828,7 +15392,7 @@ mod tests {
             data_root: temp.path().join("data").to_string_lossy().into_owned(),
             cache_root: temp
                 .path()
-                .join("cache-peer")
+                .join("cache-peer/Dux")
                 .to_string_lossy()
                 .into_owned(),
         })
@@ -15860,7 +16424,7 @@ mod tests {
             data_root: temp.path().join("data").to_string_lossy().into_owned(),
             cache_root: temp
                 .path()
-                .join("cache-peer")
+                .join("cache-peer/Dux")
                 .to_string_lossy()
                 .into_owned(),
         })
@@ -18763,14 +19327,245 @@ mod tests {
                 non_evictable_over_cap: false,
                 accounting_unstable: true,
             },
+            managed_scan_cache: CoreManagedScanCacheFootprint {
+                controls: core_storage_usage(2, 4, 4),
+                entries: core_storage_usage(3, 4, 4),
+                temporary: core_storage_usage(4, 4, 4),
+                total: core_storage_usage(9, 12, 12),
+                entry_count: 1,
+                temporary_count: 1,
+            },
             embedded_ai_cache: CoreEmbeddedAiCacheFootprint {
                 record_count: 2,
                 logical_content_bytes: 100,
                 expired_record_count: 1,
                 expired_logical_content_bytes: 50,
             },
-            physical_total: core_storage_usage(290, 364, 364),
+            physical_total: core_storage_usage(299, 376, 376),
         }
+    }
+
+    #[test]
+    fn managed_scan_cache_clear_projection_is_bounded_correlated_and_path_free() {
+        let clearable = core_storage_usage(7, 8, 8);
+        let prepared_at = UNIX_EPOCH + Duration::from_secs(10);
+        let expires_at = prepared_at + Duration::from_secs(30);
+        let info = managed_scan_cache_clear_preview_info_values(
+            2,
+            1,
+            3,
+            clearable,
+            prepared_at,
+            expires_at,
+        )
+        .unwrap();
+        assert_eq!(info.record_version, FFI_RECORD_VERSION);
+        assert_eq!(info.entry_count, 2);
+        assert_eq!(info.temporary_count, 1);
+        assert_eq!(info.clearable_count, 3);
+
+        let result = managed_scan_cache_clear_result_values(2, 1, 3, clearable, &info).unwrap();
+        assert_eq!(result.record_version, FFI_RECORD_VERSION);
+        assert_eq!(result.cleared_count, 3);
+        assert_eq!(result.cleared_usage, info.clearable);
+
+        let debug = format!("{info:?} {result:?}").to_lowercase();
+        for forbidden_shape in [
+            "path", "root", "file", "name", "digest", "token", "selector",
+        ] {
+            assert!(
+                !debug.contains(forbidden_shape),
+                "unexpected selector-shaped field: {forbidden_shape}"
+            );
+        }
+
+        for invalid in [
+            managed_scan_cache_clear_preview_info_values(
+                2,
+                1,
+                2,
+                clearable,
+                prepared_at,
+                expires_at,
+            ),
+            managed_scan_cache_clear_preview_info_values(
+                0,
+                0,
+                0,
+                CoreOwnedStorageUsage::default(),
+                prepared_at,
+                expires_at,
+            ),
+            managed_scan_cache_clear_preview_info_values(
+                MANAGED_SCAN_CACHE_MAX_NON_CONTROL_OBJECTS,
+                1,
+                MANAGED_SCAN_CACHE_MAX_NON_CONTROL_OBJECTS + 1,
+                clearable,
+                prepared_at,
+                expires_at,
+            ),
+            managed_scan_cache_clear_preview_info_values(
+                1,
+                MANAGED_SCAN_CACHE_MAX_TEMPORARY_OBJECTS + 1,
+                MANAGED_SCAN_CACHE_MAX_TEMPORARY_OBJECTS + 2,
+                clearable,
+                prepared_at,
+                expires_at,
+            ),
+            managed_scan_cache_clear_preview_info_values(
+                2,
+                1,
+                3,
+                core_storage_usage(9, 8, 8),
+                prepared_at,
+                expires_at,
+            ),
+            managed_scan_cache_clear_preview_info_values(
+                2, 1, 3, clearable, expires_at, expires_at,
+            ),
+        ] {
+            assert_eq!(invalid, Err(ManagedScanCacheClearError::CorruptData));
+        }
+
+        for invalid in [
+            managed_scan_cache_clear_result_values(1, 1, 2, clearable, &info),
+            managed_scan_cache_clear_result_values(2, 0, 2, clearable, &info),
+            managed_scan_cache_clear_result_values(2, 1, 2, clearable, &info),
+            managed_scan_cache_clear_result_values(2, 1, 3, core_storage_usage(6, 8, 8), &info),
+        ] {
+            assert_eq!(invalid, Err(ManagedScanCacheClearError::OutcomeUnknown));
+        }
+    }
+
+    #[test]
+    fn managed_scan_cache_clear_errors_map_one_to_one() {
+        for (core, ffi) in [
+            (
+                CoreManagedScanCacheClearError::Closed,
+                ManagedScanCacheClearError::Closed,
+            ),
+            (
+                CoreManagedScanCacheClearError::NothingToClear,
+                ManagedScanCacheClearError::NothingToClear,
+            ),
+            (
+                CoreManagedScanCacheClearError::ReadOnlyStore,
+                ManagedScanCacheClearError::ReadOnlyStore,
+            ),
+            (
+                CoreManagedScanCacheClearError::ChangedSincePreview,
+                ManagedScanCacheClearError::ChangedSincePreview,
+            ),
+            (
+                CoreManagedScanCacheClearError::PreviewExpired,
+                ManagedScanCacheClearError::PreviewExpired,
+            ),
+            (
+                CoreManagedScanCacheClearError::WrongEngine,
+                ManagedScanCacheClearError::WrongEngine,
+            ),
+            (
+                CoreManagedScanCacheClearError::Busy,
+                ManagedScanCacheClearError::Busy,
+            ),
+            (
+                CoreManagedScanCacheClearError::UnsafeStorage,
+                ManagedScanCacheClearError::UnsafeStorage,
+            ),
+            (
+                CoreManagedScanCacheClearError::BudgetExceeded,
+                ManagedScanCacheClearError::BudgetExceeded,
+            ),
+            (
+                CoreManagedScanCacheClearError::CorruptData,
+                ManagedScanCacheClearError::CorruptData,
+            ),
+            (
+                CoreManagedScanCacheClearError::OutcomeUnknown,
+                ManagedScanCacheClearError::OutcomeUnknown,
+            ),
+            (
+                CoreManagedScanCacheClearError::Unavailable,
+                ManagedScanCacheClearError::Unavailable,
+            ),
+            (
+                CoreManagedScanCacheClearError::InternalState,
+                ManagedScanCacheClearError::InternalState,
+            ),
+        ] {
+            assert_eq!(map_managed_scan_cache_clear_error(core), ffi);
+        }
+    }
+
+    #[test]
+    fn managed_scan_cache_clear_preview_is_engine_bound_consume_once_and_close_drained() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (temp, primary) = engine();
+        let primary = Arc::new(primary);
+        seed_managed_scan_cache(&temp, &primary, "managed-clear-first");
+        let same_store = DuxEngine::new(EngineStorageRoots {
+            data_root: temp.path().join("data").to_string_lossy().into_owned(),
+            cache_root: temp.path().join("cache/Dux").to_string_lossy().into_owned(),
+        })
+        .unwrap();
+
+        let released = primary.prepare_managed_scan_cache_clear().unwrap();
+        assert_eq!(
+            released.release().unwrap(),
+            ManagedScanCacheClearPreviewReleaseOutcome::Released
+        );
+        assert_eq!(
+            released.release().unwrap(),
+            ManagedScanCacheClearPreviewReleaseOutcome::AlreadyUnavailable
+        );
+        assert_eq!(
+            primary
+                .clear_managed_scan_cache(Arc::clone(&released))
+                .unwrap_err(),
+            ManagedScanCacheClearError::PreviewUnavailable
+        );
+
+        let preview = primary.prepare_managed_scan_cache_clear().unwrap();
+        let info = preview.info().unwrap();
+        assert_eq!(info.entry_count, 1);
+        assert_eq!(info.temporary_count, 0);
+        assert_eq!(info.clearable_count, 1);
+        assert!(info.clearable.charged_bytes > 0);
+        assert_eq!(
+            same_store
+                .clear_managed_scan_cache(Arc::clone(&preview))
+                .unwrap_err(),
+            ManagedScanCacheClearError::WrongEngine
+        );
+        let result = primary
+            .clear_managed_scan_cache(Arc::clone(&preview))
+            .unwrap();
+        assert_eq!(result.cleared_entry_count, 1);
+        assert_eq!(result.cleared_count, 1);
+        assert_eq!(result.cleared_usage, info.clearable);
+        assert_eq!(
+            primary
+                .clear_managed_scan_cache(Arc::clone(&preview))
+                .unwrap_err(),
+            ManagedScanCacheClearError::PreviewUnavailable
+        );
+        let Err(empty_error) = primary.prepare_managed_scan_cache_clear() else {
+            panic!("an empty managed cache unexpectedly produced a clear preview");
+        };
+        assert_eq!(empty_error, ManagedScanCacheClearError::NothingToClear);
+
+        seed_managed_scan_cache(&temp, &primary, "managed-clear-close");
+        let drained = primary.prepare_managed_scan_cache_clear().unwrap();
+        assert!(primary.close());
+        assert_eq!(
+            drained.info().unwrap_err(),
+            ManagedScanCacheClearError::Closed
+        );
+        assert_eq!(
+            drained.release().unwrap(),
+            ManagedScanCacheClearPreviewReleaseOutcome::AlreadyUnavailable
+        );
+        assert!(same_store.close());
     }
 
     #[test]
@@ -18787,6 +19582,8 @@ mod tests {
                 .logical_bytes
                 .checked_add(footprint.snapshots.total.logical_bytes)
                 .unwrap()
+                .checked_add(footprint.managed_scan_cache.total.logical_bytes)
+                .unwrap()
         );
         assert_eq!(
             footprint.physical_total.allocated_bytes,
@@ -18795,6 +19592,8 @@ mod tests {
                 .allocated_bytes
                 .checked_add(footprint.snapshots.total.allocated_bytes)
                 .unwrap()
+                .checked_add(footprint.managed_scan_cache.total.allocated_bytes)
+                .unwrap()
         );
         assert_eq!(
             footprint.physical_total.charged_bytes,
@@ -18802,6 +19601,8 @@ mod tests {
                 .database
                 .charged_bytes
                 .checked_add(footprint.snapshots.total.charged_bytes)
+                .unwrap()
+                .checked_add(footprint.managed_scan_cache.total.charged_bytes)
                 .unwrap()
         );
         for usage in [
@@ -18816,6 +19617,10 @@ mod tests {
             footprint.snapshots.temporary_quiescent,
             footprint.snapshots.temporary_unleased,
             footprint.snapshots.total,
+            footprint.managed_scan_cache.controls,
+            footprint.managed_scan_cache.entries,
+            footprint.managed_scan_cache.temporary,
+            footprint.managed_scan_cache.total,
             footprint.physical_total,
         ] {
             assert_eq!(usage.record_version, FFI_RECORD_VERSION);
@@ -18823,6 +19628,10 @@ mod tests {
             assert!(usage.charged_bytes >= usage.allocated_bytes);
         }
         assert_eq!(footprint.snapshots.record_version, FFI_RECORD_VERSION);
+        assert_eq!(
+            footprint.managed_scan_cache.record_version,
+            FFI_RECORD_VERSION
+        );
         assert_eq!(
             footprint.embedded_ai_cache.record_version,
             FFI_RECORD_VERSION
@@ -18855,7 +19664,9 @@ mod tests {
         assert!(projected.snapshots.accounting_unstable);
         assert!(!projected.snapshots.non_evictable_over_cap);
         assert_eq!(projected.embedded_ai_cache.logical_content_bytes, 100);
-        assert_eq!(projected.physical_total.charged_bytes, 364);
+        assert_eq!(projected.managed_scan_cache.entry_count, 1);
+        assert_eq!(projected.managed_scan_cache.temporary_count, 1);
+        assert_eq!(projected.physical_total.charged_bytes, 376);
 
         let mut malformed = Vec::new();
 
@@ -18877,6 +19688,33 @@ mod tests {
         let mut invalid_physical_total = valid_core_owned_storage_footprint();
         invalid_physical_total.physical_total.logical_bytes += 1;
         malformed.push(invalid_physical_total);
+
+        let mut invalid_cache_total = valid_core_owned_storage_footprint();
+        invalid_cache_total.managed_scan_cache.total.logical_bytes += 1;
+        invalid_cache_total.physical_total.logical_bytes += 1;
+        malformed.push(invalid_cache_total);
+
+        let mut invalid_cache_count = valid_core_owned_storage_footprint();
+        invalid_cache_count.managed_scan_cache.entry_count =
+            MANAGED_SCAN_CACHE_MAX_NON_CONTROL_OBJECTS;
+        invalid_cache_count.managed_scan_cache.temporary_count = 1;
+        malformed.push(invalid_cache_count);
+
+        let mut invalid_cache_temporary_count = valid_core_owned_storage_footprint();
+        invalid_cache_temporary_count
+            .managed_scan_cache
+            .temporary_count = MANAGED_SCAN_CACHE_MAX_TEMPORARY_OBJECTS + 1;
+        malformed.push(invalid_cache_temporary_count);
+
+        let mut invalid_zero_cache_entries = valid_core_owned_storage_footprint();
+        invalid_zero_cache_entries.managed_scan_cache.entry_count = 0;
+        malformed.push(invalid_zero_cache_entries);
+
+        let mut invalid_zero_cache_temporary = valid_core_owned_storage_footprint();
+        invalid_zero_cache_temporary
+            .managed_scan_cache
+            .temporary_count = 0;
+        malformed.push(invalid_zero_cache_temporary);
 
         let mut invalid_available_count = valid_core_owned_storage_footprint();
         invalid_available_count.snapshots.available_count += 1;
@@ -18947,9 +19785,15 @@ mod tests {
             large_database_bytes,
         );
         invalid_ai_maximum.physical_total = core_storage_usage(
-            large_database_bytes + invalid_ai_maximum.snapshots.total.logical_bytes,
-            large_database_bytes + invalid_ai_maximum.snapshots.total.allocated_bytes,
-            large_database_bytes + invalid_ai_maximum.snapshots.total.charged_bytes,
+            large_database_bytes
+                + invalid_ai_maximum.snapshots.total.logical_bytes
+                + invalid_ai_maximum.managed_scan_cache.total.logical_bytes,
+            large_database_bytes
+                + invalid_ai_maximum.snapshots.total.allocated_bytes
+                + invalid_ai_maximum.managed_scan_cache.total.allocated_bytes,
+            large_database_bytes
+                + invalid_ai_maximum.snapshots.total.charged_bytes
+                + invalid_ai_maximum.managed_scan_cache.total.charged_bytes,
         );
         malformed.push(invalid_ai_maximum);
 

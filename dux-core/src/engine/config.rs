@@ -36,7 +36,9 @@ pub struct EngineConfigError {
 /// Explicit process-independent locations owned by one engine session.
 ///
 /// Opening an engine securely provisions and migrates the database parent.
-/// Snapshot and cache roots remain reserved for their later storage owners.
+/// The snapshot owner uses the fixed database sibling. The cache path must be
+/// the conventional platform `Dux` container; managed cache ownership begins
+/// only at the marker-validated fixed child beneath it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EngineConfig {
     database_path: PathBuf,
@@ -78,6 +80,12 @@ impl EngineConfig {
             return Err(EngineConfigError {
                 field: EngineConfigField::Cache,
                 reason: EngineConfigReason::OverlappingStorage,
+            });
+        }
+        if cache_directory.file_name().and_then(|name| name.to_str()) != Some("Dux") {
+            return Err(EngineConfigError {
+                field: EngineConfigField::Cache,
+                reason: EngineConfigReason::UnexpectedLayout,
             });
         }
 
@@ -274,7 +282,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let database = temp.path().join("data/dux.sqlite3");
         let snapshots = temp.path().join("data/snapshots");
-        let cache = temp.path().join("cache");
+        let cache = temp.path().join("cache/Dux");
 
         let config = EngineConfig::new(database.clone(), snapshots.clone(), cache.clone()).unwrap();
 
@@ -320,6 +328,19 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.field, EngineConfigField::Snapshots);
+        assert_eq!(error.reason, EngineConfigReason::UnexpectedLayout);
+    }
+
+    #[test]
+    fn cache_must_use_the_fixed_dux_container_name() {
+        let temp = TempDir::new().unwrap();
+        let error = EngineConfig::new(
+            temp.path().join("data/dux.sqlite3"),
+            temp.path().join("data/snapshots"),
+            temp.path().join("cache"),
+        )
+        .unwrap_err();
+        assert_eq!(error.field, EngineConfigField::Cache);
         assert_eq!(error.reason, EngineConfigReason::UnexpectedLayout);
     }
 

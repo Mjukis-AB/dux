@@ -6,8 +6,14 @@ enum DuxOwnedStorageFootprintAccessibility {
   static let chart = "dux-owned-storage-footprint-chart"
   static let databaseSegment = "dux-owned-storage-footprint-database-segment"
   static let snapshotSegment = "dux-owned-storage-footprint-snapshot-segment"
+  static let managedScanCacheSegment =
+    "dux-owned-storage-footprint-managed-scan-cache-segment"
   static let databaseRows = "dux-owned-storage-footprint-database-rows"
   static let snapshotRows = "dux-owned-storage-footprint-snapshot-rows"
+  static let managedScanCacheRows =
+    "dux-owned-storage-footprint-managed-scan-cache-rows"
+  static let managedScanCacheDetails =
+    "dux-owned-storage-footprint-managed-scan-cache-details"
   static let totalRows = "dux-owned-storage-footprint-total-rows"
   static let snapshotPolicy = "dux-owned-storage-footprint-snapshot-policy"
   static let aiContent = "dux-owned-storage-footprint-ai-content"
@@ -16,6 +22,16 @@ enum DuxOwnedStorageFootprintAccessibility {
   static let refresh = "dux-owned-storage-footprint-refresh"
   static let progress = "dux-owned-storage-footprint-progress"
   static let error = "dux-owned-storage-footprint-error"
+  static let clearManagedScanCache =
+    "dux-owned-storage-footprint-clear-managed-scan-cache"
+  static let clearManagedScanCacheConfirmation =
+    "dux-owned-storage-footprint-clear-managed-scan-cache-confirmation"
+  static let clearManagedScanCacheProgress =
+    "dux-owned-storage-footprint-clear-managed-scan-cache-progress"
+  static let clearManagedScanCacheSuccess =
+    "dux-owned-storage-footprint-clear-managed-scan-cache-success"
+  static let clearManagedScanCacheError =
+    "dux-owned-storage-footprint-clear-managed-scan-cache-error"
 
   static let allControlIdentifiers = [
     section,
@@ -23,8 +39,11 @@ enum DuxOwnedStorageFootprintAccessibility {
     chart,
     databaseSegment,
     snapshotSegment,
+    managedScanCacheSegment,
     databaseRows,
     snapshotRows,
+    managedScanCacheRows,
+    managedScanCacheDetails,
     totalRows,
     snapshotPolicy,
     aiContent,
@@ -33,11 +52,17 @@ enum DuxOwnedStorageFootprintAccessibility {
     refresh,
     progress,
     error,
+    clearManagedScanCache,
+    clearManagedScanCacheConfirmation,
+    clearManagedScanCacheProgress,
+    clearManagedScanCacheSuccess,
+    clearManagedScanCacheError,
   ]
 }
 
 struct DuxOwnedStorageFootprintSettingsView: View {
   @Bindable var settings: DuxOwnedStorageFootprintSettingsModel
+  @State private var isClaimingManagedScanCacheClear = false
 
   var body: some View {
     VStack(alignment: .leading, spacing: 10) {
@@ -45,8 +70,9 @@ struct DuxOwnedStorageFootprintSettingsView: View {
         .font(.headline)
 
       Text(
-        "A point-in-time measurement of DUX’s private database and snapshot "
-          + "stores. It does not inspect user files and is not a "
+        "A point-in-time measurement of DUX’s private database, snapshot, "
+          + "and marker-owned scan-cache stores. It does not inspect user "
+          + "files and is not a "
           + "reclaimable-space or free-space estimate."
       )
       .foregroundStyle(.secondary)
@@ -93,6 +119,8 @@ struct DuxOwnedStorageFootprintSettingsView: View {
         }
       }
 
+      managedScanCacheAction
+
       Text(
         "This bounded observation excludes directory metadata, the legacy "
           + "caller-selected CLI cache, and unattributable interrupted setup "
@@ -109,6 +137,56 @@ struct DuxOwnedStorageFootprintSettingsView: View {
     .accessibilityIdentifier(
       DuxOwnedStorageFootprintAccessibility.section
     )
+    .confirmationDialog(
+      "Clear DUX scan cache?",
+      isPresented: Binding(
+        get: { settings.managedScanCacheClearConfirmation != nil },
+        set: { presented in
+          guard
+            !presented,
+            !isClaimingManagedScanCacheClear,
+            let confirmation =
+              settings.managedScanCacheClearConfirmation
+          else {
+            return
+          }
+          Task {
+            await settings.dismissManagedScanCacheClear(confirmation)
+          }
+        }
+      ),
+      titleVisibility: .visible
+    ) {
+      if let confirmation = settings.managedScanCacheClearConfirmation {
+        Button("Clear scan cache", role: .destructive) {
+          // Claim synchronously before the system implicitly dismisses its
+          // dialog. The model then consumes the exact engine-owned lease.
+          isClaimingManagedScanCacheClear = true
+          Task {
+            await settings.confirmManagedScanCacheClear(confirmation)
+            isClaimingManagedScanCacheClear = false
+          }
+        }
+        Button("Cancel", role: .cancel) {
+          Task {
+            await settings.cancelManagedScanCacheClear(confirmation)
+          }
+        }
+      }
+    } message: {
+      if let confirmation = settings.managedScanCacheClearConfirmation {
+        Text(Self.confirmationMessage(for: confirmation.preview))
+          .accessibilityIdentifier(
+            DuxOwnedStorageFootprintAccessibility
+              .clearManagedScanCacheConfirmation
+          )
+      }
+    }
+    .onDisappear {
+      Task {
+        await settings.dismissManagedScanCacheClear()
+      }
+    }
   }
 
   @ViewBuilder
@@ -130,12 +208,15 @@ struct DuxOwnedStorageFootprintSettingsView: View {
 
     DuxOwnedStorageStackedBar(
       databaseBytes: observation.database.chargedBytes,
-      snapshotBytes: observation.snapshots.total.chargedBytes
+      snapshotBytes: observation.snapshots.total.chargedBytes,
+      managedScanCacheBytes:
+        observation.managedScanCache.total.chargedBytes
     )
 
     HStack(spacing: 18) {
       Label("Database & history", systemImage: "cylinder.fill")
       Label("Snapshots (striped)", systemImage: "doc.on.doc.fill")
+      Label("Scan cache (dotted)", systemImage: "internaldrive")
     }
     .font(.caption)
     .foregroundStyle(.secondary)
@@ -151,12 +232,19 @@ struct DuxOwnedStorageFootprintSettingsView: View {
       identifier: DuxOwnedStorageFootprintAccessibility.snapshotRows
     )
     storageRows(
+      title: "DUX scan cache",
+      usage: observation.managedScanCache.total,
+      identifier:
+        DuxOwnedStorageFootprintAccessibility.managedScanCacheRows
+    )
+    storageRows(
       title: "Combined physical storage",
       usage: observation.physicalTotal,
       identifier: DuxOwnedStorageFootprintAccessibility.totalRows
     )
 
     snapshotPolicy(observation.snapshots)
+    managedScanCacheDetails(observation.managedScanCache)
     aiContent(observation.embeddedAiCache)
 
     if observation.snapshots.accountingUnstable {
@@ -252,6 +340,119 @@ struct DuxOwnedStorageFootprintSettingsView: View {
     )
   }
 
+  private func managedScanCacheDetails(
+    _ cache: DuxManagedScanCacheFootprintModel
+  ) -> some View {
+    GroupBox("DUX scan-cache accounting") {
+      VStack(alignment: .leading, spacing: 5) {
+        LabeledContent("Published entries") {
+          Text(verbatim: String(cache.entryCount))
+            .monospacedDigit()
+        }
+        byteRow("Published entry charged usage", cache.entries.chargedBytes)
+        LabeledContent("Quiescent temporary remnants") {
+          Text(verbatim: String(cache.temporaryCount))
+            .monospacedDigit()
+        }
+        byteRow(
+          "Temporary remnant charged usage",
+          cache.temporary.chargedBytes
+        )
+        byteRow("Ownership controls", cache.controls.chargedBytes)
+        if let clearableCount = cache.clearableCount,
+          let clearable = cache.clearable
+        {
+          LabeledContent("Clearable objects") {
+            Text(verbatim: String(clearableCount))
+              .monospacedDigit()
+          }
+          byteRow("Clearable charged usage", clearable.chargedBytes)
+        }
+        Text(
+          "Only DUX’s fixed marker-owned private scan cache is counted here. "
+            + "The outer legacy CLI cache and embedded AI content are excluded."
+        )
+        .font(.caption)
+        .foregroundStyle(.secondary)
+      }
+      .frame(maxWidth: .infinity, alignment: .leading)
+    }
+    .accessibilityElement(children: .contain)
+    .accessibilityIdentifier(
+      DuxOwnedStorageFootprintAccessibility.managedScanCacheDetails
+    )
+  }
+
+  @ViewBuilder
+  private var managedScanCacheAction: some View {
+    let clearableCount =
+      settings.observation?.managedScanCache.clearableCount ?? 0
+    Button("Clear DUX scan cache…") {
+      Task {
+        await settings.prepareManagedScanCacheClear()
+      }
+    }
+    .disabled(
+      clearableCount == 0
+        || settings.state.isLoading
+        || settings.managedScanCacheClearState.isBusy
+        || settings.managedScanCacheClearConfirmation != nil
+    )
+    .accessibilityIdentifier(
+      DuxOwnedStorageFootprintAccessibility.clearManagedScanCache
+    )
+    .accessibilityHint(
+      "Prepares an exact confirmation for clearing only DUX’s "
+        + "marker-owned private scan cache; it does not remove user files"
+    )
+
+    switch settings.managedScanCacheClearState {
+    case .preparing:
+      ProgressView("Preparing exact scan-cache confirmation")
+        .accessibilityIdentifier(
+          DuxOwnedStorageFootprintAccessibility
+            .clearManagedScanCacheProgress
+        )
+    case .clearing:
+      ProgressView("Clearing DUX scan cache")
+        .accessibilityIdentifier(
+          DuxOwnedStorageFootprintAccessibility
+            .clearManagedScanCacheProgress
+        )
+    case .completed(let result):
+      Label(
+        "Cleared \(result.clearedCount) scan-cache objects "
+          + "(\(DuxOwnedStorageByteFormatter.string(from: result.clearedUsage.chargedBytes)) charged).",
+        systemImage: "checkmark.circle"
+      )
+      .foregroundStyle(.green)
+      .accessibilityIdentifier(
+        DuxOwnedStorageFootprintAccessibility
+          .clearManagedScanCacheSuccess
+      )
+    case .failed(let error):
+      Label(Self.clearMessage(for: error), systemImage: "exclamationmark.triangle")
+        .foregroundStyle(.red)
+        .accessibilityIdentifier(
+          DuxOwnedStorageFootprintAccessibility
+            .clearManagedScanCacheError
+        )
+    case .outcomeUnknown:
+      Label(
+        "The clear result is uncertain. DUX measured storage again and "
+          + "did not retry the deletion.",
+        systemImage: "questionmark.diamond"
+      )
+      .foregroundStyle(.orange)
+      .accessibilityIdentifier(
+        DuxOwnedStorageFootprintAccessibility
+          .clearManagedScanCacheError
+      )
+    case .idle, .awaitingConfirmation:
+      EmptyView()
+    }
+  }
+
   private func aiContent(
     _ ai: DuxEmbeddedAiCacheFootprintModel
   ) -> some View {
@@ -324,16 +525,75 @@ struct DuxOwnedStorageFootprintSettingsView: View {
       )
     }
   }
+
+  static func confirmationMessage(
+    for preview: DuxManagedScanCacheClearPreviewModel
+  ) -> String {
+    "Clear exactly \(preview.clearableCount) objects "
+      + "(\(preview.entryCount) published entries and "
+      + "\(preview.temporaryCount) temporary remnants) using "
+      + "\(DuxOwnedStorageByteFormatter.string(from: preview.clearable.chargedBytes)) "
+      + "of charged storage? This affects only DUX’s marker-owned private "
+      + "scan cache. It excludes the outer legacy cache, embedded AI, "
+      + "database and history, snapshots, settings, and user files. The next "
+      + "CLI scan may be slower. Charged bytes are not a promise of the "
+      + "free-space change. This confirmation expires "
+      + preview.expiresAt.formatted(date: .omitted, time: .standard)
+      + "."
+  }
+
+  static func clearMessage(
+    for error: DuxManagedScanCacheClearServiceError
+  ) -> String {
+    switch error {
+    case .nothingToClear:
+      String(localized: "There is no DUX scan cache to clear.")
+    case .changedSincePreview:
+      String(
+        localized:
+          "The DUX scan cache changed after confirmation. Prepare a new confirmation."
+      )
+    case .previewExpired, .previewUnavailable:
+      String(
+        localized:
+          "The scan-cache confirmation expired or is no longer available."
+      )
+    case .readOnlyStore:
+      String(localized: "The DUX scan-cache store is read-only.")
+    case .unsafeStorage:
+      String(
+        localized:
+          "The DUX scan cache failed its ownership or permission checks."
+      )
+    case .budgetExceeded:
+      String(localized: "The bounded scan-cache operation exceeded its safety budget.")
+    case .corruptData:
+      String(localized: "DUX scan-cache accounting is inconsistent or corrupt.")
+    case .closed:
+      String(localized: "The storage engine session is closed.")
+    case .retryable:
+      String(localized: "The DUX scan cache is busy. Try again after current work settles.")
+    case .wrongEngine, .invalidResponse, .unavailable, .internalState:
+      String(localized: "The DUX scan cache is unavailable.")
+    case .outcomeUnknown:
+      String(
+        localized:
+          "The clear result is uncertain. DUX will measure storage again without retrying."
+      )
+    }
+  }
 }
 
 struct DuxOwnedStorageStackedBar: View {
   let databaseBytes: UInt64
   let snapshotBytes: UInt64
+  let managedScanCacheBytes: UInt64
 
   private var shares: DuxOwnedStorageChartMath.Shares {
     DuxOwnedStorageChartMath.shares(
       database: databaseBytes,
-      snapshots: snapshotBytes
+      snapshots: snapshotBytes,
+      managedScanCache: managedScanCacheBytes
     )
   }
 
@@ -387,6 +647,32 @@ struct DuxOwnedStorageStackedBar: View {
             .accessibilityIdentifier(
               DuxOwnedStorageFootprintAccessibility.snapshotSegment
             )
+
+          Rectangle()
+            .fill(Color.purple.opacity(0.72))
+            .frame(
+              width: geometry.size.width * shares.managedScanCache
+            )
+            .overlay {
+              DuxOwnedStorageDotPattern()
+                .fill(Color.primary.opacity(0.48))
+            }
+            .overlay {
+              Image(systemName: "internaldrive")
+                .font(.caption2)
+                .foregroundStyle(.white.opacity(0.85))
+            }
+            .accessibilityElement()
+            .accessibilityLabel("DUX scan cache, dotted")
+            .accessibilityValue(
+              DuxOwnedStorageByteFormatter.string(
+                from: managedScanCacheBytes
+              )
+            )
+            .accessibilityIdentifier(
+              DuxOwnedStorageFootprintAccessibility
+                .managedScanCacheSegment
+            )
         }
         .clipShape(Capsule())
       }
@@ -397,7 +683,8 @@ struct DuxOwnedStorageStackedBar: View {
     .accessibilityValue(
       Self.accessibilityValue(
         databaseBytes: databaseBytes,
-        snapshotBytes: snapshotBytes
+        snapshotBytes: snapshotBytes,
+        managedScanCacheBytes: managedScanCacheBytes
       )
     )
     .accessibilityIdentifier(
@@ -407,12 +694,15 @@ struct DuxOwnedStorageStackedBar: View {
 
   static func accessibilityValue(
     databaseBytes: UInt64,
-    snapshotBytes: UInt64
+    snapshotBytes: UInt64,
+    managedScanCacheBytes: UInt64
   ) -> String {
     "Database and history "
       + DuxOwnedStorageByteFormatter.string(from: databaseBytes)
       + "; snapshots "
       + DuxOwnedStorageByteFormatter.string(from: snapshotBytes)
+      + "; DUX scan cache "
+      + DuxOwnedStorageByteFormatter.string(from: managedScanCacheBytes)
   }
 }
 
@@ -427,6 +717,31 @@ private struct DuxOwnedStorageDiagonalHatch: Shape {
         to: CGPoint(x: offset + rect.height, y: rect.minY)
       )
       offset += spacing
+    }
+    return path
+  }
+}
+
+private struct DuxOwnedStorageDotPattern: Shape {
+  func path(in rect: CGRect) -> Path {
+    var path = Path()
+    let spacing: CGFloat = 7
+    let diameter: CGFloat = 2
+    var y = rect.minY + spacing / 2
+    while y < rect.maxY {
+      var x = rect.minX + spacing / 2
+      while x < rect.maxX {
+        path.addEllipse(
+          in: CGRect(
+            x: x - diameter / 2,
+            y: y - diameter / 2,
+            width: diameter,
+            height: diameter
+          )
+        )
+        x += spacing
+      }
+      y += spacing
     }
     return path
   }

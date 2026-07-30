@@ -22,8 +22,7 @@ use crossterm::{
 use dux_core::{
     CacheMetadata, CachedScanConfig, CancellationToken, DiskTree, EngineHandle, ScanConfig,
     ScanMessage, ScanOutcome, ScanRootErrorKind, ScanTermination, Scanner,
-    StandaloneScanScopeLease, StartTaskError, cache_path_for, get_mtime, is_cache_valid,
-    load_cache, save_cache, spot_check_mtimes,
+    StandaloneScanScopeLease, StartTaskError, get_mtime, is_cache_valid, spot_check_mtimes,
 };
 use ratatui::{Terminal, backend::CrosstermBackend, style::Style, widgets::Widget};
 
@@ -43,6 +42,11 @@ struct ActiveCliScan {
     cancellation: CancellationToken,
     messages: Receiver<ScanMessage>,
     handle: JoinHandle<ScanOutcome>,
+}
+
+struct CachedScanLoad {
+    scan: Option<(DiskTree, SystemTime)>,
+    warning: Option<&'static str>,
 }
 
 fn main() -> ExitCode {
@@ -94,8 +98,8 @@ fn run_tui(args: TuiArgs) -> Result<()> {
         .map_err(|_| color_eyre::eyre::eyre!("DUX storage is unavailable"))?;
     let engine = EngineHandle::open(config)
         .map_err(|_| color_eyre::eyre::eyre!("DUX could not open its shared storage"))?;
-    let (cache_path, cached_scan) = load_cached_scan(&path, &args);
-    let initial_lease = if cached_scan.is_none() {
+    let cached = load_cached_scan(&engine, &path, &args);
+    let initial_lease = if cached.scan.is_none() {
         Some(
             engine
                 .acquire_standalone_scan_scope(path.clone())
@@ -114,15 +118,7 @@ fn run_tui(args: TuiArgs) -> Result<()> {
     terminal.clear()?;
 
     // Run app
-    let result = run_app(
-        &mut terminal,
-        path,
-        &args,
-        &engine,
-        cache_path,
-        cached_scan,
-        initial_lease,
-    );
+    let result = run_app(&mut terminal, path, &args, &engine, cached, initial_lease);
 
     // Restore terminal
     disable_raw_mode()?;
@@ -144,8 +140,7 @@ fn run_app(
     path: PathBuf,
     args: &TuiArgs,
     engine: &EngineHandle,
-    cache_path: Option<PathBuf>,
-    cached_scan: Option<(DiskTree, SystemTime)>,
+    cached: CachedScanLoad,
     initial_lease: Option<StandaloneScanScopeLease>,
 ) -> Result<()> {
     let theme = Theme::default();
@@ -169,8 +164,11 @@ fn run_app(
         max_depth: args.max_depth,
     };
 
-    if let Some((tree, scan_time)) = cached_scan {
+    if let Some((tree, scan_time)) = cached.scan {
         state.set_cached_tree(tree, scan_time);
+    }
+    if let Some(warning) = cached.warning {
+        state.set_error(warning.to_string());
     }
 
     // The initial lease was acquired before terminal takeover. Start the
@@ -178,10 +176,11 @@ fn run_app(
     // the worker join.
     let mut active_scan =
         initial_lease.map(|lease| start_scanner_with_lease(lease, scan_config.clone()));
-    let mut cache_save_handle: Option<JoinHandle<dux_core::Result<()>>> = None;
+    let mut cache_save_handle: Option<
+        JoinHandle<std::result::Result<(), dux_core::DuxManagedScanCacheError>>,
+    > = None;
 
     // For cache saving after scan
-    let cache_path_for_save = cache_path.clone();
     let cache_config_for_save = cache_config.clone();
     let root_path_for_save = path.clone();
 
@@ -230,45 +229,70 @@ fn run_app(
                     handle,
                 } = active;
                 let joined = handle.join();
-                // The scanner is now quiescent. Only now may another process
-                // acquire this exact or overlapping scope.
-                drop(lease);
-                joined
+                (lease, joined)
             });
             match join_result {
-                Some(Ok(outcome)) if outcome.termination() == ScanTermination::Completed => {
+                Some((lease, Ok(outcome)))
+                    if outcome.termination() == ScanTermination::Completed =>
+                {
                     let (tree, coverage, _) = outcome.into_parts();
                     // Never let an older background writer rename over this newer scan.
-                    join_cache_save(cache_save_handle.take())?;
-                    let scan_time = SystemTime::now();
-                    if let Some(ref cp) = cache_path_for_save {
-                        let tree_for_cache = tree.clone();
-                        let cache_path = cp.clone();
-                        let meta = cache_metadata_for_tree(
-                            &tree_for_cache,
-                            root_path_for_save.clone(),
-                            cache_config_for_save.clone(),
-                            scan_time,
+                    if join_cache_save(cache_save_handle.take()).is_some() {
+                        state.set_error(
+                            "The previous managed cache update failed; the scan remains available."
+                                .to_string(),
                         );
-                        cache_save_handle = Some(std::thread::spawn(move || {
-                            save_cache(&cache_path, &tree_for_cache, &meta)
-                        }));
+                    }
+                    let scan_time = SystemTime::now();
+                    let tree_for_cache = tree.clone();
+                    let engine_for_cache = engine.clone();
+                    let root_for_cache = root_path_for_save.clone();
+                    let config_for_cache = cache_config_for_save.clone();
+                    let meta = cache_metadata_for_tree(
+                        &tree_for_cache,
+                        root_for_cache.clone(),
+                        config_for_cache.clone(),
+                        scan_time,
+                    );
+                    let writer = std::thread::Builder::new()
+                        .name("dux-managed-cache-writer".to_string())
+                        .spawn(move || {
+                            engine_for_cache.save_managed_scan_cache(
+                                lease,
+                                &config_for_cache,
+                                &meta,
+                                &tree_for_cache,
+                            )
+                        });
+                    match writer {
+                        Ok(handle) => cache_save_handle = Some(handle),
+                        Err(_) => state.set_error(
+                            "The managed cache writer could not start; the scan remains available."
+                                .to_string(),
+                        ),
                     }
                     state.set_scanned_tree(tree, scan_time, coverage);
                 }
-                Some(Ok(outcome)) if outcome.termination() == ScanTermination::Cancelled => {
+                Some((lease, Ok(outcome)))
+                    if outcome.termination() == ScanTermination::Cancelled =>
+                {
+                    drop(lease);
                     state.quit();
                 }
-                Some(Ok(_)) => {
+                Some((lease, Ok(_))) => {
+                    drop(lease);
                     let message = state.error_message.clone().unwrap_or_else(|| {
                         "Scanner failed before producing a usable tree".to_owned()
                     });
                     recover_from_scan_failure(&mut state, message)?;
                 }
-                Some(Err(_)) => recover_from_scan_failure(
-                    &mut state,
-                    "Scanner worker panicked before producing a usable tree".to_string(),
-                )?,
+                Some((lease, Err(_))) => {
+                    drop(lease);
+                    recover_from_scan_failure(
+                        &mut state,
+                        "Scanner worker panicked before producing a usable tree".to_string(),
+                    )?
+                }
                 None => recover_from_scan_failure(
                     &mut state,
                     "Scanner terminated without a worker handle".to_string(),
@@ -378,7 +402,11 @@ fn run_app(
                 );
                 if action == Action::Rescan {
                     // A completed older scan must finish writing before a newer scan starts.
-                    join_cache_save(cache_save_handle.take())?;
+                    if join_cache_save(cache_save_handle.take()).is_some() {
+                        state.set_error(
+                            "The managed cache update failed; rescanning from disk.".to_string(),
+                        );
+                    }
                     match engine.acquire_standalone_scan_scope(path.clone()) {
                         Ok(lease) => {
                             state.prepare_rescan();
@@ -424,34 +452,45 @@ fn run_app(
     }
 
     // Ensure the initial post-scan snapshot is complete before returning.
-    join_cache_save(cache_save_handle.take())?;
+    let _ = join_cache_save(cache_save_handle.take());
 
     Ok(())
 }
 
 fn load_cached_scan(
+    engine: &EngineHandle,
     path: &std::path::Path,
     args: &TuiArgs,
-) -> (Option<PathBuf>, Option<(DiskTree, SystemTime)>) {
+) -> CachedScanLoad {
     let cache_config = CachedScanConfig {
         follow_symlinks: args.follow_symlinks,
         same_filesystem: !args.cross_filesystems,
         max_depth: args.max_depth,
     };
-    let cache_dir = dirs::cache_dir().map(|directory| directory.join("dux"));
-    let cache_path = cache_dir
-        .as_ref()
-        .map(|directory| cache_path_for(path, directory));
-    let cached = if args.no_cache {
-        None
-    } else {
-        cache_path.as_ref().and_then(|cache_path| {
-            let (metadata, tree) = load_cache(cache_path).ok()?;
-            (is_cache_valid(&metadata, path, &cache_config) && spot_check_mtimes(&tree, 32))
-                .then_some((tree, metadata.scan_time))
-        })
-    };
-    (cache_path, cached)
+    if args.no_cache {
+        return CachedScanLoad {
+            scan: None,
+            warning: None,
+        };
+    }
+    match engine.load_managed_scan_cache(path, &cache_config) {
+        Ok(Some((metadata, tree)))
+            if is_cache_valid(&metadata, path, &cache_config) && spot_check_mtimes(&tree, 32) =>
+        {
+            CachedScanLoad {
+                scan: Some((tree, metadata.scan_time)),
+                warning: None,
+            }
+        }
+        Ok(_) => CachedScanLoad {
+            scan: None,
+            warning: None,
+        },
+        Err(_) => CachedScanLoad {
+            scan: None,
+            warning: Some("The managed scan cache could not be read; DUX is scanning from disk."),
+        },
+    }
 }
 
 fn start_scanner_with_lease(
@@ -546,13 +585,13 @@ fn recover_from_scan_failure(state: &mut AppState, message: String) -> Result<()
     }
 }
 
-fn join_cache_save(handle: Option<JoinHandle<dux_core::Result<()>>>) -> Result<()> {
-    if let Some(handle) = handle {
-        handle
-            .join()
-            .map_err(|_| color_eyre::eyre::eyre!("background cache writer panicked"))??;
+fn join_cache_save(
+    handle: Option<JoinHandle<std::result::Result<(), dux_core::DuxManagedScanCacheError>>>,
+) -> Option<()> {
+    match handle {
+        Some(handle) => (!matches!(handle.join(), Ok(Ok(())))).then_some(()),
+        None => None,
     }
-    Ok(())
 }
 
 fn handle_action(state: &mut AppState, action: Action) {
@@ -714,10 +753,9 @@ mod tests {
     }
 
     #[test]
-    fn cache_update_preserves_the_tree_original_scan_time() {
+    fn cache_metadata_preserves_the_tree_original_scan_time() {
         let temp = tempfile::TempDir::new().unwrap();
         let root = temp.path().to_path_buf();
-        let cache_path = temp.path().join("scan.dux");
         let tree = DiskTree::new(root.clone());
         let original_scan_time = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(12_345);
         let config = CachedScanConfig {
@@ -726,11 +764,8 @@ mod tests {
             max_depth: None,
         };
 
-        let meta = cache_metadata_for_tree(&tree, root, config, original_scan_time);
-        save_cache(&cache_path, &tree, &meta).unwrap();
-
-        let (loaded_meta, _) = load_cache(&cache_path).unwrap();
-        assert_eq!(loaded_meta.scan_time, original_scan_time);
+        let metadata = cache_metadata_for_tree(&tree, root, config, original_scan_time);
+        assert_eq!(metadata.scan_time, original_scan_time);
     }
 
     #[test]

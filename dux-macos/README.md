@@ -98,6 +98,21 @@ ignored `Generated/` and must be recreated before building from a clean
 checkout. Never combine bindings, a library, CLI bytes, or metadata produced
 from different source revisions or build configurations.
 
+## Managed scan cache
+
+The app and TUI share the fixed marker-owned
+`~/Library/Caches/Dux/scan-cache-v1` store. The outer `Dux` directory is only a
+conventional container: legacy or unknown siblings are never adopted,
+inventoried, reported, migrated, or cleared. Cache failure cannot block a
+fresh CLI scan.
+
+**Storage & Privacy** reports this managed cache as the third additive physical
+share and can prepare a two-minute, consume-once confirmation for its exact
+published entries and recognized temporary remnants. The clear operation
+preserves store controls and excludes the outer cache, AI content,
+database/history, snapshots, settings, and user files. A changed preview is
+rejected before effect; an uncertain outcome is remeasured without retry.
+
 ## Review storage changes
 
 Explorer’s **Changes** mode compares the selected retained snapshot with its

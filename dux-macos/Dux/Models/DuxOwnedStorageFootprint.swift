@@ -3,6 +3,12 @@ import Foundation
 /// Exact logical, allocated, and conservative charged usage for one
 /// DUX-owned storage component.
 struct DuxOwnedStorageUsageModel: Equatable, Sendable {
+  static let zero = Self(
+    logicalBytes: 0,
+    allocatedBytes: 0,
+    chargedBytes: 0
+  )
+
   let logicalBytes: UInt64
   let allocatedBytes: UInt64
   let chargedBytes: UInt64
@@ -111,6 +117,50 @@ struct DuxEmbeddedAiCacheFootprintModel: Equatable, Sendable {
   let expiredLogicalContentBytes: UInt64
 }
 
+/// Exact physical accounting inside DUX's fixed marker-owned scan-cache
+/// child. Legacy caller-selected cache files are outside this model.
+struct DuxManagedScanCacheFootprintModel: Equatable, Sendable {
+  // Includes the store's one-object recovery window. Normal publication
+  // admission remains capped at 2,048 objects and 64 temporaries.
+  static let maximumObjectCount: UInt32 = 2_049
+  static let maximumTemporaryObjectCount: UInt32 = 65
+
+  let controls: DuxOwnedStorageUsageModel
+  let entries: DuxOwnedStorageUsageModel
+  let temporary: DuxOwnedStorageUsageModel
+  let total: DuxOwnedStorageUsageModel
+  let entryCount: UInt32
+  let temporaryCount: UInt32
+
+  var clearableCount: UInt32? {
+    let result = entryCount.addingReportingOverflow(temporaryCount)
+    return result.overflow ? nil : result.partialValue
+  }
+
+  var clearable: DuxOwnedStorageUsageModel? {
+    Self.add(entries, temporary)
+  }
+
+  private static func add(
+    _ left: DuxOwnedStorageUsageModel,
+    _ right: DuxOwnedStorageUsageModel
+  ) -> DuxOwnedStorageUsageModel? {
+    guard
+      let logicalBytes = left.logicalBytes.addingExactly(right.logicalBytes),
+      let allocatedBytes =
+        left.allocatedBytes.addingExactly(right.allocatedBytes),
+      let chargedBytes = left.chargedBytes.addingExactly(right.chargedBytes)
+    else {
+      return nil
+    }
+    return DuxOwnedStorageUsageModel(
+      logicalBytes: logicalBytes,
+      allocatedBytes: allocatedBytes,
+      chargedBytes: chargedBytes
+    )
+  }
+}
+
 /// A bounded, path-free observation of fixed marker-owned DUX storage.
 ///
 /// It excludes the legacy caller-selected CLI cache and is neither free-space
@@ -119,8 +169,67 @@ struct DuxOwnedStorageFootprintModel: Equatable, Sendable {
   let observedAt: Date
   let database: DuxOwnedStorageUsageModel
   let snapshots: DuxSnapshotStorageFootprintModel
+  let managedScanCache: DuxManagedScanCacheFootprintModel
   let embeddedAiCache: DuxEmbeddedAiCacheFootprintModel
   let physicalTotal: DuxOwnedStorageUsageModel
+}
+
+struct DuxManagedScanCacheClearPreviewModel: Equatable, Sendable {
+  let entryCount: UInt32
+  let temporaryCount: UInt32
+  let clearableCount: UInt32
+  let clearable: DuxOwnedStorageUsageModel
+  let preparedAt: Date
+  let expiresAt: Date
+}
+
+struct DuxManagedScanCacheClearResultModel: Equatable, Sendable {
+  let clearedEntryCount: UInt32
+  let clearedTemporaryCount: UInt32
+  let clearedCount: UInt32
+  let clearedUsage: DuxOwnedStorageUsageModel
+}
+
+struct DuxManagedScanCacheClearConfirmation: Equatable, Sendable {
+  let generation: UInt64
+  let preview: DuxManagedScanCacheClearPreviewModel
+}
+
+enum DuxManagedScanCacheClearServiceError: Error, Equatable, Sendable {
+  case closed
+  case nothingToClear
+  case readOnlyStore
+  case changedSincePreview
+  case previewExpired
+  case wrongEngine
+  case previewUnavailable
+  case retryable
+  case unsafeStorage
+  case budgetExceeded
+  case corruptData
+  case outcomeUnknown
+  case unavailable
+  case internalState
+  case invalidResponse
+}
+
+enum DuxManagedScanCacheClearState: Equatable, Sendable {
+  case idle
+  case preparing
+  case awaitingConfirmation(DuxManagedScanCacheClearConfirmation)
+  case clearing(DuxManagedScanCacheClearPreviewModel)
+  case completed(DuxManagedScanCacheClearResultModel)
+  case failed(DuxManagedScanCacheClearServiceError)
+  case outcomeUnknown
+
+  var isBusy: Bool {
+    switch self {
+    case .preparing, .clearing:
+      true
+    case .idle, .awaitingConfirmation, .completed, .failed, .outcomeUnknown:
+      false
+    }
+  }
 }
 
 enum DuxOwnedStorageFootprintServiceError: Error, Equatable, Sendable {
@@ -151,28 +260,36 @@ enum DuxOwnedStorageChartMath {
   struct Shares: Equatable, Sendable {
     let database: Double
     let snapshots: Double
+    let managedScanCache: Double
 
     var isEmpty: Bool {
-      database == 0 && snapshots == 0
+      database == 0 && snapshots == 0 && managedScanCache == 0
     }
   }
 
-  /// Normalizes without adding the two UInt64 inputs, so zero and
+  /// Normalizes without adding the three UInt64 inputs, so zero and
   /// UInt64.max are both safe.
-  static func shares(database: UInt64, snapshots: UInt64) -> Shares {
-    let scale = max(database, snapshots)
+  static func shares(
+    database: UInt64,
+    snapshots: UInt64,
+    managedScanCache: UInt64
+  ) -> Shares {
+    let scale = max(max(database, snapshots), managedScanCache)
     guard scale > 0 else {
-      return Shares(database: 0, snapshots: 0)
+      return Shares(database: 0, snapshots: 0, managedScanCache: 0)
     }
     let scaledDatabase = Double(database) / Double(scale)
     let scaledSnapshots = Double(snapshots) / Double(scale)
-    let scaledTotal = scaledDatabase + scaledSnapshots
+    let scaledManagedScanCache = Double(managedScanCache) / Double(scale)
+    let scaledTotal =
+      scaledDatabase + scaledSnapshots + scaledManagedScanCache
     guard scaledTotal.isFinite, scaledTotal > 0 else {
-      return Shares(database: 0, snapshots: 0)
+      return Shares(database: 0, snapshots: 0, managedScanCache: 0)
     }
     return Shares(
       database: scaledDatabase / scaledTotal,
-      snapshots: scaledSnapshots / scaledTotal
+      snapshots: scaledSnapshots / scaledTotal,
+      managedScanCache: scaledManagedScanCache / scaledTotal
     )
   }
 }

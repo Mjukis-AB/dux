@@ -35,7 +35,14 @@ creating private DUX storage. On macOS these are:
 ~/Library/Caches/Dux/
 ```
 
-The legacy TUI cache remains independent during the engine migration.
+The progressive TUI now reads and publishes only the engine-owned
+`~/Library/Caches/Dux/scan-cache-v1/` child. That child has its own DUX marker,
+private controls, bounded inventory, and non-legacy wire format. Existing
+legacy cache files elsewhere in the conventional outer directory are ignored:
+DUX neither adopts, reports, migrates, nor clears them. Cache failures are
+presentation failures only; the TUI performs a fresh scan, and a completed
+scan holds its exact cross-process scan-scope lease through cache publication.
+`--no-cache` skips the read but still permits that managed post-scan write.
 
 ## Shared guarantees
 
