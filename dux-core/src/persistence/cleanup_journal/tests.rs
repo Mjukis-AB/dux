@@ -3153,6 +3153,150 @@ fn live_owner_without_provenance_is_unproven_and_a_byte_for_byte_no_op() {
 }
 
 #[test]
+fn migrated_v13_active_journal_is_unproven_and_a_byte_for_byte_no_op() {
+    let temp = TempDir::new().unwrap();
+    let database = temp.path().join("store").join("dux.sqlite3");
+    let paths = crate::persistence::storage::SecureStorePaths::prepare(&database).unwrap();
+    let sqlite_path = paths.sqlite_path().unwrap();
+    let connection = rusqlite::Connection::open(sqlite_path).unwrap();
+    for migration in &crate::persistence::migrations::test_migrations()[..13] {
+        connection.execute_batch(migration.sql).unwrap();
+        connection
+            .execute(
+                "INSERT INTO schema_migrations (
+                     version, name, checksum_sha256, applied_at_unix_ms
+                 ) VALUES (?1, ?2, ?3, 1)",
+                params![
+                    i64::from(migration.version),
+                    migration.name,
+                    migration.checksum_sha256.as_slice(),
+                ],
+            )
+            .unwrap();
+        connection
+            .pragma_update(
+                None,
+                "application_id",
+                crate::persistence::migrations::DUX_APPLICATION_ID,
+            )
+            .unwrap();
+        connection
+            .pragma_update(None, "user_version", migration.version)
+            .unwrap();
+    }
+    connection
+        .pragma_update(None, "foreign_keys", true)
+        .unwrap();
+
+    let owner = crate::persistence::process_liveness::current_process_instance().unwrap();
+    connection
+        .execute(
+            "INSERT INTO scans (
+                 scan_id, root_path, root_path_encoding, started_at_unix_ms,
+                 completed_at_unix_ms, status
+             ) VALUES ('scan:v13-active', ?1, 1, 998000, 999000, 'succeeded')",
+            [b"/v13".as_slice()],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO cleanup_sessions (
+                 session_id, plan_id, started_at_unix_ms, mode, estimated_bytes,
+                 trigger_source, status, record_format_version, source_scan_id,
+                 plan_created_at_unix_seconds, plan_created_at_nanoseconds,
+                 plan_expires_at_unix_seconds, plan_expires_at_nanoseconds,
+                 execution_owner_id, execution_generation, last_heartbeat_at_unix_ms,
+                 cancellation_requested
+             ) VALUES (
+                 'session:v13-active', 'plan:v13-active', 1000500,
+                 'permanent_safe', 8, 'manual', 'running', 2,
+                 'scan:v13-active', 1000, 0, 1900, 0, ?1, 1, 1000600, 0
+             )",
+            [owner.as_str()],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO cleanup_items (
+                 session_id, item_ordinal, rule_id, rule_revision, estimated_bytes,
+                 final_status, record_format_version, candidate_id, category,
+                 safety_tier, proposed_action, rule_schedule_eligible
+             ) VALUES (
+                 'session:v13-active', 0, 'fixture.v13-active', 1, 8,
+                 'planned', 2, 'candidate:v13-active', 'application_cache',
+                 'safe_regenerable', 'remove_known_regenerable_contents', 0
+             )",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO cleanup_item_paths (
+                 session_id, item_ordinal, path_ordinal, target_path,
+                 target_path_encoding, status
+             ) VALUES ('session:v13-active', 0, 0, ?1, 1, 'planned')",
+            [b"/v13/cache".as_slice()],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO cleanup_item_evidence (
+                 session_id, item_ordinal, evidence_ordinal, evidence_kind,
+                 path_value, path_value_encoding
+             ) VALUES (
+                 'session:v13-active', 0, 0, 'matched_path', ?1, 1
+             )",
+            [b"/v13/cache".as_slice()],
+        )
+        .unwrap();
+    for (ordinal, warning) in [
+        "estimated_bytes_unverified",
+        "permanent_removal_cannot_be_undone",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        connection
+            .execute(
+                "INSERT INTO cleanup_plan_warnings (
+                     session_id, warning_ordinal, warning_kind
+                 ) VALUES ('session:v13-active', ?1, ?2)",
+                params![ordinal as i64, warning],
+            )
+            .unwrap();
+    }
+    drop(connection);
+    drop(paths);
+
+    let store = StoreCoordinator::open(&database).unwrap();
+    let session_id = CleanupSessionId::new("session:v13-active").unwrap();
+    let lease = store.acquire_cleanup_journal_lease(LOCK_TIMEOUT).unwrap();
+    let migrated = lease
+        .load(&session_id)
+        .unwrap()
+        .expect("the migrated v13 active graph must decode");
+    assert_eq!(migrated.execution_provenance, None);
+    assert!(matches!(
+        migrated.lifecycle,
+        JournalLifecycle::Active {
+            phase: ActivePhase::Running,
+            ..
+        }
+    ));
+    assert_eq!(migrated.items.len(), 1);
+    drop(lease);
+
+    let before = mutable_journal_bytes(&store, &session_id);
+    let result = store
+        .acquire_cleanup_journal_lease(LOCK_TIMEOUT)
+        .unwrap()
+        .try_recover(&session_id, UNIX_EPOCH + Duration::from_millis(1_000_700))
+        .unwrap();
+    assert!(matches!(result, RecoveryClaimResult::Unproven));
+    assert_eq!(mutable_journal_bytes(&store, &session_id), before);
+}
+
+#[test]
 fn cleanup_journal_lease_is_exclusive_within_the_store() {
     let fixture = Fixture::new(
         CleanupMode::PermanentSafe,

@@ -2393,8 +2393,12 @@ couples that evidence to the held cleanup lock and stored owner only after
 dropping all database locks: `DefinitelyGone` supplies a one-use in-memory
 permit whose stale phase, owner, generation, heartbeat, and cancellation bit
 must all match again in the recovery transaction. `Alive` and `Unknown` leave
-the journal unchanged. Recovery remains same-boot only and cannot interpret a
-changed scope as proof of reboot until stable host provenance is implemented.
+the journal unchanged. Executable recovery remains same-host and same-boot
+only. Schema v14 binds new cleanup claims to separate stable-host and boot-scope
+provenance, so a changed relationship is classified as `ForeignHost` or
+`PriorBoot` rather than treated as owner death. Both classifications are typed
+journal no-ops, and migrated, partial, malformed, or unsupported provenance is
+`Unproven`; no prior-boot reconciliation handle exists.
 
 Schema v9 separately binds each newly started scan to an immutable private
 process-instance claim in the same transaction as the pristine `running` row.

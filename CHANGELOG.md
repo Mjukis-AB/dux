@@ -1,5 +1,10 @@
 # Changelog
 
+- Hardened the schema-v14 cleanup-owner migration proof with a populated v13
+  active journal graph. The migrated graph must decode through the production
+  journal loader as explicitly `Unproven`, and attempting recovery must leave
+  its complete mutable journal state byte-identical. This adds no recovery,
+  reconciliation, validation, resume, or effect authority.
 - Added the bounded cleanup-owner provenance checkpoint in checksummed SQLite
   schema v14. New cleanup claims can persist separate fixed-size,
   domain-separated stable-host and boot-scope digests with the sole current

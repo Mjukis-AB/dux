@@ -6316,16 +6316,19 @@ Tasks:
   prior-boot, and otherwise unproven provenance has a typed non-executable
   classification and remains a journal no-op. This checkpoint adds no
   reconciliation handle, generation claim, validation, resume, or effect
-  authority. Verified 2026-07-30 with all 71 cleanup-journal cases (70 in the
-  final host-loaded lane plus the sole 250 ms query-budget trip passing alone),
-  the schema-v14 fingerprint and populated-v13 migration cases, the real
-  unsandboxed macOS provenance probe, warnings-as-errors workspace Clippy,
-  92 FFI tests with the two quiescence-only effect tests ignored, all 561
-  linked native tests, the 31 script-policy tests, and the 269-file
-  destructive-call scan. Debug/Release bindings are byte-identical; the
-  unsigned Release app and Rust archive are universal arm64/x86_64, the app
-  targets macOS 14.0 with `LSUIElement=true`, and resolved Release settings
-  omit the internal permanent-cleanup condition.
+  authority. A populated v13 active journal graph now migrates through the
+  production loader as `Unproven`, and a recovery attempt is proven to leave
+  its complete mutable journal state byte-identical. Verified 2026-07-30 with
+  all 72 cleanup-journal cases (71 in the final host-loaded lane plus the sole
+  250 ms query-budget trip passing alone), the schema-v14 fingerprint and
+  populated-v13 migration cases, the real unsandboxed macOS provenance probe,
+  warnings-as-errors workspace Clippy, 92 FFI tests with the two
+  quiescence-only effect tests ignored, 560/561 linked native tests in the
+  loaded lane plus the sole cadence-timing trip passing alone, the 31
+  script-policy tests, and the 269-file destructive-call scan. Debug/Release
+  bindings are byte-identical; the unsigned Release app and Rust archive are
+  universal arm64/x86_64, the app targets macOS 14.0 with `LSUIElement=true`,
+  and resolved Release settings omit the internal permanent-cleanup condition.
 - [ ] Resolve persistent crash debt before production release: define and test
   cross-reboot/foreign-scope claimed-running-row behavior, a non-fabricating
   legacy-v8 policy, bounded-exhaustion recovery, and diagnostics for
